@@ -12,7 +12,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import { probeCompiledType } from "./context/speculative.js";
-import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
+import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1/S2)
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import {
   addArrayIteratorImports,
@@ -28,9 +28,12 @@ import {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
   getOrRegisterSubviewType,
+  getOrRegisterTaDynViewType,
   getOrRegisterVecType,
   getSubviewArrTypeIdx,
+  isTaViewTypeIdx,
 } from "./registry/types.js";
+import { emitTaDynViewToVec, emitTaDynViewValidate, emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through; (#3058) dyn-view materialize+validate
 import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -191,6 +194,23 @@ function isKnownNonCallable(ctx: CodegenContext, arg: ts.Expression): boolean {
     ts.TypeFlags.StringLike |
     ts.TypeFlags.BigIntLike;
   if (tsType.flags & NON_CALLABLE_FLAGS) return true;
+  // (#2934 host-bridge A) A plain OBJECT type with NO call and NO construct
+  // signatures is statically non-callable — `arr.map(new Object())`
+  // (map/15.4.4.19-4-7) must throw the §23.1.3.18 step-3 TypeError BEFORE
+  // iterating, instead of falling to the host callback bridge (which leaks
+  // `env::__call_1_f64` into standalone AND mis-types the element arg —
+  // "call[1] expected f64, found array.get of externref"). `any`/`unknown`
+  // and union types stay dynamic (their flags are not Object), so an
+  // imprecisely-typed value that may hold a function at runtime is never
+  // gated.
+  if (
+    tsType.flags & ts.TypeFlags.Object &&
+    !(tsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) &&
+    (tsType.getCallSignatures?.() ?? []).length === 0 &&
+    (tsType.getConstructSignatures?.() ?? []).length === 0
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -219,6 +239,45 @@ function emitCallbackTypeCheck(
     return true;
   }
   return false;
+}
+
+/**
+ * (#3126, the #3098 typed-lane residual) Gate for admitting a REF/REF_NULL
+ * element receiver (native-string `string[]` vecs, object-struct `T[]`
+ * arrays) into the native typed HOF impls on the HOST-FREE lanes
+ * (standalone/wasi — the caller checks the lane; see hofElemKindOk for why
+ * the gc host lane keeps its `__make_callback` fallback).
+ *
+ * The typed loops are element-kind agnostic on the CLOSURE path
+ * (`buildClosureCallInstrs` — `call_ref` + `coercionInstrs`), but the
+ * non-closure fallback (`buildBridgeCallInstrs`) converts the element to the
+ * host bridge's f64 argument, which has no lowering for a GC struct element —
+ * admitting that shape would emit invalid Wasm. So ref-element receivers are
+ * admitted ONLY when the callback provably compiles to a GC closure struct:
+ *   - inline arrow / function expression → `compileArrowAsClosure`, always a
+ *     closure struct;
+ *   - any other expression → transactional probe-compile (#1919 machinery),
+ *     admitted iff the compiled type is a ref with registered ClosureInfo.
+ * Missing or known-non-callable callbacks are admitted too: the typed impls
+ * emit the spec §23.1.3 step-3 TypeError, which beats the fallback (an
+ * unsatisfiable `env.__make_callback` host-import leak on these lanes).
+ *
+ * The opaque-externref callback residual (a callback VALUE typed `any`)
+ * deliberately stays on the current fallback — that is #3015's bridge-path
+ * slice, not this gate's scope.
+ */
+function refElemHofCallbackIsClosure(ctx: CodegenContext, fctx: FunctionContext, callExpr: ts.CallExpression): boolean {
+  if (callExpr.arguments.length < 1) return true; // typed impl emits the spec TypeError
+  const cbArg = callExpr.arguments[0]!;
+  if (isKnownNonCallable(ctx, cbArg)) return true; // typed impl emits the spec TypeError
+  if (ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)) return true;
+  const probed = probeCompiledType(ctx, fctx, () => compileExpression(ctx, fctx, cbArg));
+  return (
+    probed !== null &&
+    probed !== undefined &&
+    (probed.kind === "ref" || probed.kind === "ref_null") &&
+    ctx.closureInfoByTypeIdx.has((probed as { typeIdx: number }).typeIdx)
+  );
 }
 
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
@@ -375,6 +434,16 @@ export function emitBoundsCheckedArrayGet(
   // zero-extending (`get_u`). When undefined, fall back to the legacy
   // storage-kind heuristic (i8→get_u, i16→get_s) for non-typed-array callers.
   signedness?: "s" | "u",
+  // (#2773 S7) Optional replacement for the default `array.len(arr)` upper
+  // bound: instructions that push the LOGICAL length (i32). A grown vec's
+  // backing array is over-allocated (capacity = max(idx+1, cap*2, 4)), so
+  // `array.len` over-reports the bound and an index in [length, capacity)
+  // silently reads the element DEFAULT (null/0) instead of being OOB —
+  // `var k=[]; k[0]=1; k[1]` read null, not `undefined` (the test262 HOF
+  // "-c-ii-5" family). The vec-struct call site passes
+  // `[local.get vecRef, struct.get length]` here. When undefined, the legacy
+  // capacity bound is emitted — every existing caller is byte-identical.
+  lengthBoundInstrs?: Instr[],
 ): void {
   // Save index and array ref to locals so we can use them in both branches
   const idxLocal = allocLocal(fctx, `__bounds_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -393,12 +462,22 @@ export function emitBoundsCheckedArrayGet(
     if (undefinedFuncIdx !== undefined) flushLateImportShifts(ctx, fctx);
   }
 
-  // Condition: idx >= 0 && idx < array.len(arr)
-  // We use: (unsigned)idx < array.len — this handles negative indices too
-  // since negative i32 interpreted as unsigned is > any valid length
+  // Condition: idx >= 0 && idx < bound
+  // We use: (unsigned)idx < bound — this handles negative indices too
+  // since negative i32 interpreted as unsigned is > any valid length.
+  // (#2773 S7) The bound is the caller-supplied LOGICAL length when provided
+  // (vec length field — capacity may exceed it after a grow), else the
+  // backing-array capacity (`array.len`, the legacy byte-identical default).
   fctx.body.push({ op: "local.get", index: idxLocal });
-  fctx.body.push({ op: "local.get", index: arrLocal });
-  fctx.body.push({ op: "array.len" });
+  if (lengthBoundInstrs) {
+    // Clone per use — a caller may pass the same template to sibling helpers,
+    // and one Instr OBJECT must never appear twice in a body (the DCE type
+    // remap would visit it twice; see reference_shared_instr_object_dce_double_remap).
+    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i }) as Instr));
+  } else {
+    fctx.body.push({ op: "local.get", index: arrLocal });
+    fctx.body.push({ op: "array.len" });
+  }
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
   // Build the "then" branch: in-bounds -> array.get. (#2593) For a packed i8/i16
@@ -617,6 +696,12 @@ const ARRAY_LIKE_METHOD_SET = new Set([
 
 /** Search methods handled inline (no callback). #1360 */
 const ARRAY_LIKE_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
+
+// (#2773 S8) Array-like `.call(obj, cb, thisArg)` methods with a spec thisArg
+// slot at args[2] (§23.1.3.* `If thisArg is present, its value is used as the
+// this value`). reduce/reduceRight take initialValue at args[2] — NEVER a
+// thisArg (their callback `this` is undefined).
+const ARRAY_LIKE_THISARG_METHODS = new Set(["every", "some", "forEach", "find", "findIndex", "filter", "map"]);
 
 /**
  * #2036 S6 step 1 — Array.prototype methods that, over a borrowed array-like
@@ -854,6 +939,23 @@ export function compileArrayLikePrototypeCall(
   ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
   ensureLateImport(ctx, "__extern_set", [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], []);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  // (#2773 S8) A boolean-returning callback (`return prev === null` — the
+  // test262 reduce/map "-c-ii-2x" family) must box its i32 result via
+  // `__box_boolean` (true/false), not `__box_number` (1/0): the number-boxed
+  // value fails `assert.sameValue(result, true)` in any `any`-typed consumer.
+  // Detect boolean-ness from the callback's TS signature (works for named fn
+  // refs whose closure metadata erases the brand) and pre-register the host
+  // box HERE, with the other up-front imports, so no funcIdx baked into a
+  // detached ladder template below is shifted by a late registration (the #16
+  // discipline). Host lane only: standalone keeps the number box unless its
+  // native `__box_boolean` is already registered (mirrors #2785's host-first
+  // shipping; the arms below check funcMap at build time).
+  // Routed through the oracle (#1930): the signature fact's `returns` is
+  // `{kind:"boolean"}` exactly when the declared return type is boolean.
+  const cbTsReturnsBool = ctx.oracle.signatureOf(cbArg)?.returns.kind === "boolean";
+  if (cbTsReturnsBool && !noJsHost(ctx)) {
+    ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
+  }
   flushLateImportShifts(ctx, fctx);
 
   // Compile receiver to externref
@@ -901,6 +1003,33 @@ export function compileArrayLikePrototypeCall(
 
   const closureTmp = allocLocal(fctx, `__ali_cl_${fctx.locals.length}`, cbResult);
   fctx.body.push({ op: "local.set", index: closureTmp });
+
+  // (#2773 S8) Spec `thisArg` for the `.call(obj, cb, thisArg)` form. The
+  // direct-array HOF path installs thisArg into the `__current_this` global
+  // around the call_ref (#2152), but this generic array-like loop never did —
+  // `Array.prototype.map.call({0:11,length:2}, cb, thisArg)` ran `cb` with the
+  // wrong `this` (the test262 HOF "-c-ii-20" family). Compile it here (spec
+  // arg-eval order: receiver, callback, thisArg) into an externref local;
+  // each method arm wraps its callback invocation via `withThisInstalled`
+  // below. Args layout for the `.call` form: 0=receiver, 1=callback,
+  // 2=thisArg — ONLY for methods with a spec thisArg slot (reduce/reduceRight
+  // take initialValue at args[2], never a thisArg). Arrow callbacks are
+  // lexically `this`-bound — thisArg MUST be ignored (mirrors compileThisArg).
+  // Runs BEFORE the #16 re-resolves below (this compile can register imports).
+  let thisSlots: { thisArgTmp: number; prevThisTmp: number } | undefined;
+  if (ARRAY_LIKE_THISARG_METHODS.has(methodName) && callExpr.arguments.length >= 3 && !ts.isArrowFunction(cbArg)) {
+    ensureCurrentThisGlobal(ctx);
+    const thisArgTmp = allocLocal(fctx, `__ali_this_${fctx.locals.length}`, { kind: "externref" });
+    const prevThisTmp = allocLocal(fctx, `__ali_prevthis_${fctx.locals.length}`, { kind: "externref" });
+    const tArgType = compileExpression(ctx, fctx, callExpr.arguments[2]!);
+    if (tArgType && tArgType.kind !== "externref") {
+      coerceType(ctx, fctx, tArgType, { kind: "externref" });
+    } else if (!tArgType) {
+      emitUndefined(ctx, fctx);
+    }
+    fctx.body.push({ op: "local.set", index: thisArgTmp });
+    thisSlots = { thisArgTmp, prevThisTmp };
+  }
 
   // #16 — re-resolve the per-element helpers AFTER the callback compile (which,
   // like the receiver compile, can register new functions and shift every
@@ -970,6 +1099,41 @@ export function compileArrayLikePrototypeCall(
     { op: "ref.as_non_null" } as Instr,
     { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
   ];
+
+  /**
+   * (#2773 S8) Wrap a callback-invocation template with the #2152
+   * `__current_this` install/restore so the spec `thisArg` binds as the
+   * callback's `this` for the duration of the call_ref. MUST be invoked at
+   * arm-build time (immediately before the loop instrs are assembled), NOT
+   * baked early: `ctx.currentThisGlobalIdx` is a MODULE global whose index
+   * shifts when an arm later adds a string-constant IMPORT global
+   * (`addStringConstantGlobal` → `fixupModuleGlobalIndices` — which patches
+   * ctx fields and committed bodies but NOT detached templates). Reading the
+   * idx fresh at invocation keeps the baked index correct. The restore after
+   * the call_ref does not disturb the call result already on the stack.
+   * Fresh install/restore Instr objects per invocation (no aliasing).
+   */
+  const withThisInstalled = (call: Instr[]): Instr[] =>
+    thisSlots === undefined || ctx.currentThisGlobalIdx < 0
+      ? call
+      : [
+          { op: "global.get", index: ctx.currentThisGlobalIdx } as Instr,
+          { op: "local.set", index: thisSlots.prevThisTmp } as Instr,
+          { op: "local.get", index: thisSlots.thisArgTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+          ...call,
+          { op: "local.get", index: thisSlots.prevThisTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+        ];
+
+  // (#2773 S8) Resolved `__box_boolean` funcIdx for a boolean-returning
+  // callback's i32 result (registered up-front — see the #16 block note).
+  // undefined ⇒ the ladders keep the legacy number box (standalone without the
+  // native helper, or a non-boolean callback).
+  const cbBoolBoxIdx =
+    cbTsReturnsBool || (closureInfo.returnType as { boolean?: boolean } | null)?.boolean === true
+      ? ctx.funcMap.get("__box_boolean")
+      : undefined;
 
   /** Convert callback result to i32 truthy flag */
   const toTruthy: Instr[] =
@@ -1048,7 +1212,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 { op: "i32.eqz" } as Instr,
                 {
@@ -1085,7 +1249,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 {
                   op: "if",
@@ -1118,7 +1282,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 // drop return value if any
                 ...(closureInfo.returnType !== null ? [{ op: "drop" } as Instr] : []),
               ]),
@@ -1144,7 +1308,7 @@ export function compileArrayLikePrototypeCall(
             body: [
               ...exitIfDone,
               ...loadElem,
-              ...callClosure,
+              ...withThisInstalled(callClosure),
               ...toTruthy,
               {
                 op: "if",
@@ -1178,7 +1342,7 @@ export function compileArrayLikePrototypeCall(
             body: [
               ...exitIfDone,
               ...loadElem,
-              ...callClosure,
+              ...withThisInstalled(callClosure),
               ...toTruthy,
               {
                 op: "if",
@@ -1234,7 +1398,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...toTruthy,
                 {
                   op: "if",
@@ -1305,7 +1469,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: mapBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: mapBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: mapBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
@@ -1352,7 +1519,7 @@ export function compileArrayLikePrototypeCall(
               ...exitIfDone,
               ...gatedBody([
                 ...loadElem,
-                ...callClosure,
+                ...withThisInstalled(callClosure),
                 ...mapReturnToExternref,
                 { op: "local.set", index: mappedTmp } as Instr,
                 ...storeMapped,
@@ -1494,7 +1661,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rdBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rdBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rdBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : []; // externref: already right type
@@ -1649,7 +1819,10 @@ export function compileArrayLikePrototypeCall(
           : closureInfo.returnType.kind === "f64"
             ? [{ op: "call", funcIdx: rrBoxIdx } as Instr]
             : closureInfo.returnType.kind === "i32"
-              ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rrBoxIdx } as Instr]
+              ? // (#2773 S8) boolean-returning callback → __box_boolean (true/false)
+                cbBoolBoxIdx !== undefined
+                ? [{ op: "call", funcIdx: cbBoolBoxIdx } as Instr]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: rrBoxIdx } as Instr]
               : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
                 ? [{ op: "extern.convert_any" }]
                 : [];
@@ -2840,6 +3013,196 @@ const ARRAY_METHODS = new Set([
 ]);
 
 /**
+ * (#3058 Bucket A, first slice) Read-side TypedArray proto-methods that (a) produce NO
+ * new TypedArray value so they can run over a materialized f64-vec copy of a dynamic
+ * `$__ta_dyn_view` (via {@link emitTaDynViewToVec}) through the ordinary f64-vec method
+ * impl, AND (b) whose non-dyn-view ELSE arm (re-dispatched through
+ * {@link compileExpression}) stays **host-import-free** in the standalone lane — a hard
+ * requirement, because both arms are emitted and a single `env.*` import in the (never-
+ * executed-for-a-dyn-view) ELSE arm still makes the pure-Wasm module fail to
+ * instantiate.
+ *
+ * BANKED (their externref ELSE arm pulls a host import in standalone, which would poison
+ * the module):
+ *   - `join` → `env.<TA>_join`
+ *   - the callback methods `find`/`findIndex`/`findLast`/`findLastIndex`/`every`/`some`/
+ *     `forEach`/`reduce`/`reduceRight` → `env.__make_callback`
+ * These flip only once the standalone externref-receiver callback/join paths are native
+ * (a separate follow-up). Also banked: in-place mutators (`fill`/`copyWithin`/`reverse`/
+ * `sort` — Bucket B, need write-back) and species/new-view producers (`slice`/`subarray`/
+ * `map`/`filter`/`with`/`toSorted`/`toReversed` — Bucket C, need real-buffer identity).
+ */
+const DYN_VIEW_READ_METHODS = new Set<string>(["at", "indexOf", "lastIndexOf", "includes", "toLocaleString"]);
+
+/**
+ * (#3058) Call expressions whose dyn-view two-arm ELSE arm is CURRENTLY re-dispatching
+ * through {@link compileExpression} to reproduce the exact non-dyn-view path. The
+ * two-arm gate skips a marked node so the re-dispatch runs the ORDINARY method
+ * compilation (the externref/plain-array/host fallback) instead of re-entering the
+ * two-arm (infinite recursion). Keyed by node identity (per-compile nodes) — never
+ * leaks across compiles.
+ */
+const dynViewTwoArmActive = new WeakSet<ts.CallExpression>();
+
+/**
+ * (#3058) True when identifier `name` resolves to an `externref`-typed local — the
+ * static rep of an `any`-typed variable, which is the ONLY shape a boxed
+ * `$__ta_dyn_view` receiver can take. Restricting the two-arm to externref locals
+ * keeps the runtime `ref.test` off statically-typed array/TA receivers (which can
+ * never be a dyn view) — pure overhead avoidance, and it matches the B1 rebind's
+ * identifier-local restriction.
+ */
+function dynViewReceiverIsExternref(fctx: FunctionContext, name: string): boolean {
+  const localIdx = fctx.localMap.get(name);
+  if (localIdx === undefined) return false;
+  const t = getLocalType(fctx, localIdx);
+  return t !== undefined && t.kind === "externref";
+}
+
+/**
+ * (#3058) Coerce a just-compiled method-arm result (already on the Wasm stack, or
+ * VOID) to `externref` so both arms of the dyn-view two-arm branch leave exactly one
+ * externref (the branch's unified result rep). Returns false when the arm declined
+ * (null/undefined) — the caller then abandons the two-arm and falls back to the
+ * ordinary single path.
+ */
+function coerceArmToExternref(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  r: ValType | null | undefined | typeof VOID_RESULT,
+  treatNullAsVoid = false,
+): boolean {
+  if (r === undefined || r === null) {
+    // THEN arm (treatNullAsVoid=false): a null/undefined from the recursive f64-vec
+    // impl means the method genuinely didn't compile — decline the whole two-arm.
+    // ELSE arm (treatNullAsVoid=true): the call WAS re-dispatched (side effects
+    // emitted); a null result is a void expression — push undefined-as-externref so
+    // the branch stays balanced rather than declining.
+    if (!treatNullAsVoid) return false;
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  if (r === VOID_RESULT) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return true;
+  }
+  const vt = r as ValType;
+  if (vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
+  return true;
+}
+
+/**
+ * (#3058) Emit the runtime `ref.test $__ta_dyn_view` two-arm for a read-side Bucket-A
+ * method on an `any`/externref receiver in a `moduleUsesDynTaView` module.
+ *
+ *   if (ref.test $__ta_dyn_view <recv>) {
+ *     emitTaDynViewValidate(dv)          // §23.2.3.* step 1 ValidateTypedArray (OOB → TypeError)
+ *     mat = emitTaDynViewToVec(dv)        // widen runtime kind → $__vec_f64
+ *     <ordinary f64-vec method impl over mat>       // arm 1 (recursive compileArrayMethodCall)
+ *   } else {
+ *     <EXACT existing method compilation of the WHOLE call>   // arm 2 (unchanged)
+ *   }
+ *
+ * Arm 1 re-enters {@link compileArrayMethodCall} with `skipDynViewWrap=true` over the
+ * receiver identifier rebound to the materialized f64-vec local (a concrete vec ref, so
+ * it can't re-trigger the two-arm). Arm 2 re-dispatches the ENTIRE call expression via
+ * {@link compileExpression} — reproducing the caller's exact non-dyn-view behavior
+ * INCLUDING every host/externref fallback that lives ABOVE compileArrayMethodCall (an
+ * externref receiver makes compileArrayMethodCall return `undefined`, so the real impl
+ * is the caller's tail, not reachable by re-entering compileArrayMethodCall). A
+ * `dynViewTwoArmActive` guard on the call node prevents the re-dispatch from
+ * re-entering this two-arm (infinite recursion). Both results unify to `externref`.
+ * Returns the result ValType, or `undefined` when arm 1 declines (caller runs the
+ * single path).
+ *
+ * Late-import safety: the outer body + both arm buffers stay registered on
+ * `fctx.savedBodies` for the whole build, so any late-import funcIdx shift triggered
+ * inside an arm patches every already-emitted funcIdx (the shift walker dedups by
+ * array identity, so double-registration is harmless).
+ */
+function emitDynViewMethodTwoArm(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  callExpr: ts.CallExpression,
+  receiverType: ts.Type,
+  methodName: string,
+  expectedType: ValType | undefined,
+): ValType | null | undefined | typeof VOID_RESULT {
+  const receiverExpr = propAccess.expression;
+  if (!ts.isIdentifier(receiverExpr)) return undefined;
+  const name = receiverExpr.text;
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+
+  // Compile the receiver ONCE → externref → recvExt; recvAny (anyref) for ref.test/cast.
+  const rt = compileExpression(ctx, fctx, receiverExpr);
+  if (rt && rt.kind !== "externref") coerceType(ctx, fctx, rt, { kind: "externref" });
+  const recvExt = allocLocal(fctx, `__dvm_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvExt } as Instr);
+  const recvAny = allocLocal(fctx, `__dvm_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvExt } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: recvAny } as Instr);
+
+  const dvLocal = allocLocal(fctx, `__dvm_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+
+  const outer = fctx.body;
+  const thenArm: Instr[] = [];
+  const elseArm: Instr[] = [];
+  fctx.savedBodies.push(outer);
+  fctx.savedBodies.push(thenArm);
+  fctx.savedBodies.push(elseArm);
+
+  // --- THEN arm (dyn view) ---
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: recvAny } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
+  emitTaDynViewValidate(ctx, fctx, dvLocal);
+  const f64VecIdx = emitTaDynViewToVec(ctx, fctx, dvLocal);
+  const matLocal = allocLocal(fctx, `__dvm_mat_${fctx.locals.length}`, { kind: "ref", typeIdx: f64VecIdx });
+  fctx.body.push({ op: "local.set", index: matLocal } as Instr);
+  const savedBind = fctx.localMap.get(name);
+  fctx.localMap.set(name, matLocal);
+  const rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
+  if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
+  else fctx.localMap.delete(name);
+  const thenOk = coerceArmToExternref(ctx, fctx, rThen);
+
+  // --- ELSE arm (exact existing non-dyn-view impl) — re-dispatch the WHOLE call
+  // through compileExpression so the caller's host/externref fallback (which lives
+  // ABOVE compileArrayMethodCall) runs verbatim. The `dynViewTwoArmActive` guard
+  // stops the re-dispatch from re-entering this two-arm.
+  fctx.body = elseArm;
+  dynViewTwoArmActive.add(callExpr);
+  const rElse = compileExpression(ctx, fctx, callExpr, expectedType);
+  dynViewTwoArmActive.delete(callExpr);
+  const elseOk = coerceArmToExternref(ctx, fctx, rElse, /* treatNullAsVoid */ true);
+
+  fctx.body = outer;
+  fctx.savedBodies.pop(); // elseArm
+  fctx.savedBodies.pop(); // thenArm
+  fctx.savedBodies.pop(); // outer
+
+  if (!thenOk || !elseOk) {
+    // Arm 1 declined — abandon the two-arm. The recvExt/recvAny setup already emitted
+    // into `outer` is stack-balanced (local.set/get pairs) and merely a dead store;
+    // the caller re-compiles the receiver on the ordinary single path.
+    return undefined;
+  }
+
+  outer.push({ op: "local.get", index: recvAny } as Instr);
+  outer.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  outer.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: thenArm,
+    else: elseArm,
+  } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * Compile array method calls to inline Wasm instructions.
  * Returns undefined if the call is not an array method (caller should continue).
  * Returns ValType for successful compilation, VOID_RESULT for void methods,
@@ -2853,10 +3216,33 @@ export function compileArrayMethodCall(
   receiverType: ts.Type,
   overrideMethodName?: string,
   expectedType?: ValType,
+  skipDynViewWrap = false,
 ): ValType | null | undefined | typeof VOID_RESULT {
   const methodName =
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
+
+  // (#3058) Runtime-kind proto-method dispatch on a boxed `$__ta_dyn_view` receiver
+  // (dynamic `new <ctorVar>(rab)` where the element kind is only known at runtime).
+  // A read-side Bucket-A method on such a view must (1) ValidateTypedArray (OOB →
+  // TypeError) and (2) run over a materialized f64-vec copy. Because the receiver is
+  // statically `any`/externref, its dyn-view-ness is a RUNTIME `ref.test`, NOT a
+  // compile-time fact — so we emit a two-arm branch that wraps BOTH the dyn-view
+  // f64-vec impl and the EXACT existing externref/plain-array impl (never hijacks a
+  // plain-array `any` receiver). See emitDynViewMethodTwoArm.
+  if (
+    !skipDynViewWrap &&
+    ctx.moduleUsesDynTaView &&
+    !dynViewTwoArmActive.has(callExpr) &&
+    ts.isPropertyAccessExpression(propAccess) &&
+    DYN_VIEW_READ_METHODS.has(methodName) &&
+    ts.isIdentifier(propAccess.expression) &&
+    dynViewReceiverIsExternref(fctx, propAccess.expression.text)
+  ) {
+    const two = emitDynViewMethodTwoArm(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType);
+    if (two !== undefined) return two;
+    // Fell through (arm compile declined) — continue with the ordinary single path.
+  }
   // (#2863 Phase 2) `toLocaleString` is array-dispatched ONLY under standalone/
   // wasi (no host `__extern_toLocaleString` carrier). In host (gc) mode fall
   // through to the host `__extern_toLocaleString` path (real Intl grouping +
@@ -2893,6 +3279,20 @@ export function compileArrayMethodCall(
   // through `compileArrayJoinExtern` whenever this is set so the WasmGC-
   // native loop doesn't try to extract a vec struct from a JS array.
   let receiverIsExternref = false;
+  // (#3054 B1 Option A) When the receiver is a `$__ta_view` (shared-backing TA
+  // over a buffer), it can't be `ref.cast` to the native element-typed vec the
+  // method operates on. We materialize the view into a native vec and rebind the
+  // receiver identifier; these hold the rebind so we can restore it post-dispatch.
+  let taViewRebindName: string | undefined;
+  let taViewRebindSaved: number | undefined;
+  // (#3054 B3) write-through: after a MUTATING method runs on the de-viewed
+  // native-vec copy, byte-encode it back into the view's shared buffer. Capture
+  // the view typeIdx, the original view local, the native-vec copy local and its
+  // vec typeIdx so `emitTaViewWriteBack` can round-trip the mutation.
+  let taViewWbTypeIdx: number | undefined;
+  let taViewWbViewLocal: number | undefined;
+  let taViewWbMatLocal: number | undefined;
+  let taViewWbNativeVecIdx: number | undefined;
 
   // The receiver's actual Wasm type may differ from the TS type — e.g.
   // `[0, true].lastIndexOf(...)` infers i32 elements during construction,
@@ -2955,13 +3355,39 @@ export function compileArrayMethodCall(
       (actualType as { typeIdx: number }).typeIdx !== vecTypeIdx
     ) {
       const actualVecIdx = (actualType as { typeIdx: number }).typeIdx;
-      const actualArrIdx = getArrTypeIdxFromVec(ctx, actualVecIdx);
-      if (actualArrIdx >= 0) {
-        const actualArrDef = ctx.mod.types[actualArrIdx];
-        if (actualArrDef && actualArrDef.kind === "array") {
-          vecTypeIdx = actualVecIdx;
-          arrTypeIdx = actualArrIdx;
-          elemType = actualArrDef.element;
+      // (#3054 B1 Option A) `$__ta_view` receiver: materialize into the native
+      // element-typed vec (`vecTypeIdx`, from `resolveArrayInfo`) and rebind the
+      // identifier so the method's receiver re-compile loads the copy instead of
+      // ref.cast-trapping on the view. Only the identifier-local case (the
+      // measured regression: `ta.fill(...)`/`ta.includes(...)`); other receiver
+      // shapes are rarer and fall through unchanged.
+      if (isTaViewTypeIdx(ctx, actualVecIdx) && ts.isIdentifier(receiverExpr) && fctx.localMap.has(receiverExpr.text)) {
+        const matLocal = allocLocal(fctx, `__tav_mrecv_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: vecTypeIdx,
+        });
+        compileExpression(ctx, fctx, receiverExpr); // loads the view ref
+        emitTaViewToVec(ctx, fctx, actualVecIdx, vecTypeIdx); // → native vec
+        fctx.body.push({ op: "local.set", index: matLocal });
+        taViewRebindName = receiverExpr.text;
+        taViewRebindSaved = fctx.localMap.get(receiverExpr.text);
+        fctx.localMap.set(receiverExpr.text, matLocal);
+        // (#3054 B3) remember the pieces needed to write the copy back through
+        // the view's buffer after a mutating method. `taViewRebindSaved` is the
+        // original view local (the shared-backing `$__ta_view` ref).
+        taViewWbTypeIdx = actualVecIdx;
+        taViewWbViewLocal = taViewRebindSaved;
+        taViewWbMatLocal = matLocal;
+        taViewWbNativeVecIdx = vecTypeIdx;
+      } else {
+        const actualArrIdx = getArrTypeIdxFromVec(ctx, actualVecIdx);
+        if (actualArrIdx >= 0) {
+          const actualArrDef = ctx.mod.types[actualArrIdx];
+          if (actualArrDef && actualArrDef.kind === "array") {
+            vecTypeIdx = actualVecIdx;
+            arrTypeIdx = actualArrIdx;
+            elemType = actualArrDef.element;
+          }
         }
       }
     }
@@ -3003,6 +3429,36 @@ export function compileArrayMethodCall(
       savedLocal = tempLocal;
     }
   }
+
+  // (#3126, #3098 typed-lane residual) Element-kind gate for the callback-
+  // consuming HOF impls below. f64/i32/externref were always admitted;
+  // ref/ref_null (native-string / object-struct) elements are admitted on the
+  // HOST-FREE lanes (standalone/wasi) when the callback provably takes the
+  // native closure path (see refElemHofCallbackIsClosure). There the generic
+  // fallback is strictly unusable — it materializes the callback via
+  // `env.__make_callback`, an unsatisfiable host import (typed `string[]`
+  // find/filter — the #3098 boundary), so routing native can only gain.
+  //
+  // The gc HOST lane is deliberately NOT widened. Its fallback compiles the
+  // inline arrow via compileArrowAsCallback (`__make_callback`), whose body
+  // resolves HOST globals (`Temporal`, `TemporalHelpers`, …) and host-object
+  // method calls; the closure path (compileArrowAsClosure) does not — a
+  // widened gc gate flipped 212 Temporal merge_group tests pass→fail
+  // ("TemporalHelpers is not defined" inside the lifted closure) on PR #2838's
+  // first merge-group attempt. The gc-lane residual (struct-array `T[]`
+  // find/filter/some are a silent no-op through the SAME fallback when the
+  // body is host-free) stays pre-existing and documented in the #3126 issue
+  // file — its real root is closure-lifted host-global resolution, not this
+  // gate. Mirrors the #1967 `sort` / #2688 `map` widenings otherwise.
+  // Evaluated lazily: at most one probe-compile per call site, only for
+  // ref-element receivers on the host-free lanes.
+  const hofElemKindOk = (et: ValType): boolean =>
+    et.kind === "f64" ||
+    et.kind === "i32" ||
+    et.kind === "externref" ||
+    ((et.kind === "ref" || et.kind === "ref_null") &&
+      (ctx.standalone || ctx.wasi) &&
+      refElemHofCallbackIsClosure(ctx, fctx, callExpr));
 
   let result: ValType | null | undefined;
   switch (methodName) {
@@ -3082,12 +3538,12 @@ export function compileArrayMethodCall(
           ? compileArraySort(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
-    // Functional array methods -- supported for numeric (f64, i32) and externref element types
+    // Functional array methods -- numeric (f64, i32) / externref element types,
+    // plus ref/ref_null elements when the callback is a provable closure (#3126).
     case "filter":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFilter(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFilter(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "map":
       // (#2688) Include ref/ref_null struct-element receivers (mirrors the #1967
@@ -3108,61 +3564,52 @@ export function compileArrayMethodCall(
           : undefined;
       break;
     case "reduce":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayReduce(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayReduce(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "reduceRight":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayReduceRight(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayReduceRight(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "forEach": {
-      const feResult =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayForEach(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      const feResult = hofElemKindOk(elemType)
+        ? compileArrayForEach(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       // forEach returns void; use VOID_RESULT so compileExpression doesn't rollback
       result = feResult === null ? (VOID_RESULT as any) : feResult;
       break;
     }
     case "find":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFind(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFind(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findIndex":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findLast":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindLast(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindLast(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "findLastIndex":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayFindLastIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayFindLastIndex(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "some":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArraySome(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArraySome(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "every":
-      result =
-        elemType.kind === "f64" || elemType.kind === "i32" || elemType.kind === "externref"
-          ? compileArrayEvery(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
-          : undefined;
+      result = hofElemKindOk(elemType)
+        ? compileArrayEvery(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
+        : undefined;
       break;
     case "toReversed":
       result = compileArrayToReversed(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -3213,6 +3660,33 @@ export function compileArrayMethodCall(
     if (ts.isIdentifier(propAccess.expression)) {
       fctx.localMap.delete(propAccess.expression.text);
     }
+  }
+
+  // (#3054 B3) WRITE-THROUGH: a mutating method (`.fill`/`.set`/`.sort`/
+  // `.copyWithin`/`.reverse`) ran on the de-viewed native-vec copy — byte-encode
+  // the (mutated) copy back into the view's shared buffer so sibling views /
+  // DataViews observe it. Gated exactly like the module-global write-back above:
+  // only for MUTATING methods that actually ran (result present). Read-only
+  // methods skip this (nothing to propagate); B1's de-view stays a pure copy.
+  if (
+    taViewWbTypeIdx !== undefined &&
+    taViewWbViewLocal !== undefined &&
+    taViewWbMatLocal !== undefined &&
+    taViewWbNativeVecIdx !== undefined &&
+    MUTATING.has(methodName) &&
+    result !== null &&
+    result !== undefined
+  ) {
+    emitTaViewWriteBack(ctx, fctx, taViewWbTypeIdx, taViewWbViewLocal, taViewWbMatLocal, taViewWbNativeVecIdx);
+  }
+
+  // (#3054 B1 Option A) Restore the receiver identifier's original binding after
+  // the method dispatched on the materialized native-vec copy. The original var
+  // is still the `$__ta_view` (its buffer aliasing is intact for later element
+  // access); only this method call saw the de-viewed copy.
+  if (taViewRebindName !== undefined) {
+    if (taViewRebindSaved !== undefined) fctx.localMap.set(taViewRebindName, taViewRebindSaved);
+    else fctx.localMap.delete(taViewRebindName);
   }
 
   return result;
@@ -4070,11 +4544,16 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: resTmp });
 
-  // (#2001 S1) An `any[]` hole reads `$Hole`; map it to `undefined` before the
-  // strict-eq so `indexOf(undefined)` matches the hole index (an absent index
-  // reads as undefined via Get). Pre-ensure `__get_undefined` while we own
-  // `fctx.body` so the detached `holeToUndefinedInstrs` flush can't shift the
-  // already-captured `__host_eq` funcIdx.
+  // (#2001 S1 — indexOf hole-SKIP DEFERRED, see the S2 boundary note.) §23.1.3.14
+  // uses HasProperty, so a clean sparse hole should be SKIPPED
+  // (`[1,,3].indexOf(undefined) === -1`). But test262's only sparse-hole indexOf
+  // tests combine a hole with a prototype-INHERITED index
+  // (`Object.defineProperty(Array.prototype,"0",…)`), which the flat WasmGC vec
+  // cannot model — those pass coincidentally via this S1 `$Hole → undefined` map,
+  // and a spec-correct skip regresses them for no offsetting test262 win. Keep S1
+  // here (net-0) until prototype-index inheritance is modeled. Pre-ensure
+  // `__get_undefined` so the detached `holeToUndefinedInstrs` flush can't shift
+  // the captured `__host_eq` funcIdx.
   let holeMap: Instr[] = [];
   if (ctx.usesArrayHoles && elemType.kind === "externref") {
     ensureGetUndefined(ctx);
@@ -6316,21 +6795,46 @@ function buildBridgeCallInstrs(
   loop: ArrayLoopLocals,
   elemSource: { kind: "local"; index: number } | { kind: "inline" },
 ): Instr[] {
+  const conv = bridgeElemConvertInstrs(ctx, elemType);
   return [
     { op: "local.get", index: setup.cbTmp! } as Instr,
     ...(elemSource.kind === "local"
-      ? [
-          { op: "local.get", index: elemSource.index } as Instr,
-          ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
-        ]
+      ? [{ op: "local.get", index: elemSource.index } as Instr, ...conv]
       : [
           { op: "local.get", index: loop.dataTmp } as Instr,
           { op: "local.get", index: loop.iTmp } as Instr,
           { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
-          ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+          ...conv,
         ]),
     { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
   ];
+}
+
+/**
+ * (#2934 host-bridge C) Convert a loop ELEMENT (as read from the backing
+ * array) to the host bridge's numeric arg kind (`f64` in non-fast mode, `i32`
+ * in fast mode). The old inline conversion only knew `i32 → f64`, so:
+ *   - a BOXED-ANY (externref) element — `new Array(N)` / `any[]` vecs — flowed
+ *     raw into the f64 param: `call[1] expected type f64, found array.get of
+ *     type externref` (the `__closure_2/4` invalid-Wasm cluster,
+ *     `filter/create-species-poisoned.js`);
+ *   - a PACKED i8/i16 element reads as the widened i32 but compared as
+ *     `elemType.kind === "i32"` → no convert → i32 into f64 (same class).
+ * externref unboxes via `__unbox_number` (ToNumber; registered by
+ * `addUnionImports` — native in standalone, import in host mode, resolved at
+ * build time so the funcIdx is post-shift-correct and the pushed body is
+ * walked by any later shifts).
+ */
+function bridgeElemConvertInstrs(ctx: CodegenContext, elemType: ValType): Instr[] {
+  if (ctx.fast) return [];
+  const readKind = elemType.kind === "i8" || elemType.kind === "i16" ? "i32" : elemType.kind;
+  if (readKind === "i32") return [{ op: "f64.convert_i32_s" } as Instr];
+  if (readKind === "externref" || readKind === "ref_extern") {
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) return [{ op: "call", funcIdx: unboxIdx } as Instr];
+  }
+  return [];
 }
 
 /** Build instructions to check truthiness of a callback result (-> i32). */
@@ -6406,6 +6910,93 @@ function emitArrayLoop(fctx: FunctionContext, loopBody: Instr[]): void {
     blockType: { kind: "empty" },
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
   });
+}
+
+/**
+ * (#2001 S2) Should this externref-element vec loop emit a hole visit-skip?
+ * Only when the module contains array-literal holes (`usesArrayHoles`) AND the
+ * source element ValType is `externref` (the only rep that can physically hold
+ * the `$Hole` sentinel). Typed (f64/i32/ref) element vecs and hole-free modules
+ * are byte-identical — no `ref.test`, no gate.
+ *
+ * (PR #2832 merge-group park) ALSO disabled module-wide when the pre-scan saw
+ * an `Array.prototype` INDEX write (`arrayProtoIndexDirty`): §23.1.3.* keys the
+ * skip on `HasProperty(O, k)`, which is TRUE for a hole whose index is
+ * inherited from `Array.prototype` — a relationship the flat vec cannot check
+ * per element. Falling back to the S1 visit-with-`undefined` behavior matches
+ * the observable result of the dominant shape (inherited accessor without a
+ * getter ⇒ [[Get]] is `undefined`) and un-regresses
+ * `{every,filter,some}/*-c-i-22.js`.
+ */
+function shouldHoleSkip(ctx: CodegenContext, elemType: ValType): boolean {
+  return ctx.usesArrayHoles && !ctx.arrayProtoIndexDirty && elemType.kind === "externref";
+}
+
+/**
+ * (#2001 S2) Load `data[i]` and leave `i32 = 1` iff the slot is the `$Hole`
+ * sentinel (an ABSENT index per §HasProperty). Reads the slot a second time
+ * (the callback path reads it again for its own value); holes are rare
+ * (`usesArrayHoles`-gated) so the extra `array.get` is acceptable.
+ * Stack: `[] → [i32]`.
+ */
+function loadIsHoleInstrs(ctx: CodegenContext, loop: ArrayLoopLocals, arrTypeIdx: number): Instr[] {
+  return [
+    { op: "local.get", index: loop.dataTmp } as Instr,
+    { op: "local.get", index: loop.iTmp } as Instr,
+    { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
+    ...holeTestInstrs(ctx), // any.convert_extern; ref.test $Hole → i32 (1 = hole)
+  ];
+}
+
+/**
+ * (#2001 S2) Visit-skip gate for a loop body that produces NO value and has no
+ * loop/block-escaping `br` in `inner` (forEach). Wraps `inner` in
+ * `if (present) { inner }` so a hole falls straight through to the caller's
+ * `loopIncrement`. Byte-identical (`inner` unchanged) for typed / hole-free
+ * vecs. Because the gate adds an `if` level, `inner` MUST NOT contain a `br`
+ * that targets the loop/block — use {@link gateHoleFlag} for the escape
+ * methods (some/every).
+ */
+function gateHoleSkip(
+  ctx: CodegenContext,
+  loop: ArrayLoopLocals,
+  arrTypeIdx: number,
+  elemType: ValType,
+  inner: Instr[],
+): Instr[] {
+  if (!shouldHoleSkip(ctx, elemType)) return inner;
+  return [
+    ...loadIsHoleInstrs(ctx, loop, arrTypeIdx),
+    { op: "i32.eqz" } as Instr, // 1 = present (NOT hole)
+    { op: "if", blockType: { kind: "empty" }, then: inner } as Instr,
+  ];
+}
+
+/**
+ * (#2001 S2) Visit-skip gate for a loop body whose per-iteration work leaves an
+ * `i32` truthy/falsy FLAG on the stack (filter/some/every). A hole yields flag
+ * `0` (not truthy, not falsy) so the caller's following `if` — which
+ * matches/breaks/pushes on the flag — does nothing, and the callback is not
+ * invoked. Crucially this does NOT add a control-flow level around the caller's
+ * escaping `br`, so its `br` depths are unshifted. Stack: `[] → [i32]`.
+ */
+function gateHoleFlag(
+  ctx: CodegenContext,
+  loop: ArrayLoopLocals,
+  arrTypeIdx: number,
+  elemType: ValType,
+  flagInner: Instr[],
+): Instr[] {
+  if (!shouldHoleSkip(ctx, elemType)) return flagInner;
+  return [
+    ...loadIsHoleInstrs(ctx, loop, arrTypeIdx),
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 } as Instr], // hole ⇒ flag 0 (skip)
+      else: flagInner, // present ⇒ run callback + truthy/falsy check
+    } as Instr,
+  ];
 }
 
 /**
@@ -6514,7 +7105,10 @@ function compileArrayFilter(
     { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
     { op: "local.set", index: elemTmp } as Instr,
 
-    ...callAndCheck,
+    // (#2001 S2) filter does not call the callback for a hole (§23.1.3.7 uses
+    // HasProperty) and never adds it to the result. The flag-gate yields 0 for
+    // a hole → the push `if` below does not fire (and the callback isn't run).
+    ...gateHoleFlag(ctx, loop, arrTypeIdx, elemType, callAndCheck),
 
     // if result is truthy, add element to result
     {
@@ -6599,6 +7193,18 @@ function compileArrayMap(
     mapArrTypeIdx = getOrRegisterArrayType(ctx, mapResultElemType.kind, mapResultElemType);
     mapVecTypeIdx = getOrRegisterVecType(ctx, mapResultElemType.kind, mapResultElemType);
   }
+
+  // (#2001 S2 — map result-hole is DEFERRED; see the boundary note in the issue
+  // file.) Spec §23.1.3.19 preserves absent indices: a source hole should yield
+  // a RESULT hole (`join` renders it ""). Representing that needs the result vec
+  // to be externref (to hold the `$Hole` sentinel), but TS types
+  // `[1,,3].map(x=>x*10)` as `number[]`, so every downstream consumer (`.join`,
+  // element read, arithmetic) is compiled against an f64 result and would
+  // mis-read a forced-externref result. Closing it cleanly requires threading
+  // the widened result type through the downstream type-flow — a separate slice.
+  // Until then map VISITS the hole (the S1 read map presents `undefined` to the
+  // callback), unchanged from pre-S2. The other skip methods
+  // (forEach/filter/some/every/reduce/indexOf/lastIndexOf) are hole-correct.
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "map");
 
@@ -6735,7 +7341,10 @@ function compileArrayReduce(
       typeIdx: arrTypeIdx,
     });
     // (#2001 S1) If data[0] is a `$Hole` (the no-initial-value seed), map it to
-    // `undefined` before it becomes the accumulator.
+    // `undefined` before it becomes the accumulator. (#2001 S2 — reduce
+    // hole-skip / first-present seed seek DEFERRED alongside indexOf: its
+    // test262 coverage relies on prototype-inherited indices; see the S2
+    // boundary note. Keeping S1 fold/seed here for net-0.)
     if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
     // Coerce the seed element to the accumulator type (e.g. element externref
     // string → accumulator externref, or i32 element → f64 accumulator).
@@ -6810,12 +7419,18 @@ function compileArrayReduce(
       { op: "local.get", index: loop.dataTmp } as Instr,
       { op: "local.get", index: loop.iTmp } as Instr,
       { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
-      ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+      // (#2934 host-bridge C) externref/packed elems convert to the bridge's
+      // numeric arg kind — see bridgeElemConvertInstrs.
+      ...bridgeElemConvertInstrs(ctx, elemType),
       { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
       { op: "local.set", index: accTmp } as Instr,
     ];
   }
 
+  // (#2001 S2 — reduce hole-skip DEFERRED, see the S2 boundary note.) reduce
+  // folds ALL indices (a hole reads `undefined` via the S1 map inside
+  // `callInstrs`), unchanged from pre-S2. Skipping regresses the
+  // prototype-inheritance test262 tests for no offsetting win.
   const loopBody: Instr[] = [...loopExitCheck(loop), ...callInstrs, ...loopIncrement(loop)];
 
   emitArrayLoop(fctx, loopBody);
@@ -6887,7 +7502,20 @@ function compileArrayReduceRight(
   const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, accType);
 
-  // Compile initial value or use arr[length-1] as default
+  // (#2001 S1 / #2809) `__get_undefined` is pre-ensured at the top of this
+  // function (before the closure `ref.func` is emitted) so the detached
+  // `holeToUndefinedInstrs` below can't shift a captured funcIdx.
+
+  // Build the loop locals struct for buildClosureCallInstrs compatibility
+  const loop: ArrayLoopLocals = {
+    vecTmp,
+    dataTmp,
+    lenTmp,
+    iTmp,
+    getOp,
+  };
+
+  // Compile initial value or use the last present element as the default seed.
   if (callExpr.arguments.length >= 2) {
     compileExpression(ctx, fctx, callExpr.arguments[1]!, accType);
     fctx.body.push({ op: "local.set", index: accTmp });
@@ -6911,6 +7539,8 @@ function compileArrayReduceRight(
     fctx.body.push({ op: "i32.sub" });
     fctx.body.push({ op: getOp, typeIdx: arrTypeIdx });
     // (#2001 S1) data[length-1] seed may be a `$Hole` → bind `undefined`.
+    // (#2001 S2 — reduceRight hole-skip / last-present seed seek DEFERRED: its
+    // test262 coverage relies on prototype-inherited indices; net-0 keeps S1.)
     if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
     // Coerce the seed element to the accumulator type (e.g. element externref
     // string → accumulator externref, or i32 element → f64 accumulator).
@@ -6921,19 +7551,6 @@ function compileArrayReduceRight(
     fctx.body.push({ op: "i32.sub" });
     fctx.body.push({ op: "local.set", index: iTmp });
   }
-
-  // (#2001 S1 / #2809) `__get_undefined` is pre-ensured at the top of this
-  // function (before the closure `ref.func` is emitted) so the detached
-  // `holeToUndefinedInstrs` below can't shift a captured funcIdx.
-
-  // Build the loop locals struct for buildClosureCallInstrs compatibility
-  const loop: ArrayLoopLocals = {
-    vecTmp,
-    dataTmp,
-    lenTmp,
-    iTmp,
-    getOp,
-  };
 
   // Build reduce-specific callback invocation (2-arg: acc, elem)
   let callInstrs: Instr[];
@@ -6996,12 +7613,18 @@ function compileArrayReduceRight(
       { op: "local.get", index: dataTmp } as Instr,
       { op: "local.get", index: iTmp } as Instr,
       { op: getOp, typeIdx: arrTypeIdx } as Instr,
-      ...(!ctx.fast && elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+      // (#2934 host-bridge C) externref/packed elems convert to the bridge's
+      // numeric arg kind — see bridgeElemConvertInstrs.
+      ...bridgeElemConvertInstrs(ctx, elemType),
       { op: "call", funcIdx: setup.callBridgeIdx! } as Instr,
       { op: "local.set", index: accTmp } as Instr,
     ];
   }
 
+  // (#2001 S2 — reduceRight hole-skip DEFERRED, see the S2 boundary note.)
+  // Folds ALL indices (a hole reads `undefined` via the S1 map in `callInstrs`),
+  // unchanged from pre-S2 — skipping regresses the prototype-inheritance test262
+  // tests for no offsetting win.
   // Loop: while (i >= 0) { acc = cb(acc, data[i], i, arr); i--; }
   const loopBody: Instr[] = [
     // Exit check: if (i < 0) break
@@ -7054,13 +7677,23 @@ function compileArrayForEach(
     });
     const dropInstrs: Instr[] = setup.closureInfo.returnType ? [{ op: "drop" } as Instr] : [];
 
-    const loopBody: Instr[] = [...loopExitCheck(loop), ...callInstrs, ...dropInstrs, ...loopIncrement(loop)];
+    // (#2001 S2) forEach does not call the callback for a hole (§23.1.3.15 uses
+    // HasProperty). Gate the call+drop; a hole falls through to loopIncrement.
+    const loopBody: Instr[] = [
+      ...loopExitCheck(loop),
+      ...gateHoleSkip(ctx, loop, arrTypeIdx, elemType, [...callInstrs, ...dropInstrs]),
+      ...loopIncrement(loop),
+    ];
 
     emitArrayLoop(fctx, loopBody);
   } else {
     const callInstrs = buildBridgeCallInstrs(ctx, setup, elemType, arrTypeIdx, loop, { kind: "inline" });
 
-    const loopBody: Instr[] = [...loopExitCheck(loop), ...callInstrs, { op: "drop" } as Instr, ...loopIncrement(loop)];
+    const loopBody: Instr[] = [
+      ...loopExitCheck(loop),
+      ...gateHoleSkip(ctx, loop, arrTypeIdx, elemType, [...callInstrs, { op: "drop" } as Instr]),
+      ...loopIncrement(loop),
+    ];
 
     emitArrayLoop(fctx, loopBody);
   }
@@ -7113,10 +7746,21 @@ function compileArrayFind(
   // as `externref` for an externref element (and use `ref.null.extern` — the
   // `undefined` sentinel — for "not found", which is the spec result anyway).
   const elemIsExternref = elemType.kind === "externref";
-  // Result local -- NaN/undefined (not found) or element value
-  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  // (#3126) ref/ref_null element (native-string / object-struct arrays): the
+  // result is the element's NULLABLE ref with a `ref.null` "not found"
+  // sentinel — the typed lane's `undefined` rep (same rep pop()/at() misses
+  // use). The numeric NaN sentinel below would `local.set` a GC ref into an
+  // f64 local (invalid Wasm).
+  const refElemResType: ValType | undefined =
+    elemType.kind === "ref" || elemType.kind === "ref_null"
+      ? { kind: "ref_null", typeIdx: (elemType as { typeIdx: number }).typeIdx }
+      : undefined;
+  // Result local -- null/NaN/undefined (not found) or element value
+  const findResType: ValType = refElemResType ?? (ctx.fast || elemIsExternref ? elemType : { kind: "f64" });
   const findResTmp = allocLocal(fctx, `__arr_find_res_${fctx.locals.length}`, findResType);
-  if (elemIsExternref) {
+  if (refElemResType) {
+    fctx.body.push({ op: "ref.null", typeIdx: refElemResType.typeIdx });
+  } else if (elemIsExternref) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7161,7 +7805,7 @@ function compileArrayFind(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  return findResType;
 }
 
 /**
@@ -7318,9 +7962,17 @@ function compileArrayFindLast(
   // not an f64; keep the result type externref with a `ref.null.extern`
   // (undefined) "not found" sentinel. See compileArrayFind.
   const elemIsExternref = elemType.kind === "externref";
-  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  // (#3126) ref/ref_null element: nullable elem ref + `ref.null` sentinel —
+  // see compileArrayFind.
+  const refElemResType: ValType | undefined =
+    elemType.kind === "ref" || elemType.kind === "ref_null"
+      ? { kind: "ref_null", typeIdx: (elemType as { typeIdx: number }).typeIdx }
+      : undefined;
+  const findResType: ValType = refElemResType ?? (ctx.fast || elemIsExternref ? elemType : { kind: "f64" });
   const findResTmp = allocLocal(fctx, `__arr_findLast_res_${fctx.locals.length}`, findResType);
-  if (elemIsExternref) {
+  if (refElemResType) {
+    fctx.body.push({ op: "ref.null", typeIdx: refElemResType.typeIdx });
+  } else if (elemIsExternref) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7363,7 +8015,7 @@ function compileArrayFindLast(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
+  return findResType;
 }
 
 /**
@@ -7477,7 +8129,10 @@ function compileArraySome(
   const loopBody: Instr[] = [
     ...loopExitCheck(loop),
 
-    ...callAndCheck,
+    // (#2001 S2) some does not call the callback for a hole (§23.1.3.28 uses
+    // HasProperty). The flag-gate yields 0 (not truthy) for a hole, so the
+    // match `if` below does not fire and scanning continues.
+    ...gateHoleFlag(ctx, loop, arrTypeIdx, elemType, callAndCheck),
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -7539,7 +8194,10 @@ function compileArrayEvery(
   const loopBody: Instr[] = [
     ...loopExitCheck(loop),
 
-    ...callAndCheck,
+    // (#2001 S2) every does not call the callback for a hole (§23.1.3.6 uses
+    // HasProperty). The flag-gate yields 0 (not falsy) for a hole, so the
+    // falsify `if` below does not fire and a hole never makes `every` false.
+    ...gateHoleFlag(ctx, loop, arrTypeIdx, elemType, callAndCheck),
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -8702,9 +9360,10 @@ function compileArrayLastIndexOf(
   }
   fctx.body.push({ op: "local.set", index: liofResTmp });
 
-  // (#2001 S1) Map a `$Hole` element to `undefined` before the strict-eq so
-  // `lastIndexOf(undefined)` matches a hole index. Pre-ensure `__get_undefined`
-  // so the detached mapping flush can't shift the captured `__host_eq` funcIdx.
+  // (#2001 S1 — lastIndexOf hole-SKIP DEFERRED, see the S2 boundary note.) Same
+  // as indexOf: §23.1.3.20 uses HasProperty (a clean hole should be skipped),
+  // but test262's sparse-hole lastIndexOf tests rely on prototype-inherited
+  // indices we can't model, so keep the S1 `$Hole → undefined` map (net-0).
   let liofHoleMap: Instr[] = [];
   if (ctx.usesArrayHoles && elemType.kind === "externref") {
     ensureGetUndefined(ctx);

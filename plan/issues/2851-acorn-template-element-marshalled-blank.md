@@ -3,7 +3,7 @@ id: 2851
 title: "compiled-acorn marshals TemplateLiteral `quasis[]` TemplateElement nodes BLANK (type/value/tail dropped across host boundary)"
 status: done
 completed: 2026-06-30
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 feasibility: medium

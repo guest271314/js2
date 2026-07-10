@@ -14,6 +14,11 @@
 // Phase 2 & 3 widen the Instr and Terminator sets.
 
 import type { ValType } from "./types.js";
+// #2949 slice 1 — the canonical JS-type tag enum, from the dependency-free
+// leaf `codegen/js-tag.ts` (extracted there precisely so this pure-leaf
+// module can carry it without importing the codegen policy chain). Type-only:
+// nodes.ts stays free of value imports.
+import type { JsTag } from "../codegen/js-tag.js";
 
 // ---------------------------------------------------------------------------
 // Symbolic references
@@ -44,8 +49,6 @@ export interface IrTypeRef {
   /** Unique WasmGC type name (same namespace as `ctx.typeNames`). */
   readonly name: string;
 }
-
-export type IrSymRef = IrFuncRef | IrGlobalRef | IrTypeRef;
 
 // ---------------------------------------------------------------------------
 // IR types
@@ -99,6 +102,11 @@ export type IrSymRef = IrFuncRef | IrGlobalRef | IrTypeRef;
 //                                inner IrType's ValType as its `$val`
 //                                (unwrapped via `asVal` at the resolver
 //                                boundary).
+//   { kind: "dynamic", tag? }  → `resolver.resolveDynamic()` — the module's
+//                                canonical boxed-any carrier (#2949/#1852:
+//                                `ref_null $AnyValue` in fast/standalone,
+//                                `externref` in host mode). The `tag`
+//                                refinement never changes the carrier.
 
 /**
  * A canonical object shape — a sorted list of named fields with their IR
@@ -174,6 +182,17 @@ export interface IrClassShape {
   readonly fields: readonly IrClassFieldDescriptor[];
   readonly methods: readonly IrClassMethodDescriptor[];
   readonly constructorParams: readonly IrType[];
+  /**
+   * #3000-E: the immediate parent class shape for a subclass declared via
+   * `class Sub extends Parent`. Present only when `Parent` is a locally-declared
+   * user class whose own shape projected (single-level, WasmGC-struct parent).
+   * Drives `super(...)` (→ the parent's `_init`) and `super.method()` (→ the
+   * parent's method slot). Absent (undefined) for flat / root classes and for
+   * subclasses of a builtin/externref-backed parent (which stay on legacy).
+   * `classShapeEquals` deliberately does NOT compare `parent` — a shape is
+   * identified by `className` alone (see the doc there).
+   */
+  readonly parent?: IrClassShape;
 }
 
 export type IrType =
@@ -235,7 +254,36 @@ export type IrType =
   // not a raw ValType); the resolver unwraps it to a ValType and delegates
   // to `getOrRegisterRefCellType` so legacy and IR ref cells share the same
   // WasmGC struct.
-  | { readonly kind: "boxed"; readonly inner: IrType };
+  | { readonly kind: "boxed"; readonly inner: IrType }
+  // #2949 slice 1 — the DYNAMIC leaf: a value whose JS type is not statically
+  // known (JS `any` / `unknown`, propagation-lattice top, reflective access
+  // results). This is the lattice TOP of the IrType system: every other
+  // IrType is convertible INTO dynamic via an explicit `box` instruction and
+  // OUT of it via explicit `unbox` (after a `tag.test` proof). There are NO
+  // implicit conversions — the verifier rejects a dynamic operand feeding
+  // any op that requires a concrete kind (see verify.ts #2949 rules).
+  //
+  // `tag` is an OPTIONAL static refinement: when present, the producer has
+  // proved the runtime `JsTag` partition of the value (e.g. after a
+  // `tag.test` branch), enabling checked unboxes and op selection without a
+  // runtime re-test. Absence means "partition unknown". The refinement is
+  // erased at joins: two dynamics with different (or one missing) tags are
+  // NOT equal under `irTypeEquals` — producers must widen to the bare
+  // `{kind:"dynamic"}` before a join point (branch args, slot writes).
+  //
+  // Lowering contract (per the ratified #1852 representation table):
+  //   - WasmGC: `resolver.resolveDynamic()` returns the module's canonical
+  //     boxed-any carrier ValType — `ref_null $AnyValue` in fast/standalone
+  //     mode, `externref` in host mode — matching legacy `resolveWasmType`'s
+  //     any/unknown arm EXACTLY so IR-claimed and legacy-compiled functions
+  //     agree on the `any` ABI. Boxing/unboxing routes through the existing
+  //     `__any_box_*` / `$AnyValue` helper family (never a second engine).
+  //   - Linear: f64-value + i32-tag parallel cell — DEFERRED (#1852-G4 /
+  //     #2956); `resolveDynamic` stays unimplemented there and lowering
+  //     throws.
+  // The `tag` refinement never changes the carrier — it is compile-time
+  // knowledge only.
+  | { readonly kind: "dynamic"; readonly tag?: JsTag };
 
 /** Wrap a plain ValType as an IrType — the common path for Phase 1/2 callers. */
 export function irVal(v: ValType): IrType {
@@ -263,6 +311,22 @@ export function irValSigned(v: ValType, signed: boolean): IrType {
  */
 export function asVal(t: IrType): ValType | null {
   return t.kind === "val" ? t.val : null;
+}
+
+/**
+ * #2949 slice 1 — construct a dynamic IrType, optionally refined with a
+ * statically-proven `JsTag` partition. `irDynamic()` is the lattice top
+ * (partition unknown); `irDynamic(JsTag.String)` is a refinement a producer
+ * may emit after a `tag.test` proof. See the `dynamic` arm of `IrType` for
+ * the full contract (joins erase refinements; carrier is tag-independent).
+ */
+export function irDynamic(tag?: JsTag): IrType {
+  return tag === undefined ? { kind: "dynamic" } : { kind: "dynamic", tag };
+}
+
+/** #2949 slice 1 — narrow an IrType to its dynamic arm (refined or not). */
+export function isDynamic(t: IrType): t is Extract<IrType, { kind: "dynamic" }> {
+  return t.kind === "dynamic";
 }
 
 /**
@@ -310,6 +374,14 @@ export function irTypeEquals(a: IrType, b: IrType): boolean {
   // match.
   if (a.kind === "extern" && b.kind === "extern") {
     return a.className === b.className;
+  }
+  // #2949 slice 1 — dynamic equality is EXACT on the `tag` refinement (both
+  // absent, or both present and equal). Deliberately strict: silently
+  // merging two different refinements at a join would keep whichever tag the
+  // first producer wrote, which is provably wrong for the other path.
+  // Producers widen to the bare `{kind:"dynamic"}` before joins instead.
+  if (a.kind === "dynamic" && b.kind === "dynamic") {
+    return (a.tag ?? null) === (b.tag ?? null);
   }
   return false;
 }
@@ -380,6 +452,21 @@ export type IrValueId = number & { readonly __brand: "IrValueId" };
 
 export function asValueId(n: number): IrValueId {
   return n as IrValueId;
+}
+
+/**
+ * #2952 slice 2 — per-function-unique identity of a loop (or, in slice 3, a
+ * labeled block) that `br.label` can target. Like {@link IrValueId} it is a
+ * branded number allocated by the builder; unlike an SSA value it names a
+ * CONTROL-FLOW frame, not a value. Labels are semantic: the Wasm `br` depth
+ * is NEVER stored in the IR — it is derived at lowering time by the
+ * `ctrlStack` frame counter in `lower.ts` (a stored depth would rot under
+ * any pass that re-nests buffers).
+ */
+export type IrLabelId = number & { readonly __brand: "IrLabelId" };
+
+export function asLabelId(n: number): IrLabelId {
+  return n as IrLabelId;
 }
 
 /**
@@ -714,10 +801,20 @@ export interface IrInstrRawWasm extends IrInstrBase {
 }
 
 /**
- * Box a scalar into a tagged-union struct. `toType` must be an `IrType.union`
- * whose `members` contains `value`'s static ValType. Lowering emits
- * `struct.new $union_<members>` with the matching tag constant + the value
- * in the `$val` field. Result is `(ref $union_<members>)` / the `toType`.
+ * Box a value into a tagged carrier. Two targets (discriminated by
+ * `toType.kind` — ONE boxing concept in the IR, the type system carries the
+ * representation):
+ *
+ *   - `toType.kind === "union"` (V1, scalar tagged unions): `members` must
+ *     contain `value`'s static ValType. Lowering emits `struct.new
+ *     $union_<members>` with the matching tag constant + the value in the
+ *     `$val` field. Result is `(ref $union_<members>)`.
+ *   - `toType.kind === "dynamic"` (#2949): erase `value` into the module's
+ *     canonical boxed-any carrier (per the #1852 table — `$AnyValue` family
+ *     on WasmGC, routed through the existing `__any_box_*` helpers; never a
+ *     second boxing engine). `value` must NOT itself be dynamic (a re-box is
+ *     provably redundant — the verifier rejects it). Lowering lands in
+ *     #2949 slice 3; until then the lowerer throws a staged error.
  */
 export interface IrInstrBox extends IrInstrBase {
   readonly kind: "box";
@@ -726,27 +823,165 @@ export interface IrInstrBox extends IrInstrBase {
 }
 
 /**
- * Unbox a tagged-union value to one of its member ValTypes. The caller must
- * have proved the tag already (via `tag.test` earlier in the same IR path);
- * lowering emits a plain `struct.get $val` without a tag check at runtime.
- * A debug-mode assertion can still verify the tag.
+ * Unbox a tagged value to a concrete payload. The caller must have proved
+ * the tag already (via `tag.test` earlier in the same IR path); lowering
+ * emits a payload read without a runtime tag check. A debug-mode assertion
+ * can still verify the tag.
+ *
+ *   - union operand (V1): `tag` (REQUIRED here) names the member ValType to
+ *     extract; lowers to `struct.get $val`.
+ *   - dynamic operand (#2949): `jsTag` (REQUIRED here) names the proven JS
+ *     partition; it must have a payload (`jsTagUnboxKind(jsTag) !== null` —
+ *     Null/Undefined are singleton partitions and cannot be unboxed). `tag`,
+ *     when also present, must be consistent with the partition's payload
+ *     kind (exact for scalar partitions, ref-shaped for String/Object/
+ *     Function). Lowering lands in #2949 slice 3.
  */
 export interface IrInstrUnbox extends IrInstrBase {
   readonly kind: "unbox";
   readonly value: IrValueId;
-  readonly tag: ValType;
+  /** Target member ValType — REQUIRED for union operands (V1 contract). */
+  readonly tag?: ValType;
+  /** Proven JS partition — REQUIRED for dynamic operands (#2949). */
+  readonly jsTag?: JsTag;
 }
 
 /**
  * Runtime tag discriminator — result (via `IrInstrBase.result`) is `i32`,
- * 1 if `value`'s runtime tag matches `tag`, else 0. `value` must be a
- * tagged-union type containing `tag` as a member. Lowers to
- * `struct.get $tag; i32.const <N>; i32.eq`.
+ * 1 if `value`'s runtime tag matches, else 0.
+ *
+ *   - union operand (V1): `tag` (REQUIRED here) must be a member ValType;
+ *     lowers to `struct.get $tag; i32.const <N>; i32.eq`.
+ *   - dynamic operand (#2949): `jsTag` (REQUIRED here) names the JS
+ *     partition under test — ANY partition, including the payload-less
+ *     Null/Undefined (testing for them is the point). Lowering (slice 3)
+ *     dispatches on the carrier's runtime tag via the canonical classifier
+ *     path (`emitTagLoad`/`emitTagTest` on the backend emitter).
  */
 export interface IrInstrTagTest extends IrInstrBase {
   readonly kind: "tag.test";
   readonly value: IrValueId;
-  readonly tag: ValType;
+  /** Member ValType under test — REQUIRED for union operands (V1 contract). */
+  readonly tag?: ValType;
+  /** JS partition under test — REQUIRED for dynamic operands (#2949). */
+  readonly jsTag?: JsTag;
+}
+
+/**
+ * `ToBoolean(value)` on a boxed-any carrier — the dynamic-value truthiness
+ * op (#2949 S5.1). `value` MUST be `IrType.dynamic`; result (via
+ * `IrInstrBase.result`) is `i32` (1 = truthy, 0 = falsy), suitable directly
+ * as an `if` / loop / ternary `condValue`.
+ *
+ * This is deliberately NOT `unbox{Boolean}`: unboxing reads the Boolean
+ * *partition* payload and is only valid on a proven boolean, whereas JS
+ * `ToBoolean` (§7.1.2) is defined over EVERY partition — `0`/`NaN`/`""`/
+ * `null`/`undefined` are falsy, every other value truthy. Lowering routes
+ * through the SAME `coercion-engine.emitToBoolean` legacy uses (`__any_
+ * unbox_bool` on the gc `$AnyValue` carrier / `__is_truthy` on the host
+ * externref carrier) via `IrDynamicLowering.emitToBoolean` — one ToBoolean
+ * engine (June-audit D4), byte-parity with legacy. The known-literal
+ * `tag.test`+`unbox` fast path is reserved for producers that statically
+ * know the partition; general truthiness is this node.
+ */
+export interface IrInstrDynTruthy extends IrInstrBase {
+  readonly kind: "dyn.truthy";
+  readonly value: IrValueId;
+}
+
+/**
+ * `dyn.to_number{value}` — `ToNumber(value)` (§7.1.4) on a boxed-any carrier,
+ * result `f64` (#2949 S5.3). The single-operand ToNumber primitive that the
+ * numeric-abstract relational lowering (`< > <= >=`) uses: from-ast converts a
+ * dynamic relational operand to `f64` with this node, then feeds the existing
+ * `f64.lt`/`gt`/`le`/`ge` compare path (a concrete numeric operand is used
+ * as-is — no node).
+ *
+ * Lowering routes to the CANONICAL per-backend ToNumber engine via
+ * `IrDynamicLowering.emitToNumber` — one ToNumber policy (June-audit D4):
+ *   - gc/fast/standalone: `__any_to_f64` (the SAME boxed-any→f64 helper legacy's
+ *     `__any_lt`/`__any_gt`/… + the arithmetic helpers use — null→0,
+ *     undefined→NaN, boolean→0/1, number→value).
+ *   - host: `__unbox_number` (`Number(v)`, §7.1.4 — the canonical host ToNumber
+ *     `coercion-engine.emitToNumber` emits for the externref carrier).
+ *
+ * SCOPE — numeric-abstract only. Legacy `any < any` is a FULL Abstract
+ * Relational Comparison (§7.2.11) that is mode-split three ways (host
+ * `__host_compare`; standalone a runtime both-strings-lexicographic-else-numeric
+ * branch; fast numeric-hint) — NOT a bare ToNumber. This node deliberately
+ * implements only the numeric arm; string×string lexicographic relational is
+ * DEFERRED. A boxed-string operand ToNumbers (host: `Number("5")=5`; gc:
+ * `__any_to_f64` reads the box's f64 slot, matching legacy `__any_lt`), which is
+ * spec-correct ONLY when the OTHER operand is a number (ARC never takes the
+ * both-strings branch) — hence the S5.P producer admits a dynamic relational
+ * operand ONLY against a numeric literal/concrete.
+ */
+export interface IrInstrDynToNumber extends IrInstrBase {
+  readonly kind: "dyn.to_number";
+  readonly value: IrValueId;
+}
+
+/**
+ * `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality (§7.2.15 /
+ * §7.2.16) between two boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
+ *
+ * BOTH operands MUST be `dynamic`: the producer boxes any concrete operand
+ * into the carrier first (via `box{toType: dynamic}`), leaving the dyn side
+ * as-is, so this node always sees two carriers — exactly the `(ref null
+ * $AnyValue, ref null $AnyValue)` shape the canonical equality helpers take.
+ * Lowering routes through the SAME `__any_strict_eq` (`===`/`!==`, `loose:
+ * false`) / `__any_eq` (`==`/`!=`, `loose: true`) helpers legacy's
+ * `compileAnyBinaryDispatch` uses — one equality engine, byte-parity with
+ * legacy, and the tag-5 field-4 classifier (incl. `NaN === NaN → false` via
+ * the helper's `f64.eq`) stays in the helper body, never re-implemented
+ * (June-audit D4). `negate` appends `i32.eqz` for the `!==`/`!=` form (the
+ * helper always computes the positive `===`/`==`). The payload-less
+ * `dyn === null` / `dyn === undefined` STRICT cases are NOT this node — the
+ * producer lowers those via the cheaper exact `tag.test{Null|Undefined}`.
+ */
+export interface IrInstrDynEq extends IrInstrBase {
+  readonly kind: "dyn.eq";
+  readonly lhs: IrValueId;
+  readonly rhs: IrValueId;
+  /** `true` = loose `==`/`!=` (`__any_eq`); `false` = strict `===`/`!==` (`__any_strict_eq`). */
+  readonly loose: boolean;
+  /** `true` = `!==`/`!=` — append `i32.eqz` to the helper's positive result. */
+  readonly negate: boolean;
+}
+
+/**
+ * `dyn.member_get{recv, key}` — a dynamic member read `recv[key]` / `recv.name`
+ * on a boxed-any receiver, result `dynamic` (#3053 U1 / #2949 S5.4).
+ *
+ * BOTH operands are `dynamic` carriers: the producer boxes the receiver (an
+ * `any`-typed value already IS the carrier) and the key (a property-name string
+ * for `.name`, or a boxed index for `[i]`) into the carrier first, so this node
+ * always sees the `(carrier, carrier) -> carrier` shape the unified reader
+ * primitive `__dyn_member_get(recv, key)` (#3053 U0) takes and returns.
+ *
+ * Lowering routes through `IrDynamicLowering.emitMemberGet` (named) /
+ * `emitElementGet` (indexed) — both emit a bare `[call __dyn_member_get]` and
+ * flip the `ctx.usesDynMemberGet` latch that makes the finalize
+ * `ensureDynMemberGet` pass build the helper. The helper closes the
+ * externref↔carrier round-trip INSIDE its own frame (U0), so the result is the
+ * identity-preserving, tag-honest carrier (object→tag-6, string→tag-5,
+ * number→tag-3, …) with NO externref↔$AnyValue impedance at the IR boundary —
+ * the S5.4 carrier-impedance blocker is dissolved because the helper takes and
+ * returns the carrier directly. `key` is carried dynamic so the helper's own
+ * `__any_to_extern(key)` performs `ToPropertyKey` (string as-is, number →
+ * decimal) inside its frame.
+ *
+ * MECHANISM ONLY in U1: the IR selector's move-only scan still REJECTS a dyn
+ * receiver in a member read (`select.ts` `dynamicUsesAreMoveOnly`), so no
+ * from-ast producer reaches this node in a claimed function until S5.P (U2)
+ * opens the scan. The node + lowering are wired but unreached — byte-inert.
+ */
+export interface IrInstrDynMemberGet extends IrInstrBase {
+  readonly kind: "dyn.member_get";
+  /** The receiver carrier (`dynamic`). */
+  readonly recv: IrValueId;
+  /** The property key carrier (`dynamic`): a boxed string name or boxed index. */
+  readonly key: IrValueId;
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +1221,30 @@ export interface IrInstrClassNew extends IrInstrBase {
 }
 
 /**
+ * #3000-C: allocate a fresh, default-initialised instance of a class WITHOUT
+ * running its constructor. This is the primitive the IR constructor-body
+ * lowering (`lowerFunctionAstToIr` for a `ConstructorDeclaration`) uses to
+ * synthesise `this` at body entry — the ctor body then writes fields via
+ * `class.set` and the epilogue `return`s the instance.
+ *
+ * Unlike `class.new` (which `call`s the legacy `<className>_new` constructor —
+ * the very function the ctor body is BEING compiled INTO, so reusing it would
+ * recurse), `class.alloc` lowers to the exact default-field + tag +
+ * `struct.new` prefix the legacy `<className>_new` emits before it tail-calls
+ * `<className>_init`. The default values, the `__tag` constant and the struct
+ * type index all come from the resolver's `IrClassLowering.allocInstrs`, which
+ * the `ClassRegistry` derives from the SAME `ctx.structFields` / `ctx.classTagMap`
+ * the legacy path uses — so the emitted allocation prefix is byte-identical.
+ *
+ * Takes no SSA operands (a pure, side-effect-free allocation, like `object.new`).
+ * Result type: `{ kind: "class"; shape }` → `(ref $ClassStruct)` (non-null).
+ */
+export interface IrInstrClassAlloc extends IrInstrBase {
+  readonly kind: "class.alloc";
+  readonly shape: IrClassShape;
+}
+
+/**
  * Read a named field from a class instance. `value` must be `IrType.class`
  * with a shape containing `fieldName`. Lowering emits:
  *   <emit value>
@@ -1033,6 +1292,45 @@ export interface IrInstrClassSet extends IrInstrBase {
  */
 export interface IrInstrClassCall extends IrInstrBase {
   readonly kind: "class.call";
+  readonly receiver: IrValueId;
+  readonly methodName: string;
+  readonly args: readonly IrValueId[];
+}
+
+/**
+ * #3000-E: a derived constructor's `super(args)` call. Runs the PARENT class's
+ * `<parent>_init` on the already-allocated `self` — NOT the parent's `_new`
+ * (which would allocate a second, wrong-typed instance). The legacy backend
+ * splits every WasmGC-struct class into `<Class>_new` (alloc + tail-call init)
+ * and `<Class>_init` (`(...ctorParams, self) -> (ref $struct)` — field inits +
+ * ctor body, self LAST), and lowers a derived `super(...)` to
+ * `call <Parent>_init(args..., self)`. This instr mirrors that exactly.
+ *
+ * Statement-only (no SSA result): `<Parent>_init` returns `(ref $ParentStruct)`
+ * but `super(...)` as a statement discards it, so the lowering drops the result.
+ * `self` is a `(ref $SubStruct)` — a WasmGC subtype of `(ref $ParentStruct)`, so
+ * the raw `call` typechecks. Lowering emits: <each arg>, <self>, call, drop.
+ */
+export interface IrInstrClassSuperInit extends IrInstrBase {
+  readonly kind: "class.super_init";
+  readonly parentShape: IrClassShape;
+  readonly self: IrValueId;
+  readonly args: readonly IrValueId[];
+}
+
+/**
+ * #3000-E: a `super.method(args)` call inside a subclass method. Static-dispatches
+ * to the PARENT's method slot (`<parent>_<method>`) with the subclass receiver.
+ * Unlike `class.call` (which resolves the method against the RECEIVER's shape),
+ * this resolves against `parentShape` so an override on the subclass is bypassed.
+ * The receiver value is a `(ref $SubStruct)` passed where the parent method
+ * expects `(ref $ParentStruct)` (valid WasmGC subtyping). Lowering emits:
+ *   <receiver> <each arg> call $<parent>_<method>
+ * Result type: the parent method descriptor's `returnType` (null → void).
+ */
+export interface IrInstrClassSuperCall extends IrInstrBase {
+  readonly kind: "class.super_call";
+  readonly parentShape: IrClassShape;
   readonly receiver: IrValueId;
   readonly methodName: string;
   readonly args: readonly IrValueId[];
@@ -1190,6 +1488,8 @@ export interface IrInstrForOfVec extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,6 +1674,8 @@ export interface IrInstrForOfIter extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1432,6 +1734,34 @@ export interface IrInstrGenEpilogue extends IrInstrBase {
 export interface IrInstrGenYieldStar extends IrInstrBase {
   readonly kind: "gen.yieldStar";
   readonly inner: IrValueId;
+}
+
+/**
+ * #2951 — a generator's `return <value>` stash. Mirrors legacy
+ * `compileReturnStatement` (`codegen/statements/control-flow.ts:144-170`):
+ * the return value belongs ONLY to the terminal `{value, done:true}`
+ * IteratorResult — it must NOT enter the eager yield buffer (where
+ * spread / for-of / Array.from would surface it as a `done:false`
+ * element). The value is stashed on the buffer via
+ * `__gen_set_return(buffer, value)` (signature `(externref, externref)
+ * → void`), and the host drain emits it once with `done:true`.
+ *
+ * Same shape as `gen.push` (statement-level, `result: null`,
+ * `resultType: null`, one `value` operand). The lowerer BOXES the value
+ * to externref before the call — `f64` → `__box_number`, `i32` →
+ * `f64.convert_i32_s` then box, `ref`/`ref_null` → `extern.convert_any`,
+ * `externref` → pass through. Only valid inside `funcKind ===
+ * "generator"`; the lowerer reads `IrFunction.generatorBufferSlot` for
+ * the buffer `local.get`.
+ *
+ * Lowering pattern:
+ *   local.get $__gen_buffer
+ *   <emit value; box to externref>
+ *   call $__gen_set_return
+ */
+export interface IrInstrGenSetReturn extends IrInstrBase {
+  readonly kind: "gen.setReturn";
+  readonly value: IrValueId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,6 +1937,8 @@ export interface IrInstrForOfString extends IrInstrBase {
   readonly elementSlot: number;
   /** Body instrs emitted inside the loop. */
   readonly body: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,6 +1978,39 @@ export interface IrInstrForOfString extends IrInstrBase {
 export interface IrInstrThrow extends IrInstrBase {
   readonly kind: "throw";
   readonly value: IrValueId;
+}
+
+/**
+ * (#2856) Early `return` from inside a nested body buffer — the
+ * `if (v === target) return mid;` inside a `while` loop shape. The block
+ * TERMINATOR `return` can't express this (buffers aren't blocks), so this
+ * statement-level instr lowers to the Wasm `return` op, which unwinds all
+ * enclosing blocks/loops and returns from the function directly.
+ *
+ * `value` is null for a bare `return;` in a void function (the Wasm
+ * `return` then carries no operand). When non-null, the value is emitted
+ * onto the stack first and must match the function's single result type
+ * (from-ast routes it through the same `coerceReturnValue` the tail path
+ * uses).
+ *
+ * SOUNDNESS SCOPE (selector-enforced, mirrored in from-ast):
+ *   - NOT valid inside `try`/`catch`/`finally` buffers — a Wasm `return`
+ *     would skip the inlined finally blocks.
+ *   - NOT valid inside `forof.iter` bodies — the iterator protocol's
+ *     `iter.return` cleanup would be skipped (spec: `return` inside
+ *     for-of calls the iterator's return()).
+ *   - NOT valid in generators (their return routes through the buffer
+ *     epilogue, not a plain Wasm return).
+ *   Plain `while`/`for`/`do` bodies (and `if.stmt` arms nested in them)
+ *   are the supported contexts — a Wasm `return` there is exactly JS's
+ *   early-exit semantics.
+ *
+ * Like `throw`, it produces NO SSA value; instructions after it in the
+ * same buffer are dead but structurally valid.
+ */
+export interface IrInstrEarlyReturn extends IrInstrBase {
+  readonly kind: "early.return";
+  readonly value: IrValueId | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1700,6 +2065,29 @@ export interface IrInstrWhileLoop extends IrInstrBase {
   readonly condValue: IrValueId;
   /** Body instructions executed each iteration when the cond is truthy. */
   readonly body: readonly IrInstr[];
+  /**
+   * #2952 slice 1 — `do { body } while (cond)`. When `true`, the lowerer
+   * emits the body BEFORE the cond check so the body runs at least once
+   * (post-test loop). The IR structure is otherwise identical to a `while`
+   * (same `cond` / `condValue` / `body` buffers), so every pass — verify,
+   * hygiene, effects, propagate — treats a do-while exactly as a while.
+   * Only the lowering emission order differs. Absent/`false` ↔ pre-test
+   * (`while`).
+   *
+   * SAFETY of sharing the kind: the verifier walks `cond` before `body`
+   * only to register `condValue`'s def ahead of its use; a do-while body
+   * never has a cross-buffer SSA dependency on the cond buffer (each buffer's
+   * SSA values are buffer-local; the only shared state is outer-scope slots),
+   * so the cond-first walk order is sound for both loop shapes.
+   */
+  readonly postCond?: boolean;
+  /**
+   * #2952 slice 2 — identity of this loop for `br.label` targeting. The
+   * from-ast layer always synthesises one (unlabeled break/continue resolve
+   * to the innermost loop's label); loops built directly by tests may omit
+   * it. Purely semantic — no pass reads it except the lowering resolver.
+   */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1735,6 +2123,8 @@ export interface IrInstrForLoop extends IrInstrBase {
   readonly body: readonly IrInstr[];
   /** Update instructions executed after the body each iteration. */
   readonly update: readonly IrInstr[];
+  /** #2952 slice 2 — loop identity for `br.label` (see IrInstrWhileLoop). */
+  readonly loopLabel?: IrLabelId;
 }
 
 /**
@@ -1784,6 +2174,66 @@ export interface IrInstrTry extends IrInstrBase {
   readonly finallyBody?: readonly IrInstr[];
 }
 
+// ---------------------------------------------------------------------------
+// Multi-exit control flow (#2952 slice 2 — unlabeled break / continue)
+// ---------------------------------------------------------------------------
+
+/**
+ * #2952 slice 2 — branch to an enclosing loop frame identified by `label`.
+ *
+ * `mode` selects WHICH of the loop's Wasm frames the branch targets:
+ *   - `"break"`    → the loop's outer `block` (exit the loop);
+ *   - `"continue"` → the frame whose fall-through re-runs the loop's
+ *                    advance/cond (the Wasm `loop` frame for pre-test
+ *                    `while` / `forof.iter`, or a dedicated body-wrapping
+ *                    `block` for `for` / do-while / counter-advancing
+ *                    for-of shapes — the lowerer decides).
+ *
+ * NO depth is stored here (see the issue's Design-A spec): depth is a
+ * lowering-time artifact derived by scanning the emitter's `ctrlStack`.
+ * The verifier enforces (a) `label` is bound by an enclosing loop in the
+ * same buffer-nesting chain, and (b) the instr terminates its buffer
+ * (statements after it are dead code the from-ast layer never emits).
+ *
+ * A `br.label` that lexically crosses a `try` with a `finallyBody` makes
+ * the lowerer inline that finally buffer immediately before the `br` —
+ * the same inlining `IrInstrTry` already does for normal completion.
+ *
+ * Result is always void (`result: null`); control does not fall through.
+ */
+export interface IrInstrBrLabel extends IrInstrBase {
+  readonly kind: "br.label";
+  readonly label: IrLabelId;
+  readonly mode: "break" | "continue";
+}
+
+/**
+ * #2952 slice 2 — statement-level `if (cond) then [else]` inside a nested
+ * buffer (loop body / try body / another if-arm). UNLIKE the value-producing
+ * `IrInstrIf` (#1392) there are no carrier values and no result: both arms
+ * are void statement lists, and `else` may be empty (plain `if` without
+ * `else` — the lowerer emits a Wasm `if` with no else branch).
+ *
+ * This is the enabler for useful break/continue adoption: `if (c) break;`
+ * is the canonical multi-exit shape, and the loop-body statement grammar
+ * previously had no statement-`if` at all (top-level `if` uses the block
+ * CFG layer, which nested buffers cannot reach).
+ *
+ * Lowering:
+ *   <emit cond>            ;; i32
+ *   if                     ;; blocktype empty
+ *     <then instrs>
+ *   [else
+ *     <else instrs>]
+ *   end
+ */
+export interface IrInstrIfStmt extends IrInstrBase {
+  readonly kind: "if.stmt";
+  readonly cond: IrValueId;
+  readonly then: readonly IrInstr[];
+  readonly else: readonly IrInstr[];
+}
+
 export type IrInstr =
   | IrInstrConst
   | IrInstrCall
@@ -1798,6 +2248,10 @@ export type IrInstr =
   | IrInstrBox
   | IrInstrUnbox
   | IrInstrTagTest
+  | IrInstrDynTruthy
+  | IrInstrDynToNumber
+  | IrInstrDynEq
+  | IrInstrDynMemberGet
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -1812,6 +2266,9 @@ export type IrInstr =
   | IrInstrRefCellGet
   | IrInstrRefCellSet
   | IrInstrClassNew
+  | IrInstrClassAlloc
+  | IrInstrClassSuperInit
+  | IrInstrClassSuperCall
   | IrInstrClassGet
   | IrInstrClassSet
   | IrInstrClassCall
@@ -1831,10 +2288,13 @@ export type IrInstr =
   | IrInstrGenPush
   | IrInstrGenEpilogue
   | IrInstrGenYieldStar
+  | IrInstrGenSetReturn
   | IrInstrForOfString
   // Slice 9 (#1169h) — exception handling.
   | IrInstrThrow
   | IrInstrTry
+  // (#2856) Early return inside body buffers.
+  | IrInstrEarlyReturn
   // Slice 10 (#1169i) — extern class ops.
   | IrInstrExternNew
   | IrInstrExternCall
@@ -1844,6 +2304,9 @@ export type IrInstr =
   // Slice 12 (#1280) — generic structured loops.
   | IrInstrWhileLoop
   | IrInstrForLoop
+  // #2952 slice 2 — multi-exit control flow.
+  | IrInstrBrLabel
+  | IrInstrIfStmt
   // (#1373 Phase B) Async / await IR nodes. Currently type-only —
   // Phase C (CPS transform, follow-up #1373b) wires lowering.
   | IrInstrAwait
@@ -2013,22 +2476,6 @@ export interface IrModule {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-export function isIrFuncRef(x: unknown): x is IrFuncRef {
-  return typeof x === "object" && x !== null && (x as { kind?: unknown }).kind === "func";
-}
-
-export function isIrGlobalRef(x: unknown): x is IrGlobalRef {
-  return typeof x === "object" && x !== null && (x as { kind?: unknown }).kind === "global";
-}
-
-export function isIrTypeRef(x: unknown): x is IrTypeRef {
-  return typeof x === "object" && x !== null && (x as { kind?: unknown }).kind === "type";
-}
-
-// ---------------------------------------------------------------------------
 // Shared IR traversal / use-collection (#1922)
 //
 // Single authority on (a) which IrInstr kinds carry nested `IrInstr[]` buffers,
@@ -2079,6 +2526,13 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
       if (instr.catchClause) fn(instr.catchClause.body);
       if (instr.finallyBody) fn(instr.finallyBody);
       return;
+    // #2952 slice 2 — statement-level if. Both arms are plain buffers
+    // (else may be empty — still visited, mirroring `if`'s unconditional
+    // arm visit so pass behavior is uniform).
+    case "if.stmt":
+      fn(instr.then);
+      fn(instr.else);
+      return;
     // All remaining kinds carry no nested IrInstr[] buffer. The `never`
     // binding turns a newly-added buffer-bearing kind into a compile error
     // here — the single point that must know about every buffer.
@@ -2093,6 +2547,10 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
+    case "dyn.eq":
+    case "dyn.member_get":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2107,9 +2565,12 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "refcell.get":
     case "refcell.set":
     case "class.new":
+    case "class.alloc":
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2124,7 +2585,9 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "gen.push":
     case "gen.epilogue":
     case "gen.yieldStar":
+    case "gen.setReturn":
     case "throw":
+    case "br.label": // #2952 slice 2 — leaf (buffer-terminating branch)
     case "extern.new":
     case "extern.call":
     case "extern.prop":
@@ -2133,6 +2596,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return;
     default: {
       const _exhaustive: never = instr;
@@ -2211,6 +2675,13 @@ export function mapNestedBuffers(
         finallyBody: instr.finallyBody && finallyBody ? finallyBody : instr.finallyBody,
       };
     }
+    // #2952 slice 2 — statement-level if.
+    case "if.stmt": {
+      const then_ = mapBuffer(instr.then);
+      const else_ = mapBuffer(instr.else);
+      if (then_ === instr.then && else_ === instr.else) return instr;
+      return { ...instr, then: then_, else: else_ };
+    }
     // Leaf kinds carry no nested buffer — returned unchanged. (Same exhaustive
     // set as forEachNestedBuffer; the never-check enforces parity.)
     case "const":
@@ -2224,6 +2695,10 @@ export function mapNestedBuffers(
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
+    case "dyn.eq":
+    case "dyn.member_get":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2238,9 +2713,12 @@ export function mapNestedBuffers(
     case "refcell.get":
     case "refcell.set":
     case "class.new":
+    case "class.alloc":
     case "class.get":
     case "class.set":
     case "class.call":
+    case "class.super_init":
+    case "class.super_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2255,7 +2733,9 @@ export function mapNestedBuffers(
     case "gen.push":
     case "gen.epilogue":
     case "gen.yieldStar":
+    case "gen.setReturn":
     case "throw":
+    case "br.label": // #2952 slice 2 — leaf
     case "extern.new":
     case "extern.call":
     case "extern.prop":
@@ -2264,6 +2744,7 @@ export function mapNestedBuffers(
     case "await":
     case "async.return":
     case "async.throw":
+    case "early.return":
       return instr;
     default: {
       const _exhaustive: never = instr;
@@ -2294,6 +2775,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "slot.read":
     case "gen.epilogue":
     case "extern.regex":
+    // #3000-C: class.alloc takes no SSA operands — a value-less fresh allocation.
+    case "class.alloc":
       return [];
     case "call":
       return instr.args;
@@ -2310,10 +2793,15 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
+    case "dyn.eq":
     case "string.concat":
     case "string.eq":
       return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.len":
       return [instr.value];
     case "object.new":
@@ -2342,6 +2830,10 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
+      return [instr.receiver, ...instr.args];
     case "slot.write":
       return [instr.value];
     case "vec.len":
@@ -2369,12 +2861,21 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "gen.yieldStar":
       return [instr.inner];
+    case "gen.setReturn":
+      return [instr.value];
     case "forof.string":
       return [instr.str];
     case "throw":
       return [instr.value];
     case "try":
       return [];
+    // #2952 slice 2 — br.label carries no SSA operands (label is a control
+    // identity, not a value); if.stmt evaluates only its cond at its own
+    // level (arm-interior uses are reached via `collectUses(_, {deep:true})`).
+    case "br.label":
+      return [];
+    case "if.stmt":
+      return [instr.cond];
     case "extern.new":
       return instr.args;
     case "extern.call":
@@ -2392,6 +2893,9 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
     default: {
       const _exhaustive: never = instr;
       void _exhaustive;

@@ -8,7 +8,6 @@
  * (`+`, `-`, `!`, `~`) live in ./unary.ts.
  */
 import { ts } from "../../ts-api.js";
-import { isSymbolType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { tryEmitLinearU8ElementUpdate } from "../linear-uint8-codegen.js";
@@ -26,6 +25,9 @@ import {
 import {
   emitAlternateStructSetDispatch,
   emitBoundsGuardedArraySet,
+  emitCapturedBoxGlobalRead,
+  emitCapturedBoxGlobalWrite,
+  getCapturedBoxGlobal,
   resolveInheritedStaticProp,
 } from "../property-access.js";
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for inc/dec
@@ -47,7 +49,9 @@ import { resolveStructName } from "./misc.js";
  * throw) when the operand's TS type is Symbol.
  */
 function emitSymbolUpdateThrow(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): boolean {
-  if (!isSymbolType(ctx.checker.getTypeAtLocation(unwrapParens(operand)))) return false;
+  // (#1930 Slice 2) oracle fold: was a direct isSymbolType check on the
+  // checker type of the paren-unwrapped operand.
+  if (ctx.oracle.staticJsTypeOf(unwrapParens(operand)) !== "symbol") return false;
   emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
   return true;
 }
@@ -908,6 +912,39 @@ function compileMemberIncDec(
  * Caller must have already established that `expr.operator` is either
  * `PlusPlusToken` or `MinusMinusToken`.
  */
+/**
+ * (#3039) `++x` / `--x` / `x++` / `x--` on a BOXED captured global — a
+ * transitively-captured mutable var an accessor/method body updates. Reads and
+ * writes THROUGH the ref cell (never the raw box global). Numeric-only: the
+ * cell value is promoted to f64, incremented, coerced back to the cell type.
+ * Returns f64 (prefix → new value, postfix → old value), matching the module /
+ * captured-global inc/dec sites.
+ */
+function emitCapturedBoxGlobalIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  entry: { globalIdx: number; refCellTypeIdx: number; valType: ValType },
+  arithOp: "f64.add" | "f64.sub",
+  isPrefix: boolean,
+): ValType {
+  // Read the current cell value and promote to f64.
+  emitCapturedBoxGlobalRead(ctx, fctx, entry);
+  if (entry.valType.kind !== "f64") coerceType(ctx, fctx, entry.valType, { kind: "f64" });
+  const oldF64 = allocLocal(fctx, `__box_ginc_old_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: oldF64 });
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: arithOp });
+  const newF64 = allocLocal(fctx, `__box_ginc_new_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: newF64 });
+  // Coerce the new f64 back to the cell type and write it through the box.
+  if (entry.valType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, entry.valType);
+  const newVal = allocLocal(fctx, `__box_ginc_val_${fctx.locals.length}`, entry.valType);
+  fctx.body.push({ op: "local.set", index: newVal });
+  emitCapturedBoxGlobalWrite(fctx, entry, newVal);
+  fctx.body.push({ op: "local.get", index: isPrefix ? newF64 : oldF64 });
+  return { kind: "f64" };
+}
+
 function compilePrefixUpdate(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -927,6 +964,11 @@ function compilePrefixUpdate(
         return { kind: "f64" };
       }
       if (ts.isIdentifier(ppOperand)) {
+        if (fctx.localMap.get(ppOperand.text) === undefined) {
+          // (#3039) ++x on a boxed captured global — update through the cell.
+          const ppBox = getCapturedBoxGlobal(ctx, ppOperand.text);
+          if (ppBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, ppBox, "f64.add", true);
+        }
         const idx = fctx.localMap.get(ppOperand.text);
         if (idx !== undefined) {
           const boxedPP = fctx.boxedCaptures?.get(ppOperand.text);
@@ -1138,6 +1180,11 @@ function compilePrefixUpdate(
         return { kind: "f64" };
       }
       if (ts.isIdentifier(mmOperand)) {
+        if (fctx.localMap.get(mmOperand.text) === undefined) {
+          // (#3039) --x on a boxed captured global — update through the cell.
+          const mmBox = getCapturedBoxGlobal(ctx, mmOperand.text);
+          if (mmBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, mmBox, "f64.sub", true);
+        }
         const idx = fctx.localMap.get(mmOperand.text);
         if (idx !== undefined) {
           const boxed = fctx.boxedCaptures?.get(mmOperand.text);
@@ -1371,6 +1418,10 @@ function compilePostfixUnary(
     }
     const idx = fctx.localMap.get(postOperand.text);
     if (idx === undefined) {
+      // (#3039) x++/x-- on a boxed captured global — update through the cell,
+      // returning the OLD numeric value (postfix semantics).
+      const postBox = getCapturedBoxGlobal(ctx, postOperand.text);
+      if (postBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, postBox, arithOp, false);
       // Check module globals for postfix ++/--
       const postModIdx = ctx.moduleGlobals.get(postOperand.text);
       if (postModIdx !== undefined) {

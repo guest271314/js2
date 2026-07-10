@@ -1,11 +1,14 @@
 ---
 id: 2712
 title: "Introduce a real bool ValType; retire the optional i32 boolean brand"
-status: blocked
-blocked_on: "architect ValType-registration decision — the boolean analog of #2044's BigInt i64-brand decision (see Senior dev note + Architect hand-off below)"
+status: done
+completed: 2026-07-09
+assignee: ttraenkler/fable-3058
+# was blocked_on the architect ValType-registration decision — RESOLVED 2026-07-03,
+# see ## Architect Decision below: NO {kind:"bool"}; brand ratified, made total at producers
 sprint: current
 created: 2026-06-26
-updated: 2026-06-27
+updated: 2026-07-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -224,3 +227,105 @@ downstream of this same boolean-as-i32 representation collision and is
 **unrepresentable to fix cleanly until the `bool` lane exists**. Sequence #2732(b)
 behind #2712; #2732(a) (unary `+/-/~/>>>` ToPrimitive trap) is independent and
 ships on its own.
+
+---
+
+## Architect Decision (2026-07-03, fable) — NO `{kind:"bool"}`; ratify the brand, make it TOTAL at producers
+
+**Decision: do NOT introduce a first-class `{kind:"bool"}` ValType. The inert
+`{kind:"i32", boolean?: true}` brand is the permanent boolean representation.
+The fix for this issue is (I1) making the brand total at every boolean
+producer and (I2) routing all boxing through the single coercion choke
+point — not a lattice change.** This is decided as a coherent pair with
+#2044 (same date): the ValType lattice's uniform mechanism for JS types on
+scalar Wasm carriers is the optional, structurally-inert brand —
+`i64.bigint` (#1644), `i32.boolean` (#1788/#2795), `i32.symbol` (#2785).
+Boolean does not get a divergent mechanism.
+
+### Re-grounding 2026-07-03 (probes on current main — the issue is largely stale)
+
+The Senior dev note's f515906 repro table has moved again. Verified via the
+equivalence harness (host mode):
+
+| Case | senior note (06-27) | current main (07-03) |
+|---|---|---|
+| `o[true]` computed key | keys `"1"` ✗ | **keys `"true"`** ✓ (fixed by #2795 literal branding) |
+| `new Set([true]).has(1)` | wrongly `true` ✗ | **`false`** ✓ |
+| `typeof (x: any = 1 < 2)` | — | `"boolean"` ✓ |
+| computed predicate as key: `k: any = (n<2); o[k]` | — | keys `"true"` ✓ |
+| **computed predicate into Set: `new Set([(n<2)]).has(1)`** | — | **wrongly `true` ✗ — the live repro** |
+
+So the surviving bug class is exactly the senior note's structural diagnosis:
+**comparison/logical/predicate results are still born brandless**
+(`src/codegen/binary-ops.ts` has ~96 bare `return { kind: "i32" }` sites; only
+literals and declared storage brand today), and any *generic* boxing path a
+brandless predicate flows through (Set/Map element coercion here) reifies it
+as the number 1/0. That is a **producer gap**, fixable inside the brand
+design — it does not require the lattice inversion.
+
+### Why `{kind:"bool"}` is declined (the hand-off's recommendation, considered seriously)
+
+1. **Wasm has no bool valtype.** `{kind:"bool"}` would be a front-end fiction
+   re-encoded to the i32 byte `0x7F` at the emit seam. Its only real benefit
+   is compile-time switch exhaustiveness — bought at the cost of the senior
+   note's own blast-radius finding: a 524-site `=== "i32"` audit, an
+   `isI32Like` helper smeared across storage/branch/arithmetic sites, and
+   canonical-recgroup type-identity churn that is auto-park-prone.
+2. **The brand already participates everywhere it semantically must:** struct
+   identity (`canonical-recgroup.ts` `i32b` token), boxing
+   (`type-coercion.ts:1776` → `__box_boolean`), the #1917 engine
+   (brand-aware), typeof. Promotion adds no new semantic capability.
+3. **Coherence with #2044.** The bigint brand shipped, works, and is ratified.
+   Two different mechanisms for the same class of problem is itself a bug
+   factory; the exhaustiveness gap is compensated architecturally (I2).
+4. **Migration asymmetry.** Producer-totalization is a mechanical sweep of a
+   small file cluster; the bool kind is a cross-cutting inversion that
+   collides with the in-flight #1917/#2580/#2660 substrate work.
+
+### The ratified design — three invariants
+
+- **(I1) Brand-total at production.** Every expression producing a JS boolean
+  returns `{kind:"i32", boolean: true}`: literals (done, #2795), declared
+  storage (done, `type-mapper.ts:56`), **comparison/equality/relational
+  results, logical `!` and boolean-typed `&&`/`||` results, `in` /
+  `instanceof` / `delete` results** (the open sweep — concretely the ~96 bare
+  `{kind:"i32"}` returns in `src/codegen/binary-ops.ts` plus the predicate
+  returns in `expressions/unary.ts` / `expressions/logical-ops.ts`). This is
+  what fixes the live Set repro and is the enabling substrate for #2732(b)
+  (`true === 1` must be false).
+- **(I2) Consult only at the coercion choke point.** Box/unbox decisions are
+  legal ONLY in `coerceType` + the #1917 coercion engine (both already
+  brand-aware). The implementation converts straggler paths that hand-roll
+  `__box_number` on i32 values (Map/Set key coercion `map-runtime.ts`, any
+  remaining brandless `__same_value_zero` / `__to_property_key` standalone
+  arms) to route through the engine rather than adding per-site brand checks.
+- **(I3) Brands stay structurally inert.** Every `.kind === "i32"` check
+  continues to match branded booleans; arithmetic/branch/local codegen is
+  byte-unchanged; **no new canonical-recgroup token** — keep the existing
+  `i32b` tokenization exactly as-is to preserve current struct identities.
+
+### Risk note (type-identity ripple) and validation gate
+
+I1 widens which *values* are branded, not which *declared field types* are
+(field types come from `mapTsTypeToWasm`, already branded). The residual
+risk is inferred struct-field types seeded from predicate initializers
+shifting `i32`→`i32b` tokens → type-index churn. Per the senior note:
+validate on the **full merge_group floor (host + standalone)**, never a
+scoped sweep.
+
+### Re-scoped acceptance criteria (supersedes the checklist above)
+
+- [ ] Brand-totality: comparison/logical/unary/`in`/`instanceof` results carry
+      `boolean: true` (spot-audit via the probe set below).
+- [ ] `new Set<any>([(n<2) as any]).has(1) === false` and `.has(true) === true`
+      (the live repro), plus the original behavioral set — `o[true]` keys
+      `"true"`, `o[null]` keys `"null"`, `Object.values({a:true})[0] === true` —
+      in **both** host and standalone modes.
+- [ ] No boxing site outside `coerceType`/the #1917 engine decides
+      number-vs-boolean for an i32 (stragglers converted, not patched).
+- [ ] The `boolean?: true` brand is NOT removed (that line of the original AC
+      is superseded); no `{kind:"bool"}` is introduced.
+- [ ] Equivalence + test262 non-regressing on full CI / merge_group.
+
+Sequencing unchanged: land with/behind #1917 so I2 is enforced once;
+coordinate with the #2580/#2660 spine; #2732(b) stays sequenced behind this.

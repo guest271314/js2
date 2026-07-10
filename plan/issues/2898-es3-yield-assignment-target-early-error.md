@@ -4,7 +4,7 @@ title: "≤ES3: `yield` as assignment target should be an early SyntaxError (cur
 status: done
 completed: 2026-06-30
 priority: high
-sprint: current
+sprint: 69
 created: 2026-06-30
 feasibility: medium
 task_type: bug

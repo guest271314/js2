@@ -1,0 +1,88 @@
+// #2951 gate-2 — narrow the IR-first generator skip-set.
+//
+// #2138's `computeIrFirstSkipSet` blanket-excluded every generator from the
+// IR-first skip set (compile-twice), because IR-generator self-sufficiency
+// without legacy's side effects was unproven (deviation 3). The predecessor
+// slice (`gen.setReturn`, #2640) closed the last value-returning-`return`
+// deferral so value-carrying generators now IR-claim with zero post-claim
+// demotions. This suite proves the narrowing:
+//
+//   1. A selector-claimed, value-returning generator now appears in
+//      `CompileResult.irFirstSkipped` under `JS2WASM_IR_FIRST=1` (JS-host),
+//      compiles clean (no hard error / no post-claim demotion), and produces
+//      the correct runtime result when drained host-side.
+//   2. STANDALONE keeps generators compile-twice (gate 2 still excludes them):
+//      `irFirstSkipped` must NOT list the generator.
+//   3. Flag OFF is byte-inert: the skip machinery never runs, so
+//      `irFirstSkipped` is undefined and the module still runs.
+//
+// Runtime parity holds by construction: under the default (flag-off) IR
+// overlay a claimed generator ALREADY ships its IR body (the overlay
+// overwrites the legacy slot), so skipping the wasted legacy compile changes
+// only compile time — not the shipped body.
+import { afterEach, describe, expect, it } from "vitest";
+import { compile } from "../src/index.ts";
+import { buildImports } from "../src/runtime.ts";
+
+const prevFlag = process.env.JS2WASM_IR_FIRST;
+afterEach(() => {
+  if (prevFlag === undefined) Reflect.deleteProperty(process.env, "JS2WASM_IR_FIRST");
+  else process.env.JS2WASM_IR_FIRST = prevFlag;
+});
+
+async function compileWith(source: string, opts: Parameters<typeof compile>[1], irFirst: boolean) {
+  if (irFirst) process.env.JS2WASM_IR_FIRST = "1";
+  else Reflect.deleteProperty(process.env, "JS2WASM_IR_FIRST");
+  return compile(source, opts);
+}
+
+async function drain(binary: Uint8Array, imports: unknown, stringPool: unknown, take: (g: any) => unknown) {
+  const importObj = buildImports(imports as never, undefined, stringPool as never) as Record<string, unknown>;
+  const { instance } = await WebAssembly.instantiate(binary, importObj as never);
+  if (typeof importObj.setExports === "function") {
+    (importObj.setExports as (e: unknown) => void)(instance.exports);
+  }
+  return take((instance.exports as { g: (...a: number[]) => any }).g());
+}
+
+const VALUE_RETURN_GEN = `export function* g(){ yield 1; yield 2; return 3; }`;
+
+describe("#2951 gate-2 — IR-first generator skip-set narrowing", () => {
+  it("JS-host: a value-returning generator is now in irFirstSkipped and runs correctly", async () => {
+    const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, /* irFirst */ true);
+    expect(res.success).toBe(true);
+    // the generator's legacy body was skipped — IR owns the slot
+    expect(res.irFirstSkipped ?? []).toContain("g");
+    // no hard compile error and no post-claim demotion (self-sufficiency proof)
+    expect((res.errors ?? []).filter((e) => e.severity === "error")).toHaveLength(0);
+    expect(res.irPostClaimErrors ?? []).toHaveLength(0);
+    // spread excludes the return value (return 3 lands only on the terminal
+    // {value, done:true} IteratorResult, per #2035)
+    const got = await drain(res.binary!, res.imports, res.stringPool, (gen) => JSON.stringify([...gen]));
+    expect(got).toBe("[1,2]");
+  });
+
+  it("JS-host: the terminal return value surfaces once with done:true", async () => {
+    const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, true);
+    expect(res.irFirstSkipped ?? []).toContain("g");
+    const got = await drain(res.binary!, res.imports, res.stringPool, (gen) => {
+      gen.next();
+      gen.next();
+      const r = gen.next();
+      return `${r.done}:${r.value}`;
+    });
+    expect(got).toBe("true:3");
+  });
+
+  it("standalone keeps generators compile-twice (gate 2 still excludes them)", async () => {
+    const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts", target: "standalone" }, true);
+    // gate 2 stays for standalone: the generator must NOT be skipped
+    expect(res.irFirstSkipped ?? []).not.toContain("g");
+  });
+
+  it("flag OFF: skip machinery is inert (irFirstSkipped undefined)", async () => {
+    const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, /* irFirst */ false);
+    expect(res.success).toBe(true);
+    expect(res.irFirstSkipped).toBeUndefined();
+  });
+});

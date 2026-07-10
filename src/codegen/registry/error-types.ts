@@ -42,12 +42,13 @@
  */
 
 import type { CodegenContext } from "../context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import type { Instr, ValType } from "../../ir/types.js";
 
 import { BUILTIN_TYPE_TAGS } from "../builtin-tags.js";
 import { addFuncType, getOrRegisterErrorStructType } from "./types.js";
 import { addStringConstantGlobal } from "./imports.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { nativeStringLiteralInstrs, stringConstantExternrefInstrs } from "../native-strings.js";
 
 // (#2962) `getOrRegisterErrorStructType` moved to registry/types.ts so
 // native-strings.ts can import it without an import cycle (this module imports
@@ -105,6 +106,38 @@ export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErr
 }
 
 /**
+ * (#3130) Get-or-create the `__builtin_<Name>` externref carrier global for an
+ * Error-family constructor. Mirrors the global-creation half of
+ * `emitBuiltinNamespaceObject` (builtin-static-globals.ts) byte-for-byte and
+ * shares its `ctx.builtinObjectGlobals` key space, so the bare-identifier read
+ * and the `err.constructor` runtime arm resolve to the SAME global. The global
+ * starts null; both readers guard with the same lazy `__new_plain_object`
+ * materialization, so first-read-wins and identity holds either way.
+ *
+ * Called from `fillExternGetErrorProps` at FINALIZE — deliberately NOT at
+ * ctor-emit time: the standalone scaffold pre-registers `__new_TypeError` for
+ * virtually every module, and an eager per-ctor global changed bytes on
+ * error-free standalone modules (measured). Appending a global at finalize is
+ * safe: dead-elim never removes/renumbers globals (it only remaps type/func
+ * indices inside inits), and no import globals are added after the fill phase
+ * in standalone/wasi mode, so `numImportGlobals + position` is final.
+ */
+function ensureErrorCtorCarrierGlobal(ctx: CodegenContext, name: string): number {
+  let globalIdx = ctx.builtinObjectGlobals.get(name);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__builtin_${name}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(name, globalIdx);
+  }
+  return globalIdx;
+}
+
+/**
  * (#2902) Standalone/WASI-native `new Test262Error(msg)` construction.
  *
  * The test262 harness injects `class Test262Error { message }` (and, in the
@@ -152,7 +185,7 @@ function emitErrorStructConstructor(
 
   const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(importName, funcIdx);
 
   // Body: push fields in struct field order (tag, message, name), then
@@ -179,11 +212,249 @@ function emitErrorStructConstructor(
     { op: "extern.convert_any" },
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: importName,
     typeIdx,
     locals: [],
     body,
     exported: false,
   });
+}
+
+/**
+ * (#3130) Finalize-time fill: teach `__extern_get` — the universal dynamic
+ * property reader every `any`-receiver read terminally routes through
+ * (`__dyn_get`, the `__get_member_<name>` dispatcher fallbacks, typed reads
+ * with no fast path) — to answer property reads on a native `$Error_struct`
+ * receiver.
+ *
+ * WHY: `__extern_get` unwraps its receiver to `$Object` and answers a miss
+ * (undefined) for anything else. A thrown/constructed native Error is an
+ * `$Error_struct`, NOT an `$Object`, so `reason.constructor`, `err.name`,
+ * `err.message` on an `any`-typed value all read back `undefined` in
+ * standalone mode even though the struct carries the data and `instanceof`
+ * (tag-driven) passes. The static fast path in property-access.ts only
+ * covers statically-Error-typed receivers and `catch`-clause bindings — a
+ * promise rejection callback parameter (`reason`) is neither, which is
+ * exactly the `resolve-settled-*-self` §27.2.1.3.2 acceptance shape.
+ *
+ * The spliced arm, in shadowing order:
+ *   1. `$props` sidecar (fieldIdx 5, subclass own fields / dynamic writes):
+ *      recursive `__extern_get` — it holds a plain `$Object`, so accessors +
+ *      proto chain resolve normally; a nullish result falls through.
+ *   2. String-key dispatch (flatten once, `__str_equals` per candidate —
+ *      the fillBuiltinFnMeta pattern): `message`→field 1, `name`→field 2,
+ *      `stack`→field 3.
+ *   3. `constructor` → the per-name `__builtin_<Name>` bare-identifier
+ *      carrier global (#2907), lazily materialized with the SAME
+ *      `__new_plain_object` guard `emitBuiltinNamespaceObject` uses — so
+ *      `err.constructor === TypeError` is GENUINE object identity. Gated on
+ *      `$userClassId == -1` (a user subclass instance must NOT answer its
+ *      builtin parent's constructor) and, for the shared "Error" tag, on the
+ *      `$name` field equalling "Error" (a Test262Error shares the Error tag
+ *      but is a user harness class — it keeps today's miss).
+ *   4. Anything else falls through to the original body → the standard miss.
+ *
+ * Shift-safety (the fillBuiltinFnMeta discipline): runs at finalize BEFORE
+ * dead-elim; resolves every funcIdx BY NAME from the shift-maintained maps at
+ * fill time; splices into the existing body (never rebuilds it — see
+ * `reference_no_rebuild_helper_body_at_finalize`); `ref.test`/`ref.cast`/
+ * `struct.get` use type indices (append-only pre-emission). New locals are
+ * APPENDED so existing local indices are untouched.
+ *
+ * No-op (byte-identical) unless the module registered `$Error_struct`
+ * (i.e. actually constructs native errors) under wasi/standalone.
+ */
+export function fillExternGetErrorProps(ctx: CodegenContext): void {
+  if (!(ctx.wasi || ctx.standalone)) return;
+  const errTypeIdx = ctx.errorStructTypeIdx;
+  if (errTypeIdx < 0) return; // no native Error structs in this module
+  const fn = ctx.mod.functions.find((f) => f.name === "__extern_get");
+  if (!fn) return; // object runtime never emitted (nothing reads dynamically)
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (
+    externGetIdx === undefined ||
+    strFlattenIdx === undefined ||
+    strEqualsIdx === undefined ||
+    newObjectIdx === undefined
+  ) {
+    return;
+  }
+  if (ctx.anyStrTypeIdx < 0 || ctx.nativeStrTypeIdx < 0) return;
+  // (#2106 S1) Under the undefined-singleton regime the recursive $props read
+  // answers the singleton on a miss (non-null), so presence is "non-nullish";
+  // legacy regime: miss = null.
+  const isNullishIdx = ctx.funcMap.get("__extern_is_nullish");
+
+  // __extern_get: params 0=obj 1=key; existing locals o(2) e(3) any(4)
+  // getter(5) bfmeta(6). Append ours — never renumber existing ones.
+  const anyL = 2 + fn.locals.length;
+  const fkeyL = anyL + 1;
+  const scratchL = anyL + 2;
+  fn.locals.push(
+    { name: "__err_any", type: { kind: "anyref" } },
+    { name: "__err_fkey", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } },
+    { name: "__err_scratch", type: { kind: "externref" } },
+  );
+
+  const errRef = (): Instr[] => [
+    { op: "local.get", index: anyL } as Instr,
+    { op: "ref.cast", typeIdx: errTypeIdx } as Instr,
+  ];
+  const keyEquals = (lit: string): Instr[] => [
+    { op: "local.get", index: fkeyL } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    ...nativeStringLiteralInstrs(ctx, lit),
+    { op: "call", funcIdx: strEqualsIdx } as Instr,
+  ];
+  // key == "<lit>" → return struct field <fieldIdx> (externref, returned raw:
+  // the same value rep the typed fast path in property-access.ts yields).
+  const fieldArm = (lit: string, fieldIdx: number): Instr[] => [
+    ...keyEquals(lit),
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...errRef(), { op: "struct.get", typeIdx: errTypeIdx, fieldIdx } as Instr, { op: "return" } as Instr],
+    } as Instr,
+  ];
+
+  // One `constructor` arm per builtin error ctor EMITTED in this module. The
+  // carrier global is get-or-created HERE (append-only; see
+  // ensureErrorCtorCarrierGlobal for why finalize-time creation is safe) —
+  // reusing the bare-identifier read's global when one exists.
+  const ctorArms: Instr[] = [];
+  for (const name of WASI_ERROR_NAMES) {
+    if (!ctx.funcMap.has(`__new_${name}`)) continue;
+    const globalIdx = ensureErrorCtorCarrierGlobal(ctx, name);
+    const answerCarrier: Instr[] = [
+      { op: "global.get", index: globalIdx } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "call", funcIdx: newObjectIdx } as Instr, { op: "global.set", index: globalIdx } as Instr],
+      } as Instr,
+      { op: "global.get", index: globalIdx } as Instr,
+      { op: "return" } as Instr,
+    ];
+    // The "Error" tag is SHARED with Test262Error (emitStandaloneTest262Error
+    // constructs with the Error tag). Disambiguate by the immutable `$name`
+    // field: only a genuine `new Error(...)` (name === "Error") answers the
+    // Error carrier; Test262Error keeps today's miss.
+    const guarded: Instr[] =
+      name === "Error"
+        ? [
+            ...errRef(),
+            { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } as ValType },
+              then: [
+                ...errRef(),
+                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                ...nativeStringLiteralInstrs(ctx, "Error"),
+                { op: "call", funcIdx: strEqualsIdx } as Instr,
+              ],
+              else: [{ op: "i32.const", value: 0 } as Instr],
+            } as Instr,
+            { op: "if", blockType: { kind: "empty" }, then: answerCarrier } as Instr,
+          ]
+        : answerCarrier;
+    ctorArms.push(
+      ...errRef(),
+      { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "i32.const", value: BUILTIN_TYPE_TAGS[name] } as Instr,
+      { op: "i32.eq" } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: guarded } as Instr,
+    );
+  }
+
+  // "is the $props read a miss?" — leaves an i32 on the stack.
+  const propsMiss = (): Instr[] =>
+    isNullishIdx !== undefined
+      ? [{ op: "local.get", index: scratchL } as Instr, { op: "call", funcIdx: isNullishIdx } as Instr]
+      : [{ op: "local.get", index: scratchL } as Instr, { op: "ref.is_null" } as Instr];
+
+  const arm: Instr[] = [
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: anyL } as Instr,
+    { op: "ref.test", typeIdx: errTypeIdx } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // 1) $props sidecar first — subclass own fields / dynamic writes shadow
+        //    the builtin surface (JS shadowing order).
+        ...errRef(),
+        { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 5 } as Instr,
+        { op: "local.tee", index: scratchL } as Instr,
+        { op: "ref.is_null" } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: scratchL } as Instr,
+            { op: "local.get", index: 1 } as Instr,
+            { op: "call", funcIdx: externGetIdx } as Instr, // recursive: $props IS a plain $Object
+            { op: "local.set", index: scratchL } as Instr,
+            ...propsMiss(),
+            { op: "i32.eqz" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: scratchL } as Instr, { op: "return" } as Instr],
+            } as Instr,
+          ],
+        } as Instr,
+        // 2) Named-key dispatch — string keys only. A Symbol / boxed-number key
+        //    skips this block and falls through to the standard miss, exactly
+        //    like today (no trap: the cast is guarded by the ref.test).
+        { op: "local.get", index: 1 } as Instr,
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 } as Instr,
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+            { op: "call", funcIdx: strFlattenIdx } as Instr,
+            { op: "local.set", index: fkeyL } as Instr,
+            ...fieldArm("message", 1),
+            ...fieldArm("name", 2),
+            ...fieldArm("stack", 3),
+            ...keyEquals("constructor"),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // Builtin instances only: a user subclass ($userClassId != -1)
+                // keeps today's miss rather than answering the WRONG (parent)
+                // constructor.
+                ...errRef(),
+                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 4 } as Instr,
+                { op: "i32.const", value: -1 } as Instr,
+                { op: "i32.eq" } as Instr,
+                { op: "if", blockType: { kind: "empty" }, then: ctorArms } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+        // No match → fall through to the original body → standard miss.
+      ],
+    } as Instr,
+  ];
+
+  fn.body.splice(0, 0, ...arm);
 }

@@ -2,7 +2,7 @@
 id: 2886
 title: "new <global-non-constructor-builtin>() must throw TypeError (decodeURI/encodeURI/…/parseInt/parseFloat/isNaN/isFinite)"
 status: done
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 area: codegen

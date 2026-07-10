@@ -14,6 +14,7 @@ import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { funcSignatureOf } from "../func-space.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../registry/imports.js";
 import { emitWasiErrorConstructor } from "../registry/error-types.js";
@@ -71,15 +72,41 @@ export function resolveDeclaringClassForPrivateName(
   const fieldName = "__priv_" + node.text.slice(1);
   let current: ts.Node | undefined = node.parent;
   while (current) {
-    if ((ts.isClassDeclaration(current) || ts.isClassExpression(current)) && current.name) {
-      const className = current.name.text;
-      const structFields = ctx.structFields.get(className);
-      // Only return when this class actually declared the private name —
-      // a nested class that doesn't declare `#x` shouldn't shadow the outer.
-      if (structFields?.some((f) => f.name === fieldName)) {
-        const structTypeIdx = ctx.structMap.get(className);
-        if (structTypeIdx !== undefined) {
-          return { className, structTypeIdx, fieldName };
+    if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) {
+      // The declaring class is the nearest lexically-enclosing class that
+      // declares this private name in its OWN body (ES2022 §8.2.7: a private
+      // name is bound in the class's PrivateEnvironment). Match on the class's
+      // own member list — NOT `structFields`, which folds in fields INHERITED
+      // through `extends`. A subclass that inherits `#x` (`class extends Outer {
+      // f(){ return self.#x } }`) must NOT claim to declare it: resolving there
+      // would brand-check the receiver against the SUBCLASS struct, so a genuine
+      // `Outer` instance (`self`) fails `ref.test $Sub` and wrongly throws
+      // TypeError (regressed `privatefieldget-success-1`). The walk skips such a
+      // subclass and continues to the real declarer, `Outer`.
+      const declaresOwn = current.members.some(
+        (m) => m.name !== undefined && ts.isPrivateIdentifier(m.name) && m.name.text === node.text,
+      );
+      if (declaresOwn) {
+        // Resolve the class's registered name. A NAMED class uses its AST name;
+        // an ANONYMOUS class expression (`class { #m }` / `static B = class { #m }`)
+        // has no `current.name`, so its members are keyed under the synthetic
+        // `__anonClass_N` id assigned during collection. Without this fallback
+        // the walk skipped anonymous classes entirely, so a private access
+        // inside one (`o.#m` in `static fieldAccess(o) { return o.#m; }`)
+        // resolved to NO declaring class → the brand check in property-access
+        // was skipped → a wrong-brand receiver (`C.B.fieldAccess(C)`) read the
+        // field instead of throwing TypeError (#3045). Same-named `#m` on a
+        // nested class now each resolve to their own synthetic struct.
+        const className =
+          current.name?.text ?? (ts.isClassExpression(current) ? ctx.anonClassExprNames.get(current) : undefined);
+        // Guard: the field must exist in the resolved struct (own private
+        // *fields* live in structFields; a private method/getter is handled by
+        // the accessor path in property-access, so require the field slot here).
+        if (className !== undefined && ctx.structFields.get(className)?.some((f) => f.name === fieldName)) {
+          const structTypeIdx = ctx.structMap.get(className);
+          if (structTypeIdx !== undefined) {
+            return { className, structTypeIdx, fieldName };
+          }
         }
       }
     }
@@ -403,27 +430,8 @@ export function isEffectivelyVoidReturn(ctx: CodegenContext, retType: ts.Type, f
  * Handles both imported functions (index < numImportFuncs) and local functions.
  */
 export function getFuncParamTypes(ctx: CodegenContext, funcIdx: number): ValType[] | undefined {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func") return typeDef.params;
-          return undefined;
-        }
-        importFuncCount++;
-      }
-    }
-  } else {
-    const localIdx = funcIdx - ctx.numImportFuncs;
-    const func = ctx.mod.functions[localIdx];
-    if (func) {
-      const typeDef = ctx.mod.types[func.typeIdx];
-      if (typeDef?.kind === "func") return typeDef.params;
-    }
-  }
-  return undefined;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  return funcSignatureOf(ctx, funcIdx)?.params;
 }
 
 /**
@@ -432,26 +440,9 @@ export function getFuncParamTypes(ctx: CodegenContext, funcIdx: number): ValType
  * a `call` instruction pushes a value onto the stack.
  */
 export function wasmFuncReturnsVoid(ctx: CodegenContext, funcIdx: number): boolean {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          return !typeDef || typeDef.kind !== "func" || typeDef.results.length === 0;
-        }
-        importFuncCount++;
-      }
-    }
-    return true; // not found — assume void to be safe
-  }
-  const localIdx = funcIdx - ctx.numImportFuncs;
-  const func = ctx.mod.functions[localIdx];
-  if (func) {
-    const typeDef = ctx.mod.types[func.typeIdx];
-    return !typeDef || typeDef.kind !== "func" || typeDef.results.length === 0;
-  }
-  return true; // not found — assume void to be safe
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return !sig || sig.results.length === 0; // not found — assume void to be safe
 }
 
 /** Check whether a function *type* (by type index) has zero results. */
@@ -467,31 +458,9 @@ export function wasmFuncTypeReturnsVoid(ctx: CodegenContext, typeIdx: number): b
  * when TS type says 'any' (→ externref) but the Wasm function returns f64/i32.
  */
 export function getWasmFuncReturnType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func" && typeDef.results.length > 0) {
-            return typeDef.results[0]!;
-          }
-          return undefined;
-        }
-        importFuncCount++;
-      }
-    }
-    return undefined;
-  }
-  const localIdx = funcIdx - ctx.numImportFuncs;
-  const func = ctx.mod.functions[localIdx];
-  if (func) {
-    const typeDef = ctx.mod.types[func.typeIdx];
-    if (typeDef?.kind === "func" && typeDef.results.length > 0) {
-      return typeDef.results[0]!;
-    }
-  }
-  return undefined;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return sig && sig.results.length > 0 ? sig.results[0]! : undefined;
 }
 
 /**

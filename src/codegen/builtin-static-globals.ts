@@ -8,6 +8,7 @@
  * `$Object` singleton populated only with those supported properties.
  */
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { ts } from "../ts-api.js";
 import { emitCachedFuncClosureAccess } from "./closures.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -51,6 +52,103 @@ const SUPPORTED_STATIC_PROPS: ReadonlyMap<string, readonly string[]> = new Map([
 
 export function isSupportedBuiltinNamespace(name: string): boolean {
   return SUPPORTED_STATIC_PROPS.has(name);
+}
+
+/**
+ * (#3006) Builtin CONSTRUCTOR names that get a GENUINE, identity-stable reified
+ * constructor-object carrier in standalone mode — the substrate #2963's issue
+ * plan calls for ("synthesize … a `$Object`-backed … module-level singleton
+ * slot per reified builtin; the same builtin reference must yield the same
+ * object"). Both the bare identifier read (`… === Set`) AND the
+ * `<Builtin>.prototype.constructor` / `(new <Builtin>()).constructor` read route
+ * to the SAME per-name `__builtin_ctor_<Name>` singleton, so
+ * `Set.prototype.constructor === Set` is GENUINELY true (same object) while the
+ * swap-wrong-builtin cross-check `Set.prototype.constructor === Map` is GENUINELY
+ * false (distinct per-name singletons) — NOT a null≡null tautology.
+ *
+ * This is deliberately the narrow subset of `BUILTIN_CTOR_NAMES` whose bare value
+ * currently resolves to the null-externref carrier standalone (verified: all read
+ * falsy today, no native constructor-object identity) and whose `.constructor`
+ * read otherwise leaks the `env::Object_get_constructor` host import (#2999
+ * round-5 leak analysis). It EXCLUDES builtins that already carry a genuine
+ * bare-value identity — `Math`/`JSON`/`Reflect` and the `Error` family
+ * (namespace-object carriers, #2907), `Array`/`Object` (namespace objects),
+ * native-error-tag constructors, etc. — so those keep their existing lowering
+ * untouched.
+ */
+export const BUILTIN_CONSTRUCTOR_IDENTITY_NAMES: ReadonlySet<string> = new Set([
+  "Set",
+  "Map",
+  "WeakMap",
+  "WeakSet",
+  "WeakRef",
+  "RegExp",
+  "FinalizationRegistry",
+  "DisposableStack",
+  "AsyncDisposableStack",
+  "SuppressedError",
+]);
+
+export function isBuiltinConstructorIdentityName(name: string): boolean {
+  return BUILTIN_CONSTRUCTOR_IDENTITY_NAMES.has(name);
+}
+
+/**
+ * (#3006) Emit a GENUINE, identity-stable reified builtin-constructor object.
+ *
+ * One `externref` mutable global per constructor name (`__builtin_ctor_<Name>`),
+ * lazily materialized once on first read to a fresh `$Object`
+ * (`__new_plain_object`) behind an `if (ref.is_null) { … }` guard, then read via
+ * `global.get`. Every read of the same builtin — whether the bare identifier
+ * (`Set`) or a `.prototype.constructor` / instance `.constructor` read — yields
+ * the SAME object ref, so `===` (WasmGC `ref.eq` identity, preserved even across
+ * the externref-widening `assert.sameValue(a, b)` harness boundary — verified) is
+ * genuinely true for the same builtin and genuinely false across distinct
+ * builtins.
+ *
+ * The materialization is emitted directly into `fctx.body` (a shift-covered
+ * array) and contains only a `call __new_plain_object` — no `ref.func` operand —
+ * so it is immune to the late-import funcidx-shift hazard that forced #2963's
+ * static-method singleton to avoid a const-init global. Keyed in the shared
+ * `builtinObjectGlobals` map under a `ctor:` prefix so it never collides with the
+ * namespace-object carriers (`emitBuiltinNamespaceObject`), which key by bare
+ * name.
+ *
+ * Stack: `[] → [externref]`.
+ */
+export function emitBuiltinConstructorIdentity(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  builtinName: string,
+): ValType {
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+
+  const key = `ctor:${builtinName}`;
+  let globalIdx = ctx.builtinObjectGlobals.get(key);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__builtin_ctor_${builtinName}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(key, globalIdx);
+  }
+
+  fctx.body.push({ op: "global.get", index: globalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "call", funcIdx: newObjectIdx },
+      { op: "global.set", index: globalIdx },
+    ],
+  } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx });
+  return { kind: "externref" };
 }
 
 export function isSupportedBuiltinStaticProperty(builtinName: string, propName: string): boolean {
@@ -112,8 +210,8 @@ function ensureArrayIsArrayFunc(ctx: CodegenContext): number {
     }
   }
 
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [{ name: "any", type: { kind: "anyref" } }],
@@ -132,8 +230,8 @@ function ensureObjectKeysFunc(ctx: CodegenContext): number {
   ensureObjectRuntime(ctx);
   const objectKeysIdx = ctx.funcMap.get("__object_keys")!;
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$builtin_Object_keys_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: [],

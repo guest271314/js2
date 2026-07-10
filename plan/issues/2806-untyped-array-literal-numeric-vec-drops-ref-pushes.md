@@ -4,7 +4,7 @@ title: "[SENIOR-DEV ONLY] untyped `[]` array literal lowers to a NUMERIC (f64) v
 status: done
 assignee: ttraenkler/senior-dev
 completed: 2026-06-28
-sprint: current
+sprint: 69
 priority: high
 horizon: l
 feasibility: hard

@@ -65,6 +65,7 @@ import {
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
 import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
+import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
@@ -1685,15 +1686,16 @@ function compileForOfDestructuring(
             if (restIdx === undefined) {
               restIdx = allocLocal(fctx, restName, { kind: "externref" });
             }
+            // (#3100 S4) ensureLateImport routes `__extern_slice` native standalone.
             let sliceIdx = ctx.funcMap.get("__extern_slice");
             if (sliceIdx === undefined) {
-              const importsBefore = ctx.numImportFuncs;
-              const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-              addImport(ctx, "env", "__extern_slice", {
-                kind: "func",
-                typeIdx: sliceType,
-              });
-              shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+              ensureLateImport(
+                ctx,
+                "__extern_slice",
+                [{ kind: "externref" }, { kind: "f64" }],
+                [{ kind: "externref" }],
+              );
+              flushLateImportShifts(ctx, fctx);
               sliceIdx = ctx.funcMap.get("__extern_slice");
             }
             if (sliceIdx !== undefined) {
@@ -2668,14 +2670,13 @@ function emitForOfRestAssignment(
     return true;
   }
 
-  // Ensure __extern_slice is available (env import in JS-host mode; the native
-  // object-runtime slice under --target standalone routes through the same name).
+  // Ensure __extern_slice is available (env import in JS-host mode; #3100 S4:
+  // ensureLateImport routes to the NATIVE defined slice under standalone/wasi —
+  // the raw `env::` addImport this replaces leaked the host import).
   let sliceIdx = ctx.funcMap.get("__extern_slice");
   if (sliceIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+    ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
     sliceIdx = ctx.funcMap.get("__extern_slice");
   }
   if (sliceIdx === undefined) {
@@ -4786,7 +4787,7 @@ function compileForOfDirectIterator(
   iterMethodIdx: number,
 ): boolean {
   // Get the return type of the @@iterator method to find the iterator struct
-  const iterMethodDef = ctx.mod.functions[iterMethodIdx - ctx.numImportFuncs];
+  const iterMethodDef = definedFuncAt(ctx, iterMethodIdx);
   if (!iterMethodDef) return false;
   const iterMethodType = ctx.mod.types[iterMethodDef.typeIdx];
   if (!iterMethodType || iterMethodType.kind !== "func" || iterMethodType.results.length === 0) return false;
@@ -4812,7 +4813,7 @@ function compileForOfDirectIterator(
   if (nextMethodIdx === undefined) return false;
 
   // Get the return type of next() to find the result struct ({value, done})
-  const nextMethodDef = ctx.mod.functions[nextMethodIdx - ctx.numImportFuncs];
+  const nextMethodDef = definedFuncAt(ctx, nextMethodIdx);
   if (!nextMethodDef) return false;
   const nextMethodType = ctx.mod.types[nextMethodDef.typeIdx];
   if (!nextMethodType || nextMethodType.kind !== "func" || nextMethodType.results.length === 0) return false;
@@ -5120,10 +5121,14 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // #1665: Wasm-native generator for-of. When the iterable is a native
   // generator state struct (the value produced by a `function*` declaration
-  // under --target wasi/standalone), drive the loop via the generator's resume
-  // function — no JS-host iterator protocol, no #681 gate. The subject value is
-  // already on the stack from compileExpression above.
-  if ((ctx.standalone || ctx.wasi) && (iterableType.kind === "ref" || iterableType.kind === "ref_null")) {
+  // under --target wasi/standalone — or, since #3050, a try-region generator
+  // under the JS host), drive the loop via the generator's resume function — no
+  // JS-host iterator protocol, no #681 gate. TYPE-driven, not mode-driven: the
+  // state-struct type only exists when the generator registered natively, and
+  // the host iterator protocol cannot iterate a WasmGC struct (a #3050
+  // host-lane native generator consumed by for-of summed 0). The subject value
+  // is already on the stack from compileExpression above.
+  if (iterableType.kind === "ref" || iterableType.kind === "ref_null") {
     const genInfo = nativeGeneratorInfoForForOfSubject(ctx, iterableType);
     if (genInfo && tryCompileNativeGeneratorForOf(ctx, fctx, stmt, iterableType, genInfo)) {
       return;
@@ -5914,7 +5919,13 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
       recvWasmType.kind === "externref" || recvWasmType.kind === "anyref" || recvWasmType.kind === "ref_extern";
     if (isDynamicReceiver) {
       ensureObjectRuntime(ctx);
-      keysIdx = ctx.funcMap.get("__object_keys");
+      // #2964 — for-in must enumerate inherited enumerable keys too, so route
+      // through `__object_keys_forin` (own ordered keys per level + `$proto`
+      // walk with shadow-skip), NOT the OWN-only `__object_keys` (which powers
+      // Object.keys). Same `$ObjVec` return shape, so the loop scaffolding and
+      // the `__extern_length`/`__extern_get_idx`/`__extern_has` accessors below
+      // are unchanged.
+      keysIdx = ctx.funcMap.get("__object_keys_forin");
       lenIdx = ctx.funcMap.get("__extern_length");
       getIdx = ctx.funcMap.get("__extern_get_idx");
       hasIdx = ctx.funcMap.get("__extern_has");

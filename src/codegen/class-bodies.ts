@@ -14,6 +14,8 @@ import {
 } from "./builtin-tags.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
+import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
@@ -913,13 +915,13 @@ export function collectClassDeclaration(
     registerClassOptionalParams(ctx, ctorName, implicitStructCtorParams, ctorParams, implicitForwarderArity);
   }
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${className}_new_type`);
-  const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const ctorFuncIdx = mintDefinedFunc(ctx);
   // (#1983) collision-free key — also the wasm display name so the funcByName
   // body-fill lookup doesn't collide with a user `function ClassName_new()`.
   const ctorKey = classMemberFuncKey(ctx, ctorName);
   ctx.funcMap.set(ctorKey, ctorFuncIdx);
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, ctorFuncIdx, {
     name: ctorKey,
     typeIdx: ctorTypeIdx,
     locals: [],
@@ -942,10 +944,10 @@ export function collectClassDeclaration(
   if (isPromiseSubclassWithUserCtor(ctx, className, ctor)) {
     const onHostName = `${ctorName}__onhost`;
     const onHostTypeIdx = addFuncType(ctx, ctorParams, [{ kind: "externref" }], `${onHostName}_type`);
-    const onHostFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const onHostFuncIdx = mintDefinedFunc(ctx);
     const onHostKey = classMemberFuncKey(ctx, onHostName);
     ctx.funcMap.set(onHostKey, onHostFuncIdx);
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, onHostFuncIdx, {
       name: onHostKey,
       typeIdx: onHostTypeIdx,
       locals: [],
@@ -977,10 +979,10 @@ export function collectClassDeclaration(
     const initName = `${className}_init`;
     const initParams: ValType[] = [...ctorParams, { kind: "ref", typeIdx: structTypeIdx }];
     const initTypeIdx = addFuncType(ctx, initParams, [{ kind: "ref", typeIdx: structTypeIdx }], `${initName}_type`);
-    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const initFuncIdx = mintDefinedFunc(ctx);
     const initKey = classMemberFuncKey(ctx, initName); // (#1983) collision-free key + display name
     ctx.funcMap.set(initKey, initFuncIdx);
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, initFuncIdx, {
       name: initKey,
       typeIdx: initTypeIdx,
       locals: [],
@@ -1098,14 +1100,14 @@ export function collectClassDeclaration(
       }
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
-      const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const methodFuncIdx = mintDefinedFunc(ctx);
       // (#1983) Use the collision-free key for the funcMap entry AND the wasm
       // display name, so the `funcByName` body-fill lookup (which keys on the
       // display name) does not collide with a user `function ClassName_m()`.
       const methodKey = classMemberFuncKey(ctx, fullName);
       ctx.funcMap.set(methodKey, methodFuncIdx);
 
-      ctx.mod.functions.push({
+      pushDefinedFunc(ctx, methodFuncIdx, {
         name: methodKey,
         typeIdx: methodTypeIdx,
         locals: [],
@@ -1156,11 +1158,11 @@ export function collectClassDeclaration(
       }
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-      const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const getterFuncIdx = mintDefinedFunc(ctx);
       const getterKey = classMemberFuncKey(ctx, getterName); // (#1983) key + display name
       ctx.funcMap.set(getterKey, getterFuncIdx);
 
-      ctx.mod.functions.push({
+      pushDefinedFunc(ctx, getterFuncIdx, {
         name: getterKey,
         typeIdx: getterTypeIdx,
         locals: [],
@@ -1190,11 +1192,11 @@ export function collectClassDeclaration(
       registerClassOptionalParams(ctx, setterName, member.parameters, setterParams, 1);
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-      const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const setterFuncIdx = mintDefinedFunc(ctx);
       const setterKey = classMemberFuncKey(ctx, setterName); // (#1983) key + display name
       ctx.funcMap.set(setterKey, setterFuncIdx);
 
-      ctx.mod.functions.push({
+      pushDefinedFunc(ctx, setterFuncIdx, {
         name: setterKey,
         typeIdx: setterTypeIdx,
         locals: [],
@@ -1459,7 +1461,13 @@ export function collectDeclaredFuncRefs(ctx: CodegenContext): void {
     scanInstrs(func.body);
   }
   if (refs.size > 0) {
-    ctx.mod.declaredFuncRefs = [...refs].sort((a, b) => a - b);
+    // (#1916 S3b) Sort by the RESOLVED absolute index, not the raw handle
+    // value. A stable-regime handle (>= STABLE_FUNC_BASE) is numerically huge,
+    // so a raw `a - b` sort banishes it to the end and permutes the emitted
+    // element segment relative to the all-live baseline. `absoluteFuncIndex`
+    // maps both regimes to the current index, so the order is identical whether
+    // a producer has flipped to stable minting or not (byte-identity-preserving).
+    ctx.mod.declaredFuncRefs = [...refs].sort((a, b) => absoluteFuncIndex(ctx.mod, a) - absoluteFuncIndex(ctx.mod, b));
   }
 }
 
@@ -2319,6 +2327,8 @@ function compileClassBodiesInner(
 
         // Return __create_generator or __create_async_generator depending on async flag
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
+        // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+        if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         fctx.body.push({ op: "local.get", index: bufferLocal });
         fctx.body.push({ op: "local.get", index: pendingThrowLocal });

@@ -4,7 +4,7 @@ title: "test262 runner marks negative parse/early tests pass on ANY compile erro
 status: done
 assignee: ttraenkler/fix2912
 priority: medium
-sprint: current
+sprint: 69
 created: 2026-07-01
 completed: 2026-07-01
 feasibility: medium

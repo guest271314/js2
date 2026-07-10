@@ -33,6 +33,7 @@ import type { InnerResult } from "./shared.js";
 import { compileArrowAsClosure, compileExpression, VOID_RESULT } from "./shared.js";
 import { isNullOrUndefinedLiteral } from "./destructuring-params.js";
 import { coercionInstrs } from "./type-coercion.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
 /** WasmGC `eq` abstract heap type, signed-LEB `0x6d` = -19. Used for ref.eq on
  *  object keys (only GC eqrefs can be compared by identity). */
@@ -175,9 +176,9 @@ function addMapFunc(
   body: Instr[],
 ): number {
   const typeIdx = addFuncType(ctx, params, results);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.mapHelpers.set(name, funcIdx);
-  ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+  pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
   return funcIdx;
 }
 
@@ -1202,7 +1203,21 @@ function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValTyp
       return;
     }
     case "i32": {
-      // boolean / small int → box as number for now (slice 1 number/string).
+      // (#2712 I2) A BRANDED boolean boxes via __box_boolean so the element/key
+      // reifies as a boolean, not the number 1/0 — `new Set([(n<2)]).has(1)` must
+      // be false and `.has(true)` true (SameValueZero on a boolean, not a number).
+      // __box_boolean is registered alongside __box_number by the callers'
+      // addUnionImports (same note as below), so a funcMap lookup avoids a
+      // mid-body import shift; falls through to the number box if absent.
+      if (t.boolean === true) {
+        const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+        if (boxBoolIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          return;
+        }
+      }
+      // small int → box as number.
       fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
       const boxIdx = ctx.funcMap.get("__box_number");
       if (boxIdx !== undefined) {
@@ -1858,8 +1873,7 @@ function nativeStrDataFieldIdx(ctx: CodegenContext): number {
 function fixHashLocals(ctx: CodegenContext): void {
   const idx = ctx.mapHelpers.get("__hash_anyref");
   if (idx === undefined) return;
-  const fnPos = idx - ctx.numImportFuncs;
-  const fn = ctx.mod.functions[fnPos] as { locals: { name: string; type: ValType }[] } | undefined;
+  const fn = definedFuncAt(ctx, idx) as { locals: { name: string; type: ValType }[] } | undefined;
   if (!fn) return;
   fn.locals = [
     { name: "nv", type: { kind: "f64" } }, // local 1

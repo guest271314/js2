@@ -263,7 +263,25 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       inst.kind === "forof.string" ||
       inst.kind === "try" ||
       inst.kind === "while.loop" ||
-      inst.kind === "for.loop"
+      inst.kind === "for.loop" ||
+      // (#2856) The value-producing `if` (#1392) carries then/else arm
+      // buffers with their OWN SSA defs, which `renameAllInInstr` does not
+      // deep-rename — splicing one into a caller produced duplicate SSA
+      // defs (post-inline verify failure → silent legacy demote). It was
+      // missed when #1392 added the kind; latent until #2856's call-arg
+      // ref→ref_null widening made single-block callees with bounds-checked
+      // vec reads (emitSafeVecGet emits an `if`) actually inlinable.
+      inst.kind === "if" ||
+      // #2952 slice 2 — if.stmt carries nested body buffers (same deep-SSA
+      // concern as the loop kinds above); br.label references a loop label
+      // scoped to the callee (and is verifier-invalid at a block's top
+      // level anyway). Both skip conservatively.
+      inst.kind === "if.stmt" ||
+      inst.kind === "br.label" ||
+      // (#2856) early.return lowers to a Wasm `return` — spliced into a
+      // caller it would return from the CALLER, not simulate the callee's
+      // return, so it is never inlinable.
+      inst.kind === "early.return"
     ) {
       return false;
     }
@@ -401,19 +419,28 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
     }
     case "box":
     case "unbox":
-    case "tag.test": {
+    case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number": {
       const v = mapId(rename, inst.value);
       if (v === inst.value) return inst;
       return { ...inst, value: v };
     }
     case "string.const":
       return inst;
+    case "dyn.eq":
     case "string.concat":
     case "string.eq": {
       const l = mapId(rename, inst.lhs);
       const r = mapId(rename, inst.rhs);
       if (l === inst.lhs && r === inst.rhs) return inst;
       return { ...inst, lhs: l, rhs: r };
+    }
+    case "dyn.member_get": {
+      const recv = mapId(rename, inst.recv);
+      const key = mapId(rename, inst.key);
+      if (recv === inst.recv && key === inst.key) return inst;
+      return { ...inst, recv, key };
     }
     case "string.len": {
       const v = mapId(rename, inst.value);
@@ -499,6 +526,9 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (!changed) return inst;
       return { ...inst, args: newArgs };
     }
+    // #3000-C: class.alloc has no SSA operands — nothing to rename.
+    case "class.alloc":
+      return inst;
     case "class.get": {
       const v = mapId(rename, inst.value);
       if (v === inst.value) return inst;
@@ -511,6 +541,30 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       return { ...inst, value: v, newValue: nv };
     }
     case "class.call": {
+      const r = mapId(rename, inst.receiver);
+      let changed = r !== inst.receiver;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, receiver: r, args: newArgs };
+    }
+    case "class.super_init": {
+      const s = mapId(rename, inst.self);
+      let changed = s !== inst.self;
+      const newArgs: IrValueId[] = [];
+      for (const a of inst.args) {
+        const n = mapId(rename, a);
+        if (n !== a) changed = true;
+        newArgs.push(n);
+      }
+      if (!changed) return inst;
+      return { ...inst, self: s, args: newArgs };
+    }
+    case "class.super_call": {
       const r = mapId(rename, inst.receiver);
       let changed = r !== inst.receiver;
       const newArgs: IrValueId[] = [];
@@ -619,6 +673,12 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const v = mapId(rename, inst.inner);
       if (v === inst.inner) return inst;
       return { ...inst, inner: v };
+    }
+    // #2951 — generator `return <value>` stash.
+    case "gen.setReturn": {
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
     }
     // Slice 6 part 4 (#1183) — string for-of.
     case "forof.string": {
@@ -730,6 +790,31 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (cv === inst.condValue) return inst;
       return { ...inst, condValue: cv };
     }
+    // #2952 slice 2 — br.label carries no SSA operands (label is a control
+    // identity, untouched by value renames).
+    case "br.label":
+      return inst;
+    // #2952 slice 2 — if.stmt: rename the cond + recurse into both arm
+    // buffers (same pattern as `try` above), so a caller-scope rename
+    // reaches arm-interior uses of the redirected value.
+    case "if.stmt": {
+      const cv = mapId(rename, inst.cond);
+      let changed = cv !== inst.cond;
+      const newThen: IrInstr[] = [];
+      for (const sub of inst.then) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newThen.push(renamed);
+      }
+      const newElse: IrInstr[] = [];
+      for (const sub of inst.else) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newElse.push(renamed);
+      }
+      if (!changed) return inst;
+      return { ...inst, cond: cv, then: newThen, else: newElse };
+    }
     case "for.loop": {
       const cv = mapId(rename, inst.condValue);
       if (cv === inst.condValue) return inst;
@@ -752,6 +837,16 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       const r = mapId(rename, inst.reason);
       if (r === inst.reason) return inst;
       return { ...inst, reason: r };
+    }
+    // (#2856) Early return — rename the optional value. NB inlining a
+    // function CONTAINING an early.return is unsound (the return would
+    // exit the CALLER); the inline pass's eligibility check excludes the
+    // kind in `canInline`.
+    case "early.return": {
+      if (inst.value === null) return inst;
+      const v = mapId(rename, inst.value);
+      if (v === inst.value) return inst;
+      return { ...inst, value: v };
     }
   }
 }

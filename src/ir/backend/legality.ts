@@ -63,7 +63,8 @@ function checkInstr(
   if (instr.resultType) checkType(instr.resultType, blockId, `${instr.kind} result`);
 
   if (backend === "linear") {
-    reject(`linear backend does not support IR instruction '${instr.kind}' at the function-lowering boundary`);
+    const reason = linearInstrError(instr);
+    if (reason) reject(reason);
   } else if (backend === "bytecode") {
     const reason = bytecodeInstrError(instr);
     if (reason) reject(reason);
@@ -72,6 +73,53 @@ function checkInstr(
   checkInstrEmbeddedTypes(instr, blockId, checkType);
   for (const nested of nestedInstrBuffers(instr)) {
     for (const sub of nested) checkInstr(func, backend, block, sub, errors, checkType);
+  }
+}
+
+// #2954 — the linear backend's whole-function lowering boundary now permits the
+// CORE-OP families (const / arithmetic / locals-as-slots / structured control
+// flow / direct call). These lower to core Wasm and `LinearEmitter` emits them
+// byte-identically to `WasmGcEmitter`. The representation-DIVERGENT families
+// (objects, closures, boxing, strings, ref-cells, exceptions, vec CONSTRUCTION,
+// for-of iteration, promises) stay rejected here — the linear analogue lands
+// with the production wiring (#2956). This mirrors `bytecodeInstrError`'s
+// allow-list shape; the operand-type gate (`linearValTypeError`) independently
+// rejects any non-{i32,i64,f32,f64} value, so allowing an op kind here never
+// admits a divergent-typed operand.
+function linearInstrError(instr: IrInstr): string | null {
+  switch (instr.kind) {
+    case "const":
+      switch (instr.value.kind) {
+        case "i32":
+        case "i64":
+        case "f32":
+        case "f64":
+        case "bool":
+          return null;
+        default:
+          // null/ref/string/undefined consts are representation-divergent.
+          return `linear backend does not support const '${instr.value.kind}'`;
+      }
+    case "binary":
+    case "unary":
+    case "select":
+    case "if":
+    case "call":
+    case "global.get":
+    case "global.set":
+    case "slot.read":
+    case "slot.write":
+    case "while.loop":
+    case "for.loop":
+    // #2952 slice 2 — br.label lowers to a core-Wasm `br` (depth derived by
+    // the shared ctrlStack resolver) and if.stmt to a core `if`/`block`;
+    // both are backend-identical structured control flow like the loop
+    // kinds above (#1852/#1527 axis rule).
+    case "br.label":
+    case "if.stmt":
+      return null;
+    default:
+      return `linear backend does not support IR instruction '${instr.kind}' at the function-lowering boundary`;
   }
 }
 
@@ -233,6 +281,10 @@ function checkInstrEmbeddedTypes(
     case "class.new":
       checkType({ kind: "class", shape: instr.shape }, block, "class.new shape");
       return;
+    case "class.alloc":
+      // #3000-C: same shape type-check as class.new.
+      checkType({ kind: "class", shape: instr.shape }, block, "class.alloc shape");
+      return;
     case "forof.vec":
       checkType(instr.elementType, block, "forof.vec element");
       return;
@@ -259,6 +311,9 @@ function nestedInstrBuffers(instr: IrInstr): readonly (readonly IrInstr[])[] {
       if (instr.finallyBody) out.push(instr.finallyBody);
       return out;
     }
+    // #2952 slice 2 — statement-level if arms.
+    case "if.stmt":
+      return [instr.then, instr.else];
     default:
       return [];
   }

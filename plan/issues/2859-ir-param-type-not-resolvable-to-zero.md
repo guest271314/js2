@@ -2,9 +2,9 @@
 id: 2859
 title: "IR: drive param-type-not-resolvable fallback bucket to zero (TypeMap propagation)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-03
 completed: 2026-07-02
 assignee: ttraenkler/dev-2912f
 priority: high

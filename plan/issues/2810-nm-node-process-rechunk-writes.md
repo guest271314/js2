@@ -5,14 +5,14 @@ status: done
 assignee: ttraenkler/agent-ad343
 completed: 2026-06-28
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 priority: medium
 feasibility: medium
 task_type: refactor
 area: runtime
 language_feature: native-messaging
 goal: platform
-sprint: current
+sprint: 69
 horizon: m
 related: [389, 2807, 2775, 2778]
 ---

@@ -3,7 +3,6 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 /**
  * new/super/class expression compilation.
  */
-import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import {
   collectReferencedIdentifiers,
@@ -21,12 +20,20 @@ import {
   ensureExnTag,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
+  getOrRegisterResizableAbType,
   getOrRegisterVecType,
   resolveWasmType,
   typedArrayVecStorage,
 } from "../index.js";
-import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
+import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
+import {
+  emitDynamicTaViewConstruct,
+  emitTaViewConstruct,
+  emitTaViewConstructWindowed,
+  getOrRegisterDvWindowType,
+} from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing; (#3054 D) dynamic ctor construct
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
+import { emitObjectCoercion } from "./calls-guards.js"; // (#3118) shared Object(...) / new Object(...) ToObject coercion
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
@@ -34,7 +41,8 @@ import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
+import { emitNativeNumberFormat } from "../number-format-native.js";
 import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
@@ -42,6 +50,12 @@ import {
 } from "../regexp-standalone.js";
 import { emitStandaloneTest262Error, emitWasiErrorConstructor, isWasiErrorName } from "../registry/error-types.js";
 import type { InnerResult } from "../shared.js";
+import {
+  emitDynamicNewFunctionHostEval,
+  emitStandaloneDynamicFunctionStub,
+  isGlobalFunctionIdentifier,
+  tryStaticNewFunction,
+} from "./eval-inline.js";
 import {
   coerceType,
   compileExpression,
@@ -70,7 +84,9 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
+import { emitStandalonePromiseFromExecutor } from "../promise-executor.js"; // (#2959) native new Promise(executor)
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
+import { funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 // #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
@@ -240,6 +256,59 @@ function resolvesToConstructableFunctionValue(ctx: CodegenContext, calleeExpr: t
 }
 
 /**
+ * (#3087) Does `new <id>(...)` target a runtime constructor VALUE held in an
+ * `any`/`unknown`-typed binding whose constructability cannot be decided
+ * statically — most importantly a **callback PARAMETER** that receives a
+ * constructor at runtime, e.g. the TypedArray harness wrapper
+ * `testWithTypedArrayConstructors(function (TA) { new TA(3); … })` where `TA`
+ * is the concrete `Int8Array`/… constructor passed positionally into the
+ * `any`-typed callback param?
+ *
+ * Such a callee is mis-classified by the unknown-ctor fallthrough as a static
+ * `extern_class` host import named after the local (`__new_TA`), which does not
+ * exist, so instantiation/execution fails with
+ * "No dependency provided for extern class 'TA'" (#3074's dominant downstream
+ * honest-fail). It must instead route through the **existing** `__construct_closure`
+ * host bridge, whose runtime side (runtime.ts) already handles a non-struct
+ * externref host constructor value: it runs the spec IsConstructor probe
+ * (`Reflect.construct(function(){}, [], value)`) and either `Reflect.construct`s
+ * the value or throws the spec `TypeError` for a non-constructor — so routing an
+ * `any`-typed value here is spec-safe REGARDLESS of whether the runtime value is
+ * actually a constructor.
+ *
+ * Gate strictly so no static class, ambient/intrinsic ctor (ArrayBuffer,
+ * DataView, TypedArrays, Error subclasses — handled by the explicit branches
+ * that PRECEDE the placement of this check), function-constructor, or registered
+ * extern class is intercepted:
+ *  - callee is a bare identifier;
+ *  - its value declaration is a **Parameter / VariableDeclaration / BindingElement**
+ *    in a real source file (NOT a declaration-file ambient global, NOT unresolved);
+ *  - its static type is `any` or `unknown` (a genuinely-dynamic ctor value —
+ *    a construct-signature-bearing or callable binding is left to the static /
+ *    `resolvesToConstructableFunctionValue` closure paths);
+ *  - it is NOT a known compiled class, registered extern class, or function
+ *    constructor.
+ */
+function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
+  if (!ts.isIdentifier(calleeExpr)) return false;
+  if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
+  if (ctx.funcConstructorMap?.has(calleeExpr.text)) return false;
+  // (#1930) Destructured-alias form for the symbol lookup (out of ratchet scope);
+  // the type-flags check routes through the oracle (`typeFactOf`) rather than a
+  // direct `getTypeAtLocation`.
+  const { checker } = ctx;
+  const sym = checker.getSymbolAtLocation(calleeExpr);
+  const decl = sym?.valueDeclaration;
+  if (!decl) return false;
+  // Ambient globals (ArrayBuffer/DataView/TypedArrays/…) declare in lib `.d.ts` —
+  // never intercept those; their explicit branches own them.
+  if (decl.getSourceFile().isDeclarationFile) return false;
+  if (!ts.isParameter(decl) && !ts.isVariableDeclaration(decl) && !ts.isBindingElement(decl)) return false;
+  const kind = ctx.oracle.typeFactOf(calleeExpr).kind;
+  return kind === "any" || kind === "unknown";
+}
+
+/**
  * (#2886) The global builtin **functions** that are NOT constructors per
  * ECMA-262 §19.2 (`decodeURI`/`encodeURI`/…/`parseInt`/`parseFloat`/`isNaN`/
  * `isFinite`). Each is an ordinary built-in function object that does **not**
@@ -267,6 +336,110 @@ const GLOBAL_NON_CONSTRUCTOR_FUNCTIONS = new Set([
  * ambient builtin's symbol has all of its declarations in declaration files.
  * Unresolved symbols (no declaration anywhere) are treated as the global.
  */
+/**
+ * (#3097) JS-host lane: `new <TA>(buffer[, byteOffset[, length]])` with a
+ * statically-known ArrayBuffer/SharedArrayBuffer buffer arg.
+ *
+ * The native vec path treats the buffer arg as a numeric LENGTH
+ * (`ToNumber(vecStruct)` → NaN → `i32.trunc_sat` → 0), so
+ * `new Int8Array(new ArrayBuffer(8))` produced a length-0 compiled vec. Route
+ * through the host construct bridge instead: resolve the REAL host constructor
+ * (`__extern_get(globalThis, "<TA>")` — the #3087 ctor-as-value pattern),
+ * materialize the args into a JS argv, and `__construct_closure(ctor, argv)`.
+ * The bridge's runtime side (#3097) marshals a compiled-ArrayBuffer i32_byte
+ * vec struct to its canonical host ArrayBuffer (identity-cached), so the host
+ * constructor builds a REAL windowed TypedArray view with byte-sharing across
+ * sibling views.
+ *
+ * Returns a host TypedArray externref. `inferTaViewType` (variables.ts) types
+ * the binding externref in LOCK-STEP with this gate so reads route through the
+ * extern paths — a `ref.cast` to the native vec type would trap.
+ *
+ * DataView-typed buffer args are deliberately EXCLUDED (host lane): per
+ * §23.2.5.1 a DataView is not a buffer — `new TA(dataView)` takes the
+ * array-like path (length 0), which the existing numeric fallback already
+ * approximates.
+ *
+ * One terminal `flushLateImportShifts` before any body emission (the
+ * #608/#794 late-import index-shift hazard). Returns null when the bridge
+ * imports are unavailable (caller falls through to the legacy path).
+ */
+function emitHostTaBufferConstruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  className: string,
+  args: readonly ts.Expression[],
+): ValType | null {
+  const gtIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+  const ccIdx = ensureLateImport(
+    ctx,
+    "__construct_closure",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  addStringConstantGlobal(ctx, className);
+  flushLateImportShifts(ctx, fctx);
+  const finalGt = ctx.funcMap.get("__get_globalThis") ?? gtIdx;
+  const finalGet = ctx.funcMap.get("__extern_get") ?? getIdx;
+  const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+  const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+  const finalCc = ctx.funcMap.get("__construct_closure") ?? ccIdx;
+  if (
+    finalGt === undefined ||
+    finalGet === undefined ||
+    finalArrNew === undefined ||
+    finalArrPush === undefined ||
+    finalCc === undefined
+  ) {
+    return null;
+  }
+  // ctor = globalThis["<TA>"] — the genuine host constructor.
+  fctx.body.push({ op: "call", funcIdx: finalGt });
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, className));
+  fctx.body.push({ op: "call", funcIdx: finalGet });
+  const ctorLocal = allocLocal(fctx, `__hta_ctor_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: ctorLocal });
+  // argv = [buffer, byteOffset?, length?] — each boxed externref, source order.
+  fctx.body.push({ op: "call", funcIdx: finalArrNew });
+  const argvLocal = allocLocal(fctx, `__hta_argv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: argvLocal });
+  for (const arg of args) {
+    fctx.body.push({ op: "local.get", index: argvLocal });
+    const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+    if (aTy && aTy.kind !== "externref") {
+      coerceType(ctx, fctx, aTy, { kind: "externref" });
+    } else if (aTy === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    fctx.body.push({ op: "call", funcIdx: finalArrPush });
+  }
+  fctx.body.push({ op: "local.get", index: ctorLocal });
+  fctx.body.push({ op: "local.get", index: argvLocal });
+  fctx.body.push({ op: "call", funcIdx: finalCc });
+  return { kind: "externref" };
+}
+
+/**
+ * (#3097) Gate for `emitHostTaBufferConstruct` — MUST stay in lock-step with
+ * `inferTaViewType`'s host-lane arm (variables.ts) so the binding's local type
+ * (externref) agrees with the constructed value.
+ */
+function hostTaBufferArgSymName(ctx: CodegenContext, args: readonly ts.Expression[]): string | undefined {
+  if (noJsHost(ctx)) return undefined;
+  if (args.length < 1 || args.length > 3 || ts.isNumericLiteral(args[0]!)) return undefined;
+  const argSymName = ctx.oracle.builtinReceiverOf(args[0]!);
+  if (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer") return argSymName;
+  return undefined;
+}
+
 function resolvesToAmbientGlobal(ctx: CodegenContext, id: ts.Identifier): boolean {
   const sym = ctx.checker.getSymbolAtLocation(id);
   if (!sym) return true;
@@ -297,6 +470,17 @@ function emitSuperExternMethodCall(
     externAncestor = ctx.classParentMap.get(externAncestor);
   }
   if (!externAncestor) return null;
+
+  // (#2029 family B) Standalone/WASI: this whole path is a JS-host bridge
+  // (`__extern_method_call` + `__js_array_*` — a dynamic `recv[name](args)`
+  // performed in JS land). With no host, the imports both leak (the module
+  // could never instantiate with an empty import object) AND the method-name
+  // string push below baked the `-1` string-global sentinel → the raw
+  // "global index out of range — -1" emit crash (e.g. `super[Symbol.replace]`
+  // in a `class RE extends RegExp`). Refuse here so the caller reports the
+  // clean, located "Cannot find method 'X' on parent class 'Y'" error —
+  // the #1888 dual-mode invariant (loud refusal, never a poisoned index).
+  if (ctx.standalone || ctx.wasi) return null;
 
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx === undefined) return null;
@@ -344,13 +528,13 @@ function emitSuperExternMethodCall(
 
   // __extern_method_call(receiver, methodName, args)
   fctx.body.push({ op: "local.get", index: recvLocal });
+  // (#2029 family B) Route the name push through the dual-mode helper: a raw
+  // `global.get stringGlobalMap.get(name)` guarded only on `!== undefined`
+  // bakes the -1 sentinel under nativeStrings (gc + --nativeStrings; the
+  // standalone/wasi combination is refused above). Host mode is
+  // byte-identical (the helper emits the same `global.get`).
   addStringConstantGlobal(ctx, methodName);
-  const strIdx = ctx.stringGlobalMap.get(methodName);
-  if (strIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, methodName);
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
   fctx.body.push({ op: "local.get", index: argsLocal });
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
   fctx.body.push({ op: "call", funcIdx: finalMcIdx });
@@ -1147,7 +1331,7 @@ function compileNewFunctionDeclaration(
   const ctorName = `${structName}_new`;
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
-  const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const ctorFuncIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
@@ -1157,7 +1341,7 @@ function compileNewFunctionDeclaration(
     body: [] as Instr[],
     exported: false,
   };
-  ctx.mod.functions.push(ctorFunc);
+  pushDefinedFunc(ctx, ctorFuncIdx, ctorFunc);
 
   // Cache the mapping
   ctx.funcConstructorMap.set(funcName, {
@@ -1635,8 +1819,8 @@ function compileNewFunctionExpression(
   ctx.currentFunc = savedFunc;
 
   // 7. Register the lifted function
-  const liftedFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const liftedFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -1812,26 +1996,9 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
  * expected anyref, found externref`). Returns `undefined` for void / unknown.
  */
 function getFuncResultType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
-  if (funcIdx < ctx.numImportFuncs) {
-    let importFuncCount = 0;
-    for (const imp of ctx.mod.imports) {
-      if (imp.desc.kind === "func") {
-        if (importFuncCount === funcIdx) {
-          const typeDef = ctx.mod.types[imp.desc.typeIdx];
-          if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-          return undefined;
-        }
-        importFuncCount++;
-      }
-    }
-    return undefined;
-  }
-  const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
-  if (func) {
-    const typeDef = ctx.mod.types[func.typeIdx];
-    if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
-  }
-  return undefined;
+  // #1916 S2 — funcSignatureOf is the positional-read chokepoint (func-space.ts).
+  const sig = funcSignatureOf(ctx, funcIdx);
+  return sig && sig.results.length > 0 ? sig.results[0] : undefined;
 }
 
 /**
@@ -1928,6 +2095,34 @@ function emitDynamicNewFallback(
     );
     fctx.body.push({ op: "ref.null.extern" });
     return true;
+  }
+
+  // (#3087) When the value-bound ctor is an `any`/`unknown`-typed dynamic value
+  // (most importantly a callback PARAMETER receiving a real constructor — the
+  // TypedArray harness `function (TA) { new TA(buffer, 0, 4) }`), a genuine host
+  // constructor value matches NONE of the compiled-class tags and hits the
+  // no-match base below. On the JS-host lane, route that base through the
+  // `__construct_closure` bridge (its runtime side runs the spec IsConstructor
+  // probe + `Reflect.construct`) instead of the non-existent `__new_${ctorName}`
+  // extern-class import — the dominant #3074 downstream honest-fail
+  // ("No dependency provided for extern class 'TA'"). Ensure the bridge imports
+  // up-front and flush ONCE here so the funcIdx is stable before any body
+  // emission (the #608/#794 late-import index-shift hazard). Scoped to the
+  // fixed-arity (`!useRuntimeArgv`) form — the dominant harness shape.
+  const useConstructClosureBase = !noJsHost(ctx) && !useRuntimeArgv && resolvesToDynamicAnyCtorValue(ctx, calleeExpr);
+  let ccArrNewIdx: number | undefined = -1;
+  let ccArrPushIdx: number | undefined = -1;
+  let ccBridgeIdx: number | undefined = -1;
+  if (useConstructClosureBase) {
+    ccArrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    ccArrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+    ccBridgeIdx = ensureLateImport(
+      ctx,
+      "__construct_closure",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
   }
 
   // Evaluate the callee descriptor once into an anyref local (the value to
@@ -2231,7 +2426,35 @@ function emitDynamicNewFallback(
   const hostImportName = `__new_${ctorName}`;
   const hostFuncIdx = noJsHost(ctx) ? undefined : ctx.funcMap.get(hostImportName);
   let noMatchBase: Instr[];
-  if (hostFuncIdx !== undefined) {
+  if (useConstructClosureBase) {
+    // (#3087) The runtime value isn't a compiled class (tag == -1) but is an
+    // `any`-typed dynamic ctor — construct it via the host `__construct_closure`
+    // bridge: build a JS argv from the pre-evaluated externref args, then call
+    // `__construct_closure(calleeExternref, argv)`. The bridge throws the spec
+    // `TypeError` if the runtime value is not a constructor, so this is correct
+    // for ANY runtime value.
+    const finalArrNew = ctx.funcMap.get("__js_array_new") ?? ccArrNewIdx!;
+    const finalArrPush = ctx.funcMap.get("__js_array_push") ?? ccArrPushIdx!;
+    const finalCc = ctx.funcMap.get("__construct_closure") ?? ccBridgeIdx!;
+    const base: Instr[] = [];
+    const savedBodyCc = fctx.body;
+    fctx.body = base;
+    fctx.body.push({ op: "call", funcIdx: finalArrNew });
+    const ccArgvLocal = allocLocal(fctx, `__dynnew_ccargv_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: ccArgvLocal });
+    for (const aLocal of argLocals) {
+      fctx.body.push({ op: "local.get", index: ccArgvLocal });
+      fctx.body.push({ op: "local.get", index: aLocal });
+      fctx.body.push({ op: "call", funcIdx: finalArrPush });
+    }
+    // The callee descriptor (anyref) → externref for the bridge's first param.
+    fctx.body.push({ op: "local.get", index: descLocal });
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "local.get", index: ccArgvLocal });
+    fctx.body.push({ op: "call", funcIdx: finalCc });
+    fctx.body = savedBodyCc;
+    noMatchBase = base;
+  } else if (hostFuncIdx !== undefined) {
     const base: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = base;
@@ -2770,8 +2993,24 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // Handle `new Promise(executor)` — delegate to host import
+  // Handle `new Promise(executor)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Promise") {
+    // (#2959) Native standalone/WASI path — construct the `$Promise` and run the
+    // executor with synthesised native resolve/reject closures, retiring the
+    // `Promise_new` host import. Gated inside the helper on
+    // `isStandalonePromiseActive` + a resolvable executor closure; when it can't
+    // apply it emits NOTHING and returns false, falling through to the host path
+    // below (byte-unchanged in host/gc mode). Guard the ambient-global binding so
+    // a user `class Promise {}` / local shadow keeps the normal ctor path.
+    const promiseArgs = expr.arguments ?? [];
+    if (
+      promiseArgs.length >= 1 &&
+      !ctx.classSet.has("Promise") &&
+      resolvesToAmbientGlobal(ctx, expr.expression) &&
+      emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
+    ) {
+      return { kind: "externref" };
+    }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
       ensureLateImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -2806,7 +3045,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // ToNumber(Symbol) throws TypeError (§7.1.4) — the wrapper ctor runs
           // ToNumber on its argument before boxing. Mirror the `Number(sym)`
           // call-path guard so `new Number(Symbol())` throws too (#1564).
-          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+          if (ctx.oracle.staticJsTypeOf(args[0]!) === "symbol") {
             const t = compileExpression(ctx, fctx, args[0]!);
             if (t !== null) fctx.body.push({ op: "drop" });
             emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
@@ -2848,7 +3087,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           // ToBoolean never throws on Symbol (a Symbol is truthy), but this path
           // coerces the arg to f64 first, which would silently lose the Symbol.
           // A Symbol arg should produce a truthy wrapper: box 1.0.
-          if (isSymbolType(ctx.checker.getTypeAtLocation(args[0]!))) {
+          if (ctx.oracle.staticJsTypeOf(args[0]!) === "symbol") {
             const t = compileExpression(ctx, fctx, args[0]!);
             if (t !== null) fctx.body.push({ op: "drop" });
             fctx.body.push({ op: "f64.const", value: 1 });
@@ -2894,6 +3133,52 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       } else {
         // No message — push null externref (undefined message)
         fctx.body.push({ op: "ref.null.extern" });
+      }
+      // (#2969) §20.5.1.1 step 3 — `msg = ToString(message)` at CONSTRUCTION
+      // time. In standalone/WASI the native `__new_<Name>` ctor stores its arg
+      // verbatim (see error-types.ts), so `new Error(42).message` was the number
+      // `42` (spec: `"42"`) and `String(new Error(42))` degraded to `"Error"`.
+      // Do the ToString HERE at the user call site (null-guarded so argument-less
+      // / `new Error(undefined)` still render the name alone) rather than inside
+      // the SHARED ctor — the ctor is also lazily emitted for internal compiler
+      // error paths (destructuring/coercion `TypeError`s), and pulling the
+      // `__any_to_string` family into those emissions destabilised standalone
+      // `any`-equality dispatch (the tag-5 value-eq gap deferred to #2580 M2 /
+      // #3032). Host mode's `__new_<Name>` import does ToString in JS, so only
+      // the native path needs this. Applies to both the WASI-error and
+      // Test262Error branches below (both native, both standalone/WASI).
+      if ((ctx.wasi || ctx.standalone) && args.length >= 1) {
+        // Force `number_toString` before `__any_to_string` bakes so its number
+        // arm renders a raw numeric message ("42") instead of degrading to
+        // "[object Object]" (a module that only constructs `new Error(n)` never
+        // otherwise pulls the number formatter). Must precede the ensure below.
+        if (ctx.funcMap.get("number_toString") === undefined) {
+          emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+        }
+        const anyToStrIdx = ensureAnyToStringHelper(ctx);
+        if (anyToStrIdx >= 0) {
+          const msgTmp = allocTempLocal(fctx, { kind: "externref" });
+          fctx.body.push(
+            { op: "local.set", index: msgTmp },
+            { op: "local.get", index: msgTmp },
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              // undefined / null argument → keep null (renders name alone).
+              then: [{ op: "ref.null.extern" } as Instr],
+              // ToString(message): externref → anyref → __any_to_string
+              // (ref $AnyString) → externref for the ctor's $message field.
+              else: [
+                { op: "local.get", index: msgTmp } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "call", funcIdx: anyToStrIdx } as Instr,
+                { op: "extern.convert_any" } as Instr,
+              ],
+            } as Instr,
+          );
+          releaseTempLocal(fctx, msgTmp);
+        }
       }
       // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
       // use a Wasm-native `__new_<Name>` function that builds a `$Error_struct`
@@ -3038,14 +3323,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // "[object Object]". Falls back to `ref.null.extern` only if the import
   // can't be registered.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Object") {
-    const createIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
-    flushLateImportShifts(ctx, fctx);
-    if (createIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: createIdx });
-      return { kind: "externref" };
-    }
-    fctx.body.push({ op: "ref.null.extern" });
-    return { kind: "externref" };
+    // (#3118) `new Object(v)` is spec-identical to `Object(v)` (§20.1.1.1:
+    // return ToObject(v)). This arm previously ignored its arg and built an
+    // empty object; delegate to the shared coercion so a primitive boxes to its
+    // wrapper (an object passes through, null/undefined/none → fresh object).
+    const r = emitObjectCoercion(ctx, fctx, expr.arguments ?? []);
+    return r === null ? { kind: "externref" } : (r as ValType);
   }
 
   // Handle `new Proxy(target, handler)`.
@@ -3172,20 +3455,40 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Function(...)` — dynamic code generation is not possible in Wasm.
-  // Emit a no-op function that returns undefined (ref.null extern) to prevent
-  // compile errors. Tests that rely on dynamic behavior will fail at runtime
-  // instead of at compile time, which is more informative.
+  // Handle `new Function(...)`.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Function") {
-    // Compile and discard all arguments (they may have side effects)
     const args = expr.arguments ?? [];
+    // (#2924) Constant param list + body → compile-away to a real AOT callable
+    // (global scope, no capture). Dynamic bodies fall through to the no-op stub
+    // below (the Tier-2 interpreter, #2928, handles them). Guarded on the
+    // GLOBAL `Function` intrinsic (a local shadow keeps the legacy stub path).
+    const staticFn = isGlobalFunctionIdentifier(expr.expression, ctx.checker)
+      ? tryStaticNewFunction(ctx, fctx, args)
+      : undefined;
+    if (staticFn !== undefined) return staticFn;
+    // (#2960) Dynamic body (non-constant args). No longer a silent no-op stub:
+    //  - JS-host mode → route to the meta-circular runtime-eval shim
+    //    (`__extern_eval`, global scope) so the constructed function actually
+    //    works — fixes the ~119 host Function-ctor test262 cluster.
+    //  - standalone/wasi (no host) → emit a source-located warning + a callable
+    //    value that throws catchably at CALL time (construction still succeeds,
+    //    so a program that never invokes it keeps working).
+    if (isGlobalFunctionIdentifier(expr.expression, ctx.checker)) {
+      const hostEval = emitDynamicNewFunctionHostEval(ctx, fctx, args);
+      if (hostEval !== undefined) return hostEval;
+      if (noJsHost(ctx)) {
+        return emitStandaloneDynamicFunctionStub(ctx, fctx, expr, args) as ValType;
+      }
+    }
+    // Legacy fallback (e.g. a local `Function` shadow, or JS-host with
+    // nativeStrings where the shim path is unavailable): evaluate args for side
+    // effects and return the historical null-value stub.
     for (const arg of args) {
       const argResult = compileExpression(ctx, fctx, arg);
       if (argResult) {
         fctx.body.push({ op: "drop" });
       }
     }
-    // Return ref.null extern — represents a function that returns undefined
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
@@ -3486,6 +3789,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
+      // (#3097) JS-host lane `new <TA>(buffer[, byteOffset[, length]])`:
+      // route through the host construct bridge (real host TypedArray view
+      // over the canonical host ArrayBuffer) instead of the numeric-length
+      // fallback below, which coerced the buffer struct to NaN → a length-0
+      // vec. Standalone keeps the native `$__ta_view` paths (B1/B2 below).
+      if (hostTaBufferArgSymName(ctx, args) !== undefined) {
+        const hostTa = emitHostTaBufferConstruct(ctx, fctx, expr.expression.text, args);
+        if (hostTa) return hostTa;
+      }
+
       if (args.length === 0) {
         // new TypedArray() → empty array, length 0
         fctx.body.push({ op: "i32.const", value: 0 }); // length = 0
@@ -3515,13 +3828,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // handles the buffer arg correctly via the runtime, so skip the
         // native view path there.
         const argSymName = argSym?.name;
-        if (
+        // (#3054 B1) Build a SHARED-BACKING `$__ta_view` that refs the buffer's
+        // vec (not a copy) so sibling views / DataViews observe writes. Gated on
+        // `noJsHost` (standalone/WASI): the native `i32_byte` vec representation
+        // of ArrayBuffer/DataView only exists in the host-free lane. In JS-host
+        // mode an ArrayBuffer is a host object (no native vec), so the recover
+        // `any.convert_extern` + `ref.cast` would trap — host mode routes buffers
+        // through the runtime instead (#1670). This replaces the former copy loop
+        // (`emitTypedArrayFromByteBuffer`) that CLONED the bytes into a fresh
+        // backing array, which broke sibling/DataView observability.
+        const taViewOk =
           noJsHost(ctx) &&
-          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView") &&
-          !ts.isNumericLiteral(args[0]!) &&
-          emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)
-        ) {
-          return { kind: "ref_null", typeIdx: vecTypeIdx };
+          (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView");
+        if (taViewOk && !ts.isNumericLiteral(args[0]!)) {
+          const viewResult = emitTaViewConstruct(ctx, fctx, args[0]!, expr.expression.text, (e, h) =>
+            compileExpression(ctx, fctx, e, h),
+          );
+          if (viewResult) return viewResult;
         }
         const isArrayLike =
           argSym?.name === "Array" ||
@@ -3612,12 +3935,42 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
                     : srcArrDef.element.kind === "i16"
                       ? "array.get_s"
                       : "array.get";
-                const convertInstrs: Instr[] =
-                  srcArrDef.element.kind === "f64" && dstArrDef.element.kind !== "f64"
-                    ? [{ op: "i32.trunc_sat_f64_s" } as Instr]
-                    : srcArrDef.element.kind !== "f64" && dstArrDef.element.kind === "f64"
-                      ? [{ op: "f64.convert_i32_u" } as Instr]
-                      : [];
+                // (#2934 1c) The element-conversion matrix keys on the READ
+                // value's stack kind (packed i8/i16 widen to i32 via get_u/_s).
+                // The old matrix only knew f64↔int, so an EXTERNREF source
+                // element (`new Uint8Array([102])` where the literal compiled
+                // to an any[] externref vec) flowed uncoerced into the packed
+                // `array.set` — "array.set[2] expected i32, found array.get of
+                // externref" (the toBase64/`__cb_0` invalid-Wasm cluster). An
+                // externref element now unboxes (ToNumber) and truncates to
+                // integer storage; packed stores truncate width for free.
+                const srcReadKind =
+                  srcArrDef.element.kind === "i8" || srcArrDef.element.kind === "i16" ? "i32" : srcArrDef.element.kind;
+                const dstStoreKind =
+                  dstArrDef.element.kind === "i8" || dstArrDef.element.kind === "i16" ? "i32" : dstArrDef.element.kind;
+                let convertInstrs: Instr[];
+                if (srcReadKind === "externref" && dstStoreKind !== "externref") {
+                  // ToNumber the boxed element via the single coercion table
+                  // (#2108 — coercionPlan's externref→i32 row is exactly
+                  // unbox + trunc_sat; externref→f64 is the bare unbox).
+                  // Integer storage then truncates width on the packed store.
+                  addUnionImports(ctx);
+                  const plan = coercionPlan(
+                    { kind: "externref" },
+                    { kind: dstStoreKind === "f64" ? "f64" : "i32" },
+                    {
+                      boxNumberIdx: ctx.funcMap.get("__box_number") ?? null,
+                      unboxNumberIdx: ctx.funcMap.get("__unbox_number") ?? null,
+                    },
+                  );
+                  convertInstrs = plan?.instrs ?? [];
+                } else if (srcReadKind === "f64" && dstStoreKind !== "f64" && dstStoreKind !== "externref") {
+                  convertInstrs = [{ op: "i32.trunc_sat_f64_s" } as Instr];
+                } else if (srcReadKind !== "f64" && srcReadKind !== "externref" && dstStoreKind === "f64") {
+                  convertInstrs = [{ op: "f64.convert_i32_u" } as Instr];
+                } else {
+                  convertInstrs = [];
+                }
 
                 fctx.body.push({
                   op: "block",
@@ -3667,6 +4020,32 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
         fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
         return { kind: "ref_null", typeIdx: vecTypeIdx };
+      }
+
+      // (#3054 B2) `new <TA>(buffer, byteOffset[, length])` — windowed
+      // shared-backing view. Build a `$__ta_view` with the byteOffset field
+      // populated (B1 pinned it 0) so `a[i]` addresses `byteOffset + i*width`
+      // into the SHARED buffer (sibling/DataView windows mutually observable).
+      // Standalone/WASI only — host-mode buffers are host objects, not native
+      // vecs (#1670). MUST match `inferTaViewType`'s multi-arg gate so the
+      // local's type and the constructed value agree.
+      if (noJsHost(ctx) && args.length >= 2 && !ts.isNumericLiteral(args[0]!)) {
+        // (#1930) Query the type-oracle boundary, not the raw checker — this
+        // also keeps the gate in lock-step with `inferTaViewType` (variables.ts),
+        // which resolves the buffer arg through the same oracle.
+        const winArgSymName = ctx.oracle.builtinReceiverOf(args[0]!);
+        if (winArgSymName === "ArrayBuffer" || winArgSymName === "SharedArrayBuffer" || winArgSymName === "DataView") {
+          const winResult = emitTaViewConstructWindowed(
+            ctx,
+            fctx,
+            args[0]!,
+            args[1]!,
+            args[2],
+            expr.expression.text,
+            (e, h) => compileExpression(ctx, fctx, e, h),
+          );
+          if (winResult) return winResult;
+        }
       }
 
       // new TypedArray() with multiple args — shouldn't happen per spec, but handle gracefully
@@ -4257,10 +4636,92 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             : (dynCallee as ts.NonNullExpression).expression;
       }
       if (ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) {
+        // (#3054 D) Dynamic `new <ctorVal>(buffer[, off[, len]])` where `ctorVal`
+        // is a first-class `$__ta_ctor` value (a TA constructor held in a var /
+        // array element — test262 `CreateRabForTest`, `for (ctor of ctors) new
+        // ctor(rab, …)`). The callee is `any`, so `className` is undefined and the
+        // static TA paths above are bypassed. Runtime kind-switch builds the right
+        // shared-backing `$__ta_view` in the standalone lane (no host import).
+        // Gated to a buffer-typed first arg so `new ctor(5)` (count ctor) is NOT
+        // captured here (a boxed number would `ref.cast`-trap).
+        if (noJsHost(ctx) && args.length >= 1 && !ts.isNumericLiteral(args[0]!)) {
+          const arg0Sym = ctx.checker.getTypeAtLocation(args[0]!).getSymbol?.()?.name;
+          if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+            // Compile the ctor value once into an anyref local to type-test.
+            const ctorTy = compileExpression(ctx, fctx, dynCallee, { kind: "externref" });
+            if (ctorTy && ctorTy.kind !== "externref") coerceType(ctx, fctx, ctorTy, { kind: "externref" });
+            else if (ctorTy === null) fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            const ctorAnyLocal = allocLocal(fctx, `__dynctor_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+            fctx.body.push({ op: "local.set", index: ctorAnyLocal });
+            const dtav = emitDynamicTaViewConstruct(ctx, fctx, ctorAnyLocal, args[0]!, args[1], args[2], (e, h) =>
+              compileExpression(ctx, fctx, e, h),
+            );
+            if (dtav) return dtav;
+          }
+        }
         if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
           return { kind: "externref" };
         }
       }
+    }
+
+    // (#3087) Dynamic `new <ctorVal>(...)` where `ctorVal` is an `any`/`unknown`-typed
+    // runtime binding — most importantly a callback PARAMETER that receives a real
+    // constructor at runtime, e.g. the TypedArray harness wrapper
+    // `testWithTypedArrayConstructors(function (TA) { new TA(3); … })` where `TA` is the
+    // concrete `Int8Array`/… ctor passed positionally into the `any`-typed callback param.
+    // The compiled-class dynamic fallback above excludes externref-backed builtin ctors
+    // (#2026), and the `__new_${ctorName}` host-import fallthrough below resolves to a
+    // non-existent extern class → "No dependency provided for extern class 'TA'" (the
+    // dominant #3074 downstream honest-fail). Route through the SAME `__construct_closure`
+    // host bridge as the value-bound-function-ctor arm above: its runtime side runs the
+    // spec IsConstructor probe (`Reflect.construct(function(){}, [], value)`) and either
+    // `Reflect.construct`s the value or throws the spec `TypeError` for a non-constructor —
+    // correct for ANY runtime value. JS-host only; standalone keeps its native TA-view
+    // path (#3054) / the extern-class fallthrough. ONE terminal `flushLateImportShifts`
+    // (after the call) — never mid-emission (the #608/#794 index-corruption hazard).
+    if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToDynamicAnyCtorValue(ctx, s1Callee)) {
+      const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
+      if (calleeTy && calleeTy.kind !== "externref") {
+        coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+      } else if (calleeTy === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const calleeLocal = allocLocal(fctx, `__dynanyctor_callee_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: calleeLocal });
+      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      const ccIdx = ensureLateImport(
+        ctx,
+        "__construct_closure",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+      const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+      const finalCc = ctx.funcMap.get("__construct_closure") ?? ccIdx;
+      if (finalArrNew !== undefined && finalArrPush !== undefined && finalCc !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalArrNew });
+        const argvLocal = allocLocal(fctx, `__dynanyctor_argv_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: argvLocal });
+        for (const arg of args) {
+          fctx.body.push({ op: "local.get", index: argvLocal });
+          const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+          if (aTy && aTy.kind !== "externref") {
+            coerceType(ctx, fctx, aTy, { kind: "externref" });
+          } else if (aTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: finalArrPush });
+        }
+        fctx.body.push({ op: "local.get", index: calleeLocal });
+        fctx.body.push({ op: "local.get", index: argvLocal });
+        fctx.body.push({ op: "call", funcIdx: finalCc });
+        return { kind: "externref" };
+      }
+      // Imports unavailable (shouldn't happen in JS-host): fall through.
     }
 
     const importName = `__new_${ctorName}`;
@@ -4459,6 +4920,13 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
 
+      // (#3097) JS-host lane buffer-arg construction — see the matching gate
+      // in the identifier-keyed TypedArray branch above.
+      if (hostTaBufferArgSymName(ctx, args) !== undefined) {
+        const hostTa = emitHostTaBufferConstruct(ctx, fctx, className, args);
+        if (hostTa) return hostTa;
+      }
+
       if (args.length === 0) {
         // new Uint8Array() → empty array
         fctx.body.push({ op: "i32.const", value: 0 });
@@ -4472,15 +4940,21 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         // bytes into this TypedArray's backing vec.
         const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
         const argSymName = argTsType.getSymbol?.()?.name;
-        // #1670 — gate on no-JS-host (see the matching guard above): the
-        // native byte-buffer view emits an unconditional `ref.cast` to the
-        // `i32_byte` vec that traps in JS-host mode, where the buffer is not
-        // that struct.
-        const isBufferArg =
+        // (#3054 B1) Shared-backing `$__ta_view` (see the matching guard above).
+        // Standalone/WASI only — host-mode buffers are host objects, not native
+        // vecs, so the recover cast would trap (#1670).
+        // B1: single buffer arg only (offset-0). Windowed `new TA(buf, off, len)`
+        // is B2 — MUST match `inferTaViewType`'s `args.length === 1` gate so the
+        // local's type and the constructed value agree.
+        const taViewOk =
           noJsHost(ctx) &&
+          args.length === 1 &&
           (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer" || argSymName === "DataView");
-        if (isBufferArg && emitTypedArrayFromByteBuffer(ctx, fctx, args[0]!, vecTypeIdx, arrTypeIdx)) {
-          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        if (taViewOk && !ts.isNumericLiteral(args[0]!)) {
+          const viewResult = emitTaViewConstruct(ctx, fctx, args[0]!, className, (e, h) =>
+            compileExpression(ctx, fctx, e, h),
+          );
+          if (viewResult) return viewResult;
         }
         // new Uint8Array(n) → array of size n, all zeros
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
@@ -4504,6 +4978,135 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", elemType);
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     const args = expr.arguments ?? [];
+
+    // (#3054 C) Resizable ArrayBuffer: `new ArrayBuffer(n, {maxByteLength: m})`.
+    // Per §25.1.3.1 / GetArrayBufferMaxByteLengthOption: a non-object options or
+    // an options object without a `maxByteLength` property ⇒ NON-resizable (fall
+    // through to the plain path below). We handle the object-literal options form
+    // (the entire test262 resizable corpus passes an object literal) at compile
+    // time — resolving `maxByteLength` off an arbitrary dynamic object would need
+    // the object-runtime and is deferred (a dynamic options object stays
+    // non-resizable rather than mis-constructing). BOTH lanes (#3058): the plain
+    // `new ArrayBuffer(n)` path below already lowers to the native i32_byte vec
+    // in the JS-host lane too (the #3097 construct bridge marshals it to a
+    // canonical host ArrayBuffer on first crossing), so the `$__resizable_ab`
+    // subtype is equally lane-agnostic. In host mode the runtime consumes the
+    // subtype through the `__rab_resize`/`__ab_max_len` exports (resize +
+    // maxByteLength/resizable arms in `__extern_method_call`/`__extern_get`)
+    // and `_compiledAbToHostBuffer` marshals it to a HOST resizable buffer, so
+    // host TypedArray views length-track a later `rab.resize()` natively.
+    let maxByteLenInit: ts.Expression | undefined;
+    if (args.length >= 2 && ts.isObjectLiteralExpression(args[1]!)) {
+      for (const prop of args[1]!.properties) {
+        if (
+          ts.isPropertyAssignment(prop) &&
+          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+          prop.name.text === "maxByteLength"
+        ) {
+          maxByteLenInit = prop.initializer;
+        }
+      }
+    }
+
+    if (maxByteLenInit !== undefined) {
+      const rabTypeIdx = getOrRegisterResizableAbType(ctx);
+      // byteLength (arg 0) → i32, with the same non-negative-integer RangeError
+      // guard the plain path uses.
+      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      const lenF64 = allocLocal(fctx, `__rab_len_f64_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: lenF64 });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "f64.floor" });
+      fctx.body.push({ op: "f64.ne" });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.lt" });
+      fctx.body.push({ op: "i32.or" });
+      {
+        const rangeErrMsg = "RangeError: Invalid array buffer length";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+      const lenI32 = allocLocal(fctx, `__rab_len_i32_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: lenF64 });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      fctx.body.push({ op: "local.set", index: lenI32 });
+
+      // maxByteLength (options) → i32 via ToIndex: NaN→0, truncate toward zero,
+      // and `< 0` → RangeError (the upper 2^53-1 bound is subsumed by the i32 cap).
+      compileExpression(ctx, fctx, maxByteLenInit, { kind: "f64" });
+      const maxF64 = allocLocal(fctx, `__rab_max_f64_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.set", index: maxF64 });
+      // NaN → 0
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.ne" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: maxF64 } as Instr],
+        else: [],
+      });
+      // truncate toward zero
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.trunc" });
+      fctx.body.push({ op: "local.set", index: maxF64 });
+      // maxByteLength < 0 → RangeError
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.lt" });
+      {
+        const rangeErrMsg = "RangeError: Invalid array buffer max byte length";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+      const maxI32 = allocLocal(fctx, `__rab_max_i32_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: maxF64 });
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      fctx.body.push({ op: "local.set", index: maxI32 });
+
+      // AllocateArrayBuffer: byteLength > maxByteLength → RangeError.
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "local.get", index: maxI32 });
+      fctx.body.push({ op: "i32.gt_s" });
+      {
+        const rangeErrMsg = "RangeError: ArrayBuffer byteLength exceeds maxByteLength";
+        addStringConstantGlobal(ctx, rangeErrMsg);
+        const tagIdx = ensureExnTag(ctx);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          else: [],
+        });
+      }
+
+      // struct.new $__resizable_ab { length = byteLength, data = new i8[byteLength],
+      // maxByteLength }. The backing array is sized to the CURRENT byteLength (GC
+      // arrays are fixed-length; `.resize()` reallocs + swaps `data`, per A.2).
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "local.get", index: lenI32 });
+      fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+      fctx.body.push({ op: "local.get", index: maxI32 });
+      fctx.body.push({ op: "struct.new", typeIdx: rabTypeIdx });
+      // Return the PARENT vec type: a `$__resizable_ab` IS-A `$__vec_i32_byte`, so
+      // every downstream buffer consumer (byteLength, DataView, TA views, slice)
+      // treats it identically — only `.resize()`/`.maxByteLength`/`.resizable`
+      // `ref.test` the subtype. The runtime value keeps its resizable_ab identity.
+      return { kind: "ref_null", typeIdx: vecTypeIdx };
+    }
 
     if (args.length >= 1) {
       // new ArrayBuffer(byteLength) → create vec with byteLength elements, all 0
@@ -4989,128 +5592,6 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
   reportError(ctx, expr, `Unsupported new expression for class: ${className}`);
   return null;
-}
-
-/**
- * #1654 — `new Uint8Array(arrayBuffer)`: copy the ArrayBuffer's bytes into the
- * TypedArray backing array.
- *
- * The ArrayBuffer / DataView is backed by an `i32_byte` vec (field 0 = length,
- * field 1 = array of i32, one byte per element). User code lowers ArrayBuffer
- * variables to externref, so recover the struct via any.convert_extern +
- * ref.cast, read its length, allocate a destination array of that length, and
- * copy byte-by-byte. Returns true on success; false to let the caller fall back
- * to the numeric-length path.
- */
-function emitTypedArrayFromByteBuffer(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  bufExpr: ts.Expression,
-  dstVecTypeIdx: number,
-  dstArrTypeIdx: number,
-): boolean {
-  const srcVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
-  const srcArrTypeIdx = getArrTypeIdxFromVec(ctx, srcVecTypeIdx);
-  if (srcArrTypeIdx < 0 || dstArrTypeIdx < 0) return false;
-
-  // Compile the buffer expression and recover the i32_byte vec struct.
-  const bufType = compileExpression(ctx, fctx, bufExpr);
-  if (!bufType) return false;
-  if (bufType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
-  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
-    if ("typeIdx" in bufType && bufType.typeIdx !== srcVecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: srcVecTypeIdx } as Instr);
-    }
-  } else {
-    fctx.body.push({ op: "drop" } as Instr);
-    return false;
-  }
-  const srcVecLocal = allocLocal(fctx, `__tab_src_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: srcVecTypeIdx,
-  });
-  fctx.body.push({ op: "local.set", index: srcVecLocal });
-
-  // len = src.length (field 0)
-  const lenLocal = allocLocal(fctx, `__tab_len_${fctx.locals.length}`, {
-    kind: "i32",
-  });
-  fctx.body.push({ op: "local.get", index: srcVecLocal });
-  fctx.body.push({
-    op: "struct.get",
-    typeIdx: srcVecTypeIdx,
-    fieldIdx: 0,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: lenLocal });
-
-  // srcArr = src.data (field 1)
-  const srcArrLocal = allocLocal(fctx, `__tab_srcarr_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: srcArrTypeIdx,
-  });
-  fctx.body.push({ op: "local.get", index: srcVecLocal });
-  fctx.body.push({
-    op: "struct.get",
-    typeIdx: srcVecTypeIdx,
-    fieldIdx: 1,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: srcArrLocal });
-
-  const dstArrDef = ctx.mod.types[dstArrTypeIdx];
-  const dstElemKind = dstArrDef?.kind === "array" ? dstArrDef.element.kind : undefined;
-
-  // dstArr = new element[len]
-  const dstArrLocal = allocLocal(fctx, `__tab_dstarr_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: dstArrTypeIdx,
-  });
-  fctx.body.push({ op: "local.get", index: lenLocal });
-  fctx.body.push({ op: "array.new_default", typeIdx: dstArrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dstArrLocal });
-
-  // for (i = 0; i < len; i++) dstArr[i] = srcArr[i] converted to dst element type.
-  const iLocal = allocLocal(fctx, `__tab_i_${fctx.locals.length}`, {
-    kind: "i32",
-  });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal });
-  const loopBody: Instr[] = [
-    // if (i >= len) break (br 1 out of loop)
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    // dstArr[i] = converted srcArr[i] byte
-    { op: "local.get", index: dstArrLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: srcArrLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    // (#2835) packed i8 source byte → unsigned read.
-    { op: "array.get_u", typeIdx: srcArrTypeIdx } as Instr,
-    { op: "i32.const", value: 0xff } as Instr,
-    { op: "i32.and" } as Instr,
-    ...(dstElemKind === "f64" ? ([{ op: "f64.convert_i32_u" } as Instr] as Instr[]) : []),
-    { op: "array.set", typeIdx: dstArrTypeIdx } as Instr,
-    // i++
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: iLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
-  ];
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
-
-  // struct.new dstVec(len, dstArr)
-  fctx.body.push({ op: "local.get", index: lenLocal });
-  fctx.body.push({ op: "local.get", index: dstArrLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: dstVecTypeIdx } as Instr);
-  return true;
 }
 
 export { compileClassExpression, compileNewExpression, compileSuperElementMethodCall, compileSuperMethodCall };

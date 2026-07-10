@@ -15,6 +15,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { emitCachedFuncClosureAccess, emitFuncRefAsClosure } from "../closures.js";
+import { emitNativeGlobalThisObject } from "../array-object-proto.js";
 import { emitLazyClassObjectGet } from "./extern.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -26,7 +27,7 @@ import {
   localGlobalIdx,
   resolveWasmType,
 } from "../index.js";
-import { emitNullGuardedStructGet } from "../property-access.js";
+import { emitCapturedBoxGlobalRead, emitNullGuardedStructGet, getCapturedBoxGlobal } from "../property-access.js";
 import { coerceType, compileExpression } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
@@ -37,9 +38,16 @@ import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error
 import { allocLocal } from "../context/locals.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
+import { emitTaCtorValue } from "../dataview-native.js";
+import { taCtorKindOf } from "../registry/types.js";
 import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
-import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
+import {
+  emitBuiltinConstructorIdentity,
+  emitBuiltinNamespaceObject,
+  isBuiltinConstructorIdentityName,
+  isSupportedBuiltinNamespace,
+} from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
 /**
@@ -666,6 +674,50 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return declaredType;
   }
 
+  // (#3045) Lexical class-name binding — a class body evaluates in a dedicated
+  // class scope whose sole binding is the class's own name (ES2015 §14.6.13
+  // ClassDefinitionEvaluation steps 3–5 & §13.2.1: `classBinding` is bound in
+  // `classScope`, immutable, and shadows any outer binding of that name). So in
+  //   let C = 'outside'; var cls = class C { method() { return C; } };
+  // the `C` inside `method` denotes the CLASS, not the outer `C`. Without this,
+  // the read falls to the captured/module-global branches below and returns the
+  // outer shadow (`'outside'`), so `cls.prototype.method() === cls` was false
+  // (a −2 regression surfaced by #2719 once the binding itself materialized to
+  // the canonical singleton). Resolve the enclosing class's own inner name to
+  // its canonical `__class_<Name>` singleton — the SAME object the binding read,
+  // `instance.constructor`, and `C.staticProp` resolve to — placed AFTER
+  // `localMap` (a genuine method-local `C` still shadows the class name) but
+  // BEFORE the captured/module-global branches (so the class name wins over an
+  // outer same-named binding, per spec). Canonicalize through `classExprNameMap`
+  // so both dual-registration names (#1394) collapse to one singleton.
+  if (fctx.enclosingClassName !== undefined) {
+    const innerEsName = ctx.functionNameMap.get(fctx.enclosingClassName);
+    if (innerEsName !== undefined && innerEsName === name && !fctx.localMap.has(name)) {
+      const canonicalClassName = ctx.classExprNameMap.get(name) ?? fctx.enclosingClassName;
+      if (ctx.classObjectGlobals?.has(canonicalClassName)) {
+        if (emitLazyClassObjectGet(ctx, fctx, canonicalClassName)) {
+          return { kind: "externref" };
+        }
+      }
+    }
+  }
+
+  // (#3039) Check BOXED captured globals FIRST — a transitively-captured
+  // mutable var (ref cell) that a method-shorthand / class-method / accessor
+  // body reads. The promoted global holds the box; deref it (global.get;
+  // struct.get field 0) rather than returning the ref cell as if it were the
+  // value (which coerced ref→f64 to `f64.const 0` / ref→externref to garbage).
+  const capturedBox = getCapturedBoxGlobal(ctx, name);
+  if (capturedBox !== undefined) {
+    const tdzResult = ctx.tdzGlobals.has(name) ? analyzeTdzAccess(ctx, id) : "skip";
+    if (tdzResult === "check") {
+      emitTdzCheck(ctx, fctx, name);
+    } else if (tdzResult === "throw") {
+      emitStaticTdzThrow(ctx, fctx, id.text);
+    }
+    return emitCapturedBoxGlobalRead(ctx, fctx, capturedBox);
+  }
+
   // Check captured globals (variables promoted from enclosing scope for callbacks)
   const capturedIdx = ctx.capturedGlobals.get(name);
   if (capturedIdx !== undefined) {
@@ -717,6 +769,49 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
   if (ctx.standalone && isSupportedBuiltinNamespace(name)) {
     const builtinObject = emitBuiltinNamespaceObject(ctx, fctx, name);
     if (builtinObject) return builtinObject;
+  }
+
+  // (#3087) Host/gc lane: a bare TypedArray constructor name used as a VALUE
+  // (not `new TA()` / type position) resolves to the REAL host constructor
+  // externref via `__extern_get(__get_globalThis(), name)` — mirroring the #820h
+  // ERM-global-as-value pattern above. Placed BEFORE the ambient `declaredGlobals`
+  // route (which maps a bare `Int8Array` to a stub host import that returns
+  // `undefined` — so `constructors = [Int8Array, …]` degraded to a null carrier
+  // and a dynamic `new TA(...)` through the `__construct_closure` bridge saw
+  // "undefined is not a constructor"). This materializes the genuine host
+  // constructor so `fn(constructors[i])` and dynamic `new TA(...)` (#3087, the
+  // dominant #3074 downstream honest-fail) execute and pass. Covers the BigInt
+  // views too (not in the standalone `taCtorKindOf` list). Standalone/WASI keeps
+  // the native `$__ta_ctor` value below (host-free). Gated so a real
+  // local/captured/module/class binding — already returned above — wins.
+  if (
+    !ctx.standalone &&
+    !ctx.wasi &&
+    (taCtorKindOf(name) >= 0 || name === "BigInt64Array" || name === "BigUint64Array") &&
+    fctx.localMap.get(name) === undefined &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const gtFuncIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (gtFuncIdx !== undefined && getIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: gtFuncIdx });
+      addStringConstantGlobal(ctx, name);
+      const strGlobalIdx = ctx.stringGlobalMap.get(name);
+      if (strGlobalIdx !== undefined) {
+        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      return { kind: "externref" };
+    }
   }
 
   // Check declared globals (e.g. document, window)
@@ -785,6 +880,24 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     }
   }
 
+  // (#3006) Standalone bare builtin-CONSTRUCTOR identifier read as a VALUE
+  // (`… === Set`, `assert.sameValue(…, Set)`, `[Set, Map]`) → the GENUINE,
+  // identity-stable reified constructor object, NOT the null-externref carrier it
+  // otherwise falls through to. This is the RHS partner of the
+  // `<Builtin>.prototype.constructor` fold in property-access.ts: both resolve to
+  // the SAME per-name `__builtin_ctor_<Name>` singleton, so
+  // `Set.prototype.constructor === Set` is genuinely true and
+  // `Set.prototype.constructor === Map` genuinely false (distinct singletons).
+  // Scoped to the narrow constructor subset with no existing bare-value identity
+  // (Set/Map/Weak*/RegExp/FinalizationRegistry/Disposable*/SuppressedError) and to
+  // standalone; gc/host and the namespace-object / native-error-tag builtins are
+  // untouched. Order: AFTER local/module/declared-global shadowing and the
+  // class-object / promise-subclass singleton blocks (so a user binding or a real
+  // class always wins), BEFORE the null-externref fallback.
+  if (ctx.standalone && isBuiltinConstructorIdentityName(name)) {
+    return emitBuiltinConstructorIdentity(ctx, fctx, name);
+  }
+
   // #1502 — Browser Storage globals (localStorage / sessionStorage). Emit
   // a host import that resolves to the real browser Storage when running
   // inside a browser / jsdom, and to an in-memory polyfill in standalone
@@ -822,8 +935,20 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     return { kind: "externref" };
   }
 
-  // globalThis — return the JS global object via host import
+  // globalThis — return the JS global object.
   if (name === "globalThis") {
+    // (#2996) Standalone / WASI (no-JS-host): resolve to a native, cached
+    // `$Object` singleton instead of the `env::__get_globalThis` host import,
+    // which a host-free binary can't satisfy (it merely leaks into the import
+    // section). This eliminates the biggest genuine sole-import leak lever
+    // (47 tests) — READ-value substrate only; `globalThis.prop` reflective reads
+    // are the deferred #2988 MOP work and keep their existing path. Host/gc mode
+    // is byte-identical (falls through to the host import below).
+    if (ctx.standalone || ctx.wasi) {
+      const nativeVt = emitNativeGlobalThisObject(ctx, fctx);
+      if (nativeVt) return nativeVt;
+      // Native runtime unavailable — fall through to the host-import path.
+    }
     let funcIdx = ctx.funcMap.get("__get_globalThis");
     if (funcIdx === undefined) {
       const importsBefore = ctx.numImportFuncs;
@@ -928,10 +1053,32 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
   // not a shift-walker miss — the index was an import from the start. Skip the
   // closure path for imports so the identifier falls through to the
   // type-appropriate graceful default below (valid Wasm, no spurious throw).
+  //
+  // (#3087) A `__`-prefixed name is only skipped when it does NOT resolve to a
+  // USER function declaration in the compiled source. The old blunt
+  // `!name.startsWith("__")` filter existed to keep compiler-internal DEFINED
+  // helpers that share the funcMap namespace (`__module_init`, `__closure_N`,
+  // `__call_fn_N`, method trampolines, …) out of the closure-wrap path — but it
+  // also silently compiled a user-defined `__foo` referenced as a VALUE to the
+  // graceful null default, so `var f: any = __foo; f(x)` dispatched on null and
+  // the call was dropped. That was the dominant honest-fail of the ~1,487-file
+  // test262 TypedArray harness cluster: the runner shim passes
+  // `__ta_makeCtorArgPassthrough` positionally into every callback, so
+  // `makeCtorArg(...)` returned null and `new TA(null)` built a length-0 view.
+  // Discriminate by the checker instead: a source-level function declaration
+  // resolves to a symbol whose valueDeclaration is a FunctionDeclaration;
+  // compiler-internal helper names do not resolve to any source declaration.
+  const isInternalHelperName = (): boolean => {
+    if (!name.startsWith("__")) return false;
+    const { checker } = ctx;
+    const valSym = checker.getSymbolAtLocation(id);
+    const valDecl = valSym?.valueDeclaration;
+    return !(valDecl !== undefined && ts.isFunctionDeclaration(valDecl));
+  };
   if (
     funcRefIdx !== undefined &&
     funcRefIdx >= ctx.numImportFuncs &&
-    !name.startsWith("__") &&
+    !isInternalHelperName() &&
     !ctx.classSet.has(name)
   ) {
     // Check if there's already a closure registered (e.g. from closureMap)
@@ -1005,6 +1152,26 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       fctx.body.push({ op: "throw", tagIdx });
     }
     return { kind: "externref" };
+  }
+
+  // (#3054 D) First-class TypedArray CONSTRUCTOR value. A bare TA name used as a
+  // VALUE (not `new TA()` / type position — those are handled syntactically in
+  // new-super / property-access) previously fell through to the null-externref
+  // default below, so every TA ctor was indistinguishable (`Uint8Array ===
+  // Int8Array` was `true`) and a dynamic `new ctor(rab)` dropped the ctor. Emit a
+  // `$__ta_ctor{kind}` so `ctors = [Uint8Array, …]`, `for (ctor of ctors)`, and
+  // dynamic `new ctor(rab)` / `ctor.BYTES_PER_ELEMENT` work. Standalone/WASI lane
+  // only (the view/construct substrate is host-free); gated on the name not being
+  // shadowed by a local/captured binding or a user class.
+  if (
+    noJsHost(ctx) &&
+    taCtorKindOf(name) >= 0 &&
+    fctx.localMap.get(name) === undefined &&
+    !(fctx.boxedCaptures?.has(name) ?? false) &&
+    !ctx.classSet.has(name)
+  ) {
+    const taCtorVt = emitTaCtorValue(ctx, fctx, name);
+    if (taCtorVt) return taCtorVt;
   }
 
   // Graceful fallback for known but unimplemented globals (Symbol, Object,
@@ -1259,7 +1426,66 @@ function emitInstanceofThrowGuard(ctx: CodegenContext, fctx: FunctionContext): v
   // stack out: [i32 0|1]
 }
 
+/**
+ * (#2998) True when `t` is EXCLUSIVELY a primitive value type — every union
+ * constituent is a number / string / boolean / bigint / symbol / null /
+ * undefined / void, and NONE is `Object` / `any` / `unknown` / a non-primitive
+ * brand / a type-parameter. `never` also qualifies: a `never`-typed operand can
+ * never produce a value, so any downstream constant is unreachable.
+ *
+ * Used to short-circuit the fully-dynamic `instanceof` path: §7.3.20
+ * OrdinaryHasInstance step 3 ("If Type(O) is not Object, return false") makes a
+ * primitive left-hand value answer `false` WITHOUT reading `target.prototype` or
+ * walking any prototype chain — so no host predicate is needed.
+ */
+function isExclusivelyPrimitiveType(t: ts.Type): boolean {
+  const PRIM =
+    ts.TypeFlags.NumberLike |
+    ts.TypeFlags.StringLike |
+    ts.TypeFlags.BooleanLike |
+    ts.TypeFlags.BigIntLike |
+    ts.TypeFlags.ESSymbolLike |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void |
+    ts.TypeFlags.Never;
+  const NON_PRIM =
+    ts.TypeFlags.Object |
+    ts.TypeFlags.Any |
+    ts.TypeFlags.Unknown |
+    ts.TypeFlags.NonPrimitive |
+    ts.TypeFlags.TypeParameter;
+  if (t.isUnion()) return t.types.length > 0 && t.types.every(isExclusivelyPrimitiveType);
+  return (t.flags & PRIM) !== 0 && (t.flags & NON_PRIM) === 0;
+}
+
 function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+  // (#2998) Standalone / WASI: when the left-hand operand is STATICALLY and
+  // EXCLUSIVELY a primitive, §13.10.2 → §7.3.20 OrdinaryHasInstance step 3
+  // ("If Type(O) is not Object, return false") resolves the operator to `false`
+  // WITHOUT the `__instanceof_check` host predicate, no prototype read, no
+  // proto-chain walk. We still compile BOTH operands (spec evaluates the LHS,
+  // then the RHS, before any check — preserving side effects and a RHS
+  // ReferenceError / accessor throw), discard them, and push the constant. This
+  // retires the `env::__instanceof_check` sole-import leak on the legacy
+  // `language/expressions/instanceof/S15.3.5.3_A1_*` (`<primitive> instanceof
+  // Function(...)`) and `primitive-prototype-with-primitive` /
+  // `prototype-getter-with-primitive` (`0 instanceof Function.prototype`) shapes.
+  //
+  // Gated on `noJsHost`: in the gc/host lane the import is satisfiable and the
+  // runtime predicate still throws a spec TypeError for a genuine-primitive RHS
+  // (`1 instanceof <runtime-non-object>`), so that lane is left byte-identical.
+  // The object-LHS dynamic path (a real proto-chain-walk membership test) is
+  // deferred to the #2916 Slice B substrate.
+  if (noJsHost(ctx) && isExclusivelyPrimitiveType(ctx.checker.getTypeAtLocation(expr.left))) {
+    const lt = compileExpression(ctx, fctx, expr.left);
+    if (lt) fctx.body.push({ op: "drop" });
+    const rt = compileExpression(ctx, fctx, expr.right);
+    if (rt) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+
   // (#2702) `__instanceof_check` implements §13.10.2 InstanceofOperator +
   // §7.3.20 OrdinaryHasInstance and returns a tri-state (0/1/2) so the
   // non-object / non-callable / custom-@@hasInstance cases are handled

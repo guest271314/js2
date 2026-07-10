@@ -24,6 +24,7 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
+import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
 import {
   coerceType,
   compileExpression,
@@ -738,13 +739,70 @@ export function emitExternrefDestructureGuard(ctx: CodegenContext, fctx: Functio
   fctx.body.push({ op: "ref.is_null" } as Instr);
   fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
 
-  // Also check JS undefined via __extern_is_undefined import
+  // Also check JS undefined via __extern_is_undefined import.
+  //
+  // (#3010) HOST-MODE ONLY for the *container* guard. In host mode this catches a
+  // genuine JS `undefined` container (`let {x} = undefined` → TypeError) which is
+  // a real externref distinct from `null`. In standalone/wasi it must NOT run:
+  //   - The canonical standalone undefined is the null externref, already caught
+  //     by the `ref.is_null` check above — so this second call was historically
+  //     redundant (pre-#2979 `__extern_is_undefined` *was* bare `ref.is_null`).
+  //   - After #2979 `__extern_is_undefined` became sentinel-aware: it also reports
+  //     `true` for a `$BoxedNumber` carrying the UNDEF_F64 sentinel. That is
+  //     correct for *value* sites (`g.next().value === undefined`, element-default
+  //     application) but WRONG for a destructure *container*: a single-element
+  //     array-literal argument `f([undefined])` is scalarized at the call site to
+  //     exactly that boxed-sentinel, so the sentinel-aware container guard misread
+  //     the array as "undefined" and threw "Cannot destructure 'null' or
+  //     'undefined'" at runtime — regressing 55 `class/dstr/*meth-ary-ptrn-elem-
+  //     id-init-*` test262 files. Element-level default checks (which DO want the
+  //     sentinel awareness) call `__extern_is_undefined` directly elsewhere and
+  //     are unaffected. So: keep the sentinel-aware call for value sites, but for
+  //     the container guard rely on `ref.is_null` alone under standalone/wasi.
+  //
+  // (#3010 follow-up) CRITICAL: the `ensureLateImport` + `flushLateImportShifts`
+  // side effects MUST run UNCONDITIONALLY in both host and standalone/wasi modes.
+  // The first #2570 attempt gated the ENTIRE block (registration + flush + the
+  // three emitted instructions) behind `!standalone && !wasi`. Skipping the
+  // registration/flush in standalone perturbed the late-import/funcIdx
+  // bookkeeping for the rest of the function body: a later `call funcIdx` in the
+  // enclosing method got miswired, so `method([])` (an empty array pattern, which
+  // per §13.3.3.6 must perform NO iterator observation) instead invoked the
+  // argument generator's `.next()` — regressing all 24 `class/dstr/*ary-ptrn-
+  // empty` files (statement + expression meth/gen/private/static/async variants),
+  // which PASS on plain main. `__extern_is_undefined` is already registered
+  // unconditionally at the value-default sites below (and pre-#2570 this guard
+  // registered it in every mode), so the registration itself is host-free-safe —
+  // it resolves to the native impl under standalone with no leaked host import.
+  // Therefore: keep registration + flush identical to main in ALL modes, and gate
+  // ONLY the three emitted throw-check instructions to host mode. This makes the
+  // change byte-identical to main for host mode and, for standalone, a pure
+  // removal of the three erroneous instructions with the funcIdx accounting
+  // preserved exactly as main computed it.
   const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
   if (undefIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "call", funcIdx: undefIdx });
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
+    if (!ctx.standalone && !ctx.wasi) {
+      fctx.body.push({ op: "local.get", index: paramIdx });
+      fctx.body.push({ op: "call", funcIdx: undefIdx });
+      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildDestructureNullThrow(ctx, fctx), else: [] });
+    } else if (undefinedSingletonActive(ctx)) {
+      // (#2106 S1) Under the singleton regime a standalone `undefined`
+      // container is a NON-null externref, so the `ref.is_null` guard above
+      // misses it. Test the tag-1 `$AnyValue` shape ONLY — deliberately NOT
+      // the sentinel-aware `__extern_is_undefined`, whose UNDEF_F64
+      // `$BoxedNumber` arm false-positives on a scalarized `[undefined]`
+      // array container (the #3010 55-test regression).
+      const scratchAny = allocLocal(fctx, `__s1_dguard_any_${fctx.locals.length}`, { kind: "anyref" });
+      if (emitIsUndefinedSingletonExternAt(ctx, fctx, paramIdx, scratchAny)) {
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: buildDestructureNullThrow(ctx, fctx),
+          else: [],
+        });
+      }
+    }
   }
 }
 

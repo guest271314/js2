@@ -1,10 +1,9 @@
 ---
 id: 2927
 title: "Interpreter foundation: Acorn-via-js2wasm runtime parser + generic-built-in audit"
-status: in-progress
-assignee: ttraenkler/dev-2927
+status: ready
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-04
 priority: medium
 horizon: l
 feasibility: hard
@@ -233,3 +232,135 @@ These three are the concrete #2928 prerequisites this audit gates; each maps to
 existing infra (#2151 dispatchers, #2863 `__get_builtin`, `__str_*`/`__vec_*`
 helpers) rather than net-new machinery.
 
+
+---
+
+## Generic built-in audit — Part 2 refinement + first fix (sr-interp, 2026-07-03)
+
+Empirically re-measured the "generic `(any,…)→any` callability" surface on
+current `origin/main` by compiling genuinely-`any`-receiver built-in method
+calls (param typed `any`, so the compiler cannot statically resolve the brand)
+and inspecting the **declared Wasm function imports** of the emitted module. This
+materially corrects the coverage table above.
+
+### Methodology correction — `standalone: true` (option) ≠ host-free
+
+The earlier probes used the `{ standalone: true }` compile **option**, which is a
+**hybrid** mode that still permits `env.*` host imports (the object runtime is
+host-backed: `env.__extern_get`, `env.__extern_method_call`, …). The **truly
+host-free** path is `--target standalone` / `--target wasi` (the native runtime,
+0 function imports). Measuring host-freeness under the *option* conflates a real
+host dependency with a satisfied JS bridge. **All findings below use `target:
+"standalone"`** and assert the function-import set directly
+(`WebAssembly.Module.imports`).
+
+### Measured host-free status of any-receiver built-in calls (`target: standalone`)
+
+| Any-receiver call | Host-free (0 fn-imports)? | Correct value? | Note |
+|---|---|---|---|
+| `String.prototype.*` (toUpperCase/indexOf/charCodeAt/concat/slice/…) | ✅ | ✅ | resolved inline/native — **does NOT use the `__extern_method_call` brand stub** |
+| `Array.prototype` non-callback (indexOf/lastIndexOf/includes) | ✅ | ✅ | #2583 `$__vec_base` search arm |
+| `Array.prototype.push` / `.pop` | ✅ | ❌→✅ **FIXED here** | was host-free but **silently wrong** (see below) |
+| object-literal methods (`o.m()` / `o.m(a)`) | ✅ | ✅ | #2151 closed-method dispatch |
+| `Array.prototype` **callback** methods (map/filter/forEach/reduce) | ❌ | (host) | emits `env.__make_callback` — **GAP** |
+| `Map.prototype` (get/set) on `any` | ❌ | (host) | emits `env.WeakMap_get` / `env.WeakMap_set` — **GAP** |
+| `Set.prototype` (has/add) on `any` | ❌ | (host) | emits `env.WeakMap_has` / `env.Set_add` — **GAP** |
+
+**Key correction to the coverage table above:** the String/Array brand arms are
+**NOT** "stub → undefined" in practice — genuinely-`any` String and non-callback
+Array methods already run **host-free and correct** via inline/native paths (they
+never reach the native `__extern_method_call` non-`$Object` `else` arm). The real
+host-free gaps for the #2928 interpreter's `CallBuiltin` are narrower and more
+specific: **Map/Set methods** and **Array callback methods** on an `any` receiver
+still emit `env.*` host imports.
+
+### Fix landed here — native-vec `.push`/`.pop` on `any` (host-free data-loss bug)
+
+The one **reachable, host-free, silently-WRONG** case found: `--target standalone`
+`const a:any=[1,2]; a.push(3)` returned **0**, left `a.length===2`, and dropped
+the element (`a[2]===0`); `a.pop()` returned **0**. Host mode was correct (3).
+
+Root cause: the standalone any-receiver method-call-with-args path (#2151) routes
+`push`/`pop` through `__call_m_push_1` / `__call_m_pop_0`, whose dispatcher had
+**no native-vec arm** — an `any`/externref array receiver matched no closed-struct
+`entries` arm and fell to the open-`$Object` bottom arm (returns `undefined`). The
+#2784 S3 native-vec push/pop fast path in `calls.ts` is `!ctx.standalone`-gated,
+so it never fired standalone.
+
+Fix (`src/codegen/closed-method-dispatch.ts` + `src/codegen/expressions/calls.ts`):
+a `$__vec_base` brand arm in the fixed-arity closed-method dispatcher routes
+`push` (arity 1) / `pop` (arity 0) to the carrier-generic `__vec_push` /
+`__vec_pop` helpers (grow-and-append / pop-last over every vec carrier). `push`'s
+`-1` unsupported-carrier sentinel returns `undefined` (matching the pre-fix
+fall-through) instead of boxing a bogus length. The vec helper is reserved at the
+`calls.ts` call site to avoid an eval-time import cycle. This is the #2151
+"Slice-4 brand arms" made real for the mutation methods, and is **shared work**
+with standalone AOT any-receiver dispatch (roadmap §4.2), not interpreter-only.
+
+Tests: `tests/issue-2927-standalone-any-push-pop.test.ts` (7 cases; standalone
+assertions verify **0 function imports** before running, i.e. truly host-free).
+No regression: `#2151`/`#2583` suites (51) + array-methods/prototype (35) green;
+`tsc` clean.
+
+### Remaining generic-built-in gaps (tracking items — gate #2928 sign-off)
+
+1. **Map/Set methods on an `any` receiver are NOT host-free** — emit
+   `env.WeakMap_get`/`WeakMap_set`/`WeakMap_has`/`Set_add`. **Root cause pinned:**
+   the native Map/Set/WeakMap interception in `compileExternMethodCall`
+   (`src/codegen/expressions/extern.ts:60-93`) keys on the receiver's **static
+   TypeScript class name** (`className === "Map"` / `"Set"` / …). A genuinely-`any`
+   receiver has no static class name, so the interception is skipped and the call
+   falls to the generic extern/host path → `env.WeakMap_*` / `Set_*` imports —
+   even though the WasmGC-native Map/Set runtime already exists
+   (`src/codegen/map-runtime.ts`: `__map_get`/`__map_set`/`__map_has`/
+   `__map_delete`/`__map_size`; `ctx.mapTypeIdx` `$Map` struct; `set-runtime.ts`).
+   **Turnkey fix (mirrors the #2927 push/pop arm):** a runtime `ref.test
+   ctx.mapTypeIdx` / `$Set` brand arm in the closed-method dispatcher
+   (`__call_m_get_1` / `__call_m_set_2` / `__call_m_has_1` / `__call_m_add_1`)
+   routing to the native `__map_*` / `__set_*` helpers with the boxed args, so an
+   `any` Map/Set receiver dispatches native. This is the highest-value host-free
+   gap and the next slice to pick up. *(new gap — file as a #2928-prep child of
+   #1584.)*
+2. **Array callback methods (map/filter/forEach/reduce) on an `any` receiver are
+   NOT host-free** — emit `env.__make_callback`. Host callback marshalling on a
+   dynamic receiver; the largest of the three (needs an in-Wasm callback bridge).
+   *(new gap — child of #1584.)*
+3. **`string[].push` under standalone is a no-op** — the native-string vec carrier
+   is not in `__vec_push`'s `mutEntries` (only externref/f64/i32), so the brand
+   arm's `__vec_push` returns `-1` and the fix returns `undefined` for `string[]`
+   (no regression — it was already broken). Fix belongs in the `__vec_push`/
+   `__vec_pop` carrier set (`src/codegen/index.ts` `mutEntries`), not this arm.
+   *(new gap — file under #2784.)*
+
+Parts still open on this umbrella issue: **Part 1 (Acorn-via-js2wasm runtime
+parser)** is untouched here — it is gated on **#2937** (host `$Object`-hash poison
+→ uniform parse null-deref) per the probe results above, and remains the larger
+half of this foundation. See `## Suspended Work`.
+
+## Suspended Work
+
+- **Branch**: `issue-2927-interpreter-foundation` (PR opened 2026-07-03).
+- **Landed**: native-vec `.push`/`.pop` brand arm for standalone any-receiver
+  (the one reachable host-free correctness bug the Part-2 audit surfaced) +
+  refined coverage findings above.
+- **Not done (roll forward)**:
+  - Part 1 — Acorn runtime parser (blocked on #2937; then #2850/#2853/#2841/etc.).
+  - Part 2 remaining gaps 1–3 above (Map/Set host imports, array-callback
+    `__make_callback`, `string[]` push carrier). Each should become a child
+    issue under #1584 / #2784 and gates #2928.
+- **Resume**: pick up Part 2 gap #1 (Map/Set native brand arms) next — it is the
+  highest-value host-free gap and mirrors the push/pop pattern (a `$Map`/`$Set`
+  `ref.test` arm in the closed-method dispatcher routing to `map-runtime.ts`).
+
+## Architect update (2026-07-04)
+
+- Stale claim from the dead `sr-interp` session released
+  (`claim-issue.mjs --release`); status flipped back to `ready`. The push/pop
+  fix + audit refinement above are MERGED (PR #2592) — the roll-forward items
+  are what remains.
+- This issue's remaining work is now sequenced in the unified spec:
+  `docs/architecture/runtime-eval-interpreter.md` **Part II §15–§16** and the
+  `## Implementation Plan` in **#2928**. Mapping: the in-Wasm AST consumer
+  probe = slice **E0**; the #2853-A/B parser blockers = **P1/P2**; the Part-2
+  gaps 1–3 = **G1/G3/G4** (plus **G2** args-passing/arity). Devs picking this
+  up should claim one named slice, not the whole umbrella.

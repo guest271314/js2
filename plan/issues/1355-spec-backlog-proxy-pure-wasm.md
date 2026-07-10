@@ -4,7 +4,7 @@ title: "spec backlog: Proxy implementation beyond JS-host fallback (235 test262 
 status: in-progress
 assignee: ttraenkler/sdev-proxy
 created: 2026-05-08
-updated: 2026-06-24
+updated: 2026-07-04
 priority: top
 feasibility: hard
 reasoning_effort: high
@@ -522,3 +522,13 @@ dynamic-new path). Plus Stage S0/S1 from the RE-MEASURE section (standalone
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — umbrella. The referencing merged PR landed one slice (defineProperty trap, §10.5.6, standalone). The ~10 remaining Proxy traps + invariant checks toward 100% standalone (past host-fallback) remain. Stays in-progress; needs architect spec for the harder traps.
+
+## Architect spec pointer (2026-07-04)
+
+The remaining hard pieces are now specced in the dynamic-MOP umbrella
+**#3031** (`plan/issues/3031-dynamic-mop-extensions-spec.md`, Part 1):
+standalone construct + dynamic-new dispatch = **K2** (FABLE); revocable
+(S0) = **P3** (OPUS); `Reflect.*` wiring (S1) = **P4** (OPUS); §10.5
+invariants + descriptor-attribute bits (G) = **P5**; host apply/construct
+keystone = **K1** (== 2623-A, see #2618). The receiver-classification
+ladder + front-guard mechanism is ratified in #3031 Part 0.

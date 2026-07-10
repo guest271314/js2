@@ -121,12 +121,17 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
     return { instrs: [{ op: "call", funcIdx: unboxNumberIdx }, { op: "i64.trunc_sat_f64_s" } as Instr] };
   }
 
-  // ── ref/ref_null → number: extern.convert_any then unbox ──
+  // ── ref/ref_null/eqref/anyref → number: extern.convert_any then unbox ──
   // (A GC ref carrying a boxed number — e.g. an AnyValue/$box_number struct
   // reached the externref world. extern.convert_any re-enters the extern side
   // so __unbox_number can read it. This is what callArgCoercionInstrs does;
   // fixBranchType previously dropped to 0/NaN here — the #1917 divergence.)
-  if ((from.kind === "ref" || from.kind === "ref_null") && toK === "f64") {
+  // (#2140) eqref/anyref sit in the SAME any-hierarchy as concrete GC refs —
+  // `extern.convert_any` accepts any anyref-side value — so they take the
+  // identical unbox sequence instead of falling through unhandled.
+  const anyHierarchyFrom =
+    from.kind === "ref" || from.kind === "ref_null" || from.kind === "eqref" || from.kind === "anyref";
+  if (anyHierarchyFrom && toK === "f64") {
     if (unboxNumberIdx === null) {
       // No unbox helper available — genuinely cannot bridge; lossy NaN
       // (ToNumber(object-without-valueOf) is NaN per §7.1.4).
@@ -134,7 +139,7 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
     }
     return { instrs: [{ op: "extern.convert_any" } as Instr, { op: "call", funcIdx: unboxNumberIdx }] };
   }
-  if ((from.kind === "ref" || from.kind === "ref_null") && toK === "i32") {
+  if (anyHierarchyFrom && toK === "i32") {
     if (unboxNumberIdx === null) {
       return { instrs: [{ op: "drop" }, { op: "i32.const", value: 0 }], lossy: true };
     }

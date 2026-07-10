@@ -49,6 +49,11 @@
             "type": "command",
             "command": "bash /workspace/scripts/sync-workspace-main.sh 2>/dev/null || true",
             "timeout": 20
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/ensure-sshd.sh 2>/dev/null || true",
+            "timeout": 10
           }
         ]
       }

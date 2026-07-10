@@ -1,15 +1,16 @@
 ---
 id: 2805
 title: "init-time `any`-receiver field WRITE dropped at module-init (symmetric write side of #2800)"
-status: ready
-assignee: ttraenkler/unassigned
-sprint: current
+status: done
+assignee: ttraenkler/senior-developer
+sprint: 69
 priority: medium
 horizon: m
 feasibility: hard
 reasoning_effort: max
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
+completed: 2026-07-02
 task_type: bugfix
 area: codegen
 language_feature: object-literals
@@ -104,3 +105,77 @@ settles). Dump the ctor body and resolve `funcIdx` → name against the FINAL
 `tests/issue-2800-toplevel-new-objlit-init-read.test.ts` (the read-side guard) +
 the `new VI(...)` write variant dropped from it (see #2800's git history) which
 reads `topLevelZz() === 0` pre-fix.
+
+## Resolution (2026-07-02)
+
+Implemented the symmetric `__in_module_init` gate in
+`tryEmitDeleteAwareDynamicSet` (`src/codegen/property-access.ts`).
+
+### Measure-first (the exact repro shape matters)
+
+The bug reproduces ONLY with a **clean** function constructor — implicit-`any`
+`this`, NO `this: any` annotation, NO `(VI as any)` cast:
+
+```ts
+function VI(label, conf) { this.label = label; this.zz = conf.zz || 0; }
+function useDelete(o: any): void { delete o.x; }
+const x: any = new VI("a", { zz: 9 });          // top-level (init)
+function mk(): any { return new VI("b", { zz: 9 }); }
+// pre-fix: topLevelZz()===0, topLevelLabel()===null; runtimeZz()===9
+```
+
+An explicit `this: any` annotation OR an `(VI as any)` cast routes `new` through
+the **dynamic-new** path, which independently fails to marshal the object-literal
+argument (`conf` reads `undefined` at BOTH init and runtime — a *separate*,
+pre-existing `new (fn as any)(objLiteral)` arg-passing gap, NOT this bug). Using
+the clean ctor form (the shape acorn actually emits for `new TokenType(...)`)
+isolates the init-timing write drop cleanly. The delete-free variant already
+works at init (native `struct.set`, no host setter), confirming the root cause is
+the host-setter timing, not the write itself.
+
+### funcIdx desync — root-caused and avoided (not just "verified")
+
+The #2800 write-side prototype baked the SAME `call funcIdx` for `this.label` and
+`this.zz` because it reserved `__set_member_<name>` **before** evaluating the
+`value` expression. The value (`conf.zz || 0`) itself reserves a
+`__get_member_zz` dispatcher and pulls late imports, shifting the defined-function
+index space; the already-captured `setMemberIdx` local went stale-low. Fix:
+reserve the dispatcher **after** both operands are lowered into locals, with
+nothing emitted between its reserve+flush and the bake — so its funcIdx is
+post-shift. `setIdx` (`__extern_set_strict`) is an IMPORT (stable index once
+added) so baking it late is safe. Verified by dumping the compiled `$VI` ctor and
+resolving funcIdx→name against the final index space:
+
+- `this.label` init arm → `call 11` = `$__set_member_label`
+- `this.zz`    init arm → `call 13` = `$__set_member_zz`  (distinct ✓)
+- both writes + the `conf.zz` read gate on the SAME flag global (`__in_module_init`)
+- runtime arms → `__extern_set_strict` (import) / `__extern_get` (import) preserved
+
+### Files
+
+- `src/codegen/property-access.ts` — `tryEmitDeleteAwareDynamicSet` init gate.
+  Reuses the #2800 flag machinery (`recordInModuleInitFlagRead` /
+  `finalizeInModuleInitFlag` — the write reads are patched by the same finalize
+  pass, sharing `ctx.inModuleInitFlagReads`), and the #2664
+  `reserveMemberSetDispatch`.
+- Guard: `tests/issue-2805-init-time-any-receiver-write.test.ts`.
+
+### Verified
+
+- new guard (3 cases): init write lands (`x.zz===9`, `x.label==="a"`), runtime
+  write still `9`, delete-free module unaffected.
+- `#2800` read guard, `#2179`/`#2731`/`#2664` dispatch, `issue-forin`,
+  `#2130` delete-in-presence all green.
+- Byte-inert for untouched lanes: a delete-free module emits NO
+  `__in_module_init`; standalone early-returns (no flag). The change is reachable
+  only in a delete-using gc/host module — the target lane.
+- (`tests/delete-operator.test.ts`, `tests/constructor-arity.test.ts` #593, and
+  the `./helpers.js` importers fail identically on base main — pre-existing
+  worktree test-infra breakage, unrelated.)
+
+### Known follow-up (out of scope)
+
+`new (fn as any)(objLiteral)` / `new fn(objLiteral)` with an explicit `this: any`
+param drops the object-literal ARGUMENT (`conf` reads `undefined`) at both init
+and runtime — a dynamic-new arg-marshaling gap, distinct from this init-timing
+write drop. Worth a dedicated issue if a real program hits it.

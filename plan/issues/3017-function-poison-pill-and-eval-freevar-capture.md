@@ -1,0 +1,128 @@
+---
+id: 3017
+title: "Function .caller/.arguments poison-pill throw + free-variable capture in Function/eval shim child module"
+status: ready
+sprint: Backlog
+created: 2026-07-03
+updated: 2026-07-03
+priority: medium
+horizon: l
+feasibility: hard
+reasoning_effort: high
+task_type: feature
+area: codegen
+language_feature: eval
+goal: correctness
+parent: 2960
+---
+
+## Problem
+
+The diagnostic work on #2960 / PR #2548 (dynamic `eval` / `new Function`
+diagnostics) established that 3 apparent test262 regressions were coincidental
+"pass" losses — those tests were only passing because they leaned on OTHER
+pre-existing bugs, not because the compiler implemented the feature under test.
+Removing the coincidental support surfaced TWO real, distinct, currently
+unimplemented spec-semantics gaps. This issue documents both so they can be
+scheduled deliberately.
+
+Neither gap was introduced by #2548; both are pre-existing feature holes that
+the sharper diagnostics simply made visible.
+
+---
+
+### Gap 1 — Function `.caller` / `.arguments` poison-pill accessors do not throw
+
+Per ES spec, reading (or writing) the `caller` or `arguments` own property of a
+strict-mode function must throw a `TypeError` — the so-called "poison pill"
+accessor pair (`%ThrowTypeError%`). This applies to any function that is strict,
+including every function created via the `Function` constructor and any function
+with an explicit `"use strict"` directive.
+
+Currently the compiler returns `undefined` for `.caller` / `.arguments` on a
+real callable instead of throwing.
+
+**Repro:**
+
+```js
+var foo = new Function("'use strict';");
+foo.caller;      // spec: throws TypeError; actual: returns undefined
+foo.arguments;   // spec: throws TypeError; actual: returns undefined
+```
+
+**test262 files:**
+- `test/language/statements/function/13.2-5-s.js`
+- `test/language/statements/function/13.2-13-s.js`
+
+**Direction (not a spec):** the function object's property lookup path needs a
+poison-pill accessor for `caller`/`arguments` on strict functions that throws
+`TypeError` on get/set rather than resolving to `undefined`. Scope: which
+functions count as "strict" (Function-constructor-created, `"use strict"`
+bodies, modules) and whether the throw is on the own-property or via the
+prototype accessor pair.
+
+---
+
+### Gap 2 — Free-variable capture in the meta-circular `eval` / `Function` shim child module
+
+When `Function("return f();")()` is invoked and `f` is a free variable resolved
+from the enclosing lexical scope, the current meta-circular shim compiles the
+Function body into a child module that does NOT have access to that free
+variable. The result is a spurious `"null is not a function"` runtime error
+instead of either correctly resolving `f` or throwing the spec-correct
+`ReferenceError` when `f` is genuinely unbound.
+
+**Repro:**
+
+```js
+(function () {
+  "use strict";
+  Function("return f();")();   // actual: "null is not a function" runtime error
+})();
+```
+
+Note that per spec, functions created by the `Function` constructor are created
+in the **global** scope, NOT the caller's scope — so `f` here (a local of the
+IIFE) is genuinely NOT visible to the Function body, and the spec-correct
+outcome is a `ReferenceError` for an unresolved `f` at call time. The bug is
+that the shim produces a different, misleading error (`"null is not a
+function"`) rather than the correct `ReferenceError` (or correct resolution when
+`f` IS a global). Getting the scoping and the error shape right is the work.
+
+**test262 file:**
+- `test/built-ins/Function/15.3.5.4_2-77gs.js`
+
+**Direction (not a spec):** the child-module code path for the eval/Function
+shim needs a defined story for free-variable resolution — resolve against the
+global environment (spec-correct for the `Function` constructor), and surface a
+proper `ReferenceError` for a truly unbound identifier rather than a
+downstream null-call error.
+
+---
+
+## Acceptance criteria
+
+1. `new Function("'use strict';").caller` and `.arguments` throw `TypeError`
+   (and the two `13.2-*-s.js` test262 files pass).
+2. `(function(){"use strict"; Function("return f();")();})()` produces the
+   spec-correct `ReferenceError` (unbound global `f`), not a
+   `"null is not a function"` error (and `15.3.5.4_2-77gs.js` passes).
+3. No net test262 regression relative to the post-#2548 baseline.
+
+## Notes
+
+- Origin: diagnostic follow-up from #2960 / PR #2548.
+- The two gaps are independent in mechanism (function-object property semantics
+  vs. eval/Function shim scoping) but share an origin and both touch the
+  dynamic-`Function` story, so they are filed together. A dev may split them
+  into two PRs if that keeps each change small; treat the acceptance criteria as
+  independently landable.
+- **Gap 2's normative design is now specified** (architect, 2026-07-04) in
+  `docs/architecture/runtime-eval-interpreter.md` **§14** (unified name
+  resolution, consumer 2): the shim child module compiles free identifiers
+  with *eval-code linkage* against a global-environment handle passed from the
+  parent module (its globalThis `$Object`), with a root-miss →
+  `ReferenceError`. Implementing that section satisfies acceptance criterion 2
+  AND fixes the deeper sharing bug (eval'd `var x` landing in the child's
+  globals, invisible to the parent). Gap 2 is independent of the #2928
+  interpreter and schedulable anytime.

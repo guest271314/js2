@@ -1,13 +1,14 @@
 ---
 id: 2138
 title: "IR-first compile-once inversion: selector decides before compileDeclarations (flag-gated investigation)"
-status: in-progress
+status: done
+completed: 2026-07-02
 assignee: ttraenkler/dev-2138f
 pipeline_unblocked: 1927
 spec: ready
-sprint: current
+sprint: 69
 created: 2026-06-12
-updated: 2026-07-02
+updated: 2026-07-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -16,7 +17,7 @@ task_type: architecture
 area: compiler
 language_feature: compiler-internals
 goal: maintainability
-related: [1530, 1916, 1927, 2135]
+related: [1530, 1916, 1927, 2135, 2945, 2947, 2972, 2973]
 origin: "2026-06-12 sprint-62 architecture analysis (pipeline workstream N2)"
 ---
 
@@ -26,7 +27,7 @@ origin: "2026-06-12 sprint-62 architecture analysis (pipeline workstream N2)"
 
 Legacy compiles ALL bodies (`src/codegen/index.ts:1174`), then the IR
 overlay re-compiles claimed ones and overwrites (`:1308`). Wasted compile
-time — and the always-available legacy body is *the mechanism* that makes
+time — and the always-available legacy body is _the mechanism_ that makes
 silent fallback possible (#1530's root enabler). "Phase out the fallback"
 has no destination until the pipeline can skip legacy for claimed
 functions.
@@ -61,8 +62,8 @@ STRICT_IR_REASONS ratchet feeds into.
 ### Root cause (confirmed against current main)
 
 The legacy front-end compiles **every** top-level function body, then the IR
-overlay re-compiles the claimed ones and *overwrites the just-emitted legacy
-body*. The overwrite is literal:
+overlay re-compiles the claimed ones and _overwrites the just-emitted legacy
+body_. The overwrite is literal:
 
 - `generateModule` (`src/codegen/index.ts:1032`) runs the third pass
   `compileDeclarations(ctx, ast.sourceFile)` (`:1333`) — this emits a full
@@ -76,7 +77,7 @@ body*. The overwrite is literal:
 
 So every IR-claimed function is compiled twice by design: once by legacy
 (thrown away), once by IR (kept). That wasted legacy compile is also the
-*mechanism* that makes silent fallback free (#1530's root enabler) — because a
+_mechanism_ that makes silent fallback free (#1530's root enabler) — because a
 working legacy body always exists, an IR throw can be demoted to a warning with
 no destination cost. "Phase out the fallback" has no endgame until the pipeline
 can **skip legacy for fully-claimed functions**.
@@ -96,7 +97,7 @@ inversion is **plan-IR-first → compile only the un-claimed via legacy → comp
 the claimed via IR once**. Concretely, behind `JS2WASM_IR_FIRST=1`:
 
 1. Run `planIrCompilation` (+ the `overrideMap`/`safeSelection` resolution that
-   currently sits *after* `compileDeclarations`) **before** the body pass.
+   currently sits _after_ `compileDeclarations`) **before** the body pass.
 2. Compute the **fully-claimed closure**: a function is skippable by legacy iff
    it AND its whole call-graph closure are in `safeSelection.funcs` (the
    selector already closes the claim set under local call edges — see
@@ -129,7 +130,7 @@ so the `ctx.mod.functions[localIdx] = {…}` patch site needs **no** change.
 would renumber every downstream funcIdx and desync `call $idx` ops, the
 late-import shifter, and `declaredFuncRefs` — the exact index-fragility class
 #1916 exists to kill. Keep the slot, swap the body. This keeps the inversion a
-*body-emission* change, never an *index-layout* change. Verify with the
+_body-emission_ change, never an _index-layout_ change. Verify with the
 byte-identical gate (flag-off) and an index-stability assertion (flag-on, see
 tests).
 
@@ -140,12 +141,12 @@ Each slice is a separate PR, green on its own, ordered by risk.
 #### Slice 1 — hoist IR planning above `compileDeclarations` (refactor, no behavior change)
 
 - **Scope:** move the `planIrCompilation` + `buildTypeMap` + `buildIrClassShapes`
-  + `overrideMap`/`safeSelection` construction block (`index.ts:1355-1493`) so it
-  runs **before** `compileDeclarations(ctx, ast.sourceFile)` (`:1333`). The
-  actual `compileIrPathFunctions` call (`:1494`) stays AFTER `compileDeclarations`
-  (it still needs the final funcIdx/typeIdx that `compileDeclarations` assigns).
-  Net effect: the *plan* (which functions are claimed) is known before the body
-  pass; the *overlay* still runs after. No legacy skipping yet.
+  - `overrideMap`/`safeSelection` construction block (`index.ts:1355-1493`) so it
+    runs **before** `compileDeclarations(ctx, ast.sourceFile)` (`:1333`). The
+    actual `compileIrPathFunctions` call (`:1494`) stays AFTER `compileDeclarations`
+    (it still needs the final funcIdx/typeIdx that `compileDeclarations` assigns).
+    Net effect: the _plan_ (which functions are claimed) is known before the body
+    pass; the _overlay_ still runs after. No legacy skipping yet.
 - **Files:** `src/codegen/index.ts` only.
 - **Risk:** LOW. Pure reordering of a side-effect-light planning block. The one
   hazard: `buildIrClassShapes(ctx, …)` reads `ctx.classSet`/`ctx.structFields`/
@@ -189,8 +190,8 @@ Each slice is a separate PR, green on its own, ordered by risk.
      to warning). If legacy already skipped its body, that fallback now lands on
      an `unreachable` placeholder — a hard runtime trap, not a graceful demote.
      **Resolution:** only mark a function `skippable` after it survived
-     overrideMap resolution (`overrideMap.has(name)`). Because IR-*build*
-     failures are only known *after* `compileIrPathFunctions` runs (which is
+     overrideMap resolution (`overrideMap.has(name)`). Because IR-_build_
+     failures are only known _after_ `compileIrPathFunctions` runs (which is
      after `compileDeclarations`), gate the skip conservatively: under
      `JS2WASM_IR_FIRST`, if `compileIrPathFunctions`'s `report.errors` names a
      skipped function, that is now a **hard error** (the placeholder is live).
@@ -250,18 +251,18 @@ the technical prerequisite for everything below and it left the
 
 - **#2138 (this issue) enables / unblocks:**
   - **#2135 (single IR capability predicate)** — the inversion makes the
-    selector's claim decision *load-bearing for correctness* (a wrong claim now
+    selector's claim decision _load-bearing for correctness_ (a wrong claim now
     traps a skipped function instead of silently demoting). That sharply raises
     the value of unifying `select.ts`'s `isPhase1Expr` with `from-ast.ts`'s
     throw sites so selector and builder cannot disagree. #2138's flag-on traps
     are exactly the `select`↔`from-ast` drift #2135 fixes. **Sequence #2135
     right after #2138 Slice 2** — they are mutually reinforcing; #2138's
     measurement (Slice 3) feeds #2135's acceptance metric.
-  - **#1916 (symbolic function references)** — independent in *files*
+  - **#1916 (symbolic function references)** — independent in _files_
     (`emit/binary.ts`, `late-imports.ts`) but the inversion's placeholder-slot
     discipline depends on funcIdx layout staying stable; #1916's FuncHandle
     indirection makes that stability structural rather than convention. #1916
-    can land before OR after #2138; doing #1916 first *reduces* #2138's
+    can land before OR after #2138; doing #1916 first _reduces_ #2138's
     index-fragility risk. No file conflict (different files).
 - **#2138 needs (soft):** nothing hard-blocking beyond #1927 (landed). It reads
   `planIrCompilation`/`safeSelection` (`select.ts`) and the overlay
@@ -279,14 +280,14 @@ the technical prerequisite for everything below and it left the
 - **Flag OFF must be byte-identical.** The hoist (Slice 1) and the skip logic
   (Slice 2) both gate on `JS2WASM_IR_FIRST`; with it unset, not one emitted byte
   changes. This is acceptance criterion 1 and the only unconditional guarantee.
-- **funcIdx layout invariant.** Slot pre-allocation happens for *every*
+- **funcIdx layout invariant.** Slot pre-allocation happens for _every_
   function regardless of skip; only the body differs. Never remove or reorder a
   slot. An index-stability test (compile the same source flag-on vs flag-off and
   assert `ctx.mod.functions.map(f => f.name)` is identical) guards this.
 - **`new.target` clears `safeSelection`** — compute `skippable` strictly after
   that clear (Slice 2 trap 1).
 - **Post-claim fallback on a skipped function** traps under the flag — this is
-  intended *investigation* behavior (surface divergences), not a silent demote;
+  intended _investigation_ behavior (surface divergences), not a silent demote;
   fail loud and file it (Slice 2 trap 2).
 - **Class members** go through the `classMember` parity guard
   (`integration.ts:704`) and a separate slot pre-allocation in `class-bodies.ts`
@@ -330,11 +331,11 @@ the full `merge_group` run, not a scoped sweep.
 ### Status / blocker note (2026-06-23, architect)
 
 This issue's frontmatter blocker is **#2167 (Fable model disabled)**, NOT
-#1927. #1927 (the *technical* prerequisite) has now **landed** (PR #1958), so
+#1927. #1927 (the _technical_ prerequisite) has now **landed** (PR #1958), so
 the technical path is clear and this spec is dev-ready. But #2167 is still
 `in-progress` (Fable unavailable) and gated this issue on `reasoning_effort:
 max`. Per #2167's own resolution policy, this issue stays parked on the Fable
-gate for *implementation dispatch*; the spec is written now so it is
+gate for _implementation dispatch_; the spec is written now so it is
 ready-to-dispatch the moment #2167 closes. The frontmatter therefore keeps
 `status: blocked` / `blocked_by: [2167]` but records `pipeline_unblocked: 1927`
 to mark that the technical prerequisite is satisfied.
@@ -363,7 +364,7 @@ Behind `JS2WASM_IR_FIRST=1` (default OFF, requires the default-on
 - `IrSelection.localCallees` (`src/ir/select.ts`, additive) — the Step-2
   call-graph callee edges, exposed so the skip-set derivation reuses the
   selector's own edges instead of re-deriving them.
-- Fail-loud contract: a post-claim IR failure on a *skipped* function is
+- Fail-loud contract: a post-claim IR failure on a _skipped_ function is
   promoted from the warning demote to a **hard compile error**
   (`[IR-FIRST skipped-slot, #2138]`), plus a backstop that errors when a
   skipped function is neither in `report.compiled` nor `report.errors`.
@@ -383,11 +384,11 @@ Behind `JS2WASM_IR_FIRST=1` (default OFF, requires the default-on
    - `buildIrClassShapes` reads `ctx.structFields`, which body compilation
      mutates (dynamic field additions, #516) — a hoisted read sees
      pre-body-compile shapes.
-   Making the ORDER conditional on the flag turns acceptance criterion 1
-   (byte-identical without the flag) into a property that holds by
-   construction. Slices 1+2 therefore landed as ONE PR: with no
-   unconditional reorder there is no standalone "low-risk hoist" left to
-   de-risk separately.
+     Making the ORDER conditional on the flag turns acceptance criterion 1
+     (byte-identical without the flag) into a property that holds by
+     construction. Slices 1+2 therefore landed as ONE PR: with no
+     unconditional reorder there is no standalone "low-risk hoist" left to
+     de-risk separately.
 2. **Skip-set closure check is DIRECT-callee, not transitive.** The
    selector's Step-2 closure is already bidirectional (callers AND callees),
    so `selection.funcs` is closed; the only re-opening is overrideMap
@@ -450,8 +451,188 @@ below).
   function. Record a real number in Slice 3 (idle box / CI).
 - **Divergences**: one, filed — #2945 (`%` selector↔builder drift).
 - **What the FULL run needs (Slice 3)**: `JS2WASM_IR_FIRST=1 pnpm run
-  test:262` on an idle box or CI, diffed against the current baseline JSONL
+test:262` on an idle box or CI, diffed against the current baseline JSONL
   (`scripts/fetch-baseline-jsonl.mjs`) via `/analyze-regression`; compile
   time from the runner's per-run timing in `runs/index.json`. Every
   flag-ON-only failure is by construction a loud selector↔builder/skip
   divergence — bucket by error class, file per class.
+
+## Measurement (JS2WASM_IR_FIRST) — FULL RUN, 2026-07-02 (dev-2138f) — Slice 3, closes the issue
+
+Run: `test262-sharded.yml` workflow_dispatch **28580162377** with
+`ir_first: true` (the #2947 lane) on `main@89676d232513` — full 57×2-shard
+matrix, `JS2WASM_IR_FIRST: 1` verified in every shard's env, fresh compiles
+(no result cache), promote-baseline hard-skipped by design. Diffed
+per-test against the honest baseline
+(`loopdive/js2wasm-baselines` JSONL, refreshed same day from unflagged main)
+via `scripts/diff-test262.ts`.
+
+### (a) test262 delta — js-host lane, 48,088 shared tests (official + proposals)
+
+| status          | baseline (flag OFF) | flagged (IR-first ON) | delta             |
+| --------------- | ------------------- | --------------------- | ----------------- |
+| pass            | 34,781              | 34,766                | **−15 (−0.031%)** |
+| fail            | 12,534              | 12,537                | +3                |
+| compile_error   | 576                 | 591                   | +15               |
+| compile_timeout | 83                  | 80                    | −3                |
+
+15 regressions, 0 improvements, **0 wasm-identical noise, 0 ct-flakes** —
+all 15 are real compiler-output differences, and they collapse into exactly
+TWO root causes (attributed, filed):
+
+- **#2972 (14 tests, `pass → compile_error`)** — ONE harness function
+  (`decimalToPercentHexString`): selector claims string element access with
+  a computed (BinaryExpression) index, from-ast throws `not in slice 12` →
+  skipped slot → hard error. **Fail-loud contract working as designed**;
+  the fix is #2135 family-2/3 capability work.
+- **#2973 (1 test, `pass → fail`, silent)** — `S12.4_A2_T2`: the eval shim's
+  in-process sub-compile (`runtime-eval.ts:213` wraps eval strings in a
+  claimable `__eval_result` FunctionDeclaration) inherits the env flag, its
+  post-claim residual hard-errors, and the shim's `catch` swallows it →
+  `undefined` instead of `7`. **The only fail-loud violation found** —
+  eval/`new Function` sub-compiles must opt out of the flag (#2973, S).
+
+Additionally, the pre-flip `%` class (#2945) never appears — retired by
+#2135 slice 1 before this run, confirming the capability-table mechanism.
+
+### (b) compile-time delta — honestly: not measurable across runs
+
+The diff tool reports **−1.8%** aggregate compile time vs the baseline the
+run itself fetched at 09:39 (8,510,718 → 8,356,264 ms over 47,882 shared
+tests), and **−27.1%** vs the 11:26-refreshed baseline (11,459,923 ms
+baseline side). Those two baseline timing sets describe the SAME unflagged
+code and differ by +35% — cross-run CI wall-clock is runner-lottery-
+dominated, so neither delta is attributable to the inversion. Verdict:
+**no measurable wall-clock change beyond noise** (expected: the structural
+saving is one legacy body compile per claimed function, small vs total
+front-end cost). A rigorous number needs a same-runner A/B (two dispatches
+on the same SHA back-to-back, flag off/on); not worth runner-minutes unless
+the inversion becomes default-on policy.
+
+### (c) skipped-body telemetry
+
+Not surfaced per-test by the runner (`CompileResult.irFirstSkipped` is not
+recorded into the JSONL rows). Local corpus evidence stands (8 bodies / 13
+playground examples; 100% of claimed funcs on claim-dense inputs). Optional
+runner extension if a future run wants the aggregate; not needed for the
+conclusion.
+
+### Verdict (what this buys #1530/#1916/#2855 sequencing)
+
+The compile-once inversion is **viable**: 99.97% of the js-host suite is
+indifferent to skipping legacy bodies for claimed closures; the fail-loud
+contract held for 14/15 divergences; the single silent path is an eval-shim
+artifact with a one-file fix (#2973); and the flag surfaced exactly the
+selector↔builder drift classes #2135 is retiring (one already fixed before
+this run, one filed as #2972). Remaining before any default-on discussion:
+#2973, #2972, the claim-partial ratchet (#2135 families), and the
+generator/class-member skip exclusions. Slice 4 (generateMultiModule seam)
+remains open as a follow-on under #2135-family planning.
+
+**Acceptance criteria: all met** — (1) flag + byte-identical default
+(proven), (2) full measured test262 + compile-time run recorded here,
+(3) divergences filed (#2945, #2972, #2973). → `status: done`.
+
+### Merge reconciliation (dev-2138f, 2026-07-02) — Slice 3 vs gate 4 ordering
+
+The gate-4 notes below (sr-irfirst, landed 2fbdd928) were written in
+parallel with the Slice-3 run above. Ordering facts: the measurement ran on
+`main@89676d232513`, which does NOT include gate 4 — but per the gate-4
+calibration note itself the exclusion is **latent today** (the selector
+rejects host receivers wholesale until #2856 lands), so the −15/48,088
+result is not affected and the measurement stands. The "Slice 3 plan
+(after this lands)" below is therefore **superseded** by the executed run,
+EXCEPT its claim-rate ask, which remains open as a runner extension:
+`CompileResult.irFirstSkipped` is not recorded into the test262 JSONL, so
+the per-run % -of-top-level-functions-skipped stat (the #2949 north-star)
+needs a small runner change before it can be measured at suite scale —
+re-measure AFTER #2856's host arms land, when gate 4 becomes load-bearing.
+
+## Implementation Notes (sr-irfirst, 2026-07-02 — Trap 4 / gate 4)
+
+**Branch:** `issue-2138-trap4-host-node-skip` (based on upstream/main @
+c4ff5a241). Adds the host-node skip exclusion the #2856 extern-in-IR spec
+requires ("#2138's skippable-closure computation must exclude any function
+whose claim depends on a host node until the lowering is proven" —
+lead-confirmed plan, mirrored here per the spec's cross-ref request):
+
+- `src/codegen/ir-first-gate.ts` (NEW) — `irFirstBodyReadsHostNode` +
+  `collectModuleTopLevelNames`, pure checker-free AST scan. Own module so
+  tests import it without the codegen-entry init cycle (importing
+  `codegen/index.js` directly from a test hits a `boolToStringEmitter`
+  before-initialization ReferenceError via string-ops/regexp-standalone).
+- `src/codegen/index.ts` — `computeIrFirstSkipSet(plan, sourceFile)` gains
+  gate 4 (`irFirstBodyReadsHostNode` exclusion) + doc; call site passes
+  `ast.sourceFile`.
+- `tests/issue-2138.test.ts` — gate-4 unit tests (host property/method/
+  element/bare-call positives; Math-whitelist / local / module-binding /
+  extern-`new`-chain / nested-scope negatives) + one integration guard
+  (FIB skip set unchanged — no over-exclusion collateral).
+
+**Calibration rationale (do not tighten):** the scan allowlists exactly
+today's selector ambient accepts — root `Math` (#1371 whitelist) and opaque
+`NewExpression` roots (slice-10 extern classes) — so it cannot depress the
+#2949 skip rate. It is latent today (selector rejects host receivers
+wholesale); it becomes load-bearing when #2856's HostMemberGet/HostMethodCall
+arm lands.
+
+**Validation (this branch):** `tsc --noEmit` clean; `tests/issue-2138.test.ts`
+14/14 green (6 landed + 8 gate-4); `check:ir-fallbacks` zero delta (the
+checker runs flag-off, where gate 4 is unreachable — flag-off behavior is
+untouched by construction since `computeIrFirstSkipSet` only runs under
+`JS2WASM_IR_FIRST=1`).
+
+**Also in this PR:** `scripts/byte-diff-corpus.mts` — the reusable
+byte-identity harness (compiles a fixed corpus — example files default+wasi
+plus a stride-N test262 sample — with two compiler checkouts and SHA-diffs
+every binary; usage header in the file). Used to prove the superseded
+unconditional hoist byte-identical (2,692 compiles, 0 diff) and intended for
+Slice 3 / future IR-first ratchet validation.
+
+**Slice 3 plan (after this lands):** flag-on `pnpm run test:262` vs flag-off
+baseline via `/analyze-regression` + compile-time delta from
+`runs/index.json`, AND (lead request) the **IR claim-rate stat**: % of
+top-level functions skipped under the flag at test262 scale — sum
+`CompileResult.irFirstSkipped` over the run vs total top-level
+FunctionDeclarations; this is the #2949 north-star number, record
+before/after pairs. Run AFTER Trap-4 lands so measurements are clean.
+
+**Superseded branch:** `issue-2138-ir-first-slice1` (origin) — my
+unconditional-hoist Slice 1, superseded by the landed flag-conditional
+implementation (6ac915824). Safe to delete; its issue-file docs were ported.
+
+## Measurement addendum (sr-irfirst, 2026-07-02) — the claim-rate stat, measured
+
+Closes the one item the merge-reconciliation note above left open ("the
+claim-rate ask … remains open as a runner extension"): measured at sample
+scale WITHOUT a runner change, via `scripts/ir-first-sweep.mts` (committed
+with this addendum — compiles each corpus file twice, flag off/on, in one
+process, and reads `CompileResult.irFirstSkipped` directly).
+
+**Corpus:** all example files + stride-20 test262 sample = 2,671 files,
+compiled on `main@bcea34ed1` (INCLUDES gate 4, unlike the full CI run above —
+gate 4 is latent, so results are comparable). Raw JSON:
+`.tmp/slice3-sweep-backup.json` on the measurement branch; regenerate with
+`STRIDE=20 npx tsx scripts/ir-first-sweep.mts <checkout> <out.json>`.
+
+- **Claim/skip rate: 14 / 437 = 3.2%** of top-level FunctionDeclarations in
+  flag-off-compiling files (497 in all files). Low as expected — raw test262
+  is untyped sloppy-mode JS, so the TypeMap resolves few signatures. On the
+  TYPED corpus the rate is what matters: `benchmarks.ts` skips 4/4 of its
+  benchable functions (fib, bench_fib, bench_loop, bench_string).
+- **Compile-time: the compile-once dividend is real and visible exactly
+  where claims are dense** — same-process A/B (not cross-run CI lottery):
+  `benchmarks.ts` 4,977 → 2,499 ms (**−50%**), `fib.ts` 863 → 660 ms
+  (**−24%**). Aggregate over all 2,671 files: −1.2% (dominated by unclaimed
+  files; consistent with the full run's "no measurable aggregate change"
+  verdict).
+- **Divergences: ZERO in both directions** (2,258 flag-off-ok files all
+  flag-on-ok; no reverse flips). Consistent with the full run's finding that
+  the #2945 class is retired; the #2972 harness-function class does not
+  appear because this sweep compiles raw files without the test262 harness
+  prelude (the full run remains the authority on harness-exposed
+  divergences). Nothing new to file.
+- **Re-measure trigger:** after #2856's host arms land (gate 4 becomes
+  load-bearing) — rerun the sweep; the skip set should stay trap-free while
+  the claim rate rises. The suite-scale per-run stat still needs the small
+  runner extension (`irFirstSkipped` into the JSONL rows) if wanted.

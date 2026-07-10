@@ -18,6 +18,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
+  getDrainFuncIdxForWasiStart,
   getOrRegisterPromiseType,
   isStandalonePromiseActive,
   emitDrainMicrotasks,
@@ -63,9 +64,9 @@ import { compileConditionalExpression, compileYieldExpression } from "./expressi
 import { compileArrowFunction } from "./closures.js";
 
 // Property access + binary ops (used inside compileExpressionInner)
-import { compileBinaryExpression } from "./binary-ops.js";
+import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.js";
 import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
-import { compileElementAccess, compilePropertyAccess } from "./property-access.js";
+import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
 import { compileDeleteExpression, compileRegExpLiteral, compileTypeofExpression } from "./typeof-delete.js";
 
@@ -1215,7 +1216,7 @@ function compileExpressionInner(
         return compileHostInstanceOf(ctx, fctx, expr);
       }
     }
-    return compileBinaryExpression(ctx, fctx, expr);
+    return brandBooleanBinaryResult(expr.operatorToken.kind, compileBinaryExpression(ctx, fctx, expr));
   }
 
   if (ts.isTypeOfExpression(expr)) {
@@ -1244,10 +1245,20 @@ function compileExpressionInner(
     if (ts.isIdentifier(expr.expression) && expr.expression.text === "__drain_microtasks") {
       // Gate on the native-`$Promise` CARRIER (not merely `isAsyncDriveActive`):
       // emit the real drain only where the drive layer actually produces native
-      // promises. With the carrier `wasi`-only today, `--target standalone` and
-      // the gc lane get a void no-op (no microtask infra registered, output
-      // unchanged); the #2895-1d carrier re-widen auto-activates it for standalone.
-      if (isStandalonePromiseActive(ctx)) emitDrainMicrotasks(ctx, fctx);
+      // promises. With the carrier `wasi`-only today the gc lane gets a void
+      // no-op (no microtask infra registered, output unchanged).
+      //
+      // (#2865) `--target standalone` addendum: the async-GENERATOR drive is now
+      // active under standalone (carrier-independent — its promises are minted
+      // by `__async_gen_next_*`), so when THIS module has already registered the
+      // native microtask queue, emit the real drain too. Modules with no driven
+      // machinery keep the byte-identical no-op (`getDrainFuncIdxForWasiStart`
+      // is null when the queue was never registered). Function bodies compile in
+      // source order, so a harness-appended `__drain_microtasks()` call compiles
+      // after every producer/consumer registration.
+      if (isStandalonePromiseActive(ctx) || getDrainFuncIdxForWasiStart(ctx) !== null) {
+        emitDrainMicrotasks(ctx, fctx);
+      }
       return VOID_RESULT;
     }
     const callStart = fctx.body.length;
@@ -1347,25 +1358,45 @@ function compileExpressionInner(
     // (#2128) Property reads can dispatch a host GETTER callback whose
     // mutable captures live in ref cells (see the assignment arm above for
     // the setter counterpart) — re-sync the outer locals after the read.
+    // (#3037 CS1b) Re-classify a dynamic `any`-member read that is a direct
+    // operand of a standalone `any`-equality into the `$AnyValue` tag-6 carrier
+    // (object identity), byte-inert off that exact shape. Applied BEFORE the
+    // getter-writeback resync so the classifier consumes the read result while
+    // it is still on top of the stack (the writebacks are net-zero local
+    // re-syncs that leave the carrier value in place).
+    const readResult = maybeWrapAnyReadEqualityCarrier(ctx, fctx, expr, compilePropertyAccess(ctx, fctx, expr));
     if (fctx.persistentCallbackWritebacks && fctx.persistentCallbackWritebacks.length > 0) {
-      const readResult = compilePropertyAccess(ctx, fctx, expr);
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => structuredClone(instr)));
-      return readResult;
     }
-    return compilePropertyAccess(ctx, fctx, expr);
+    return readResult;
   }
 
   if (ts.isElementAccessExpression(expr)) {
     // (#2128) Same getter-dispatch re-sync as the property-access arm above.
+    // (#3037 CS1b(ii)) Re-classify a dynamic `any`-element read (`a[i]`, `o[key]`)
+    // that is a direct operand of a standalone `any`-equality into the `$AnyValue`
+    // tag-6 carrier (object identity) — the SAME context-aware carrier the
+    // property-access arm applies, now at the ElementAccessExpression choke point
+    // (`arr[i] === arr[j]`). Byte-inert off that exact shape: the wrapper is a
+    // no-op unless the read compiled to a bare externref AND both `===` operands
+    // are statically `any` (see maybeWrapAnyReadEqualityCarrier). Applied BEFORE
+    // the getter-writeback resync so the classifier consumes the read result while
+    // it is still on top of the stack (the writebacks are net-zero local re-syncs
+    // that leave the carrier value in place).
     if (fctx.persistentCallbackWritebacks && fctx.persistentCallbackWritebacks.length > 0) {
-      const readResult = compileElementAccess(ctx, fctx, expr, expectedType);
+      const readResult = maybeWrapAnyReadEqualityCarrier(
+        ctx,
+        fctx,
+        expr,
+        compileElementAccess(ctx, fctx, expr, expectedType),
+      );
       fctx.body.push(...fctx.persistentCallbackWritebacks.map((instr) => structuredClone(instr)));
       return readResult;
     }
     // (#2760 F1) Forward the value-context hint so the primitive OOB→undefined
     // widening is suppressed in a numeric (f64/i32) context (avoids boxing + a
     // late-import shift under a funcIdx already captured by a numeric caller).
-    return compileElementAccess(ctx, fctx, expr, expectedType);
+    return maybeWrapAnyReadEqualityCarrier(ctx, fctx, expr, compileElementAccess(ctx, fctx, expr, expectedType));
   }
 
   if (ts.isObjectLiteralExpression(expr)) {

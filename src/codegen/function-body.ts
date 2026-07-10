@@ -28,7 +28,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -52,9 +52,8 @@ import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-bu
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
-import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
-import { emitAsyncFrameStateMachine, asyncFnNeedsDrive, asyncFnNeedsHostDrive } from "./async-frame.js";
-import { isStandalonePromiseActive } from "./async-scheduler.js";
+import { maybeActivateAsync } from "./async-activation.js";
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import {
   functionHasLinearU8Params,
   getLinearU8ParamIndicesForDeclaration,
@@ -129,12 +128,6 @@ function findTdzViolatingParamRef(decl: ts.FunctionLikeDeclarationBase, paramInd
  * CPS hook to switch an async function's result from its unwrapped value type
  * to `externref` (it returns a Promise object).
  */
-function rewriteFuncResultType(ctx: CodegenContext, func: WasmFunction, result: ValType): void {
-  const ft = ctx.mod.types[func.typeIdx];
-  if (!ft || ft.kind !== "func") return;
-  func.typeIdx = addFuncType(ctx, ft.params.slice(), [result]);
-}
-
 /** Set of instruction ops that disqualify a function body from inlining */
 export const INLINE_DISALLOWED_OPS = new Set([
   "block",
@@ -948,6 +941,25 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // When a parameter is declared as e.g. function([x, y, z]) or function({a, b}),
   // the parameter is received as a single value (vec struct or struct ref) and
   // we need to extract the individual bindings into separate locals.
+  //
+  // (#3024) Keep the param-default materialization body reachable for the
+  // field-pad patch that fires while a nested pattern's DEFAULT object literal
+  // is compiled inside the destructure. A param OUTER default (`function f({ w:
+  // { x, y, z } = { x, y, z } } = { w: { x, z } })`) materializes its object
+  // literal into an `if.then` buffer embedded in THIS body; the destructure
+  // helpers then descend into detached branch buffers to compile the nested
+  // default, which — when it SHARES the outer sub-object's anonymous struct but
+  // carries MORE fields — grows that struct via `ensureComputedPropertyFields`.
+  // The resulting `patchStructNewForAddedField` walks `fctx.body` + `savedBodies`
+  // + `liveBodies`, but by then this outer body is off `fctx.body` (a plain swap,
+  // not on `savedBodies`), so the already-emitted outer `struct.new` was left one
+  // operand short of the grown field count ("struct.new need 3, got 2" invalid
+  // Wasm). Registering the body here (same mechanism as the var-decl #3024 fix in
+  // statements/destructuring.ts and the #2503/#2158 param-branch fixes) makes it
+  // reachable; removed after so it does not leak.
+  const paramDestructBody = fctx.body;
+  const paramDestructWasLive = ctx.liveBodies.has(paramDestructBody);
+  if (!paramDestructWasLive) ctx.liveBodies.add(paramDestructBody);
   for (let i = 0; i < decl.parameters.length; i++) {
     const param = decl.parameters[i]!;
     if (ts.isObjectBindingPattern(param.name)) {
@@ -956,6 +968,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       destructureParamArray(ctx, fctx, i, param.name, params[i]!.type);
     }
   }
+  if (!paramDestructWasLive) ctx.liveBodies.delete(paramDestructBody);
 
   // Set up `arguments` object if the function body references it.
   // We create a vec struct (same as Array) populated from all function parameters.
@@ -1017,7 +1030,15 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     );
   }
 
-  if (isGenerator) {
+  if (isGenerator && hasAsyncModifier(decl) && isAsyncGenDriveCandidate(ctx, decl)) {
+    // (#2906 slice 3d-i) Async-generator PRODUCER core. `async function* g(){
+    // yield await P; yield E }` routes through the generator-buffer path and
+    // fails at the #680 native-generator gate in standalone/wasi. Intercept a
+    // bounded async-gen body HERE — before that gate — and drive it host-free on
+    // the async-frame CFG machine (frame carrier + `__async_gen_next_<name>`).
+    // The generator returnType is already externref (the frame carrier).
+    emitAsyncGenerator(ctx, fctx, decl);
+  } else if (isGenerator) {
     const nativeGenerator = ctx.nativeGenerators.get(func.name);
     if (nativeGenerator) {
       compileNativeGeneratorFunction(ctx, fctx, decl, nativeGenerator);
@@ -1096,6 +1117,8 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // the AST node directly to detect async function* declarations.
       const isAsyncGenerator = hasAsyncModifier(decl);
       const createGenName = isAsyncGenerator ? "__create_async_generator" : "__create_generator";
+      // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+      if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
       const createGenIdx = ctx.funcMap.get(createGenName)!;
       fctx.body.push({ op: "local.get", index: bufferLocal });
       fctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -1136,77 +1159,15 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // to be available before their textual position in the enclosing scope.
       hoistFunctionDeclarations(ctx, fctx, bodyStatements);
 
-      // (#1042/#1796) Async/await CPS state-machine activation hook. Gated by
-      // the per-function `asyncFnNeedsCps` predicate (#1936): a JS-host async
-      // function is CPS-lowered ONLY when it *genuinely suspends* — at least one
-      // await operand is not statically resolved AND the body matches a single
-      // tail-await canonical shape (no try-across-await / nested await). Fully
-      // await-elidable bodies (`return await Promise.resolve(42)`) fall through
-      // to the legacy synchronous path and keep returning the unwrapped value,
-      // preserving the `asyncFn() as any as number` "compile away" idiom
-      // (#1313/#1727). On a match we rewrite the result type to externref (the
-      // fn now returns a real Promise object), drive emitAsyncStateMachine, and
-      // skip the normal statement loop.
-      let asyncCpsHandled = false;
-      // (#2895 PATH B) Host-free async drive layer. Gated on the native-`$Promise`
-      // *carrier* (`isStandalonePromiseActive`, currently `wasi`-only): when the
-      // awaited operand resolves to a native `$Promise`, a genuinely-suspending
-      // async fn is driven by a real resumable `$AsyncFrame` (await → spill +
-      // reaction + return result-promise; microtask drain resumes). Gating the
-      // wiring on the carrier predicate makes the standalone re-widen (#2895 1d)
-      // flip the carrier AND the drive layer together — exactly the AG0-safe
-      // coupling. The result is a real `$Promise` (externref), not a sync value.
-      if (
-        ASYNC_CPS_ENABLED &&
-        isAsync &&
-        isStandalonePromiseActive(ctx) &&
-        ts.isFunctionDeclaration(decl) &&
-        decl.body
-      ) {
-        const asyncPlan = analyzeAsyncBody(ctx, decl);
-        // (#2906) Drive-layer eligibility now accepts linear MULTI-await bodies,
-        // not just the single canonical await `asyncFnNeedsCps` gates on. For a
-        // single await the verdict is identical, so wasi single-await routing is
-        // unchanged; ≥2 sequential awaits (previously demoted to the AG0 unwrap)
-        // now get the general N-state resume machine.
-        if (asyncFnNeedsDrive(ctx, decl, asyncPlan)) {
-          rewriteFuncResultType(ctx, func, { kind: "externref" });
-          fctx.returnType = { kind: "externref" };
-          emitAsyncFrameStateMachine(ctx, fctx, decl, asyncPlan);
-          asyncCpsHandled = true;
-        }
-      }
-      if (
-        !asyncCpsHandled &&
-        ASYNC_CPS_ENABLED &&
-        isAsync &&
-        !ctx.wasi &&
-        !ctx.standalone &&
-        ts.isFunctionDeclaration(decl) &&
-        decl.body
-      ) {
-        const asyncPlan = analyzeAsyncBody(ctx, decl);
-        if (asyncFnNeedsCps(decl, asyncPlan)) {
-          // The async function returns a Promise object (externref), not the
-          // unwrapped value. Rewrite the registered signature's result + fctx.
-          rewriteFuncResultType(ctx, func, { kind: "externref" });
-          fctx.returnType = { kind: "externref" };
-          fctx.asyncCpsActive = true;
-          emitAsyncStateMachine(ctx, fctx, decl, asyncPlan);
-          asyncCpsHandled = true;
-        } else if (asyncFnNeedsHostDrive(ctx, decl, asyncPlan)) {
-          // (#1042 July re-scope) JS-host lane onto the #2906 N-state resume
-          // machine with HOST-Promise settle adapters. Claims only the linear
-          // shapes the single-tail-await CPS lane rejects (multi-await,
-          // try/finally-across-await) — those previously fell through to the
-          // legacy synchronous fakery and returned wrong values under genuine
-          // suspension. Same externref result contract as the CPS lane.
-          rewriteFuncResultType(ctx, func, { kind: "externref" });
-          fctx.returnType = { kind: "externref" };
-          emitAsyncFrameStateMachine(ctx, fctx, decl, asyncPlan, /*host*/ true);
-          asyncCpsHandled = true;
-        }
-      }
+      // (#1042/#1796/#2895/#2906) Async/await state-machine activation. The
+      // CPS (host) + drive (standalone/host) gating, result-type rewrite, and
+      // emitter dispatch were extracted into `maybeActivateAsync` (#2957
+      // phase 1) so the arrow/method/object-literal body-compile paths can
+      // reuse the exact same entry point in phases 2–3. On a match the helper
+      // has already emitted the full body, so the normal statement loop below
+      // is skipped. Byte-inert: the internal `ts.isFunctionDeclaration` guards
+      // are preserved, so declaration activation is unchanged.
+      const asyncCpsHandled = maybeActivateAsync(ctx, fctx, decl, func);
 
       if (!asyncCpsHandled) {
         for (const stmt of bodyStatements) {

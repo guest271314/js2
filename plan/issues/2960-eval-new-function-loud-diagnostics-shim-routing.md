@@ -1,10 +1,12 @@
 ---
 id: 2960
 title: "eval / new Function: loud standalone diagnostics + call-time-throwing stub + host Tier-1 shim routing for dynamic new Function"
-status: ready
-sprint: current
+status: done
+completed: 2026-07-02
+assignee: ttraenkler/agent-dev-opus
+sprint: 69
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-03
 priority: medium
 horizon: m
 feasibility: medium
@@ -62,3 +64,45 @@ origin: "2026-07-02 July Fable audit §4 (silent wrong-value stub in both modes;
   and throws catchably at the call site.
 - No new host imports without the standalone fallback above (dual-mode
   rule).
+
+## Implementation Notes / Test Results (2026-07-02)
+
+Delivered across `src/codegen/expressions/{eval-inline,new-super,calls}.ts`,
+`src/codegen/context/types.ts`, `src/runtime-eval.ts`, `src/runtime.ts`:
+
+- **Host dynamic `new Function`** → new `createNewFunctionShim` (runtime-eval.ts,
+  wired as the `env::__extern_new_function` host import). It compiles the body as
+  an EXPORTED function via `compileSourceSync` (the same meta-circular machinery
+  indirect eval uses, LRU-cached) and returns a real JS-callable value — unlike
+  the eval shim's child-module closure, which the parent can't cast/invoke.
+  Codegen builds `(paramString, bodyString)` at runtime (ToString + `__concat_N`)
+  and calls it. The immediate-call form `new Function(dyn)(args)` routes through
+  the existing `__call_function` packer (`isFunctionCtorImmediateCall` guard).
+- **Standalone/wasi dynamic `eval`** → source-located WARNING + catchable throw
+  at the eval call site; NO `env::__extern_eval` leak (was an instantiation trap).
+- **Standalone/wasi dynamic `new Function`** → WARNING + a call-time-throwing
+  stub VALUE (hoisted `throw new Error(...)` closure). Construction succeeds, so a
+  program that never invokes it keeps working; calling throws catchably.
+- **Cleanup rider**: deleted the inert `classifyEvalTier` (`eval-tiering.ts`,
+  #1261, zero production callers) + its test + the dead `evalTier?` ctx field.
+
+Verified (`tests/issue-2960.test.ts`, 8/8):
+- Host: `new Function("a","b","return a"+op+"b")(1,2) === 3` (dynamic immediate);
+  constant immediate still `=== 3` (#2924 unchanged); dynamic value via
+  `[..].map(f)` invokes the real callable (`=== 12`); `__extern_new_function`
+  import present (no silent null stub).
+- Standalone eval: no `__extern_eval` leak, warns, host-free instantiable, throws
+  catchably (try/catch → 42).
+- Standalone `new Function`: warns, host-free, construction returns 7; a later
+  call throws catchably (try/catch → 99).
+- Byte-inert: 5 non-eval programs compile sha256-identical to `origin/main`.
+- `tests/issue-2923-eval-const-broaden.test.ts` `bailsToDynamic` helper updated
+  for the new no-leak/warn signature (17/17).
+
+**Known pre-existing (out of scope, fails identically on `origin/main`)**: the
+`(eval as any)()` / `(X as any)()` parenthesized-cast-callee immediate-call
+shape overflows the compiler stack (`tests/issue-1006.test.ts` &
+`tests/issue-1163.test.ts` "eval with no arguments"). Also, calling a host-JS
+function held in an `any` variable directly from wasm (`const f: any = …; f(x)`)
+returns undefined — the general any-callee host-function dispatch limitation;
+the shim value still works via immediate-call and host consumers.

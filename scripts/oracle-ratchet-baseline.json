@@ -1,0 +1,260 @@
+{
+  "files": {
+    "src/codegen/array-methods.ts": {
+      "getTypeAtLocation": 10,
+      "ctxChecker": 13
+    },
+    "src/codegen/array-reduce-fusion.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/async-cps.ts": {
+      "getTypeAtLocation": 3,
+      "ctxChecker": 2
+    },
+    "src/codegen/async-frame.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/binary-ops.ts": {
+      "getTypeAtLocation": 11,
+      "ctxChecker": 14
+    },
+    "src/codegen/builtin-static-globals.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/class-bodies.ts": {
+      "getTypeAtLocation": 13,
+      "ctxChecker": 24
+    },
+    "src/codegen/closures.ts": {
+      "getTypeAtLocation": 10,
+      "ctxChecker": 21
+    },
+    "src/codegen/context/create-context.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/context/types.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/declarations.ts": {
+      "getTypeAtLocation": 53,
+      "ctxChecker": 86
+    },
+    "src/codegen/destructuring-params.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 7
+    },
+    "src/codegen/expressions/assignment.ts": {
+      "getTypeAtLocation": 21,
+      "ctxChecker": 32
+    },
+    "src/codegen/expressions/builtins.ts": {
+      "getTypeAtLocation": 4,
+      "ctxChecker": 4
+    },
+    "src/codegen/expressions/calls-closures.ts": {
+      "getTypeAtLocation": 5,
+      "ctxChecker": 13
+    },
+    "src/codegen/expressions/calls-guards.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/expressions/calls-optional.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/calls.ts": {
+      "getTypeAtLocation": 60,
+      "ctxChecker": 134
+    },
+    "src/codegen/expressions/eval-inline.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/extern.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/fnctor-prototype.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/helpers.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions/identifiers.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 15
+    },
+    "src/codegen/expressions/misc.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 5
+    },
+    "src/codegen/expressions/new-super.ts": {
+      "getTypeAtLocation": 22,
+      "ctxChecker": 46
+    },
+    "src/codegen/expressions/unary-updates.ts": {
+      "getTypeAtLocation": 4,
+      "ctxChecker": 4
+    },
+    "src/codegen/expressions/unary.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/expressions.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 16
+    },
+    "src/codegen/fnctor-escape-gate.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 3
+    },
+    "src/codegen/function-body.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 5
+    },
+    "src/codegen/generators-native.ts": {
+      "getTypeAtLocation": 6,
+      "ctxChecker": 9
+    },
+    "src/codegen/index.ts": {
+      "getTypeAtLocation": 53,
+      "ctxChecker": 115
+    },
+    "src/codegen/json-standalone.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/linear-uint8-analysis.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 0
+    },
+    "src/codegen/linear-uint8-arena.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/linear-uint8-codegen.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 2
+    },
+    "src/codegen/linear-uint8-signatures.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 6
+    },
+    "src/codegen/literals.ts": {
+      "getTypeAtLocation": 25,
+      "ctxChecker": 55
+    },
+    "src/codegen/node-fs-api.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/object-ops.ts": {
+      "getTypeAtLocation": 14,
+      "ctxChecker": 22
+    },
+    "src/codegen/property-access.ts": {
+      "getTypeAtLocation": 31,
+      "ctxChecker": 54
+    },
+    "src/codegen/regexp-standalone.ts": {
+      "getTypeAtLocation": 14,
+      "ctxChecker": 23
+    },
+    "src/codegen/set-runtime.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 1
+    },
+    "src/codegen/statements/control-flow.ts": {
+      "getTypeAtLocation": 7,
+      "ctxChecker": 7
+    },
+    "src/codegen/statements/destructuring.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 2
+    },
+    "src/codegen/statements/loops.ts": {
+      "getTypeAtLocation": 16,
+      "ctxChecker": 16
+    },
+    "src/codegen/statements/nested-declarations.ts": {
+      "getTypeAtLocation": 2,
+      "ctxChecker": 8
+    },
+    "src/codegen/statements/variables.ts": {
+      "getTypeAtLocation": 9,
+      "ctxChecker": 14
+    },
+    "src/codegen/string-builder.ts": {
+      "getTypeAtLocation": 1,
+      "ctxChecker": 22
+    },
+    "src/codegen/string-ops.ts": {
+      "getTypeAtLocation": 8,
+      "ctxChecker": 13
+    },
+    "src/codegen/temporal-native.ts": {
+      "getTypeAtLocation": 0,
+      "ctxChecker": 1
+    },
+    "src/codegen/typeof-delete.ts": {
+      "getTypeAtLocation": 6,
+      "ctxChecker": 10
+    },
+    "src/codegen/with-scope.ts": {
+      "getTypeAtLocation": 3,
+      "ctxChecker": 3
+    }
+  },
+  "preauthorized": [
+    {
+      "file": "src/codegen/index.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3000 Phase-1b: buildIrClassShapes re-derives class-field IR types from the raw ts.Type of a field's declaration node (PropertyDeclaration / ctor this.x= LHS). The surrounding function already reads ctor/method param + return types the same way; the ctx.oracle abstraction exposes only TypeFact, not the raw ts.Type that tsTypeToClassPositionIr requires (t.flags & StringLike, t.getSymbol(), objectIrTypeFromTsType). Consistent with the existing direct-checker code in this function."
+    },
+    {
+      "file": "src/codegen/index.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3000 Phase-1b: the single ctx.checker.getTypeAtLocation call above (buildIrClassShapes field-type derivation)."
+    },
+    {
+      "file": "src/codegen/index.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3057: sourceHasDynamicTaConstruct pre-scan gates the dynamic-`new ctorVar(buffer)` element-codec flag on the first arg's NOMINAL buffer type (getSymbol().name === 'ArrayBuffer'/'SharedArrayBuffer'/'DataView'), mirroring the runtime dynamic-construct gate in new-super.ts. ctx.oracle's TypeFact union exposes only jsTag/shape, not the nominal symbol name this precision gate requires (dropping it over-triggers on new Map(x)/new Set(x)/... and breaks byte-inertness). Uses a local `checker` param (not ctx.checker), so only getTypeAtLocation grows."
+    },
+    {
+      "file": "src/codegen/generators-native.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#2173 slice-2b: isGenericIterableDelegate needs ts.Type property membership to gate a yield* subject as a genuine iterable (a [Symbol.iterator] member \u2014 spec GetIterator). ctx.oracle's TypeFact union has no iterability/property-membership query and models iterables inconsistently (ArrayIterator as class, custom {[Symbol.iterator]} as builtin 'Iterable', Map/Set/generator/String each differently), so an oracle-based gate would be fragile and incomplete. Mirrors the existing direct-checker use in nativeGeneratorDelegationName in this same file."
+    },
+    {
+      "file": "src/codegen/generators-native.ts",
+      "field": "ctxChecker",
+      "extra": 2,
+      "reason": "#2173 slice-2b: the getTypeAtLocation + getPropertiesOfType pair in isGenericIterableDelegate (see the getTypeAtLocation entry above) \u2014 both match the ctx.checker counter."
+    },
+    {
+      "file": "src/codegen/expressions/calls.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3064: the standalone escape/unescape routing block ToString-coerces its argument via emitToString(ctx, fctx, arg0Type, arg0TsType, 'string') \u2014 exactly like the adjacent String()/parseInt/URI blocks. emitToString requires a raw ts.Type; the ctx.oracle abstraction exposes only TypeFact, not the raw ts.Type, so arg0TsType must come from ctx.checker.getTypeAtLocation (consistent with the #3000 precedent and the surrounding direct-checker code in this dispatcher)."
+    },
+    {
+      "file": "src/codegen/expressions/calls.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3064: the single ctx.checker.getTypeAtLocation call above (standalone escape/unescape argument ToString)."
+    }
+  ]
+}

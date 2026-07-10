@@ -24,8 +24,25 @@
 
 import { ts } from "../ts-api.js";
 
+import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
+import { ensureLateImport } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
-import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
+import {
+  addGeneratorImports,
+  addIteratorImports,
+  addStringImports,
+  addUnionImports, // (#2949 slice 3) host-mode dynamic op imports (__box_number/__typeof_* family)
+  TYPED_ARRAY_NAMES,
+} from "../codegen/index.js";
+import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
+// (#2949 S5.1) THE canonical ToBoolean engine — one truthiness path for legacy and IR (D4).
+import {
+  emitToBoolean as emitCoercionToBoolean,
+  emitToNumber as emitCoercionToNumber,
+} from "../codegen/coercion-engine.js";
+import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
+import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import {
   ensureNativeStringHelpers,
@@ -33,36 +50,41 @@ import {
   type StringEncoding,
 } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../codegen/registry/imports.js";
+// (#2856) Console-variant parity with the legacy collectConsoleImports scan.
+import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
 } from "../codegen/registry/types.js";
-import type { CodegenContext } from "../codegen/context/types.js";
+import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
+import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
   lowerIrTypeToValType,
   type IrClassLowering,
   type IrClosureLowering,
+  type IrDynamicLowering,
   type IrLowerResolver,
   type IrObjectStructLowering,
   type IrRefCellLowering,
   type IrUnionLowering,
 } from "./lower.js";
-import type {
-  IrClassShape,
-  IrClosureSignature,
-  IrFuncRef,
-  IrFunction,
-  IrGlobalRef,
-  IrInstr,
-  IrModule,
-  IrObjectShape,
-  IrType,
-  IrTypeRef,
+import {
+  forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
+  type IrClassShape,
+  type IrClosureSignature,
+  type IrFuncRef,
+  type IrFunction,
+  type IrGlobalRef,
+  type IrInstr,
+  type IrModule,
+  type IrObjectShape,
+  type IrType,
+  type IrTypeRef,
 } from "./nodes.js";
 import { analyzeEscape } from "./analysis/escape.js";
 import { analyzeOwnership } from "./analysis/ownership.js";
@@ -79,6 +101,7 @@ import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
+import { definedFuncAt, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
@@ -172,7 +195,7 @@ export function compileIrPathFunctions(
   // Phase 3 once the registries exist; both share the same underlying
   // logic for the methods both expose.
   // -------------------------------------------------------------------------
-  const fromAstResolver = makeFromAstResolver(ctx);
+  const fromAstResolver = makeFromAstResolver(ctx, sourceFile);
 
   // -------------------------------------------------------------------------
   // Phase 1 — Build: lower every selected AST function to an IrFunction.
@@ -283,46 +306,79 @@ export function compileIrPathFunctions(
     for (const stmt of sourceFile.statements) {
       if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
       const className = stmt.name.text;
-      // Phase A's selector already excluded classes with `extends`; defensive
-      // re-check here so a future selector loosening doesn't silently flow
-      // unsupported shapes into Phase B.
-      if (stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) continue;
 
+      // #3000-E: `buildIrClassShapes` now seeds single-level subclasses of a
+      // LOCAL user class (the shape carries `.parent`), so the wholesale
+      // `extends`-skip that used to sit here is gone — the shape presence IS the
+      // gate. A subclass of a builtin / externref-backed parent still gets NO
+      // shape there, so the `if (!classShape) continue;` below keeps it on legacy;
+      // the selector's `parentIsLocalClass` gate mirrors this exactly, so a
+      // claimed subclass member always finds its shape (no post-claim demotion).
       const classShape = classShapes?.get(className);
-      // The IR class shape registry only seeds non-extends classes today
-      // (see `buildIrClassShapes` in `src/codegen/index.ts`). Without a
-      // shape we can't form a valid `IrType.class` for the `__self` param,
-      // so the methods stay on legacy.
       if (!classShape) continue;
 
       for (const member of stmt.members) {
-        if (!ts.isMethodDeclaration(member) || !member.name) continue;
-        // Phase B v1 — instance methods only. Static methods skip `self`
-        // injection and use a different funcMap entry shape; defer to a
-        // follow-up. Abstract methods have no body — Phase A already
-        // rejected them as `class-method`.
-        const isStatic = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
-        if (isStatic) continue;
-        if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue;
+        // Phase B v1 — instance methods + (#3000-B) instance get/set accessors
+        // + (#3000-C) the constructor. Static members skip `self` injection and
+        // use a different funcMap entry shape; defer. Abstract methods have no
+        // body — Phase A already rejected them as `class-method`.
+        const isCtorMember = ts.isConstructorDeclaration(member);
+        const isAccessor = ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member);
+        if (!ts.isMethodDeclaration(member) && !isAccessor && !isCtorMember) continue;
+        // Non-ctor members: skip nameless / static / abstract. A constructor
+        // carries no `.name`, is never static, and never abstract — so these
+        // guards apply only to methods / accessors.
+        if (!isCtorMember) {
+          if (!member.name) continue;
+          const isStatic = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false;
+          if (isStatic) continue;
+          if (member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue;
+        }
 
-        // Phase A's `phase1MemberName` admits identifier / string-literal /
-        // numeric-literal — replicate the dispatch here without re-importing
-        // the helper (it's selector-private). The synthetic name format
-        // mirrors `class-bodies.ts:275` exactly.
-        let methodNameRaw: string;
-        if (ts.isIdentifier(member.name)) methodNameRaw = member.name.text;
-        else if (ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)) {
-          methodNameRaw = member.name.text;
-        } else continue; // computed / private name — skipped by selector
+        // #3000-C: the constructor's synthetic funcMap key is `${className}_new`
+        // (mirrors `class-bodies.ts`). Methods/accessors compute their key from
+        // the member name below.
+        let memberName: string;
+        let returnTypeOverride: IrType | null | undefined;
+        if (isCtorMember) {
+          memberName = `${className}_new`;
+        } else {
+          // Phase A's `phase1MemberName` admits identifier / string-literal /
+          // numeric-literal — replicate the dispatch here without re-importing
+          // the helper (it's selector-private). The synthetic name format
+          // mirrors `class-bodies.ts:275` exactly.
+          let memberBaseName: string;
+          if (ts.isIdentifier(member.name!)) memberBaseName = member.name!.text;
+          else if (ts.isStringLiteral(member.name!) || ts.isNumericLiteral(member.name!)) {
+            memberBaseName = member.name!.text;
+          } else continue; // computed / private name — skipped by selector
 
-        const memberName = `${className}_${methodNameRaw}`;
+          // #3000-B: accessors register under `${className}_get_${prop}` /
+          // `${className}_set_${prop}` funcMap keys (see `class-bodies.ts`); a
+          // setter is VOID (`returnTypeOverride: null`), a getter returns
+          // `member.type` unchanged. Methods keep `${className}_${name}`.
+          if (ts.isGetAccessorDeclaration(member)) {
+            memberName = `${className}_get_${memberBaseName}`;
+          } else if (ts.isSetAccessorDeclaration(member)) {
+            memberName = `${className}_set_${memberBaseName}`;
+            returnTypeOverride = null; // set accessor bodies return void
+          } else {
+            memberName = `${className}_${memberBaseName}`;
+          }
+        }
         if (!selected.classMembers.has(memberName)) continue;
 
         try {
+          // #3000-C: a constructor is NOT passed `__self` — it allocates the
+          // instance itself (`constructorClassShape` drives the `class.alloc` +
+          // `return this` synthesis in from-ast). Methods/accessors get the
+          // caller-supplied `selfParam` FIRST param instead.
           const result = lowerFunctionAstToIr(member, {
-            exported: false, // class methods are not directly exported
+            exported: false, // class members are not directly exported
             funcName: memberName,
-            selfParam: { type: { kind: "class", shape: classShape } as IrType },
+            ...(isCtorMember
+              ? { constructorClassShape: classShape }
+              : { selfParam: { type: { kind: "class", shape: classShape } as IrType }, returnTypeOverride }),
             calleeTypes,
             classShapes,
             resolver: fromAstResolver,
@@ -616,6 +672,19 @@ export function compileIrPathFunctions(
   preregisterExceptionSupport(ctx, readyForLower);
 
   // -------------------------------------------------------------------------
+  // #2949 slice 3 — pre-register the dynamic box/unbox/tag.test backing
+  // (fast: `ensureAnyHelpers` → $AnyValue + the `__any_box_*`/`__any_unbox_*`
+  // defined-function family; host: `addUnionImports` → the `__box_number` /
+  // `__unbox_*` / `__typeof_*` import family) if any IR function carries a
+  // dynamic op. Same rationale as every preregister above: registration
+  // during Phase-3 emission would shift funcIdx values under an in-flight
+  // body buffer (the #329/#2078 bug class). Both entry points are
+  // idempotent, and `addUnionImports` performs the defined-function shift
+  // fix-up itself for anything already compiled.
+  // -------------------------------------------------------------------------
+  preregisterDynamicSupport(ctx, readyForLower);
+
+  // -------------------------------------------------------------------------
   // Phase 3 — Lower: translate each IrFunction to Wasm and install in ctx.
   // -------------------------------------------------------------------------
   //
@@ -680,15 +749,15 @@ export function compileIrPathFunctions(
         errors.push({ func: name, message: `no funcIdx allocated for ${name}` });
         continue;
       }
-      const localIdx = funcIdx - ctx.numImportFuncs;
-      if (localIdx < 0 || localIdx >= ctx.mod.functions.length) {
+      // #1916 S2 — definedFuncAt/replaceDefinedFuncAt are the positional
+      // read/write chokepoints (func-space.ts).
+      const existing = definedFuncAt(ctx, funcIdx);
+      if (!existing) {
         errors.push({ func: name, message: `funcIdx ${funcIdx} out of local range for ${name}` });
         continue;
       }
 
       const { func: wasmFunc } = lowerIrFunctionToWasm(entry.fn, resolver);
-
-      const existing = ctx.mod.functions[localIdx];
       // #1370 Phase B: signature parity guard for class methods.
       //
       // The legacy `class-bodies.ts` pass pre-allocated this method's
@@ -721,19 +790,28 @@ export function compileIrPathFunctions(
       // here, where the full module type info is available to enforce the same
       // guards (param-count + return-type match, never inside a try-with-handler).
       const tcoBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
-      ctx.mod.functions[localIdx] = {
+      replaceDefinedFuncAt(ctx, funcIdx, {
         name: existing.name,
         typeIdx: wasmFunc.typeIdx,
         locals: wasmFunc.locals,
         body: tcoBody,
         exported: existing.exported,
-      };
+      });
       compiled.push(name);
     } catch (e) {
       errors.push({
         func: name,
         message: e instanceof Error ? e.message : String(e),
-        kind: e instanceof Error && e.message.includes("backend legality failed") ? "backend-legality" : "lower",
+        // (#2134) "emission-schedule verify" marks a failure of the
+        // independent schedule checker in lower.ts — classify it "verify" so
+        // it is a HARD failure under CI/test (`irVerifierHardFailureEnabled`)
+        // while remaining a demote-to-legacy warning in production.
+        kind:
+          e instanceof Error && e.message.includes("backend legality failed")
+            ? "backend-legality"
+            : e instanceof Error && e.message.includes("emission-schedule verify")
+              ? "verify"
+              : "lower",
       });
     }
   }
@@ -896,7 +974,33 @@ function resolveVecForElementImpl(
   };
 }
 
-function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
+/**
+ * (#2856) Brand an externref-shaped extern-member result with its extern
+ * class name, resolved from the checker's type AT THE USE SITE. Returns
+ * `undefined` (no brand — the IR carries a plain externref) when the result
+ * isn't externref-shaped, no use-site node is available, or the use-site type
+ * has no named symbol (unions of distinct classes, type params, anonymous
+ * shapes). An unbranded result still lowers correctly — it just can't
+ * dispatch FURTHER member access, which then demotes that function cleanly.
+ */
+function externResultClassName(
+  ctx: CodegenContext,
+  node: ts.Node | undefined,
+  result: ValType | undefined,
+): string | undefined {
+  if (!node || !result || result.kind !== "externref") return undefined;
+  try {
+    const t = ctx.checker.getTypeAtLocation(node);
+    const nonNull = ctx.checker.getNonNullableType(t);
+    const name = nonNull.getSymbol()?.name;
+    if (!name || name === "__type" || name === "__object") return undefined;
+    return name;
+  } catch {
+    return undefined;
+  }
+}
+
+function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): IrFromAstResolver {
   return {
     nativeStrings(): boolean {
       return ctx.nativeStrings;
@@ -924,6 +1028,120 @@ function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
         methods: info.methods,
         properties: info.properties,
       };
+    },
+    // (#2856) Host-global identifier → the `global_<name>` handle import the
+    // legacy `collectDeclaredGlobals` pass registered. Nothing to resolve in
+    // host-free modes: that pass skips registration under
+    // standalone/strictNoHostImports, so `document` correctly stays
+    // unresolvable there (and the selector's capability gate already deferred
+    // any function that references it).
+    getHostGlobalInfo(name: string) {
+      const g = ctx.declaredGlobals.get(name);
+      if (!g || !g.className) return undefined;
+      return { importName: `global_${name}`, className: g.className };
+    },
+    // (#2856) Mode flag for the capability invariant assert at the from-ast
+    // host-extern arms.
+    jsHostExterns(): boolean {
+      return !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+    },
+    // (#2856 C2) TypedArray-view receiver detection for element STORES —
+    // the same checker walk as the legacy `elementAccessTypedArrayName`
+    // (assignment.ts): symbol name of the receiver's TS type against the
+    // TYPED_ARRAY_NAMES registry. Writes into those views carry per-view
+    // conversion semantics (ToUint8/ToUint8Clamp/packing) that the plain
+    // vec store helper must not bypass, so the IR demotes them.
+    isTypedArrayViewExpr(expr: ts.Expression): boolean {
+      const t = ctx.checker.getTypeAtLocation(expr);
+      let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+      if ((!name || !TYPED_ARRAY_NAMES.has(name)) && ts.isNewExpression(expr) && ts.isIdentifier(expr.expression)) {
+        name = expr.expression.text;
+      }
+      return !!name && TYPED_ARRAY_NAMES.has(name);
+    },
+    // (#2856 C3) Module-scope binding → the Wasm global the legacy backend
+    // allocated (`__mod_<name>` in ctx.mod.globals, TDZ flag `__tdz_<name>`
+    // when tracked) + the extern-class brand of the held value from the
+    // checker at the DECLARATION site. Only externref-shaped extern-class
+    // instances resolve (e.g. `const cache = new Map()` → "Map"); plain
+    // scalars / non-extern values return undefined so the identifier arm
+    // demotes cleanly.
+    getModuleScopeExternBinding(name: string) {
+      if (!ctx.moduleGlobals.has(name)) return undefined;
+      const globalName = `__mod_${name}`;
+      const g = ctx.mod.globals.find((gl) => gl.name === globalName);
+      if (!g || g.type.kind !== "externref") return undefined;
+      // Brand from the checker: the module-level declaration's type symbol
+      // must name a REGISTERED extern class (host mode only — in
+      // standalone/nativeStrings the class isn't registered, so this
+      // resolves nothing and the function demotes to legacy, which has the
+      // native runtime interception).
+      const sf = sourceFile;
+      if (!sf) return undefined;
+      let className: string | undefined;
+      for (const stmt of sf.statements) {
+        if (!ts.isVariableStatement(stmt)) continue;
+        for (const d of stmt.declarationList.declarations) {
+          if (!ts.isIdentifier(d.name) || d.name.text !== name) continue;
+          const t = ctx.checker.getTypeAtLocation(d.name);
+          className = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+        }
+      }
+      if (!className || !ctx.externClasses.has(className)) return undefined;
+      const tdzGlobalName = ctx.mod.globals.some((gl) => gl.name === `__tdz_${name}`) ? `__tdz_${name}` : null;
+      return { globalName, tdzGlobalName, className };
+    },
+    // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
+    // predicates as the legacy `collectConsoleImports` registration scan
+    // (string → bool → number → externref, in that order), so the import
+    // name the IR resolves (`console_<m>_<variant>`) is registered by
+    // construction.
+    consoleArgVariant(arg: ts.Expression) {
+      const argType = ctx.checker.getTypeAtLocation(arg);
+      if (isStringType(argType)) return "string";
+      if (isBooleanType(argType)) return "bool";
+      if (isNumberType(argType)) return "number";
+      return "externref";
+    },
+    // (#2856) Chain-walking extern-member resolution + use-site result
+    // branding. Mirrors the legacy `resolveExtern` (collectUsedExternImports)
+    // and `compileExternPropertyGetFromStack` walks: start at the receiver's
+    // class, follow `externClassParent` until a class carries the member.
+    // The RESULT brand comes from the checker at the use site (`node`) — the
+    // same per-site resolution legacy property-access/calls use — because
+    // registration-time member signatures collapse overloads (e.g.
+    // `Document.createElement`'s first overload returns a type-param) and
+    // cannot brand. `getNonNullableType` strips `| null` (e.g.
+    // `getElementById(): HTMLElement | null`) so the brand survives unions
+    // with null/undefined.
+    resolveExternMember(className: string, memberName: string, kind: "method" | "property", node?: ts.Node) {
+      let current: string | undefined = className;
+      while (current) {
+        const info = ctx.externClasses.get(current);
+        if (info) {
+          if (kind === "method") {
+            const method = info.methods.get(memberName);
+            if (method) {
+              return {
+                importPrefix: info.importPrefix,
+                method,
+                resultClassName: externResultClassName(ctx, node, method.results[0]),
+              };
+            }
+          } else {
+            const property = info.properties.get(memberName);
+            if (property) {
+              return {
+                importPrefix: info.importPrefix,
+                property,
+                resultClassName: externResultClassName(ctx, node, property.type),
+              };
+            }
+          }
+        }
+        current = ctx.externClassParent.get(current);
+      }
+      return undefined;
     },
     // Same logic as `IrLowerResolver.resolveVec` in `makeResolver`.
     // Walks `ctx.mod.types` to recover the vec layout from a `(ref|
@@ -983,8 +1201,30 @@ function makeResolver(
   refCellResolver: DeferredRefCellResolver,
   classResolver: DeferredClassResolver,
 ): IrLowerResolver {
+  // (#2949 slice 3) One dynamic-lowering handle per resolver (undefined =
+  // not yet built; null = mode has no dynamic op lowering).
+  let dynamicLoweringMemo: IrDynamicLowering | null | undefined;
   return {
     resolveFunc(ref: IrFuncRef): number {
+      // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
+      // Materialize it on demand: `ensureFmod` is idempotent (funcMap-cached)
+      // and appends a DEFINED function (never an import), so no existing
+      // funcIdx shifts — same append-only discipline as the IR's own closure
+      // functions. On-demand keeps the helper out of modules that never use
+      // `%` (parity with legacy, which also emits it lazily).
+      if (ref.name === FMOD_FN) return ensureFmod(ctx);
+      // (#2856 C2) `__vec_elem_set_<vecTypeIdx>` — element-store helper with
+      // full legacy grow semantics. Materialized on demand, same append-only
+      // defined-function discipline as `ensureFmod` (never an import, no
+      // existing funcIdx shifts). Idempotent via funcMap.
+      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
       // Slice 6 part 4 (#1183): native-string helpers (`__str_charAt`,
@@ -1089,6 +1329,34 @@ function makeResolver(
         return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
       }
       return { kind: "externref" };
+    },
+    // -------------------------------------------------------------------
+    // Dynamic (boxed-any) carrier dispatch (#2949 slice 1).
+    //
+    // MUST match legacy `resolveWasmType`'s any/unknown arm EXACTLY
+    // (codegen/index.ts — "any/unknown → ref_null $AnyValue in fast mode,
+    // externref otherwise") so IR-claimed and legacy-compiled functions
+    // agree on the `any` ABI. `ensureAnyValueType` is idempotent and only
+    // APPENDS a type (never shifts existing indices), the same lazy
+    // registration legacy performs at its own first `any` use.
+    // -------------------------------------------------------------------
+    resolveDynamic(): ValType {
+      if (ctx.fast) {
+        ensureAnyValueType(ctx);
+        return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+      }
+      return { kind: "externref" };
+    },
+    // (#2949 slice 3) Op-emission handle for dynamic box/unbox/tag.test —
+    // memoized so all arms of one lowering run share a single handle. The
+    // factory's mode split mirrors resolveDynamic above by construction
+    // (both key on ctx.fast). Helpers/imports the handle resolves by name
+    // were registered up front by preregisterDynamicSupport.
+    resolveDynamicLowering(): IrDynamicLowering | null {
+      if (dynamicLoweringMemo === undefined) {
+        dynamicLoweringMemo = makeDynamicLowering(ctx);
+      }
+      return dynamicLoweringMemo;
     },
     // Slice 6 part 4 refactor (#1185): expose the nativeStrings mode
     // discriminator so the from-ast for-of arms can dispatch without
@@ -1418,6 +1686,497 @@ function preregisterExceptionSupport(ctx: CodegenContext, fns: readonly BuiltFnR
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic (boxed-any) op lowering (#2949 slice 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * #2949 slice 3 — does this instruction carry a dynamic box/unbox/tag.test?
+ * `jsTag` presence is the dynamic-operand discriminator for unbox/tag.test
+ * (verifier R2/R3 make it REQUIRED exactly there and reject it elsewhere).
+ */
+function isDynamicOp(instr: IrInstr): boolean {
+  if (instr.kind === "box") return instr.toType.kind === "dynamic";
+  if (instr.kind === "unbox" || instr.kind === "tag.test") return instr.jsTag !== undefined;
+  // #2949 S5.1 — dyn.truthy always consumes the boxed-any carrier, so its
+  // presence requires the dynamic backing (ensureAnyHelpers / addUnionImports).
+  if (instr.kind === "dyn.truthy") return true;
+  // #2949 S5.3 — dyn.to_number consumes the carrier and calls the canonical
+  // ToNumber helper (`__any_to_f64` gc / `__unbox_number` host), so it requires
+  // the dynamic backing pre-registered too.
+  if (instr.kind === "dyn.to_number") return true;
+  // #2949 S5.2 — dyn.eq consumes two carriers and calls the canonical equality
+  // helpers, so it too requires the dynamic backing pre-registered.
+  if (instr.kind === "dyn.eq") return true;
+  // #3053 U1 / #2949 S5.4 — dyn.member_get calls `__dyn_member_get`, which is
+  // built on the canonical any-helper family (`__any_from_extern_honest` /
+  // `__any_to_extern` / `__box_*`), so it requires the dynamic backing too.
+  // The helper itself is registered separately below (`ensureDynMemberGet`).
+  if (instr.kind === "dyn.member_get") return true;
+  return false;
+}
+
+/**
+ * #3053 U1 — does this instruction lower through the unified dynamic-reader
+ * carrier primitive `__dyn_member_get` (#3053 U0)? That helper is a DEFINED
+ * function built at finalize by `ensureDynMemberGet`, gated on the
+ * `ctx.usesDynMemberGet` latch; it must be REGISTERED up-front (before Phase 3)
+ * so the handle's `emitMemberGet` can resolve its funcidx by name, exactly like
+ * the any/eq helper families above.
+ */
+function usesDynMemberGet(instr: IrInstr): boolean {
+  return instr.kind === "dyn.member_get";
+}
+
+/**
+ * #2949 S5.2 — does this instruction lower through the canonical any-equality
+ * helper family (`__any_strict_eq` / `__any_eq`, plus `__any_from_extern` in
+ * host mode)? These are DEFINED functions built by `ensureAnyHelpers`, which
+ * the host (non-fast) preregister path does NOT otherwise run — so a `dyn.eq`
+ * in a host module needs the extra registration below.
+ */
+function usesDynEq(instr: IrInstr): boolean {
+  return instr.kind === "dyn.eq";
+}
+
+/**
+ * #2949 slice 3 — map a box target's tag refinement onto `boxToAny`'s
+ * `jsType` hint. One partition table (js-tag.ts) → one hint vocabulary
+ * (value-tags.ts); "unknown" reproduces the historical kind-keyed dispatch
+ * exactly, so an unrefined box is behavior-identical to legacy's unbranded
+ * `any` coercion.
+ */
+function jsTagToStaticType(
+  hint: JsTag | undefined,
+): "null" | "undefined" | "boolean" | "number" | "string" | "object" | "function" | "unknown" {
+  switch (hint) {
+    case JsTag.Null:
+      return "null";
+    case JsTag.Undefined:
+      return "undefined";
+    case JsTag.Boolean:
+      return "boolean";
+    case JsTag.NumberI32:
+    case JsTag.NumberF64:
+      return "number";
+    case JsTag.String:
+      return "string";
+    case JsTag.Object:
+      return "object";
+    case JsTag.Function:
+      return "function";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * #2949 slice 3 — pre-register everything `makeDynamicLowering`'s emit
+ * methods can resolve by name, BEFORE Phase-3 emission starts:
+ *   - fast (gc strategy): `ensureAnyHelpers` — $AnyValue + the canonical
+ *     `__any_box_*` / `__any_unbox_*` family. These are DEFINED functions
+ *     (appended, no import shift), but ensureAnyHelpers also pulls string
+ *     imports on some paths, so it must not fire mid-emission.
+ *   - host: `addUnionImports` — `__box_number` / `__unbox_number` /
+ *     `__unbox_boolean` / `__typeof_*`. This is a late-IMPORT registration
+ *     that shifts every defined funcIdx; running it here (before any IR
+ *     body buffer exists) makes the shift a no-op hazard-wise, exactly
+ *     like `preregisterStringSupport`.
+ * Both are idempotent, so overlapping legacy registration is a no-op.
+ */
+function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  let usesDynamicOps = false;
+  let usesEq = false;
+  let usesMemberGet = false;
+  for (const entry of fns) {
+    for (const block of entry.fn.blocks) {
+      for (const instr of block.instrs) {
+        forEachInstrDeep(instr, (i) => {
+          if (isDynamicOp(i)) usesDynamicOps = true;
+          if (usesDynEq(i)) usesEq = true;
+          if (usesDynMemberGet(i)) usesMemberGet = true;
+        });
+        if (usesDynamicOps && usesEq && usesMemberGet) break;
+      }
+      if (usesDynamicOps && usesEq && usesMemberGet) break;
+    }
+    if (usesDynamicOps && usesEq && usesMemberGet) break;
+  }
+  if (!usesDynamicOps) return;
+  if (ctx.fast) {
+    // gc: ensureAnyHelpers registers $AnyValue + the __any_box_*/__any_unbox_*
+    // family AND the equality helpers (__any_strict_eq / __any_eq) — one call
+    // covers every gc dynamic op, dyn.eq included.
+    ensureAnyHelpers(ctx);
+  } else {
+    // host: the classifier / box import family for box/unbox/tag.test/truthy.
+    addUnionImports(ctx);
+    // #2949 S5.2 — dyn.eq in host mode calls `__host_eq` (JS `===`) /
+    // `__host_loose_eq` (JS `==`) — the SAME host-import equality legacy
+    // `any === any` uses. Register them up-front (they are LATE IMPORTS that
+    // shift defined funcIdxs) so no emit can trigger a mid-emission shift
+    // (#329/#2078), exactly like `addUnionImports` above. Both are idempotent;
+    // only fired when a host module actually carries a dyn.eq.
+    if (usesEq) {
+      ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+      ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+    }
+  }
+  // #3053 U1 — a `dyn.member_get` present in any IR body needs the unified
+  // reader primitive `__dyn_member_get` (#3053 U0) REGISTERED up-front so the
+  // handle's `emitMemberGet` resolves its funcidx by name at emit time (the
+  // finalize `ensureDynMemberGet` runs AFTER Phase 3, too late for that). Flip
+  // the latch and register here; `ensureDynMemberGet` mints only DEFINED funcs
+  // (`addFuncType` + `mintDefinedFunc` — no import shift) and reuses the any-
+  // helper family just registered above, so this is funcidx-shift-safe at
+  // preregister time. It self-guards (bails, resetting the latch, if the object
+  // runtime's `__extern_get` is not yet registered), and the finalize pass is
+  // then idempotent via the `dynMemberGetHelpersEmitted` latch. Byte-inert
+  // until S5.P (U2) opens the selector scan: no from-ast producer emits
+  // `dyn.member_get` in a claimed function today, so `usesMemberGet` is never
+  // set in a production compile.
+  if (usesMemberGet) {
+    ctx.usesDynMemberGet = true;
+    ensureDynMemberGet(ctx);
+  }
+}
+
+/**
+ * #2949 slice 3 — the PRODUCTION `IrDynamicLowering` factory (see
+ * `backend/handles.ts` for the full contract, incl. the V2 numeric-class
+ * tag.test rule and the payload-field table). Exported so tests exercise
+ * the exact implementation the compiler uses, not a mock.
+ *
+ * Mode split MUST mirror `resolveDynamic()` (same `ctx.fast` test — the
+ * carrier and its ops are one decision):
+ *   - fast → "gc": `ref_null $AnyValue`; box via `boxToAny` (THE canonical
+ *     tag-selection policy — same helper family, same tags, byte-parity
+ *     with legacy's `any` coercion for the same operand kind); unbox via
+ *     the canonical `__any_unbox_f64` / `__any_unbox_i32` readers (V2:
+ *     they accept BOTH numeric tags) or a direct payload `struct.get`;
+ *     tag.test via a tag-field read.
+ *   - non-fast → "host": externref; `__box_number` family + `__typeof_*`
+ *     classifier imports (registered by `preregisterDynamicSupport`).
+ *
+ * Every funcIdx is resolved BY NAME at emit time (never captured at handle
+ * creation) — the #2191/#2193 name-based-repoint discipline.
+ *
+ * Producer contracts the emit arms rely on (enforced upstream, asserted
+ * here defensively):
+ *   - unbox is only emitted under a tag.test proof (verifier R2 field
+ *     rules + producer discipline) — a wasm-null gc carrier traps.
+ *   - a BOOLEAN-branded i32 must not be boxed through `emitBox` (both
+ *     strategies box bare i32 as a NUMBER, matching legacy's unbranded
+ *     kind-keyed dispatch); a boolean-aware box needs the jsType hint
+ *     plumbed through — a later producer slice.
+ */
+export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | null {
+  if (ctx.fast) {
+    ensureAnyValueType(ctx);
+    const anyTypeIdx = ctx.anyValueTypeIdx;
+    const callHelper = (name: string): Instr => {
+      const idx = ctx.funcMap.get(name);
+      if (idx === undefined) {
+        throw new Error(
+          `ir/integration: ${name} not registered — preregisterDynamicSupport must run before Phase 3 (#2949)`,
+        );
+      }
+      return { op: "call", funcIdx: idx };
+    };
+    const payloadFieldIdx = (tag: JsTag): number => {
+      switch (jsTagUnboxKind(tag)) {
+        case "i32":
+          return 1; // i32val (NumberI32 / Boolean)
+        case "f64":
+          return 2; // f64val (NumberF64)
+        case "ref":
+          // String rides extern-shaped in `externval` under tag 5 in BOTH
+          // string modes (the #42 / tag-5-field-4 contract); Object and
+          // Function refs ride in `refval` (eqref).
+          return tag === JsTag.String ? 4 : 3;
+        default:
+          throw new Error(`ir/integration: JsTag ${JsTag[tag]} is a singleton partition — no payload field (#2949)`);
+      }
+    };
+    return {
+      carrier: { kind: "ref_null", typeIdx: anyTypeIdx },
+      strategy: "gc",
+      anyValueTypeIdx: anyTypeIdx,
+      tagFieldIdx: 0,
+      payloadFieldIdx,
+      emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
+        // Route through boxToAny — THE canonical boxing entry point. It only
+        // touches `fctx.body`, so a body-only context shim is sound; using it
+        // (instead of re-deriving the helper choice here) keeps ONE
+        // kind→tag policy for legacy and IR (June-audit D4), including the
+        // native-string re-tag arm and the honestAnyBoxing flag behavior.
+        // The refinement hint maps onto boxToAny's jsType hint verbatim —
+        // same "never override representation" contract.
+        const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+        if (!boxToAny(ctx, shim, from, jsTagToStaticType(hint))) {
+          throw new Error(
+            `ir/integration: no canonical boxing arm for operand kind "${from.kind}" — ` +
+              `was preregisterDynamicSupport skipped? (#2949)`,
+          );
+        }
+        return shim.body;
+      },
+      emitUnbox(tag: JsTag): readonly Instr[] {
+        switch (tag) {
+          case JsTag.NumberF64:
+            // V2 numeric class: the canonical reader converts a tag-2 i32
+            // payload, so a class-proven "number" always reads correctly.
+            return [callHelper("__any_unbox_f64")];
+          case JsTag.NumberI32:
+            // V2 numeric class: trunc-sats a tag-3 f64 payload.
+            return [callHelper("__any_unbox_i32")];
+          case JsTag.Boolean:
+          case JsTag.String:
+          case JsTag.Object:
+          case JsTag.Function:
+            // Exact-tag partitions: direct payload read after the proof.
+            return [{ op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: payloadFieldIdx(tag) }];
+          default:
+            throw new Error(`ir/integration: cannot unbox singleton partition ${JsTag[tag]} (#2949 R2)`);
+        }
+      },
+      emitTagTest(tag: JsTag): readonly Instr[] {
+        if (tag === JsTag.NumberI32 || tag === JsTag.NumberF64) {
+          // Numeric CLASS test (V2): tag ∈ {2,3} ⇔ (tag − 2) ≤u 1. Keeps
+          // gc and host tag.test semantics identical — host `typeof` has
+          // exactly one "number".
+          return [
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: JsTag.NumberI32 },
+            { op: "i32.sub" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.le_u" },
+          ];
+        }
+        return [
+          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+          { op: "i32.const", value: tag },
+          { op: "i32.eq" },
+        ];
+      },
+      emitToBoolean(): readonly Instr[] {
+        // #2949 S5.1 — ToBoolean(carrier) via THE canonical coercion-engine
+        // path (D4): for the `$AnyValue` carrier it emits `__any_unbox_bool`
+        // (proper JS truthiness — `0`/`NaN`/`""`/`null`/`undefined` falsy).
+        // `ensureAnyHelpers` already ran in `preregisterDynamicSupport`, so
+        // the internal `ensureAnyHelpers` here is an idempotent no-op — no
+        // mid-emission funcIdx shift.
+        return emitCoercionToBoolean(ctx, { kind: "ref_null", typeIdx: anyTypeIdx }, []);
+      },
+      emitToNumber(): readonly Instr[] {
+        // #2949 S5.3 — ToNumber(carrier) for the gc `$AnyValue` carrier via
+        // `__any_to_f64`: THE canonical boxed-any→f64 helper legacy's
+        // `__any_lt`/`__any_gt`/… + arithmetic helpers use (null→0, undefined→
+        // NaN, boolean→0/1, number→value) — one ToNumber engine (D4). Chosen
+        // directly rather than through `coercion-engine.emitToNumber`, whose
+        // `$AnyValue` arm routes to `coerceType(…,"number")` and allocates a
+        // temp local (via `allocTempLocal`), which the handle's pure `Instr[]`
+        // contract cannot supply. `ensureAnyHelpers` (run up-front in
+        // `preregisterDynamicSupport`) registers `__any_to_f64`, so `callHelper`
+        // resolves it by name with no mid-emission funcIdx shift.
+        return [callHelper("__any_to_f64")];
+      },
+      emitEqOperand(): readonly Instr[] {
+        // #2949 S5.2 — the gc carrier IS `(ref null $AnyValue)`, already the
+        // `__any_strict_eq`/`__any_eq` parameter shape. No marshalling.
+        return [];
+      },
+      emitStrictEq(negate: boolean): readonly Instr[] {
+        // Canonical `===` engine (D4): the tag-5 classifier — cross-type
+        // falsity, numeric-class `23 === 23.0`, `NaN === NaN → false`
+        // (`f64.eq`), reference identity — lives in `__any_strict_eq`'s body.
+        return negate ? [callHelper("__any_strict_eq"), { op: "i32.eqz" }] : [callHelper("__any_strict_eq")];
+      },
+      emitLooseEq(negate: boolean): readonly Instr[] {
+        return negate ? [callHelper("__any_eq"), { op: "i32.eqz" }] : [callHelper("__any_eq")];
+      },
+      emitMemberGet(): readonly Instr[] {
+        // #3053 U1 / #2949 S5.4 — dynamic member read via the unified reader
+        // primitive. The carrier IS `(ref null $AnyValue)`, exactly the
+        // `__dyn_member_get(recv, key)` param shape, and the result is the same
+        // carrier — no marshalling. Flip the latch that makes the finalize
+        // `ensureDynMemberGet` pass build the helper; it was pre-registered
+        // up-front by `preregisterDynamicSupport`, so `callHelper` resolves it
+        // by name with no mid-emission funcidx shift.
+        ctx.usesDynMemberGet = true;
+        return [callHelper("__dyn_member_get")];
+      },
+      emitElementGet(): readonly Instr[] {
+        // Indexed form — the reader is key-uniform (the helper's own
+        // `__any_to_extern(key)` converts a boxed number key to a decimal
+        // property key), so it lowers to the identical bare call.
+        ctx.usesDynMemberGet = true;
+        return [callHelper("__dyn_member_get")];
+      },
+    };
+  }
+
+  // Host (non-fast): externref carrier; ops via the union-import family.
+  const callImport = (name: string): Instr => {
+    const idx = ctx.funcMap.get(name);
+    if (idx === undefined) {
+      throw new Error(
+        `ir/integration: host import ${name} not registered — preregisterDynamicSupport must run before Phase 3 (#2949)`,
+      );
+    }
+    return { op: "call", funcIdx: idx };
+  };
+  return {
+    carrier: { kind: "externref" },
+    strategy: "host",
+    anyValueTypeIdx: -1,
+    tagFieldIdx: -1,
+    payloadFieldIdx(tag: JsTag): number {
+      throw new Error(`ir/integration: host dynamic carrier has no payload fields (asked for ${JsTag[tag]})`);
+    },
+    emitBox(from: ValType, hint?: JsTag): readonly Instr[] {
+      switch (from.kind) {
+        case "f64":
+          return [callImport("__box_number")];
+        case "i32":
+          // Boolean-REFINED i32 boxes as a host boolean (mirrors legacy's
+          // type-aware coerceType, #2785). Unrefined i32 keeps NUMBER
+          // semantics — identical to legacy's unbranded i32→externref
+          // coercion.
+          if (hint === JsTag.Boolean) {
+            return [callImport("__box_boolean")];
+          }
+          return [{ op: "f64.convert_i32_s" }, callImport("__box_number")];
+        case "externref":
+          // Host strings / already-host-boxed values ARE the carrier.
+          return [];
+        case "ref":
+        case "ref_null":
+        case "eqref":
+          // Struct/array/closure refs are anyref subtypes — re-tag.
+          return [{ op: "extern.convert_any" }];
+        default:
+          throw new Error(`ir/integration: no host boxing arm for operand kind "${from.kind}" (#2949)`);
+      }
+    },
+    emitUnbox(tag: JsTag): readonly Instr[] {
+      switch (tag) {
+        case JsTag.NumberF64:
+          return [callImport("__unbox_number")];
+        case JsTag.NumberI32:
+          // Same narrowing the gc reader applies to a tag-3 payload.
+          return [callImport("__unbox_number"), { op: "i32.trunc_sat_f64_s" }];
+        case JsTag.Boolean:
+          // ToBoolean on a PROVEN boolean is the identity payload read.
+          return [callImport("__unbox_boolean")];
+        case JsTag.String:
+        case JsTag.Object:
+        case JsTag.Function:
+          // The host carrier IS the host value — identity.
+          return [];
+        default:
+          throw new Error(`ir/integration: cannot unbox singleton partition ${JsTag[tag]} (#2949 R2)`);
+      }
+    },
+    emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[] {
+      switch (tag) {
+        case JsTag.NumberI32:
+        case JsTag.NumberF64:
+          // Numeric CLASS test (V2) — host typeof has one "number".
+          return [callImport("__typeof_number")];
+        case JsTag.String:
+          return [callImport("__typeof_string")];
+        case JsTag.Boolean:
+          return [callImport("__typeof_boolean")];
+        case JsTag.Function:
+          return [callImport("__typeof_function")];
+        case JsTag.Undefined:
+          return [callImport("__typeof_undefined")];
+        case JsTag.Null:
+          // JS null crosses the boundary as THE null externref; undefined
+          // is a real (non-null) host value — so ref.is_null is exactly
+          // the Null partition test.
+          return [{ op: "ref.is_null" }];
+        case JsTag.Object: {
+          // `typeof v === "object"` is true for null (host semantics);
+          // the Object PARTITION excludes it. Read the operand twice via
+          // the lazily-allocated carrier scratch local.
+          const s = scratch();
+          return [
+            { op: "local.tee", index: s },
+            callImport("__typeof_object"),
+            { op: "local.get", index: s },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            { op: "i32.and" },
+          ];
+        }
+        default:
+          throw new Error(`ir/integration: no host tag.test arm for ${JsTag[tag]} (#2949)`);
+      }
+    },
+    emitToBoolean(): readonly Instr[] {
+      // #2949 S5.1 — ToBoolean(externref carrier) via the canonical
+      // coercion-engine path (D4): `__is_truthy` (0/NaN/null/undefined/""
+      // → falsy). `addUnionImports` already ran in
+      // `preregisterDynamicSupport` (which registers `__is_truthy`), so the
+      // internal `addUnionImports` / `ensureLateImport` here find the import
+      // by name and add nothing — no import shift mid-emission.
+      return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
+    },
+    emitToNumber(): readonly Instr[] {
+      // #2949 S5.3 — ToNumber(externref carrier) via THE canonical
+      // `coercion-engine.emitToNumber` (D4): for the externref carrier it emits
+      // a single `__unbox_number` (`Number(v)`, §7.1.4 — string→StringToNumber,
+      // null→0, undefined→NaN, boolean→0/1). No temp-local allocation for the
+      // externref arm (unlike the gc `$AnyValue` arm), so the body-only
+      // `FunctionContext` shim is sound (same pattern as the gc `emitBox`).
+      // `addUnionImports` already ran in `preregisterDynamicSupport` (which
+      // registers `__unbox_number`), so the internal `addUnionImports` here
+      // finds it by name and adds nothing — no import shift mid-emission.
+      const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+      emitCoercionToNumber(ctx, shim, { kind: "externref" });
+      return shim.body;
+    },
+    emitEqOperand(): readonly Instr[] {
+      // #2949 S5.2 — the host carrier is `externref`, which is EXACTLY the
+      // `(externref, externref)` shape `__host_eq` / `__host_loose_eq` take.
+      // No marshalling — legacy host `any === any` compares the raw externrefs
+      // (verified: a `boxToAny`+`__any_eq` marshalling DIVERGES — it drops the
+      // §7.2.15 coercions, giving `"5" == 5 → false`; the `__any_eq` path is the
+      // STANDALONE `noJsHost` branch in binary-ops, not host's).
+      return [];
+    },
+    emitStrictEq(negate: boolean): readonly Instr[] {
+      // #2949 S5.2 — host STRICT `===` via the SAME `__host_eq` (JS `===`,
+      // §7.2.16) legacy host `any === any` uses (D4, byte-parity with the host
+      // runtime result). `__host_eq` is a host import in this (non-fast,
+      // JS-host) mode; standalone/wasi is the `gc` strategy, which uses the
+      // native `__any_strict_eq` instead — so there is no host-import leak into
+      // a host-free module.
+      return negate ? [callImport("__host_eq"), { op: "i32.eqz" }] : [callImport("__host_eq")];
+    },
+    emitLooseEq(negate: boolean): readonly Instr[] {
+      // Host LOOSE `==` via `__host_loose_eq` (JS `==`, §7.2.15) — the coercion
+      // arms (String⇄Number, `null == undefined`) are JS's, matching legacy.
+      return negate ? [callImport("__host_loose_eq"), { op: "i32.eqz" }] : [callImport("__host_loose_eq")];
+    },
+    emitMemberGet(): readonly Instr[] {
+      // #3053 U1 / #2949 S5.4 — dynamic member read. In host mode the carrier
+      // IS `externref` and `__dyn_member_get` is a thin `__extern_get` wrapper
+      // (a DEFINED function, resolved by name — same funcMap lookup as
+      // `callImport`), so the read is a bare call with no box/peel. Flip the
+      // latch the finalize `ensureDynMemberGet` reads.
+      ctx.usesDynMemberGet = true;
+      return [callImport("__dyn_member_get")];
+    },
+    emitElementGet(): readonly Instr[] {
+      ctx.usesDynMemberGet = true;
+      return [callImport("__dyn_member_get")];
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Object struct registry (#1169b)
 // ---------------------------------------------------------------------------
 
@@ -1549,6 +2308,10 @@ function irTypeKey(t: IrType): string {
   if (t.kind === "extern") return `extern:${t.className}`;
   // #1926 — union members / boxed inner are IrTypes; recurse.
   if (t.kind === "union") return `union<${t.members.map(irTypeKey).join(",")}>`;
+  // #2949 — dynamic is keyed with its optional JsTag refinement: two
+  // dynamics with different refinements are distinct types (irTypeEquals is
+  // exact on the tag), so their keys must differ too.
+  if (t.kind === "dynamic") return t.tag === undefined ? "dynamic" : `dynamic:${t.tag}`;
   return `boxed<${irTypeKey(t.inner)}>`;
 }
 
@@ -1716,6 +2479,40 @@ class RefCellRegistry {
 }
 
 /**
+ * #3000-C: the default value pushed for one struct field when allocating a
+ * fresh class instance (the `class.alloc` IR instr). Mirrors the `newBody`
+ * default switch in `class-bodies.ts` (the legacy `<className>_new` alloc
+ * prefix) EXACTLY — the `__tag` slot gets the class discrimination constant,
+ * every other field gets its ValType zero/null. Keeping this identical to the
+ * legacy switch is what makes the IR-emitted allocation byte-compatible with
+ * the struct the legacy path builds.
+ */
+function defaultFieldAllocInstr(field: FieldDef, tagValue: number): Instr {
+  if (field.name === "__tag") return { op: "i32.const", value: tagValue };
+  switch (field.type.kind) {
+    case "f64":
+      return { op: "f64.const", value: 0 };
+    case "i32":
+      return { op: "i32.const", value: 0 };
+    case "externref":
+      return { op: "ref.null.extern" };
+    case "ref":
+    case "ref_null":
+      return { op: "ref.null", typeIdx: field.type.typeIdx };
+    case "i64":
+      return { op: "i64.const", value: 0n };
+    case "eqref":
+      return { op: "ref.null.eq" };
+    default:
+      // Legacy fallback for any unhandled type — push i32 0 (mirrors
+      // class-bodies.ts). A mis-typed default can only make `struct.new`
+      // fail validation (a clean legacy fallback via the caller's try),
+      // never miscompile.
+      return { op: "i32.const", value: 0 };
+  }
+}
+
+/**
  * Slice 4 (#1169d): per-class lookup over the legacy class registry.
  *
  * The legacy `collectClassDeclaration` pass (in `class-bodies.ts`)
@@ -1769,6 +2566,24 @@ class ClassRegistry {
     // the legacy name for every non-colliding class.
     const ctx = this.ctx;
     const constructorFuncName = classMemberFuncKey(ctx, `${shape.className}_new`);
+    // #3000-E: the parent-init entry a derived `super(...)` chains to. Legacy
+    // registers `<className>_init` for every non-externref-backed class (the
+    // only kind that can be an IR subclass parent), keyed the same way.
+    const initFuncName = classMemberFuncKey(ctx, `${shape.className}_init`);
+
+    // #3000-C: precompute the default-alloc instruction prefix so the
+    // `class.alloc` IR instr (used by the IR constructor-body lowering to
+    // synthesise `this`) emits the SAME allocation the legacy
+    // `<className>_new` emits before its tail-call to `<className>_init`.
+    // The field defaults + `__tag` constant mirror `class-bodies.ts`
+    // (the `newBody` loop) exactly, keyed off the SAME `legacyFields` /
+    // `classTagMap`, so the emitted `struct.new` prefix is byte-identical.
+    const tagValue = ctx.classTagMap.get(shape.className) ?? 0;
+    const allocInstrs: Instr[] = [];
+    for (const field of legacyFields) {
+      allocInstrs.push(defaultFieldAllocInstr(field, tagValue));
+    }
+    allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
 
     const lowering: IrClassLowering = {
       structTypeIdx,
@@ -1780,12 +2595,14 @@ class ClassRegistry {
         return idx;
       },
       constructorFuncName,
+      initFuncName,
       methodFuncName: (name: string): string => {
         // Returns a NAME — the resolver's `resolveFunc` maps it to the
         // funcIdx via `ctx.funcMap`, which the legacy collection pass
         // populated with stable indices. (#1983) collision-free key.
         return classMemberFuncKey(ctx, `${shape.className}_${name}`);
       },
+      allocInstrs,
     };
     this.cache.set(shape.className, lowering);
     return lowering;

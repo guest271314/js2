@@ -8,8 +8,11 @@
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { ensureAnyValueType } from "./any-helpers.js";
 import { emitNativeCaseConversion } from "./case-convert-native.js";
+import { emitNativeHtmlWrapperHelpers } from "./html-wrapper-native.js";
+import { emitNativeWellFormedHelpers } from "./wellformed-native.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addImport } from "./registry/imports.js";
@@ -311,7 +314,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const wlArrRefNull: ValType = { kind: "ref_null", typeIdx: wlArrTypeIdx };
 
     const typeIdx = addFuncType(ctx, [strRef, strDataRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_copy_tree", funcIdx);
 
     // params: node(0), buf(1), pos(2)
@@ -581,7 +584,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 2 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_copy_tree",
       typeIdx,
       locals: [
@@ -607,7 +610,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   if (ctx.utf8Storage && ctx.utf8StrTypeIdx >= 0) {
     const u8StrRef: ValType = { kind: "ref", typeIdx: ctx.utf8StrTypeIdx };
     const typeIdx = addFuncType(ctx, [u8StrRef], [flatStrRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_utf8_to_flat", funcIdx);
     // params: u(0)
     // locals: len(1) code-unit count, byteLen(2), data(3) i8 array, out(4) i16 array,
@@ -854,7 +857,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 4 },
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_utf8_to_flat",
       typeIdx,
       locals: [
@@ -879,7 +882,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // If s is already a FlatString, returns it. Otherwise flattens the rope tree.
   {
     const typeIdx = addFuncType(ctx, [strRef], [flatStrRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_flatten", funcIdx);
     // Also register in funcMap so the deferred late-import shift
     // (flushLateImportShifts walks ctx.funcMap) keeps __str_flatten's index
@@ -930,7 +933,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_flatten",
       typeIdx,
       locals: [
@@ -969,7 +972,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const u8DataRef: ValType = { kind: "ref", typeIdx: ctx.utf8StrDataTypeIdx };
     const typeIdx = addFuncType(ctx, [strRef], [u8DataRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_to_utf8", funcIdx);
 
     // params: s(0)
@@ -1345,7 +1348,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: OUT },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_to_utf8",
       typeIdx,
       locals: [
@@ -1372,7 +1375,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   {
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const typeIdx = addFuncType(ctx, [strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_concat", funcIdx);
 
     // params: a(0), b(1)
@@ -1469,7 +1472,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_concat",
       typeIdx,
       locals: [
@@ -1493,7 +1496,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // directly (caller traps on out-of-memory at the array.new_default site).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_buf_next_cap", funcIdx);
 
     // params: curCap(0), needed(1)
@@ -1541,7 +1544,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_buf_next_cap",
       typeIdx,
       locals: [],
@@ -1553,7 +1556,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_equals(a: ref $NativeString, b: ref $NativeString) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_equals", funcIdx);
 
     // locals: len(2), i(3), aData(4), bData(5), aOff(6), bOff(7)
@@ -1646,7 +1649,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_equals",
       typeIdx,
       locals: [
@@ -1666,7 +1669,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Lexicographic comparison: returns -1 (a < b), 0 (a == b), or 1 (a > b)
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_compare", funcIdx);
 
     // locals: lenA(2), lenB(3), minLen(4), i(5), aData(6), bData(7), aOff(8), bOff(9), ca(10), cb(11)
@@ -1801,7 +1804,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_compare",
       typeIdx,
       locals: [
@@ -1824,7 +1827,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_substring(s: ref $NativeString, start: i32, end: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_substring", funcIdx);
 
     // O(1) substring: creates a view sharing the backing array.
@@ -1897,7 +1900,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_substring",
       typeIdx,
       locals: [
@@ -1912,7 +1915,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_charAt(s: ref $NativeString, idx: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_charAt", funcIdx);
 
     const body: Instr[] = [
@@ -1954,7 +1957,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_charAt",
       typeIdx,
       locals: [],
@@ -1972,7 +1975,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // their cursor by the returned string's `len`.
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_charAt_cp", funcIdx);
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
@@ -2052,7 +2055,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_charAt_cp",
       typeIdx,
       locals: [],
@@ -2065,7 +2068,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Like substring but handles negative indices
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_slice", funcIdx);
 
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
@@ -2159,7 +2162,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_slice",
       typeIdx,
       locals: [{ name: "len", type: { kind: "i32" } }],
@@ -2179,7 +2182,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // absent length so the min() clamps it to `len - start` (to the end).
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_substr", funcIdx);
 
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
@@ -2261,7 +2264,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_substr",
       typeIdx,
       locals: [
@@ -2276,7 +2279,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_indexOf(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_indexOf", funcIdx);
 
     // params: haystack(0), needle(1), fromIndex(2)
@@ -2411,7 +2414,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: -1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_indexOf",
       typeIdx,
       locals: [
@@ -2432,7 +2435,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_lastIndexOf(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_lastIndexOf", funcIdx);
 
     // params: haystack(0), needle(1), fromIndex(2)
@@ -2568,7 +2571,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: -1 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_lastIndexOf",
       typeIdx,
       locals: [
@@ -2589,7 +2592,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_includes(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_includes", funcIdx);
 
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
@@ -2603,7 +2606,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.ne" },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_includes",
       typeIdx,
       locals: [],
@@ -2615,7 +2618,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_startsWith(s: ref $NativeString, prefix: ref $NativeString, position: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_startsWith", funcIdx);
 
     // params: s(0), prefix(1), position(2)
@@ -2721,7 +2724,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_startsWith",
       typeIdx,
       locals: [
@@ -2741,7 +2744,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_endsWith(s: ref $NativeString, suffix: ref $NativeString, endPos: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_endsWith", funcIdx);
 
     // params: s(0), suffix(1), endPos(2)
@@ -2847,7 +2850,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_endsWith",
       typeIdx,
       locals: [
@@ -2872,7 +2875,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   //   0x205F, 0x3000, 0xFEFF (BOM/ZWNBSP).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_isWhitespace", funcIdx);
 
     // Membership test as an OR-chain. `eq(v)` / `range(lo,hi)` each push one i32
@@ -2913,7 +2916,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "i32.or" },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_isWhitespace",
       typeIdx,
       locals: [],
@@ -2925,7 +2928,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trimStart(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trimStart", funcIdx);
 
     const isWsIdx = ctx.nativeStrHelpers.get("__str_isWhitespace")!;
@@ -2983,7 +2986,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trimStart",
       typeIdx,
       locals: [
@@ -3000,7 +3003,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trimEnd(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trimEnd", funcIdx);
 
     const isWsIdx = ctx.nativeStrHelpers.get("__str_isWhitespace")!;
@@ -3058,7 +3061,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: substringIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trimEnd",
       typeIdx,
       locals: [
@@ -3074,7 +3077,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_trim(s: ref $NativeString) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_trim", funcIdx);
 
     const trimStartIdx = ctx.nativeStrHelpers.get("__str_trimStart")!;
@@ -3086,7 +3089,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: trimEndIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_trim",
       typeIdx,
       locals: [],
@@ -3098,7 +3101,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // --- $__str_repeat(s: ref $NativeString, count: i32) -> ref $NativeString ---
   {
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_repeat", funcIdx);
 
     // params: s(0), count(1)
@@ -3209,7 +3212,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_repeat",
       typeIdx,
       locals: [
@@ -3233,7 +3236,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_padStart", funcIdx);
 
     // params: s(0), targetLen(1), padStr(2)
@@ -3297,7 +3300,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_padStart",
       typeIdx,
       locals: [
@@ -3319,7 +3322,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
 
     const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_padEnd", funcIdx);
 
     // params: s(0), targetLen(1), padStr(2)
@@ -3387,7 +3390,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_padEnd",
       typeIdx,
       locals: [
@@ -3405,7 +3408,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // ASCII-only: maps A-Z (65-90) to a-z (97-122), copies everything else as-is
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_toLowerCase", funcIdx);
 
     // params: s(0)
@@ -3493,7 +3496,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_toLowerCase",
       typeIdx,
       locals: [
@@ -3513,7 +3516,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // ASCII-only: maps a-z (97-122) to A-Z (65-90), copies everything else as-is
   {
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_toUpperCase", funcIdx);
 
     // params: s(0)
@@ -3601,7 +3604,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_toUpperCase",
       typeIdx,
       locals: [
@@ -3625,6 +3628,13 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // flatten a cons-string input.
   emitNativeCaseConversion(ctx, strTypeIdx, strDataTypeIdx, anyStrTypeIdx);
 
+  // (#3068) String.prototype.isWellFormed / toWellFormed — pure UTF-16
+  // code-unit scans over the flattened NativeString. Emitted here (after
+  // __str_flatten + the NativeString types exist) so the method arms in
+  // string-ops.ts find `__str_isWellFormed` / `__str_toWellFormed` in
+  // nativeStrHelpers without a mid-body late-import shift.
+  emitNativeWellFormedHelpers(ctx, strTypeIdx, strDataTypeIdx);
+
   // --- $__str_getSubstitution(replacement, matched, prefix, suffix) -> ref $NativeString ---
   // #1822 — expand `$` patterns in a replacement string per ECMAScript
   // §22.1.3.19 GetSubstitution (string-search variant, no capture groups):
@@ -3637,7 +3647,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_getSubstitution", funcIdx);
 
     // params: replacement(0), matched(1), prefix(2), suffix(3)
@@ -3833,7 +3843,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: concatIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_getSubstitution",
       typeIdx,
       locals: [
@@ -3860,7 +3870,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_replace", funcIdx);
 
     // params: s(0), search(1), replacement(2)
@@ -3923,7 +3933,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_replace",
       typeIdx,
       locals: [
@@ -3946,7 +3956,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const getSubstitutionIdx = ctx.nativeStrHelpers.get("__str_getSubstitution")!;
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_replaceAll", funcIdx);
 
     // params: s(0), search(1), replacement(2)
@@ -4128,7 +4138,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_replaceAll",
       typeIdx,
       locals: [
@@ -4158,7 +4168,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const nstrVecRef: ValType = { kind: "ref", typeIdx: nstrVecTypeIdx };
 
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [nstrVecRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_split", funcIdx);
 
     const indexOfIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
@@ -4444,7 +4454,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: nstrVecTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_split",
       typeIdx,
       locals: [
@@ -4472,7 +4482,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // Supplementary (cp > 0xFFFF): 2-element surrogate pair.
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_fromCodePoint", funcIdx);
 
     // params: cp(0)
@@ -4517,7 +4527,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_fromCodePoint",
       typeIdx,
       locals: [],
@@ -4532,7 +4542,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   // are taken (no surrogate-pair handling — that is fromCodePoint's job).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_fromCharCode", funcIdx);
 
     // params: code(0). Build: struct.new $NativeString(len=1, off=0, [code & 0xFFFF])
@@ -4546,7 +4556,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_fromCharCode",
       typeIdx,
       locals: [],
@@ -4575,7 +4585,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
     const typeIdx = addFuncType(ctx, [strRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__regex_escape", funcIdx);
 
     // params: s(0)
@@ -5020,7 +5030,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: OUT },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__regex_escape",
       typeIdx,
       locals: [
@@ -5039,6 +5049,12 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       exported: false,
     });
   }
+
+  // (#3069) Annex B §B.2.2 HTML string-wrapper methods — the `__str_html_escape_quot`
+  // helper (CreateHTML step-4.b `"`→`&quot;` escaping). Emitted here, AFTER
+  // __str_flatten/__str_concat are registered. The tag/attribute concatenation
+  // is built inline at each call site in string-ops.ts via __str_concat.
+  emitNativeHtmlWrapperHelpers(ctx, strTypeIdx, strDataTypeIdx, anyStrTypeIdx);
 }
 
 /**
@@ -5110,7 +5126,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
 
   if (existingEncode === undefined) {
     const typeIdx = addFuncType(ctx, [strRef], [vecRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__textencoder_encode", funcIdx);
     ctx.funcMap.set("__textencoder_encode", funcIdx);
 
@@ -5385,7 +5401,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
       { op: "struct.new", typeIdx: vecTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__textencoder_encode",
       typeIdx,
       locals: [
@@ -5408,7 +5424,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
 
   if (existingDecode === undefined) {
     const typeIdx = addFuncType(ctx, [vecRef], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__textdecoder_decode_u8", funcIdx);
     ctx.funcMap.set("__textdecoder_decode_u8", funcIdx);
 
@@ -5662,7 +5678,7 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__textdecoder_decode_u8",
       typeIdx,
       locals: [
@@ -5687,452 +5703,6 @@ export function ensureTextEncodingHelpers(ctx: CodegenContext): {
     encodeIdx: ctx.funcMap.get("__textencoder_encode")!,
     decodeU8Idx: ctx.funcMap.get("__textdecoder_decode_u8")!,
     vecTypeIdx,
-    resultTypeIdx,
-  };
-}
-
-/**
- * (#1780) Register `__textencoder_encode_into_<destElemKey>`: writes UTF-8 bytes
- * of `source` into the `dest` Uint8Array backing array, never splitting a code
- * point, and returns a `{ read, written }` result struct. `read` counts UTF-16
- * code units consumed for fully-written code points; `written` counts bytes
- * written. Shares the surrogate-decode + UTF-8 emit shape of
- * `__textencoder_encode`, but writes into a caller-supplied bounded buffer.
- *
- * The destination vec storage differs by target: WASI/standalone back
- * `Uint8Array` with a packed `i8_byte` array (`{ kind: "i8" }`), other targets
- * with an `f64` array (see `typedArrayVecStorage`). The caller passes the
- * matching `destElemKey` so the bytes land in the right element representation.
- */
-export function ensureEncodeIntoHelper(
-  ctx: CodegenContext,
-  destElemKey: "f64" | "i8_byte",
-): { encodeIntoIdx: number; destVecTypeIdx: number; resultTypeIdx: number } {
-  ensureTextEncodingHelpers(ctx);
-  const resultTypeIdx = ensureEncodeIntoResultStruct(ctx);
-  const destElemType: ValType = destElemKey === "i8_byte" ? { kind: "i8" } : { kind: "f64" };
-  const destVecTypeIdx = getOrRegisterVecType(ctx, destElemKey, destElemType);
-  const destVecArrTypeIdx = getArrTypeIdxFromVec(ctx, destVecTypeIdx);
-
-  const helperName = `__textencoder_encode_into_${destElemKey}`;
-  const existingEncodeInto = ctx.funcMap.get(helperName);
-  if (existingEncodeInto !== undefined) {
-    return { encodeIntoIdx: existingEncodeInto, destVecTypeIdx, resultTypeIdx };
-  }
-
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-  const anyStrTypeIdx = ctx.anyStrTypeIdx;
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  if (strTypeIdx < 0 || anyStrTypeIdx < 0 || strDataTypeIdx < 0 || destVecArrTypeIdx < 0) {
-    throw new Error("TextEncoder.encodeInto requires native string and Uint8Array runtime types");
-  }
-
-  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
-  const flatStrRef: ValType = { kind: "ref", typeIdx: strTypeIdx };
-  const strDataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
-  const destVecRef: ValType = { kind: "ref_null", typeIdx: destVecTypeIdx };
-  const destVecArrRef: ValType = { kind: "ref", typeIdx: destVecArrTypeIdx };
-  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten")!;
-  const vecTypeIdx = destVecTypeIdx;
-  const vecArrTypeIdx = destVecArrTypeIdx;
-
-  {
-    // Returns (i32 read, i32 written) as a multi-value result. The caller builds
-    // the `{ read, written }` result object via normal codegen (struct.new in a
-    // regularly-compiled function), which avoids materializing a fresh WasmGC
-    // struct from inside this late-registered runtime helper.
-    const typeIdx = addFuncType(ctx, [strRef, destVecRef], [{ kind: "i32" }, { kind: "i32" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.nativeStrHelpers.set(helperName, funcIdx);
-    ctx.funcMap.set(helperName, funcIdx);
-
-    const FLAT = 2;
-    const DATA = 3;
-    const OFF = 4;
-    const LEN = 5;
-    const DEST = 6;
-    const CAP = 7;
-    const I = 8; // current read index into the source code units
-    const O = 9; // bytes written so far
-    const READ = 10; // committed UTF-16 code units consumed
-    const CU = 11;
-    const CP = 12;
-    const LO = 13;
-    const NB = 14; // UTF-8 byte length of the current code point
-
-    // Compute the UTF-8 byte length for the decoded code point in CP.
-    const computeNB: Instr[] = [
-      { op: "local.get", index: CP },
-      { op: "i32.const", value: 0x80 },
-      { op: "i32.lt_u" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: 1 },
-          { op: "local.set", index: NB },
-        ],
-        else: [
-          { op: "local.get", index: CP },
-          { op: "i32.const", value: 0x800 },
-          { op: "i32.lt_u" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "i32.const", value: 2 },
-              { op: "local.set", index: NB },
-            ],
-            else: [
-              { op: "local.get", index: CP },
-              { op: "i32.const", value: 0x10000 },
-              { op: "i32.lt_u" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  { op: "i32.const", value: 3 },
-                  { op: "local.set", index: NB },
-                ],
-                else: [
-                  { op: "i32.const", value: 4 },
-                  { op: "local.set", index: NB },
-                ],
-              },
-            ],
-          },
-        ],
-      },
-    ];
-
-    // i8_byte arrays store one packed byte per element (raw i32 value); f64
-    // arrays store the byte as an f64, so widen before the set.
-    const isPacked = destElemKey === "i8_byte";
-    const writeByteToDest = (valueInstrs: Instr[]): Instr[] => [
-      { op: "local.get", index: DEST },
-      { op: "local.get", index: O },
-      ...valueInstrs,
-      ...(isPacked ? [] : [{ op: "f64.convert_i32_u" } as Instr]),
-      { op: "array.set", typeIdx: vecArrTypeIdx },
-      { op: "local.get", index: O },
-      { op: "i32.const", value: 1 },
-      { op: "i32.add" },
-      { op: "local.set", index: O },
-    ];
-
-    const emitCodePointBytes: Instr[] = [
-      { op: "local.get", index: NB },
-      { op: "i32.const", value: 1 },
-      { op: "i32.eq" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: writeByteToDest([{ op: "local.get", index: CP }]),
-        else: [
-          { op: "local.get", index: NB },
-          { op: "i32.const", value: 2 },
-          { op: "i32.eq" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              ...writeByteToDest([
-                { op: "i32.const", value: 0xc0 },
-                { op: "local.get", index: CP },
-                { op: "i32.const", value: 6 },
-                { op: "i32.shr_u" },
-                { op: "i32.or" },
-              ]),
-              ...writeByteToDest([
-                { op: "i32.const", value: 0x80 },
-                { op: "local.get", index: CP },
-                { op: "i32.const", value: 0x3f },
-                { op: "i32.and" },
-                { op: "i32.or" },
-              ]),
-            ],
-            else: [
-              { op: "local.get", index: NB },
-              { op: "i32.const", value: 3 },
-              { op: "i32.eq" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0xe0 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 12 },
-                    { op: "i32.shr_u" },
-                    { op: "i32.or" },
-                  ]),
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0x80 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 6 },
-                    { op: "i32.shr_u" },
-                    { op: "i32.const", value: 0x3f },
-                    { op: "i32.and" },
-                    { op: "i32.or" },
-                  ]),
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0x80 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 0x3f },
-                    { op: "i32.and" },
-                    { op: "i32.or" },
-                  ]),
-                ],
-                else: [
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0xf0 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 18 },
-                    { op: "i32.shr_u" },
-                    { op: "i32.or" },
-                  ]),
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0x80 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 12 },
-                    { op: "i32.shr_u" },
-                    { op: "i32.const", value: 0x3f },
-                    { op: "i32.and" },
-                    { op: "i32.or" },
-                  ]),
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0x80 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 6 },
-                    { op: "i32.shr_u" },
-                    { op: "i32.const", value: 0x3f },
-                    { op: "i32.and" },
-                    { op: "i32.or" },
-                  ]),
-                  ...writeByteToDest([
-                    { op: "i32.const", value: 0x80 },
-                    { op: "local.get", index: CP },
-                    { op: "i32.const", value: 0x3f },
-                    { op: "i32.and" },
-                    { op: "i32.or" },
-                  ]),
-                ],
-              },
-            ],
-          },
-        ],
-      },
-    ];
-
-    // Decode the code point at source index I (advancing I past it), exactly as
-    // __textencoder_encode's decodeCodePoint does, but leaving the result in CP
-    // without emitting bytes (the caller decides whether the bytes fit first).
-    const decodeOnly: Instr[] = [
-      { op: "local.get", index: DATA },
-      { op: "local.get", index: OFF },
-      { op: "local.get", index: I },
-      { op: "i32.add" },
-      { op: "array.get_u", typeIdx: strDataTypeIdx },
-      { op: "local.set", index: CU },
-      { op: "local.get", index: CU },
-      { op: "local.set", index: CP },
-      { op: "local.get", index: I },
-      { op: "i32.const", value: 1 },
-      { op: "i32.add" },
-      { op: "local.set", index: I },
-      { op: "local.get", index: CU },
-      { op: "i32.const", value: 0xd800 },
-      { op: "i32.ge_u" },
-      { op: "local.get", index: CU },
-      { op: "i32.const", value: 0xdbff },
-      { op: "i32.le_u" },
-      { op: "i32.and" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: I },
-          { op: "local.get", index: LEN },
-          { op: "i32.lt_s" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: DATA },
-              { op: "local.get", index: OFF },
-              { op: "local.get", index: I },
-              { op: "i32.add" },
-              { op: "array.get_u", typeIdx: strDataTypeIdx },
-              { op: "local.set", index: LO },
-              { op: "local.get", index: LO },
-              { op: "i32.const", value: 0xdc00 },
-              { op: "i32.ge_u" },
-              { op: "local.get", index: LO },
-              { op: "i32.const", value: 0xdfff },
-              { op: "i32.le_u" },
-              { op: "i32.and" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  { op: "i32.const", value: 0x10000 },
-                  { op: "local.get", index: CU },
-                  { op: "i32.const", value: 0xd800 },
-                  { op: "i32.sub" },
-                  { op: "i32.const", value: 10 },
-                  { op: "i32.shl" },
-                  { op: "i32.add" },
-                  { op: "local.get", index: LO },
-                  { op: "i32.const", value: 0xdc00 },
-                  { op: "i32.sub" },
-                  { op: "i32.add" },
-                  { op: "local.set", index: CP },
-                  { op: "local.get", index: I },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.add" },
-                  { op: "local.set", index: I },
-                ],
-                else: [
-                  { op: "i32.const", value: 0xfffd },
-                  { op: "local.set", index: CP },
-                ],
-              },
-            ],
-            else: [
-              { op: "i32.const", value: 0xfffd },
-              { op: "local.set", index: CP },
-            ],
-          },
-        ],
-        else: [
-          { op: "local.get", index: CU },
-          { op: "i32.const", value: 0xdc00 },
-          { op: "i32.ge_u" },
-          { op: "local.get", index: CU },
-          { op: "i32.const", value: 0xdfff },
-          { op: "i32.le_u" },
-          { op: "i32.and" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "i32.const", value: 0xfffd },
-              { op: "local.set", index: CP },
-            ],
-          },
-        ],
-      },
-    ];
-
-    // Leave (read, written) on the stack as two i32s; the caller materializes
-    // the result object.
-    const buildResult: Instr[] = [
-      { op: "local.get", index: READ },
-      { op: "local.get", index: O },
-    ];
-
-    const body: Instr[] = [
-      // dest may be null (spec rejects, but be defensive) → read=written=0
-      { op: "local.get", index: 1 },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: 0 },
-          { op: "local.set", index: READ },
-          { op: "i32.const", value: 0 },
-          { op: "local.set", index: O },
-          ...buildResult,
-          { op: "return" },
-        ],
-      },
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: flattenIdx },
-      { op: "local.set", index: FLAT },
-      { op: "local.get", index: FLAT },
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
-      { op: "local.set", index: OFF },
-      { op: "local.get", index: FLAT },
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
-      { op: "local.set", index: LEN },
-      { op: "local.get", index: FLAT },
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
-      { op: "local.set", index: DATA },
-      { op: "local.get", index: 1 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
-      { op: "local.set", index: CAP },
-      { op: "local.get", index: 1 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
-      { op: "local.set", index: DEST },
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: I },
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: O },
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: READ },
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              { op: "local.get", index: I },
-              { op: "local.get", index: LEN },
-              { op: "i32.ge_s" },
-              { op: "br_if", depth: 1 },
-              ...decodeOnly,
-              ...computeNB,
-              // If O + NB > CAP, the code point doesn't fit — stop without
-              // writing (and without committing READ for it).
-              { op: "local.get", index: O },
-              { op: "local.get", index: NB },
-              { op: "i32.add" },
-              { op: "local.get", index: CAP },
-              { op: "i32.gt_s" },
-              { op: "br_if", depth: 1 },
-              ...emitCodePointBytes,
-              // Commit: the whole code point fit, so READ now covers I.
-              { op: "local.get", index: I },
-              { op: "local.set", index: READ },
-              { op: "br", depth: 0 },
-            ],
-          },
-        ],
-      },
-      ...buildResult,
-    ];
-
-    ctx.mod.functions.push({
-      name: helperName,
-      typeIdx,
-      locals: [
-        { name: "flat", type: flatStrRef },
-        { name: "data", type: strDataRef },
-        { name: "off", type: { kind: "i32" } },
-        { name: "len", type: { kind: "i32" } },
-        { name: "dest", type: destVecArrRef },
-        { name: "cap", type: { kind: "i32" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "o", type: { kind: "i32" } },
-        { name: "read", type: { kind: "i32" } },
-        { name: "cu", type: { kind: "i32" } },
-        { name: "cp", type: { kind: "i32" } },
-        { name: "lo", type: { kind: "i32" } },
-        { name: "nb", type: { kind: "i32" } },
-      ],
-      body,
-      exported: false,
-    });
-  }
-
-  return {
-    encodeIntoIdx: ctx.funcMap.get(helperName)!,
-    destVecTypeIdx,
     resultTypeIdx,
   };
 }
@@ -6260,10 +5830,10 @@ function ensureErrorToStringHelper(ctx: CodegenContext): number | undefined {
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "anyref" }], [strRef]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set("__error_to_string", funcIdx);
   ctx.funcMap.set("__error_to_string", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__error_to_string",
     typeIdx,
     locals: [
@@ -6644,10 +6214,10 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ];
 
   const typeIdx = addFuncType(ctx, [anyref], [strRef]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set("__any_to_string", funcIdx);
   ctx.funcMap.set("__any_to_string", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__any_to_string",
     typeIdx,
     locals: [
@@ -6852,10 +6422,10 @@ function ensureNativeVecJoinHelper(
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: vecTypeIdx }], [strRef]);
-  const joinFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const joinFuncIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set(cacheKey, joinFuncIdx);
   ctx.funcMap.set(cacheKey, joinFuncIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, joinFuncIdx, {
     name: cacheKey,
     typeIdx,
     locals: [
@@ -7235,10 +6805,10 @@ export function ensureStrToCharVecHelper(ctx: CodegenContext): { funcIdx: number
   ];
 
   const typeIdx = addFuncType(ctx, [strRef], [{ kind: "ref", typeIdx: nstrVecTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeStrHelpers.set("__str_to_char_vec", funcIdx);
   ctx.funcMap.set("__str_to_char_vec", funcIdx);
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__str_to_char_vec",
     typeIdx,
     locals: [
@@ -7277,6 +6847,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
     });
   }
 
+  const importsBeforeBridge = ctx.numImportFuncs;
   const fromMemIdx = ensureLateImport(
     ctx,
     "__str_from_mem",
@@ -7285,10 +6856,27 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
   )!;
   const toMemIdx = ensureLateImport(ctx, "__str_to_mem", [{ kind: "externref" }, { kind: "i32" }], [])!;
   const externLenIdx = ensureLateImport(ctx, "__str_extern_len", [{ kind: "externref" }], [{ kind: "i32" }])!;
+  // (#2934 slice 3) Close the deferred late-import batch BEFORE baking
+  // `fromMemIdx`/`toMemIdx`/`externLenIdx` into the helper bodies below. The
+  // deferred flush repairs STALE refs by bumping every `funcIdx >=
+  // importsBefore` — it cannot distinguish a freshly-baked, already-final
+  // import index (these three) from a stale defined-function ref, so leaving
+  // the batch open until some later flush bumps the baked import refs onto
+  // whatever defined function lands at that offset (`__str_to_extern`'s
+  // `call __str_from_mem` resolved to `__str_copy_tree`, arity 3 — "not
+  // enough arguments on the stack" for every object-with-own-toString string
+  // coercion, S15.5.4.6_A4_T2). Flushing here settles all pre-batch stale
+  // refs and makes the subsequent flush a no-op for this batch. Gated on
+  // actually having REGISTERED imports (a funcMap-hit lookup is pure and must
+  // not force-flush an outer batch), so already-registered paths are
+  // byte-identical.
+  if (ctx.numImportFuncs > importsBeforeBridge) {
+    flushLateImportShifts(ctx, null);
+  }
 
   {
     const typeIdx = addFuncType(ctx, [strRef], [{ kind: "externref" }]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_to_extern", funcIdx);
     ctx.funcMap.set("__str_to_extern", funcIdx);
 
@@ -7361,7 +6949,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
       { op: "call", funcIdx: fromMemIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_to_extern",
       typeIdx,
       locals: [
@@ -7378,7 +6966,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
 
   {
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [strRef]);
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     ctx.nativeStrHelpers.set("__str_from_extern", funcIdx);
     ctx.funcMap.set("__str_from_extern", funcIdx);
 
@@ -7428,7 +7016,7 @@ export function ensureNativeStringExternBridge(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    ctx.mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__str_from_extern",
       typeIdx,
       locals: [
@@ -7509,7 +7097,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
   // locals: len(1), data(2), i(3)
   {
     const typeIdx = addFuncType(ctx, [externref], [anyStrRef]);
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
 
     const body: Instr[] = [
       // len = wasm:js-string.length(s)
@@ -7569,7 +7157,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__test_str_from_externref",
       typeIdx,
       locals: [
@@ -7599,7 +7187,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
   // locals: flat(1), len(2), off(3), result(4), i(5)
   {
     const typeIdx = addFuncType(ctx, [anyStrRef], [externref]);
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
 
     const body: Instr[] = [
       // flat = __str_flatten(s)
@@ -7674,7 +7262,7 @@ export function emitTestRuntimeStringHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 4 },
     ];
 
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__test_str_to_externref",
       typeIdx,
       locals: [
@@ -7733,6 +7321,19 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
   if (ctx.exnTagIdx < 0) return;
   if (ctx.funcMap.has("__exn_render_prepare")) return;
 
+  // (#2969) Force `number_toString` before `__any_to_string` bakes so its number
+  // arm renders a raw thrown number ("42") instead of degrading to
+  // "[object Object]" — a throwing module that never itself stringifies a number
+  // otherwise leaves the arm unresolved. `emitExceptionRenderExports` is the
+  // first (and here, only) consumer of `__any_to_string` for such a module, so
+  // ensuring the format helper ahead of the `ensureAnyToStringHelper` call below
+  // makes the number arm real. Size cost falls only on throwing standalone/WASI
+  // modules. Must precede the ensure call (which snapshots the number_toString
+  // funcIdx into the baked arm).
+  if (ctx.funcMap.get("number_toString") === undefined) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+  }
+
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
   const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten");
   const flatTypeIdx = ctx.nativeStrTypeIdx;
@@ -7753,7 +7354,7 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
   // __exn_render_prepare(payload: externref) -> i32
   {
     const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$exn_render_prepare_type");
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "ref.is_null" },
@@ -7771,7 +7372,7 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
       { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
     ];
     ctx.funcMap.set("__exn_render_prepare", funcIdx);
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__exn_render_prepare",
       typeIdx,
       locals: [],
@@ -7784,7 +7385,7 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
   // __exn_render_char(i: i32) -> i32
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }], "$exn_render_char_type");
-    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const funcIdx = mintDefinedFunc(ctx);
     const L_I = 0;
     const L_BUF = 1;
     const body: Instr[] = [
@@ -7820,7 +7421,7 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
       { op: "array.get_u", typeIdx: dataTypeIdx },
     ];
     ctx.funcMap.set("__exn_render_char", funcIdx);
-    mod.functions.push({
+    pushDefinedFunc(ctx, funcIdx, {
       name: "__exn_render_char",
       typeIdx,
       locals: [{ name: "buf", type: { kind: "ref_null", typeIdx: flatTypeIdx } }],

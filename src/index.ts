@@ -1,4 +1,41 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * `@loopdive/js2` — an ahead-of-time compiler from JavaScript and TypeScript to
+ * WebAssembly GC.
+ *
+ * This is the package's main entry point. Use {@link compile} to turn source
+ * text into a {@link CompileResult} (a Wasm binary plus a `.d.ts`, host import
+ * helpers, and diagnostics), or the higher-level {@link compileFiles} /
+ * {@link compileProject} for multi-file and on-disk projects. The full option
+ * surface — target backend (`gc` / `linear` / `wasi` / `standalone`), native
+ * strings, wasm-opt optimization, WIT generation, source maps, and more — is
+ * documented on {@link CompileOptions}.
+ *
+ * @example
+ * ```ts
+ * import { compile } from "@loopdive/js2";
+ *
+ * const result = await compile(`
+ *   export function add(a: number, b: number): number {
+ *     return a + b;
+ *   }
+ * `);
+ * const { instance } = await WebAssembly.instantiate(result.binary, result.importObject);
+ * console.log((instance.exports.add as (a: number, b: number) => number)(2, 3)); // 5
+ * ```
+ *
+ * @module
+ */
+
+/**
+ * A single host capability an emitted module may need from its import object.
+ *
+ * The compiler analyzes the source and, for every JS-host operation it cannot
+ * lower to pure Wasm (string ops, `console.log`, `Math.*`, boxing/unboxing,
+ * `typeof`, extern property get/set, timers, Node builtins, the JSX runtime,
+ * …), records an `ImportIntent`. The runtime ({@link buildImports}) reads these
+ * to synthesize the matching host functions. Discriminated on the `type` field.
+ */
 export type ImportIntent =
   | { type: "string_literal"; value: string }
   | { type: "math"; method: string }
@@ -52,16 +89,28 @@ export type ImportIntent =
       specifier: string;
     };
 
+/**
+ * Describes one import the compiled module declares, so the host runtime can
+ * build the matching entry in the Wasm import object.
+ */
 export interface ImportDescriptor {
+  /** Wasm import namespace the entry lives in. */
   module: "env" | "wasm:js-string" | "string_constants";
+  /** Import field name within {@link ImportDescriptor.module}. */
   name: string;
+  /** Whether the import is a function or a global. */
   kind: "func" | "global";
+  /** The host capability this import provides (see {@link ImportIntent}). */
   intent: ImportIntent;
 }
 
 export type { ExportSignature, TypedArrayKind } from "./ir/types.js";
 import type { ExportSignature } from "./ir/types.js";
 
+/**
+ * The output of a `compile*` call: the compiled Wasm binary plus the artifacts
+ * and metadata needed to instantiate, type, and debug it.
+ */
 export interface CompileResult {
   /** Wasm binary with GC proposal */
   binary: Uint8Array;
@@ -144,6 +193,15 @@ export interface CompileResult {
    */
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
   /**
+   * (#3000) Names of functions/class-members whose slots were actually patched
+   * with an IR-lowered body (the integration pass's `report.compiled`). A mere
+   * selector claim does NOT imply emission — a claimed class member whose class
+   * has no `IrClassShape` is skipped in Phase B and stays byte-inert on legacy.
+   * This is the durable genuine-emission (non-vacuity) signal: a member is truly
+   * IR-emitted iff it appears here. Always collected on the WasmGC path.
+   */
+  irCompiledFuncs?: readonly string[];
+  /**
    * (#2138) IR-first compile-once inversion telemetry. Present ONLY when the
    * `JS2WASM_IR_FIRST=1` flag was active for this compile: lists the
    * top-level functions whose legacy body emission was skipped because the
@@ -154,10 +212,15 @@ export interface CompileResult {
   irFirstSkipped?: readonly string[];
 }
 
+/** A single compile diagnostic (error or warning) with its source position. */
 export interface CompileError {
+  /** Human-readable diagnostic message. */
   message: string;
+  /** 1-based line number in the source. */
   line: number;
+  /** 1-based column number in the source. */
   column: number;
+  /** Whether the diagnostic is fatal (`"error"`) or advisory (`"warning"`). */
   severity: "error" | "warning";
   /** TS diagnostic code (if from TypeScript diagnostics) */
   code?: number;
@@ -171,14 +234,27 @@ export interface CompileError {
   file?: string;
 }
 
+/** Restricts DOM access of compiled code to a subtree (safe-mode containment). */
 export interface DomContainmentOptions {
+  /** Root element or shadow root that scopes all DOM access. */
   domRoot: Element | ShadowRoot;
 }
 
+/**
+ * Policy controlling which host imports a module is allowed to use
+ * (see {@link checkPolicy}).
+ */
 export interface ImportPolicy {
+  /** Set of import names that are disallowed. */
   blocked: Set<string>;
 }
 
+/**
+ * Options controlling a compile: target backend, string representation,
+ * optimization, diagnostics, host/platform surface, and output artifacts.
+ * Every field is optional; the defaults produce a browser-oriented WasmGC
+ * module.
+ */
 export interface CompileOptions {
   /** Emit WAT debug output (default: true) */
   emitWat?: boolean;
@@ -217,6 +293,47 @@ export interface CompileOptions {
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */
   nativeStrings?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — Stage-B regime flag of the tag-5
+   * ABI retirement. When true, boxing an externref-carried dynamic value into
+   * `$AnyValue` runtime-classifies it to its true `JsTag` (undefined/number/
+   * boolean/string/object) instead of the historical blanket tag-5 "string"
+   * (#1888 box-the-externref ABI). Default false (legacy, byte-identical).
+   * Standalone/wasi only — host (gc) mode dynamic values stay host-owned.
+   * Do not enable in production until slice S4 of #2141 flips the default.
+   */
+  honestAnyBoxing?: boolean;
+  /**
+   * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
+   * three-way true-class dispatch inside the both-tags-5 arm of
+   * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),
+   * String×String → content eq (landed #1888), Object×Object → `ref.eq`
+   * identity (#2585), else legacy `0`. Default false (legacy: only the
+   * guarded string arm; non-string tag-5 pairs answer `0`, which also makes
+   * them fake-NaN self-unequal — the vacuity the test262 comparator
+   * accidentally relies on, see #2141 S2). The env var
+   * `JS2WASM_TAG5_CLASSIFIER=1` defaults this on for whole-runner A/B
+   * measurements. Do not enable by default until the #3032 lazy-generator
+   * waves land (the −162 dstr cluster unmasking).
+   */
+  tag5ValueEqClassifier?: boolean;
+  /**
+   * (#2106 S1) Standalone `$undefined` tag-1 singleton regime. When true (and
+   * targeting standalone/nativeStrings), `undefined` is represented by the
+   * S1.0 immutable tag-1 `$AnyValue` global (extern-wrapped at the externref
+   * plane), DISTINCT from `null` (`ref.null.extern`): `null !== undefined`,
+   * `typeof null === "object"`, ToNumber(null)=0 vs ToNumber(undefined)=NaN.
+   * All undefined producers (emitUndefined, `__extern_get`/`__extern_get_idx`
+   * miss, literal stores, boxToAny) and undefined-specific consumers
+   * (`__extern_is_undefined`, typeof cluster, strict-eq) flip in lockstep
+   * under this flag; nullish-intent consumers widen to `is_null ∨
+   * is-singleton`. Default false (legacy: undefined ≡ null ≡ ref.null.extern,
+   * byte-identical modules). Host (gc) mode is unaffected — it has a real
+   * host `undefined` via `__get_undefined`. `JS2WASM_UNDEF_SINGLETON=1`
+   * defaults it on for whole-runner A/B; the default flip is a separate
+   * measured PR (#2106).
+   */
+  undefinedSingleton?: boolean;
   /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
    *  sites the encoding analysis proves `ascii`/`utf8-guaranteed` are stored
    *  as i8-backed `Utf8String`; all others stay i16. Default false →
@@ -275,6 +392,18 @@ export interface CompileOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt this compile out of the `JS2WASM_IR_FIRST` compile-once
+   * inversion, regardless of the ambient env flag. Semantics-critical
+   * in-process sub-compiles — the `eval` / `new Function` host shims — MUST
+   * set this: they are a proven fast path, not an IR-first *measurement*
+   * target, and an IR-first post-claim hard error there is swallowed by the
+   * shim's fallback `catch` arms and silently degraded to `undefined` (a wrong
+   * answer, not a fail-loud error). Only the fail-loud skip-body inversion is
+   * disabled; the ordinary IR overlay (`experimentalIR`) is untouched.
+   * Default: false.
+   */
+  disableIrFirst?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
    *  before TypeScript parsing. Example: `{ "process.env.NODE_ENV": '"production"' }`.
    *  Values must be valid JS expression literals (strings need inner quotes).

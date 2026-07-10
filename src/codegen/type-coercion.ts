@@ -11,8 +11,13 @@ import { coercionPlan } from "./coercion-plan.js";
 import { boxToAny } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitThrowTypeError } from "./expressions/helpers.js";
+import { ensureWrapperStringValueHelper } from "./object-runtime.js";
+import { ensureNativeArrayFromIterN } from "./iterator-native.js";
+import { markNoBrandSiblingShapes } from "./shape-brand.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
@@ -202,6 +207,31 @@ export function getVecInfo(ctx: CodegenContext, typeIdx: number): { arrTypeIdx: 
   // Vec struct: field 0 = $length (i32), field 1 = $data (ref $arr)
   if (sd.fields.length < 2) return null;
   const dataField = sd.fields[1]!;
+  if (dataField.type.kind !== "ref" && dataField.type.kind !== "ref_null") return null;
+  const arrTypeIdx = (dataField.type as { typeIdx: number }).typeIdx;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") return null;
+  return { arrTypeIdx, elemType: (arrDef as ArrayTypeDef).element };
+}
+
+/**
+ * (#2161 B0) Structural twin of {@link getVecInfo} for vec-SHAPED structs that
+ * are not named `__vec_*` — a struct whose field 0 is `length: i32` and field 1
+ * is `data: ref/ref_null <array>` (the `$__regexp_match_vec` subtype shape).
+ * Used only by `emitSafeStructConversion` to route such sources through the
+ * element-copying vec→vec body instead of the trapping struct-narrow field
+ * copy. Deliberately NOT folded into `getVecInfo` itself: its other callers
+ * (extern-vec builders, host glue) assume genuine `__vec_*` layout semantics.
+ */
+function getVecShapedInfo(ctx: CodegenContext, typeIdx: number): { arrTypeIdx: number; elemType: ValType } | null {
+  const typeDef = ctx.mod.types[typeIdx];
+  if (!typeDef || typeDef.kind !== "struct") return null;
+  const sd = typeDef as StructTypeDef;
+  if (sd.fields.length < 2) return null;
+  const lenField = sd.fields[0]!;
+  const dataField = sd.fields[1]!;
+  if (lenField.name !== "length" || lenField.type.kind !== "i32") return null;
+  if (dataField.name !== "data") return null;
   if (dataField.type.kind !== "ref" && dataField.type.kind !== "ref_null") return null;
   const arrTypeIdx = (dataField.type as { typeIdx: number }).typeIdx;
   const arrDef = ctx.mod.types[arrTypeIdx];
@@ -562,8 +592,8 @@ export function buildVecFromExternMaterializer(ctx: CodegenContext, vecTypeIdx: 
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [resultType], "$vec_from_extern_type");
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.mod.functions.push({
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
     name,
     typeIdx,
     locals: fctx.locals,
@@ -596,16 +626,29 @@ function buildTupleFromIterableFallback(
   if (externLocal === undefined) {
     return [{ op: "ref.null", typeIdx: tupleTypeIdx } as Instr];
   }
+  // (#2995) In host-free targets (standalone / WASI) the host `__array_from_iter`
+  // import is unavailable — emitting it leaks `env::__array_from_iter` and breaks
+  // zero-import instantiation. Materialize through the NATIVE `__array_from_iter_n`
+  // instead (registered by `ensureNativeArrayFromIterN`, #2904), passing `-1` for
+  // an unbounded drain that is byte-semantics-equivalent to the host
+  // `__array_from_iter` (fully drain the iterable, then index each tuple slot via
+  // `__extern_get_idx`). Host mode keeps the JS-host `__array_from_iter` path
+  // unchanged (byte-inert). Mirrors the native ObjVec steering in
+  // `buildVecFromExternref`.
+  const useNativeFromIter = ctx.standalone || ctx.wasi;
+  if (useNativeFromIter) ensureNativeArrayFromIterN(ctx);
   // Register all helpers first so every ensureLateImport shift completes
   // before we freeze funcIdx values — otherwise a later ensureLateImport
   // could shift a previously-captured funcIdx and produce the wrong call.
-  ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeFromIter) {
+    ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
   ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
   ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
   ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  const iterIdx = ctx.funcMap.get("__array_from_iter");
+  const iterIdx = useNativeFromIter ? ctx.funcMap.get("__array_from_iter_n") : ctx.funcMap.get("__array_from_iter");
   const getIdxFn = ctx.funcMap.get("__extern_get_idx");
   const isUndefFn = ctx.funcMap.get("__extern_is_undefined");
   const unboxIdx = ctx.funcMap.get("__unbox_number");
@@ -647,9 +690,12 @@ function buildTupleFromIterableFallback(
     }
   }
 
-  // Result shape: if (isNull || isUndefined) then ref.null else build tuple
+  // Result shape: if (isNull || isUndefined) then ref.null else build tuple.
+  // Native `__array_from_iter_n(externref, f64)` takes a count arg — pass `-1`
+  // (unbounded drain, byte-semantics-equivalent to the host `__array_from_iter`).
   const buildTupleInstrs: Instr[] = [
     { op: "local.get", index: externLocal } as Instr,
+    ...(useNativeFromIter ? [{ op: "f64.const", value: -1 } as Instr] : []),
     { op: "call", funcIdx: iterIdx } as Instr,
     { op: "local.set", index: matLocal } as Instr,
     ...fieldExtracts,
@@ -948,6 +994,40 @@ function emitSafeStructConversion(
     return true;
   }
 
+  // (#2161 B0) Vec-SHAPED source struct → genuine vec: ELEMENT COPY, never the
+  // struct-narrow field copy below. `getVecInfo` only recognises structs NAMED
+  // `__vec_*`, so the `$__regexp_match_vec` subtype (a `{length, data}` vec
+  // prefix + index/input/groups/indices result fields, #1914/#2588/#2589)
+  // missed Case 2 above and fell into struct narrowing. Narrowing "copies" the
+  // `data` field with a guarded ref-cast to the DESTINATION's array type —
+  // `__arr_ref_<anyStr>` never passes `ref.test $__arr_externref`, so the else
+  // arm produced null and the trailing non-null assert TRAPPED ("dereferencing
+  // a null pointer": every harness call passing a match result to an `any[]`
+  // param, e.g. `assert_compareArray("foo".match(re), ["foo"])`). Element-wise
+  // copy coerces each nullable-native-string capture to the destination element
+  // (null captures = `undefined` flow through as null externrefs). Checked
+  // AFTER the declared-subtype fast path so a match-vec flowing to its own base
+  // vec keeps identity (no copy).
+  if (!srcVec) {
+    const vecShaped = getVecShapedInfo(ctx, fromTypeIdx);
+    if (vecShaped) {
+      const dstVec = getVecInfo(ctx, toTypeIdx);
+      if (dstVec) {
+        const srcRefIdx =
+          vecShaped.elemType.kind === "ref" || vecShaped.elemType.kind === "ref_null"
+            ? (vecShaped.elemType as { typeIdx: number }).typeIdx
+            : undefined;
+        const dstRefIdx =
+          dstVec.elemType.kind === "ref" || dstVec.elemType.kind === "ref_null"
+            ? (dstVec.elemType as { typeIdx: number }).typeIdx
+            : undefined;
+        if (vecShaped.elemType.kind !== dstVec.elemType.kind || srcRefIdx !== dstRefIdx) {
+          return emitVecToVecBody(ctx, fctx, fromTypeIdx, toTypeIdx, vecShaped, dstVec);
+        }
+      }
+    }
+  }
+
   // Case 3: struct narrowing — destination fields are a subset of source fields
   const narrowInfo = getStructNarrowInfo(ctx, fromTypeIdx, toTypeIdx);
   if (narrowInfo) {
@@ -1106,11 +1186,17 @@ function emitVecToVecBody(
   // dstArr[i] = coerce(srcArr[i])
   fctx.body.push({ op: "local.get", index: dstArrLocal });
   fctx.body.push({ op: "local.get", index: iLocal });
-  // Read source element
+  // Read source element. (#2934 1c) A packed i8/i16 source (byte/short typed
+  // array backing) must read with `array.get_u`/`get_s` — a plain `array.get`
+  // on a packed array is invalid Wasm. No view name exists on this generic
+  // coercion path (the i8_byte array type is shared by Int8Array AND
+  // Uint8Array), so use the storage-kind heuristic; the read value is the
+  // widened i32.
   fctx.body.push({ op: "local.get", index: srcLocal });
   fctx.body.push({ op: "struct.get", typeIdx: fromTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "array.get", typeIdx: srcVec.arrTypeIdx });
+  fctx.body.push({ op: elemGetOp(srcVec.elemType, undefined), typeIdx: srcVec.arrTypeIdx } as Instr);
+  const readElemType = unpackedElemType(srcVec.elemType);
   // Coerce element type. Important: comparing only `.kind` is insufficient
   // when both sides are `ref` / `ref_null` to DIFFERENT struct types — e.g.
   // a vec of `IncompatibleKeyError` being copied into a vec of `__anon_24`
@@ -1118,15 +1204,15 @@ function emitVecToVecBody(
   // `kind: "ref"`, so the old check skipped the coercion and the
   // `array.set` below saw a value of the wrong element type, failing Wasm
   // validation. Force a coercion when the typeIdx differs too.
-  const srcKind = srcVec.elemType.kind;
+  const srcKind = readElemType.kind;
   const dstKind = dstVec.elemType.kind;
   const srcRefIdx =
-    srcKind === "ref" || srcKind === "ref_null" ? (srcVec.elemType as { typeIdx: number }).typeIdx : undefined;
+    srcKind === "ref" || srcKind === "ref_null" ? (readElemType as { typeIdx: number }).typeIdx : undefined;
   const dstRefIdx =
     dstKind === "ref" || dstKind === "ref_null" ? (dstVec.elemType as { typeIdx: number }).typeIdx : undefined;
   const needsCoerce = srcKind !== dstKind || srcRefIdx !== dstRefIdx;
   if (needsCoerce) {
-    coerceType(ctx, fctx, srcVec.elemType, dstVec.elemType);
+    coerceType(ctx, fctx, readElemType, dstVec.elemType);
   }
   // Write to destination
   fctx.body.push({ op: "array.set", typeIdx: dstVec.arrTypeIdx });
@@ -1301,6 +1387,9 @@ export function coerceType(
       }
       // For related struct types (subtypes), use guarded ref.cast to avoid
       // illegal cast traps when runtime type differs from static type.
+      // (#2853 park fix) If from/to are same-layout sibling shapes, this guarded
+      // downcast would trap post-brand — exclude both from nominal branding.
+      markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromIdx, toIdx);
       {
         const guardFrom = from.kind === "ref_null" ? ({ kind: "anyref" } as ValType) : ({ kind: "anyref" } as ValType);
         const tmpGuard = allocTempLocal(fctx, guardFrom);
@@ -1349,6 +1438,8 @@ export function coerceType(
     const toRefNullIdx = (to as { typeIdx: number }).typeIdx;
     if (fromRefIdx !== toRefNullIdx) {
       if (!emitSafeStructConversion(ctx, fctx, fromRefIdx, toRefNullIdx)) {
+        // (#2853 park fix) same-layout sibling shapes → exclude from branding.
+        markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromRefIdx, toRefNullIdx);
         // Guarded cast: ref $X → ref_null $Y — avoid illegal cast trap
         const tmpRefNull = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.tee", index: tmpRefNull });
@@ -1424,6 +1515,8 @@ export function coerceType(
     const toNonNullIdx = (to as { typeIdx: number }).typeIdx;
     if (fromNullIdx !== toNonNullIdx) {
       if (!emitSafeStructConversion(ctx, fctx, fromNullIdx, toNonNullIdx)) {
+        // (#2853 park fix) same-layout sibling shapes → exclude from branding.
+        markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromNullIdx, toNonNullIdx);
         // Guarded cast: ref_null $X → ref $Y
         const tmpCast = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.tee", index: tmpCast });
@@ -1440,7 +1533,27 @@ export function coerceType(
         releaseTempLocal(fctx, tmpCast);
       }
     }
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    // (#2161 family B0) NATIVE-STRING targets skip the non-null assert: a null
+    // native-string ref is the in-band `undefined` sentinel, not a bug. The
+    // non-strict checker ERASES `undefined` from unions, so a
+    // `["a", undefined, "c"]` literal types as `string[]` while its lowered
+    // array legitimately stores a null slot — the element read is `ref_null`
+    // and the `string`-typed sink requests `ref`. Asserting non-null here
+    // turned every such value into a "dereferencing a null pointer" trap (the
+    // standalone RegExp exec-vs-expected-array / split-harness family, 100+
+    // tests). Passing the null through is validation-safe — every native-string
+    // sink is physically NULLABLE (`string` params/locals/struct fields all
+    // encode `(ref null $AnyString)`) — and matches the behaviour of a
+    // `string | undefined` local, whose null already flows through compare/
+    // concat/call paths. Non-string ref targets keep the assert: their sinks
+    // (method dispatch on typed struct receivers) genuinely assume non-null.
+    const isNativeStringTarget =
+      ctx.nativeStrings &&
+      ((ctx.anyStrTypeIdx >= 0 && toNonNullIdx === ctx.anyStrTypeIdx) ||
+        (ctx.nativeStrTypeIdx >= 0 && toNonNullIdx === ctx.nativeStrTypeIdx));
+    if (!isNativeStringTarget) {
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    }
     return;
   }
 
@@ -1699,6 +1812,33 @@ export function coerceType(
       const tupleFields = getTupleFields(ctx, toIdx);
       if (tupleFields) {
         elseBranch = buildTupleFromExternref(ctx, fctx, tmpAnyLocal, toIdx, tupleFields, tmpExternLocal);
+      } else if (
+        // (#2161 B1) externref → native `$AnyString` where the cast failed: the
+        // source may be a boxed-`new String(...)` wrapper ($Object carrying its
+        // [[StringData]] under the FLAG_INTERNAL WRAPPER_PRIMITIVE_KEY slot). The
+        // generic `ref.test $AnyString` misses it (a wrapper is an object, not a
+        // string) so it was dropped to null → downstream `__str_flatten` trapped
+        // on `new String(s).split/search/match/replace`. Recover the wrapper's
+        // primitive string via `__wrapper_string_value` (the same internal-slot
+        // read `__to_primitive` does inline, WITHOUT the OrdinaryToPrimitive
+        // valueOf/toString dispatch — a bare slot probe). Gated on the object
+        // runtime already being present (`ensureWrapperStringValueHelper` returns
+        // -1 for gc/host mode or a string-free / object-free module) so string-
+        // free programs stay byte-identical. Only the `$AnyString` supertype
+        // target qualifies — the wrapper's stored string is a native-string
+        // subtype of it, so the helper's `ref.cast $AnyString` never traps;
+        // narrower string-subtype targets keep the prior null fallthrough.
+        toIdx === ctx.anyStrTypeIdx &&
+        ctx.anyStrTypeIdx >= 0 &&
+        ctx.objectRuntimeTypes !== undefined &&
+        ctx.funcMap.has("__obj_find") &&
+        ensureWrapperStringValueHelper(ctx) >= 0
+      ) {
+        const wrapperValIdx = ctx.funcMap.get("__wrapper_string_value")!;
+        elseBranch = [
+          { op: "local.get", index: tmpExternLocal },
+          { op: "call", funcIdx: wrapperValIdx },
+        ];
       } else {
         elseBranch = [{ op: "ref.null", typeIdx: toIdx } as Instr];
       }
@@ -1832,8 +1972,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to externref if needed
-        const funcDefIdx = toPrimFuncIdx - ctx.numImportFuncs;
-        const funcDef = funcDefIdx >= 0 ? ctx.mod.functions[funcDefIdx] : undefined;
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         // Default to "externref" for imports (funcDefIdx < 0) which typically return externref
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "externref";
@@ -2095,7 +2234,7 @@ export function coerceType(
         pushStringHint(ctx, fctx, hint);
         fctx.body.push({ op: "call", funcIdx: toPrimFuncIdx });
         // Coerce result to f64 if needed
-        const funcDef = ctx.mod.functions[toPrimFuncIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, toPrimFuncIdx);
         const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
         const retKind = (funcType?.kind === "func" && funcType.results?.[0]?.kind) || "f64";
         if (retKind === "i32") {
@@ -2124,8 +2263,7 @@ export function coerceType(
             // Call ClassName_valueOf(self) — self is already on stack
             fctx.body.push({ op: "call", funcIdx: valueOfFuncIdx });
             // Check return type — if not f64, convert to f64
-            const voFuncDefIdx = valueOfFuncIdx - ctx.numImportFuncs;
-            const voFuncDef = voFuncDefIdx >= 0 ? ctx.mod.functions[voFuncDefIdx] : undefined;
+            const voFuncDef = definedFuncAt(ctx, valueOfFuncIdx);
             const funcType = voFuncDef ? ctx.mod.types[voFuncDef.typeIdx] : undefined;
             if (funcType?.kind === "func" && funcType.results?.[0]?.kind === "i32") {
               fctx.body.push({ op: "f64.convert_i32_s" });
@@ -2432,7 +2570,7 @@ export function coerceType(
           // function rather than a closure stored in the struct field.
           const standaloneValueOf = ctx.funcMap.get(`${name}_valueOf`);
           if (standaloneValueOf !== undefined) {
-            const funcType = ctx.mod.types[ctx.mod.functions[standaloneValueOf - ctx.numImportFuncs]?.typeIdx ?? -1];
+            const funcType = ctx.mod.types[definedFuncAt(ctx, standaloneValueOf)?.typeIdx ?? -1];
             const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
             // (#1525b §7.1.1.1 step 6) For object-ref return, we must re-route
             // through the host helper using the ORIGINAL struct. Save it before
@@ -2629,7 +2767,7 @@ function tryToStringFallback(
   const toStrFuncIdx = ctx.funcMap.get(`${structName}_toString`);
   if (toStrFuncIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx: toStrFuncIdx });
-    const funcType = ctx.mod.types[ctx.mod.functions[toStrFuncIdx - ctx.numImportFuncs]?.typeIdx ?? -1];
+    const funcType = ctx.mod.types[definedFuncAt(ctx, toStrFuncIdx)?.typeIdx ?? -1];
     const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
     emitToStringResultToF64ByKind(ctx, fctx, retKind);
     return true;
@@ -2686,6 +2824,19 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
   // string is cast to the concrete $AnyString so the value type is exact.
   const normaliseToString = (retKind: string | undefined): void => {
+    // (#2934 slice 3) A dispatched method whose Wasm func type has NO result —
+    // it either always throws (never; e.g. `toString(){ throw "x"; }`,
+    // S15.5.4.6_A4_T2) or returns undefined (void). Nothing is on the stack, so
+    // the arms below would under-feed their consumer (`call $__any_to_string`
+    // with 0 operands — "not enough arguments on the stack"). Per §7.1.1
+    // OrdinaryToPrimitive, a toString that yields no primitive ends in
+    // TypeError; emit that throw — for the always-throwing case it is dead
+    // code after the call, and `throw` leaves the stack polymorphic so the
+    // enclosing arm's declared `ref $AnyString` result validates.
+    if (retKind === undefined || retKind === "void") {
+      emitThrowTypeError(ctx, fctx, "Cannot convert object to primitive value");
+      return;
+    }
     if (retKind === "externref" || retKind === "ref_extern") {
       // externref holding a native string → any.convert_extern + cast.
       fctx.body.push({ op: "any.convert_extern" } as Instr);
@@ -2715,8 +2866,7 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   };
 
   const funcResultKind = (funcIdx: number): string | undefined => {
-    const defIdx = funcIdx - ctx.numImportFuncs;
-    const def = defIdx >= 0 ? ctx.mod.functions[defIdx] : undefined;
+    const def = definedFuncAt(ctx, funcIdx);
     const ft = def ? ctx.mod.types[def.typeIdx] : undefined;
     return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
   };

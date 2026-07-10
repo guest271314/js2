@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("negative zero modulus (#175)", () => {
   it("-1 % -1 produces -0", async () => {

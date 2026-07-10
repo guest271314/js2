@@ -28,7 +28,8 @@ import {
   resolveWasmType,
   TYPED_ARRAY_NAMES,
 } from "../index.js";
-import { getSubviewArrTypeIdx, isSubviewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write
+import { getSubviewArrTypeIdx, isSubviewTypeIdx, isTaViewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write; (#3054 B1) TA view write
+import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write; (#3057) dynamic view element write
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
@@ -36,7 +37,11 @@ import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for compound
 import {
   emitAlternateStructSetDispatch,
+  emitCapturedBoxGlobalRead,
+  emitCapturedBoxGlobalWrite,
   emitNullGuardedStructGet,
+  getCapturedBoxGlobal,
+  isNumericIndexExpression,
   isProvablyNonNull,
   isSafeBoundsEliminated,
   tryEmitDeleteAwareDynamicSet,
@@ -67,6 +72,7 @@ import {
   widenLocalToNullable,
 } from "./helpers.js";
 import {
+  emitUndefined,
   ensureLateImport,
   flushLateImportShifts,
   patchStructNewForAddedField,
@@ -363,6 +369,30 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       emitMappedArgParamSync(ctx, fctx, localIdx, resultType);
       return resultType;
     }
+    // (#3039) Boxed captured global — write THROUGH the ref cell (struct.set
+    // field 0), not into the box global (which would replace the shared cell
+    // with the raw value / null). Mirrors the boxedCaptures local-box `=` path.
+    const capturedBoxSimple = getCapturedBoxGlobal(ctx, name);
+    if (capturedBoxSimple !== undefined) {
+      const resultType = compileExpression(ctx, fctx, expr.right, capturedBoxSimple.valType);
+      if (!resultType) {
+        reportError(ctx, expr, "Failed to compile assignment value");
+        return null;
+      }
+      if (!valTypesMatch(resultType, capturedBoxSimple.valType)) {
+        coerceType(ctx, fctx, resultType, capturedBoxSimple.valType);
+      }
+      const tmpVal = allocLocal(fctx, `__box_g_tmp_${fctx.locals.length}`, capturedBoxSimple.valType);
+      fctx.body.push({ op: "local.set", index: tmpVal });
+      // entry.globalIdx is read fresh inside the helper AFTER RHS compilation,
+      // and `capturedBoxGlobals` is shifted in the global-index fixup, so a
+      // string-constant global added while compiling the RHS can't stale it.
+      emitCapturedBoxGlobalWrite(fctx, capturedBoxSimple, tmpVal);
+      // Assignment expression result: the (coerced) assigned value.
+      fctx.body.push({ op: "local.get", index: tmpVal });
+      return capturedBoxSimple.valType;
+    }
+
     // Check captured globals
     const capturedIdx = ctx.capturedGlobals.get(name);
     if (capturedIdx !== undefined) {
@@ -592,6 +622,17 @@ function emitIdentifierWriteFromLocal(
     const localType = getLocalType(fctx, localIdx);
     pushRhsCoerced(localType);
     fctx.body.push({ op: "local.set", index: localIdx });
+    return;
+  }
+
+  // (#3039) Boxed captured global — destructuring / for-of style write through
+  // the ref cell rather than overwriting the box global.
+  const capturedBoxWrite = getCapturedBoxGlobal(ctx, name);
+  if (capturedBoxWrite !== undefined) {
+    pushRhsCoerced(capturedBoxWrite.valType);
+    const tmpVal = allocLocal(fctx, `__box_gw_${fctx.locals.length}`, capturedBoxWrite.valType);
+    fctx.body.push({ op: "local.set", index: tmpVal });
+    emitCapturedBoxGlobalWrite(fctx, capturedBoxWrite, tmpVal);
     return;
   }
 
@@ -2123,26 +2164,29 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
-  // native object-runtime impl under --target standalone — no leaked
-  // `env::__extern_get` host import — and to the host import in JS-host mode).
-  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  // (#3100 S4) Standalone/WASI element reads use the carrier-aware native
+  // `__extern_get_idx(mat, f64 i)` (#2190 vec/$ObjVec arms) — the native
+  // `__extern_get` is string-keyed and misses vec carriers. Host byte-identical.
+  const useIdxReads = ctx.standalone || ctx.wasi;
+  const readName = useIdxReads ? "__extern_get_idx" : "__extern_get";
+  const keyType: ValType = useIdxReads ? { kind: "f64" } : { kind: "externref" };
+  ensureLateImport(ctx, readName, [{ kind: "externref" }, keyType], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  let getIdx = ctx.funcMap.get("__extern_get");
+  let getIdx = ctx.funcMap.get(readName);
   if (getIdx === undefined) return null;
 
-  // Ensure __box_number is available (needed to convert index to externref)
+  // __box_number: host mode only — it boxes the index key for `__extern_get`.
   let boxIdx = ctx.funcMap.get("__box_number");
-  if (boxIdx === undefined) {
+  if (!useIdxReads && boxIdx === undefined) {
     const importsBefore = ctx.numImportFuncs;
     const boxType = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "__box_number", { kind: "func", typeIdx: boxType });
     shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
     boxIdx = ctx.funcMap.get("__box_number");
     // Also refresh getIdx since it may have shifted
-    getIdx = ctx.funcMap.get("__extern_get");
+    getIdx = ctx.funcMap.get(readName);
   }
-  if (boxIdx === undefined || getIdx === undefined) return null;
+  if ((!useIdxReads && boxIdx === undefined) || getIdx === undefined) return null;
 
   for (let i = 0; i < target.elements.length; i++) {
     const element = target.elements[i]!;
@@ -2158,13 +2202,11 @@ function compileExternrefArrayDestructuringAssignment(
         }
         let sliceIdx = ctx.funcMap.get("__extern_slice");
         if (sliceIdx === undefined) {
-          const importsBefore = ctx.numImportFuncs;
-          const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-          addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-          shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+          ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
           sliceIdx = ctx.funcMap.get("__extern_slice");
           boxIdx = ctx.funcMap.get("__box_number");
-          getIdx = ctx.funcMap.get("__extern_get");
+          getIdx = ctx.funcMap.get(readName);
         }
         if (sliceIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: tmpLocal });
@@ -2176,10 +2218,9 @@ function compileExternrefArrayDestructuringAssignment(
       continue;
     }
 
-    // Emit: __extern_get(tmpLocal, box(i)) -> externref
     fctx.body.push({ op: "local.get", index: tmpLocal });
     fctx.body.push({ op: "f64.const", value: i });
-    fctx.body.push({ op: "call", funcIdx: boxIdx! });
+    if (!useIdxReads) fctx.body.push({ op: "call", funcIdx: boxIdx! });
     fctx.body.push({ op: "call", funcIdx: getIdx! });
 
     const elemType: ValType = { kind: "externref" };
@@ -3831,6 +3872,26 @@ function compileElementAssignment(
 
   // Non-ref types (externref, f64, i32): fallback to __extern_set(obj, key, val)
   if (arrType.kind !== "ref" && arrType.kind !== "ref_null") {
+    // (#3057) A boxed `$__ta_dyn_view` (dynamic `new <ctorVar>(rab)`) reaches here as
+    // an externref receiver with a numeric index. Its element kind is a RUNTIME
+    // field, so `__extern_set` can't byte-encode it (writes silently no-op'd —
+    // #3054 D+E banked this). Route through the runtime-kind byte codec, which
+    // `ref.test $__ta_dyn_view` FIRST and falls through to the EXACT `__extern_set`
+    // path (via compileExternSetFallback semantics) for any non-dyn-view receiver,
+    // so plain-array `any[i]=v` is unaffected. Gated on the module pre-scan
+    // (`moduleUsesDynTaView`) so a helper compiled before the construct still routes
+    // correctly; byte-inert when the module has no dynamic TA view. Standalone lane.
+    if (
+      arrType.kind === "externref" &&
+      ctx.standalone &&
+      ctx.moduleUsesDynTaView &&
+      isNumericIndexExpression(ctx, target.argumentExpression)
+    ) {
+      const dynR = emitTaDynViewElementSet(ctx, fctx, target.argumentExpression, value, (e, h) =>
+        compileExpression(ctx, fctx, e, h),
+      );
+      if (dynR) return dynR;
+    }
     return compileExternSetFallback(ctx, fctx, target, value, arrType);
   }
   const typeIdx = (arrType as { typeIdx: number }).typeIdx;
@@ -3842,6 +3903,19 @@ function compileElementAssignment(
   // 2-field `isVecStructAssign` test is false and the field path would mis-handle
   // it. Compile-time discriminated by the receiver typeIdx; plain vec arrays never
   // reach this arm. The receiver ref is already on the stack (from line ~2765).
+  // (#3054 B1) `$__ta_view` target (shared-backing TypedArray over an
+  // ArrayBuffer): byte-encode `ta[i] = v` little-endian into the SHARED buffer
+  // vec (true aliasing → sibling views / DataViews observe it). Must run BEFORE
+  // the 2-field vec-struct assign check (a `$__ta_view` is a 3-field struct).
+  // Compile-time discriminated by receiver typeIdx. Receiver ref already on the
+  // stack (from the `compileExpression(target.expression)` above).
+  if (typeDef?.kind === "struct" && isTaViewTypeIdx(ctx, typeIdx)) {
+    const r = emitTaViewElementSet(ctx, fctx, typeIdx, target.argumentExpression, value, (e, h) =>
+      compileExpression(ctx, fctx, e, h),
+    );
+    if (r) return r;
+  }
+
   if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
     const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
     const subArrDef = ctx.mod.types[subArrTypeIdx];
@@ -4177,6 +4251,50 @@ function compileElementAssignment(
       ],
     } as Instr);
 
+    // (#2773 S7) Gap-fill for an index-grow write PAST the current length on an
+    // externref-element vec: `a[idx] = v` with idx > length leaves
+    // [length, idx) holding the array.new_default null (or a stale popped
+    // slot), and once `vec.length` is bumped to idx+1 below those slots are
+    // IN-BOUNDS — so a read returned `null` where JS reads `undefined`
+    // (test262 reduceRight "-c-ii-5": `kIndex[3]=1` on an empty tracking array,
+    // then `typeof kIndex[2]` must be "undefined"). Fill the gap with the JS
+    // `undefined` value so the length-bounded read (property-access) returns it
+    // directly. True HOLE fidelity ($Hole sentinel + HOF visit-skip) is #2001
+    // S2/S3 — out of scope here; `undefined` is what §OrdinaryGet reads either
+    // way. Externref elements only: an f64/i32 slot cannot hold `undefined`
+    // (its gap stays the numeric default — #2001 S3 boundary). Standalone is
+    // neutral: `emitUndefined` falls back to `ref.null.extern` there, which is
+    // what `array.new_default` already produced.
+    if (arrDef.element.kind === "externref" || arrDef.element.kind === "ref_extern") {
+      // undefined → local, emitted IMPERATIVELY so the `__get_undefined` late
+      // import registers/shifts through the normal path (never baked inside a
+      // detached branch array).
+      emitUndefined(ctx, fctx);
+      const gapUndefLocal = allocLocal(fctx, `__gap_undef_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: gapUndefLocal });
+      const gapOldLenLocal = allocLocal(fctx, `__gap_len_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // current length
+      fctx.body.push({ op: "local.set", index: gapOldLenLocal });
+      // if (idx > length) array.fill(data, length, undefined, idx - length)
+      fctx.body.push({ op: "local.get", index: idxLocal });
+      fctx.body.push({ op: "local.get", index: gapOldLenLocal });
+      fctx.body.push({ op: "i32.gt_s" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "local.get", index: gapUndefLocal } as Instr,
+          { op: "local.get", index: idxLocal } as Instr,
+          { op: "local.get", index: gapOldLenLocal } as Instr,
+          { op: "i32.sub" } as Instr,
+          { op: "array.fill", typeIdx: arrTypeIdx } as Instr,
+        ],
+      } as Instr);
+    }
+
     // array.set: data[idx] = val (using potentially grown data)
     fctx.body.push({ op: "local.get", index: dataLocal });
     fctx.body.push({ op: "local.get", index: idxLocal });
@@ -4429,6 +4547,7 @@ export function compileLogicalAssignment(
   let storage:
     | { kind: "local"; index: number; type: ValType }
     | { kind: "captured"; index: number; type: ValType }
+    | { kind: "capturedBox"; box: { globalIdx: number; refCellTypeIdx: number; valType: ValType }; type: ValType }
     | { kind: "module"; index: number; type: ValType }
     | null = null;
 
@@ -4441,6 +4560,13 @@ export function compileLogicalAssignment(
       index: localIdx,
       type: localType ?? { kind: "f64" },
     };
+  }
+  if (!storage) {
+    // (#3039) Boxed captured global — read/write THROUGH the ref cell.
+    const capturedBoxLogical = getCapturedBoxGlobal(ctx, name);
+    if (capturedBoxLogical !== undefined) {
+      storage = { kind: "capturedBox", box: capturedBoxLogical, type: capturedBoxLogical.valType };
+    }
   }
   if (!storage) {
     const capturedIdx = ctx.capturedGlobals.get(name);
@@ -4486,12 +4612,24 @@ export function compileLogicalAssignment(
     return ctx.moduleGlobals.get(name)!;
   };
   const emitGet = () => {
-    if (storage!.kind === "local") fctx.body.push({ op: "local.get", index: getStorageIndex() });
-    else fctx.body.push({ op: "global.get", index: getStorageIndex() });
+    if (storage!.kind === "capturedBox") {
+      emitCapturedBoxGlobalRead(ctx, fctx, storage!.box);
+    } else if (storage!.kind === "local") {
+      fctx.body.push({ op: "local.get", index: getStorageIndex() });
+    } else {
+      fctx.body.push({ op: "global.get", index: getStorageIndex() });
+    }
   };
   const emitSet = () => {
-    if (storage!.kind === "local") fctx.body.push({ op: "local.tee", index: getStorageIndex() });
-    else {
+    if (storage!.kind === "capturedBox") {
+      // Value on stack → stash, write through the cell, re-read for the result.
+      const tmpVal = allocLocal(fctx, `__box_glog_${fctx.locals.length}`, storage!.box.valType);
+      fctx.body.push({ op: "local.set", index: tmpVal });
+      emitCapturedBoxGlobalWrite(fctx, storage!.box, tmpVal);
+      emitCapturedBoxGlobalRead(ctx, fctx, storage!.box);
+    } else if (storage!.kind === "local") {
+      fctx.body.push({ op: "local.tee", index: getStorageIndex() });
+    } else {
       const idx = getStorageIndex();
       fctx.body.push({ op: "global.set", index: idx });
       fctx.body.push({ op: "global.get", index: idx });
@@ -5878,6 +6016,48 @@ export function compileCompoundAssignment(
     return { kind: "f64" };
   }
 
+  // (#3039) Boxed captured global compound-assign (`c += 1` in a method-
+  // shorthand / class-method / accessor body reading a transitively-captured
+  // boxed var). Read THROUGH the ref cell, apply the op, write back THROUGH the
+  // cell — never treat the box global as holding the scalar. Self-contained
+  // (sources the box from the global each time, no localMap rebind) to avoid a
+  // conditionally-set-local dominance hazard; mirrors the boxedCaptures
+  // local-box compound path below (string concat for externref cells, f64
+  // arithmetic with coerce-in/coerce-out for numeric cells).
+  const capturedBoxCompound = getCapturedBoxGlobal(ctx, name);
+  if (capturedBoxCompound !== undefined) {
+    const valType = capturedBoxCompound.valType;
+    // Read current value (null-guarded default for an uninitialized cell).
+    emitCapturedBoxGlobalRead(ctx, fctx, capturedBoxCompound);
+
+    // NOTE: string `+=` concat on an EXTERNREF boxed cell (a string-typed boxed
+    // transitively-captured var updated with `+=` inside an accessor/method) is
+    // intentionally NOT special-cased here — it goes through the numeric path
+    // below (ToNumber both sides). That sub-case is vanishingly rare, already
+    // miscompiled on main (the whole boxed-transitive-capture-accessor path was
+    // broken), and is out of scope for this fix; adding it back would require
+    // direct type-checker probing (against the #1930 oracle ratchet). The
+    // numeric/bitwise path handles every #3039 acceptance case (f64/i32 cells).
+
+    // Numeric / bitwise: the op switch is f64-based, so promote a non-f64 cell
+    // value (and the RHS) to f64 and coerce the result back on writeback.
+    const needsCoerce = valType.kind !== "f64";
+    if (needsCoerce) coerceType(ctx, fctx, valType, { kind: "f64" });
+    const compoundRhs = compileExpression(ctx, fctx, expr.right, needsCoerce ? { kind: "f64" } : valType);
+    if (!compoundRhs) {
+      reportError(ctx, expr, "Failed to compile compound assignment RHS");
+      return null;
+    }
+    if (needsCoerce && compoundRhs.kind !== "f64") coerceType(ctx, fctx, compoundRhs, { kind: "f64" });
+    emitCompoundOp(ctx, fctx, op);
+    if (needsCoerce) coerceType(ctx, fctx, { kind: "f64" }, valType);
+    const tmpRes = allocLocal(fctx, `__box_gcmp_${fctx.locals.length}`, valType);
+    fctx.body.push({ op: "local.set", index: tmpRes });
+    emitCapturedBoxGlobalWrite(fctx, capturedBoxCompound, tmpRes);
+    fctx.body.push({ op: "local.get", index: tmpRes });
+    return valType;
+  }
+
   // String += : concat instead of numeric add.
   // Skip when the binding is a boxed mutable capture (ref cell): the boxed
   // path below (assignment.ts boxedCaptures branch) loads/stores through the
@@ -6165,8 +6345,8 @@ export function compileCompoundAssignment(
     return boxed.valType;
   }
 
-  const localType = getLocalType(fctx, localIdx) ?? { kind: "f64" as const };
-  const needsLocalCoerce = localType.kind !== "f64";
+  let localType = getLocalType(fctx, localIdx) ?? { kind: "f64" as const };
+  let needsLocalCoerce = localType.kind !== "f64";
 
   fctx.body.push({ op: "local.get", index: localIdx });
   if (needsLocalCoerce) coerceType(ctx, fctx, localType, { kind: "f64" });
@@ -6179,6 +6359,28 @@ export function compileCompoundAssignment(
     return null;
   }
   if (compoundRhsType3.kind !== "f64") coerceType(ctx, fctx, compoundRhsType3, { kind: "f64" });
+
+  // (#3024) Compiling the RHS can PROMOTE this local's slot from a concrete
+  // primitive to externref mid-expression — e.g. `x *= eval("var x = 2;")`,
+  // where the direct-eval body redeclares `x` (the re-declaration re-type in
+  // statements/variables.ts). The left value was already emitted above as a raw
+  // `local.get` of the then-f64 slot with no coercion, so it is now a stale
+  // externref buried under the (f64) RHS on the stack — and the writeback below
+  // would `local.tee` an f64 into what is now an externref slot. Both are invalid
+  // Wasm. Detect the flip (slot was primitive when read, is externref now) and
+  // repair: unbox the buried left operand to f64 (save RHS, coerce left, restore
+  // RHS), then switch the writeback to re-box via the externref path. Guarded on
+  // an actual primitive→externref flip, so ordinary compound assignments are
+  // byte-inert.
+  const localTypeAfter = getLocalType(fctx, localIdx);
+  if (!needsLocalCoerce && localType.kind === "f64" && localTypeAfter?.kind === "externref") {
+    const tmpRhs = allocLocal(fctx, `__cmp3024_${fctx.locals.length}`, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: tmpRhs });
+    coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
+    fctx.body.push({ op: "local.get", index: tmpRhs });
+    localType = { kind: "externref" };
+    needsLocalCoerce = true;
+  }
 
   emitCompoundOp(ctx, fctx, op);
 

@@ -2,9 +2,9 @@
 id: 2782
 title: "Hybrid IR Row 5 — no-box NUMBER-local proof gate"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: medium
 horizon: m

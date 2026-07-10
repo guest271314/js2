@@ -439,6 +439,9 @@ function irTypeKey(t: IrType): string {
     const parts = [...t.members].map(irTypeKey).sort();
     return `u:${parts.join("|")}`;
   }
+  // #2949 — dynamic keyed with its optional JsTag refinement (distinct
+  // refinements are distinct types under irTypeEquals; keys must match that).
+  if (t.kind === "dynamic") return t.tag === undefined ? "dyn" : `dyn:${t.tag}`;
   return `b:${irTypeKey(t.inner)}`;
 }
 
@@ -648,7 +651,13 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":
@@ -678,11 +687,18 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 4 (#1169d): class ops.
     case "class.new":
       return instr.args;
+    case "class.alloc":
+      // #3000-C: no SSA operands.
+      return [];
     case "class.get":
       return [instr.value];
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
+      return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
       return [instr.receiver, ...instr.args];
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
@@ -750,6 +766,9 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 7b (#1169f): yield* delegation.
     case "gen.yieldStar":
       return [instr.inner];
+    // #2951 — generator `return <value>` stash.
+    case "gen.setReturn":
+      return [instr.value];
     // Slice 9 (#1169h) — exception handling.
     case "throw":
       return [instr.value];
@@ -788,6 +807,22 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "while.loop":
     case "for.loop":
       return [instr.condValue];
+    // #2952 slice 2 — br.label has no SSA operands; if.stmt surfaces its
+    // cond plus arm-buffer uses (same deep pattern as `if` above, so the
+    // monomorphize use-counting sees outer values referenced in arms).
+    case "br.label":
+      return [];
+    case "if.stmt": {
+      const out: IrValueId[] = [instr.cond];
+      const walk = (instrs: readonly IrInstr[]): void => {
+        for (const sub of instrs) {
+          for (const u of collectUses(sub)) out.push(u);
+        }
+      };
+      walk(instr.then);
+      walk(instr.else);
+      return out;
+    }
     // (#1373 Phase B) Async / await IR nodes — single operand.
     case "await":
       return [instr.operand];
@@ -795,5 +830,8 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.value];
     case "async.throw":
       return [instr.reason];
+    // (#2856) early.return — the optional return value is a direct use.
+    case "early.return":
+      return instr.value !== null ? [instr.value] : [];
   }
 }

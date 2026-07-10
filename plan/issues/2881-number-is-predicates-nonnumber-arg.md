@@ -4,7 +4,7 @@ title: "Number.is{Integer,Finite,NaN,SafeInteger} coerce non-Number args (boolea
 status: done
 area: codegen
 language_feature: number-predicates
-sprint: current
+sprint: 69
 priority: medium
 horizon: s
 assignee: ttraenkler/explore3

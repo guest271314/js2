@@ -3,9 +3,9 @@ id: 2804
 title: "host path: object spread `{...a}` & Object.assign drop copied values/keys (closed-struct representation mismatch)"
 status: done
 assignee: ttraenkler/sendev-objspread
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: medium
 feasibility: medium

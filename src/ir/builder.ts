@@ -8,8 +8,10 @@
 
 import {
   asBlockId,
+  asLabelId,
   asValueId,
   irVal,
+  irDynamic,
   AllocKind,
   AllocSiteId,
   IrBinop,
@@ -22,6 +24,7 @@ import {
   IrFunction,
   IrGlobalRef,
   IrInstr,
+  IrLabelId,
   IrObjectShape,
   IrParam,
   IrSiteId,
@@ -34,6 +37,7 @@ import {
 } from "./nodes.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { Instr, ValType } from "./types.js";
+import { JsTag, jsTagUnboxKind } from "../codegen/js-tag.js";
 
 interface OpenBlock {
   readonly id: IrBlockId;
@@ -68,6 +72,10 @@ export class IrFunctionBuilder {
   // index of the `__gen_buffer` Wasm-local. Set when the generator
   // prologue is emitted in from-ast.
   private generatorBufferSlot: number | undefined = undefined;
+  // #2952 slice 2 — per-function loop-label allocator (see IrLabelId in
+  // nodes.ts). Labels identify loop frames for `br.label`; unlabeled
+  // break/continue resolve to the innermost loop's synthesised label.
+  private nextLabelId = 0;
 
   constructor(
     private readonly name: string,
@@ -310,6 +318,229 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  // --- dynamic value ops (#2949 S5.0) -------------------------------------
+  //
+  // Builder-level emit vocabulary for the `IrType.dynamic` boxed-any carrier:
+  // `box` erases a concrete value into the carrier, `unbox` reads a proven
+  // partition's payload back out, and `tag.test` classifies the carrier's
+  // runtime JS tag. These are the plumbing the S5.1–S5.P dynamic-use-in-body
+  // producers consume; the node-level LOWERING already landed in slices 2/3
+  // (`lower.ts` box/unbox/tag.test cases → `resolveDynamicLowering` →
+  // `IrDynamicLowering`, backed by `$AnyValue` / `__any_box_*` on WasmGC and
+  // the `__box_number` / classifier import family on host).
+  //
+  // S5.0 is byte-inert by construction: these methods only APPEND verifier-
+  // clean nodes, and no producer calls them yet (from-ast/select unchanged),
+  // so no compiled function's Wasm changes (prove-emit-identity IDENTICAL).
+
+  /**
+   * Emit `box{value → toType}` — erase a concrete value into a boxed-any
+   * carrier (`toType.kind === "dynamic"`) or a scalar tagged union
+   * (`toType.kind === "union"`). Result type is `toType`.
+   *
+   * The operand must NOT itself be dynamic — a re-box is provably redundant
+   * (verifier R1); this is asserted here so a producer bug surfaces at
+   * construction time rather than as a malformed double-boxed carrier that
+   * only fails later in verify/lower.
+   *
+   * A `dynamic` `toType` may carry a `tag` refinement (`irDynamic(JsTag.X)`);
+   * lowering maps it onto the canonical boxing helper's representation hint
+   * (e.g. a Boolean-refined i32 boxes as tag-4, not an unbranded number),
+   * so producers that statically know the partition SHOULD refine the box
+   * target — see slice-3 note 4 in the #2949 issue file.
+   */
+  emitBox(value: IrValueId, toType: IrType): IrValueId {
+    if (this.typeOf(value).kind === "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitBox operand ${value} is already dynamic — re-boxing a dynamic value is invalid (#2949 R1) (func ${this.name})`,
+      );
+    }
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, toType);
+    this.pushInstr({ kind: "box", value, toType, result, resultType: toType });
+    return result;
+  }
+
+  /**
+   * Emit `unbox{value, jsTag}` — read the proven JS partition's payload off
+   * a boxed-any carrier. The caller MUST have proved the tag already (via an
+   * earlier `emitTagTest`, or a static refinement); lowering emits a payload
+   * read without a runtime re-check.
+   *
+   * `jsTag` must be payload-bearing: Null/Undefined are singleton partitions
+   * with no payload (`jsTagUnboxKind === null`, verifier R2) — their identity
+   * is observed via `emitTagTest` alone, so unboxing them is rejected here.
+   *
+   * Result type is the partition's payload ValType per `jsTagUnboxKind`:
+   * `i32` (NumberI32 / Boolean), `f64` (NumberF64), or a ref-shaped carrier
+   * for String/Object/Function. The exact ref ValType is a resolver/consumer
+   * decision at lowering (host: the externref carrier is the value; WasmGC:
+   * String rides `externval`, Object/Function ride `refval` — see slice-3
+   * hazard (b)); the plumbing declares the ref-shaped result as `externref`
+   * and the S5.4 member-read producer refines it where a native ref is
+   * needed.
+   */
+  emitUnbox(value: IrValueId, jsTag: JsTag): IrValueId {
+    const payload = jsTagUnboxKind(jsTag);
+    if (payload === null) {
+      throw new Error(
+        `IrFunctionBuilder: emitUnbox with payload-less JsTag ${JsTag[jsTag]} is invalid — use emitTagTest (#2949 R2) (func ${this.name})`,
+      );
+    }
+    const payloadVal: ValType =
+      payload === "i32" ? { kind: "i32" } : payload === "f64" ? { kind: "f64" } : { kind: "externref" };
+    const resultType = irVal(payloadVal);
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "unbox", value, jsTag, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `tag.test{value, jsTag}` — does the carrier's runtime tag match the
+   * JS partition? Result is `i32` (1 if it matches, else 0).
+   *
+   * `jsTag` may be ANY partition, including the payload-less Null/Undefined
+   * (testing for them is the point — verifier R3). Per the V2 numeric-class
+   * invariant the two number partitions are ONE class, so `tag.test` against
+   * either `NumberI32` or `NumberF64` lowers to the same numeric-class test
+   * in both backends (see slice-3 note 3 in the #2949 issue file).
+   */
+  emitTagTest(value: IrValueId, jsTag: JsTag): IrValueId {
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "tag.test", value, jsTag, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `dyn.truthy{value}` — `ToBoolean(value)` (§7.1.2) on a boxed-any
+   * carrier. Result is `i32` (1 = truthy, 0 = falsy), usable directly as an
+   * `if` / loop / ternary `condValue` (#2949 S5.1).
+   *
+   * The operand MUST be `dynamic` — this is the general JS-truthiness op, not
+   * a Boolean-partition read. Feeding a concrete scalar here is a producer
+   * bug (a concrete value already lowers ToBoolean inline via the existing
+   * `coerceLoopCondToBool` arms), so it is rejected at construction time
+   * rather than silently mis-lowering the carrier. Lowering routes through
+   * `IrDynamicLowering.emitToBoolean` → `coercion-engine.emitToBoolean`
+   * (`__any_unbox_bool` gc / `__is_truthy` host) — one ToBoolean engine (D4).
+   */
+  emitDynTruthy(value: IrValueId): IrValueId {
+    if (this.typeOf(value).kind !== "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitDynTruthy operand ${value} is not dynamic — general truthiness applies only to the boxed-any carrier (#2949 S5.1) (func ${this.name})`,
+      );
+    }
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.truthy", value, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `dyn.to_number{value}` — `ToNumber(value)` (§7.1.4) on a boxed-any
+   * carrier. Result is `f64`, feeding the existing `f64.lt`/`gt`/`le`/`ge`
+   * numeric-abstract relational compare path (#2949 S5.3).
+   *
+   * The operand MUST be `dynamic` — this is the carrier ToNumber, not a
+   * concrete-scalar conversion (a concrete numeric operand converts to f64
+   * inline). Feeding a concrete value here is a producer bug, rejected at
+   * construction time rather than mis-lowering the carrier. Lowering routes
+   * through `IrDynamicLowering.emitToNumber` — `__any_to_f64` (gc, the SAME
+   * boxed-any→f64 helper legacy's `__any_lt` family uses) / `__unbox_number`
+   * (host, `Number(v)`) — one ToNumber engine (D4). SCOPE: numeric-abstract
+   * only; string×string lexicographic relational is DEFERRED (see the
+   * `IrInstrDynToNumber` node doc).
+   */
+  emitDynToNumber(value: IrValueId): IrValueId {
+    if (this.typeOf(value).kind !== "dynamic") {
+      throw new Error(
+        `IrFunctionBuilder: emitDynToNumber operand ${value} is not dynamic — carrier ToNumber applies only to the boxed-any carrier (#2949 S5.3) (func ${this.name})`,
+      );
+    }
+    const resultType = irVal({ kind: "f64" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.to_number", value, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `dyn.eq{lhs, rhs, loose, negate}` — strict/loose equality between two
+   * boxed-any carriers, result `i32` (0/1) (#2949 S5.2).
+   *
+   * BOTH operands MUST be `dynamic`. The producer boxes any concrete operand
+   * into the carrier first (`emitBox(v, irDynamic(...))`), leaving the dyn side
+   * as-is, so both operands are carriers by the time they reach here — exactly
+   * the `(ref null $AnyValue, ref null $AnyValue)` shape the canonical
+   * `__any_strict_eq` / `__any_eq` helpers take. A concrete operand slipping
+   * through is a producer bug (a concrete `===` has an inline scalar compare),
+   * rejected at construction rather than mis-lowered through the carrier.
+   *
+   * @param opts.loose  `true` = `==`/`!=` (`__any_eq`); `false` = `===`/`!==`
+   *                    (`__any_strict_eq`).
+   * @param opts.negate `true` = `!==`/`!=` — append `i32.eqz` at lowering.
+   */
+  emitDynEq(lhs: IrValueId, rhs: IrValueId, opts: { loose: boolean; negate: boolean }): IrValueId {
+    for (const [label, v] of [
+      ["lhs", lhs],
+      ["rhs", rhs],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynEq ${label} operand ${v} is not dynamic — carrier equality applies only to boxed-any operands; box concrete operands first (#2949 S5.2) (func ${this.name})`,
+        );
+      }
+    }
+    const resultType = irVal({ kind: "i32" });
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.eq", lhs, rhs, loose: opts.loose, negate: opts.negate, result, resultType });
+    return result;
+  }
+
+  /**
+   * Emit `dyn.member_get{recv, key}` — a dynamic member read `recv[key]` /
+   * `recv.name` on a boxed-any receiver, result `dynamic` (#3053 U1 / #2949
+   * S5.4).
+   *
+   * BOTH operands MUST be `dynamic` carriers. The receiver is already the
+   * carrier (an `any`-typed value); the key is a boxed property name (string)
+   * or boxed index — the producer boxes them first, so this node always sees
+   * the `(carrier, carrier) -> carrier` shape the unified reader primitive
+   * `__dyn_member_get(recv, key)` (#3053 U0) takes and returns. A concrete
+   * operand slipping through is a producer bug (the receiver would need a box,
+   * the key its own `ToPropertyKey`), rejected here at construction rather than
+   * mis-lowered through the carrier ABI.
+   *
+   * Lowering routes through `IrDynamicLowering.emitMemberGet` — a bare
+   * `[call __dyn_member_get]` that flips `ctx.usesDynMemberGet`. The result
+   * carrier is identity-preserving + tag-honest (the helper closes the
+   * externref↔carrier round-trip in its OWN frame, U0), so the read composes:
+   * `recv.a.z` is two chained `dyn.member_get`s with no `__any_to_extern`
+   * tag-6 breaker in between.
+   */
+  emitDynMemberGet(recv: IrValueId, key: IrValueId): IrValueId {
+    for (const [label, v] of [
+      ["recv", recv],
+      ["key", key],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynMemberGet ${label} operand ${v} is not dynamic — the dynamic member read applies only to boxed-any carriers; box the receiver/key first (#3053 U1 / #2949 S5.4) (func ${this.name})`,
+        );
+      }
+    }
+    const resultType = irDynamic();
+    const result = this.allocator.fresh();
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "dyn.member_get", recv, key, result, resultType });
+    return result;
+  }
+
   // --- object ops (#1169b) ------------------------------------------------
 
   /**
@@ -537,6 +768,30 @@ export class IrFunctionBuilder {
   }
 
   /**
+   * #3000-C: emit `class.alloc` — allocate a fresh, default-initialised
+   * instance of `shape`'s class WITHOUT running its constructor. Used by the
+   * IR constructor-body lowering to synthesise `this` at body entry (the ctor
+   * body then writes fields via `class.set`, and the epilogue returns the
+   * instance). Result type is `{ kind: "class"; shape }` → `(ref $struct)`.
+   */
+  emitClassAlloc(shape: IrClassShape): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "class", shape };
+    this.valueTypes.set(result, resultType);
+    // A fresh struct allocation — same alloc namespace as `class.new` /
+    // `object.new` ("object").
+    const alloc = this.allocId("object", resultType);
+    this.pushInstr({
+      kind: "class.alloc",
+      shape,
+      result,
+      resultType,
+      alloc,
+    });
+    return result;
+  }
+
+  /**
    * Emit `class.get` to read a named field on a class instance. Caller
    * passes the field's IrType (looked up against the receiver's shape) so
    * the SSA def's static type matches without a second resolver lookup.
@@ -589,6 +844,53 @@ export class IrFunctionBuilder {
     }
     this.pushInstr({
       kind: "class.call",
+      receiver,
+      methodName,
+      args: [...args],
+      result,
+      resultType,
+    });
+    return result;
+  }
+
+  /**
+   * #3000-E: emit `class.super_init` for a derived ctor's `super(args)`. Runs
+   * the PARENT's `<parent>_init` on the already-allocated `self`. Statement-only
+   * (no SSA result) — the parent init's `(ref $struct)` return is dropped by the
+   * lowering. `self` is the subclass instance (a WasmGC subtype of the parent).
+   */
+  emitClassSuperInit(parentShape: IrClassShape, self: IrValueId, args: readonly IrValueId[]): void {
+    this.pushInstr({
+      kind: "class.super_init",
+      parentShape,
+      self,
+      args: [...args],
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * #3000-E: emit `class.super_call` for `super.method(args)`. Static-dispatches
+   * to the PARENT's `<parent>_<method>` slot with the subclass receiver.
+   * `resultType` is the parent method descriptor's `returnType` (`null` for void);
+   * returns `null` for void methods (callers in expression position reject null).
+   */
+  emitClassSuperCall(
+    parentShape: IrClassShape,
+    receiver: IrValueId,
+    methodName: string,
+    args: readonly IrValueId[],
+    resultType: IrType | null,
+  ): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
+    this.pushInstr({
+      kind: "class.super_call",
+      parentShape,
       receiver,
       methodName,
       args: [...args],
@@ -823,6 +1125,26 @@ export class IrFunctionBuilder {
     this.pushInstr({ kind: "gen.yieldStar", inner, result: null, resultType: null });
   }
 
+  /**
+   * #2951: emit a `gen.setReturn` instr — stash a generator's `return
+   * <value>` on the buffer via `__gen_set_return(buf, value)`. The lowerer
+   * BOXES `value` to externref (f64 → __box_number; i32 → convert+box;
+   * ref/ref_null → extern.convert_any; externref → pass through). The caller
+   * passes `value` in its NATIVE dispatch shape (f64 / i32 stay native;
+   * reference-shaped values coerced to externref upstream), exactly like
+   * `emitGenPush`. Guarded on `funcKind === "generator"` +
+   * `generatorBufferSlot` set (mirrors the `emitGenPush` guards).
+   */
+  emitGenSetReturn(value: IrValueId): void {
+    if (this.funcKind !== "generator") {
+      throw new Error(`IrFunctionBuilder: emitGenSetReturn requires funcKind=generator (${this.name})`);
+    }
+    if (this.generatorBufferSlot === undefined) {
+      throw new Error(`IrFunctionBuilder: emitGenSetReturn requires setGeneratorBufferSlot first (${this.name})`);
+    }
+    this.pushInstr({ kind: "gen.setReturn", value, result: null, resultType: null });
+  }
+
   private requireBlock(): OpenBlock {
     if (this.current === null) {
       throw new Error(`IrFunctionBuilder: no open block (func ${this.name})`);
@@ -976,6 +1298,8 @@ export class IrFunctionBuilder {
     dataSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.vec",
@@ -987,6 +1311,7 @@ export class IrFunctionBuilder {
       dataSlot: args.dataSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1062,6 +1387,8 @@ export class IrFunctionBuilder {
     resultSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.iter",
@@ -1070,6 +1397,7 @@ export class IrFunctionBuilder {
       resultSlot: args.resultSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1091,6 +1419,8 @@ export class IrFunctionBuilder {
     strSlot: number;
     elementSlot: number;
     body: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "forof.string",
@@ -1100,6 +1430,7 @@ export class IrFunctionBuilder {
       strSlot: args.strSlot,
       elementSlot: args.elementSlot,
       body: args.body,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1120,6 +1451,18 @@ export class IrFunctionBuilder {
    */
   emitThrow(value: IrValueId): void {
     this.pushInstr({ kind: "throw", value, result: null, resultType: null });
+  }
+
+  /**
+   * (#2856) Emit an early `return [value]` from inside a nested body buffer
+   * (loop bodies / if.stmt arms). Lowers to the Wasm `return` op. `value`
+   * is null for a bare `return;` in a void function; otherwise it must
+   * already be coerced to the function's declared result type. See
+   * `IrInstrEarlyReturn` for the soundness scope (no try/finally, no
+   * iterator-protocol for-of, no generators — selector/from-ast enforced).
+   */
+  emitEarlyReturn(value: IrValueId | null): void {
+    this.pushInstr({ kind: "early.return", value, result: null, resultType: null });
   }
 
   /**
@@ -1153,12 +1496,22 @@ export class IrFunctionBuilder {
    * `block { loop { <cond>; i32.eqz; br_if 1; <body>; br 0 } }`
    * Wasm pattern.
    */
-  emitWhileLoop(args: { cond: readonly IrInstr[]; condValue: IrValueId; body: readonly IrInstr[] }): void {
+  emitWhileLoop(args: {
+    cond: readonly IrInstr[];
+    condValue: IrValueId;
+    body: readonly IrInstr[];
+    /** #2952 slice 1 — set for `do { body } while (cond)` (post-test loop). */
+    postCond?: boolean;
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
+  }): void {
     this.pushInstr({
       kind: "while.loop",
       cond: args.cond,
       condValue: args.condValue,
       body: args.body,
+      ...(args.postCond ? { postCond: true } : {}),
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
       result: null,
       resultType: null,
     });
@@ -1175,6 +1528,8 @@ export class IrFunctionBuilder {
     condValue: IrValueId;
     body: readonly IrInstr[];
     update: readonly IrInstr[];
+    /** #2952 slice 2 — loop identity for `br.label` targeting. */
+    loopLabel?: IrLabelId;
   }): void {
     this.pushInstr({
       kind: "for.loop",
@@ -1182,6 +1537,43 @@ export class IrFunctionBuilder {
       condValue: args.condValue,
       body: args.body,
       update: args.update,
+      ...(args.loopLabel !== undefined ? { loopLabel: args.loopLabel } : {}),
+      result: null,
+      resultType: null,
+    });
+  }
+
+  // --- multi-exit control flow (#2952 slice 2) -----------------------------
+
+  /**
+   * #2952 slice 2 — allocate a fresh per-function loop label. The from-ast
+   * layer calls this once per lowered loop; unlabeled `break` / `continue`
+   * emit `br.label` against the innermost loop's label.
+   */
+  freshLoopLabel(): IrLabelId {
+    return asLabelId(this.nextLabelId++);
+  }
+
+  /**
+   * #2952 slice 2 — emit a `br.label` (unlabeled `break` / `continue`
+   * targeting the loop identified by `label`). Buffer-terminating; the
+   * caller must not emit further instructions into the same buffer.
+   */
+  emitBrLabel(label: IrLabelId, mode: "break" | "continue"): void {
+    this.pushInstr({ kind: "br.label", label, mode, result: null, resultType: null });
+  }
+
+  /**
+   * #2952 slice 2 — emit a statement-level `if (cond) then [else]` inside a
+   * nested buffer. Both arms are pre-collected via `collectBodyInstrs`;
+   * `else` may be an empty array (plain if). Result is void.
+   */
+  emitIfStmt(args: { cond: IrValueId; then: readonly IrInstr[]; else: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "if.stmt",
+      cond: args.cond,
+      then: args.then,
+      else: args.else,
       result: null,
       resultType: null,
     });

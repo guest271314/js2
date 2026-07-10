@@ -1,10 +1,12 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { emitWasiErrorConstructor, fillExternGetErrorProps } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -22,10 +24,16 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
-import { irVal, type IrType } from "../ir/nodes.js";
+import { irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
+import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
+import {
+  collectModuleTopLevelNames,
+  irFirstBodyReadsHostNode,
+  irFirstBodyReadsStringElement,
+} from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -44,10 +52,12 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
-import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
-import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
+import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
+import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
+import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
-import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -72,6 +82,7 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
+import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
   addImport,
   addStringConstantGlobal,
@@ -97,6 +108,7 @@ import {
   isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
   ensureLateImport,
@@ -111,6 +123,7 @@ import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
+  buildIsUndefinedExternBody,
   emitWrapperValueOfFunctions,
   ensureAnyFromExternHelper,
   ensureAnyHelpers,
@@ -118,7 +131,9 @@ import {
   ensureAnyValueType,
   ensureWrapperTypes,
   isAnyValue,
+  undefinedSingletonActive,
 } from "./any-helpers.js";
+import { UNDEF_F64_BITS } from "./value-tags.js";
 import {
   buildShapePropFlagsTable,
   collectClassDeclaration,
@@ -145,6 +160,7 @@ import {
 import {
   emitExceptionRenderExports,
   emitTestRuntimeStringHelpers,
+  ensureAnyToStringHelper,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
   flatStringType,
@@ -330,6 +346,71 @@ function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
     ) {
       found = true;
       return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * (#3057) True when the source dynamically constructs a `$__ta_dyn_view` —
+ * `new <ctorExpr>(bufferArg[, off[, len]])` where `<ctorExpr>` is an IDENTIFIER
+ * that is NOT a statically-named TA constructor (so it's a TA constructor held in
+ * a variable / array element, type `any` or a TA-ctor union — test262
+ * `for (ctor of ctors) new ctor(rab, …)` / `CreateRabForTest`) and NOT a user
+ * class. Mirrors the runtime dynamic-construct gate in `new-super.ts` (buffer-typed
+ * first arg, non-numeric-literal). Used to enable the runtime-kind element byte
+ * codec on the generic index path for helper functions compiled BEFORE the
+ * construct (the `$__ta_dyn_view` type registers lazily). Byte-inert: modules
+ * without this pattern never set the flag, so they never emit the codec arm.
+ */
+function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
+  const TA_NAMES = new Set([
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+  ]);
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (ts.isNewExpression(node) && node.arguments && node.arguments.length >= 1) {
+      let callee: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee) || ts.isNonNullExpression(callee)) {
+        callee = callee.expression;
+      }
+      const arg0 = node.arguments[0]!;
+      if (ts.isIdentifier(callee) && !ts.isNumericLiteral(arg0)) {
+        // Static TA name (`new Uint8Array(buf)`) is handled by the static view
+        // ctor path, never the dynamic one — skip it.
+        if (!TA_NAMES.has(callee.text)) {
+          // A user class callee resolves to a ClassDeclaration value — skip; only
+          // a value-bound ctor (variable / param / any) reaches the dynamic path.
+          const sym = checker.getSymbolAtLocation(callee);
+          const decl = sym?.valueDeclaration;
+          const isUserClass = decl !== undefined && ts.isClassDeclaration(decl);
+          if (!isUserClass) {
+            // Buffer-typed first arg gates the dynamic TA construct (matches the
+            // runtime gate) — excludes `new fn(x)` on unrelated identifiers.
+            let arg0Sym: string | undefined;
+            try {
+              arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
+            } catch {
+              arg0Sym = undefined;
+            }
+            if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+              found = true;
+              return;
+            }
+          }
+        }
+      }
     }
     forEachChild(node, walk);
   }
@@ -577,11 +658,17 @@ function resolvePositionType(
     if (node.kind === ts.SyntaxKind.NumberKeyword) return irVal({ kind: "f64" });
     if (node.kind === ts.SyntaxKind.BooleanKeyword) return irVal({ kind: "i32" });
     if (node.kind === ts.SyntaxKind.StringKeyword) return { kind: "string" };
-    // Slice 14 (#1228) — AnyKeyword lowers to externref. The IR's externref
-    // val type is the catch-all for host values; operations on `any`-typed
-    // SSA defs must be conservative (no field access, no arithmetic) but
-    // pass-through forwarding (return, parameter passing) is fine.
-    if (node.kind === ts.SyntaxKind.AnyKeyword) return irVal({ kind: "externref" });
+    // (#2949 slice 3b) AnyKeyword IS the dynamic type. The historical #1228
+    // mapping (externref in ALL modes) diverged from legacy's fast-mode
+    // `any` ABI — legacy `resolveWasmType` is mode-split (fast →
+    // `ref_null $AnyValue`, host → externref), so an IR-claimed
+    // `f(x: any)` had a DIFFERENT fast-mode signature than its legacy
+    // callers/callees (measured in the slice-2 session; class-method
+    // claims hit the typeIdx-parity guard for the same reason). `dynamic`
+    // lowers through `resolveDynamic()`, which mirrors that mode split
+    // exactly — one `any` ABI for both front-ends in both modes. Host-mode
+    // bytes are unchanged (dynamic lowers to externref there).
+    if (node.kind === ts.SyntaxKind.AnyKeyword) return irDynamic();
     // Slice 6 part 2 (#1181) — array type (T[] or Array<T>) resolves to a
     // vec ref. The legacy `getOrRegisterVecType` produces the same
     // (ref_null $vec_<elem>) struct ref the for-of vec fast path needs,
@@ -591,8 +678,17 @@ function resolvePositionType(
     // types throw and fall back to legacy.
     if (ts.isArrayTypeNode(node)) {
       const elemIr = resolvePositionType(node.elementType, undefined, ctx, classShapes);
+      // (#2949 slice 3b) `any[]` elements keep their historical externref
+      // vec representation — the AnyKeyword POSITION arm above now returns
+      // `dynamic`, but element storage is a vec-layout decision (the
+      // boxed-any element rep is #2379/#1852 territory, not this slice).
+      // Byte-preserving for every currently-claimed `any[]` shape.
       const elemVal =
-        elemIr.kind === "val" ? elemIr.val : elemIr.kind === "string" ? ({ kind: "externref" } as ValType) : null;
+        elemIr.kind === "val"
+          ? elemIr.val
+          : elemIr.kind === "string" || elemIr.kind === "dynamic"
+            ? ({ kind: "externref" } as ValType)
+            : null;
       if (!elemVal) {
         throw new Error(
           `array element TypeNode ${ts.SyntaxKind[node.elementType.kind]} could not be lowered to a primitive ValType`,
@@ -680,6 +776,25 @@ function resolvePositionType(
           return irVal({ kind: "externref" });
         }
       }
+      // (#2856) Host extern class annotation (`: HTMLElement`, `: Element`,
+      // …) — an ambient lib interface the legacy backend models as an extern
+      // class (opaque externref + per-member `<Class>_get_<p>` /
+      // `<Class>_<m>` imports). JS-host lane only; in host-free modes the
+      // object-lowering fallback below keeps throwing (→ legacy → the
+      // existing #1472 refusal). Placed AFTER the local-class / typed-array /
+      // Array / iterable arms so it can't shadow them, and BEFORE
+      // `objectIrTypeFromTsType`, which rejects method-carrying interfaces
+      // anyway.
+      if (
+        ts.isTypeReferenceNode(node) &&
+        ts.isIdentifier(node.typeName) &&
+        !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports)
+      ) {
+        const refType = ctx.checker.getTypeFromTypeNode(node);
+        if (isExternalDeclaredClass(refType, ctx.checker)) {
+          return { kind: "extern", className: refType.getSymbol()?.name ?? node.typeName.text };
+        }
+      }
       const tsType = ctx.checker.getTypeFromTypeNode(node);
       const ir = objectIrTypeFromTsType(ctx, tsType);
       if (ir) return ir;
@@ -708,6 +823,22 @@ function resolvePositionType(
     const ir = objectIrTypeFromLattice(mapped);
     if (ir) return ir;
     throw new Error(`object position type — lattice shape not lowerable to IrType.object`);
+  }
+  // #2949 slice 2 — UNANNOTATED position whose lattice converged to `unknown`
+  // (no evidence) or `dynamic` (top): the position is honestly dynamic. MUST
+  // stay predicate-identical to the selector's `resolveParamType` /
+  // `resolveReturnType` dynamic arms (select.ts) — the selector claims
+  // exactly the functions this resolver maps, so a drift here would either
+  // drop claimed functions at resolve time (kind "resolve" demotions) or
+  // hand the from-ast builder types the move-only scan never approved.
+  // Lowering: `lowerIrTypeToValType`'s dynamic arm → `resolveDynamic()` =
+  // legacy `resolveWasmType`'s any/unknown carrier (fast: ref_null $AnyValue,
+  // host: externref), so the claimed function's Wasm signature equals what
+  // legacy gives the same declaration. `node` is undefined here (annotated
+  // positions — including element/field recursion, which always passes a
+  // node — returned or threw above).
+  if (mapped && (mapped.kind === "unknown" || mapped.kind === "dynamic")) {
+    return irDynamic();
   }
   throw new Error(`no concrete type (mapped=${mapped?.kind ?? "missing"})`);
 }
@@ -842,9 +973,29 @@ function buildIrClassShapes(
   sourceFile: ts.SourceFile,
 ): Map<string, import("../ir/nodes.js").IrClassShape> {
   const out = new Map<string, import("../ir/nodes.js").IrClassShape>();
+  // #3000-E: className → declaration, for parent-chain field re-derivation and
+  // parent-shape lookup on a subclass.
+  const classDeclByName = new Map<string, ts.ClassDeclaration>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isClassDeclaration(stmt) && stmt.name) classDeclByName.set(stmt.name.text, stmt);
+  }
   for (const stmt of sourceFile.statements) {
     if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
-    if (stmt.heritageClauses && stmt.heritageClauses.length > 0) continue; // slice 4 defers inheritance
+    // #3000-E: a single-level `extends` of a LOCAL user class projects (its own
+    // shape carries the parent as `.parent`, driving `super(...)` / `super.method`
+    // lowering). A class with `extends` of a builtin / externref-backed / not-yet-
+    // built parent, or a non-identifier heritage expression, still defers to legacy
+    // — `parentShape` stays undefined and the `continue` below drops it. An
+    // `implements`-only class (no `extends`) is structurally flat and projects. This
+    // predicate MIRRORS the selector's `hasParent && parentIsLocalClass` gate
+    // (`src/ir/select.ts`) so a claimed subclass member always finds a shape here.
+    let parentShape: import("../ir/nodes.js").IrClassShape | undefined;
+    const extendsName = extendsParentClassName(stmt);
+    if (extendsName !== null) {
+      const ps = out.get(extendsName);
+      if (!ps) continue; // parent isn't a local projected class (builtin, or declared later) → defer
+      parentShape = ps;
+    }
     const className = stmt.name.text;
     if (!ctx.classSet.has(className)) continue;
     if (!ctx.structFields.has(className)) continue;
@@ -872,17 +1023,85 @@ function buildIrClassShapes(
     }
     if (!ctorOk) continue;
 
-    // Fields — read from the legacy `structFields` (already includes
-    // type info that the IR cares about). Strip the `__tag` prefix and
-    // map each remaining field's ValType back to an IrType. If any
-    // field type can't be projected (e.g. tagged-union ref), skip the
-    // whole class.
+    // Fields — read from the legacy `structFields` (which fixes the
+    // authoritative field set: names, count, and the backend ValType each
+    // struct slot commits to). Strip the `__tag` prefix and map each remaining
+    // field to an IrType.
+    //
+    // #3000 Phase-1b (string-field-shape) — re-derive each field's IR type
+    // from the AST/checker instead of the *lossy* legacy ValType. A `string`
+    // field lowers to externref (host) / (ref $AnyString) (native); the ValType
+    // alone can't tell a string from an `any`/object in host mode (both are
+    // externref), so the old `valTypeToIrField(ValType)` returned null for
+    // strings and the WHOLE class (e.g. classes.ts's `Animal`, whose `#name`
+    // is a string) got no IrClassShape — leaving every accessor / method / ctor
+    // byte-inert on legacy. We build a checker-derived field→IrType map keyed
+    // by the SAME mangled name legacy stores in `structFields`, then adopt the
+    // richer type ONLY when it is byte-compatible with the legacy struct slot
+    // (`irFieldTypeMatchesLegacyValType` — a field-level parity guard). Fields
+    // the AST can't resolve, or whose projection disagrees with the struct
+    // slot, fall back to the original ValType path. Net effect: string (and
+    // boolean/number) fields now project; unresolvable shapes still reject the
+    // class, so the worst case remains a clean legacy fallback.
+    const astFieldIr = new Map<string, IrType>();
+    const recordField = (nameNode: ts.PropertyName, tsNode: ts.Node): void => {
+      let mangled: string;
+      if (ts.isPrivateIdentifier(nameNode)) mangled = "__priv_" + nameNode.text.slice(1);
+      else if (ts.isIdentifier(nameNode)) mangled = nameNode.text;
+      else return; // computed / string-literal / numeric names → leave to ValType path
+      if (astFieldIr.has(mangled)) return;
+      const tsType = ctx.checker.getTypeAtLocation(tsNode);
+      const ir = tsTypeToClassPositionIr(ctx, tsType, out);
+      if (ir) astFieldIr.set(mangled, ir);
+    };
+    // #3000-E: the legacy `structFields` for a subclass is `[...parentFields,
+    // ...ownFields]` (see `collectClassDeclaration`), so a subclass's slot set
+    // includes fields DECLARED on its ancestors — e.g. Dog's `__priv_name` is
+    // Animal's string field. The AST re-derivation must therefore walk the whole
+    // ancestor chain (self + every local parent), or an inherited STRING field
+    // has no `astFieldIr` entry and falls to the null-returning ValType path,
+    // rejecting the whole subclass. Numeric/boolean inherited fields survive the
+    // ValType path regardless; this walk is what recovers inherited string fields.
+    const chain: ts.ClassDeclaration[] = [stmt];
+    for (let cursor: string | null = extendsParentClassName(stmt); cursor !== null; ) {
+      const decl = classDeclByName.get(cursor);
+      if (!decl) break; // non-local ancestor (builtin) — its fields aren't struct slots here
+      chain.push(decl);
+      cursor = extendsParentClassName(decl);
+    }
+    for (const decl of chain) {
+      // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
+      // field type off the member node itself; mirror that source exactly.
+      for (const member of decl.members) {
+        if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
+          recordField(member.name, member);
+        }
+      }
+      // Constructor-body `this.x = …` field introductions — legacy reads the
+      // field type off the property-access LHS node; mirror that source.
+      const declCtor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
+      if (declCtor?.body) {
+        for (const s of declCtor.body.statements) {
+          if (
+            ts.isExpressionStatement(s) &&
+            ts.isBinaryExpression(s.expression) &&
+            s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isPropertyAccessExpression(s.expression.left) &&
+            s.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+          ) {
+            recordField(s.expression.left.name, s.expression.left);
+          }
+        }
+      }
+    }
+
     const legacyFields = ctx.structFields.get(className)!;
     const fields: { name: string; type: IrType }[] = [];
     let fieldsOk = true;
     for (const f of legacyFields) {
       if (f.name === "__tag") continue;
-      const ir = valTypeToIrField(ctx, f.type);
+      const astIr = astFieldIr.get(f.name);
+      const ir = astIr && irFieldTypeMatchesLegacyValType(ctx, astIr, f.type) ? astIr : valTypeToIrField(ctx, f.type);
       if (!ir) {
         fieldsOk = false;
         break;
@@ -940,9 +1159,28 @@ function buildIrClassShapes(
       fields,
       methods,
       constructorParams,
+      // #3000-E: present only for a single-level subclass of a local user class.
+      ...(parentShape ? { parent: parentShape } : {}),
     });
   }
   return out;
+}
+
+/**
+ * #3000-E: the name of a class's `extends` parent when it is a bare identifier
+ * (`class Dog extends Animal` → "Animal"). Returns null for no `extends` (flat /
+ * `implements`-only) and for a non-identifier heritage expression (`extends
+ * ns.Base`, `extends mixin(X)` — deferred). Mirrors `extendsParentName` in
+ * `src/ir/select.ts` so the shape builder and selector agree on which subclasses
+ * are IR-eligible.
+ */
+function extendsParentClassName(stmt: ts.ClassDeclaration): string | null {
+  for (const h of stmt.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const first = h.types[0]?.expression;
+    if (first && ts.isIdentifier(first)) return first.text;
+  }
+  return null;
 }
 
 /**
@@ -995,12 +1233,52 @@ function tsTypeToClassPositionIr(
  */
 function valTypeToIrField(_ctx: CodegenContext, vt: import("../ir/types.js").ValType): IrType | null {
   if (vt.kind === "f64" || vt.kind === "i32") return irVal(vt);
-  // Slice 4 defers `string`-typed class fields exposed as externref or
-  // (ref $AnyString) — the IR's `IrType.string` is backend-agnostic
-  // but the legacy `structFields` already commits to a backend ValType
-  // (externref/ref). Returning null here lets the class fall back to
-  // legacy if it has string fields.
+  // `string`-typed class fields are handled by the AST/checker projection in
+  // `buildIrClassShapes` (#3000 Phase-1b) — the legacy ValType (externref /
+  // (ref $AnyString)) is ambiguous in host mode, so string recovery can't be
+  // done from the ValType alone. This ValType path stays the fallback for
+  // non-string fields; returning null here still rejects any field the AST
+  // couldn't resolve (e.g. tagged-union / `any` refs), so the class falls back
+  // to legacy cleanly.
   return null;
+}
+
+/**
+ * #3000 Phase-1b — field-level parity guard. Does an AST/checker-derived class
+ * field `IrType` lower to the SAME backend `ValType` the legacy struct slot
+ * already committed to? We only adopt the richer AST-derived type when it is
+ * byte-compatible with the struct, so `class.get`/`class.set` against the shape
+ * produce exactly the ValType the struct holds — no invalid Wasm, no ABI drift
+ * versus legacy-compiled callers, and the #1370 method-signature parity guard
+ * (`integration.ts`) sees identical typeIdx on both sides.
+ *
+ * Scope is intentionally narrow: primitives (`f64`/`i32`) and `string`. The
+ * `string` arm mirrors `resolveWasmType`'s string arm + the `ref`→`ref_null`
+ * field widening in `collectClassDeclaration` (native → `(ref/ref_null
+ * $AnyString)`; host → `externref`), which is exactly what `resolveString()`
+ * resolves an `IrType.string` to at lower time. Any other IR kind returns
+ * false → the caller falls back to the ValType path.
+ */
+function irFieldTypeMatchesLegacyValType(
+  ctx: CodegenContext,
+  ir: IrType,
+  vt: import("../ir/types.js").ValType,
+): boolean {
+  if (ir.kind === "val") {
+    const a = ir.val;
+    if (a.kind !== vt.kind) return false;
+    if (a.kind === "ref" || a.kind === "ref_null") {
+      return a.typeIdx === (vt as { typeIdx: number }).typeIdx;
+    }
+    return true;
+  }
+  if (ir.kind === "string") {
+    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      return (vt.kind === "ref" || vt.kind === "ref_null") && vt.typeIdx === ctx.anyStrTypeIdx;
+    }
+    return vt.kind === "externref";
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,11 +1399,29 @@ interface IrOverlayPlan {
  *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
  *      strictly AFTER the #2023 `new.target` clear and after resolve-time
  *      drops), so the IR path WILL attempt it.
- *   2. It is not a generator (`function*`). Legacy generator compilation
- *      creates auxiliary machinery beyond the slot body; whether the IR
- *      generator lowering is fully standalone without the legacy compile's
- *      side effects is unproven, so the first cut keeps generators on the
- *      compile-twice path. Lift only after a dedicated measurement.
+ *   2. If it is a generator (`function*`), the compile targets a JS host
+ *      (`generatorsSkippable` — `!standalone && !wasi`). #2951 gate-2: the
+ *      IR generator lowering is now self-sufficient for the JS-host path —
+ *      it pre-registers its own generator host imports
+ *      (`addGeneratorImports` in `ir/integration.ts`, driven by any
+ *      `funcKind === "generator"` claim) and its own `__exn` tag, and the
+ *      source-level scan (`state.generatorFound` in `declarations.ts`)
+ *      registers the generator imports independently of ANY individual
+ *      generator's legacy body emission — so skipping a claimed generator's
+ *      legacy body drops no import/type/tag the IR body relies on. The
+ *      predecessor slice (`gen.setReturn`, #2640) closed the last
+ *      value-returning-`return` deferral, so value-carrying generators now
+ *      IR-claim with zero post-claim demotions (proven on a representative
+ *      host-drain corpus, `irPostClaimErrors` empty). Any generator SHAPE the
+ *      IR path still can't own is filtered UPSTREAM by the selector (async
+ *      generators, generator methods → `deferred-feature`; unresolved yield
+ *      shapes) so it never enters `safeSelection.funcs` and never reaches
+ *      this gate. STANDALONE/WASI generators stay compile-twice: legacy
+ *      restricts them to sequential-numeric-yield native lowering
+ *      (`function-body.ts` "#680" guard) and the IR path unconditionally
+ *      registers JS-host generator imports, so standalone self-sufficiency
+ *      is genuinely unproven (#2138 deviation 3) — lift in a follow-up after
+ *      a standalone measurement.
  *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
  *      selector's Step-2 closure already guarantees this against
  *      `selection.funcs`, but overrideMap resolution can re-open the closure
@@ -1135,6 +1431,13 @@ interface IrOverlayPlan {
  *      sufficient: only the function's own IR success is load-bearing for
  *      its slot, and a callee that is claimed-but-not-skipped still occupies
  *      its pre-allocated slot with a working body either way.
+ *   4. Its body does not read a HOST node (property/element access or bare
+ *      call rooted at an identifier that is neither function-local nor a
+ *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
+ *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
+ *      host-global receivers), load-bearing the moment #2856's extern-in-IR
+ *      selector arm lands: host-node functions stay compile-twice until that
+ *      lowering is proven, keeping the flag-on measurement clean.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1149,14 +1452,42 @@ interface IrOverlayPlan {
  * placeholder must never ship) — surfacing exactly the selector↔builder
  * divergences this investigation exists to find (#2135).
  */
-function computeIrFirstSkipSet(plan: IrOverlayPlan): ReadonlySet<string> {
+function computeIrFirstSkipSet(
+  plan: IrOverlayPlan,
+  sourceFile: ts.SourceFile,
+  generatorsSkippable: boolean,
+): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
   const edges = plan.selection.localCallees;
+  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
+  // module-level user bindings, computed once — receivers/callees rooted at
+  // these are user code, never host globals.
+  const moduleNames = collectModuleTopLevelNames(sourceFile);
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
-    if (!fn || fn.asteriskToken) continue; // gate 2 — generators
+    if (!fn) continue;
+    // gate 2 (#2951) — a claimed generator is skippable only when targeting a
+    // JS host. Standalone/WASI generators stay compile-twice (legacy's
+    // native-generator restriction + unproven IR standalone self-sufficiency,
+    // #2138 deviation 3). Non-generators are unaffected.
+    if (fn.asteriskToken && !generatorsSkippable) continue;
+    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
+    if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
+    // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
+    // under IR-first while the dynamic surface is move-only (no box/unbox
+    // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
+    // to make claims build-proof, but a scan↔builder divergence on this brand-
+    // new surface would otherwise become a skipped-slot HARD error; keep the
+    // legacy body as the demotion target until slice 3 lowering + an ir_first
+    // lane measurement prove the claims robust, then lift this gate.
+    {
+      const o = plan.overrideMap.get(name);
+      if (o && (o.params.some((p) => isDynamic(p)) || (o.returnType !== null && isDynamic(o.returnType)))) {
+        continue;
+      }
+    }
     if (!edges) continue; // no edge info (defensive) — stay conservative
     const callees = edges.get(name);
     let closed = true;
@@ -1188,7 +1519,34 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
   // continues to enable the histogram log; the strict set additionally
   // forces collection.
   const trackFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
-  const selection = planIrCompilation(ast.sourceFile, { experimentalIR: true, trackFallbacks }, typeMap);
+  // (#2856) Host-extern claiming: mode gate + checker-backed ambient-global
+  // resolution. Selection runs BEFORE `collectDeclaredGlobals` /
+  // `collectUsedExternImports` populate the ctx registries, so the selector
+  // cannot read them — it gets the checker-derived answer instead (which is
+  // also shadow-exact: a user binding named `document` resolves to the user
+  // declaration, never the lib global). The registries ARE populated by the
+  // time from-ast lowers (post-`compileDeclarations`), which is where member
+  // resolution happens.
+  const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
+  // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
+  // the gc `$AnyValue` but strings are host js-string externrefs, so the native
+  // honest classifier mis-tags reads and the body is invalid. Gate the dynamic
+  // member-read claim off in that ONE config (clean pre-claim rejection, not a
+  // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
+  // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
+  const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
+  const selection = planIrCompilation(
+    ast.sourceFile,
+    {
+      experimentalIR: true,
+      trackFallbacks,
+      jsHostExterns,
+      dynMemberReadBuildable,
+      resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
+    },
+    typeMap,
+  );
   // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
   // promote every fallback with that reason to a hard compile error
   // instead of letting the legacy path silently catch it. The set
@@ -1334,6 +1692,8 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
   // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
   irFirstSkipped?: readonly string[];
 } {
@@ -1364,6 +1724,14 @@ export function generateModule(
   // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
   // `new` sites ⇒ empty result ⇒ no-op).
   ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
+  // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
+  // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
+  // for an `any` receiver) is enabled in helper functions compiled BEFORE the
+  // construct (the `$__ta_dyn_view` type registers lazily). Host-free lane only;
+  // byte-inert when the pattern is absent.
+  if (ctx.standalone || ctx.wasi) {
+    ctx.moduleUsesDynTaView = sourceHasDynamicTaConstruct(ast.checker, ast.sourceFile);
+  }
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1685,12 +2053,21 @@ export function generateModule(
     // an `unreachable` placeholder that the IR overlay MUST overwrite (a
     // post-claim IR failure on a skipped function is promoted to a hard
     // compile error below, never a silent legacy demote).
-    const irFirst = !!options?.experimentalIR && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    // (#2973) `disableIrFirst` opts a compile out of the IR-first inversion
+    // regardless of the ambient env flag — semantics-critical sub-compiles
+    // (eval / new Function host shims) set it so a post-claim IR-first hard
+    // error is not swallowed by the shim's fallback catch into a silent
+    // `undefined`. The ordinary IR overlay (`experimentalIR`) still runs.
+    const irFirst = !!options?.experimentalIR && !options?.disableIrFirst && truthyEnv(process.env.JS2WASM_IR_FIRST);
     let irPlan: IrOverlayPlan | null = null;
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
       irPlan = planIrOverlay(ctx, ast);
-      irSkipBodies = computeIrFirstSkipSet(irPlan);
+      // (#2951) generators are skippable only for the JS-host path — the same
+      // condition the selector uses for `jsHostExterns`. Standalone/WASI keep
+      // generators on the compile-twice path (see gate 2 in computeIrFirstSkipSet).
+      const generatorsSkippable = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+      irSkipBodies = computeIrFirstSkipSet(irPlan, ast.sourceFile, generatorsSkippable);
     }
 
     // Third pass: compile function bodies
@@ -1726,6 +2103,10 @@ export function generateModule(
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
+      // #3000 — record the set of functions/class-members whose slots were
+      // actually patched with an IR body (genuine-emission signal; a mere
+      // selector claim does not imply this — see `irCompiledFuncs` doc).
+      ctx.irCompiledFuncs = report.compiled;
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
       // before `compileIrPathFunctions` runs; an ordinary IR throw here is a
@@ -1911,6 +2292,11 @@ export function generateModule(
     // DataView.prototype.{get,set}{Uint,Int,Float}* on i32_byte vec structs (#1056)
     emitDataViewByteExports(ctx);
 
+    // (#3058) __rab_resize / __ab_max_len exports so the host runtime can
+    // implement ArrayBuffer.prototype.resize + maxByteLength/resizable on
+    // $__resizable_ab vec structs (no-op unless a resizable buffer exists).
+    emitResizableAbExports(ctx);
+
     // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
     emitVecSetByteExport(ctx);
 
@@ -1927,20 +2313,23 @@ export function generateModule(
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
 
-    // (#2038, reserve-then-fill #1719) Rebuild the native `__iterator` /
-    // `__iterator_next` carrier bodies with the USER `{next()}`-protocol arm now
-    // that the closed-struct dispatchers exist: `__sget_value`/`__sget_done`
-    // (emitStructFieldGetters, above) and `__call_@@iterator`/`__call_next`
-    // (emitIteratorMethodExport, just above). No-op unless the standalone native
-    // iterator runtime was registered AND a custom iterable produced those
-    // dispatchers — otherwise the carrier stays vec-only and byte-identical.
+    // (#2038 / #3100, reserve-then-fill #1719) Rebuild the native `__iterator`
+    // body with the LATE ladder arms now that every carrier type is known: the
+    // (#3100) vec-FAMILY normalization arms ($ObjVec + `__vec_<elemKind>` —
+    // dynamic iterables, previously an `illegal cast` trap) and, when the
+    // closed-struct dispatchers just emitted above exist, the (#2038) USER
+    // `{next()}` arm. Full docs on `fillNativeIteratorLateArms`. No-op unless
+    // the standalone native iterator runtime was registered.
     if (
       ctx.nativeIteratorUserArmPending &&
-      ctx.funcMap.has("__call_@@iterator") &&
-      ctx.funcMap.has("__call_next") &&
-      ctx.funcMap.has("__sget_value") &&
-      ctx.funcMap.has("__sget_done") &&
-      !ctx.funcMap.has("__is_truthy")
+      !ctx.funcMap.has("__is_truthy") &&
+      ((ctx.funcMap.has("__call_@@iterator") &&
+        ctx.funcMap.has("__call_next") &&
+        ctx.funcMap.has("__sget_value") &&
+        ctx.funcMap.has("__sget_done")) ||
+        // (#3119) The plain-`$Object` OBJ arm needs `__is_truthy` too (the
+        // `@@iterator`/`res` truthiness gates + the ToBoolean on `done`).
+        (ctx.funcMap.has("__extern_get") && ctx.funcMap.has("__box_symbol") && ctx.objectRuntimeTypes !== undefined))
     ) {
       // The USER `done` flag needs `__is_truthy` (ToBoolean on the boxed bool).
       // `emitStructFieldGetters` usually registers it via `addUnionImports` when a
@@ -1949,7 +2338,7 @@ export function generateModule(
       // Native in standalone/WASI (appends funcs, no funcIdx shift).
       addUnionImports(ctx);
     }
-    fillNativeIteratorUserArms(ctx);
+    fillNativeIteratorLateArms(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
@@ -2074,6 +2463,13 @@ export function generateModule(
     // reserved a dispatcher (standalone/wasi only).
     fillClosedMethodDispatch(ctx);
 
+    // (#3125) Fill the reserved `__promise_has_callable_then` predicate — the
+    // native-Promise resolve path's §27.2.1.3.2 Get("then")+IsCallable test —
+    // from the SAME struct/closure collectors as the `__call_m_then_vararg`
+    // dispatcher the thenable job invokes. Read-only over funcMap. No-op unless
+    // the async scheduler's thenable substrate reserved it (standalone/wasi).
+    fillPromiseThenableHelpers(ctx);
+
     // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
     // that EVERY struct type (incl. late-registered fnctor structs like acorn's
     // `$__fnctor_Parser`) is known — so each `any`-receiver `obj.<name> = v` write
@@ -2113,6 +2509,13 @@ export function generateModule(
     // value resolve its spec `name`/`length` at runtime, host-free. No-op when
     // no builtin closure was materialized (standalone only).
     fillBuiltinFnMeta(ctx);
+
+    // (#3130) Splice the `$Error_struct` arm into `__extern_get` so dynamic
+    // reads of `err.message`/`err.name`/`err.stack`/`err.constructor` resolve
+    // on native Error objects instead of missing to `undefined` (see the fill's
+    // doc in registry/error-types.ts). No-op unless the module constructs
+    // native errors (standalone/wasi only) — byte-identical otherwise.
+    fillExternGetErrorProps(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
@@ -2180,6 +2583,12 @@ export function generateModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) Emit the unified dynamic-reader carrier primitive
+    // (__dyn_member_get + __carrier_recv_to_extern) iff a call site flagged the
+    // module needs it (U1+). Gated on ctx.usesDynMemberGet, which U0 never sets,
+    // so this is a no-op in U0 → byte-identical. Runs beside ensureDynReadHelpers
+    // (before dead-elim/freeze) so the helper funcIdx values are stable.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -2187,6 +2596,14 @@ export function generateModule(
     // Runs before dead-elim (which never prunes/remaps live globals) and the
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
+
+    // (#2853) Nominal shape branding: structurally-colliding `__anon_*` /
+    // `__fnctor_*` shape types get a trailing brand-ref field so the engine's
+    // iso-recursive canonicalization cannot merge distinct key-sets into one
+    // runtime type (which made `ref.test`-keyed property dispatch read fields
+    // by OFFSET instead of by KEY). Runs after all instruction emission and
+    // BEFORE dead-type elimination so the brand-chain refs get remapped.
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
@@ -2229,6 +2646,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
     irFirstSkipped,
   };
 }
@@ -2438,6 +2856,17 @@ function addWasiStartExport(ctx: CodegenContext): void {
     applyModuleInitGuard(ctx);
   }
 
+  // (#2968) Pre-emit the uncaught-exception printer helper BEFORE any funcidx is
+  // read below, so any late import it (transitively) registers shifts the index
+  // space first and every index we compute afterwards is already post-shift.
+  // Gated on a throwing (`exnTagIdx >= 0`), native-strings WASI module that has
+  // the fd_write + proc_exit imports the printer needs (registerWasiImports set
+  // both when the source contains a `throw`). A no-op otherwise, so the `_start`
+  // body stays byte-identical for every non-throwing module.
+  if (ctx.wasi && ctx.exnTagIdx >= 0 && ctx.nativeStrings && ctx.wasiFdWriteIdx >= 0 && ctx.wasiProcExitIdx >= 0) {
+    ensureWasiStartExnPrinter(ctx);
+  }
+
   // Choose the WASI program entry that `_start` wraps.
   //
   // #1411 regression: #1978 correctly stopped splicing the module-init body
@@ -2461,9 +2890,8 @@ function addWasiStartExport(ctx: CodegenContext): void {
 
   const mainIdx = ctx.funcMap.get("main");
   if (mainIdx !== undefined) {
-    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-      const func = ctx.mod.functions[funcArrayIdx]!;
+    const func = definedFuncAt(ctx, mainIdx);
+    if (func) {
       const funcType = ctx.mod.types[func.typeIdx];
       // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
       // A non-exported `main` (the `main()`-calls-itself convention) is reached
@@ -2517,11 +2945,43 @@ function addWasiStartExport(ctx: CodegenContext): void {
       }
     }
 
+    // (#2968) If the uncaught-exception printer was emitted (throwing WASI
+    // module), wrap the entry call + reactor drain in `try` / `catch $exc`.
+    // A `return` inside the entry exits the `try` without entering the catch, so
+    // only a real uncaught throw reaches the handler; there it renders the
+    // payload to stderr via `__error_to_string`/fd_write and `proc_exit(1)`s so
+    // the exception surfaces (instead of the pre-fix silent exit 0). No wrap when
+    // the printer is absent → non-throwing modules stay byte-identical.
+    const exnPrinterIdx = ctx.funcMap.get("__wasi_start_print_exn");
+    const startBody: Instr[] =
+      exnPrinterIdx !== undefined && ctx.wasiProcExitIdx >= 0
+        ? [
+            {
+              op: "try",
+              blockType: { kind: "empty" },
+              body,
+              catches: [
+                {
+                  tagIdx: ctx.exnTagIdx,
+                  body: [
+                    // The catch pushes the thrown externref payload; render + write it.
+                    { op: "call", funcIdx: exnPrinterIdx } as Instr,
+                    // An uncaught exception is a failure — exit nonzero.
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "call", funcIdx: ctx.wasiProcExitIdx } as Instr,
+                    { op: "unreachable" } as Instr,
+                  ],
+                },
+              ],
+            } as unknown as Instr,
+          ]
+        : body;
+
     ctx.mod.functions.push({
       name: "_start",
       typeIdx: startTypeIdx,
       locals: [],
-      body,
+      body: startBody,
       exported: true,
     });
 
@@ -2687,7 +3147,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__sget_value` / `__sget_done` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). No other code looks `__sget_*` up by funcMap
+    // (`fillNativeIteratorLateArms`). No other code looks `__sget_*` up by funcMap
     // key, so this is inert for every other path.
     ctx.funcMap.set(funcName, funcIdx);
   }
@@ -2785,32 +3245,69 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
   if (fieldMap.size === 0) return;
 
-  // Setter signatures: 3 variants by val type.
-  // Mixed-kind buckets are skipped — sidecar carries the write instead.
-  const setterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [], "$sset_extern_type");
-  const setterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [], "$sset_f64_type");
-  const setterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [], "$sset_i32_type");
-
   // Only kinds we can emit a correct `struct.set` for after the externref →
   // anyref convert. Abstract heap types other than `anyref` (eqref / structref /
   // funcref) would need a `ref.cast` to an abstract heap type, which the
-  // current Instr encoding does not express — skip those buckets so the
+  // current Instr encoding does not express — skip those ARMS so the
   // sidecar still carries the write.
   const isRefKind = (k: ValType["kind"]) =>
     k === "ref" || k === "ref_null" || k === "anyref" || k === "externref" || k === "ref_extern";
 
+  // (#2853 bug B) Mixed-kind buckets are NO LONGER skipped. A skipped bucket
+  // (e.g. `pos`, whose field kind differs across acorn's Parser /
+  // RegExpValidationState structs) meant every HOST write (`state.pos = 0` via
+  // a method-parameter access → `__extern_set` → `_safeSet`) landed in the
+  // JS sidecar only, while every in-wasm `this.pos` access used the live
+  // struct field — two stores for one key. Once the sidecar was seeded, host
+  // reads (`_safeGet` first) saw the frozen sidecar value (0) forever, so
+  // acorn's regexp validator compared a phantom `state.pos` and raised
+  // "Unmatched ')'" on every group. Mixed buckets now use the externref
+  // signature with per-arm coercion: numeric fields unbox via __unbox_number.
+  // Ensure the union helpers exist BEFORE any setter funcIdx is computed
+  // (mirrors the getter emitter's needsBox discipline / #1320).
+  let needsUnbox = false;
+  for (const entries of fieldMap.values()) {
+    const allF64 = entries.every((e) => e.fieldType.kind === "f64");
+    const allI32 = entries.every((e) => e.fieldType.kind === "i32");
+    if (allF64 || allI32) continue;
+    if (entries.some((e) => e.fieldType.kind === "f64" || e.fieldType.kind === "i32")) {
+      needsUnbox = true;
+      break;
+    }
+  }
+  if (needsUnbox) addUnionImports(ctx);
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+
+  // Setter signatures: 3 variants by val type. All return i32 (1 = an arm
+  // matched and wrote the live struct field, 0 = no arm matched) so the
+  // runtime `_safeSet` can decide whether the sidecar must carry the value
+  // (expando / unmatched shape) or must NOT shadow the live field (#2853 B).
+  const setterExternTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+    "$sset_extern_type",
+  );
+  const setterF64TypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "i32" }],
+    "$sset_f64_type",
+  );
+  const setterI32TypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    "$sset_i32_type",
+  );
+
   for (const [fieldName, entries] of fieldMap) {
     const allF64 = entries.every((e) => e.fieldType.kind === "f64");
     const allI32 = entries.every((e) => e.fieldType.kind === "i32");
-    const allRef = entries.every((e) => isRefKind(e.fieldType.kind));
-
-    // Skip mixed-kind buckets or any bucket containing kinds we can't
-    // route through one of the three setter signatures (i64 / f32 / v128
-    // / packed i8/i16). The sidecar still carries those writes.
-    if (!allF64 && !allI32 && !allRef) continue;
 
     let setterTypeIdx: number;
     let valMode: "extern" | "f64" | "i32";
+    let useEntries = entries;
     if (allF64) {
       setterTypeIdx = setterF64TypeIdx;
       valMode = "f64";
@@ -2818,6 +3315,16 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
       setterTypeIdx = setterI32TypeIdx;
       valMode = "i32";
     } else {
+      // Ref-only AND mixed buckets: externref signature, per-arm coercion.
+      // Arms whose field kind we cannot coerce from externref (i64 / f32 /
+      // v128 / packed i8/i16, or numeric without __unbox_number) are dropped —
+      // they return 0 and the sidecar carries those writes, as before.
+      useEntries = entries.filter(
+        (e) =>
+          isRefKind(e.fieldType.kind) ||
+          ((e.fieldType.kind === "f64" || e.fieldType.kind === "i32") && unboxNumIdx !== undefined),
+      );
+      if (useEntries.length === 0) continue;
       setterTypeIdx = setterExternTypeIdx;
       valMode = "extern";
     }
@@ -2825,13 +3332,17 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const funcName = `__sset_${fieldName}`;
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
+    const wroteLocal = 3; // i32 "an arm matched and wrote" flag (defaults 0)
 
-    const funcBody = buildSetterNestedIfElse(ctx, entries, anyLocal, valMode);
+    const funcBody = buildSetterNestedIfElse(ctx, useEntries, anyLocal, valMode, wroteLocal, unboxNumIdx);
 
     mod.functions.push({
       name: funcName,
       typeIdx: setterTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      locals: [
+        { name: "__any", type: { kind: "anyref" } },
+        { name: "__wrote", type: { kind: "i32" } },
+      ],
       body: funcBody,
       exported: true,
     } as WasmFunction);
@@ -2849,6 +3360,8 @@ function buildSetterNestedIfElse(
   entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId?: number; shapeFieldIdx?: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
+  wroteLocal: number,
+  unboxNumIdx?: number,
 ): Instr[] {
   const body: Instr[] = [];
 
@@ -2858,11 +3371,11 @@ function buildSetterNestedIfElse(
   body.push({ op: "local.set", index: anyLocal } as Instr);
 
   // Chain: if (ref.test T1) { cast + struct.set T1 } else if (ref.test T2) { ... }
-  let current: Instr[] = []; // final else: no-op
+  let current: Instr[] = []; // final else: no-op (wrote flag stays 0)
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    let thenBranch = buildSetterStore(ctx, entry, anyLocal, valMode);
+    let thenBranch = buildSetterStore(ctx, entry, anyLocal, valMode, wroteLocal, unboxNumIdx);
 
     // (#2009) Colliding struct: `ref.test typeIdx` matched, but same-shape
     // canonicalization means the instance might be a DIFFERENT struct that
@@ -2895,25 +3408,31 @@ function buildSetterNestedIfElse(
   }
 
   body.push(...current);
+  // Result: 1 iff an arm matched this receiver's runtime type and wrote.
+  body.push({ op: "local.get", index: wroteLocal } as Instr);
   return body;
 }
 
-/** Build the "then" branch that stores `val` (local 1) into a struct field. */
+/** Build the "then" branch that stores `val` (local 1) into a struct field
+ *  and sets the `wroteLocal` success flag (#2853 B). */
 function buildSetterStore(
   ctx: CodegenContext,
   entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
+  wroteLocal: number,
+  unboxNumIdx?: number,
 ): Instr[] {
   const then: Instr[] = [];
   const ft = entry.fieldType;
+  const markWrote: Instr[] = [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: wroteLocal } as Instr];
 
   // Push the cast struct ref onto the stack
   then.push({ op: "local.get", index: anyLocal } as Instr);
   then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
 
-  // Push the value (already typed per valMode) — since we only emit setters
-  // for homogeneous-kind buckets, valMode and ft.kind line up.
+  // Push the value (typed per valMode; for extern-mode buckets the arm
+  // coerces per its own field kind below — mixed buckets are allowed, #2853 B).
   then.push({ op: "local.get", index: 1 } as Instr);
 
   if (valMode === "extern") {
@@ -2932,15 +3451,27 @@ function buildSetterStore(
       then.push({ op: "call", funcIdx: vecMatIdx } as Instr);
       if (ft.kind === "ref") then.push({ op: "ref.as_non_null" } as Instr);
       then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push(...markWrote);
       return then;
     }
-    // Field kinds are restricted by isRefKind above to: ref / ref_null /
-    // anyref / externref / ref_extern. externref & ref_extern need no
-    // conversion; everything else converts externref → anyref first, then
-    // typed-ref fields cast down to the field's specific heap type. Cast
-    // failures trap; the runtime _safeSet wraps the setter call in
-    // try/catch so a wrong-type assign degrades to sidecar-only (the
-    // prior behaviour) rather than crashing.
+    // (#2853 B) Numeric field in an extern-mode (mixed) bucket: unbox the
+    // externref value to f64 (Number coercion host-side), truncating for i32
+    // fields. Boolean-branded i32 fields coerce true/false → 1/0 the same way.
+    if (ft.kind === "f64" || ft.kind === "i32") {
+      // Caller guarantees unboxNumIdx is defined for these arms (bucket filter).
+      then.push({ op: "call", funcIdx: unboxNumIdx! } as Instr);
+      if (ft.kind === "i32") then.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push(...markWrote);
+      return then;
+    }
+    // Remaining field kinds here: ref / ref_null / anyref / externref /
+    // ref_extern (the bucket filter drops i64 / f32 / v128 / packed arms).
+    // externref & ref_extern need no conversion; everything else converts
+    // externref → anyref first, then typed-ref fields cast down to the
+    // field's specific heap type. Cast failures trap; the runtime _safeSet
+    // wraps the setter call in try/catch so a wrong-type assign degrades to
+    // sidecar-only (the prior behaviour) rather than crashing.
     if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref") {
       then.push({ op: "any.convert_extern" } as Instr);
     }
@@ -2952,6 +3483,7 @@ function buildSetterStore(
   }
 
   then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  then.push(...markWrote);
   return then;
 }
 
@@ -3339,7 +3871,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx === undefined) continue;
 
-      const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+      const funcDef = definedFuncAt(ctx, funcIdx);
       const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
       const resultType: ValType =
         funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3411,13 +3943,14 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__call_@@iterator` / `__call_next` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). Harmless for the host/GC path — no other
+    // (`fillNativeIteratorLateArms`). Harmless for the host/GC path — no other
     // code looks these up by funcMap key.
     ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
   emitMethodDispatch("next", "__call_next");
+  emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
 }
 
 /**
@@ -3485,7 +4018,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType: ValType =
       funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -3604,7 +4137,7 @@ function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): bool
       continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
-    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcDef = definedFuncAt(ctx, funcIdx);
     const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
     const resultType =
       funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
@@ -4347,40 +4880,9 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * choose between callable-wrapping (#1308) and `_wasmToPlain` marshaling
  * (#1504). No-op when the module has no closures.
  */
-/**
- * Collect the deduped set of closure base-wrapper struct type indices from
- * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
- * their funcref signature with the base wrapper post-V8 canonicalisation, so a
- * `ref.test` against the base catches all of them. Walks each registered
- * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
- * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
- * closure-recognition arms.)
- */
-function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
-  const mod = ctx.mod;
-  const baseTypeIdxs: number[] = [];
-  const seenBase = new Set<number>();
-  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (!info) continue;
-    const typeDef = mod.types[typeIdx];
-    if (!typeDef || typeDef.kind !== "struct") continue;
-    // Walk up to the root struct in the chain.
-    let root = typeIdx;
-    let cur = typeDef;
-    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
-      const superIdx: number = cur.superTypeIdx;
-      const parent = mod.types[superIdx];
-      if (!parent || parent.kind !== "struct") break;
-      root = superIdx;
-      cur = parent;
-    }
-    if (!seenBase.has(root)) {
-      seenBase.add(root);
-      baseTypeIdxs.push(root);
-    }
-  }
-  return baseTypeIdxs;
-}
+/* (#2175 V2-S1) `collectClosureBaseWrapperTypeIdxs` moved to the leaf module
+ * `closure-classifier.ts` so `index.ts` and `dyn-read.ts` share ONE list (see
+ * that file). Imported at the top of this module. */
 
 function emitIsClosureExport(ctx: CodegenContext): void {
   const mod = ctx.mod;
@@ -4522,6 +5024,20 @@ function emitIsDataStructExport(ctx: CodegenContext): void {
  *   (a callable is `"function"`, never `"object"`) BEFORE the final non-null
  *   `i32.const 1`, so a wrapper read back from an open-object slot is not
  *   mis-classified as `"object"`.
+ * - (#2175 V2-S1) `__typeof`: the MATERIALIZED typeof-result native (the tag as
+ *   a NativeString VALUE, used by `const t = typeof x`). It classified
+ *   null/number/boolean/bigint/string and fell through to `"object"` — with NO
+ *   function arm, so a closure read back dynamically produced `"object"` while
+ *   the INLINE `typeof x === "function"` compare (via the `__typeof_function`
+ *   predicate above) produced `"function"`. That path-dependence is the #2984
+ *   `typeof` instability and contradicts `JsTag.Function` (#2949 V1 tag
+ *   fidelity). We splice a closure `ref.test` arm returning the `"function"`
+ *   NativeString before the terminal `"object"` sequence, using the SAME
+ *   closure base-wrapper list — one predicate, all three natives in lockstep.
+ *
+ * All three natives now share the single closure classifier
+ * (`buildClosureRefTestArms` / `collectClosureBaseWrapperTypeIdxs`,
+ * `closure-classifier.ts`) — never two divergent arm lists.
  *
  * No-op unless native-strings (the helpers only exist then) and at least one
  * closure base wrapper was registered.
@@ -4535,20 +5051,13 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
     ctx.mod.functions.find((f) => (f as { name?: string }).name === name) as WasmFunction | undefined;
 
   // Chained `ref.test` arms over the anyref-converted param in local 0/1. Each
-  // arm returns `matchValue` on hit. Caller supplies the param→anyref local.
-  const closureTestArms = (anyLocalIdx: number, matchValue: number): Instr[] => {
-    const arms: Instr[] = [];
-    for (const t of baseTypeIdxs) {
-      arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
-      arms.push({ op: "ref.test", typeIdx: t } as Instr);
-      arms.push({
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: matchValue } as Instr, { op: "return" } as Instr],
-      } as Instr);
-    }
-    return arms;
-  };
+  // i32-predicate arm returns `matchValue` on hit. Builds from the ONE shared
+  // closure-base-wrapper list (`closure-classifier.ts`).
+  const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
+    buildClosureRefTestArms(ctx, anyLocalIdx, [
+      { op: "i32.const", value: matchValue } as Instr,
+      { op: "return" } as Instr,
+    ]);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");
@@ -4568,7 +5077,7 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
       { op: "local.get", index: 0 } as Instr,
       { op: "any.convert_extern" } as Instr,
       { op: "local.set", index: 1 } as Instr,
-      ...closureTestArms(1, 1),
+      ...closureI32Arms(1, 1),
       { op: "i32.const", value: 0 } as Instr,
     ];
   }
@@ -4584,7 +5093,38 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
     const lastIdx = b.length - 1;
     const last = b[lastIdx] as { op?: string; value?: number } | undefined;
     if (last && last.op === "i32.const" && last.value === 1) {
-      b.splice(lastIdx, 0, ...closureTestArms(1, 0));
+      b.splice(lastIdx, 0, ...closureI32Arms(1, 0));
+    }
+  }
+
+  // --- (#2175 V2-S1) __typeof (materialized result): splice a closure arm that
+  // returns the `"function"` NativeString before the terminal `"object"`
+  // sequence. The body converts param → anyref into local 1 (`$any_temp`)
+  // before its boxed-primitive guards, and local 1 still holds it at the
+  // terminal, so the arm reads local 1 exactly like the primitive guards.
+  //
+  // Robust splice point: the terminal is the last N instrs, where N is the
+  // length of `stringConstantExternrefInstrs(ctx, "object")` (deterministic —
+  // "object" was already registered when the body was built, so re-deriving it
+  // yields the same length). We verify the tail's op-shape matches before
+  // splicing; if `__typeof` is the `ref.null.extern` stub (no native-string
+  // type) the shape check fails and we skip — self-guarding.
+  const tt = fnByName("__typeof");
+  if (tt && ctx.nativeStrTypeIdx >= 0) {
+    const b = tt.body;
+    const objTerminal = stringConstantExternrefInstrs(ctx, "object");
+    const spliceAt = b.length - objTerminal.length;
+    const tailMatches =
+      spliceAt >= 0 &&
+      objTerminal.every(
+        (inst, i) => (b[spliceAt + i] as { op?: string } | undefined)?.op === (inst as { op?: string }).op,
+      );
+    if (tailMatches) {
+      const fnArm = buildClosureRefTestArms(ctx, 1, [
+        ...stringConstantExternrefInstrs(ctx, "function"),
+        { op: "return" } as Instr,
+      ]);
+      b.splice(spliceAt, 0, ...fnArm);
     }
   }
 }
@@ -4743,7 +5283,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
-        const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+        const funcDef = definedFuncAt(ctx, funcIdx);
         const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
         const resultType: ValType =
           funcType && funcType.kind === "func" && funcType.results.length > 0
@@ -5041,8 +5581,9 @@ function fields_type_kind(ctx: CodegenContext, structTypeIdx: number, fieldIdx: 
  * export + funcMap entry (shift-tracked); the finalize pass FILLS the body in
  * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
  */
-export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get"): number {
-  const name = kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : "__vec_get";
+export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get" | "len"): number {
+  const name =
+    kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : kind === "len" ? "__vec_len" : "__vec_get";
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
   const typeIdx =
@@ -5050,11 +5591,13 @@ export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop"
       ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
       : kind === "pop"
         ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
-        : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
+        : kind === "len"
+          ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type")
+          : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
   const idx = ctx.numImportFuncs + ctx.mod.functions.length;
   // Placeholder body must match the declared result type.
   const placeholder: Instr[] =
-    kind === "push" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
+    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
   ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
   ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
   ctx.funcMap.set(name, idx);
@@ -5175,17 +5718,32 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     }
     body.push(...current);
 
-    mod.functions.push({
-      name: "__vec_len",
-      typeIdx: lenTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({
-      name: "__vec_len",
-      desc: { kind: "func", index: lenFuncIdx },
-    });
+    // (#2773) FILL-or-build. The dynamic-index native-vec element read
+    // (property-access.ts) reserves a `__vec_len` placeholder before this
+    // finalize pass (so it can bake the length-guard call at compile time); fill
+    // it in place if reserved, else push a fresh definition.
+    const reservedLen = ctx.funcMap.get("__vec_len");
+    if (reservedLen !== undefined) {
+      const fn = definedFuncAt(ctx, reservedLen)! as {
+        locals: { name: string; type: ValType }[];
+        body: Instr[];
+      };
+      fn.locals = [{ name: "__any", type: { kind: "anyref" } as ValType }];
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_len",
+        typeIdx: lenTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_len",
+        desc: { kind: "func", index: lenFuncIdx },
+      });
+      ctx.funcMap.set("__vec_len", lenFuncIdx);
+    }
   }
 
   // __vec_get(externref, i32) -> externref
@@ -5366,7 +5924,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // pass; fill it in place if reserved.
     const reservedGet = ctx.funcMap.get("__vec_get");
     if (reservedGet !== undefined) {
-      const fn = mod.functions[reservedGet - ctx.numImportFuncs]! as { locals: typeof getLocals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
       fn.locals = getLocals;
       fn.body = body;
     } else {
@@ -5613,7 +6171,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
     const reservedPush = ctx.funcMap.get("__vec_push");
     if (reservedPush !== undefined) {
-      const fn = mod.functions[reservedPush - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5713,7 +6271,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // (#2784 S3) FILL-or-build (see __vec_push above).
     const reservedPop = ctx.funcMap.get("__vec_pop");
     if (reservedPop !== undefined) {
-      const fn = mod.functions[reservedPop - ctx.numImportFuncs]! as { locals: typeof locals; body: Instr[] };
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
       fn.locals = locals;
       fn.body = body;
     } else {
@@ -5727,6 +6285,20 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
       ctx.funcMap.set("__vec_pop", popFuncIdx);
     }
+  }
+
+  // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]
+  // write-back exports (values into the vec, attributes in the sidecar — see
+  // src/codegen/vec-define-writeback.ts for the full rationale). Gated on a
+  // defineProperty import being present so modules that never define
+  // properties stay byte-identical.
+  const wantsDefineWriteback =
+    ctx.funcMap.has("__defineProperty_value") ||
+    ctx.funcMap.has("__defineProperty_desc") ||
+    ctx.funcMap.has("__defineProperty_accessor") ||
+    ctx.funcMap.has("__defineProperties");
+  if (wantsDefineWriteback) {
+    emitVecDefineWritebackExports(ctx, mutEntries, unboxNumIdx);
   }
 }
 
@@ -5870,9 +6442,8 @@ function hasExportedVecParam(ctx: CodegenContext): boolean {
   const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
   for (const exp of mod.exports) {
     if (exp.desc.kind !== "func") continue;
-    const idx = exp.desc.index - ctx.numImportFuncs;
-    if (idx < 0 || idx >= mod.functions.length) continue;
-    const fn = mod.functions[idx]!;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
     const typeDef = mod.types[fn.typeIdx];
     if (!typeDef) continue;
     // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
@@ -6377,6 +6948,8 @@ export function generateMultiModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -6608,6 +7181,9 @@ export function generateMultiModule(
     // Emit __dv_byte_{len,get,set} exports for DataView host runtime.
     emitDataViewByteExports(ctx);
 
+    // (#3058) Resizable-ArrayBuffer helper exports (mirrors generateModule path).
+    emitResizableAbExports(ctx);
+
     // Emit __test_str_from_externref / __test_str_to_externref helpers
     // (no-op unless ctx.testRuntime && ctx.nativeStrings).
     emitTestRuntimeStringHelpers(ctx);
@@ -6674,6 +7250,9 @@ export function generateMultiModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) See the single-module pipeline note above. No-op unless
+    // ctx.usesDynMemberGet is set (U1+); byte-identical in U0.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -6681,6 +7260,11 @@ export function generateMultiModule(
     // Runs before dead-elim (which never prunes/remaps live globals) and the
     // index freeze. No-op unless a gc/host delete-aware read recorded the flag.
     finalizeInModuleInitFlag(ctx);
+
+    // (#2853) Nominal shape branding — same pass + placement as the
+    // single-module pipeline (see generateModule): after all instruction
+    // emission, before dead-type elimination.
+    brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
     markLeafStructsFinal(mod, ctx.wasi);
 
@@ -6725,6 +7309,7 @@ export function generateMultiModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
   };
 }
 
@@ -6983,6 +7568,17 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   const needsPathOpen = ctx.wasiNodeFsFuncs.has("writeFileSync");
 
   function visit(node: ts.Node) {
+    // (#2968) Any `throw` in the program can propagate uncaught to `_start`. The
+    // uncaught-exception printer wired in `addWasiStartExport` renders the payload
+    // to stderr via `fd_write` and calls `proc_exit(1)`, so a throwing WASI module
+    // needs BOTH imports even when it does no explicit console/process I/O — a bare
+    // `throw new TypeError("x")` otherwise exited 0 with no diagnostic. Registering
+    // them here (during the normal import pass) keeps them in the existing WASI set
+    // and avoids any late-import funcidx shift. Non-throwing modules are unaffected.
+    if (ts.isThrowStatement(node)) {
+      needsFdWrite = true;
+      needsProcExit = true;
+    }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const propAccess = node.expression;
       if (
@@ -8518,6 +9114,81 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
 }
 
 /**
+ * (#2968) Ensure `__wasi_start_print_exn(payload: externref) -> void` exists and
+ * return its function index (lazy). Renders an uncaught exception payload to
+ * stderr for the WASI `_start` wrapper (addWasiStartExport):
+ *   - null payload (e.g. `throw null`) → no-op (no string form).
+ *   - else `any.convert_extern` → `__any_to_string` (whose #2962 error arm turns
+ *     an `$Error_struct` into a real "TypeError: x") → `__wasi_write_any_string_stderr`
+ *     (flatten + WTF-16→UTF-8 encode + fd 2 write) → a trailing newline byte.
+ * The caller invokes this from the `$exc` catch, then `proc_exit(1)`s.
+ *
+ * Valid only for a throwing, native-strings WASI module whose fd_write import is
+ * registered (registerWasiImports sets it when the source contains a `throw`);
+ * returns -1 otherwise so the caller keeps the plain `_start`.
+ *
+ * Index-shift safety: every dependency is ensured (each may append functions /
+ * a late import) BEFORE this helper's own funcidx is reserved, and the baked
+ * funcidx values are read from the authoritative `funcMap` after all ensures.
+ */
+function ensureWasiStartExnPrinter(ctx: CodegenContext): number {
+  const helperName = "__wasi_start_print_exn";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+  if (!ctx.wasi || ctx.exnTagIdx < 0 || !ctx.nativeStrings) return -1;
+  if (!ctx.linkNodeShims && ctx.wasiFdWriteIdx < 0) return -1;
+
+  // Ensure dependencies first (append functions / possible late import) so this
+  // helper's reserved index lands AFTER any shift they cause.
+  ensureNativeStringHelpers(ctx);
+  ensureAnyToStringHelper(ctx);
+  const writeStderrIdx = ensureWasiWriteAnyStringHelper(ctx, /* useStderr */ true);
+  // The chunked-write helper backs the newline `emitWasiWriteTail` below; ensure
+  // it now (idempotent — ensureWasiWriteAnyStringHelper already did) so the tail
+  // lookup never pushes a function after this helper's funcidx is reserved.
+  ensureWasiFdWriteAllHelper(ctx);
+  // Read baked funcidx values from the authoritative funcMap AFTER all ensures.
+  const anyToStrIdx = ctx.funcMap.get("__any_to_string");
+  if (writeStderrIdx < 0 || anyToStrIdx === undefined) return -1;
+
+  // param 0 = payload externref; local 1 = the newline write length (=1).
+  const NL_LEN = 1;
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "externref" }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    // A null payload has no string form — skip rendering, still exit via caller.
+    { op: "local.get", index: 0 } as Instr,
+    { op: "ref.is_null" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
+    // payload (externref) → anyref → __any_to_string yields ref AnyString → stderr.
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "call", funcIdx: anyToStrIdx } as Instr,
+    { op: "call", funcIdx: writeStderrIdx } as Instr,
+    // Trailing newline: store 0x0A at the shared write scratch and write 1 byte
+    // to fd 2 (emitWasiWriteTail handles both the direct-WASI and node-shim path).
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "i32.const", value: 0x0a } as Instr,
+    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "local.set", index: NL_LEN } as Instr,
+    ...emitWasiWriteTail(ctx, 2, WASI_WRITE_SCRATCH_START, NL_LEN),
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    locals: [{ name: "nlLen", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
  * #2639: Ensure `__wasi_write_any_string_fd(s: ref AnyString, fd: i32) -> i32`
  * exists and return its function index (lazy). Encodes the string to UTF-8 in
  * the shared linear scratch (the same encoder as the fixed-fd writer) and writes
@@ -9509,12 +10180,12 @@ export function addStringImports(ctx: CodegenContext): void {
   if (delta > 0 && ctx.mod.functions.length > 0) {
     const newImportNames = new Set(["concat", "length", "equals", "substring", "charCodeAt"]);
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -9525,10 +10196,10 @@ export function addStringImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -9578,20 +10249,22 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
       }
     }
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep
     // — see the matching block in addUnionImports / shiftLateImportIndices.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#1839) `nativeStrHelpers` is read directly by string-lowering call sites
     // and helper emitters — it is NOT a copy of funcMap, so it must be shifted
@@ -9599,14 +10272,14 @@ export function addStringImports(ctx: CodegenContext): void {
     // every entry >= importsBefore moves up by `delta`. Omitting this left the
     // map stale under plain `--nativeStrings` JS-host mode.
     for (const [name, idx] of ctx.nativeStrHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
     // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
     // sites bake `call` indices straight from this map.
     for (const [name, idx] of ctx.nativeRegexHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
@@ -9615,7 +10288,7 @@ export function addStringImports(ctx: CodegenContext): void {
     // indices straight from this map (see shiftLateImportIndices for the full
     // rationale / the WeakMap stale-index validation failure it fixes).
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
@@ -9634,7 +10307,7 @@ export function addStringImports(ctx: CodegenContext): void {
     }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
   }
@@ -10965,7 +11638,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     ]);
     // Update funcMap entries for defined functions (not imports)
     for (const [name, idx] of ctx.funcMap) {
-      if (!newImportNames.has(name) && idx >= importsBefore) {
+      if (!newImportNames.has(name) && inLiveShiftRange(idx, importsBefore)) {
         ctx.funcMap.set(name, idx + delta);
       }
     }
@@ -10978,13 +11651,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     // (e.g. `__box_number` for a numeric key/value) land between helper
     // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
     for (const [name, idx] of ctx.mapHelpers) {
-      if (idx >= importsBefore) {
+      if (inLiveShiftRange(idx, importsBefore)) {
         ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
     for (const exp of ctx.mod.exports) {
-      if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+      if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
         exp.desc.index += delta;
       }
     }
@@ -10995,10 +11668,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       if (shifted.has(instrs)) return;
       shifted.add(instrs);
       for (const instr of instrs) {
-        if ((instr.op === "call" || instr.op === "return_call") && instr.funcIdx >= importsBefore) {
+        if ((instr.op === "call" || instr.op === "return_call") && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
-        if (instr.op === "ref.func" && instr.funcIdx >= importsBefore) {
+        if (instr.op === "ref.func" && inLiveShiftRange(instr.funcIdx, importsBefore)) {
           instr.funcIdx += delta;
         }
         const a = instr as any;
@@ -11045,7 +11718,7 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const elem of ctx.mod.elements) {
       if (elem.funcIndices) {
         for (let i = 0; i < elem.funcIndices.length; i++) {
-          if (elem.funcIndices[i]! >= importsBefore) {
+          if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
             elem.funcIndices[i]! += delta;
           }
         }
@@ -11053,11 +11726,13 @@ export function addUnionImports(ctx: CodegenContext): void {
     }
     // Update declaredFuncRefs
     if (ctx.mod.declaredFuncRefs.length > 0) {
-      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + delta : idx));
+      ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+        inLiveShiftRange(idx, importsBefore) ? idx + delta : idx,
+      );
     }
     // Update Wasm start function index (#907) — late-added imports shift the
     // defined-function index that __module_init lives at.
-    if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
       ctx.mod.startFuncIdx += delta;
     }
     // Sync nativeStrHelpers and re-base so reconcileNativeStrFinalizeShift is a no-op
@@ -11065,11 +11740,11 @@ export function addUnionImports(ctx: CodegenContext): void {
     // native-string helper bodies. Without this, reconcile double-shifts them (#1677-fast-path).
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
-        if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeStrHelpers.set(name, idx + delta);
       }
       // (#1913) Regex helper map shares the same lifecycle.
       for (const [name, idx] of ctx.nativeRegexHelpers) {
-        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+        if (inLiveShiftRange(idx, importsBefore)) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
@@ -11078,8 +11753,8 @@ export function addUnionImports(ctx: CodegenContext): void {
     // reachable from any Instr — without this, finalizeMethodTrampolines later
     // resolves the wrong (import) signature, producing invalid Wasm.
     for (const t of ctx.pendingMethodTrampolines) {
-      if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += delta;
-      if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += delta;
+      if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += delta;
+      if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += delta;
     }
     // (#2918) Async-scheduler + Promise.all/race combinator side-channel funcIdxs
     // move in lockstep too (addUnionImports missed them). Same complete key list
@@ -11201,6 +11876,16 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
   }
   const strToNumberIdx = ctx.funcMap.get("__str_to_number");
+
+  // (#2106 S1) `undefinedSingleton` regime support for the union natives:
+  // when active, `undefined` is a non-null extern-wrapped tag-1 `$AnyValue`
+  // (never `ref.null.extern`), so ToBoolean must classify it FALSY, the
+  // typeof cluster must answer "undefined" for the singleton and "object"
+  // for null, and `__typeof_undefined` flips off bare `ref.is_null`.
+  // Inactive (default): every body below is byte-identical to legacy.
+  const s1Active = undefinedSingletonActive(ctx);
+  if (s1Active) ensureAnyValueType(ctx);
+  const s1AnyValIdx = s1Active ? ctx.anyValueTypeIdx : -1;
 
   /**
    * Synthesize a native helper function. The funcIdx is allocated as
@@ -11512,6 +12197,30 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2106 S1) `$AnyValue` box: tag 0 (null) / 1 (undefined) → FALSY
+      // (§7.1.2); other wrapped tags (5 string / 6 object) keep the non-null-
+      // ref default (truthy). Without this arm the non-null `$undefined`
+      // singleton would be truthy — `if (undefined)` taking the then-branch.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.gt_u" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11662,8 +12371,19 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
-  registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null` (legacy: null and
+  //     undefined share the null-extern bit pattern). (#2106 S1) Under the
+  //     `undefinedSingleton` regime: tag-1 `$AnyValue` ∨ UNDEF_F64 box; a null
+  //     externref answers 0 (typeof null is "object", not "undefined").
+  {
+    const s1Body = s1Active ? buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS) : undefined;
+    registerNative(
+      "__typeof_undefined",
+      externrefToI32,
+      s1Body ?? [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
+      s1Body !== undefined ? [{ name: "$any_temp", type: { kind: "anyref" } as ValType }] : [],
+    );
+  }
 
   // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
   //     not boolean AND not bigint AND not function. We approximate as "non-null and
@@ -11679,8 +12399,36 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+        // (#2106 S1) typeof null IS "object" (§13.5.3) — under the singleton
+        // regime a null externref means JS null, so answer 1. Legacy: null
+        // means null-or-undefined; keep the historical 0.
+        then: [{ op: "i32.const", value: s1Active ? 1 : 0 }, { op: "return" }],
       },
+      // (#2106 S1) the tag-1 `$undefined` singleton is NOT an object.
+      ...(s1AnyValIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: s1AnyValIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: s1AnyValIdx },
+                { op: "struct.get", typeIdx: s1AnyValIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+                } as Instr,
+              ],
+            },
+          ] as Instr[])
+        : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 1 },
@@ -11730,12 +12478,92 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 15. __typeof(externref) -> externref — returns null externref under
-  //     wasi. Producing real type-tag strings would require a NativeString
-  //     per tag; defer until a wasi caller needs the typeof RESULT as a
-  //     string (today's callers compare against literal tags via the
-  //     __typeof_* helpers above).
-  registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  // 15. __typeof(externref) -> externref — the MATERIALIZED typeof result.
+  //     (#2965) This was a `ref.null.extern` stub ("defer until a wasi caller
+  //     needs the typeof RESULT as a string"), which silently broke every
+  //     standalone site where the typeof string is a VALUE rather than an
+  //     inline `typeof x === "…"` compare: `var t = typeof x`,
+  //     `assert_sameValue_str(typeof(o.p), "undefined")` (the test262 runner's
+  //     paren-form transform miss), any typeof flowing through a param. The
+  //     result was a null externref, so `t === "undefined"` was false for
+  //     EVERY tag and `t.length` trapped. Classify with the same dispatch the
+  //     `__typeof_*` predicates above use (null → "undefined", box_number →
+  //     "number", box_boolean → "boolean", $BigInt → "bigint", $AnyString →
+  //     "string", else → "object"). (#2175 V2-S1) A closure/function value read
+  //     back here would otherwise fall through to "object";
+  //     `fillStandaloneTypeofClosureArms` splices a closure `ref.test` →
+  //     "function" arm before the terminal at finalize (closures aren't all
+  //     registered yet at this registration point), so the materialized result
+  //     agrees with the `__typeof_function` predicate. The tag is returned as
+  //     an inline NativeString (sentinel-safe, no funcidx baked — the #2515
+  //     discipline; string literals here are type-index-only instructions, so
+  //     the late-import finalize shift cannot desync this body). Falls back to
+  //     the old stub only when no native-string type is registered (then no
+  //     string content could be represented anyway).
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const typeofTagArm = (test: Instr[], tag: string): Instr[] => [
+      ...test,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...stringConstantExternrefInstrs(ctx, tag), { op: "return" }],
+      },
+    ];
+    registerNative(
+      "__typeof",
+      externrefToExternref,
+      [
+        // null externref → undefined (matches __typeof_undefined = ref.is_null).
+        // (#2106 S1) Under the singleton regime null means JS null → "object"
+        // (§13.5.3), and the tag-1/UNDEF-box arm below answers "undefined".
+        ...typeofTagArm([{ op: "local.get", index: 0 }, { op: "ref.is_null" }], s1Active ? "object" : "undefined"),
+        ...(s1Active
+          ? (() => {
+              const test = buildIsUndefinedExternBody(ctx, 1, UNDEF_F64_BITS);
+              return test !== undefined ? typeofTagArm(test, "undefined") : [];
+            })()
+          : []),
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: 1 },
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumStructIdx },
+          ],
+          "number",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxBoolStructIdx },
+          ],
+          "boolean",
+        ),
+        ...typeofTagArm(
+          [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: bigIntStructIdx },
+          ],
+          "bigint",
+        ),
+        ...(ctx.anyStrTypeIdx >= 0
+          ? typeofTagArm(
+              [
+                { op: "local.get", index: 1 },
+                { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+              ],
+              "string",
+            )
+          : []),
+        // non-null, not a boxed primitive, not a string → object
+        ...stringConstantExternrefInstrs(ctx, "object"),
+      ],
+      [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+    );
+  } else {
+    registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+  }
 
   // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
   // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
@@ -13963,6 +14791,33 @@ function collectInterfaceMembers(
       if (info.className === "RegExp" && propName === "lastIndex" && !ctx.standalone && !ctx.wasi) {
         wasmType = { kind: "externref" };
       }
+      // (#3051 Slice 2) `RegExp.prototype.global` / `.unicode` are spec-readonly
+      // booleans, but test262's @@replace/@@split coercion tests redefine them as
+      // writable data properties (`Object.defineProperty(r,'global',{writable:true})`)
+      // and then assign arbitrary values (`r.global = Symbol.replace`, `= {}`,
+      // `= NaN`, …). §22.2.6.11/§22.2.6.14 read the flag back through
+      // `ToBoolean(? Get(rx, "global"|"unicode"))` — i.e. any value coerces at
+      // read time, it is NOT constrained to a boolean on write. Typing the extern
+      // property `boolean` makes the generated `RegExp_set_global(externref, i32)`
+      // setter eagerly ToNumber the assigned value: a Symbol RHS traps ("Cannot
+      // convert a Symbol value to a number") and an object RHS traps ("Cannot
+      // convert object to primitive value") at the wasm boundary, before the value
+      // is ever stored. Carry the slot as `externref` in host mode (mirroring the
+      // #2671 `lastIndex` treatment) so the raw value round-trips onto the native
+      // RegExp and the native @@replace/@@split protocol performs the spec
+      // ToBoolean itself; explicit `r.global` reads coerce externref→boolean at the
+      // use site (a boxed `false` unboxes correctly — see the Slice 2 controls).
+      // Standalone / WASI keep their native struct-field RegExp path (the
+      // `RegExp_*_global` extern import is never emitted there), so only host mode
+      // is retyped.
+      if (
+        info.className === "RegExp" &&
+        (propName === "global" || propName === "unicode") &&
+        !ctx.standalone &&
+        !ctx.wasi
+      ) {
+        wasmType = { kind: "externref" };
+      }
       const isReadonly = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword) ?? false;
       info.properties.set(propName, { type: wasmType, readonly: isReadonly });
     }
@@ -14314,7 +15169,11 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
       addImport(ctx, "env", importName, { kind: "func", typeIdx });
       const funcIdx = ctx.funcMap.get(importName);
       if (funcIdx !== undefined) {
-        ctx.declaredGlobals.set(name, { type: { kind: "externref" }, funcIdx });
+        // (#2856) Record the extern class of the global's declared type so
+        // the IR host-extern path can type the `call global_<name>` handle
+        // as `IrType.extern { className }` and dispatch member access on it.
+        const className = type.getSymbol()?.name;
+        ctx.declaredGlobals.set(name, { type: { kind: "externref" }, funcIdx, className });
       }
     }
   }
@@ -15759,6 +16618,7 @@ export {
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
   getOrRegisterRefCellType,
+  getOrRegisterResizableAbType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";

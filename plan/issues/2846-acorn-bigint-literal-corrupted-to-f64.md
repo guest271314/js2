@@ -2,7 +2,7 @@
 id: 2846
 title: "compiled-acorn corrupts BigInt literals — parsed/marshalled as float64, losing value AND the `bigint` string"
 status: done
-sprint: current
+sprint: 69
 priority: high
 horizon: m
 feasibility: hard

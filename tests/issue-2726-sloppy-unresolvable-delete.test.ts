@@ -18,10 +18,13 @@ import { buildImports } from "../src/runtime.js";
 //
 // Root-cause / oracle: an unresolvable identifier yields NO symbol from the TS
 // checker (`getSymbolAtLocation === undefined`). The non-configurable intrinsic
-// globals that MUST stay `false` (`undefined`, `arguments`, `globalThis`) and
-// all lib-declared globals (`NaN`, `Infinity`, `JSON`, …) DO return a symbol, so
-// they correctly remain `false`. Symbol-presence — not the weaker
-// `!valueDeclaration` heuristic — is what keeps those intrinsics out of `true`.
+// globals that MUST stay `false` (`undefined`, `arguments`, `globalThis`,
+// `NaN`, `Infinity`) DO return a symbol (or are name-excluded), so they correctly
+// remain `false`. Symbol-presence — not the weaker `!valueDeclaration` heuristic
+// — is what keeps those intrinsics out of `true`. (#2726 (b) later refined this:
+// the OTHER lib-declared globals — `JSON`/`Object`/`Math`/… — are CONFIGURABLE
+// global properties, so `delete` of them returns `true`; see the dedicated
+// group-(b) test file.)
 
 async function run(source: string): Promise<unknown> {
   const result = await compile(source);
@@ -97,11 +100,15 @@ describe("#2726 (a) sloppy delete of unresolvable identifier", () => {
     expect(await run(src)).toBe(1);
   });
 
-  it("delete of a lib-declared global (JSON / Object) stays false", async () => {
+  // (#2726 (b) refinement) JSON / Object are CONFIGURABLE global properties
+  // (ECMA-262 §19) ⇒ `delete` returns true (test262 11.4.1-4.a-8). This
+  // corrects the group-(a) conservative placeholder that kept them false;
+  // only NaN / Infinity / undefined are non-configurable (guarded above).
+  it("delete of a configurable built-in global (JSON / Object) returns true", async () => {
     const src = `
       export function test(): number {
-        if ((delete JSON) !== false) return 11;
-        if ((delete Object) !== false) return 12;
+        if ((delete JSON) !== true) return 11;
+        if ((delete Object) !== true) return 12;
         return 1;
       }`;
     expect(await run(src)).toBe(1);

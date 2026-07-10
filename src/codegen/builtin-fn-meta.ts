@@ -50,6 +50,19 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
   "Array.isArray": { name: "isArray", length: 1 },
   "Object.keys": { name: "keys", length: 1 },
   "Object.getOwnPropertyDescriptor": { name: "getOwnPropertyDescriptor", length: 2 },
+  // (#2933) Fixed-arity Reflect.* namespace static-method value reads. Spec
+  // `length` per §28.1 (receiver arg is optional and not counted).
+  "Reflect.get": { name: "get", length: 2 },
+  "Reflect.has": { name: "has", length: 2 },
+  "Reflect.set": { name: "set", length: 3 },
+  "Reflect.ownKeys": { name: "ownKeys", length: 1 },
+  // (#2933) JSON.stringify as a VALUE — the fixed 1-arg compact form. The value
+  // closure serialises via the native `__json_stringify_root` (host-free), the
+  // SAME entry the direct `JSON.stringify(o)` call path uses. Spec `.length` is
+  // 3 (value, replacer, space); the host-free closure supports only the leading
+  // value arg (replacer/space out of scope, matching the standalone call-path
+  // narrowing), but `.length` reports the spec arity.
+  "JSON.stringify": { name: "stringify", length: 3 },
 };
 
 /**
@@ -220,11 +233,6 @@ export function ensureBuiltinFnMetaType(
   return typeIdx;
 }
 
-/** Bit set in `bfnstate` when the `name` own property was deleted. */
-export const BFN_STATE_NAME_DELETED = 1;
-/** Bit set in `bfnstate` when the `length` own property was deleted. */
-export const BFN_STATE_LENGTH_DELETED = 2;
-
 /**
  * The instruction sequence that materializes a builtin closure VALUE from a
  * factory result. A meta-typed closure struct has the extra `(mut i32)
@@ -240,4 +248,64 @@ export function pushBuiltinFnClosureValueInstrs(
   if (isMeta) instrs.push({ op: "i32.const", value: 0 } as Instr);
   instrs.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
   return instrs;
+}
+
+/**
+ * (#2963) IDENTITY-STABLE reified builtin-function value. Instead of a fresh
+ * `struct.new` per read (which gives `Promise.resolve !== Promise.resolve` —
+ * two distinct closure instances), materialize the closure struct into a
+ * MODULE-LEVEL SINGLETON: one `(ref null <structType>)` mutable global per
+ * (builtin, member), lazily initialized on first read, so every read of the
+ * same builtin value yields the SAME ref.
+ *
+ * Why a lazy null-guard in the FUNCTION BODY rather than a global const-init:
+ * the singleton's `struct.new` takes a `ref.func <closureFuncIdx>` operand, and
+ * `closureFuncIdx` is a DEFINED-function index that shifts whenever a late
+ * import is added (`addUnionImports` / `shiftLateImportIndices` / the
+ * string-import shifter). Those shifters walk function bodies + nested
+ * `.then`/`.body`/`.else` arrays (verified) but do NOT walk
+ * `ctx.mod.globals[].init`, so a `ref.func` embedded in a const-init would go
+ * stale and reference the wrong function. Emitting the materialization inside
+ * an `if (ref.is_null) { … }` guard in `fctx.body` keeps the `ref.func` in a
+ * shift-covered array — the same discipline as every other funcidx bake site.
+ *
+ * The mutable `bfnstate` (delete-bits) field being shared across all reads is
+ * spec-correct: a builtin method is ONE function object, so `delete fn.name`
+ * seen through any reference mutates the same object (test262 `verifyProperty`
+ * `isConfigurable` arm).
+ *
+ * Stack: `[] → [(ref <structType>)]` (non-null, exactly what
+ * `pushBuiltinFnClosureValueInstrs` produced, so callers' result type is
+ * unchanged).
+ */
+export function pushBuiltinFnSingletonValueInstrs(
+  ctx: CodegenContext,
+  closure: { type: { kind: "ref"; typeIdx: number }; funcIdx: number },
+): Instr[] {
+  const typeIdx = closure.type.typeIdx;
+  if (!ctx.builtinFnSingletonGlobalByTypeIdx) ctx.builtinFnSingletonGlobalByTypeIdx = new Map();
+  let globalIdx = ctx.builtinFnSingletonGlobalByTypeIdx.get(typeIdx);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__builtinfn_singleton_${typeIdx}`,
+      // (ref null <structType>) — starts null, set once on first read.
+      type: { kind: "ref_null", typeIdx },
+      mutable: true,
+      init: [{ op: "ref.null", typeIdx } as Instr],
+    });
+    ctx.builtinFnSingletonGlobalByTypeIdx.set(typeIdx, globalIdx);
+  }
+
+  return [
+    { op: "global.get", index: globalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...pushBuiltinFnClosureValueInstrs(ctx, closure), { op: "global.set", index: globalIdx } as Instr],
+    } as Instr,
+    { op: "global.get", index: globalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+  ];
 }

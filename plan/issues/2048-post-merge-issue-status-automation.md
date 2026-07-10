@@ -4,7 +4,7 @@ title: "process: nothing executes the 'merged PR ⇒ status: done' rule — stal
 status: ready
 sprint: Backlog
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-07-03
 priority: medium
 feasibility: easy
 reasoning_effort: medium
@@ -66,3 +66,30 @@ merge-queue slots, and reviewer attention.
   sprint-61 backfill (done manually 2026-06-10).
 - No redispatch loop in the following sprint produces >1 post-merge
   metadata PR per issue.
+
+## Partial resolution — layer 3 (2026-07-03)
+
+**Layer 3 (reconciler surfacing) landed.** `scripts/reconcile-tasklist.mjs`'s
+merged-PR cross-check (#2147) previously flagged only `ready`/`in-progress`
+issues cited by a merged code PR — `in-review` was deliberately excluded as
+"not a wrong-claim risk." But that is exactly the stale-status class #2048 is
+about: an `in-review` issue whose fix has merged but whose frontmatter never got
+flipped to `done`. Added `in-review` to `AT_RISK_ISSUE_STATUSES`, so the
+reconciler (already a SessionStart hook, `--quiet`) now surfaces these too, with
+guidance that they are the "merged PR ⇒ done" flip that never ran. Report-only
+— no frontmatter is written — so zero blast radius. This satisfies the
+**"Reconciler reports zero stale `in-review` issues"** acceptance bullet (the
+reconciler now _detects_ them so the lead/PO can act; it reports 0 only once the
+backfill is applied).
+
+**Still open (this issue stays `ready`):**
+
+- **Layer 1 (load-bearing)** — a `push: main` workflow that auto-commits
+  `status: done` + `completed:` for a merged `issue-<id>-*` / `symphony/<id>`
+  branch whose issue is still `in-review`/`in-progress` and has no other open
+  PR. Deferred here: it writes to `main` and can only be validated on a real
+  merge event (not on-demand), so it wants its own careful PR + a fixture
+  dry-run. It is the piece that actually _cures_ the churn.
+- **Layer 2** — the codex/symphony redispatch prompt gating on `gh pr view
+<pr> --json state` before re-validating a merged issue (a prompt/process
+  change, not code in this repo).

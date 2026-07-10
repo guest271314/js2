@@ -26,20 +26,31 @@
  *     (try/finally without catch is, as in Phase 1).
  */
 import { ts } from "../ts-api.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { isBooleanType, isNumberType, isStringType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
-import { allocLocal } from "./context/locals.js";
+import { allocLocal, getLocalType } from "./context/locals.js";
+import { ensureNativeIteratorRuntime } from "./iterator-native.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import type { CodegenContext, FunctionContext, NativeGeneratorInfo } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { nativeStringType } from "./native-strings.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
-import { addFuncType } from "./registry/types.js";
-import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import {
+  coerceType,
+  compileExpression,
+  compileStatement,
+  ensureLateImport,
+  flushLateImportShifts,
+  valTypesMatch,
+} from "./shared.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
 import { addUnionImports } from "./index.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
+import { destructureParamArray, destructureParamObject } from "./destructuring-params.js";
+import { resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 // (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
 // field-I/O / spill-store emit helpers now live in the shared resumable-frame
@@ -84,8 +95,17 @@ type StateTerminator =
   | { kind: "yield"; expr: ts.Expression | undefined; next: number }
   | { kind: "return"; expr: ts.Expression | undefined }
   | { kind: "done" }
-  | { kind: "jump"; next: number }
+  // (#3050) `setPending` — when jumping INTO a state-lowered finally on the
+  // NORMAL path, reset the region's pending-completion kind to 0 (none) so the
+  // finally's exit router proceeds to the join. Abrupt entries write the pending
+  // fields directly in the routers; plain jumps leave it undefined (no write).
+  | { kind: "jump"; next: number; setPending?: number }
   | { kind: "branch"; cond: ts.Expression; negate: boolean; thenState: number; elseState: number }
+  // (#3050) Exit router of a state-lowered `finally` block: consult the saved
+  // pending completion — none → proceed to `join`; return/throw → re-dispatch
+  // the completion against the region's OUTER unwind chain (innermost-first),
+  // which may enter an outer catch/finally or complete/re-throw.
+  | { kind: "finally-exit"; join: number; unwind: UnwindEntry[] }
   // (#2170) `yield* <inner-generator-call>` — delegate to an inner native
   // generator. `subject` is the inner generator call expression; `innerName` is
   // the callee's source name (resolved to a `NativeGeneratorInfo` at emit time).
@@ -93,7 +113,96 @@ type StateTerminator =
   // the state struct (see `delegationSites`). This is a SELF-suspending state:
   // each `.next()` re-enters it, driving the inner's resume until the inner is
   // done, then control transfers to `next`.
-  | { kind: "yield-star"; subject: ts.Expression; innerName: string; siteIndex: number; next: number };
+  // (#2864 R1) `bindResultTo` — for `const x = yield* inner()`: the name that
+  // receives the DELEGATION COMPLETION value (the inner's `return` value,
+  // §27.5.3.7 — `innerRes.value` once `innerRes.done`). It is delivered by the
+  // done-arm inside the SAME resume call that observed the inner's completion,
+  // NOT from the `sent` field — so it is deliberately NOT a resume binding (a
+  // resume binding would clobber it with the `.next(v)` argument on re-entry).
+  | {
+      kind: "yield-star";
+      delegationKind: "native-gen";
+      subject: ts.Expression;
+      innerName: string;
+      siteIndex: number;
+      next: number;
+      bindResultTo?: string;
+    }
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` — delegate to a NUMERIC
+  // iterable by driving a vec cursor directly (the array for-of fast path),
+  // never the #1320 `__iterator` bridge (which would leak host box/unbox
+  // imports). `vecSiteIndex` keys the per-site `{ref null $Vec, i32 cursor}`
+  // slot pair. Like the native-gen kind this state is SELF-suspending: each
+  // `.next()` re-enters it, re-yields `vec.data[cursor]`, and advances the
+  // cursor until it is exhausted, then transfers to `next`.
+  | {
+      kind: "yield-star";
+      delegationKind: "vec";
+      subject: ts.Expression;
+      vecSiteIndex: number;
+      next: number;
+      bindResultTo?: string;
+    }
+  // (#2173 slice-2b) `yield* <generic iterable>` — delegate to a `.values()`
+  // iterator or a custom `{ [Symbol.iterator]() { return { next() {…} } } }` by
+  // driving the standalone-native `__iterator` / `__iterator_next` runtime
+  // (#2038) from an `externref` `$__IterRec` slot. Zero host imports (the native
+  // iterator runtime is emitted Wasm). Like the other delegation kinds this
+  // state is SELF-suspending: each `.next()` re-enters it, steps the iterator,
+  // re-yields the (unboxed) value, and transfers to `next` once the iterator
+  // reports done. `iterableSiteIndex` keys the per-site externref slot.
+  | {
+      kind: "yield-star";
+      delegationKind: "iterable";
+      subject: ts.Expression;
+      iterableSiteIndex: number;
+      next: number;
+      bindResultTo?: string;
+    };
+
+/**
+ * (#3050) A try-region admitted by the NEW try-region machinery: a `try` whose
+ * catch crosses a yield, and/or whose `finally` itself yields. The catch and
+ * finally blocks are lowered as REAL states; abrupt completions (`.throw(e)` /
+ * `.return(v)` at a suspended yield, or a runtime exception during a try-part
+ * state) are ROUTED to the region's handler states instead of the legacy
+ * "replay finalizers then re-throw" tail. Legacy kind-L regions (finally-only
+ * with a yield-free finally) never mint one of these — they keep the
+ * byte-identical `abruptResume.finalizers` replay.
+ */
+interface TryRegionPlan {
+  /** Catch-clause binding name (spilled as externref), when the catch binds one. */
+  catchParamName?: string;
+  /** Entry state of the catch block (set when the catch block is lowered). */
+  catchEntryState?: number;
+  /** Entry state of the state-lowered finally block. */
+  finallyEntryState?: number;
+}
+
+/**
+ * (#3050) One step of the abrupt-completion unwind chain attached to a
+ * resumable state, ordered innermost-first at capture time:
+ *  - `replay`  legacy yield-free finally — compiled inline, runs for BOTH
+ *              return and throw completions (byte-identical to abruptResume);
+ *  - `catch`   an enclosing catch handler — intercepts THROW completions only:
+ *              binds the stored error and enters the catch block's states;
+ *  - `finally` an enclosing state-lowered finally — intercepts BOTH: saves the
+ *              completion in the pending fields and enters the finally states;
+ *              the finally's exit router re-dispatches the pending completion.
+ */
+type UnwindEntry =
+  | { kind: "replay"; statements: readonly ts.Statement[] }
+  | { kind: "catch"; region: TryRegionPlan }
+  | { kind: "finally"; region: TryRegionPlan };
+
+/**
+ * (#3050) Runtime-throw route for exceptions raised WHILE EXECUTING a state
+ * (e.g. a `throw obj;` statement in a try block, or a throwing call). States
+ * positionally inside a NEW try-region get their dispatch arm wrapped in a wasm
+ * `try`/`catch $exc` that routes the exception per JS semantics: into the
+ * region's catch (binding the error) or into its finally (as a pending throw).
+ */
+type ThrowRoute = { kind: "catch"; region: TryRegionPlan } | { kind: "finally"; region: TryRegionPlan };
 
 interface NativeGeneratorState {
   /** Straight-line, yield-free statements to run on entering this state. */
@@ -108,6 +217,18 @@ interface NativeGeneratorState {
    * `GeneratorResumeAbrupt` (`.return()`) hitting the yield that leads here.
    */
   abruptResume?: { finalizers: readonly ts.Statement[][] };
+  /**
+   * (#3050) Innermost-first unwind chain for abrupt resume at this state.
+   * Present INSTEAD of `abruptResume` when any enclosing try-region uses the
+   * new machinery; states under only legacy kind-L regions keep `abruptResume`
+   * so already-supported shapes emit byte-identical code.
+   */
+  unwind?: UnwindEntry[];
+  /**
+   * (#3050) Runtime-throw route for exceptions raised while this state's arm
+   * executes (set for states positionally inside a NEW try-region).
+   */
+  throwRoute?: ThrowRoute;
   terminator: StateTerminator;
 }
 
@@ -133,6 +254,34 @@ interface NativeGeneratorPlan {
    * the outer generator's host re-entries.
    */
   delegationSites: { innerName: string }[];
+  /**
+   * (#2173 slice-2a) One entry per `yield* <numeric-array/vec>` site, in source
+   * order. `buildResumeInfo` resolves each `subject`'s vec type and allocates a
+   * `{ref null $Vec, i32 cursor}` field pair, appended AFTER the native-gen
+   * delegation slots so the f64 `spillFieldOffset` and native-gen slot indices
+   * are unaffected (byte-inert for non-vec-delegating generators).
+   */
+  vecDelegationSites: { subject: ts.Expression }[];
+  /**
+   * (#2173 slice-2b) One entry per `yield* <generic iterable>` site, in source
+   * order. `buildResumeInfo` allocates one `externref` field per entry (the
+   * `$__IterRec` slot), appended AFTER the native-gen and vec delegation slots.
+   */
+  iterableDelegationSites: { subject: ts.Expression }[];
+  /**
+   * (#3050) True when any try-region lowers its finally as states (a yielding
+   * finally): the state struct then carries an i32 `pending` completion-kind
+   * field (0 none / 1 return / 2 throw) consumed by the finally exit router.
+   * The value/error payloads ride the existing `abrupt` / `error` fields.
+   */
+  needsPending: boolean;
+  /**
+   * (#3050) True when any state carries a `throwRoute` (its arm is wrapped in a
+   * wasm try/catch). In JS-host mode the wrap's catch_all recovers foreign JS
+   * exceptions via `__get_caught_exception`, acquired up-front by the resume
+   * emitter so no late import fires mid-trampoline.
+   */
+  hasThrowRoutes: boolean;
 }
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
@@ -286,6 +435,46 @@ function nodeContainsYield(root: ts.Node): boolean {
 }
 
 /**
+ * (#2920) Collect every bound identifier in a param binding pattern
+ * (recursively — nested array/object patterns and rest elements included;
+ * array holes skipped). Used to register each destructured PARAM name as a
+ * live-across-yield spill and to resolve its spill ValType from the checker.
+ */
+function collectPatternBindingIdentifiers(pattern: ts.BindingPattern): ts.Identifier[] {
+  const out: ts.Identifier[] = [];
+  const visitPattern = (pat: ts.BindingPattern): void => {
+    for (const el of pat.elements) {
+      if (ts.isOmittedExpression(el)) continue;
+      if (ts.isIdentifier(el.name)) out.push(el.name);
+      else visitPattern(el.name);
+    }
+  };
+  visitPattern(pattern);
+  return out;
+}
+
+/**
+ * (#2920) A spilled destructured-param local must round-trip through a state
+ * struct field, so its ValType needs a struct-construction default. Scalars and
+ * nullable refs qualify; a non-null `ref` is widened to `ref_null` (matching the
+ * F1b reconcile). Any other kind → null (bail the whole generator to host).
+ */
+function spillSafeValType(t: ValType): ValType | null {
+  switch (t.kind) {
+    case "f64":
+    case "i32":
+    case "i64":
+    case "externref":
+    case "ref_null":
+      return t;
+    case "ref":
+      return { kind: "ref_null", typeIdx: t.typeIdx };
+    default:
+      return null;
+  }
+}
+
+/**
  * Plan builder. Walks the generator body producing a state graph. Returns
  * `null` when any shape is outside the supported subset, so callers fall back
  * to the host path (or the scoped diagnostic in standalone).
@@ -310,10 +499,29 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2170) `yield*` delegation sites, allocated in source order; index into
   // this array is the terminator's `siteIndex`.
   const delegationSites: { innerName: string }[] = [];
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` sites, allocated in source
+  // order; index into `vecDelegationSlots` at emit time.
+  const vecDelegationSites: { subject: ts.Expression }[] = [];
+  // (#2173 slice-2b) `yield* <generic iterable>` sites, allocated in source
+  // order; index into `iterableDelegationSlots` at emit time.
+  const iterableDelegationSites: { subject: ts.Expression }[] = [];
+  // (#2864 R1) Names bound to a delegation COMPLETION value
+  // (`const x = yield* inner()`). Spilled at f64 — the delegation gate admits
+  // only f64-elem inners, and the inner's `return` value rides its result
+  // struct's f64 `value` field. Typed here (not via `resolveSpillLocalValType`,
+  // whose declaration-shape cascade doesn't model a yield* initializer, nor via
+  // the `sent`-carrier rule, which types `.next(v)` bindings).
+  const delegationBindingNames = new Set<string>();
   const spillSet = new Set<string>();
   // (#2864 F1b) The variable declaration that introduced each spilled name, so
   // the spill's wasm type can be resolved at its actual ValType.
   const spillDecls = new Map<string, ts.VariableDeclaration>();
+  // (#2920) Types for names bound by a destructuring PARAM pattern. These names
+  // are not introduced by a body `VariableDeclaration` (so `resolveSpillLocalValType`
+  // cannot type them) — they are destructured from the raw arg in the resume
+  // function's state-0 prelude. Registering them as spills persists them across
+  // yields; this map supplies their ValType in the spill-typing loop.
+  const patternParamSpillTypes = new Map<string, ValType>();
   const addSpill = (name: string, decl?: ts.VariableDeclaration): void => {
     if (decl !== undefined && !spillDecls.has(name)) spillDecls.set(name, decl);
     if (spillSet.has(name)) return;
@@ -332,7 +540,25 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   let curStatements: ts.Statement[] = [];
   let curResumeBindings: string[] = [];
   let curAbrupt: NativeGeneratorState["abruptResume"] | undefined;
+  let curUnwind: UnwindEntry[] | undefined; // (#3050) new-region unwind chain
   let curUsed = false; // becomes the id below once we know it
+
+  // (#3050) New try-region machinery bookkeeping. `curThrowRoute` is the
+  // runtime-throw route for states reserved at the current lowering position
+  // (stamped onto every state minted while set); `stateThrowRoutes` collects the
+  // stamps and is applied to the final state objects after lowering (finishState
+  // rebuilds state objects, so stamping the placeholder would be lost).
+  // `stateFinallyDepth` counts how many state-lowered finally blocks enclose the
+  // current position — a region with its OWN state-lowered finally nested inside
+  // one would clobber the single shared pending-completion field, so it bails.
+  let curThrowRoute: ThrowRoute | undefined;
+  const stateThrowRoutes = new Map<number, ThrowRoute>();
+  let stateFinallyDepth = 0;
+  let needsPending = false;
+  let hasThrowRoutes = false;
+  // (#3050) Catch-param spills are typed externref (the exn tag payload) —
+  // resolved here, not from a body VariableDeclaration (none exists).
+  const catchParamSpillTypes = new Map<string, ValType>();
 
   // Reserve the state id for the in-progress state.
   let curId = reserveState();
@@ -345,6 +571,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       resumeBindings: [],
       terminator: { kind: "done" },
     });
+    // (#3050) Stamp the runtime-throw route of the lowering position that
+    // minted this state (applied to the final object after lowering).
+    if (curThrowRoute) stateThrowRoutes.set(id, curThrowRoute);
     return id;
   }
 
@@ -352,6 +581,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
+    curUnwind = undefined;
     curUsed = false;
     return reserveState();
   }
@@ -361,8 +591,18 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       statements: curStatements,
       resumeBindings: curResumeBindings,
       abruptResume: curAbrupt,
+      unwind: curUnwind,
       terminator,
     };
+  }
+
+  /** (#3050) Point the cursor at an already-reserved state with a fresh prelude. */
+  function resetCursor(id: number): void {
+    curId = id;
+    curStatements = [];
+    curResumeBindings = [];
+    curAbrupt = undefined;
+    curUnwind = undefined;
   }
 
   const tryYieldDeclaration = (stmt: ts.Statement): { name: string; yieldExpr: ts.YieldExpression } | null => {
@@ -384,9 +624,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
    * that successor. Loops/ifs containing yields reserve their header / branch
    * states and wire jumps. Returns false (sets ok=false) on unsupported shapes.
    *
-   * `activeFinalizers` carries enclosing try/finally bodies for abrupt-resume.
+   * `unwind` carries the enclosing try-region unwind chain for abrupt-resume,
+   * outermost-first (#3050): legacy yield-free finally bodies as `replay`
+   * entries (byte-identical to the historical activeFinalizers threading) plus
+   * `catch` / `finally` entries for regions on the new try-region machinery.
    */
-  function lowerStatements(statements: readonly ts.Statement[], activeFinalizers: readonly ts.Statement[][]): boolean {
+  function lowerStatements(statements: readonly ts.Statement[], unwind: readonly UnwindEntry[]): boolean {
     for (const stmt of statements) {
       if (!ok) return false;
       if (stmt.kind === ts.SyntaxKind.EmptyStatement) continue;
@@ -398,6 +641,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
         // (#2171) The return *value* must match the generator's yield element
         // type (numeric or string); a bare `return;` (no expr) is allowed.
         if (stmt.expression && !yieldValueOk(stmt.expression)) return fail();
+        // (#3050) A `return` inside a region with a state-lowered finally must
+        // thread the completion THROUGH the finally (which can itself suspend).
+        // That return-through path is not modeled yet — bail to the host path
+        // rather than silently skip the finally. (Catch entries never intercept
+        // returns, and legacy replay entries keep today's behavior.)
+        if (unwind.some((e) => e.kind === "finally")) return fail();
         collectSpillsIn(stmt);
         finishState(curId, { kind: "return", expr: stmt.expression });
         // Unreachable tail — start a fresh (dead) state so the cursor stays
@@ -418,61 +667,193 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // Statement that CONTAINS a yield somewhere — must be modeled.
       // 1) `yield expr;` as an expression statement.
       if (ts.isExpressionStatement(stmt) && ts.isYieldExpression(stmt.expression)) {
-        if (!emitYield(stmt.expression, undefined, activeFinalizers)) return false;
+        if (!emitYield(stmt.expression, undefined, unwind)) return false;
         continue;
       }
 
       // 2) `let x = yield expr;`
       const yd = tryYieldDeclaration(stmt);
       if (yd) {
-        if (!emitYield(yd.yieldExpr, yd.name, activeFinalizers)) return false;
+        if (!emitYield(yd.yieldExpr, yd.name, unwind)) return false;
         continue;
       }
 
-      // 3) try/finally (no catch) wrapping yields.
+      // 3) try statements wrapping yields.
       if (ts.isTryStatement(stmt)) {
-        if (stmt.catchClause || !stmt.finallyBlock) return fail();
-        if (!statementsAreYieldFree(stmt.finallyBlock.statements)) return fail();
-        if (!lowerStatements(stmt.tryBlock.statements, [...activeFinalizers, [...stmt.finallyBlock.statements]])) {
-          return false;
+        const finallyYieldFree = !stmt.finallyBlock || statementsAreYieldFree(stmt.finallyBlock.statements);
+        if (!stmt.catchClause && stmt.finallyBlock && finallyYieldFree) {
+          // Legacy kind-L region: finally-only, yield-free finally — the
+          // historical replay lowering, byte-identical to pre-#3050.
+          if (
+            !lowerStatements(stmt.tryBlock.statements, [
+              ...unwind,
+              { kind: "replay", statements: [...stmt.finallyBlock.statements] },
+            ])
+          ) {
+            return false;
+          }
+          // finally runs on the normal path too.
+          for (const f of stmt.finallyBlock.statements) {
+            collectSpillsIn(f);
+            curStatements.push(f);
+          }
+          continue;
         }
-        // finally runs on the normal path too.
-        for (const f of stmt.finallyBlock.statements) {
-          collectSpillsIn(f);
-          curStatements.push(f);
-        }
+        // (#3050) New try-region machinery: catch across yield and/or a
+        // yielding finally.
+        if (!lowerTryRegion(stmt, unwind)) return false;
         continue;
       }
 
       // 4) if / else with yields in a branch.
       if (ts.isIfStatement(stmt)) {
-        if (!lowerIf(stmt, activeFinalizers)) return false;
+        if (!lowerIf(stmt, unwind)) return false;
         continue;
       }
 
       // 5) while / do-while / for loops with yields in the body.
       if (ts.isWhileStatement(stmt)) {
-        if (!lowerWhile(stmt, activeFinalizers)) return false;
+        if (!lowerWhile(stmt, unwind)) return false;
         continue;
       }
       if (ts.isDoStatement(stmt)) {
-        if (!lowerDoWhile(stmt, activeFinalizers)) return false;
+        if (!lowerDoWhile(stmt, unwind)) return false;
         continue;
       }
       if (ts.isForStatement(stmt)) {
-        if (!lowerFor(stmt, activeFinalizers)) return false;
+        if (!lowerFor(stmt, unwind)) return false;
         continue;
       }
 
       // 6) A bare block with yields — flatten it (no new scope modeling).
       if (ts.isBlock(stmt)) {
-        if (!lowerStatements(stmt.statements, activeFinalizers)) return false;
+        if (!lowerStatements(stmt.statements, unwind)) return false;
         continue;
       }
 
       return fail();
     }
     return ok;
+  }
+
+  /**
+   * (#3050) Lower a try statement on the NEW try-region machinery: the try,
+   * catch and finally blocks each become real state subgraphs; abrupt
+   * completions and runtime exceptions are ROUTED between them per JS
+   * semantics (§14.15 TryStatement + §27.5.3.4 GeneratorResumeAbrupt):
+   *
+   *   [cur] --jump--> [try states] --normal--> [finally states | join]
+   *                     | runtime throw / .throw() at a yield
+   *                     v
+   *                  [catch states] --normal--> [finally states | join]
+   *                     | runtime throw / abrupt at a yield (throw AND return)
+   *                     v
+   *                  [finally states] --exit router--> join | outer unwind
+   *
+   * The catch param is spilled as externref; the pending completion kind rides
+   * the state struct's i32 `pending` field (payloads reuse `abrupt`/`error`).
+   */
+  function lowerTryRegion(stmt: ts.TryStatement, outerUnwind: readonly UnwindEntry[]): boolean {
+    // A region with a state-lowered finally nested inside another state-lowered
+    // finally would clobber the single shared pending-completion field — bail.
+    if (stmt.finallyBlock && stateFinallyDepth > 0) return fail();
+
+    // Catch param: identifier-only, spilled at externref (the exn tag payload).
+    let catchParamName: string | undefined;
+    const catchDecl = stmt.catchClause?.variableDeclaration;
+    if (catchDecl) {
+      if (!ts.isIdentifier(catchDecl.name)) return fail();
+      catchParamName = catchDecl.name.text;
+      if (!catchParamSpillTypes.has(catchParamName)) {
+        // Reusing the slot across sibling catches of the same name is fine
+        // (externref, non-overlapping lifetimes); any OTHER same-named binding
+        // (body local, param, pattern binding) would share the slot wrongly.
+        if (
+          spillSet.has(catchParamName) ||
+          patternParamSpillTypes.has(catchParamName) ||
+          (decl.body !== undefined && bodyDeclaresBinding(decl.body, catchParamName))
+        ) {
+          return fail();
+        }
+        catchParamSpillTypes.set(catchParamName, { kind: "externref" });
+        addSpill(catchParamName);
+      }
+    }
+
+    const region: TryRegionPlan = { catchParamName };
+    if (stmt.finallyBlock) needsPending = true;
+    hasThrowRoutes = true;
+
+    const outerRoute = curThrowRoute;
+    const tryPartRoute: ThrowRoute = stmt.catchClause ? { kind: "catch", region } : { kind: "finally", region };
+    const catchPartRoute: ThrowRoute | undefined = stmt.finallyBlock ? { kind: "finally", region } : outerRoute;
+
+    // Unwind chains per part (outermost-first, matching the legacy threading;
+    // captured lists are reversed to innermost-first at the yield).
+    const finallyEntryUnwind: UnwindEntry[] = stmt.finallyBlock ? [{ kind: "finally", region }] : [];
+    const tryUnwind: UnwindEntry[] = [
+      ...outerUnwind,
+      ...finallyEntryUnwind,
+      ...(stmt.catchClause ? [{ kind: "catch", region } as UnwindEntry] : []),
+    ];
+    const catchUnwind: UnwindEntry[] = [...outerUnwind, ...finallyEntryUnwind];
+
+    // Reserve all part-entry states up front so each part's tail can be wired
+    // the moment its cursor is still live (finishState reads the live cursor).
+    const tryEntry = reserveState();
+    const catchEntry = stmt.catchClause ? reserveState() : -1;
+    const finallyEntry = stmt.finallyBlock ? reserveState() : -1;
+    const joinId = reserveState();
+    if (catchEntry >= 0) region.catchEntryState = catchEntry;
+    if (finallyEntry >= 0) region.finallyEntryState = finallyEntry;
+    // The up-front reservations were stamped with the SURROUNDING route —
+    // re-stamp them with their own part's route.
+    stampRoute(tryEntry, tryPartRoute);
+    if (catchEntry >= 0) stampRoute(catchEntry, catchPartRoute);
+    if (finallyEntry >= 0) stampRoute(finallyEntry, outerRoute);
+    stampRoute(joinId, outerRoute);
+
+    const normalNext = finallyEntry >= 0 ? finallyEntry : joinId;
+    const normalPending = finallyEntry >= 0 ? 0 : undefined;
+
+    // --- try part ---
+    finishState(curId, { kind: "jump", next: tryEntry });
+    curThrowRoute = tryPartRoute;
+    resetCursor(tryEntry);
+    const tryOk = lowerStatements(stmt.tryBlock.statements, tryUnwind);
+    curThrowRoute = outerRoute;
+    if (!tryOk) return false;
+    finishState(curId, { kind: "jump", next: normalNext, setPending: normalPending });
+
+    // --- catch part ---
+    if (stmt.catchClause) {
+      curThrowRoute = catchPartRoute;
+      resetCursor(catchEntry);
+      const catchOk = lowerStatements(stmt.catchClause.block.statements, catchUnwind);
+      curThrowRoute = outerRoute;
+      if (!catchOk) return false;
+      finishState(curId, { kind: "jump", next: normalNext, setPending: normalPending });
+    }
+
+    // --- finally part ---
+    if (stmt.finallyBlock) {
+      resetCursor(finallyEntry);
+      stateFinallyDepth++;
+      const finOk = lowerStatements(stmt.finallyBlock.statements, [...outerUnwind]);
+      stateFinallyDepth--;
+      if (!finOk) return false;
+      finishState(curId, { kind: "finally-exit", join: joinId, unwind: [...outerUnwind].reverse() });
+    }
+
+    // Continue in the join state.
+    resetCursor(joinId);
+    return ok;
+  }
+
+  /** (#3050) Overwrite / clear a state's runtime-throw route stamp. */
+  function stampRoute(id: number, route: ThrowRoute | undefined): void {
+    if (route) stateThrowRoutes.set(id, route);
+    else stateThrowRoutes.delete(id);
   }
 
   function fail(): boolean {
@@ -484,7 +865,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   function emitYield(
     yieldExpr: ts.YieldExpression,
     bindSentTo: string | undefined,
-    activeFinalizers: readonly ts.Statement[][],
+    unwind: readonly UnwindEntry[],
   ): boolean {
     // (#2170) `yield* <inner-generator-call>` — delegate to an inner native
     // generator. Slice-1 supports a direct call to a native-generator function
@@ -492,40 +873,140 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     // value of `yield*` consumed, a non-native inner) still bails to the host
     // path / scoped diagnostic.
     if (yieldExpr.asteriskToken) {
+      // (#3050) `yield*` inside a NEW try-region is not modeled — the
+      // delegation states ignore the resume mode, so an abrupt completion
+      // could not be routed into the region's catch/finally. Bail to the host
+      // path (legacy replay-only regions keep today's behavior).
+      if (unwind.some((e) => e.kind !== "replay")) return fail();
       const subject = yieldExpr.expression;
       const innerName = subject ? nativeGeneratorDelegationName(subject) : undefined;
+      if (subject && innerName === undefined) {
+        // (#2173 slice-2a) Not a native-generator call — try a NUMERIC
+        // array / vec delegate (`yield* [1,2,3]`, `yield* arr`). Driven by a
+        // direct vec cursor (no host box/unbox), so it stays standalone-clean.
+        // Same carrier-mismatch gate as the native-gen path: the vec elements
+        // are f64, so an f64 outer re-yields them exactly and a boxed-any outer
+        // boxes via the `repairStructTypeMismatches` seam (fixups.ts); a STRING
+        // outer has a concrete-ref `value` no repair can bridge — bail it to the
+        // host path (standalone: the clean #680 refusal).
+        if (!elemIsString && isNumericIterableDelegate(ctx, subject)) {
+          // (#2864 R1) `const x = yield* [..]` — the delegation completion value
+          // (§27.5.3.7) of an array is `undefined`; the done-arm delivers the f64
+          // undefined sentinel into the binding's spill (a #2106 residual).
+          if (bindSentTo !== undefined) {
+            delegationBindingNames.add(bindSentTo);
+            addSpill(bindSentTo);
+          }
+          const vecSiteIndex = vecDelegationSites.length;
+          vecDelegationSites.push({ subject });
+          const nextId = startStateAfterYield(undefined, unwind);
+          finishState(curId, {
+            kind: "yield-star",
+            delegationKind: "vec",
+            subject,
+            vecSiteIndex,
+            next: nextId,
+            bindResultTo: bindSentTo,
+          });
+          curId = reserveState();
+          curStatements = [];
+          curResumeBindings = pendingResumeBindings;
+          curAbrupt = pendingAbrupt;
+          curUnwind = pendingUnwind;
+          pendingResumeBindings = [];
+          pendingAbrupt = undefined;
+          pendingUnwind = undefined;
+          return ok;
+        }
+        // (#2173 slice-2b) Not a native-gen call nor a numeric vec — try a
+        // GENERIC iterable (`yield* arr.values()`, `yield* customIterable`).
+        // Driven by the standalone-native `__iterator`/`__iterator_next` runtime
+        // (#2038) → zero host imports. Same STRING-outer bail as the other arms:
+        // the iterator value rides externref and re-yields through the OUTER
+        // result struct's `value` field; an f64 outer unboxes it and a boxed-any
+        // outer passes it through, but a concrete-ref (string) outer has no
+        // repair seam — bail to the host path (the clean #680 refusal).
+        if (!elemIsString && isGenericIterableDelegate(ctx, subject)) {
+          // (#2864 R1) `const x = yield* it` — the delegation completion value
+          // (§27.5.3.7) is the iterator's done-result `value`; for the common
+          // array/`.values()` shape that is `undefined`. The done-arm delivers
+          // the outer's undefined sentinel into the binding's spill (#2106
+          // residual, exactly as the vec arm).
+          if (bindSentTo !== undefined) {
+            delegationBindingNames.add(bindSentTo);
+            addSpill(bindSentTo);
+          }
+          const iterableSiteIndex = iterableDelegationSites.length;
+          iterableDelegationSites.push({ subject });
+          const nextId = startStateAfterYield(undefined, unwind);
+          finishState(curId, {
+            kind: "yield-star",
+            delegationKind: "iterable",
+            subject,
+            iterableSiteIndex,
+            next: nextId,
+            bindResultTo: bindSentTo,
+          });
+          curId = reserveState();
+          curStatements = [];
+          curResumeBindings = pendingResumeBindings;
+          curAbrupt = pendingAbrupt;
+          curUnwind = pendingUnwind;
+          pendingResumeBindings = [];
+          pendingAbrupt = undefined;
+          pendingUnwind = undefined;
+          return ok;
+        }
+        return fail();
+      }
       if (!subject || innerName === undefined) return fail();
-      // The successor after delegation finishes. Like a yield successor it may
-      // carry a resume binding (`x = yield* inner()` binds the inner's return
-      // value); slice-1 supports only the unbound expression-statement form, so
-      // require `bindSentTo === undefined`.
-      if (bindSentTo !== undefined) return fail();
+      // (#2864 R1) Carrier-mismatch gate: the delegation yield-arm re-yields the
+      // inner's f64 `value` through the OUTER result struct. For an f64 outer
+      // that is exact; for the boxed-any outer the f64→externref mismatch is
+      // repaired to a `__box_number` by `repairStructTypeMismatches`
+      // (fixups.ts). A STRING outer's result `value` is a concrete ref no
+      // repair can bridge — main emitted an INVALID module for that shape
+      // (wasm validation failure at instantiation, latent since #2170/#2171).
+      // Bail it to the host path (standalone: the clean #680 refusal) instead.
+      if (elemIsString) return fail();
+      // (#2864 R1) `const x = yield* inner()` — bind the delegation COMPLETION
+      // value (the inner's `return` value). The done-arm writes it inside the
+      // same resume call, so it is NOT a resume binding (see the terminator
+      // comment); it only needs a typed spill slot.
+      if (bindSentTo !== undefined) {
+        delegationBindingNames.add(bindSentTo);
+        addSpill(bindSentTo);
+      }
       const siteIndex = delegationSites.length;
       delegationSites.push({ innerName });
-      const nextId = startStateAfterYield(undefined, activeFinalizers);
+      const nextId = startStateAfterYield(undefined, unwind);
       finishState(curId, {
         kind: "yield-star",
+        delegationKind: "native-gen",
         subject,
         innerName,
         siteIndex,
         next: nextId,
+        bindResultTo: bindSentTo,
       });
       // Create the successor and make it current (mirrors finishCurrentAsYield).
       curId = reserveState();
       curStatements = [];
       curResumeBindings = pendingResumeBindings;
       curAbrupt = pendingAbrupt;
+      curUnwind = pendingUnwind;
       pendingResumeBindings = [];
       pendingAbrupt = undefined;
+      pendingUnwind = undefined;
       return ok;
     }
     // (#2171) yieldValueOk admits the f64 numeric path AND the uniform
     // native-string path; mixed/object yields still bail.
     if (!yieldValueOk(yieldExpr.expression)) return fail();
-    const next = startStateAfterYield(bindSentTo, activeFinalizers);
+    const next = startStateAfterYield(bindSentTo, unwind);
     // The state we were filling (curIdBefore) is finished by startStateAfterYield's
     // caller — handled inside helper to keep ids tidy.
-    finishCurrentAsYield(yieldExpr.expression, next, activeFinalizers, bindSentTo);
+    finishCurrentAsYield(yieldExpr.expression, next, unwind, bindSentTo);
     return ok;
   }
 
@@ -558,13 +1039,60 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     return callee.text;
   }
 
+  // (#2173 slice-2a) True when `subject`'s static type is a NUMERIC array
+  // (`number[]` — an array literal of numbers, or an identifier/param typed
+  // `number[]`), which lowers to the canonical f64 vec. This is the direct-vec
+  // case driven by the array for-of fast path — `vec.data[idx]` reads f64 with
+  // zero host imports. Generic `{next()}` iterables / `arr.values()` iterators
+  // are NOT arrays and stay on the host path (slice-2b, the #1320 bridge); a
+  // string / string[] / object[] subject fails the numeric-element gate.
+  // (#1930) Uses the registry-free `ctx.oracle` type boundary, NOT the raw
+  // TS checker (the oracle-ratchet gate); the concrete vec ValType is resolved
+  // separately in `buildResumeInfo` via `getOrRegisterVecType`.
+  function isNumericIterableDelegate(ctx: CodegenContext, subject: ts.Expression): boolean {
+    const fact = ctx.oracle.typeFactOf(subject);
+    return fact.kind === "array" && fact.element.kind === "number";
+  }
+
+  // (#2173 slice-2b) True when `subject`'s static type is a GENERIC iterable that
+  // is NOT already handled by the numeric-vec fast path — a `.values()`/`.keys()`/
+  // `.entries()` iterator or a custom `{ [Symbol.iterator]() {…} }` object. Such a
+  // type carries a well-known `[Symbol.iterator]` member, which the TS checker
+  // names with a `__@iterator`-prefixed escaped name (e.g. `__@iterator@9`). We
+  // require that member (spec-aligned: `yield*` performs GetIterator, which reads
+  // `[Symbol.iterator]`), so a bare non-iterable object is NOT admitted. The
+  // native `__iterator` runtime (#2038) then drives it host-free. Mirrors the
+  // checker use already present in `nativeGeneratorDelegationName`.
+  function isGenericIterableDelegate(ctx: CodegenContext, subject: ts.Expression): boolean {
+    const t = ctx.checker.getTypeAtLocation(subject);
+    if (!t) return false;
+    for (const p of ctx.checker.getPropertiesOfType(t)) {
+      if (p.getName().startsWith("__@iterator")) return true;
+    }
+    return false;
+  }
+
   // Reserve the successor of a yield and set up its resume binding/abrupt
   // context, returning its id.
   let pendingResumeBindings: string[] = [];
   let pendingAbrupt: NativeGeneratorState["abruptResume"] | undefined;
-  function startStateAfterYield(bindSentTo: string | undefined, activeFinalizers: readonly ts.Statement[][]): number {
+  let pendingUnwind: UnwindEntry[] | undefined; // (#3050)
+  function startStateAfterYield(bindSentTo: string | undefined, unwind: readonly UnwindEntry[]): number {
     pendingResumeBindings = bindSentTo ? [bindSentTo] : [];
-    pendingAbrupt = { finalizers: [...activeFinalizers].reverse() };
+    if (unwind.every((e) => e.kind === "replay")) {
+      // Legacy chain (replay-only): byte-identical abruptResume capture.
+      pendingAbrupt = {
+        // Replay entries are minted with fresh mutable arrays (lowerStatements
+        // spreads the finally statements), so this cast only erases the
+        // UnwindEntry-level readonly view.
+        finalizers: unwind.map((e) => [...(e as { statements: readonly ts.Statement[] }).statements]).reverse(),
+      };
+      pendingUnwind = undefined;
+    } else {
+      // (#3050) New try-region chain — captured innermost-first.
+      pendingAbrupt = undefined;
+      pendingUnwind = [...unwind].reverse();
+    }
     if (bindSentTo) addSpill(bindSentTo);
     return states.length; // successor id (reserved inside finishCurrentAsYield)
   }
@@ -572,7 +1100,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   function finishCurrentAsYield(
     expr: ts.Expression | undefined,
     nextId: number,
-    _activeFinalizers: readonly ts.Statement[][],
+    _unwind: readonly UnwindEntry[],
     _bindSentTo: string | undefined,
   ): void {
     finishState(curId, { kind: "yield", expr, next: nextId });
@@ -581,12 +1109,14 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = pendingResumeBindings;
     curAbrupt = pendingAbrupt;
+    curUnwind = pendingUnwind;
     pendingResumeBindings = [];
     pendingAbrupt = undefined;
+    pendingUnwind = undefined;
   }
 
   /** if (cond) thenBlock [else elseBlock] — at least one branch yields. */
-  function lowerIf(stmt: ts.IfStatement, activeFinalizers: readonly ts.Statement[][]): boolean {
+  function lowerIf(stmt: ts.IfStatement, unwind: readonly UnwindEntry[]): boolean {
     if (!isNumericExpression(ctx, stmt.expression)) return fail();
     collectSpillsIn(stmt.expression);
     // Close current state with a branch terminator. Reserve the join state and
@@ -612,7 +1142,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
-    if (!lowerStatements(thenBody(stmt.thenStatement), activeFinalizers)) return false;
+    curUnwind = undefined;
+    if (!lowerStatements(thenBody(stmt.thenStatement), unwind)) return false;
     finishState(curId, { kind: "jump", next: joinId });
 
     if (hasElse) {
@@ -620,7 +1151,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       curStatements = [];
       curResumeBindings = [];
       curAbrupt = undefined;
-      if (!lowerStatements(thenBody(stmt.elseStatement!), activeFinalizers)) return false;
+      curUnwind = undefined;
+      if (!lowerStatements(thenBody(stmt.elseStatement!), unwind)) return false;
       finishState(curId, { kind: "jump", next: joinId });
     }
 
@@ -629,11 +1161,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
+    curUnwind = undefined;
     return ok;
   }
 
   /** while (cond) body — body yields. */
-  function lowerWhile(stmt: ts.WhileStatement, activeFinalizers: readonly ts.Statement[][]): boolean {
+  function lowerWhile(stmt: ts.WhileStatement, unwind: readonly UnwindEntry[]): boolean {
     if (!isNumericExpression(ctx, stmt.expression)) return fail();
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
@@ -656,7 +1189,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), activeFinalizers)) return false;
+    curUnwind = undefined;
+    if (!lowerStatements(thenBody(stmt.statement), unwind)) return false;
     finishState(curId, { kind: "jump", next: headerId });
 
     // continue at exit.
@@ -664,11 +1198,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
+    curUnwind = undefined;
     return ok;
   }
 
   /** do body while (cond) — body runs at least once, then header. */
-  function lowerDoWhile(stmt: ts.DoStatement, activeFinalizers: readonly ts.Statement[][]): boolean {
+  function lowerDoWhile(stmt: ts.DoStatement, unwind: readonly UnwindEntry[]): boolean {
     if (!isNumericExpression(ctx, stmt.expression)) return fail();
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     collectSpillsIn(stmt.expression);
@@ -684,7 +1219,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), activeFinalizers)) return false;
+    curUnwind = undefined;
+    if (!lowerStatements(thenBody(stmt.statement), unwind)) return false;
     finishState(curId, { kind: "jump", next: headerId });
 
     // header: cond ? bodyEntry : exit
@@ -698,11 +1234,12 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
+    curUnwind = undefined;
     return ok;
   }
 
   /** for (init; cond; update) body — body yields. */
-  function lowerFor(stmt: ts.ForStatement, activeFinalizers: readonly ts.Statement[][]): boolean {
+  function lowerFor(stmt: ts.ForStatement, unwind: readonly UnwindEntry[]): boolean {
     if (loopBodyHasUnsupportedJump(stmt.statement)) return fail();
     // init: a yield-free var-decl list or expression; append to current state.
     if (stmt.initializer) {
@@ -746,7 +1283,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
-    if (!lowerStatements(thenBody(stmt.statement), activeFinalizers)) return false;
+    curUnwind = undefined;
+    if (!lowerStatements(thenBody(stmt.statement), unwind)) return false;
     finishState(curId, { kind: "jump", next: updateId });
 
     // update → header
@@ -764,6 +1302,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     curStatements = [];
     curResumeBindings = [];
     curAbrupt = undefined;
+    curUnwind = undefined;
     return ok;
   }
 
@@ -773,7 +1312,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // already in the state struct.
   function collectSpillsIn(node: ts.Node): void {
     function visit(n: ts.Node): void {
-      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name)) {
+      // (#3050) A catch clause's binding IS a ts.VariableDeclaration — catch
+      // params are registered (externref-typed) by lowerTryRegion, not here.
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && !ts.isCatchClause(n.parent)) {
         addSpill(n.name.text, n);
       }
       if (
@@ -795,17 +1336,116 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // spill regardless of which state declared it).
   collectSpillsIn(decl.body);
 
+  // (#2920) Register each destructuring-PARAM binding name as a spill, typed at
+  // its declared ValType. The raw arg is stored in the state struct (a
+  // `param_*` field) and destructured into these spill locals once, on first
+  // entry (state 0), by the resume function; spilling persists them across
+  // yields. If ANY bound name has no struct-storable type, bail to host so the
+  // candidate gate and registration agree (no undefined-funcidx module).
+  for (const param of decl.parameters) {
+    if (ts.isIdentifier(param.name)) continue;
+    const pat = param.name;
+    if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
+    // (#2938) A WHOLE-PARAM default on a binding pattern (`{} = undefined`,
+    // `{x} = {}`) evaluates the initializer when the argument is `undefined`.
+    // The resume-prelude destructure has no defaulted-raw-arg arm yet — on the
+    // no-yield corpus this shape mis-typed the state struct
+    // (`struct.new[k] expected i32, found externref`,
+    // gen-meth-dflt-obj-init-undefined.js + static variant) — so bail to the
+    // host path, same policy as the element-default bail below.
+    if (param.initializer) return null;
+    // Slice-1 conservative gate (correct-or-legacy — no regressions):
+    //  • FLAT patterns only — every element binds an identifier (a nested
+    //    array/object sub-pattern is a follow-up; bail so it stays on host).
+    //  • NO rest element — object rest needs `__extern_rest_object`, array rest
+    //    needs the host iterator drain; both are host imports, so bail.
+    //  • ARRAY patterns require a CONCRETE typed param (a `ref`/`ref_null` vec or
+    //    tuple). An untyped array pattern widens the param to `externref`, whose
+    //    host-free element extraction is a pre-existing fragile path (a numeric
+    //    vec reads back null — normal functions have the same gap), so bail to
+    //    the host path rather than risk turning a passing test null. Object
+    //    patterns extract host-free & correctly regardless of typing.
+    for (const el of pat.elements) {
+      if (ts.isOmittedExpression(el)) continue;
+      if (el.dotDotDotToken) return null;
+      if (!ts.isIdentifier(el.name)) return null;
+      // (#2920) A default initializer on a pattern element (`{a = expr}`,
+      // `{a: b = expr}`) evaluates `expr` when the property is `undefined`. The
+      // resume-prelude destructure lowering of that default is not yet correct
+      // for all shapes — a throwing / function-valued default produced invalid
+      // modules on the corpus — so bail to the host path (a follow-up slice can
+      // widen this once the defaulted-destructure lowering is hardened).
+      if (el.initializer) return null;
+    }
+    // (#2920) ARRAY patterns are native-eligible ONLY when TYPED (`param.type`
+    // present) and the resolved type is a concrete vec/tuple ref. This is the
+    // gate-consistency + correctness guard:
+    //  • `param.type` present ⇒ BOTH callers — the free-function path
+    //    (`bindingPatternParamNeedsWiden` returns false when `p.type` is set) and
+    //    the class-method path (class-bodies.ts) — type the param via
+    //    `resolveWasmType(getTypeAtLocation(param))`, IDENTICAL to this gate. So
+    //    `isNativeGeneratorCandidate` and `registerNativeGenerator` (both routed
+    //    through this one plan builder) AND the resume-prelude destructure all
+    //    observe the SAME `paramTypes[i]` — no divergence, no invalid module, no
+    //    externref/concrete miscompile.
+    //  • An UNTYPED array pattern is widened to `externref` (and may be
+    //    call-site-inferred) by the free-function caller — that diverges from a
+    //    plain `getTypeAtLocation` resolution AND hits the pre-existing
+    //    externref-array null-readback rep gap (a numeric vec reads back null;
+    //    normal functions share it). So BAIL to the host path (a later slice with
+    //    its own honest yield can widen this once that rep gap is closed).
+    // Object patterns extract correctly for externref OR concrete, so they carry
+    // no such guard — accepted regardless of typing.
+    if (ts.isArrayBindingPattern(pat)) {
+      if (!param.type) return null;
+      const pt = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
+      if (pt.kind !== "ref" && pt.kind !== "ref_null") return null;
+    }
+    for (const id of collectPatternBindingIdentifiers(pat)) {
+      const safe = spillSafeValType(resolveWasmType(ctx, ctx.checker.getTypeAtLocation(id)));
+      if (!safe) return null;
+      patternParamSpillTypes.set(id.text, safe);
+      addSpill(id.text);
+    }
+  }
+
   if (!lowerStatements(decl.body.statements, [])) return null;
   if (!ok) return null;
 
   // Final fallthrough state completes the generator.
   finishState(curId, { kind: "done" });
 
-  // Reject if there is no actual suspension point (then it's not a generator
-  // worth the native path) or the state count is too large. (#2170) A
-  // `yield*` delegation state is a suspension point too.
-  const suspendCount = states.filter((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star").length;
-  if (suspendCount === 0) return null;
+  // (#3050) When the final fallthrough state carries trailing statements
+  // (`… yield x; trailing();`), it doubles as BOTH the last executable state
+  // and the completed-generator dispatch target (doneState = last id) — so
+  // every post-completion `.next()` re-dispatched into it and RE-RAN the
+  // trailing prelude (observable via a `unreachable += 1` after the last
+  // yield, GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty
+  // done state in that case; generators whose final state is already empty
+  // keep their exact state graph (byte-identical).
+  if (states[curId]!.statements.length > 0) {
+    reserveState(); // empty placeholder — its default terminator IS `done`
+  }
+
+  // (#3050) Apply the runtime-throw route stamps now that every state object is
+  // final (finishState rebuilds them, so stamping placeholders would be lost).
+  for (const [id, route] of stateThrowRoutes) {
+    const s = states[id];
+    if (s) s.throwRoute = route;
+  }
+
+  // Reject when the state count is too large. (#2170) A `yield*` delegation
+  // state is a suspension point too.
+  //
+  // (#2938) NO-YIELD generators now lower natively: a zero-suspend body runs to
+  // completion in state 0 and produces a done-from-start trampoline. This was
+  // held off behind the late-import funcIdx-shift bug (`__str_flatten call[1]
+  // expected externref, found i32` at harness scale) fixed by #2936 (the
+  // raw-import + deferred-batch shift-regime mix in ensureLateImport). The
+  // 1780-file no-yield dstr-binding corpus is the payoff (~250-350 host-free
+  // flips). This bail relaxes in LOCKSTEP with the candidate gate's terminal
+  // yield-require (`isNativeGeneratorCandidate`) — a mismatch is an
+  // undefined-funcidx invalid module.
   if (states.length > MAX_NATIVE_GENERATOR_STATES) return null;
 
   // (#2864 F1b) Type every spilled local at its ACTUAL wasm ValType so a live-
@@ -827,6 +1467,13 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   const carrierType = genCarrierFieldType(elemValType);
   const spillTypes = new Map<string, ValType>();
   for (const name of spills) {
+    // (#2864 R1) A delegation-completion binding (`const x = yield* inner()`)
+    // holds the inner's f64 `return` value — always f64 (only f64-elem inners
+    // are delegated), independent of the OUTER's carrier.
+    if (delegationBindingNames.has(name)) {
+      spillTypes.set(name, { kind: "f64" });
+      continue;
+    }
     if (resumeBindingNames.has(name)) {
       // A `let x = yield …` binding reads `.next(v)`'s value from the `sent`
       // carrier field. For numeric / native-string carriers (sent = f64 / string)
@@ -838,13 +1485,75 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       spillTypes.set(name, carrierType);
       continue;
     }
+    // (#2920) A destructuring-param binding name — typed up-front from the
+    // checker (no body `VariableDeclaration` exists to resolve it from).
+    const patternType = patternParamSpillTypes.get(name);
+    if (patternType) {
+      spillTypes.set(name, patternType);
+      continue;
+    }
+    // (#3050) A catch-clause param — always externref (the exn tag payload);
+    // no body VariableDeclaration exists to resolve it from. A same-named body
+    // declaration bailed at region-lowering time, so no conflict reaches here.
+    const catchType = catchParamSpillTypes.get(name);
+    if (catchType) {
+      spillTypes.set(name, catchType);
+      continue;
+    }
     const declNode = spillDecls.get(name);
     const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
     if (!resolved) return null;
     spillTypes.set(name, resolved);
   }
 
-  return { states, spills, spillTypes, elemValType, delegationSites };
+  return {
+    states,
+    spills,
+    spillTypes,
+    elemValType,
+    delegationSites,
+    vecDelegationSites,
+    iterableDelegationSites,
+    needsPending,
+    hasThrowRoutes,
+  };
+}
+
+/**
+ * (#3050) True when `body` (a generator body) declares a binding named `name`
+ * anywhere reachable in this function's scope model (var/let/const declaration,
+ * or a nested non-function block). Used to bail a catch-param spill whose name
+ * would collide with a body local in the resume function's flat local map.
+ * Does not descend into nested function-likes (their locals are theirs).
+ */
+function bodyDeclaresBinding(body: ts.Node, name: string): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      // A catch clause's binding IS a ts.VariableDeclaration — catch params are
+      // exactly what this check protects, so they don't collide with themselves
+      // (same-named sibling catch params share the externref slot safely).
+      !ts.isCatchClause(node.parent)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(body, visit);
+  return found;
 }
 
 /** A `break`/`continue` inside a yield-loop body is not modeled in this slice. */
@@ -929,8 +1638,245 @@ function methodBodyUsesSuper(body: ts.Node): boolean {
  */
 export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration;
 
+/**
+ * (#3050) True when the generator body contains a try statement that crosses a
+ * yield AND needs the NEW try-region machinery: it has a catch clause, or its
+ * finally itself yields. (A finally-only try with a yield-free finally is the
+ * legacy kind-L shape the eager host path also handles observably-correctly for
+ * `.next()` driving, so it does NOT flip the host lane.) Does not descend into
+ * nested function-likes — their yields/trys belong to inner generators.
+ */
+/**
+ * (#3050) True when any value-position identifier in the generator body has no
+ * checker symbol (an unresolvable global like test262's `test262unresolvable`).
+ * Host-lane native routing bails on these — the eager path's #928
+ * deferred-pending-throw is the behavior the JS-host lane relies on. Skips
+ * property names and does not descend into nested function-likes.
+ */
+function bodyReferencesUnresolvableIdentifier(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  const { checker } = ctx;
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    if (
+      ts.isIdentifier(node) &&
+      node.text !== "arguments" &&
+      node.text !== "undefined" &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !((ts.isVariableDeclaration(node.parent) || ts.isBindingElement(node.parent)) && node.parent.name === node)
+    ) {
+      const sym = checker.getSymbolAtLocation(node);
+      if (!sym) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
+/**
+ * (#3050) Conservative HOST-lane use-site safety walk. The native generator
+ * state struct is a WasmGC ref the JS host cannot iterate, so it must never
+ * escape to a host-iterating context. Walks every `<name>(…)` call in the
+ * source file and demands its result flow into an allowlisted consumer:
+ *
+ *   - `g().next()/…` member access on the call result;
+ *   - `for (x of g())` (NO await), `[...g()]`, `Array.from(g())`;
+ *   - `const [a,b] = g()` array-destructuring;
+ *   - `iter = g()` / `var iter = g()` — where EVERY reference of `iter` is
+ *     itself allowlisted (member access — `.next()`/`.throw()` incl. inside
+ *     nested closures like `assert.throws(function(){ iter.throw(e) })` —
+ *     for-of/spread/Array.from subject, destructuring source, reassignment).
+ *
+ * Anything else (an eager generator's `yield*` subject, for-await-of, an
+ * arbitrary call argument such as `Promise.all(g())` / `new Map(g())`, a
+ * return value, a property value, …) fails the walk and the generator keeps
+ * the eager host path. Name-based matching over-approximates (a shadowing
+ * same-named function bails too) — conservative by design.
+ */
+function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  if (!decl.name || !ts.isIdentifier(decl.name)) return false;
+  const genName = decl.name.text;
+  const sf = decl.getSourceFile();
+  const { checker } = ctx;
+
+  const isArrayFromArg = (node: ts.Node): boolean => {
+    const p = node.parent;
+    return (
+      ts.isCallExpression(p) &&
+      p.arguments.length > 0 &&
+      p.arguments[0] === node &&
+      ts.isPropertyAccessExpression(p.expression) &&
+      ts.isIdentifier(p.expression.expression) &&
+      p.expression.expression.text === "Array" &&
+      p.expression.name.text === "from"
+    );
+  };
+
+  /** A reference/result value consumed in an allowlisted, host-safe position? */
+  const useIsSafe = (node: ts.Node): boolean => {
+    const p = node.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === node) return true; // .next()/.throw()/.value…
+    if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
+    if (ts.isSpreadElement(p)) return true;
+    if (isArrayFromArg(node)) return true;
+    if (ts.isParenthesizedExpression(p)) return useIsSafe(p);
+    return false;
+  };
+
+  /** Every reference of the binding `sym` (outside its declaration) is safe? */
+  const bindingUsesAreSafe = (bindingName: ts.Identifier): boolean => {
+    const sym = checker.getSymbolAtLocation(bindingName);
+    if (!sym) return false;
+    let safe = true;
+    const visitRef = (node: ts.Node): void => {
+      if (!safe) return;
+      if (ts.isIdentifier(node) && node.text === bindingName.text && node !== bindingName) {
+        // Skip non-value positions (property names, declaration names — incl.
+        // the binding's own `var iter;` declaration name).
+        if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+        if (ts.isPropertyAssignment(node.parent) && node.parent.name === node) return;
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
+        const refSym = checker.getSymbolAtLocation(node);
+        if (refSym !== sym) return;
+        const p = node.parent;
+        if (useIsSafe(node)) return;
+        // Reassignment target (`iter = g()` again) — the RHS call is checked
+        // at its own call site.
+        if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
+          return;
+        }
+        // Array-destructuring SOURCE: `[a] = iter` / `const [a] = iter`.
+        if (ts.isVariableDeclaration(p) && p.initializer === node && !ts.isIdentifier(p.name)) return;
+        if (
+          ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          p.right === node &&
+          ts.isArrayLiteralExpression(p.left)
+        ) {
+          return;
+        }
+        safe = false;
+      }
+      ts.forEachChild(node, visitRef);
+    };
+    ts.forEachChild(sf, visitRef);
+    return safe;
+  };
+
+  let allSafe = true;
+  const visit = (node: ts.Node): void => {
+    if (!allSafe) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === genName &&
+      // Only calls that actually resolve to THIS declaration (a same-named
+      // local in another scope is someone else's call).
+      (checker.getSymbolAtLocation(node.expression)?.declarations?.includes(decl) ?? true)
+    ) {
+      const p = node.parent;
+      if (useIsSafe(node)) {
+        // safe direct consumer
+      } else if (ts.isVariableDeclaration(p) && p.initializer === node) {
+        if (ts.isIdentifier(p.name)) {
+          if (!bindingUsesAreSafe(p.name)) allSafe = false;
+        }
+        // array/object-binding destructuring init → handled natively, safe.
+      } else if (
+        ts.isBinaryExpression(p) &&
+        p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        p.right === node &&
+        ts.isIdentifier(p.left)
+      ) {
+        if (!bindingUsesAreSafe(p.left)) allSafe = false;
+      } else if (
+        ts.isBinaryExpression(p) &&
+        p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        p.right === node &&
+        ts.isArrayLiteralExpression(p.left)
+      ) {
+        // `[a, b] = g()` destructuring-assignment source — native path.
+      } else {
+        allSafe = false;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sf, visit);
+  return allSafe;
+}
+
+export function bodyHasNewTryRegionAcrossYield(decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    if (ts.isTryStatement(node) && nodeContainsYield(node)) {
+      const finallyYields =
+        node.finallyBlock !== undefined && node.finallyBlock.statements.some((s) => statementContainsYield(s));
+      if (node.catchClause || finallyYields) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
 export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorDecl): boolean {
-  if (!noJsHostTarget(ctx)) return false;
+  if (!noJsHostTarget(ctx)) {
+    // (#3050) JS-HOST lane: the eager-buffer lowering evaluates the whole body
+    // at creation, so it PROVABLY cannot express a `.throw()`/abrupt resumption
+    // into a try-region (statements after a suspended yield already ran —
+    // GeneratorPrototype/throw/try-{catch,finally}-*). Route exactly those
+    // shapes — a free `function*` DECLARATION whose body has a catch across a
+    // yield or a yielding finally — through the native state machine even under
+    // the JS host. Every other host-lane generator keeps the eager path
+    // unchanged (zero behavior delta), and non-plannable shapes still fall back
+    // via the plan gate below.
+    if (!ts.isFunctionDeclaration(decl)) return false;
+    if (!bodyHasNewTryRegionAcrossYield(decl)) return false;
+    // Conservative: a body referencing an UNRESOLVABLE identifier (e.g.
+    // `try { yield test262unresolvable } catch (e) {…}`) keeps the eager path —
+    // its host-lane semantics ride #928's deferred-pending-throw (the eager
+    // eval's JS ReferenceError is re-thrown at the first next()), which the
+    // resume-time evaluation may not reproduce identically.
+    if (bodyReferencesUnresolvableIdentifier(ctx, decl)) return false;
+    // Conservative use-site safety walk: the native state struct is a WasmGC
+    // ref the JS HOST cannot iterate — if it escapes to any host-iterating
+    // context (an EAGER generator's `yield*`, for-await-of, Promise.all,
+    // `new Map(g())`, an arbitrary call argument, …) the values silently drop
+    // (an eager outer's `yield* inner()` over a native inner yielded nothing).
+    // Only generators whose every call-site result flows into an ALLOWLISTED
+    // consumer — `.next()/.throw()/.return()` member calls, for-of (no await),
+    // spread, `Array.from`, destructuring — route natively under the JS host;
+    // anything else keeps the eager path.
+    if (!hostLaneGeneratorUsesAreSafe(ctx, decl)) return false;
+  }
   if (!decl.name || !decl.body || !decl.asteriskToken) return false;
   // (#2571) An object-literal method with a computed/string name
   // (`{ [k]*(){} }`, `{ "m"*(){} }`) is out of scope — only an identifier-named
@@ -955,7 +1901,19 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   for (const param of decl.parameters) {
-    if (param.dotDotDotToken || !ts.isIdentifier(param.name)) return false;
+    // (#2920) Rest params (`...args`) still bail — a separate follow-up. Array /
+    // object binding-pattern params are now natively lowered: the raw
+    // (externref/vec-widened) arg is stored in the state struct and destructured
+    // in the resume function's state-0 prelude (see `emitPatternParamDestructure`
+    // + `collectPatternBindingIdentifiers`). Identifier params stay byte-identical.
+    if (param.dotDotDotToken) return false;
+    if (
+      !ts.isIdentifier(param.name) &&
+      !ts.isArrayBindingPattern(param.name) &&
+      !ts.isObjectBindingPattern(param.name)
+    ) {
+      return false;
+    }
   }
   // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
   // must bail to the host path. Object-literal methods are invoked through the
@@ -968,6 +1926,38 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   if (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent)) {
     for (const param of decl.parameters) {
       if (param.initializer || param.questionToken) return false;
+    }
+  }
+  // (#2938) A generator METHOD whose emitted name is not unique within its
+  // class / object literal must bail to the host path. The class collection
+  // pass keys everything on `${className}_${methodName}` and SKIPS a
+  // duplicate-name member ("Skip if a function with this name is already
+  // registered" — the static/instance same-name case), so a second `*id()`
+  // would be emitted against the FIRST member's `NativeGeneratorInfo`
+  // (mismatched `synthesizedThis` param model → "local index out of range" at
+  // binary emit, fn-name-gen-method.js). Computed names (`*[sym]()`) bail too:
+  // their emitted-name derivation is not stable enough to prove uniqueness.
+  // Gate here — the SINGLE source of truth — so collection, the method emit
+  // AND `sourceNeedsGeneratorHostImports` all agree (host imports stay
+  // registered; behavior matches the pre-#2938 eager-buffer path).
+  if (ts.isMethodDeclaration(decl)) {
+    if (ts.isComputedPropertyName(decl.name)) return false;
+    const parent = decl.parent;
+    if (ts.isClassLike(parent) || ts.isObjectLiteralExpression(parent)) {
+      const ownName = decl.name.getText();
+      const members: readonly ts.Node[] = ts.isObjectLiteralExpression(parent) ? parent.properties : parent.members;
+      let sameName = 0;
+      for (const m of members) {
+        if (
+          ts.isMethodDeclaration(m) &&
+          m.asteriskToken &&
+          !ts.isComputedPropertyName(m.name) &&
+          m.name.getText() === ownName
+        ) {
+          sameName++;
+        }
+      }
+      if (sameName > 1) return false;
     }
   }
   // (#2571) A method generator that reads `arguments`, uses `super.*`, or
@@ -986,7 +1976,10 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   const plan = buildNativeGeneratorPlan(ctx, decl);
-  return plan !== null && plan.states.some((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star");
+  // (#2938) No terminal yield-require — no-yield (zero-suspend) generators are
+  // native candidates now that #2936 fixed the late-import funcIdx-shift class.
+  // Relaxed in LOCKSTEP with buildNativeGeneratorPlan's suspendCount bail.
+  return plan !== null;
 }
 
 /**
@@ -1132,7 +2125,13 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
 
   const fields: FieldDef[] = [
     { name: "value", type: elem, mutable: false },
-    { name: "done", type: { kind: "i32" }, mutable: false },
+    // (#3050) `done` is BRANDED boolean so any boxing to externref (the dynamic
+    // any-receiver `.done` read in the JS-host lane, `result.done` flowing into
+    // an `any` context) routes through `__box_boolean`, not `__box_number` —
+    // `result.done === true` must hold (a number-boxed 1 !== true, which failed
+    // the GeneratorPrototype/throw follow-up-`next()` asserts). Wasm-level the
+    // field is a plain i32 (brands are erased at emission).
+    { name: "done", type: { kind: "i32", boolean: true }, mutable: false },
   ];
   const typeIdx = ctx.mod.types.length;
   ctx.mod.types.push({ kind: "struct", name: structName, fields });
@@ -1141,6 +2140,20 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
   ctx.structFields.set(structName, fields);
   if (isF64) ctx.nativeGeneratorResultTypeIdx = typeIdx;
   return typeIdx;
+}
+
+/**
+ * (#3050) One leading synthetic capture param of a capturing nested native
+ * generator. The caller (nested-declarations.ts) prepends these before the
+ * user params — mutable captures ride as `ref $cell` (writes propagate to the
+ * enclosing frame through the shared cell), immutable ones by value. `boxed`
+ * carries the cell layout so the resume function registers the name in
+ * `boxedCaptures` (identifier reads/writes deref the cell, exactly like a
+ * lifted closure body).
+ */
+export interface NativeGeneratorCaptureParam {
+  name: string;
+  boxed?: { refCellTypeIdx: number; valType: ValType };
 }
 
 export function registerNativeGenerator(
@@ -1155,6 +2168,11 @@ export function registerNativeGenerator(
   // the param/name arrays stay aligned. Free functions / static methods leave
   // this `false` — byte-identical to pre-#2571.
   synthesizedThis = false,
+  // (#3050) Capturing nested generator: the caller passes
+  // `paramTypes = [...captureParamTypes, ...userParamTypes]` plus this aligned
+  // capture list. Mutually exclusive with `synthesizedThis` (methods never take
+  // the capturing path).
+  leadingCaptures?: NativeGeneratorCaptureParam[],
 ): NativeGeneratorInfo | null {
   const existing = ctx.nativeGenerators.get(functionName);
   if (existing) return existing;
@@ -1172,8 +2190,15 @@ export function registerNativeGenerator(
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, elemValType);
   // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
   // with the caller's `paramTypes[0] === receiverType`. User params follow.
-  const userParamNames = decl.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ""));
-  const paramNames = synthesizedThis ? ["this", ...userParamNames] : userParamNames;
+  // (#2920) A binding-pattern param has no source identifier; mint a unique
+  // synthetic name (`__genarg{i}`) so its `param_*` state field is distinct
+  // (two `[a,b]`/`{x}` params would otherwise both be `param_`, a dup field).
+  // The raw arg lives in this field and is destructured in the resume prelude.
+  const userParamNames = decl.parameters.map((p, i) => (ts.isIdentifier(p.name) ? p.name.text : `__genarg${i}`));
+  // (#3050) Leading synthetic capture params (capturing nested generator)
+  // precede the user params, aligned with the caller's paramTypes prefix.
+  const captureNames = (leadingCaptures ?? []).map((c) => c.name);
+  const paramNames = synthesizedThis ? ["this", ...userParamNames] : [...captureNames, ...userParamNames];
   // (#2864 F1) `sent` / `abrupt` carry the `.next(v)` / `.return(v)` value. For
   // the boxed-any carrier they are externref so an arbitrary value survives; for
   // numeric / string carriers they stay f64 (byte-identical to before).
@@ -1228,6 +2253,63 @@ export function registerNativeGenerator(
     stateFields.push({ name: `deleg_${delegationSlots.length - 1}`, type: slotType, mutable: true });
   }
 
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` slots — appended AFTER the
+  // native-gen delegation slots (and after spills) so neither the f64
+  // `spillFieldOffset` nor the native-gen slot field indices are affected;
+  // byte-inert for generators without a vec-delegation site. Each site gets TWO
+  // fields: `ref null $Vec` (materialized iterable) + `i32` cursor. The vec type
+  // is resolved once here from the subject's static type and stored on the info,
+  // so the emit-time cursor drive and this field layout use the SAME typeIdx.
+  const vecDelegationSlots: NonNullable<NativeGeneratorInfo["vecDelegationSlots"]> = [];
+  for (const _site of plan.vecDelegationSites) {
+    // The gate (`isNumericIterableDelegate`) has already established the subject
+    // is a `number[]`, which lowers to the canonical f64 vec. Resolve that vec
+    // type directly (registry call, no checker) so the field layout and the
+    // emit-time cursor drive use the SAME typeIdx as `compileExpression(subject)`
+    // produces (both go through `getOrRegisterVecType(ctx, "f64")`).
+    const vecTypeIdx = getOrRegisterVecType(ctx, "f64");
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    const vecFieldIdx = stateFields.length;
+    stateFields.push({
+      name: `vecdeleg_${vecDelegationSlots.length}`,
+      type: { kind: "ref_null", typeIdx: vecTypeIdx },
+      mutable: true,
+    });
+    const cursorFieldIdx = stateFields.length;
+    stateFields.push({ name: `veccur_${vecDelegationSlots.length}`, type: { kind: "i32" }, mutable: true });
+    vecDelegationSlots.push({
+      vecFieldIdx,
+      cursorFieldIdx,
+      vecTypeIdx,
+      arrTypeIdx,
+      elemType: { kind: "f64" },
+    });
+  }
+
+  // (#2173 slice-2b) `yield* <generic iterable>` slots — appended AFTER the
+  // native-gen and vec delegation slots (and after spills) so no earlier field
+  // index or the f64 `spillFieldOffset` is affected; byte-inert for generators
+  // without a generic-iterable site. Each site gets ONE `externref` field
+  // holding the `$__IterRec` returned by the native `__iterator` runtime.
+  const iterableDelegationSlots: NonNullable<NativeGeneratorInfo["iterableDelegationSlots"]> = [];
+  for (const _site of plan.iterableDelegationSites) {
+    iterableDelegationSlots.push({ fieldIdx: stateFields.length });
+    stateFields.push({
+      name: `iterdeleg_${iterableDelegationSlots.length - 1}`,
+      type: { kind: "externref" },
+      mutable: true,
+    });
+  }
+
+  // (#3050) Pending completion kind for state-lowered finally regions —
+  // appended LAST so every existing field index is unaffected; byte-inert for
+  // generators without a yielding finally. Payloads reuse `abrupt` / `error`.
+  let pendingFieldIdx: number | undefined;
+  if (plan.needsPending) {
+    pendingFieldIdx = stateFields.length;
+    stateFields.push({ name: "pending", type: { kind: "i32" }, mutable: true });
+  }
+
   const stateName = `__GenState_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({ kind: "struct", name: stateName, fields: stateFields });
@@ -1255,6 +2337,16 @@ export function registerNativeGenerator(
     doneState: plan.states.length - 1, // the final `done` state id
     elemValType,
     delegationSlots: delegationSlots.length > 0 ? delegationSlots : undefined,
+    vecDelegationSlots: vecDelegationSlots.length > 0 ? vecDelegationSlots : undefined,
+    iterableDelegationSlots: iterableDelegationSlots.length > 0 ? iterableDelegationSlots : undefined,
+    pendingFieldIdx,
+    // (#3050) Capturing nested generator: leading capture-param count (for the
+    // resume prelude's user-param offset) + the cell layouts to register in the
+    // resume fctx's boxedCaptures.
+    leadingCaptureCount: leadingCaptures && leadingCaptures.length > 0 ? leadingCaptures.length : undefined,
+    leadingCaptureCells: leadingCaptures
+      ?.filter((c) => c.boxed)
+      .map((c) => ({ name: c.name, refCellTypeIdx: c.boxed!.refCellTypeIdx, valType: c.boxed!.valType })),
   };
   ctx.nativeGenerators.set(functionName, info);
   return info;
@@ -1271,7 +2363,7 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
   return null;
 }
 
-// (#2171/#2970) The default `value` for a done/empty result. The old comment
+// (#2171/#2979) The default `value` for a done/empty result. The old comment
 // claimed "the consumer never reads value when done=1" — FALSE: JS reads
 // `.value` off a done result routinely, and it must be `undefined`
 // (`g.next().value` after exhaustion — test262 `generators/{no-yield,return}.js`).
@@ -1326,7 +2418,7 @@ function nativeReturnResultFromLocal(info: NativeGeneratorInfo, valueLocal: numb
 function emitExpressionAsF64(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression | undefined): number {
   if (!expr) {
     const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, { kind: "f64" });
-    // (#2970) A missing expression is JS `undefined` (bare `return;`,
+    // (#2979) A missing expression is JS `undefined` (bare `return;`,
     // `.next()` / `.return()` with no argument). Use the UNDEF_F64 sentinel —
     // numerically identical to the old quiet NaN (still a NaN), but
     // distinguishable by sentinel-aware readers so `gen.return().value` /
@@ -1486,6 +2578,8 @@ function emitTrampoline(
   plan: NativeGeneratorPlan,
   selfLocal: number,
   resultLocal: number,
+  // (#3050) Host-mode foreign-exception recovery import for throw-route wraps.
+  getCaughtExnIdx?: number,
 ): Instr[] {
   const states = plan.states;
 
@@ -1515,6 +2609,7 @@ function emitTrampoline(
       exitDepth,
       selfLocal,
       resultLocal,
+      getCaughtExnIdx,
     );
     const elseBody = buildArm(stateId + 1, level + 1);
     return [
@@ -1564,6 +2659,9 @@ function compileState(
   exitDepth: number,
   selfLocal: number,
   resultLocal: number,
+  // (#3050) Host-mode foreign-exception recovery import for throw-route wraps,
+  // acquired up-front by the resume emitter (never mid-trampoline).
+  getCaughtExnIdx?: number,
 ): Instr[] {
   const saved = fctx.body;
   const body: Instr[] = [];
@@ -1575,13 +2673,46 @@ function compileState(
   // import would over-shift any `call` funcIdx already in the outer body.
   ctx.liveBodies.add(saved);
 
+  // (#3050) A state positionally inside a NEW try-region gets its whole arm
+  // wrapped in a wasm `try`/`catch $exc` (see the tail of this function) so a
+  // runtime exception routes to the region's catch/finally. The wrap adds one
+  // block level — every branch depth inside the arm shifts by one.
+  if (state.throwRoute) {
+    loopDepth += 1;
+    exitDepth += 1;
+  }
+
   // Abrupt-resume handling: if we resumed into this state in an abrupt mode
   // (mode != 0), run the enclosing finalizers, then either complete with the
   // `.return(v)` value (mode 1) or RE-THROW the `.throw(e)` error (mode 2, #2864
   // F2). Both share the finalizer run + spill store + done transition; they
   // diverge only at the tail. The finalizers are compiled ONCE into `abruptBody`,
   // which the outer `if (mode != 0)` guards.
-  if (state.abruptResume) {
+  //
+  // (#3050) States under a NEW try-region carry `unwind` instead: the abrupt
+  // completion walks the innermost-first unwind chain — into an enclosing catch
+  // (throw only), into a state-lowered finally (both, saved as pending), through
+  // legacy replay finalizers — and only completes/re-throws when no handler
+  // remains. Legacy states keep the byte-identical `abruptResume` emission.
+  if (state.unwind) {
+    const abruptBody: Instr[] = [];
+    const savedAbrupt = fctx.body;
+    fctx.body = abruptBody;
+    emitUnwindWalk(ctx, fctx, info, state.unwind, {
+      selfLocal,
+      resultLocal,
+      srcFieldIdx: info.modeFieldIdx,
+      loopDepth: loopDepth + 1, // inside the `if (mode != 0)`
+      exitDepth: exitDepth + 1,
+    });
+    fctx.body = savedAbrupt;
+
+    body.push({ op: "local.get", index: selfLocal });
+    body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx });
+    body.push({ op: "i32.const", value: MODE_NEXT });
+    body.push({ op: "i32.ne" });
+    body.push({ op: "if", blockType: { kind: "empty" }, then: abruptBody, else: [] });
+  } else if (state.abruptResume) {
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
@@ -1679,8 +2810,46 @@ function compileState(
     }
     case "jump": {
       body.push(...storeSpills(info, fctx, selfLocal));
+      // (#3050) A normal-path entry into a state-lowered finally resets the
+      // region's pending-completion kind (abrupt entries write it in the
+      // routers instead).
+      if (term.setPending !== undefined && info.pendingFieldIdx !== undefined) {
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "i32.const", value: term.setPending });
+        body.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.pendingFieldIdx });
+      }
       body.push(...setStateInstrs(info, selfLocal, term.next));
       body.push({ op: "br", depth: loopDepth }); // re-enter dispatch at new state
+      break;
+    }
+    // (#3050) Exit router of a state-lowered finally: pending none → proceed to
+    // the join; pending return/throw → re-dispatch the saved completion against
+    // the region's OUTER unwind chain (which may enter an outer catch/finally,
+    // run legacy replays, or complete/re-throw).
+    case "finally-exit": {
+      body.push(...storeSpills(info, fctx, selfLocal));
+      const abruptArm: Instr[] = [];
+      {
+        const savedFx = fctx.body;
+        fctx.body = abruptArm;
+        emitUnwindWalk(ctx, fctx, info, term.unwind, {
+          selfLocal,
+          resultLocal,
+          srcFieldIdx: info.pendingFieldIdx!,
+          loopDepth: loopDepth + 1, // inside the `if (pending == 0) … else …`
+          exitDepth: exitDepth + 1,
+        });
+        fctx.body = savedFx;
+      }
+      body.push({ op: "local.get", index: selfLocal });
+      body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.pendingFieldIdx! });
+      body.push({ op: "i32.eqz" });
+      body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...setStateInstrs(info, selfLocal, term.join), { op: "br", depth: loopDepth + 1 }],
+        else: abruptArm,
+      });
       break;
     }
     case "branch": {
@@ -1708,6 +2877,262 @@ function compileState(
       break;
     }
     case "yield-star": {
+      if (term.delegationKind === "vec") {
+        // (#2173 slice-2a) Delegate to a NUMERIC array / vec by driving a cursor
+        // over its f64 `data`, zero host imports (the array for-of fast path):
+        //   if (vec == null) { vec = <subject>(); cursor = 0 }   ; first entry
+        //   if (cursor >= vec.length) {                          ; exhausted
+        //     vec = null; bindResult = undefined; state = next; br loop;
+        //   } else {
+        //     state = THIS; mode = 0; cursor++;
+        //     result = { vec.data[cursor], done: 0 }; br exit;    ; re-enter here
+        //   }
+        const vslot = info.vecDelegationSlots?.[term.vecSiteIndex];
+        if (!vslot || vslot.vecTypeIdx === null) {
+          // Defensive: unresolved vec type — complete rather than emit invalid wasm.
+          body.push(...storeSpills(info, fctx, selfLocal));
+          body.push(...setStateInstrs(info, selfLocal, info.doneState));
+          body.push(...emptyResult(info));
+          body.push({ op: "local.set", index: resultLocal });
+          break;
+        }
+        const vecTypeIdx = vslot.vecTypeIdx;
+        const vecRefType: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+        const vecLocal = allocLocal(fctx, `__gen_vec_${fctx.locals.length}`, vecRefType);
+        const cursorLocal = allocLocal(fctx, `__gen_veccur_${fctx.locals.length}`, { kind: "i32" });
+
+        // Spill straight-line locals computed in this state's prelude BEFORE
+        // suspending; the vec slot itself lives in the struct already.
+        body.push(...storeSpills(info, fctx, selfLocal));
+
+        // Lazily materialize the iterable on first entry (slot null): evaluate
+        // the subject ONCE (iterator semantics — GetIterator runs once) and
+        // reset the cursor to 0 (so a vec-yield* inside a loop re-iterates).
+        const materialize: Instr[] = [];
+        {
+          const savedC = fctx.body;
+          fctx.body = materialize;
+          compileExpression(ctx, fctx, term.subject, vecRefType);
+          fctx.body = savedC;
+        }
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx });
+        body.push({ op: "ref.is_null" });
+        body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: selfLocal },
+            ...materialize,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+            { op: "local.get", index: selfLocal },
+            { op: "i32.const", value: 0 },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+          ],
+          else: [],
+        });
+
+        // Load vec + cursor into locals.
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx });
+        body.push({ op: "local.set", index: vecLocal });
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx });
+        body.push({ op: "local.set", index: cursorLocal });
+
+        // (#2864 R1) `const x = yield* [..]` — deliver the completion value
+        // (§27.5.3.7). An array's completion value is `undefined`; carry the f64
+        // undefined-as-NaN sentinel into the binding's local AND its spill.
+        // (#2106 residual: `x === x` diverges from Node — do not pin in tests.)
+        const bindInstrs: Instr[] = [];
+        if (term.bindResultTo !== undefined) {
+          const bindLocal = fctx.localMap.get(term.bindResultTo);
+          const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
+          if (bindLocal !== undefined && bindSpillIdx >= 0) {
+            bindInstrs.push(
+              { op: "f64.const", value: NaN },
+              { op: "local.set", index: bindLocal },
+              { op: "local.get", index: selfLocal },
+              { op: "f64.const", value: NaN },
+              {
+                op: "struct.set",
+                typeIdx: info.stateTypeIdx,
+                fieldIdx: info.spillFieldOffset + bindSpillIdx,
+              } as Instr,
+            );
+          }
+        }
+
+        const doneArm: Instr[] = [
+          // exhausted — clear the slot, advance to the successor, re-enter.
+          { op: "local.get", index: selfLocal },
+          { op: "ref.null", typeIdx: vecTypeIdx },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+          ...bindInstrs,
+          ...setStateInstrs(info, selfLocal, term.next),
+          { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
+        ];
+        const yieldArm: Instr[] = [
+          // element available — stay in THIS state; advance the cursor.
+          ...setStateInstrs(info, selfLocal, stateId),
+          ...setModeInstrs(info, selfLocal, 0),
+          { op: "local.get", index: selfLocal },
+          { op: "local.get", index: cursorLocal },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+          // result = { vec.data[cursor] (f64), done: 0 }
+          { op: "local.get", index: vecLocal },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+          { op: "local.get", index: cursorLocal },
+          { op: "array.get", typeIdx: vslot.arrTypeIdx } as Instr,
+          { op: "i32.const", value: 0 },
+          { op: "struct.new", typeIdx: info.resultTypeIdx },
+          { op: "local.set", index: resultLocal },
+          { op: "br", depth: exitDepth + 1 }, // +1 for the inner `if`
+        ];
+        // if (cursor >= vec.length) doneArm else yieldArm
+        body.push({ op: "local.get", index: cursorLocal });
+        body.push({ op: "local.get", index: vecLocal });
+        body.push({ op: "ref.as_non_null" } as Instr);
+        body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        body.push({ op: "i32.ge_s" } as Instr);
+        body.push({ op: "if", blockType: { kind: "empty" }, then: doneArm, else: yieldArm });
+        break;
+      }
+      if (term.delegationKind === "iterable") {
+        // (#2173 slice-2b) Delegate to a GENERIC iterable by driving the
+        // standalone-native `__iterator`/`__iterator_next` runtime (#2038) from an
+        // externref `$__IterRec` slot — zero host imports. §27.5.3.7:
+        //   if (rec == null) rec = __iterator(<subject>);        ; first entry
+        //   (done, value) = __iterator_next(rec);
+        //   if (done) { rec = null; bindResult = undefined; state = next; br loop }
+        //   else { state = THIS; mode = 0; result = { unbox(value), done:0 }; br exit }
+        const islot = info.iterableDelegationSlots?.[term.iterableSiteIndex];
+        if (!islot) {
+          // Defensive: unresolved slot — complete rather than emit invalid wasm.
+          body.push(...storeSpills(info, fctx, selfLocal));
+          body.push(...setStateInstrs(info, selfLocal, info.doneState));
+          body.push(...emptyResult(info));
+          body.push({ op: "local.set", index: resultLocal });
+          break;
+        }
+        ensureNativeIteratorRuntime(ctx);
+        const iteratorIdx = ctx.funcMap.get("__iterator");
+        const iteratorNextIdx = ctx.funcMap.get("__iterator_next");
+        if (iteratorIdx === undefined || iteratorNextIdx === undefined) {
+          body.push(...storeSpills(info, fctx, selfLocal));
+          body.push(...setStateInstrs(info, selfLocal, info.doneState));
+          body.push(...emptyResult(info));
+          body.push({ op: "local.set", index: resultLocal });
+          break;
+        }
+        const recLocal = allocLocal(fctx, `__gen_iterrec_${fctx.locals.length}`, { kind: "externref" });
+        const doneLocal = allocLocal(fctx, `__gen_iterdone_${fctx.locals.length}`, { kind: "i32" });
+        const valueLocal = allocLocal(fctx, `__gen_iterval_${fctx.locals.length}`, { kind: "externref" });
+
+        // Spill straight-line locals BEFORE suspending; the rec slot lives in the
+        // struct already.
+        body.push(...storeSpills(info, fctx, selfLocal));
+
+        // Lazily materialize the iterator on first entry (slot null): evaluate the
+        // subject ONCE (GetIterator runs once), box to externref, and wrap via the
+        // native `__iterator`.
+        const materialize: Instr[] = [];
+        {
+          const savedC = fctx.body;
+          fctx.body = materialize;
+          const st = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
+          if (st && st.kind !== "externref") coerceType(ctx, fctx, st, { kind: "externref" });
+          fctx.body.push({ op: "call", funcIdx: iteratorIdx } as Instr);
+          fctx.body = savedC;
+        }
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx });
+        body.push({ op: "ref.is_null" } as Instr);
+        body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: selfLocal } as Instr,
+            ...materialize,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx } as Instr,
+          ],
+          else: [],
+        });
+
+        // rec → local; step it once: (done, value) = __iterator_next(rec).
+        body.push({ op: "local.get", index: selfLocal });
+        body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx });
+        body.push({ op: "local.set", index: recLocal });
+        body.push({ op: "local.get", index: recLocal });
+        body.push({ op: "call", funcIdx: iteratorNextIdx } as Instr);
+        body.push({ op: "local.set", index: valueLocal }); // value (top of stack)
+        body.push({ op: "local.set", index: doneLocal }); // done
+
+        // (#2864 R1 / #2106 residual) `const x = yield* it` — deliver the
+        // completion value (undefined for the array/`.values()` shape) into the
+        // binding's local AND spill. Sentinel matches the binding's slot type.
+        const bindInstrs: Instr[] = [];
+        if (term.bindResultTo !== undefined) {
+          const bindLocal = fctx.localMap.get(term.bindResultTo);
+          const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
+          if (bindLocal !== undefined && bindSpillIdx >= 0) {
+            const bindType = getLocalType(fctx, bindLocal);
+            const undef: Instr =
+              bindType?.kind === "f64" ? { op: "f64.const", value: NaN } : ({ op: "ref.null.extern" } as Instr);
+            bindInstrs.push(
+              undef,
+              { op: "local.set", index: bindLocal },
+              { op: "local.get", index: selfLocal },
+              undef,
+              {
+                op: "struct.set",
+                typeIdx: info.stateTypeIdx,
+                fieldIdx: info.spillFieldOffset + bindSpillIdx,
+              } as Instr,
+            );
+          }
+        }
+
+        // Re-yielded value: unbox the externref `value` to the OUTER element type
+        // (f64 outer → native `__unbox_number` via coerceType; boxed-any outer →
+        // pass through). String outers bailed in `emitYield`.
+        const valueInstrs: Instr[] = [];
+        {
+          const savedC = fctx.body;
+          fctx.body = valueInstrs;
+          fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+          if (info.elemValType.kind === "f64") {
+            coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
+          }
+          fctx.body = savedC;
+        }
+
+        const doneArm: Instr[] = [
+          // exhausted — clear the slot, advance to the successor, re-enter.
+          { op: "local.get", index: selfLocal } as Instr,
+          { op: "ref.null.extern" } as Instr,
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx } as Instr,
+          ...bindInstrs,
+          ...setStateInstrs(info, selfLocal, term.next),
+          { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
+        ];
+        const yieldArm: Instr[] = [
+          // iterator yielded — stay in THIS state so the next .next() re-drives it.
+          ...setStateInstrs(info, selfLocal, stateId),
+          ...setModeInstrs(info, selfLocal, 0),
+          ...valueInstrs,
+          { op: "i32.const", value: 0 },
+          { op: "struct.new", typeIdx: info.resultTypeIdx },
+          { op: "local.set", index: resultLocal },
+          { op: "br", depth: exitDepth + 1 }, // +1 for the inner `if`
+        ];
+        body.push({ op: "local.get", index: doneLocal });
+        body.push({ op: "if", blockType: { kind: "empty" }, then: doneArm, else: yieldArm });
+        break;
+      }
       // (#2170) Delegate to the inner native generator. §27.5.3.7:
       //   if (deleg == null) deleg = <inner>();           ; first entry
       //   innerRes = __gen_resume_<inner>(deleg);
@@ -1770,12 +3195,39 @@ function compileState(
       body.push({ op: "call", funcIdx: innerResumeIdx });
       body.push({ op: "local.set", index: innerResLocal });
 
+      // (#2864 R1) `const x = yield* inner()` — on completion, deliver the
+      // inner's `return` value (§27.5.3.7: the yield* expression's value is
+      // `innerRes.value` once `innerRes.done`) into the binding's local AND its
+      // spill field, so it both flows into the successor state within this
+      // resume call and survives later suspensions. The inner is f64-gated, so
+      // the value and the binding's spill slot are both f64.
+      const bindInstrs: Instr[] = [];
+      if (term.bindResultTo !== undefined) {
+        const bindLocal = fctx.localMap.get(term.bindResultTo);
+        const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
+        if (bindLocal !== undefined && bindSpillIdx >= 0) {
+          bindInstrs.push(
+            { op: "local.get", index: innerResLocal },
+            { op: "struct.get", typeIdx: innerInfo.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD },
+            { op: "local.set", index: bindLocal },
+            { op: "local.get", index: selfLocal },
+            { op: "local.get", index: bindLocal },
+            {
+              op: "struct.set",
+              typeIdx: info.stateTypeIdx,
+              fieldIdx: info.spillFieldOffset + bindSpillIdx,
+            } as Instr,
+          );
+        }
+      }
+
       // if (innerRes.done == 0) re-yield innerRes.value (stay in THIS state)
       const doneArm: Instr[] = [
         // inner done — clear the slot, advance to the successor state, re-enter.
         { op: "local.get", index: selfLocal },
         { op: "ref.null", typeIdx: innerInfo.stateTypeIdx },
         { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx } as Instr,
+        ...bindInstrs,
         ...setStateInstrs(info, selfLocal, term.next),
         { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
       ];
@@ -1799,7 +3251,175 @@ function compileState(
 
   fctx.body = saved;
   ctx.liveBodies.delete(saved);
+
+  // (#3050) Wrap the arm in a wasm try/catch so a runtime exception raised
+  // while this state executes (a `throw` statement in a try block, a throwing
+  // call, …) routes to the enclosing region's catch/finally per JS semantics.
+  // The wrap was already accounted for in the +1 depth shift at the top.
+  if (state.throwRoute) {
+    const route = state.throwRoute;
+    // Route body with the caught error value (externref) ON THE STACK.
+    const routeInstrs = (): Instr[] => {
+      const out: Instr[] = [];
+      if (route.kind === "catch") {
+        // Bind the error to the catch param (local + spill, so it survives a
+        // later suspension inside the catch), then enter the catch block. The
+        // jump stays within this resume call, so locals remain authoritative.
+        const eName = route.region.catchParamName;
+        const localIdx = eName !== undefined ? fctx.localMap.get(eName) : undefined;
+        if (localIdx !== undefined) {
+          out.push({ op: "local.set", index: localIdx });
+          const spillIdx = eName !== undefined ? info.spillNames.indexOf(eName) : -1;
+          if (spillIdx >= 0) {
+            out.push({ op: "local.get", index: selfLocal });
+            out.push({ op: "local.get", index: localIdx });
+            out.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + spillIdx });
+          }
+        } else {
+          out.push({ op: "drop" });
+        }
+        out.push(...setModeInstrs(info, selfLocal, MODE_NEXT));
+        out.push(...setStateInstrs(info, selfLocal, route.region.catchEntryState!));
+      } else {
+        // Save the throw as the region's pending completion and enter the
+        // state-lowered finally; its exit router re-propagates afterwards.
+        const scratch = allocLocal(fctx, `__gen_exn_${fctx.locals.length}`, { kind: "externref" });
+        out.push({ op: "local.set", index: scratch });
+        out.push({ op: "local.get", index: selfLocal });
+        out.push({ op: "local.get", index: scratch });
+        out.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD });
+        if (info.pendingFieldIdx !== undefined) {
+          out.push({ op: "local.get", index: selfLocal });
+          out.push({ op: "i32.const", value: MODE_THROW });
+          out.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.pendingFieldIdx });
+        }
+        out.push(...setModeInstrs(info, selfLocal, MODE_NEXT));
+        out.push(...setStateInstrs(info, selfLocal, route.region.finallyEntryState!));
+      }
+      // Inside the try construct the loop label sits at the (already shifted)
+      // loopDepth — identical for the try body and its catch bodies.
+      out.push({ op: "br", depth: loopDepth });
+      return out;
+    };
+    // Foreign JS exceptions (host mode only): recover the value via
+    // `__get_caught_exception` (acquired up-front — no late import here) and
+    // route identically. Standalone/wasi have no foreign exceptions (#1473).
+    const catchAll: Instr[] | undefined =
+      getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx } as Instr, ...routeInstrs()] : undefined;
+    return [
+      {
+        op: "try",
+        blockType: { kind: "empty" },
+        body,
+        catches: [{ tagIdx: ensureExnTag(ctx), body: routeInstrs() }],
+        catchAll,
+      } as Instr,
+    ];
+  }
   return body;
+}
+
+/**
+ * (#3050) Emit the abrupt-completion unwind walk into `fctx.body`. `entries`
+ * is innermost-first. The completion KIND is read from the state struct field
+ * `srcFieldIdx` — the resume `mode` field when routing a fresh `.throw()` /
+ * `.return()` at a suspended yield, or the `pending` field when a state-lowered
+ * finally's exit router re-dispatches its saved completion. The payloads always
+ * ride the `error` (throw) / `abrupt` (return) fields.
+ *
+ *  - `replay`  compile the legacy yield-free finally statements inline (both
+ *              completion kinds run them — same as the historical router);
+ *  - `catch`   throw-kind only: bind `error` to the catch param (local + spill),
+ *              clear the mode, and enter the catch block's states;
+ *  - `finally` both kinds: save the kind into `pending`, clear the mode, and
+ *              enter the finally's states (its exit router continues outward) —
+ *              nothing after it is reachable;
+ *  - tail      no handler left: complete the generator, then re-throw (throw)
+ *              or produce `{abrupt, done:1}` (return) — byte-compatible with
+ *              the legacy `abruptResume` tail.
+ *
+ * `loopDepth`/`exitDepth` are the branch depths AT THE WALK'S EMISSION LEVEL.
+ */
+function emitUnwindWalk(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NativeGeneratorInfo,
+  entries: readonly UnwindEntry[],
+  o: { selfLocal: number; resultLocal: number; srcFieldIdx: number; loopDepth: number; exitDepth: number },
+): void {
+  const body = fctx.body;
+  const srcIsThrow = (): Instr[] => [
+    { op: "local.get", index: o.selfLocal },
+    { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: o.srcFieldIdx },
+    { op: "i32.const", value: MODE_THROW },
+    { op: "i32.eq" },
+  ];
+  for (const entry of entries) {
+    if (entry.kind === "replay") {
+      for (const stmt of entry.statements) compileStatement(ctx, fctx, stmt);
+      continue;
+    }
+    if (entry.kind === "catch") {
+      // Throw completions enter the catch; return completions pass through.
+      const thenInstrs: Instr[] = [];
+      const eName = entry.region.catchParamName;
+      const localIdx = eName !== undefined ? fctx.localMap.get(eName) : undefined;
+      if (localIdx !== undefined) {
+        thenInstrs.push({ op: "local.get", index: o.selfLocal });
+        thenInstrs.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD });
+        thenInstrs.push({ op: "local.set", index: localIdx });
+        const spillIdx = eName !== undefined ? info.spillNames.indexOf(eName) : -1;
+        if (spillIdx >= 0) {
+          thenInstrs.push({ op: "local.get", index: o.selfLocal });
+          thenInstrs.push({ op: "local.get", index: localIdx });
+          thenInstrs.push({
+            op: "struct.set",
+            typeIdx: info.stateTypeIdx,
+            fieldIdx: info.spillFieldOffset + spillIdx,
+          });
+        }
+      }
+      thenInstrs.push(...setModeInstrs(info, o.selfLocal, MODE_NEXT));
+      thenInstrs.push(...storeSpills(info, fctx, o.selfLocal));
+      thenInstrs.push(...setStateInstrs(info, o.selfLocal, entry.region.catchEntryState!));
+      thenInstrs.push({ op: "br", depth: o.loopDepth + 1 }); // +1: inside this if
+      body.push(...srcIsThrow());
+      body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs, else: [] });
+      continue;
+    }
+    // finally — intercepts BOTH completion kinds; nothing after is reachable.
+    body.push({ op: "local.get", index: o.selfLocal });
+    body.push({ op: "local.get", index: o.selfLocal });
+    body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: o.srcFieldIdx });
+    body.push({ op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.pendingFieldIdx! });
+    body.push(...setModeInstrs(info, o.selfLocal, MODE_NEXT));
+    body.push(...storeSpills(info, fctx, o.selfLocal));
+    body.push(...setStateInstrs(info, o.selfLocal, entry.region.finallyEntryState!));
+    body.push({ op: "br", depth: o.loopDepth });
+    return;
+  }
+  // Tail: no handler — complete the generator, then re-throw or return-complete
+  // (mirrors the legacy abruptResume tail).
+  body.push(...storeSpills(info, fctx, o.selfLocal));
+  body.push(...setStateInstrs(info, o.selfLocal, info.doneState));
+  const throwBody: Instr[] = [
+    { op: "local.get", index: o.selfLocal },
+    { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+    { op: "throw", tagIdx: ensureExnTag(ctx) } as Instr,
+  ];
+  const returnBody: Instr[] = [];
+  if (valTypesMatch(genCarrierFieldType(info.elemValType), info.elemValType)) {
+    returnBody.push({ op: "local.get", index: o.selfLocal });
+    returnBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
+  } else {
+    returnBody.push(...defaultElemValueInstrs(info.elemValType));
+  }
+  returnBody.push({ op: "i32.const", value: 1 });
+  returnBody.push({ op: "struct.new", typeIdx: info.resultTypeIdx });
+  returnBody.push({ op: "local.set", index: o.resultLocal });
+  returnBody.push({ op: "br", depth: o.exitDepth + 1 }); // +1: inside this if
+  body.push(...srcIsThrow());
+  body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: returnBody });
 }
 
 export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: NativeGeneratorInfo): number {
@@ -1833,7 +3453,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
   const selfType: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
   const resultType: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
   const typeIdx = addFuncType(ctx, [selfType], [resultType], `${fnName}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   info.resumeFuncIdx = funcIdx;
   ctx.funcMap.set(fnName, funcIdx);
 
@@ -1853,7 +3473,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     body: [{ op: "unreachable" } as Instr],
     exported: false,
   };
-  ctx.mod.functions.push(placeholder);
+  pushDefinedFunc(ctx, funcIdx, placeholder);
 
   const resumeFctx: FunctionContext = {
     name: fnName,
@@ -1877,6 +3497,17 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.set", index: localIdx });
   }
 
+  // (#3050) Capturing nested generator: register each cell-riding capture in
+  // `boxedCaptures` so identifier reads/writes inside resume states deref the
+  // shared cell (the exact mechanism a lifted capturing function body uses) —
+  // a `count += 1` inside the generator is visible in the enclosing frame.
+  if (info.leadingCaptureCells) {
+    for (const cap of info.leadingCaptureCells) {
+      if (!resumeFctx.boxedCaptures) resumeFctx.boxedCaptures = new Map();
+      resumeFctx.boxedCaptures.set(cap.name, { refCellTypeIdx: cap.refCellTypeIdx, valType: cap.valType });
+    }
+  }
+
   // Load spills into locals. (#2864 F1b) The load local is minted at the spill's
   // actual ValType so the `struct.get` (of the same-typed field) round-trips. The
   // body's var-declaration reuses this exact slot (it is already in `localMap`),
@@ -1887,6 +3518,55 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.get", index: 0 });
     resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + i });
     resumeFctx.body.push({ op: "local.set", index: localIdx });
+  }
+
+  // (#2920) Destructure binding-pattern params ONCE, on first entry (state 0).
+  // The raw arg was rehydrated into its `param_*` local above; each bound name
+  // is a spill local (loaded above, persisted across yields) that this
+  // overwrites on first entry. Guarding on `state == 0` keeps it
+  // side-effect-safe — a default initializer / getter in the pattern must not
+  // re-run on resume (the spilled value is authoritative then). The bound-name
+  // spill locals are already in `localMap`, so the destructure helper's
+  // `ensureBindingLocals` reuses them (no double-alloc, no re-type).
+  // (#3050) Leading synthetic params (`this` OR capture params) offset the
+  // user-param indices in paramNames/paramTypes.
+  const thisOffset = info.synthesizedThis ? 1 : (info.leadingCaptureCount ?? 0);
+  const patternParams = info.decl.parameters.filter((p) => !ts.isIdentifier(p.name));
+  if (patternParams.length > 0) {
+    // (#2920 funcIdx-shift fix) `destructureParamObject`/`destructureParamArray`
+    // may add a late/union import (string helpers, `__get_undefined`, …), which
+    // shifts every function index. The shifter rewrites `ctx.currentFunc.body`,
+    // so `ctx.currentFunc` MUST point at the resume fctx during this emit — else
+    // the shift is applied to the OUTER caller's body and the resume prelude's
+    // own `call` indices (and already-emitted helpers like `__str_flat`) desync,
+    // producing an invalid module (only visible at harness scale, where a late
+    // import actually fires). Mirror the `emitTrampoline` wrapping below.
+    const savedFunc = ctx.currentFunc;
+    ctx.currentFunc = resumeFctx;
+    try {
+      const saved = pushBody(resumeFctx);
+      for (let k = 0; k < info.decl.parameters.length; k++) {
+        const p = info.decl.parameters[k]!;
+        if (ts.isIdentifier(p.name)) continue;
+        const nameIdx = k + thisOffset;
+        const rawLocal = resumeFctx.localMap.get(info.paramNames[nameIdx]!);
+        if (rawLocal === undefined) continue;
+        const rawType = info.paramTypes[nameIdx]!;
+        if (ts.isArrayBindingPattern(p.name)) {
+          destructureParamArray(ctx, resumeFctx, rawLocal, p.name, rawType);
+        } else if (ts.isObjectBindingPattern(p.name)) {
+          destructureParamObject(ctx, resumeFctx, rawLocal, p.name, rawType);
+        }
+      }
+      const destrInstrs = resumeFctx.body;
+      popBody(resumeFctx, saved);
+      resumeFctx.body.push({ op: "local.get", index: 0 });
+      resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
+      resumeFctx.body.push({ op: "i32.eqz" });
+      resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] } as Instr);
+    } finally {
+      ctx.currentFunc = savedFunc;
+    }
   }
 
   // Result holding local (the trampoline writes it; the tail reads it).
@@ -1900,7 +3580,18 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     const savedFunc = ctx.currentFunc;
     ctx.currentFunc = resumeFctx;
     try {
-      resumeFctx.body.push(...emitTrampoline(ctx, resumeFctx, info, plan, 0, resultLocal));
+      // (#3050) Throw-route wraps in HOST mode recover foreign JS exceptions
+      // via `__get_caught_exception` (mirrors exceptions.ts; dead in
+      // standalone/wasi, #1473 — wasm traps aren't catchable and every native
+      // throw rides the `$exc` tag). Acquire it BEFORE the trampoline emit so
+      // no late import fires mid-arm-chain (detached earlier arms would miss
+      // the funcidx shift).
+      let getCaughtExnIdx: number | undefined;
+      if (plan.hasThrowRoutes && !ctx.standalone && !ctx.wasi) {
+        getCaughtExnIdx = ensureLateImport(ctx, "__get_caught_exception", [], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, resumeFctx);
+      }
+      resumeFctx.body.push(...emitTrampoline(ctx, resumeFctx, info, plan, 0, resultLocal, getCaughtExnIdx));
     } finally {
       ctx.currentFunc = savedFunc;
     }
@@ -1982,6 +3673,27 @@ export function compileNativeGeneratorFunction(
     } else {
       fctx.body.push({ op: "ref.null.eq" });
     }
+  }
+  // (#2173 slice-2a) `yield* <numeric-array/vec>` slots start `{null vec, 0}` —
+  // the iterable is materialized lazily on first entry into the vec-yield-star
+  // state, and the cursor is (re)set to 0 on that materialization.
+  for (const slot of info.vecDelegationSlots ?? []) {
+    if (slot.vecTypeIdx !== null) {
+      fctx.body.push({ op: "ref.null", typeIdx: slot.vecTypeIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.eq" });
+    }
+    fctx.body.push({ op: "i32.const", value: 0 }); // cursor
+  }
+  // (#2173 slice-2b) `yield* <generic iterable>` slots start null-externref —
+  // the `$__IterRec` is materialized lazily (`__iterator(subject)`) on first
+  // entry into the iterable-yield-star state.
+  for (const _slot of info.iterableDelegationSlots ?? []) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  // (#3050) Pending completion kind starts at 0 (none).
+  if (info.pendingFieldIdx !== undefined) {
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx });
 }
@@ -2490,7 +4202,7 @@ export function tryCompileNativeGeneratorResultProperty(
 
   // `value`: choose the return ValType from the STATIC type of the result's
   // `value` property. A STATICALLY-NUMERIC `.value` keeps the f64 fast path
-  // (byte-identical to before, and — with the #2970 sentinel producer — an
+  // (byte-identical to before, and — with the #2979 sentinel producer — an
   // exhausted read yields NaN, which is the spec ToNumber(undefined)).
   // Everything else (ref-typed OR no static info — the `g: any` harness shape)
   // now takes the externref path below.
@@ -2510,7 +4222,7 @@ export function tryCompileNativeGeneratorResultProperty(
     return fieldType;
   }
 
-  // (#2970) Dynamic / ref-typed `.value` read → externref, covering EVERY
+  // (#2979) Dynamic / ref-typed `.value` read → externref, covering EVERY
   // registered result carrier (the old split covered only externref-elem
   // carriers here and sent the no-static-info shape — exactly the test262
   // harness path `assert.sameValue(g.next().value, undefined)` — down the f64
@@ -2525,7 +4237,7 @@ export function tryCompileNativeGeneratorResultProperty(
 }
 
 /**
- * (#2970) True when `typeIdx` is one of the native generator IteratorResult
+ * (#2979) True when `typeIdx` is one of the native generator IteratorResult
  * structs (`__NativeGeneratorResult_<kind>`), whose f64 `value` field uses the
  * UNDEF_F64 sentinel as the absent/done marker. Generic struct-field readers
  * (member-get dispatch) use this to apply sentinel-aware boxing for exactly
@@ -2537,7 +4249,7 @@ export function isNativeGeneratorResultStruct(ctx: CodegenContext, typeIdx: numb
 }
 
 /**
- * (#2970) Instruction tail that converts an f64 already on the stack into an
+ * (#2979) Instruction tail that converts an f64 already on the stack into an
  * externref with sentinel canonicalization: the UNDEF_F64 bit pattern becomes
  * the null externref (standalone canonical `undefined`), anything else is
  * boxed via `__box_number`. Needs a caller-provided f64 scratch local.
@@ -2558,7 +4270,7 @@ export function sentinelAwareF64BoxInstrs(f64ScratchIdx: number, boxNumberIdx: n
 }
 
 /**
- * (#2970) Build the externref-producing `.value` read chain over ALL candidate
+ * (#2979) Build the externref-producing `.value` read chain over ALL candidate
  * result carriers, canonicalizing the absent/done value to the null externref
  * (the standalone canonical `undefined`). Mirrors `buildOpenResultRead`'s
  * nested ref.test chain; the no-match default is the null externref.

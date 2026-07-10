@@ -3,10 +3,11 @@
  * Host built-in compilation: console, Date, Math, and WASI output.
  */
 import { ts } from "../../ts-api.js";
-import { isBooleanType, isNumberType, isStringType, isSymbolType } from "../../checker/type-mapper.js";
+import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { resolveArrayInfo } from "../array-methods.js";
+import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
@@ -200,7 +201,7 @@ function ensureDateCivilHelper(ctx: CodegenContext): number {
   // func (param $z i64) (result i64)
   // locals: $z(0), $era(1), $doe(2), $yoe(3), $doy(4), $mp(5), $y(6), $m(7), $d(8)
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "i64" }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__date_civil_from_days", funcIdx);
 
   const body: Instr[] = [];
@@ -366,7 +367,7 @@ function ensureDateCivilHelper(ctx: CodegenContext): number {
     { op: "i64.add" } as Instr,
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__date_civil_from_days",
     typeIdx: funcTypeIdx,
     locals: [
@@ -400,7 +401,7 @@ export function ensureDateDaysFromCivilHelper(ctx: CodegenContext): number {
   // func (param $y i64) (param $m i64) (param $d i64) (result i64)
   // locals: $y(0), $m(1), $d(2), $era(3), $yoe(4), $doy(5), $doe(6)
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }, { kind: "i64" }, { kind: "i64" }], [{ kind: "i64" }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__date_days_from_civil", funcIdx);
 
   const body: Instr[] = [];
@@ -507,7 +508,7 @@ export function ensureDateDaysFromCivilHelper(ctx: CodegenContext): number {
     { op: "i64.sub" } as Instr,
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__date_days_from_civil",
     typeIdx: funcTypeIdx,
     locals: [
@@ -552,7 +553,7 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
 
   // func (param $ts i64) (result ref $NativeString)
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "ref", typeIdx: strTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__date_iso_string", funcIdx);
 
   // Locals (param $ts = 0):
@@ -865,7 +866,7 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: strTypeIdx } as Instr,
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__date_iso_string",
     typeIdx: funcTypeIdx,
     locals: [
@@ -927,7 +928,7 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
 
   // func (param $ts i64) (param $mode i32) (result ref $NativeString)
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }, { kind: "i32" }], [{ kind: "ref", typeIdx: strTypeIdx }]);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set("__date_format_string", funcIdx);
 
   // Param 0 $ts (i64), param 1 $mode (i32). Locals:
@@ -1353,7 +1354,7 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
     { op: "struct.new", typeIdx: strTypeIdx } as Instr,
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: "__date_format_string",
     typeIdx: funcTypeIdx,
     locals: [
@@ -2819,7 +2820,7 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
   // Simple i32 to decimal string conversion
   // Uses bump allocator to write digits to linear memory
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i32" }], []);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(helperName, funcIdx);
 
   // Algorithm: handle negative, then extract digits in reverse, then write forward
@@ -2967,7 +2968,7 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
     { op: "call", funcIdx: writeStringIdx } as Instr,
   );
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: helperName,
     typeIdx: funcTypeIdx,
     locals: [
@@ -3004,7 +3005,7 @@ function ensureWasiWriteF64Helper(ctx: CodegenContext, useStderr: boolean = fals
   // Simple f64 output: truncate to i32 and print as integer
   // For NaN, Infinity, -Infinity, handle specially
   const funcTypeIdx = addFuncType(ctx, [{ kind: "f64" }], []);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(helperName, funcIdx);
 
   // Allocate data segments for special values
@@ -3064,7 +3065,7 @@ function ensureWasiWriteF64Helper(ctx: CodegenContext, useStderr: boolean = fals
     { op: "call", funcIdx: writeI32Idx } as Instr,
   ];
 
-  ctx.mod.functions.push({
+  pushDefinedFunc(ctx, funcIdx, {
     name: helperName,
     typeIdx: funcTypeIdx,
     locals: [],
@@ -3098,7 +3099,7 @@ function compileMathCall(
   // (e.g. `Math.abs(Symbol())` returned the raw counter). Detect a symbol-typed
   // argument, evaluate every argument up to and including it for side effects in
   // source order, then throw — matching how `Number(Symbol())` is handled.
-  const symbolArgIdx = expr.arguments.findIndex((a) => isSymbolType(ctx.checker.getTypeAtLocation(a)));
+  const symbolArgIdx = expr.arguments.findIndex((a) => ctx.oracle.staticJsTypeOf(a) === "symbol");
   if (symbolArgIdx >= 0) {
     for (let i = 0; i <= symbolArgIdx; i++) {
       const t = compileExpression(ctx, fctx, expr.arguments[i]!);
@@ -3155,7 +3156,15 @@ function compileMathCall(
     return { kind: "f64" };
   }
 
-  if (method in nativeUnary && expr.arguments.length >= 1) {
+  // Use own-property semantics, NOT the `in` operator: `in` walks the prototype
+  // chain, so an inherited `Object.prototype` name — `Math.hasOwnProperty(…)`,
+  // `Math.toString()`, `Math.valueOf()`, `Math.constructor(…)`, etc. — would
+  // spuriously match this table and push `{ op: <inherited function> }` (a
+  // non-string op), crashing codegen downstream with "op.endsWith is not a
+  // function" (#3044). `Object.hasOwn` keeps the dispatch to the six genuine
+  // native-unary Math methods; anything else falls through to `return undefined`
+  // → generic call handling (which resolves `Math.hasOwnProperty` correctly).
+  if (Object.hasOwn(nativeUnary, method) && expr.arguments.length >= 1) {
     compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
     fctx.body.push({ op: nativeUnary[method]! } as Instr);
     return { kind: "f64" };

@@ -23,7 +23,12 @@ import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
-import { collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
+import {
+  collectBindingPatternNames,
+  collectReferencedIdentifiers,
+  emitCachedFuncClosureAccess,
+  functionBodyReferencesThis,
+} from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
@@ -58,6 +63,7 @@ import { isStandalonePromiseActive } from "./async-scheduler.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeUriDecode, emitNativeUriEncode } from "./uri-encoding-native.js";
+import { emitNativeEscape, emitNativeUnescape } from "./escape-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   isNativeGeneratorCandidate,
@@ -77,6 +83,7 @@ import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.j
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
+import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 /** Accumulated state for the single-pass collector */
@@ -105,6 +112,8 @@ interface UnifiedCollectorState {
   dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
+  // -- collectEscapeImports (#3063) — legacy global escape/unescape (§B.2.1/.2) --
+  escapeNeeded: Set<string>;
   // -- collectStringStaticImports --
   needsFromCharCode: boolean;
   needsFromCodePoint: boolean;
@@ -208,6 +217,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     parseNeeded: new Set(),
     dateParseHostNeeded: false,
     uriNeeded: new Set(),
+    escapeNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
     promiseNeeded: new Set(),
@@ -307,6 +317,26 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         }
       }
     }
+  }
+
+  // ── (#2972) string element access with a computed index ──
+  // The IR lowers a proven-in-bounds `s[i]` (string receiver, non-literal
+  // index) through the SAME charAt machinery as `s.charAt(i)` — but the
+  // element-access syntax never mentions `.charAt`, so the method-syntax
+  // scan below can't see it and the `string_charAt` env import would be
+  // missing at IR lower time (post-claim demote flag-off; a hard error
+  // under JS2WASM_IR_FIRST — the 14-test #2972 class). Pre-register the
+  // import whenever the shape appears with a string-typed receiver. If the
+  // IR ends up not claiming the function the import is simply unused (and
+  // eliminated by eliminateDeadImports), so over-registration is harmless.
+  // NOTE for #1930 (TypeOracle): this getTypeAtLocation site is a
+  // query-only fact read — migrate to `oracle.typeOf` when the facade lands.
+  if (
+    ts.isElementAccessExpression(node) &&
+    !ts.isStringLiteralLike(node.argumentExpression) &&
+    isStringType(ctx.checker.getTypeAtLocation(node.expression))
+  ) {
+    state.stringMethodNeeded.add("charAt");
   }
 
   // ── collectPrimitiveMethodImports ──
@@ -443,6 +473,46 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         }
         if (needsHost) {
           state.stringRegexpMethodNeeded.add(methodName);
+        }
+      }
+    }
+  }
+  // (#2029 family C) Element-access spelling of the number-format methods —
+  // `1["toFixed"](5)`, `5["toString"](2)` (test262
+  // property-accessors/S11.2.1_A3_T2). The dot-form scan above never sees
+  // these, so the native helpers were not registered; the codegen
+  // element-access arm (calls.ts) then found `funcMap.get("number_toFixed")`
+  // undefined and fell through past its already-pushed receiver+argument into
+  // the generic dynamic fallback — a dirty stack whose ref.null receiver threw
+  // "Cannot access property on null or undefined" at runtime standalone.
+  // Register the same helpers for a statically-resolvable string key.
+  if (
+    ts.isCallExpression(node) &&
+    ts.isElementAccessExpression(node.expression) &&
+    ts.isStringLiteral(node.expression.argumentExpression)
+  ) {
+    const elemMethodName = node.expression.argumentExpression.text;
+    // Oracle-first (#1930): a primitive-number receiver reports `"number"`;
+    // a `new Number(x)` wrapper reports its declared symbol name "Number"
+    // (mirrors `isNumberWrapperType`'s Object+symbol check).
+    const elemRecvExpr = node.expression.expression;
+    const isElemNumFmtRecv =
+      ctx.oracle.staticJsTypeOf(elemRecvExpr) === "number" ||
+      (ctx.standalone && ctx.oracle.declaredNameOf(elemRecvExpr) === "Number");
+    if (isElemNumFmtRecv) {
+      if (elemMethodName === "toFixed") {
+        state.primitiveNeeded.add("number_toFixed");
+      } else if (elemMethodName === "toPrecision") {
+        state.primitiveNeeded.add("number_toPrecision");
+        // 0-arg toPrecision routes to plain toString (see the codegen arm).
+        state.primitiveNeeded.add("number_toString");
+      } else if (elemMethodName === "toExponential") {
+        state.primitiveNeeded.add("number_toExponential");
+      } else if (elemMethodName === "toString") {
+        if (node.arguments.length > 0) {
+          state.primitiveNeeded.add("number_toString_radix");
+        } else {
+          state.primitiveNeeded.add("number_toString");
         }
       }
     }
@@ -619,6 +689,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     ) {
       state.uriNeeded.add(name);
     }
+    // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+    // transforms. JS-host mode routes to the native JS globals via an env host
+    // import (registered in the emit phase, gated to host mode so standalone
+    // never leaks an unsatisfiable import). A pure-Wasm standalone lowering is a
+    // follow-up (mirrors the uri-encoding-native.ts machinery).
+    if (name === "escape" || name === "unescape") {
+      state.escapeNeeded.add(name);
+    }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
       // Under native strings (standalone/WASI) a `Number(string)` argument is a
@@ -769,14 +847,21 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // ── collectAsyncCpsImports (#1042) ──
   // Detect a CPS-eligible async function so the host imports the driver emits
   // (__make_callback / Promise_then2 / Promise_resolve) are registered upfront
-  // with STABLE funcMap indices. Mirrors the function-body.ts activation gate
-  // exactly (single tail-await canonical shape, no try-across-await, JS-host).
+  // with STABLE funcMap indices. Mirrors the activation gate exactly (single
+  // tail-await canonical shape, no try-across-await, JS-host).
+  //
+  // (#2957 phase 2) Widened to async ARROWS and FUNCTION EXPRESSIONS: those
+  // shapes now activate the CPS machine too (via `closures.ts`), so their host
+  // imports must likewise be pre-registered. If they were not, a module whose
+  // only async fns are arrows would reach `emitAsyncStateMachine` with the
+  // imports missing → it bails and the arrow silently falls back to the legacy
+  // sync pass-through. Method shapes remain phase 3.
   if (
     ASYNC_CPS_ENABLED &&
     (!state.asyncCpsFound || !state.asyncHostDriveFound) &&
     !ctx.wasi &&
     !ctx.standalone &&
-    ts.isFunctionDeclaration(node) &&
+    (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
     node.body !== undefined &&
     hasAsyncModifier(node)
   ) {
@@ -812,12 +897,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
       if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
         const inner = p.name.expression;
+        // (#1433) Symbol.dispose / asyncDispose computed methods.
         if (
           ts.isPropertyAccessExpression(inner) &&
           ts.isIdentifier(inner.expression) &&
           inner.expression.text === "Symbol" &&
           (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
         ) {
+          state.getterCallbackFound = true;
+          break;
+        }
+        // (#3048) A non-plain-literal computed method key routes through the
+        // host plain-object method arms in literals.ts — the well-known-`Symbol`
+        // arm (`{ [Symbol.iterator]() {} }`) and the runtime-key arm
+        // (`{ [ID(2)]() {} }`, `{ [k]() {} }`) — both of which install the method
+        // value via the `__make_getter_callback` bridge. Only a plain
+        // numeric/string-literal key (`{ [1]() {} }`, `{ ["x"]() {} }`) resolves
+        // to a static method name and takes the struct/string path (no bridge),
+        // so it needs no registration. The pre-pass previously registered the
+        // bridge only for the `dispose`/`asyncDispose` arm above, so every other
+        // well-known-symbol / runtime computed method missed it → hard CE
+        // "Missing __make_getter_callback import" (#1027 resurgence). Host/GC
+        // only: standalone/WASI compile the method as a host-free closure (#2194)
+        // and must not declare the unsatisfiable `env::` bridge import.
+        const isPlainLiteralKey = ts.isNumericLiteral(inner) || ts.isStringLiteralLike(inner);
+        if (!isPlainLiteralKey && !ctx.standalone && !ctx.wasi) {
           state.getterCallbackFound = true;
           break;
         }
@@ -848,6 +952,27 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
             }
           }
         }
+      }
+    }
+  }
+  // ── getterCallbackFound: JSON.parse(text, reviver) reviver that reads `this` (#3046) ──
+  // §25.5.1.1 InternalizeJSONProperty invokes the reviver with the holder as
+  // `this`. A reviver that touches `this` must route through the
+  // `this`-forwarding `__make_getter_callback` bridge (see
+  // `compileArrowFunction` in closures.ts). Register the import here so the
+  // needsThis emit at the call site has it available.
+  if (!state.getterCallbackFound && ts.isCallExpression(node)) {
+    const callee = node.expression;
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "JSON" &&
+      callee.name.text === "parse" &&
+      node.arguments.length >= 2
+    ) {
+      const reviver = node.arguments[1]!;
+      if ((ts.isFunctionExpression(reviver) || ts.isArrowFunction(reviver)) && functionBodyReferencesThis(reviver)) {
+        state.getterCallbackFound = true;
       }
     }
   }
@@ -930,6 +1055,19 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     if (!state.generatorFound && ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
       state.generatorFound = true;
     }
+  }
+
+  // (#2980) Flag any async generator for the widened-standalone Promise-lane
+  // fallback (see `moduleHasAsyncGen` in context/types.ts). Pre-body so a
+  // `Promise.reject` INSIDE the gen sees it.
+  if (
+    !ctx.moduleHasAsyncGen &&
+    (node as ts.Node & { asteriskToken?: ts.Node }).asteriskToken !== undefined &&
+    (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) &&
+    node.body !== undefined &&
+    hasAsyncModifier(node)
+  ) {
+    ctx.moduleHasAsyncGen = true;
   }
 
   // ── collectArrayIteratorImports ──
@@ -1367,6 +1505,29 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     if (needsNativeDecode) {
       emitNativeUriDecode(ctx);
     }
+  }
+
+  // (#3063 / #3064) Legacy `escape` / `unescape` (§B.2.1.1 / §B.2.1.2).
+  //   • JS-host mode: register an `(externref) -> externref` env host import
+  //     delegating to the native JS `escape` / `unescape` (runtime.ts). The
+  //     generic call-site routing (calls.ts `funcMap.get(name)`) dispatches it
+  //     and ToString-coerces the argument, exactly like the URI globals above.
+  //   • Standalone / WASI (#3064): there is no host, so emit the pure-Wasm
+  //     `__escape` / `__unescape` helpers (registered as DEFINED funcs; the
+  //     batched late-import shift keeps their funcMap index correct as later
+  //     imports register). The call site (calls.ts) routes each name through
+  //     its native helper.
+  // A user-declared `escape` / `unescape` already sits in funcMap → the `has`
+  // guard skips it in both lanes.
+  for (const name of state.escapeNeeded) {
+    if (ctx.funcMap.has(name)) continue;
+    if (ctx.standalone || ctx.wasi) {
+      if (name === "escape") emitNativeEscape(ctx);
+      else emitNativeUnescape(ctx);
+      continue;
+    }
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", name, { kind: "func", typeIdx });
   }
 
   // ── collectStringStaticImports finalize ──
@@ -3747,7 +3908,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const funcIdx = ctx.funcMap.get(targetName)!;
 
         // Mark the function as exported (for dead-code elimination etc.)
-        const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+        const func = definedFuncAt(ctx, funcIdx);
         if (func && !func.exported) {
           func.exported = true;
         }
@@ -3788,7 +3949,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const exportedName = spec.name.text;
         if (!ctx.funcMap.has(localName)) continue;
         const funcIdx = ctx.funcMap.get(localName)!;
-        const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+        const func = definedFuncAt(ctx, funcIdx);
         if (func && !func.exported) func.exported = true;
         if (!ctx.mod.exports.some((e) => e.name === exportedName)) {
           ctx.mod.exports.push({ name: exportedName, desc: { kind: "func", index: funcIdx } });
@@ -3835,7 +3996,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (ctx.funcMap.has(targetName)) {
           hasModuleExportsDefault = true;
           const funcIdx = ctx.funcMap.get(targetName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
 
           const alreadyExported = ctx.mod.exports.some((e) => e.desc.kind === "func" && e.desc.index === funcIdx);
@@ -3907,7 +4068,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           if (!key || !valName) continue;
           if (!ctx.funcMap.has(valName)) continue;
           const funcIdx = ctx.funcMap.get(valName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === key)) {
             ctx.mod.exports.push({ name: key, desc: { kind: "func", index: funcIdx } });
@@ -3951,7 +4112,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         } else {
           // Function already registered (e.g., as a FunctionDeclaration) — just export it
           const funcIdx = ctx.funcMap.get(name)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === name)) {
             ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
@@ -3962,7 +4123,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         const targetName = expr.right.text;
         if (ctx.funcMap.has(targetName)) {
           const funcIdx = ctx.funcMap.get(targetName)!;
-          const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+          const func = definedFuncAt(ctx, funcIdx);
           if (func && !func.exported) func.exported = true;
           if (!ctx.mod.exports.some((e) => e.name === exportName)) {
             ctx.mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
@@ -4275,6 +4436,18 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ctx.moduleInitStatements.push(stmt);
       continue;
     }
+    // (#2968) A top-level `throw` under `--target wasi`: collect it into
+    // `__module_init` so the statement actually executes at module load and its
+    // exception propagates out to `_start`, where the uncaught-exception printer
+    // (addWasiStartExport) renders it to stderr + `proc_exit(1)`. Without this
+    // there is no `ThrowStatement` case, so a bare top-level `throw` was silently
+    // dropped — it emitted no code at all and the program exited 0. Gated on
+    // `ctx.wasi` so JS-host / plain-standalone output stays byte-identical (their
+    // pre-existing top-level-throw drop is out of scope for this issue).
+    if (ts.isThrowStatement(stmt)) {
+      if (ctx.wasi) ctx.moduleInitStatements.push(stmt);
+      continue;
+    }
     // Module-level expression statements with side effects:
     // new expressions, call expressions, ++/--, assignments to module globals
     if (ts.isExpressionStatement(stmt)) {
@@ -4334,6 +4507,34 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // `$Object` is populated. Host/GC mode is byte-identical (gated, dropped
         // as before). Mirrors the Array.prototype CPR keep-in-init above.
         if (ctx.standalone && isFnctorPrototypeAssignTarget(ctx, expr.left)) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
+        // (#2671) `F.<prop> = …` — a STATIC property write on a top-level
+        // FUNCTION DECLARATION (`Test262Error.thrower = function () {…}`, the
+        // test262 harness-prelude shape every Promise capability test passes
+        // as its reject callback). `F` is not a module global, so the generic
+        // check below dropped the statement: the static silently never
+        // existed at runtime (wasm-side reads → null → call traps; the host
+        // mirror shows undefined → V8's NewPromiseCapability throws "Promise
+        // resolve or reject function is not callable"). Keep the statement in
+        // __module_init so the ordinary property-write arm runs — the same
+        // write from inside a function already worked; only the top-level
+        // collection dropped it. Scoped narrowly:
+        //   - DIRECT `F.<name> = …` only (bare-identifier receiver);
+        //     `F.prototype = …` / `F.prototype.m = …` chains stay excluded —
+        //     those are consumed by the compile-time fnctor-prototype lift,
+        //     and re-running them at init would double-apply.
+        //   - Host/GC lanes only: standalone's write-arm for fnctor statics
+        //     is separate work (its prototype case has its own #2660 S2 keep
+        //     above); standalone codegen stays byte-identical.
+        if (
+          !ctx.standalone &&
+          ts.isPropertyAccessExpression(expr.left) &&
+          ts.isIdentifier(expr.left.expression) &&
+          expr.left.name.text !== "prototype" &&
+          ctx.topLevelFunctionNames.has(expr.left.expression.text)
+        ) {
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
@@ -4548,15 +4749,121 @@ export function compileDeclarations(
     }
   }
 
+  // (#2818) Collect the names of *block-scoped* (`let`/`const`) variables
+  // declared directly in a statement list (not descending into nested blocks
+  // or function bodies). Only `let`/`const` — a `var` is function-scoped and,
+  // when referenced by a class method, is already hoisted to a module global
+  // (see `wrapTest` and the module-global skip in
+  // `promoteAccessorCapturesToGlobals`), so it needs no deferral; including
+  // `var` needlessly perturbed the order-sensitive async-generator lowering.
+  function collectBlockScopedDeclNames(
+    stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[],
+    out: Set<string>,
+  ): void {
+    for (const stmt of stmts) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      const isBlockScoped = (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
+      if (!isBlockScoped) continue;
+      for (const decl of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(decl.name)) {
+          out.add(decl.name.text);
+        } else if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
+          collectBindingPatternNames(decl.name, out);
+        }
+      }
+    }
+  }
+
+  // (#2818) True iff any method / constructor / accessor body — or a
+  // parameter-default initializer — of `decl` references a name in `names`
+  // that `promoteAccessorCapturesToGlobals` would actually promote. Mirrors the
+  // member set AND the skip conditions of that function (already a module /
+  // captured global, `this`, a user-function name), so we defer a class only
+  // when the in-scope promotion channel would genuinely fire — never on a name
+  // that is already global (a false-positive defer only churns codegen order).
+  function classDeclCapturesNames(decl: ts.ClassDeclaration, names: ReadonlySet<string>): boolean {
+    if (names.size === 0) return false;
+    // (#2818 standalone follow-up) NEVER defer a class that has a base class
+    // (`extends …`). A derived class routes its constructor through a
+    // `super(...)` call; the deferred, block-recompiled path lowers that
+    // super-constructor invocation + any spread/getter in the arguments
+    // *correctly in the WasmGC (host) lane* but produces a **desynced** result
+    // in the standalone lane (the promoted-global read of a captured `let`
+    // resolves to a stale/empty value through the super/spread machinery). The
+    // *eager* path — which is exactly how `origin/main` compiled these — is
+    // correct in the standalone lane, so we keep every derived class eager.
+    // This regressed 6 standalone test262 files (all `class X extends Iterator`
+    // / `extends Parent` capturers: the `Iterator.prototype.{map,flatMap,take,
+    // drop,filter}` `return-is-forwarded*` tests + `super/call-spread-obj-
+    // getter-init`). Base-less capturers (the genuine #2818 target — a plain
+    // `class C { m(){ return s; } }` reading a block-`let`) still defer and are
+    // fixed; they have no super-constructor path and lower identically in both
+    // lanes.
+    if (decl.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) {
+      return false;
+    }
+    const wouldPromote = (name: string): boolean => {
+      if (!names.has(name)) return false;
+      if (name === "this") return false;
+      if (ctx.capturedGlobals.has(name)) return false;
+      if (ctx.moduleGlobals.has(name)) return false;
+      // A name bound to a *user* function is a function reference, not a
+      // captured variable (but a same-named wasm:js-string builtin import must
+      // not block capture — discriminate by index, as promotion does).
+      if (ctx.funcMap.has(name) && ctx.funcMap.get(name) !== ctx.jsStringImports.get(name)) return false;
+      return true;
+    };
+    for (const member of decl.members) {
+      const isBodied =
+        ts.isMethodDeclaration(member) ||
+        ts.isConstructorDeclaration(member) ||
+        ts.isGetAccessorDeclaration(member) ||
+        ts.isSetAccessorDeclaration(member);
+      if (!isBodied) continue;
+      const referenced = new Set<string>();
+      const body = (member as ts.MethodDeclaration).body;
+      if (body) {
+        for (const stmt of body.statements) collectReferencedIdentifiers(stmt, referenced);
+      }
+      for (const p of (member as ts.MethodDeclaration).parameters) {
+        if (p.initializer) collectReferencedIdentifiers(p.initializer, referenced);
+      }
+      for (const name of referenced) {
+        if (wouldPromote(name)) return true;
+      }
+    }
+    return false;
+  }
+
   // Compile class constructors and methods
   // Also compile class expressions in variable declarations
   // Scan recursively into function bodies for class expressions
   function compileClassesFromStatements(
     stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[],
     insideFunction = false,
+    // (#2818) When non-null, we are (transitively) inside a function body and
+    // this set carries the enclosing block/function-scoped `let`/`const`/`var`
+    // names in scope, so a control-flow-nested class *declaration* that
+    // genuinely captures one of them can be deferred (compiled in-scope by
+    // `compileNestedClassDeclaration`) instead of eagerly. `null` at module
+    // scope — nothing new is deferred there. See the block-`let`-captured-by-
+    // class-method ordering bug (#2818); the broad `insideFunction`-everywhere
+    // variant (PR #2335) regressed −471 by also deferring class *expressions*
+    // and non-capturing classes whose deferred shape is not re-compiled.
+    enclosingLocals: Set<string> | null = null,
   ): void {
     if (!insideFunction) {
       ensureSiblingFunctionsRegistered(stmts);
+    }
+    // (#2818) When inside a function, accumulate this statement list's own
+    // block-scoped decls onto the inherited set so a class nested deeper can
+    // detect a capture of a `let`/`const`/`var` from this or an enclosing
+    // block. A fresh copy per level keeps sibling blocks from polluting each
+    // other. `null` at module scope (no new deferral there).
+    let scopeLocals: Set<string> | null = enclosingLocals;
+    if (enclosingLocals) {
+      scopeLocals = new Set(enclosingLocals);
+      collectBlockScopedDeclNames(stmts, scopeLocals);
     }
     for (const stmt of stmts) {
       // Mirror the `.d.ts` ambient guard from `collectClassesFromStatements`:
@@ -4567,6 +4874,18 @@ export function compileDeclarations(
         if (insideFunction) {
           // Defer body compilation — will be compiled in compileNestedClassDeclaration
           // when the enclosing function is compiled (so captured locals are available)
+          ctx.deferredClassBodies.add(stmt.name.text);
+        } else if (scopeLocals && classDeclCapturesNames(stmt, scopeLocals)) {
+          // (#2818) A control-flow-nested class *declaration* (block / if /
+          // loop / switch / try / labeled body inside a function) that captures
+          // an enclosing block-scoped local. Eager compilation here runs before
+          // the block-`let` initialises, so `promoteAccessorCapturesToGlobals`
+          // never fires and the method reads null. Defer it: it is re-compiled
+          // in-scope by `compileNestedClassDeclaration` (reached from
+          // `compileStatement` for a class declaration in ANY statement
+          // position), where the local is live and promotion succeeds. Only
+          // genuine capturers are deferred — class expressions and
+          // non-capturing classes stay eager (the −471 PR #2335 shapes).
           ctx.deferredClassBodies.add(stmt.name.text);
         } else {
           try {
@@ -4580,7 +4899,24 @@ export function compileDeclarations(
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
             if (insideFunction) {
-              ctx.deferredClassBodies.add(decl.name.text);
+              // (#3045 Bug 2) Defer the class-expression BODY compilation to the
+              // in-scope variable path so its constructor/method bodies can
+              // capture the enclosing function scope — call enclosing functions
+              // and read/write enclosing locals — exactly as a nested class
+              // DECLARATION does (deferred just above, compiled in-scope by
+              // `compileNestedClassDeclaration`). Key the deferral by the
+              // SYNTHETIC name the class was collected under (`anonClassExprNames`)
+              // — the name its ctor/method funcs live under and that
+              // `compileClassExpression` resolves — NOT the binding name (which
+              // is a dead duplicate registration, #1394). The in-scope compile
+              // runs in `compileVariableStatement`. Without this, the body was
+              // compiled eagerly at module scope (in `compileAnonymousClassBodies
+              // InNode` below) BEFORE the enclosing function's nested functions
+              // were registered and BEFORE its captured locals were promoted to
+              // globals → enclosing calls returned garbage and enclosing writes
+              // were dropped.
+              const synth = ctx.anonClassExprNames.get(decl.initializer);
+              if (synth !== undefined) ctx.deferredClassBodies.add(synth);
             } else {
               try {
                 compileClassBodies(ctx, decl.initializer, funcByName, decl.name.text);
@@ -4596,16 +4932,22 @@ export function compileDeclarations(
           }
         }
       } else if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-        compileClassesFromStatements(stmt.body.statements, true);
+        // Entering a function body: start a fresh enclosing-locals scope so
+        // nested classes can detect captures of this function's block-locals.
+        compileClassesFromStatements(stmt.body.statements, true, new Set());
       } else if (ts.isIfStatement(stmt)) {
+        // (#2818) Forward `scopeLocals` (not `insideFunction`) through control-
+        // flow bodies. This does NOT change the eager/deferred decision for
+        // non-capturing classes or class expressions — only enables the
+        // capture-defer branch above for genuine block-`let` capturers.
         if (ts.isBlock(stmt.thenStatement)) {
-          compileClassesFromStatements(stmt.thenStatement.statements);
+          compileClassesFromStatements(stmt.thenStatement.statements, false, scopeLocals);
         }
         if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
-          compileClassesFromStatements(stmt.elseStatement.statements);
+          compileClassesFromStatements(stmt.elseStatement.statements, false, scopeLocals);
         }
       } else if (ts.isBlock(stmt)) {
-        compileClassesFromStatements(stmt.statements);
+        compileClassesFromStatements(stmt.statements, false, scopeLocals);
       } else if (
         ts.isForStatement(stmt) ||
         ts.isForInStatement(stmt) ||
@@ -4615,23 +4957,23 @@ export function compileDeclarations(
       ) {
         const body = stmt.statement;
         if (ts.isBlock(body)) {
-          compileClassesFromStatements(body.statements);
+          compileClassesFromStatements(body.statements, false, scopeLocals);
         }
       } else if (ts.isSwitchStatement(stmt)) {
         for (const clause of stmt.caseBlock.clauses) {
-          compileClassesFromStatements(clause.statements);
+          compileClassesFromStatements(clause.statements, false, scopeLocals);
         }
       } else if (ts.isTryStatement(stmt)) {
-        compileClassesFromStatements(stmt.tryBlock.statements);
+        compileClassesFromStatements(stmt.tryBlock.statements, false, scopeLocals);
         if (stmt.catchClause) {
-          compileClassesFromStatements(stmt.catchClause.block.statements);
+          compileClassesFromStatements(stmt.catchClause.block.statements, false, scopeLocals);
         }
         if (stmt.finallyBlock) {
-          compileClassesFromStatements(stmt.finallyBlock.statements);
+          compileClassesFromStatements(stmt.finallyBlock.statements, false, scopeLocals);
         }
       } else if (ts.isLabeledStatement(stmt)) {
         if (ts.isBlock(stmt.statement)) {
-          compileClassesFromStatements(stmt.statement.statements);
+          compileClassesFromStatements(stmt.statement.statements, false, scopeLocals);
         }
       }
       // Compile bodies for anonymous class expressions in new expressions
@@ -4643,11 +4985,13 @@ export function compileDeclarations(
   function compileClassesFromFunctionBody(expr: ts.Expression): void {
     if (ts.isArrowFunction(expr)) {
       if (ts.isBlock(expr.body)) {
-        compileClassesFromStatements(expr.body.statements, true);
+        // Fresh enclosing-locals scope for the arrow's own body (#2818).
+        compileClassesFromStatements(expr.body.statements, true, new Set());
       }
     } else if (ts.isFunctionExpression(expr)) {
       if (expr.body) {
-        compileClassesFromStatements(expr.body.statements, true);
+        // Fresh enclosing-locals scope for the function expression body (#2818).
+        compileClassesFromStatements(expr.body.statements, true, new Set());
       }
       // Compile bodies for anonymous class expressions in new expressions
       compileAnonymousClassBodiesInNode(expr);
@@ -4661,6 +5005,13 @@ export function compileDeclarations(
     const syntheticName = ctx.anonClassExprNames.get(classExpr);
     if (syntheticName) {
       compiledAnonClasses.add(classExpr);
+      // (#3045 Bug 2) A class-expression body deferred to the in-scope variable
+      // path (see the VariableStatement branch in `compileClassesFromStatements`)
+      // must NOT be eagerly compiled here at module scope — its ctor/method
+      // bodies are compiled in `compileVariableStatement`, where the enclosing
+      // function scope is live. It is already marked handled (added to
+      // `compiledAnonClasses` above) so it is never eager-compiled; skip.
+      if (ctx.deferredClassBodies.has(syntheticName)) return;
       try {
         compileClassBodies(ctx, classExpr, funcByName, syntheticName);
       } catch (e) {
@@ -4730,6 +5081,37 @@ export function compileDeclarations(
   const hasModuleInits = ctx.moduleInitStatements.length > 0 || hasLiveFuncSeeds;
   const hasStaticInits = ctx.staticInitExprs.length > 0;
   let compiledInitFctx: FunctionContext | null = null;
+
+  // (#2965) The module-init body is compiled TWICE (the second pass, below,
+  // re-runs after top-level function bodies so call sites see the final
+  // inlinable-function registry). Statement compilation mutates ctx state that
+  // encodes PROGRAM ORDER — `definedPropertyFlags` ("this key was already
+  // defined with these attributes") and `frozenVars`/`sealedVars`/
+  // `nonExtensibleVars` ("this object is frozen from here on"). If pass 2
+  // starts from pass 1's END state, every first `Object.defineProperty` at the
+  // top level looks like a REDEFINE — the struct call-site then emits its
+  // runtime SameValue guard comparing the field's ZERO-INIT default against
+  // the descriptor value, so `defineProperty(o, "x", { value: <non-zero> })`
+  // spuriously throws "Cannot redefine property" in the shipped body — and
+  // defines that PRECEDE an `Object.freeze(o)` compile as if the object were
+  // already frozen. Snapshot the order-sensitive state before pass 1 and
+  // restore it before pass 2 so both passes compile from the same initial
+  // state. (Function bodies compiled BETWEEN the passes keep seeing pass-1 end
+  // state — a function called post-init observes the final integrity state;
+  // that behavior is unchanged. After pass 2 the maps converge back to the
+  // same end state pass 1 produced, so later consumers see no difference.)
+  const propOrderStateSnapshot = {
+    definedPropertyFlags: new Map(ctx.definedPropertyFlags),
+    frozenVars: new Set(ctx.frozenVars),
+    sealedVars: new Set(ctx.sealedVars),
+    nonExtensibleVars: new Set(ctx.nonExtensibleVars),
+  };
+  function restorePropOrderState(): void {
+    ctx.definedPropertyFlags = new Map(propOrderStateSnapshot.definedPropertyFlags);
+    ctx.frozenVars = new Set(propOrderStateSnapshot.frozenVars);
+    ctx.sealedVars = new Set(propOrderStateSnapshot.sealedVars);
+    ctx.nonExtensibleVars = new Set(propOrderStateSnapshot.nonExtensibleVars);
+  }
 
   function compileModuleInitBody(): FunctionContext {
     const initFctx: FunctionContext = {
@@ -4909,7 +5291,7 @@ export function compileDeclarations(
   if (ctx.preRegisteredBodyless?.size) {
     for (const name of Array.from(ctx.preRegisteredBodyless)) {
       const funcIdx = ctx.funcMap.get(name);
-      const func = funcIdx !== undefined ? ctx.mod.functions[funcIdx - ctx.numImportFuncs] : undefined;
+      const func = funcIdx !== undefined ? definedFuncAt(ctx, funcIdx) : undefined;
       if (func && func.body.length === 0) {
         const typeDef = ctx.mod.types[func.typeIdx];
         const returnType = typeDef?.kind === "func" ? typeDef.results[0] : undefined;
@@ -4923,6 +5305,10 @@ export function compileDeclarations(
   // inside module-level code can see the final inlinable-function registry.
   // The first compile above still serves early closure/setup discovery.
   if (hasModuleInits || hasStaticInits) {
+    // (#2965) Reset the program-order-sensitive property state to its
+    // pre-pass-1 value so this recompile does not treat pass 1's own
+    // defineProperty/freeze effects as pre-existing (see snapshot above).
+    restorePropOrderState();
     compiledInitFctx = compileModuleInitBody();
     ctx.pendingInitBody = compiledInitFctx.body;
   }

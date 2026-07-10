@@ -27,6 +27,7 @@ import {
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   emitStandaloneRegExpToStringFromExpr,
+  isStaticallyUndefinedExpr,
   tryCompileStandaloneStringMatch,
   tryCompileStandaloneStringMatchAll,
   tryCompileStandaloneStringReplace,
@@ -66,7 +67,7 @@ function valueExprTsType(ctx: CodegenContext, node: ts.Expression): ts.Type {
  * wrong. Detect the statically-undefined forms so callers can treat the arg as
  * absent. Unwraps paren/as/!-assertion wrappers.
  */
-function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+export function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
   if (arg === undefined) return false;
   let cur: ts.Expression = arg;
   while (
@@ -108,6 +109,31 @@ function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionCon
   fctx.body.push({ op: "any.convert_extern" } as Instr);
   fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
 }
+
+/**
+ * (#3069) Annex B §B.2.2 legacy HTML string-wrapper method → HTML tag +
+ * optional attribute name (ECMA-262 §B.2.2.2..§B.2.2.14). `String.prototype`
+ * `bold`→`<b>`, `italics`→`<i>`, `anchor(name)`→`<a name="…">`,
+ * `link(url)`→`<a href="…">`, `fontcolor(c)`/`fontsize(s)`→`<font color/size="…">`,
+ * etc. Methods with an `attribute` take one argument (the attribute VALUE,
+ * `"`→`&quot;` escaped); the rest take none. Consumed by
+ * `compileNativeStringMethodCall`'s standalone/WASI native arm.
+ */
+const HTML_WRAPPER_TAGS: Readonly<Record<string, { tag: string; attribute?: string }>> = {
+  anchor: { tag: "a", attribute: "name" },
+  big: { tag: "big" },
+  blink: { tag: "blink" },
+  bold: { tag: "b" },
+  fixed: { tag: "tt" },
+  fontcolor: { tag: "font", attribute: "color" },
+  fontsize: { tag: "font", attribute: "size" },
+  italics: { tag: "i" },
+  link: { tag: "a", attribute: "href" },
+  small: { tag: "small" },
+  strike: { tag: "strike" },
+  sub: { tag: "sub" },
+  sup: { tag: "sup" },
+};
 
 /**
  * #1470 — Compile a `+`-concat operand and coerce its result to a native
@@ -2238,6 +2264,23 @@ export function compileNativeStringMethodCall(
       emitNativeStringRefFromExternref(ctx, fctx);
       return nativeStringType(ctx);
     }
+    // (#2934 slice 3) A reflective `String.prototype.X.call(obj, …)` receiver
+    // can compile to a concrete OBJECT struct ref — §22.1.3.x requires
+    // ToString(this) first (dispatching the object's own toString, which may
+    // throw — S15.5.4.6_A4_T2 expects exactly that). Feeding the raw struct
+    // ref to a native string helper is invalid Wasm (`call[0] expected (ref
+    // null $AnyString), found global.get of (ref null N)`). `tryStructToString`
+    // performs that dispatch and normalises to `ref $AnyString`; string-typed
+    // refs are untouched (excluded here, and not in the struct-name map).
+    if (
+      t &&
+      (t.kind === "ref" || t.kind === "ref_null") &&
+      (t as { typeIdx: number }).typeIdx !== ctx.anyStrTypeIdx &&
+      (t as { typeIdx: number }).typeIdx !== ctx.nativeStrTypeIdx &&
+      tryStructToString(ctx, fctx, t)
+    ) {
+      return nativeStringType(ctx);
+    }
     return t;
   };
 
@@ -2446,6 +2489,52 @@ export function compileNativeStringMethodCall(
     return nativeStringType(ctx);
   }
 
+  // (#3069) Annex B §B.2.2 legacy HTML string-wrapper methods (CreateHTML,
+  // §B.2.2.2.1). Pure UTF-16 concatenation: wrap the receiver `S` in an HTML
+  // tag, e.g. `"x".bold()` → `"<b>x</b>"`, `"x".anchor(n)` → `'<a name="…">x</a>'`.
+  // In JS-host mode these dispatch through `__extern_method_call`; the
+  // standalone/WASI (nativeStrings) lane has no host, so lower them natively via
+  // `__str_concat` + literals. Methods carrying an attribute (anchor/fontcolor/
+  // fontsize/link) run the value through `__str_html_escape_quot` (CreateHTML
+  // step-4.b `"`→`&quot;` escaping). Do NOT add these to STRING_METHODS — that
+  // would register a host `string_<m>` import and regress host-mode boxing.
+  {
+    const htmlWrapper = HTML_WRAPPER_TAGS[method];
+    if (htmlWrapper) {
+      const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+      const { tag, attribute } = htmlWrapper;
+      // §B.2.2.2.1 evaluates ToString(this) (step 2) before ToString(value)
+      // (step 4.b). The receiver EXPRESSION is also evaluated before the argument
+      // in normal call order — so materialize the receiver into a local first.
+      const sLocal = compileReceiverToLocal("__html_recv");
+      // Build the prefix (everything before S).
+      if (attribute) {
+        // prefix = `<tag attribute="` + escapeQuot(ToString(value)) + `">`
+        compileNativeStringLiteral(ctx, fctx, `<${tag} ${attribute}="`);
+        if (expr.arguments.length > 0) {
+          emitArgAsNativeString(ctx, fctx, expr.arguments[0]!);
+        } else {
+          // Absent argument → value is `undefined` → ToString → "undefined".
+          compileNativeStringLiteral(ctx, fctx, "undefined");
+        }
+        const escIdx = ctx.nativeStrHelpers.get("__str_html_escape_quot")!;
+        fctx.body.push({ op: "call", funcIdx: escIdx });
+        fctx.body.push({ op: "call", funcIdx: concatIdx }); // `<tag attr="` + escapedV
+        compileNativeStringLiteral(ctx, fctx, `">`);
+        fctx.body.push({ op: "call", funcIdx: concatIdx }); // … + `">`
+      } else {
+        compileNativeStringLiteral(ctx, fctx, `<${tag}>`);
+      }
+      // prefix + S
+      fctx.body.push({ op: "local.get", index: sLocal });
+      fctx.body.push({ op: "call", funcIdx: concatIdx });
+      // … + `</tag>`
+      compileNativeStringLiteral(ctx, fctx, `</${tag}>`);
+      fctx.body.push({ op: "call", funcIdx: concatIdx });
+      return nativeStringType(ctx);
+    }
+  }
+
   // substring: native helper
   if (method === "substring") {
     emitReceiver();
@@ -2623,6 +2712,26 @@ export function compileNativeStringMethodCall(
     emitFlatten();
     const helperName = `__str_${method}`;
     const funcIdx = ctx.nativeStrHelpers.get(helperName)!;
+    fctx.body.push({ op: "call", funcIdx });
+    return nativeStringType(ctx);
+  }
+
+  // (#3068) isWellFormed / toWellFormed (ES2024 §22.1.3.8/.34) — pure UTF-16
+  // code-unit scans over the flattened receiver. `__str_isWellFormed` returns an
+  // i32 boolean; `__str_toWellFormed` returns a fresh NativeString with each lone
+  // surrogate replaced by U+FFFD. Both helpers take the flattened receiver
+  // (`ref $NativeString`), emitted in ensureNativeStringHelpers.
+  if (method === "isWellFormed") {
+    emitReceiver();
+    emitFlatten();
+    const funcIdx = ctx.nativeStrHelpers.get("__str_isWellFormed")!;
+    fctx.body.push({ op: "call", funcIdx });
+    return { kind: "i32" };
+  }
+  if (method === "toWellFormed") {
+    emitReceiver();
+    emitFlatten();
+    const funcIdx = ctx.nativeStrHelpers.get("__str_toWellFormed")!;
     fctx.body.push({ op: "call", funcIdx });
     return nativeStringType(ctx);
   }
@@ -2890,6 +2999,57 @@ export function compileNativeStringMethodCall(
     return nativeStringType(ctx);
   }
 
+  // (#2161 B2) split with an UNDEFINED separator — `s.split()`, `s.split(void
+  // 0)`, `s.split(undefined, lim)` — §22.1.3.23 steps 5-8: an undefined
+  // separator never splits, so the result is `[S]` (the whole string), or `[]`
+  // when ToUint32(limit) === 0. The native-helper arm below requires a
+  // string-like separator, so these forms fell through to the host marshal
+  // path, which has no standalone `string_split` and null-deref'd. Handled
+  // natively here: build the one-element vec directly (no engine call).
+  if (
+    method === "split" &&
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0 &&
+    (expr.arguments.length === 0 || isStaticallyUndefinedExpr(expr.arguments[0]!))
+  ) {
+    const elemType: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+    const vecTypeIdx = getOrRegisterVecType(ctx, `ref_${ctx.anyStrTypeIdx}`, elemType);
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    // Receiver → native-string local (kept nullable; a null receiver would have
+    // thrown at the property access already).
+    const recvLocal = allocLocal(fctx, `__split_recv_${fctx.locals.length}`, nativeStringType(ctx));
+    emitReceiver();
+    fctx.body.push({ op: "local.set", index: recvLocal });
+    // lim = ToUint32(limit); absent / statically-undefined → unbounded (-1).
+    const limLocal = allocLocal(fctx, `__split_lim_${fctx.locals.length}`, { kind: "i32" });
+    if (expr.arguments.length > 1 && !isStaticallyUndefinedExpr(expr.arguments[1]!)) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
+    } else {
+      fctx.body.push({ op: "i32.const", value: -1 });
+    }
+    fctx.body.push({ op: "local.set", index: limLocal });
+    // lim === 0 ? { length: 0, data: [] } : { length: 1, data: [S] }
+    fctx.body.push({ op: "local.get", index: limLocal });
+    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "ref", typeIdx: vecTypeIdx } as ValType },
+      then: [
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+      ],
+      else: [
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "local.get", index: recvLocal } as Instr,
+        { op: "array.new_fixed", typeIdx: arrTypeIdx, length: 1 } as Instr,
+        { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+      ],
+    } as Instr);
+    return { kind: "ref", typeIdx: vecTypeIdx };
+  }
+
   // split: native helper, returns native string array
   if (method === "split" && firstArgIsStringLike) {
     emitReceiver();
@@ -2911,7 +3071,10 @@ export function compileNativeStringMethodCall(
     }
     // #2125: limit arg → i32 (ToUint32). Default (absent/undefined) is no limit,
     // encoded as 0xFFFFFFFF (= -1 as i32) which the helper treats as unbounded.
-    if (expr.arguments.length > 1) {
+    // (#2161 B2) A statically-`undefined` limit takes the unbounded branch too
+    // (§22.1.3.23 step 12) — compiling it lowered to f64 NaN, and ToUint32(NaN)
+    // = 0 truncated `"a b".split(" ", undefined)` to `[]`.
+    if (expr.arguments.length > 1 && !isStaticallyUndefinedExpr(expr.arguments[1]!)) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       fctx.body.push({ op: "i32.const", value: -1 });

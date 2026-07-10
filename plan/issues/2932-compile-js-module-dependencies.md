@@ -1,18 +1,23 @@
 ---
 id: 2932
 title: "codegen: .js module dependencies are not compiled in multi-file mode (imports resolve to null)"
-status: blocked
+status: done
 priority: high
-sprint: current
+sprint: 69
 created: 2026-07-02
+completed: 2026-07-02
+assignee: ttraenkler/dev-2900f
 feasibility: medium
 task_type: bug
 area: codegen
 goal: spec-completeness
 related: [2900, 2930, 2931]
 parent: 2900
-blocked_reason: "DECIDED (lead, 2026-07-02): harness-scoped (option b) — wrapTest hoists module-goal imports to top level + passes allowJs:true (or .ts-key equiv) for fixture deps, scoped to the test262 runner; NOT compiler auto-allowJs (that is a separate product decision affecting every consumer). SEQUENCING: open the PR only AFTER (1) #2930+#2931 merged AND (2) the -439 re-baseline chain (#2424 + revert) has settled with the guard back at 200 — no two large baseline deltas overlapping. Its sharded CI run IS the dedicated full-test262 validation; read the regression report BOTH directions (~172 fixture tests change; expect net-positive), bucket any pass->fail flips before merging, and message the lead with the delta once CI reports."
 ---
+
+> Unblocked 2026-07-02: lead green-light after the re-baseline chain settled
+> (revert #2450 merged, guard back at 200, honest baseline promoted 01:28Z).
+> Decision record (harness-scoped option b) preserved in "## Fix" below.
 
 # #2932 — compile `.js` module dependencies in multi-file mode
 
@@ -89,8 +94,82 @@ module goal's imports at top level) for `flags: [module]` tests. This is a
 
 ## Acceptance
 
-- `.js` module dependencies compile and link in multi-file mode.
-- `tests/issue-1015.test.ts` positive case passes.
-- Module-goal test imports are emitted at module top level (not inside `test()`).
-- Full test262 diff reviewed; net conformance change is understood and accepted.
-- #2900 (needs #2930 + #2931 + this) passes end-to-end via the runner.
+- `.js` module dependencies compile and link in multi-file mode. ✓ (allowJs in both runner FIXTURE branches)
+- `tests/issue-1015.test.ts` positive case passes. ✓ (allowJs mirrored in the test; was `expected 2 to be 1` on main)
+- Module-goal test imports are emitted at module top level (not inside `test()`). ✓ (`wrapTest` hoist, `flags: [module]` only)
+- Full test262 diff reviewed; net conformance change is understood and accepted. — via the PR's sharded CI regression report (see Test Results).
+- #2900 (needs #2930 + #2931 + this) passes end-to-end via the runner. ✓ locally (prize test returns 1 through the replicated runner path); CI confirms.
+
+## Test Results (dev-2900f, 2026-07-02)
+
+Implementation: (1) `wrapTest` (tests/test262-runner.ts) hoists top-level
+`import` / `export … from` statements to module top level for `flags: [module]`
+tests (same-line-count placeholder keeps error line citations stable; negative
+tests bypass `wrapTest` and are untouched; TLA branch untouched — its body is
+already emitted at top level); (2) `allowJs: true` in the FIXTURE compileMulti
+call of `tests/test262-shared.ts` (sharded CI + local shards) and
+`tests/test262-vitest.test.ts`; (3) `tests/issue-1015.test.ts` mirrors the
+runner and passes.
+
+Local probes (gc lane, in-process replication of the runner fixture branch):
+
+- **Prize test** `language/module-code/eval-gtbndng-indirect-update-dflt.js`:
+  baseline `fail` → **PASS** (returns 1) — the last ≤ES3 blocker for #2900.
+- Changed-path surface (static `_FIXTURE` importers): 183 tests in baseline —
+  38 pass / 54 fail / 91 skip. (The other ~600 `_FIXTURE`-grepping tests use
+  dynamic `import()` and do NOT take the fixture branch — unchanged.)
+- Baseline-fail set (54): 6 flip fail→**pass** (incl. prize test,
+  eval-rqstd-order, instn-\* siblings), 48 remain fail (honest failures now —
+  real fixture semantics instead of the null-import artifact).
+- Baseline-pass set (38): 31 still pass; 7 candidate pass→fail flips from the
+  in-process replication, resolved by a scoped REAL-runner run
+  (`TEST262_PATH_FILTER` over the candidates, local shards):
+  - 3 artifacts of the replication (no flip): `top-level-await/module-import-rejection{,-body,-tick}.js` — real runner records **pass**.
+  - 2 were real but FIXED in-branch: `import-attributes/import-attribute-key-string-{double,single}.js` — negative resolution tests; `allowJs` suppresses the
+    syntax-error bail in `compileMultiSource`, so the invalid module "compiled"
+    and its raw top-level asserts executed at instantiation. Fix: `allowJs:
+!isNegative` in both runners (negative tests assert compile-time failure;
+    allowJs must never mask it).
+  - 2 REAL honest regressions remain (baseline pass was a null-import artifact;
+    the now-compiled fixture exposes genuine compiler gaps):
+    - `language/expressions/import.meta/distinct-for-each-module.js` — requires
+      per-module `import.meta` object identity.
+    - `language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js` — requires async-module sibling evaluation ordering.
+- Scoped unit tests: `issue-1015`, `test262-runner-static-gen-yield`,
+  `test262-path-filter`, `test262-scope-classification` — 20/20 pass.
+
+## merge_group run #1 (head 228d906, run 28568484919) — PARKED, diagnosed (dev-2900f)
+
+The queue's full-matrix run attributed **8 improvements / 8 regressions**
+(merge-base baseline 72fad54, ratio gate 100% ≥ 10% → auto-park `hold`).
+Per-file attribution (from the run's merged-report artifact):
+
+- **8 improvements** — the 6 predicted fixture gains (prize test incl.) + 2
+  accidental `module-code/namespace/internals` wins
+  (`get-own-property-str-found-uninit.js`, `set-prototype-of.js`).
+- **8 regressions**, three buckets:
+  1. `import-attributes/import-attribute-key-string-{double,single}.js` —
+     negative-resolution tests broken by allowJs diagnostic suppression.
+     **FIXED** in-branch: `allowJs: !isNegative` in both runners.
+  2. 4× `module-code/namespace{,/internals}` tests failing `ns is not defined`
+     (`Symbol.iterator`, `get-own-property-str-not-found`, `is-extensible`,
+     `set-prototype-of-null`) — these tests **SELF-import**
+     (`import * as ns from './<own-filename>.js'`); the hoist moved the
+     self-import to top level where it cannot resolve under the runner's
+     virtual `./test.ts` key. **FIXED** in-branch: hoist restricted to
+     `_FIXTURE` specifiers only (the exact fixture-linking purpose of #2932).
+     This also reverts the 2 accidental namespace improvements above — they
+     were the same brittle self-import-hoist behavior in the lucky direction.
+  3. 2 honest, irreducible regressions (baseline pass was the null-import
+     artifact; the now-compiled fixture exposes real compiler gaps), each with
+     a tracking issue filed in this PR:
+     - `language/expressions/import.meta/distinct-for-each-module.js` —
+       per-module `import.meta` object identity → **#2970**.
+     - `language/module-code/top-level-await/async-module-does-not-block-sibling-modules.js` — async-module sibling evaluation ordering → **#2971**.
+
+**Post-fix arithmetic: +6 / −2 (net +4), ratio 2/6 = 33% ≥ 10%** — the
+required `check for test262 regressions` gate will re-park on re-enqueue.
+The remaining 2 regressions cannot be removed honestly at the harness level
+(skips also count as pass→other regressions). Lead decision required on the
+landing mechanism (accept-and-refresh-baseline vs gate excusal vs
+gap-fix-first).

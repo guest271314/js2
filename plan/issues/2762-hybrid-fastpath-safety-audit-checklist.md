@@ -2,9 +2,9 @@
 id: 2762
 title: "Hybrid migration-cost audit: type-directed fast-path safety-predicate checklist (living doc)"
 status: done
-sprint: current
+sprint: 69
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-03
 completed: 2026-06-28
 priority: high
 horizon: s

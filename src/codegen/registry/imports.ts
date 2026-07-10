@@ -67,6 +67,21 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
       // legitimately drop-and-degrade unsupported host APIs under WASI (e.g.
       // examples/native-messaging/nm_js2wasm.ts: setTimeout/fetch/…).
       ctx.errors.push({ message, line: 0, column: 0, severity: "degrade" });
+      // (#3009) Record the dropped host import on the MODULE so finalize-time
+      // handle resolution can name it. When a producer bakes this dropped
+      // import's (now `undefined`) function index into a helper body coupled to
+      // a stable handle — e.g. console.log's native-string extern bridge
+      // `__str_to_extern` calling the dropped `__str_from_mem`/`__str_to_mem`/
+      // `__str_extern_len` — `absoluteFuncIndex` would otherwise crash with an
+      // opaque "stable handle undefined (ordinal NaN)". With the coupling
+      // recorded, that resolution point surfaces a clean, actionable leak
+      // diagnostic naming these imports instead of an internal-error stack.
+      if (desc.kind === "func") {
+        const recorded = (ctx.mod.strictDroppedHostImports ??= []);
+        if (!recorded.some((d) => d.module === module && d.name === name)) {
+          recorded.push({ module, name });
+        }
+      }
       // Skip registration. The caller may record a stale funcMap index if it
       // looks the import up by name; if that index is ever emitted into the
       // binary the emit-time leak scan / link step catches it.
@@ -213,6 +228,16 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   if (ctx.holeGlobalIdx !== undefined && ctx.holeGlobalIdx >= threshold) {
     ctx.holeGlobalIdx += delta;
   }
+  // (#3032) Same hazard for the cached `__gen_eager_mode` flag global: a
+  // string-constant import inserted between two generator-expression
+  // emissions left the SECOND emission's `global.get` pointing one slot low
+  // (an externref global → "if[0] expected type i32, found global.get of
+  // type externref" — the fn-name-gen compile_error cluster in PR #2625's
+  // first merge_group cycle). Keep the cached index in step exactly as
+  // `newTargetGlobalIdx`/`holeGlobalIdx` above.
+  if (ctx.genEagerFlagGlobalIdx !== undefined && ctx.genEagerFlagGlobalIdx >= threshold) {
+    ctx.genEagerFlagGlobalIdx += delta;
+  }
 
   const visitedInstrs = new WeakSet<object>();
   const visitedArrays = new WeakSet<Instr[]>();
@@ -319,6 +344,19 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   }
   shiftMap(ctx.moduleGlobals);
   shiftMap(ctx.capturedGlobals);
+  // (#3039) `capturedBoxGlobals` values are objects, not bare indices — shift
+  // each entry's `globalIdx` in place like `protoOverrides` below. The
+  // pre-existing transitive-fn box global shared this latent staleness; a
+  // late string-constant import between registration and the box's
+  // `global.get`/`struct.set` would otherwise leave the recorded index
+  // pointing at the wrong (shifted) slot.
+  if (ctx.capturedBoxGlobals) {
+    for (const entry of ctx.capturedBoxGlobals.values()) {
+      if (entry.globalIdx >= threshold) {
+        entry.globalIdx += delta;
+      }
+    }
+  }
   shiftMap(ctx.staticProps);
   shiftMap(ctx.protoGlobals);
   shiftMap(ctx.classObjectGlobals); // (#1395) — same shift discipline as protoGlobals

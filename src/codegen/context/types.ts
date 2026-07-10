@@ -7,6 +7,7 @@
  * to reference context/state shapes.
  */
 import { ts } from "../../ts-api.js";
+import type { TypeOracle } from "../../checker/oracle.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
@@ -82,6 +83,23 @@ export interface CodegenOptions {
    *  `__unbox_string` JS-host string imports. Used so the compiled module is
    *  runnable under pure-Wasm engines (wasmtime, wasmer) without a JS host. */
   standalone?: boolean;
+  /**
+   * (#2141 S1) Honest generic `any` boxing — the Stage-B regime flag. When ON,
+   * `boxToAny`'s externref arm routes through `__any_box_extern` (runtime
+   * classification → true `JsTag`) instead of the historical tag-5
+   * "box-the-externref" lie (#1888). Default OFF: byte-identical to the legacy
+   * regime (the honest helper is not even registered). Flips to default-on for
+   * standalone/wasi in slice S4 after the consumer migration (S2/S3) lands —
+   * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
+   */
+  honestAnyBoxing?: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
+   *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
+  tag5ValueEqClassifier?: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern in standalone, byte-identical). */
+  undefinedSingleton?: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT run it via the wasm `start` section, so the host
    *  invokes it AFTER `setExports` (symmetric with the standalone `_start`
@@ -96,6 +114,15 @@ export interface CodegenOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * (#2973) Opt out of the `JS2WASM_IR_FIRST` compile-once inversion for this
+   * compile, regardless of the ambient env flag. Set by semantics-critical
+   * in-process sub-compiles (the `eval` / `new Function` host shims) so an
+   * IR-first post-claim hard error there is not swallowed by the shim's
+   * fallback `catch` and silently turned into `undefined`. Leaves the ordinary
+   * IR overlay (`experimentalIR`) untouched. Default: false.
+   */
+  disableIrFirst?: boolean;
   /**
    * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
    * set, surface each as a warning diagnostic. Used by
@@ -266,6 +293,60 @@ export interface NativeGeneratorInfo {
    * `innerName` resolves to the inner's `NativeGeneratorInfo` at emit time.
    */
   delegationSlots?: { fieldIdx: number; innerName: string }[];
+  /**
+   * (#2173 slice-2a) `yield*` delegation over a NUMERIC array / vec (e.g.
+   * `yield* [1,2,3]`), in source `vecSiteIndex` order. Each site owns TWO
+   * state-struct fields — a `ref null $Vec` holding the materialized iterable
+   * and an `i32` cursor — driven like the array for-of fast path: read
+   * `vec.data[cursor]` (already f64, no box), re-yield, `cursor++`, until
+   * `cursor >= vec.length`. Zero host imports (the #1320 `__iterator` bridge is
+   * NOT used — it would leak `__box_number`/`__unbox_number`). `vecTypeIdx` is
+   * null only in the defensive unresolved case (the emit arm then completes the
+   * generator rather than emit invalid wasm).
+   */
+  vecDelegationSlots?: {
+    vecFieldIdx: number;
+    cursorFieldIdx: number;
+    vecTypeIdx: number | null;
+    arrTypeIdx: number;
+    elemType: ValType;
+  }[];
+  /**
+   * (#2173 slice-2b) `yield*` delegation over a GENERIC iterable — a
+   * `.values()`/`.keys()`/`.entries()` iterator or a custom
+   * `{ [Symbol.iterator]() { return { next() {…} } } }` object, in source
+   * `iterableSiteIndex` order. Each site owns ONE `externref` state-struct field
+   * holding the `$__IterRec` returned by the standalone-native `__iterator`
+   * runtime (`iterator-native.ts`, #2038), driven per resume via
+   * `__iterator_next` (also native → zero host imports). Appended AFTER the
+   * native-gen and vec delegation slots so neither the f64 `spillFieldOffset`
+   * nor the earlier slot field indices are affected (byte-inert for generators
+   * without an iterable-delegation site).
+   */
+  iterableDelegationSlots?: { fieldIdx: number }[];
+  /**
+   * (#3050) Field index of the i32 pending-completion kind (0 none / 1 return /
+   * 2 throw) consumed by a state-lowered finally's exit router. Present only
+   * when the generator has a yielding finally (appended LAST in the state
+   * struct so all other field indices are unaffected). The completion payloads
+   * ride the existing `abrupt` (return value) / `error` (thrown value) fields.
+   */
+  pendingFieldIdx?: number;
+  /**
+   * (#3050) Capturing NESTED generator: number of leading synthetic capture
+   * params preceding the user params in `paramNames`/`paramTypes` (the state
+   * struct stores them as ordinary `param_*` fields). The factory's wasm
+   * signature carries them first — call sites already prepend them via
+   * `ctx.nestedFuncCaptures`, identical to a lifted capturing function.
+   */
+  leadingCaptureCount?: number;
+  /**
+   * (#3050) The subset of leading captures that ride as ref CELLS (mutable /
+   * already-boxed captures). The resume function registers each in its
+   * `boxedCaptures` so identifier reads/writes inside resume states deref the
+   * shared cell — writes propagate to the enclosing frame.
+   */
+  leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
@@ -317,6 +398,48 @@ export interface FunctionContext {
   generatorReturnDepth?: number;
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /**
+   * (#3121) Names whose local slot was PROMOTED to a module global by
+   * `promoteAccessorCapturesToGlobals` (object-literal method / accessor /
+   * class-body capture). The promotion deletes the name from `localMap` so
+   * every subsequent reference in this function resolves through the promoted
+   * global (`ctx.capturedGlobals` / `ctx.capturedBoxGlobals`) — the SAME store
+   * the method body reads and writes. The orphaned slot still exists in
+   * `fctx.locals`, so the #1177 block-shadow rescan in `compileArrowAsClosure`
+   * must NOT resurrect it: capturing the stale slot forks the binding into a
+   * second store (a fresh ref cell over a dead local) that the method's
+   * global-routed writes never reach. Recorded per-fctx (not by bare name on
+   * ctx) so an unrelated same-named local in another function is unaffected.
+   */
+  promotedCaptureNames?: Set<string>;
+  /**
+   * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
+   * (closures.ts materializes each capture from `__self` field `i+1` into a
+   * named local in the body prologue). The async drive lane compiles the body
+   * in a FRESH resume FunctionContext whose frame captured only the closure's
+   * PARAMS — so the resume prologue must re-materialize these capture locals
+   * from the frame-captured `__self` before any body statement compiles.
+   * `castToTypeIdx` is set when `__self`'s param type is the wrapper base
+   * struct (needs a `ref.cast` to the concrete capture struct first).
+   */
+  selfCaptureLayout?: {
+    selfParamName: string;
+    structTypeIdx: number;
+    castToTypeIdx: number | null;
+    entries: { name: string; fieldIdx: number; localType: ValType }[];
+  };
+  /**
+   * (#2976) Per-activation memo locals for capture-carrying nested function
+   * declarations referenced as VALUES: funcName → local holding the
+   * `(ref null $__fn_cap_<name>_struct)` closure instance. Every reference
+   * site emits a `ref.is_null`-guarded lazy build into this local instead of
+   * constructing a fresh struct per reference, so `f === f` holds and
+   * sidecar/static writes land on the same instance every reference sees.
+   * The guard (rather than a prologue hoist) preserves the existing
+   * value-capture semantics: immutable captures are copied at the FIRST
+   * dynamic reference, exactly where the old per-site build copied them.
+   */
+  nestedFnClosureMemos?: Map<string, number>;
   /** Whether this function is a class constructor (for new.target support) */
   isConstructor?: boolean;
   /** Whether this constructor belongs to a class declared with `extends`. Spec §10.2.1.3
@@ -723,6 +846,14 @@ export interface FunctionContext {
 export interface CodegenContext {
   mod: WasmModule;
   checker: ts.TypeChecker;
+  /**
+   * (#1930) THE type-query boundary. Prefer `ctx.oracle` over raw
+   * `ctx.checker` in ALL new code — the oracle-ratchet CI gate fails on
+   * growth of direct checker usage under src/codegen/. Registry-free,
+   * side-effect-free, memoized; returns TypeFact (never ts.Type). The
+   * codegen-side fact→ValType adapter performs registration separately.
+   */
+  oracle: TypeOracle;
   /** Map from function name to its absolute index (imports + locals) */
   funcMap: Map<string, number>;
   /** Map from struct/interface name to type index */
@@ -731,6 +862,14 @@ export interface CodegenContext {
   typeIdxToStructName: Map<number, string>;
   /** Map from struct name to field info */
   structFields: Map<string, FieldDef[]>;
+  /** (#2853 park fix) Struct type indices that MUST NOT be nominally branded by
+   *  the shape-brand finalize pass, because a trapping guarded downcast between
+   *  two same-layout sibling `__anon_*`/`__fnctor_*` shapes was emitted for them
+   *  (e.g. a `var` reassigned across different-key object literals). Branding
+   *  them would separate previously-canonically-equal types → the baked
+   *  `ref.test`/`ref.as_non_null` narrowing would trap. Excluding them reverts
+   *  those shapes to exact pre-brand baseline behaviour (test262-safe). */
+  noBrandShapeTypes: Set<number>;
   /** Number of imported functions */
   numImportFuncs: number;
   /** wasm:js-string import indices — separate from funcMap to prevent
@@ -767,6 +906,15 @@ export interface CodegenContext {
    * function/message.
    */
   irPostClaimErrors: { kind: string; func: string; message: string }[];
+  /**
+   * #3000 — names of functions/class-members whose slots were actually patched
+   * with an IR-lowered body by `compileIrPathFunctions` (its `report.compiled`).
+   * A selector CLAIM alone does not imply emission: a claimed class member whose
+   * class has no `IrClassShape` is skipped in Phase B and stays byte-inert on
+   * legacy. This list is the durable non-vacuity signal — a member is GENUINELY
+   * IR-emitted iff it appears here. Surfaced on `CompileResult.irCompiledFuncs`.
+   */
+  irCompiledFuncs?: readonly string[];
   /** Last AST node with a valid source position — used as fallback for error reporting
    * when the immediate node lacks source file context (synthetic/detached nodes). */
   lastKnownNode: ts.Node | null;
@@ -826,14 +974,41 @@ export interface CodegenContext {
   exportSignatures: Map<string, import("../../ir/types.js").ExportSignature>;
   /** Map from className → parent className (for inheritance chain walk) */
   externClassParent: Map<string, string>;
-  /** Map from global name (e.g. "document") → import info */
-  declaredGlobals: Map<string, { type: ValType; funcIdx: number }>;
+  /** Map from global name (e.g. "document") → import info. `className` is
+   *  the extern class of the global's declared type ("Document") — recorded
+   *  at registration for the IR host-extern path (#2856), which types the
+   *  `call global_<name>` handle as `IrType.extern { className }`. */
+  declaredGlobals: Map<string, { type: ValType; funcIdx: number; className?: string }>;
   /** Counter for generated callback functions (__cb_0, __cb_1, ...) */
   callbackCounter: number;
   /** Map from captured variable name → global index in mod.globals */
   capturedGlobals: Map<string, number>;
   /** Captured globals whose type was widened from ref to ref_null for null init */
   capturedGlobalsWidened: Set<string>;
+  /**
+   * (#2029 family A) Mutable-capture ref-cell boxes promoted to module
+   * globals so an accessor body can materialize a nested function's closure.
+   * When an object-literal getter/setter references a nested function `f`
+   * whose captures include a MUTABLE outer local `v`, the closure-construction
+   * code inside the accessor needs the SAME ref-cell box the enclosing
+   * function writes through — an outer-fctx local slot (`cap.outerLocalIdx`)
+   * is unreachable from the accessor's own function (baking it emit-crashed
+   * with "local index out of range", or silently read the wrong local when
+   * the stale index happened to be in range). `promoteAccessorCapturesToGlobals`
+   * boxes `v` eagerly in the enclosing fctx and aliases the box in a module
+   * global of type `(ref null $cell)`; closure-materialization sites source
+   * the capture from here when the current fctx cannot resolve it.
+   *
+   * (#3039) `valType` (the ref cell's inner value type) is present ONLY for
+   * DIRECT boxed captures — a variable the accessor/method body reads or
+   * writes itself (not merely through a nested closure). When set, the
+   * read/write sites (identifiers.ts / assignment.ts / unary-updates.ts) must
+   * DEREF the box (`global.get; struct.get/struct.set field 0`) instead of
+   * treating the global as holding the value. Transitive-fn box entries leave
+   * `valType` undefined; they are consumed only by closure materialization
+   * (calls.ts), never by the scalar read/write sites.
+   */
+  capturedBoxGlobals?: Map<string, { globalIdx: number; refCellTypeIdx: number; valType?: ValType }>;
   /** Set of class names (local classes compiled to Wasm GC structs) */
   classSet: Set<string>;
   /**
@@ -859,6 +1034,22 @@ export interface CodegenContext {
    * order. Clear — the common case — keeps every array read byte-identical.
    */
   usesArrayHoles: boolean;
+  /**
+   * (#2001 S2 / merge-group park on PR #2832) Set by the same
+   * `scanForArrayHoles` pre-scan when the module WRITES an index property onto
+   * `Array.prototype` (`Object.defineProperty(Array.prototype, "0", …)`,
+   * `Array.prototype[0] = …`, `Reflect.defineProperty(Array.prototype, …)`).
+   * §23.1.3.* HOF visit-skips are keyed on `HasProperty(O, k)` — which is TRUE
+   * for a hole whose index is inherited from `Array.prototype` — but the flat
+   * WasmGC vec cannot model prototype-index inheritance. When this flag is set
+   * the module-wide HOF hole visit-skip (`shouldHoleSkip`) is disabled and
+   * holes fall back to the S1 visit-with-`undefined` behavior, which matches
+   * the observable result for the dominant test262 shape (inherited accessor
+   * without a getter ⇒ [[Get]] yields `undefined`). Clear — the common case —
+   * keeps the spec-correct skip. See the regressed trio
+   * `built-ins/Array/prototype/{every,filter,some}/*-c-i-22.js`.
+   */
+  arrayProtoIndexDirty: boolean;
   /**
    * (#2083) Set true the first time `getOrRegisterVecType` is asked for a vec
    * type from a genuine usage site (an array literal, array method, for-of over
@@ -920,6 +1111,20 @@ export interface CodegenContext {
   usesDynRead: boolean;
   /** (#2580 M0) Idempotence latch for `ensureDynReadHelpers` (once per module). */
   dynReadHelpersEmitted: boolean;
+  /**
+   * (#3053 U0) Unified dynamic-reader carrier substrate. Set true by a call site
+   * (U1's IR member-read wiring) that needs the carrier-uniform
+   * `__dyn_member_get(recv,key) -> carrier` primitive. Gates `ensureDynMemberGet`:
+   * when clear (the common case AND all of U0, which adds NO call sites), the
+   * helper is never emitted, so every module is byte-identical — the latch, not
+   * dead-elim, guarantees zero bytes for an uncalled defined function. The
+   * `JS2WASM_FORCE_DYN_MEMBER_GET=1` self-test escape sets this (and additionally
+   * emits exported unit-test drivers) so U0's bodies are validated as VALID Wasm
+   * (gc + standalone) before U1 wires the real call sites.
+   */
+  usesDynMemberGet: boolean;
+  /** (#3053 U0) Idempotence latch for `ensureDynMemberGet` (once per module). */
+  dynMemberGetHelpersEmitted: boolean;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**
@@ -1050,6 +1255,17 @@ export interface CodegenContext {
    */
   proxyDispatchReserved?: boolean;
   /**
+   * (#3125) Set when the native-Promise thenable-assimilation substrate
+   * reserved its `__promise_has_callable_then` predicate placeholder
+   * (`ensurePromiseThenableSubstrate`, async-scheduler.ts). The predicate needs
+   * the FULL closed-struct + closure shape sets, which are only complete at
+   * FINALIZE, so the body is filled by `fillPromiseThenableHelpers`
+   * (closed-method-dispatch.ts) — same reserve-then-fill pattern as
+   * `applyClosureReserved` (#1719). Only set under standalone/wasi, so the
+   * GC/host path stays byte-identical.
+   */
+  promiseThenableReserved?: boolean;
+  /**
    * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
    * was reserved at an any-receiver call site (standalone/wasi). The placeholder
    * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
@@ -1099,6 +1315,22 @@ export interface CodegenContext {
    * `fillMemberGetDispatch`; populated in BOTH gc/host and standalone.
    */
   memberGetDispatchNames?: Set<string>;
+  /**
+   * (#2963) Class-METHOD arms for the `__get_member_<name>` dispatcher:
+   * propName → the receiver-typed arms that answer the canonical method-value
+   * singleton (the SAME per-`<Owner>_<method>` cache global the typed
+   * `C.prototype.m` read mints via `emitCachedMethodClosureAccess`), so a
+   * dynamic `any`-receiver read `c.m` is `===` the typed read. Recorded at
+   * reserve time (`ensureMethodArmsForProp` — the singleton machinery must be
+   * minted at compile time, never at finalize); consumed by
+   * `fillMemberGetDispatch`, which re-resolves the trampoline/cache-global
+   * indices BY NAME (shift-safe). Arms are children-first so an override's
+   * arm shadows the superclass arm under WasmGC subtyping.
+   */
+  memberGetMethodArms?: Map<
+    string,
+    { receiverStructTypeIdx: number; methodFullName: string; closureStructTypeIdx: number; depth: number }[]
+  >;
   /**
    * (#2831) Per-target-vec-type host-externref → wasm-vec materializer helpers.
    * Maps a vec struct typeIdx (`$__vec_*`) → the reserved helper function NAME
@@ -1296,6 +1528,35 @@ export interface CodegenContext {
   /** Function declarations lowered to Wasm-native generator state machines (#680). */
   nativeGenerators: Map<string, NativeGeneratorInfo>;
   /**
+   * (#2865) Async-generator PRODUCERS driven on the async-frame machine, keyed
+   * by sanitized stem (the `__async_gen_next_<stem>` suffix). Populated by
+   * `emitAsyncGenerator`; consumed by (a) the `.next()` runtime dispatch chain
+   * in calls.ts and (b) the stem-collision guard in `isAsyncGenDriveCandidate`
+   * (two same-named gens in different scopes would otherwise share one
+   * `__async_gen_next_<stem>` helper typed for the FIRST gen's frame — a
+   * guaranteed `ref.cast` trap for the second).
+   */
+  asyncGenProducers?: Map<string, { stateTypeIdx: number; nextHelperName: string; decl: ts.Node }>;
+  /**
+   * (#2865) True once ANY async generator was emitted on the LEGACY buffer path
+   * (`__create_async_generator`). The `.next()` runtime dispatch chain uses this
+   * to decide its miss arm: with legacy receivers possible it must fall back to
+   * the host `__gen_next`; in an all-driven module it emits a plain null instead
+   * — referencing `__gen_next` there would force an otherwise-dead host import
+   * and break the zero-import (host-free) contract.
+   */
+  asyncGenLegacyBufferEmitted?: boolean;
+  /**
+   * (#2980 conservative Promise-lane fallback) True when the module SOURCE has
+   * ANY async generator, set in the pre-body `collectDeclarations` walk. On the
+   * widened-standalone measure lane, `widenAsyncGenFallback` (async-scheduler.ts)
+   * keeps BOTH carrier gates OFF for such a module — a native `$Promise` fed into
+   * the gen's legacy `__gen_*` buffer / host `.then` over `__gen_next` mishandles
+   * it (the 07-09 async-generator −4). Pre-body so a `Promise.reject` INSIDE the
+   * gen sees it. Read only under the measure — wasi + gc/host stay byte-identical.
+   */
+  moduleHasAsyncGen?: boolean;
+  /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
    * but its body still belongs to the normal nested-function hoist pass.
@@ -1318,6 +1579,16 @@ export interface CodegenContext {
   deferredDefaultGlobalExport?: string;
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
+  /**
+   * (#2976) Module-level dedupe of the value-closure artifacts for a
+   * capture-carrying nested function declaration: funcName → its ONE custom
+   * closure struct type and trampoline. Previously every reference site
+   * minted a fresh struct type + trampoline function (and a fresh instance —
+   * the identity bug). The trampoline is stored by NAME and re-resolved
+   * through `ctx.funcMap` at each emission so late-import funcIdx shifts
+   * cannot desync a cached raw index.
+   */
+  nestedFnClosureArtifacts?: Map<string, { structTypeIdx: number; trampolineName: string }>;
   /** Nested function capture info. */
   nestedFuncCaptures: Map<
     string,
@@ -1470,6 +1741,16 @@ export interface CodegenContext {
    * the #329 native-string finalize-shift hazard. `undefined` until reserved.
    */
   undefinedGlobalIdx?: number;
+  /**
+   * (#3032 / #2141-S2) Global index of the `mut i32` `__gen_eager_mode` flag
+   * for LAZY generator-expression creation. 0 (default) = a zero-param
+   * `function*(){}` expression returns a lazy thunk generator
+   * (`__create_generator(<self closure>, null)`); the host sets the flag via
+   * the exported `__gen_set_eager` around the deferred first-`next()` body
+   * run. Reserved lazily by `ensureGenEagerFlag` (closures.ts); `undefined`
+   * until the first lazy-eligible generator expression is compiled.
+   */
+  genEagerFlagGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
@@ -1531,6 +1812,70 @@ export interface CodegenContext {
   subviewTypeIdx: number;
   /** (#2357) Per-element-kind `$__subview` struct type indices, keyed by elemKind. */
   subviewTypeMap: Map<string, number>;
+  /**
+   * (#3054 B1) Per-TypedArray-name `$__ta_view_<name>` struct type indices, keyed
+   * by the TS view name (`"Uint8Array"`, `"Int32Array"`, …). A `$__ta_view` is a
+   * byte-backed TypedArray view that holds a ref to the source ArrayBuffer's
+   * `$__vec_i32_byte` struct (SHARED backing — sibling views and DataViews over
+   * the same buffer observe each other's writes) plus an element `byteOffset`.
+   * Element access byte-decodes little-endian via the dataview-native engine,
+   * discriminated at COMPILE time by the receiver's resolved ValType.typeIdx
+   * (mirroring `subviewTypeMap`), so plain-array / native-TA hot paths are
+   * byte-inert. Map miss = not registered. (Spec: plan/issues/3054 Phase A/B1.)
+   */
+  taViewTypeMap: Map<string, number>;
+  /**
+   * (#3054 C) Type index for the standalone `$__resizable_ab` struct — a WasmGC
+   * SUBTYPE of `$__vec_i32_byte` carrying an extra `maxByteLength: i32` field:
+   * `{length: i32 (mut), data: (ref $__arr_i32_byte) (mut), maxByteLength: i32}`.
+   * Produced by `new ArrayBuffer(n, {maxByteLength})`. The subtype identity IS the
+   * resizable bit (`ref.test $__resizable_ab` ⇒ resizable; a plain
+   * `$__vec_i32_byte` ⇒ fixed) — no separate flag needed. Because it is a subtype,
+   * the 23 `i32_byte` read sites `ref.cast` to the parent vec UNCHANGED (is-a);
+   * only the resizable-aware sites (ctor, `.resize()`, `.maxByteLength`/`.resizable`
+   * getters) know the subtype. Registered late+once (mirrors `getOrRegisterTaViewType`),
+   * so the subtype always follows its supertype in type-index order → no reorder
+   * hazard. -1 = not yet registered. (Spec: plan/issues/3054 Phase A A.2.)
+   */
+  resizableAbTypeIdx: number;
+  /**
+   * (#3054 D) Type index for the standalone `$__ta_ctor` struct — a first-class
+   * runtime value for a TypedArray CONSTRUCTOR used in value position
+   * (`const c = Uint8Array`, `ctors = [Uint8Array, …]`, a `new ctor(rab)` callee).
+   * `{kind: i32}` where `kind` indexes `TA_CTOR_KINDS` (the 9 element kinds). Before
+   * this a bare TA name in value position degraded to `ref.null.extern`
+   * (indistinguishable — `Uint8Array === Int8Array` was `true`), so a dynamic
+   * `new ctor(rab)` dropped the ctor and produced null. The `kind` field drives the
+   * runtime-switch dynamic construct + `ctor.BYTES_PER_ELEMENT`. Registered
+   * late+once; -1 = not yet registered. Byte-inert: only emitted when a TA ctor is
+   * used as a value. (Spec: plan/issues/3054 Phase A/D.)
+   */
+  taCtorTypeIdx: number;
+  /** (#3054 D) Per-kind memoized singleton module-global holding the boxed `$__ta_ctor` value (identity via `ref.eq`). Key = kind index. */
+  taCtorSingletonGlobals: Map<number, number>;
+  /**
+   * (#3054 D) Type index for `$__ta_dyn_view` — a shared-backing TypedArray view
+   * whose element kind is only known at RUNTIME (built by a dynamic `new
+   * ctor(rab)`). Unlike B1's per-kind `$__ta_view_<K>` (which are structurally
+   * identical → WasmGC canonicalizes them to ONE runtime type, so `ref.test` can't
+   * recover the kind), this struct carries a `kind: i32` field:
+   * `{length: i32 (mut), buf: (ref null $__vec_i32_byte), byteOffset: i32, kind: i32}`,
+   * subtype of `$__vec_base`. All dynamic-view access (`.byteLength`, element
+   * get/set) dispatches on the stored `kind` (not `ref.test`). Registered late+once;
+   * -1 = not yet registered. Byte-inert: only emitted for a dynamic `new ctor(…)`.
+   */
+  taDynViewTypeIdx: number;
+  /**
+   * (#3057) Set by a module pre-scan when the source contains a dynamic
+   * `new <ctorVar>(bufferArg)` (a `$__ta_dyn_view`-producing construct). Enables the
+   * runtime-kind element byte-codec arm on the generic dynamic index path (`ta[i]` /
+   * `ta[i]=v` for an `any` receiver) even in a helper function compiled BEFORE the
+   * construct — the `$__ta_dyn_view` type is registered lazily, so a plain
+   * `taDynViewTypeIdx >= 0` check would miss cross-function reads (ToNumbers/Collect).
+   * Byte-inert: false for any module without the construct, so those never emit the
+   * codec arm and never register the type.
+   */
+  moduleUsesDynTaView: boolean;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */
@@ -1801,6 +2146,21 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2141 S1) Honest generic `any` boxing regime flag — see the
+   *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
+   *  box-the-externref ABI, byte-identical). */
+  honestAnyBoxing: boolean;
+  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — three-way
+   *  true-class dispatch in the both-tags-5 eq arm (numeric `f64.eq` /
+   *  string content / object `ref.eq`). Default false (legacy `0` for
+   *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
+   *  for runner-level A/B. */
+  tag5ValueEqClassifier: boolean;
+  /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
+   *  `CompileOptions.undefinedSingleton` doc. Default false (legacy:
+   *  undefined ≡ null ≡ ref.null.extern, byte-identical). Only meaningful
+   *  under standalone/nativeStrings; host mode ignores it. */
+  undefinedSingleton: boolean;
   /** (#2796) Diff-test-harness fidelity: in JS-host mode, export the top-level
    *  `__module_init` and do NOT wire the wasm `start` section to it, so the host
    *  runs it after `setExports` (symmetric with the standalone `_start` model).
@@ -1855,6 +2215,18 @@ export interface CodegenContext {
   /** (#2896) Cache: `(builtin, member)` key → the meta struct-type index above.
    *  Keeps `ensureBuiltinFnMetaType` idempotent per closure identity. */
   builtinFnMetaTypeByKey?: Map<string, number>;
+  /** (#2963) Reified-builtin-value IDENTITY substrate. A builtin static method
+   *  read AS A VALUE (`const r = Promise.resolve`, `[1,2].map(Number.isInteger)`)
+   *  must be a MODULE-LEVEL SINGLETON: every read of the same (builtin, member)
+   *  yields the SAME ref so `Promise.resolve === Promise.resolve` holds and a
+   *  `delete fn.name` mutates the one shared object (ES: builtin methods are a
+   *  single function object). Keyed by the meta/wrapper struct-type index (the
+   *  per-(builtin, member) unique type from `ensureBuiltinFnMetaType`), the value
+   *  is the index of a `(ref null <structType>)` mutable global that
+   *  `pushBuiltinFnSingletonValueInstrs` lazily materializes once (a null-guarded
+   *  `struct.new` in a shift-covered function body — NOT a const-init, whose
+   *  embedded `ref.func` the late-import funcidx shifter does not walk). */
+  builtinFnSingletonGlobalByTypeIdx?: Map<number, number>;
   /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
    *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
    *  `(self, this, start, end)` closure. Unlike a plain user function (which
@@ -2106,13 +2478,6 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
-  /**
-   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
-   * Computed read-only by `classifyEvalTier`; downstream optimization gating
-   * (#1262–#1265) consumes it. Optional because not every context constructs
-   * from a full source file.
-   */
-  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };

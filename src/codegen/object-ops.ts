@@ -13,6 +13,7 @@ import {
   collectWrittenIdentifiers,
   compileArrowAsCallback,
   compileArrowAsClosure,
+  promoteAccessorCapturesToGlobals,
 } from "./closures.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -24,6 +25,7 @@ import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWa
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import {
@@ -955,24 +957,6 @@ export const PROP_FLAG_DEFINED = 1 << 3; // 8
 export const PROP_FLAG_ACCESSOR = 1 << 4; // 16
 const PROP_FLAGS_DEFAULT_DATA = PROP_FLAG_WRITABLE | PROP_FLAG_ENUMERABLE | PROP_FLAG_CONFIGURABLE | PROP_FLAG_DEFINED;
 
-/**
- * Compute a compile-time flags integer from parsed descriptor booleans.
- * Unspecified flags default to false per the ES spec for Object.defineProperty.
- */
-export function computeDescriptorFlags(
-  writable: boolean | undefined,
-  enumerable: boolean | undefined,
-  configurable: boolean | undefined,
-  isAccessor: boolean,
-): number {
-  let flags = PROP_FLAG_DEFINED; // always mark as defined
-  if (writable) flags |= PROP_FLAG_WRITABLE;
-  if (enumerable) flags |= PROP_FLAG_ENUMERABLE;
-  if (configurable) flags |= PROP_FLAG_CONFIGURABLE;
-  if (isAccessor) flags |= PROP_FLAG_ACCESSOR;
-  return flags;
-}
-
 function applyDescriptorFlags(
   currentFlags: number | undefined,
   writable: boolean | undefined,
@@ -1000,212 +984,70 @@ function applyDescriptorFlags(
 }
 
 /**
- * Emit code to check existing property flags and throw TypeError if the
- * Object.defineProperty operation violates the spec. Also stores the new flags.
+ * (#3043) Compile-time §10.1.6.3 ValidateAndApplyPropertyDescriptor transition
+ * check for a statically-tracked `varName:propName` property. Emits a Wasm
+ * `throw TypeError` when redefining a NON-configurable property in a
+ * spec-forbidden way. Shared so the data fast path, the accessor fast path, and
+ * the attribute-only runtime path all enforce the SAME matrix against
+ * `definedPropertyFlags` — previously only the inline data path validated, so an
+ * accessor define (which records flags but routed a later attribute-only /
+ * get-set redefine through a path that skipped validation) silently accepted
+ * illegal transitions (15.2.3.6-4-30 / -252 / -312, 15.2.3.7-6-a-241).
  *
- * Uses __extern_get/set with "__pf_<propName>" keys to store flags as boxed numbers.
- * Uses "__ne" key to check non-extensibility.
+ * Mirrors the inline data-path check (writable-narrow, enum-toggle,
+ * config-false→true, data↔accessor flip) and adds the accessor-redefine case:
+ * `newProvidesFreshAccessorFn` is true when the redefining descriptor supplies a
+ * get/set as a *fresh function expression* (getNode/setNode) — always a distinct
+ * object, so redefining a non-configurable accessor's get/set with it can never
+ * be SameValue and MUST throw (spec step 10.a/b). An identifier-ref get/set is
+ * left to conservative allow (it *may* be SameValue with the existing accessor).
  *
- * @param objLocal - local index holding the externref object
- * @param propName - compile-time property name
- * @param newFlags - the flags integer for the new descriptor
- * @param hasValue - whether the new descriptor specifies a value
+ * The data/accessor KIND is read from `newFlags` (which `applyDescriptorFlags`
+ * already resolved — an attribute-only redefine like `{enumerable:true}`
+ * PRESERVES the existing kind), NOT from a raw "did this descriptor name a
+ * get/set" flag: the latter false-flags a bare-attribute redefine of an
+ * accessor as a data↔accessor flip (the accSameAttrs false-throw).
+ *
+ * Returns true when a throw was emitted (caller may skip further emission).
  */
-export function emitDefinePropertyFlagCheck(
+function emitStaticDescriptorTransitionThrow(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  objLocal: number,
-  propName: string,
+  existingFlags: number | undefined,
   newFlags: number,
-  hasValue: boolean,
-): void {
-  const flagKey = `__pf_${propName}`;
-  const neKey = "__ne";
-
-  // Ensure __extern_get, __extern_set, __unbox_number, __box_number are available
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  const setIdx = ensureLateImport(
-    ctx,
-    "__extern_set",
-    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-    [],
-  );
-  const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
-  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
-
-  if (!getIdx || !setIdx || !unboxIdx || !boxIdx) return;
-
-  // Register the flag key and non-extensible key as string constants.
-  // (#2515 S0) Materialize them via `stringConstantExternrefInstrs` rather than
-  // a raw `global.get <stringGlobalMap.get(key)!>`: in standalone /
-  // `nativeStrings` mode `addStringConstantGlobal` stores the `-1` sentinel
-  // (no host `string_constants` global), so a raw `global.get` would bake
-  // `global.get -1` and fail binary emit via the #2043 index validator. The
-  // helper takes the inline `$NativeString`-struct path in that mode.
-  addStringConstantGlobal(ctx, flagKey);
-  addStringConstantGlobal(ctx, neKey);
-  const flagKeyInstrs = stringConstantExternrefInstrs(ctx, flagKey);
-  const neKeyInstrs = stringConstantExternrefInstrs(ctx, neKey);
-
-  // Helper to build a TypeError throw instruction sequence
-  const typeErrorMessage = "TypeError: Cannot redefine property";
-  addStringConstantGlobal(ctx, typeErrorMessage);
-  const tagIdx = ensureExnTag(ctx);
-  const throwInstrs: Instr[] = [
-    ...stringConstantExternrefInstrs(ctx, typeErrorMessage),
-    { op: "throw", tagIdx } as Instr,
-  ];
-
-  const neErrMessage = "TypeError: Cannot define property, object is not extensible";
-  addStringConstantGlobal(ctx, neErrMessage);
-  const neThrowInstrs: Instr[] = [
-    ...stringConstantExternrefInstrs(ctx, neErrMessage),
-    { op: "throw", tagIdx } as Instr,
-  ];
-
-  // Allocate locals for existing flags
-  const existingFlagsLocal = allocLocal(fctx, `__pf_existing_${fctx.locals.length}`, { kind: "f64" });
-  const existingI32Local = allocLocal(fctx, `__pf_ei32_${fctx.locals.length}`, { kind: "i32" });
-
-  // Read existing flags: __extern_get(obj, "__pf_<propName>") -> externref, unbox to f64
-  fctx.body.push({ op: "local.get", index: objLocal });
-  for (const instr of flagKeyInstrs) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: getIdx });
-  fctx.body.push({ op: "call", funcIdx: unboxIdx }); // externref -> f64 (NaN if undefined)
-  fctx.body.push({ op: "local.set", index: existingFlagsLocal });
-
-  // Convert existing flags to i32 (NaN -> 0 via i32.trunc_sat_f64_s)
-  fctx.body.push({ op: "local.get", index: existingFlagsLocal });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-  fctx.body.push({ op: "local.set", index: existingI32Local });
-
-  // Build non-configurable violation checks (only emitted when property is defined AND non-configurable)
-  const isAccessor = !!(newFlags & PROP_FLAG_ACCESSOR);
-  const nonConfigChecks: Instr[] = [];
-
-  // Check: new descriptor sets configurable to true -> always TypeError
+  _isAccessor: boolean,
+  newProvidesFreshAccessorFn: boolean,
+): boolean {
+  if (existingFlags === undefined) return false;
+  if (existingFlags & PROP_FLAG_CONFIGURABLE) return false; // configurable ⇒ any redefine ok
+  // configurable false → true is forbidden.
   if (newFlags & PROP_FLAG_CONFIGURABLE) {
-    nonConfigChecks.push(...throwInstrs);
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
   }
-
-  // Check: new descriptor changes enumerable (runtime check against existing)
-  const newEnumerable = newFlags & PROP_FLAG_ENUMERABLE;
-  nonConfigChecks.push(
-    { op: "local.get", index: existingI32Local } as Instr,
-    { op: "i32.const", value: PROP_FLAG_ENUMERABLE } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "i32.const", value: newEnumerable } as Instr,
-    { op: "i32.ne" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
-  );
-
-  // Check for data property restrictions
-  if (!isAccessor) {
-    const nonWritableChecks: Instr[] = [];
-    if (newFlags & PROP_FLAG_WRITABLE || hasValue) {
-      nonWritableChecks.push(...throwInstrs);
-    }
-    if (nonWritableChecks.length > 0) {
-      // if (existing is data property)
-      //   if (existing is non-writable)
-      //     throw TypeError
-      const isDataAndNonWritable: Instr[] = [
-        { op: "local.get", index: existingI32Local } as Instr,
-        { op: "i32.const", value: PROP_FLAG_WRITABLE } as Instr,
-        { op: "i32.and" } as Instr,
-        { op: "i32.eqz" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: nonWritableChecks },
-      ];
-      nonConfigChecks.push(
-        { op: "local.get", index: existingI32Local } as Instr,
-        { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
-        { op: "i32.and" } as Instr,
-        { op: "i32.eqz" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: isDataAndNonWritable },
-      );
-    }
+  // enumerable toggle is forbidden.
+  if ((existingFlags & PROP_FLAG_ENUMERABLE) !== (newFlags & PROP_FLAG_ENUMERABLE)) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
   }
-
-  // Check: cannot change from data to accessor or vice versa on non-configurable
-  if (isAccessor) {
-    nonConfigChecks.push(
-      { op: "local.get", index: existingI32Local } as Instr,
-      { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
-      { op: "i32.and" } as Instr,
-      { op: "i32.eqz" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
-    );
-  } else if (hasValue || newFlags & PROP_FLAG_WRITABLE) {
-    nonConfigChecks.push(
-      { op: "local.get", index: existingI32Local } as Instr,
-      { op: "i32.const", value: PROP_FLAG_ACCESSOR } as Instr,
-      { op: "i32.and" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: [...throwInstrs] },
-    );
+  const existingIsAccessor = !!(existingFlags & PROP_FLAG_ACCESSOR);
+  const newIsAccessor = !!(newFlags & PROP_FLAG_ACCESSOR);
+  // data ↔ accessor flip is forbidden on a non-configurable property.
+  if (existingIsAccessor !== newIsAccessor) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
   }
-
-  // Build the outer block structure:
-  // block $defprop_check
-  //   br_if (not defined) → end of block
-  //   br_if (configurable) → end of block
-  //   <nonConfigChecks>
-  // end
-  const blockBody: Instr[] = [
-    // Check if property is defined
-    { op: "local.get", index: existingI32Local } as Instr,
-    { op: "i32.const", value: PROP_FLAG_DEFINED } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "i32.eqz" } as Instr,
-    { op: "br_if", depth: 0 } as Instr,
-    // Check if configurable
-    { op: "local.get", index: existingI32Local } as Instr,
-    { op: "i32.const", value: PROP_FLAG_CONFIGURABLE } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "br_if", depth: 0 } as Instr,
-    // Property is non-configurable — apply restrictions
-    ...nonConfigChecks,
-  ];
-
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: blockBody,
-  });
-
-  // Check: If property was NOT defined yet, check non-extensibility
-  const neCheckBody: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    ...neKeyInstrs,
-    { op: "call", funcIdx: getIdx } as Instr,
-    { op: "call", funcIdx: unboxIdx } as Instr,
-    { op: "i32.trunc_sat_f64_s" },
-    { op: "if", blockType: { kind: "empty" }, then: [...neThrowInstrs] },
-  ];
-
-  fctx.body.push(
-    { op: "local.get", index: existingI32Local },
-    { op: "i32.const", value: PROP_FLAG_DEFINED },
-    { op: "i32.and" },
-    { op: "i32.eqz" },
-  );
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: neCheckBody,
-  });
-
-  // Store the new flags: __extern_set(obj, "__pf_<propName>", box(newFlags))
-  fctx.body.push({ op: "local.get", index: objLocal });
-  for (const instr of flagKeyInstrs) fctx.body.push(instr);
-  fctx.body.push({ op: "f64.const", value: newFlags });
-  fctx.body.push({ op: "call", funcIdx: boxIdx });
-  fctx.body.push({ op: "call", funcIdx: setIdx });
+  // Data property: writable false → true is forbidden.
+  if (!existingIsAccessor && !newIsAccessor && !(existingFlags & PROP_FLAG_WRITABLE) && newFlags & PROP_FLAG_WRITABLE) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  // Accessor → accessor: a fresh (distinct) get/set can never be SameValue.
+  if (existingIsAccessor && newIsAccessor && newProvidesFreshAccessorFn) {
+    emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+    return true;
+  }
+  return false;
 }
 
 // ── Mapped-arguments value redefine (#2667) ──────────────────────────────
@@ -1342,6 +1184,34 @@ export function compileObjectDefineProperty(
     emitThrowTypeError(ctx, fctx, "TypeError: Property description must be an object");
     fctx.body.push({ op: "unreachable" });
     return { kind: "externref" };
+  }
+
+  // (#3116) A LITERAL `get: null` / `set: null` descriptor field is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). The inline lowerings used to classify null as
+  // "no accessor" and silently degrade to a data define, and the runtime route
+  // can't be trusted with it — a null struct field is indistinguishable from
+  // an absent/undefined one at the wasm boundary (#2106). Emit the throw
+  // eagerly after evaluating the arguments for side effects (spec order).
+  if (ts.isObjectLiteralExpression(descArg)) {
+    let nullAccessor: "Getter" | "Setter" | undefined;
+    for (const dp of descArg.properties) {
+      if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+      if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+      if (dp.name.text === "get") nullAccessor = "Getter";
+      else if (dp.name.text === "set" && nullAccessor === undefined) nullAccessor = "Setter";
+    }
+    if (nullAccessor !== undefined) {
+      const t1 = compileExpression(ctx, fctx, objArg);
+      if (t1) fctx.body.push({ op: "drop" });
+      const t2 = compileExpression(ctx, fctx, propArg);
+      if (t2) fctx.body.push({ op: "drop" });
+      const t3 = compileExpression(ctx, fctx, descArg);
+      if (t3) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, `${nullAccessor} must be a function: null`);
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "externref" };
+    }
   }
 
   // (#1355 Slice F) Standalone proxy-receiver routing. A standalone `Proxy`
@@ -1779,7 +1649,23 @@ export function compileObjectDefineProperty(
   // and emit an additional side-effect `__defineProperty_value` call further
   // below so attribute flags are propagated to the runtime sidecar
   // (`_wasmPropDescs`) for later `Object.getOwnPropertyDescriptor` reads.
-  const useStruct = !_anyFlagDynamic && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
+  // (#3116) Veto the compile-time struct fast path when a PRIOR define for the
+  // same var:prop went through a runtime route (`sidecarDefinedPropertyKeys` —
+  // populated by emitDefinePropertyDescRuntime / emitExternDefineProperty*):
+  // the authoritative descriptor state (attributes AND the SameValue-relevant
+  // current value) then lives in the runtime sidecar, which the compile-time
+  // `definedPropertyFlags` tracker cannot see. A static struct.set here would
+  // skip §10.1.6.3 validation against that state (e.g. redefining `{value:-0}`
+  // over a non-writable `+0` defined via a descriptor variable must throw —
+  // 15.2.3.7-6-a-46). Routing to the externref path keeps validation in the
+  // runtime, and `_structFieldWriteback` still mirrors the value into the
+  // typed struct field for static reads.
+  const priorRuntimeDefine =
+    propName !== undefined &&
+    ts.isIdentifier(objArg) &&
+    ctx.sidecarDefinedPropertyKeys.has(`${objArg.text}:${propName}`);
+  const useStruct =
+    !_anyFlagDynamic && !priorRuntimeDefine && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr;
   const anyFlagSpecified =
     _anyFlagDynamic || descWritable !== undefined || descEnumerable !== undefined || descConfigurable !== undefined;
 
@@ -1860,6 +1746,37 @@ export function compileObjectDefineProperty(
       ctx.nonConfigurableAccessorKeys.delete(`${objArg.text}:${propName}`);
     }
 
+    // (#3043) Record this accessor's descriptor flags in `definedPropertyFlags`
+    // (the compile-time descriptor source-of-truth) and validate the transition
+    // against any prior define for the same key. This fast path previously
+    // recorded ONLY `nonConfigurableAccessorKeys`, so a subsequent attribute-only
+    // redefine (routed through `emitExternDefinePropertyNoValue`) or a get/set
+    // redefine saw no existing descriptor and silently accepted illegal
+    // transitions on a non-configurable accessor (configurable false→true,
+    // enumerable toggle, data↔accessor flip, get/set change) — 15.2.3.6-4-30 /
+    // -252 / -312, 15.2.3.7-6-a-241. Only on an identifier receiver (the key
+    // shape the flag maps use).
+    // (#3043) HOST-lane only: recording an accessor key in `definedPropertyFlags`
+    // routes standalone `hasOwnProperty` through the wasm-native `__hasOwnProperty`
+    // helper (object-ops.ts ~4543), which does NOT report a defineProperty-added
+    // struct-shape property as own → regresses the standalone accessor
+    // hasOwnProperty case (#2726). The #3043 transition-validation cluster is the
+    // JS-host default lane, so gate the record + check to host mode; standalone
+    // keeps origin/main behaviour.
+    if (!ctx.standalone && ts.isIdentifier(objArg)) {
+      const dpKey = `${objArg.text}:${propName}`;
+      const existingFlags = ctx.definedPropertyFlags.get(dpKey);
+      const newFlags = applyDescriptorFlags(existingFlags, descWritable, descEnumerable, descConfigurable, true, false);
+      // On an illegal transition, RETURN immediately — emitting the compiled
+      // getter/setter below would register a second accessor that clobbers the
+      // still-live original (the define throws, so nothing must change).
+      if (emitStaticDescriptorTransitionThrow(ctx, fctx, existingFlags, newFlags, true, !!(getNode || setNode))) {
+        fctx.body.push({ op: "unreachable" });
+        return objType;
+      }
+      ctx.definedPropertyFlags.set(dpKey, newFlags);
+    }
+
     // (#1888 S5c / C2) STORE arm — land dark behind `S5C_STRUCT_ACCESSOR_CLOSURE`.
     // The #1629-S3 bare `${struct}_get/set_${prop}` fns below have NO capture
     // environment, so a getter/setter that closes over outer scope reads those
@@ -1897,6 +1814,39 @@ export function compileObjectDefineProperty(
         }
       }
     }
+
+    // (#2029 family A) Promote outer-fctx captures referenced by the
+    // descriptor's get/set bodies BEFORE compiling the bare accessor fns
+    // below. The object-literal accessor path (literals.ts) has always done
+    // this; the defineProperty descriptor path never did — so a descriptor
+    // getter like `get() { loadNextCount++; return next; }` compiled its body
+    // in a fresh fctx with no way to reach the enclosing function's locals,
+    // and materializing the nested fn `next`'s closure baked the enclosing
+    // function's local slot into the accessor body (the
+    // for-of/iterator-next-reference.js "local index out of range" emit
+    // crash — BOTH modes). `promoteAccessorCapturesToGlobals` also promotes
+    // the transitive captures of referenced nested functions (value global
+    // for immutable, shared ref-cell box global for mutable). Placed AFTER
+    // the S5c closure-lift arm so the standalone closure path keeps its
+    // existing capture sourcing.
+    const promoteDescriptorAccessorBody = (
+      node:
+        | ts.MethodDeclaration
+        | ts.GetAccessorDeclaration
+        | ts.SetAccessorDeclaration
+        | ts.FunctionExpression
+        | ts.ArrowFunction
+        | undefined,
+    ): void => {
+      if (!node) return;
+      if (ts.isArrowFunction(node) && !ts.isBlock(node.body)) {
+        promoteAccessorCapturesToGlobals(ctx, fctx, undefined, [node.body]);
+      } else if (node.body) {
+        promoteAccessorCapturesToGlobals(ctx, fctx, node.body as ts.Block);
+      }
+    };
+    promoteDescriptorAccessorBody(getNode);
+    promoteDescriptorAccessorBody(setNode);
 
     // Helper to get body statements from a getter/setter node
     const getBodyStatements = (
@@ -1940,7 +1890,7 @@ export function compileObjectDefineProperty(
         }
 
         const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-        const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const getterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(getterName, getterFuncIdx);
 
         const getterFunc: WasmFunction = {
@@ -1950,7 +1900,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(getterFunc);
+        pushDefinedFunc(ctx, getterFuncIdx, getterFunc);
 
         // Compile getter body
         const getterFctx: FunctionContext = {
@@ -2030,7 +1980,7 @@ export function compileObjectDefineProperty(
         }
 
         const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-        const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const setterFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(setterName, setterFuncIdx);
 
         const setterFunc: WasmFunction = {
@@ -2040,7 +1990,7 @@ export function compileObjectDefineProperty(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(setterFunc);
+        pushDefinedFunc(ctx, setterFuncIdx, setterFunc);
 
         // Compile setter body
         const setterFctxParams: { name: string; type: ValType }[] = [
@@ -2939,14 +2889,36 @@ function emitExternDefinePropertyNoValue(
       const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
       if (varName) {
         const key = `${varName}:${propName}`;
+        const existingFlags = ctx.definedPropertyFlags.get(key);
         const newFlags = applyDescriptorFlags(
-          ctx.definedPropertyFlags.get(key),
+          existingFlags,
           descWritable,
           descEnumerable,
           descConfigurable,
           isAccessor,
           descWritable !== undefined,
         );
+        // (#3043) §10.1.6.3 transition check. Covers the attribute-only redefine
+        // of a non-configurable accessor (`{configurable:true}` / enumerable
+        // toggle) whose FIRST define recorded flags via the accessor fast path,
+        // AND the `const o:any` accessor get/set redefine that lands here. The
+        // throw is emitted after argument side-effects (spec order). On a throw
+        // we RETURN immediately (unreachable) — continuing would emit a second,
+        // dead accessor registration that clobbers the still-live original
+        // accessor (15.2.3.6-4-540-*: the post-catch read must see the ORIGINAL
+        // get/set intact).
+        // Host-lane only (see the accessor fast-path note): the transition
+        // matrix is validated against `definedPropertyFlags`, which in standalone
+        // feeds the wasm-native hasOwnProperty routing; keep standalone on its
+        // origin/main path. The existing `definedPropertyFlags.set` below is
+        // unchanged in both modes.
+        if (
+          !ctx.standalone &&
+          emitStaticDescriptorTransitionThrow(ctx, fctx, existingFlags, newFlags, isAccessor, !!(getNode || setNode))
+        ) {
+          fctx.body.push({ op: "unreachable" });
+          return { kind: "externref" };
+        }
         ctx.definedPropertyFlags.set(key, newFlags);
       }
     }
@@ -3049,6 +3021,41 @@ function emitExternDefinePropertyNoValue(
       flushLateImportShifts(ctx, fctx);
       if (accFuncIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: accFuncIdx });
+      }
+
+      // (#3125) STANDALONE closed-struct receiver: the runtime
+      // `__defineProperty_accessor` above stores into the open-`$Object`
+      // `$PropEntry` sidecar — but a CLOSED-struct receiver (an inline object
+      // literal, `Object.defineProperty({}, 'then', {get})` — the test262
+      // poisoned-thenable pattern) fails its `ref.test $Object` and the
+      // accessor is silently DROPPED. Mirror the getter/setter closures into
+      // the #1888 S5c per-(struct,prop) module globals so runtime consumers
+      // that dispatch on the struct shape (the #3125
+      // `__promise_has_callable_then` predicate, the S5c read/write sites)
+      // still see the accessor. `_structName` resolves HERE (post-obj-compile)
+      // because compiling the literal registered its anon type; when it does
+      // not resolve, behaviour is unchanged (pre-#3125: accessor dropped).
+      // The TS-type resolution (`_structName`) misses an anonymous inline
+      // literal; the COMPILED wasm type of the receiver identifies its closed
+      // struct directly.
+      const mirrorStructName =
+        _structName ??
+        (objType.kind === "ref" || objType.kind === "ref_null"
+          ? ctx.typeIdxToStructName.get(objType.typeIdx)
+          : undefined);
+      if (S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone && mirrorStructName && _propName !== undefined) {
+        if (getNode) {
+          const getGlobalIdx = ensureStructAccessorGlobal(ctx, mirrorStructName, _propName, "get");
+          if (buildAccessorClosure(ctx, fctx, getNode as unknown as ts.FunctionExpression)) {
+            fctx.body.push({ op: "global.set", index: getGlobalIdx });
+          }
+        }
+        if (setNode) {
+          const setGlobalIdx = ensureStructAccessorGlobal(ctx, mirrorStructName, _propName, "set");
+          if (buildAccessorClosure(ctx, fctx, setNode as unknown as ts.FunctionExpression)) {
+            fctx.body.push({ op: "global.set", index: setGlobalIdx });
+          }
+        }
       }
       return { kind: "externref" };
     }
@@ -3180,6 +3187,39 @@ export function compileObjectDefineProperties(
     return { kind: "externref" };
   }
 
+  // (#3116) A LITERAL `get: null` / `set: null` in any inner descriptor is a
+  // compile-time-provable ToPropertyDescriptor TypeError (§10.1: present, not
+  // undefined, not callable). Routing it to the runtime is unreliable — a null
+  // struct field is indistinguishable from an absent/undefined one at the wasm
+  // boundary (#2106), so the runtime sometimes sees `{get: undefined}` (a
+  // VALID accessor) instead. Emit the throw eagerly, after evaluating the
+  // receiver + descriptors expressions for side effects (spec order: argument
+  // evaluation precedes the per-key ToPropertyDescriptor throw).
+  const nullAccessorField = ((): "Getter" | "Setter" | undefined => {
+    if (!ts.isObjectLiteralExpression(descsArg)) return undefined;
+    for (const prop of descsArg.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const inner = unwrapTransparentExpression(prop.initializer);
+      if (!ts.isObjectLiteralExpression(inner)) continue;
+      for (const dp of inner.properties) {
+        if (!ts.isPropertyAssignment(dp) || !ts.isIdentifier(dp.name)) continue;
+        if (unwrapTransparentExpression(dp.initializer).kind !== ts.SyntaxKind.NullKeyword) continue;
+        if (dp.name.text === "get") return "Getter";
+        if (dp.name.text === "set") return "Setter";
+      }
+    }
+    return undefined;
+  })();
+  if (nullAccessorField !== undefined) {
+    const objT = compileExpression(ctx, fctx, objArg);
+    if (objT) fctx.body.push({ op: "drop" });
+    const descsT = compileExpression(ctx, fctx, descsArg);
+    if (descsT) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `${nullAccessorField} must be a function: null`);
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
+
   // Static path: descriptors is an object literal — expand to individual defineProperty calls.
   // Pre-check: if any inner descriptor is demonstrably malformed (primitive literal, or an
   // object literal mixing data and accessor fields, or non-function get/set), abort the
@@ -3221,11 +3261,18 @@ export function compileObjectDefineProperties(
         hasAccessor = true;
         const init = dp.initializer;
         const isFn = ts.isFunctionExpression(init) || ts.isArrowFunction(init);
+        // (#3116) `get: null` / `set: null` are spec TypeErrors (ToPropertyDescriptor
+        // §10.1: present, not undefined, not callable → throw) and `get/set:
+        // undefined` is a VALID accessor descriptor (not a data property). The
+        // static expansion used to classify all three as "no accessor" and
+        // degrade the define to a plain value write, silently losing the throw /
+        // the accessor-ness (15.2.3.7-5-b-21x). Route them to the dynamic
+        // runtime, whose ToPropertyDescriptor handles both correctly.
+        if (init.kind === ts.SyntaxKind.NullKeyword) return false;
+        if (ts.isIdentifier(init) && init.text === "undefined") return false;
         const isIdLike =
           ts.isIdentifier(init) || ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init);
-        const isUndefOrNull =
-          init.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(init) && init.text === "undefined");
-        if (!isFn && !isIdLike && !isUndefOrNull) return false;
+        if (!isFn && !isIdLike) return false;
       }
     }
     if (hasData && hasAccessor) return false;
@@ -3350,8 +3397,17 @@ export function compileObjectDefineProperties(
         const structTypeIdx = structName ? ctx.structMap.get(structName) : undefined;
         const fields = structName ? ctx.structFields.get(structName) : undefined;
         const fieldIdx = fields && propName ? fields.findIndex((f) => f.name === propName) : -1;
+        // (#3116) Same veto as the singular `useStruct` path: a prior define
+        // for this var:prop went through a runtime route, so the authoritative
+        // descriptor state (attributes + SameValue-relevant current value)
+        // lives in the runtime sidecar — the compile-time struct.set would skip
+        // validation against it (15.2.3.7-6-a-46). Route to the externref path.
+        const priorRuntimeDefine =
+          propName !== undefined &&
+          ts.isIdentifier(objArg) &&
+          ctx.sidecarDefinedPropertyKeys.has(`${objArg.text}:${propName}`);
 
-        if (structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr) {
+        if (!priorRuntimeDefine && structTypeIdx !== undefined && fields && fieldIdx >= 0 && valueExpr) {
           // Struct path: emit struct.set directly
           const fieldType = fields[fieldIdx]!.type;
 
@@ -4229,6 +4285,18 @@ export function compilePropertyIntrospection(
   const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
   const receiverWasm = resolveWasmType(ctx, receiverType);
 
+  // (#3021 RC1) The test262 harness rewrites
+  // `Object.prototype.hasOwnProperty.call(X, k)` to `(X).hasOwnProperty(k)` —
+  // a *parenthesized* receiver. The AST-based receiver classification below
+  // (prototype-vs-instance, and the #1334/#2726 needsRuntime var-name gate)
+  // must see through those parens, or `(C.prototype).hasOwnProperty(...)` is
+  // misclassified as an instance receiver and constant-folds the INVERTED
+  // answer ('field'→true, 'method'→false). The type checker (`receiverType`)
+  // already resolves through parens; this local gives the AST checks the same
+  // paren-transparency.
+  let recvExpr: ts.Expression = propAccess.expression;
+  while (ts.isParenthesizedExpression(recvExpr)) recvExpr = recvExpr.expression;
+
   // For externref/any receivers (e.g. Object.create result), delegate to runtime
   // since we can't statically know their properties
   if (receiverWasm.kind === "externref") {
@@ -4387,8 +4455,7 @@ export function compilePropertyIntrospection(
   //   - Prototype:   methods + accessors are own; instance fields are NOT
   //   - Instance:    instance fields are own; methods are NOT (they're on prototype)
   //   - Constructor: static members are own; instance members are NOT
-  const isPrototypeReceiver =
-    ts.isPropertyAccessExpression(propAccess.expression) && propAccess.expression.name.text === "prototype";
+  const isPrototypeReceiver = ts.isPropertyAccessExpression(recvExpr) && recvExpr.name.text === "prototype";
 
   // A constructor type (typeof C) has construct signatures; an instance does not.
   const isConstructorReceiver = !isPrototypeReceiver && receiverType.getConstructSignatures().length > 0;
@@ -4514,7 +4581,7 @@ export function compilePropertyIntrospection(
     // queried key is in the (defineProperty-widened) struct shape, ignoring a
     // subsequent configurable `delete` that tombstoned it — the root of the
     // `11.4.1-4.a-1/-2`, `11.4.1-4-a-4-s` failures.
-    const recvVarName = ts.isIdentifier(propAccess.expression) ? propAccess.expression.text : undefined;
+    const recvVarName = ts.isIdentifier(recvExpr) ? recvExpr.text : undefined;
     let needsRuntime = false;
     if (recvVarName) {
       const prefix = `${recvVarName}:`;

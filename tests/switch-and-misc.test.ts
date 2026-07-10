@@ -7,7 +7,7 @@ import {
   compile,
   readFileSync,
   resolve,
-} from "./helpers.js";
+} from "./equivalence/helpers.js";
 
 describe("Switch fallthrough", () => {
   it("fallthrough: case 1 falls through to case 2", async () => {

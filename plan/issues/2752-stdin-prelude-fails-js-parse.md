@@ -7,7 +7,7 @@ feasibility: hard
 status: done
 completed: 2026-06-27
 assignee: ttraenkler/sdev-2752-prelude-js
-sprint: current
+sprint: 69
 ---
 
 ## Problem

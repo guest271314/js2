@@ -11,7 +11,7 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: xl
-related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879]
+related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879, 3027]
 ---
 
 # Umbrella: close the standalone-vs-js-host test262 gap
@@ -78,10 +78,23 @@ single fix flips directly.
 
 ### Not-yet-issued follow-ons (tracked here)
 
-- **$Object dynamic-object-property reader** (`__extern_get`/`__extern_rest_object`
-  leak) — ~669 tests. The known substrate root
-  (`project_standalone_any_string_value_read_substrate`). Heavily overlaps
-  clusters 2/3; revisit after #2862/#2863 land to measure the true residual.
+- **$Object dynamic-object-property reader** — **[#3027](3027-standalone-dynamic-object-property-reader-residual.md)
+  is `done` (2026-07-05)**, superseding this note. Re-measurement found the
+  originally-hypothesized root cause
+  (`project_standalone_any_string_value_read_substrate`, the dynamic `any`
+  reader dropping native-string VALUES) was already fixed by #2861/#2863 — it
+  is NOT why the residual read 1,552. That residual is a **heterogeneous
+  long tail**, not one root cause: TypedArray(Constructors) internals/
+  prototype (~350), `Temporal` (~230+, a whole deferred feature area, not a
+  codegen bug), `Object.getOwnPropertyDescriptor` (124, itself 3 unrelated
+  shapes — built-in/global descriptors, `ToPropertyKey` coercion, array-
+  element descriptors), the already-tracked eval/Function-shim gaps
+  (#3005/#3017), and many smaller one-off gaps. #3027 fixed the one
+  genuinely-addressable codegen bug found during the trace (computed/
+  bracket string property+method access never dispatching to the native
+  string engine in `--nativeStrings` mode — ~5-9 tests) and recommends the
+  PO/tech-lead triage the remaining clusters into separately-sized follow-on
+  issues (TypedArray internals, ~350, is the next-largest single slice).
 - **spread / `Array.from(iter, n)`** (`__array_from_iter_n`) — ~321 tests.
   Depends on the iterator-protocol carrier (#2864).
 - **Namespace static reads** (`Math.PI`, `JSON.stringify`, `Reflect.get`,

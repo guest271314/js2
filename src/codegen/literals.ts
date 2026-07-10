@@ -28,6 +28,7 @@ import {
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -79,6 +80,7 @@ import {
   buildAccessorClosure,
   ensureStructAccessorGlobal,
 } from "./struct-accessor-closure.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
 /**
  * Check if a TS expression is "undefined-like" — OmittedExpression (array hole),
@@ -318,10 +320,45 @@ export function compileObjectLiteralAsExternref(
       fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "call", funcIdx: setIdx });
     }
-    // MethodDeclaration is not reached here for the any-context route — object
-    // literals with methods take compileObjectLiteralWithAccessors (accessors) or
-    // emitObjectMethodAsClosure on the struct path. A plain method in an
-    // any-context literal falls through (skipped) — covered by S2 follow-on.
+    // (#3099) Method shorthand (`{ m() {…} }`) — materialize the method as a REAL
+    // runtime own property so runtime-keyed consumers (`__extern_get`,
+    // `Object.keys`, the `__proxy_*` trap reads of a shorthand handler, spread,
+    // for-in) find it, exactly like the arrow-property arm above. Previously this
+    // fell through (skipped), so a shorthand handler's traps silently forwarded
+    // and `Object.keys`/`o[k]` missed the method. Mirrors the MethodDeclaration
+    // arm in `compileObjectLiteralWithAccessors` (below): compile the method as a
+    // closure via `emitObjectLiteralMethodFn` (standalone → host-free closure;
+    // gc/host → `__make_*_callback` bridge) and store it with `__extern_set`. Only
+    // PLAIN identifier/string/numeric names are handled here — computed/symbol
+    // method keys route to the accessor/host path upstream, matching the
+    // data-property arm above (which skips `keyText === undefined`).
+    else if (ts.isMethodDeclaration(prop)) {
+      let methodName: string | undefined;
+      if (ts.isIdentifier(prop.name)) methodName = prop.name.text;
+      else if (ts.isStringLiteral(prop.name)) methodName = prop.name.text;
+      // Canonicalize a numeric method key (`{ 0x10() {} }` → "16") to match the
+      // data-property arm's `resolvePropertyNameText`, so store and read agree.
+      else if (ts.isNumericLiteral(prop.name)) methodName = String(Number(prop.name.text));
+      if (methodName === undefined) continue; // computed/symbol key — handled upstream
+      const setIdx = ensureLateImport(
+        ctx,
+        "__extern_set",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (setIdx === undefined) continue;
+      // Stack: [obj, key, closure] → __extern_set(obj, key, value).
+      addStringConstantGlobal(ctx, methodName);
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+      const ok = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression);
+      // On decline (e.g. generator/async shorthand `compileArrowAsClosure`
+      // rejects — see issue note 2), store `undefined` to keep the stack balanced,
+      // matching the sibling arm's `ref.null.extern` fallback.
+      if (!ok) fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "call", funcIdx: setIdx });
+    }
   }
 
   fctx.body.push({ op: "local.get", index: objLocal });
@@ -969,6 +1006,52 @@ export function objectLiteralSpreadTakesHostPath(ctx: CodegenContext, expr: ts.O
   );
 }
 
+/**
+ * (#3037 CS1a) True when a **non-empty, spread-free, data-only** object literal
+ * is produced into a genuine `any`/`unknown` contextual position under
+ * `--target standalone` — a subset of the `isAnyContextNonEmpty` branch of
+ * `compileObjectLiteral` that builds it as an open `$Object` and hands back an
+ * **externref**. This is the object-identity CS1a "carrier" site: such a literal
+ * assigned to an `any`-typed local is currently carried as an externref, so at
+ * `===` it boxes **tag-5** and loses `ref.eq` identity (an object is not `===`
+ * to itself). The variable-declaration local typing (statements/variables.ts)
+ * consults this predicate to slot the local as a raw `ref $Object` instead — so
+ * the value boxes **tag-6** (`__any_box_ref`, identity in `refval`) at `===`
+ * (the tag-6 same-tag `ref.eq` arm answers identity) while dynamic `any`-typed
+ * reads coerce the ref back to externref (`extern.convert_any`) for
+ * `__extern_get`. This keeps the local representation and the literal's value in
+ * lockstep, the same discipline `objectLiteralSpreadTakesHostPath` enforces.
+ *
+ * Scoped tightly to keep the beachhead low-risk and to avoid colliding with the
+ * earlier `compileObjectLiteral` gates: **no spreads** (those route via
+ * `objectLiteralSpreadTakesHostPath` → host path), **no accessors/methods/
+ * computed keys** (all-data-property + resolvable-name check), non-empty, not a
+ * parameter default. The pure string-index DICTIONARY case is intentionally
+ * excluded (it must keep the externref carrier for runtime `o[k]=v` writes).
+ */
+export function objectLiteralIsStandaloneAnyObjectCarrier(
+  ctx: CodegenContext,
+  expr: ts.ObjectLiteralExpression,
+): boolean {
+  if (!ctx.standalone) return false;
+  if (expr.properties.length === 0) return false;
+  if (ts.isParameter(expr.parent)) return false;
+  // Data-only, spread-free, statically-named keys — matches the open-`$Object`
+  // any-context branch of `compileObjectLiteral` (minus spreads / dictionaries).
+  if (!expr.properties.every((p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))) {
+    return false;
+  }
+  if (!expr.properties.every((p) => resolvePropertyNameText(ctx, p) !== undefined)) return false;
+  // (#1930) Query the contextual type through the oracle boundary, not the raw
+  // TypeChecker. `contextualFactOf` classifies `any`/`unknown` directly; the
+  // `object` keyword (NonPrimitive) is not a distinct fact — it is intentionally
+  // NOT covered here (an `object`-keyword-typed carrier is a rare, safe
+  // under-fix: the literal stays externref/tag-5, reconciled by S3a). The `any`
+  // case is the CS1a beachhead.
+  const ctxFact = ctx.oracle.contextualFactOf(expr);
+  return ctxFact !== undefined && (ctxFact.kind === "any" || ctxFact.kind === "unknown");
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1111,13 +1194,27 @@ export function compileObjectLiteral(
     ctx.standalone &&
     expr.properties.length > 0 &&
     !ts.isParameter(expr.parent) &&
-    // only data props / spreads we can build onto a $Object (no accessor /
-    // method / mixed shapes that need the struct or host accessor path).
+    // only data props / spreads / plain-named method shorthand we can build onto
+    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
+    // host accessor path). (#3099) Plain-named method shorthand is now buildable
+    // here — compileObjectLiteralAsExternref materializes it as a runtime own
+    // property closure — so a method-bearing any-context literal (`const h: any =
+    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
+    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
+    // whose method exists only in the compile-time member table.
     expr.properties.every(
-      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+      (p) =>
+        ts.isPropertyAssignment(p) ||
+        ts.isShorthandPropertyAssignment(p) ||
+        ts.isSpreadAssignment(p) ||
+        isPlainNamedMethodDeclaration(p),
     ) &&
-    // and no computed/symbol keys (resolvePropertyNameText returns undefined).
-    expr.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
+    // check return undefined/false for those).
+    expr.properties.every(
+      (p) =>
+        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
+    )
   ) {
     const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
     // Require an EXPLICIT any / unknown / `object` contextual type to divert to
@@ -1390,6 +1487,21 @@ export function resolveConstantExpression(ctx: CodegenContext, expr: ts.Expressi
   }
 
   return undefined;
+}
+
+/**
+ * (#3099) True for a method-shorthand property with a PLAIN compile-time key
+ * (`m() {}`, `"m"() {}`, `0() {}`) — the shapes `compileObjectLiteralAsExternref`
+ * materializes as a runtime own-property closure. Computed / well-known-symbol
+ * method keys (`[Symbol.iterator]() {}`, `[expr]() {}`) return false so they keep
+ * routing to the accessor / host / struct path upstream, which handles the
+ * Symbol-boxing those require.
+ */
+export function isPlainNamedMethodDeclaration(prop: ts.ObjectLiteralElementLike): boolean {
+  return (
+    ts.isMethodDeclaration(prop) &&
+    (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) || ts.isNumericLiteral(prop.name))
+  );
 }
 
 /**
@@ -1699,7 +1811,18 @@ export function compileWidenedEmptyObject(
         fctx.body.push({ op: "i32.const", value: 0 });
         break;
       case "externref":
-        fctx.body.push({ op: "ref.null.extern" });
+        // (#3042) A widened `externref` field that is never assigned — e.g. a
+        // property introduced ONLY through `Object.defineProperty(obj, k, desc)`
+        // with a value-less descriptor (`{ enumerable: false }`), which lowers to
+        // a struct no-op — must read back as JS `undefined`, not `null`. Per ES
+        // §10.1.6.3 a value-less data descriptor defaults `[[Value]]` to
+        // `undefined`; reading a would-be-absent property likewise yields
+        // `undefined`. `ref.null.extern` reads as `null` and breaks the
+        // defineProperty attribute round-trip (verifyProperty's `value:
+        // undefined` check). Mirror the established default-value semantics of
+        // the main object-literal path (its "missing fields" branch), which uses
+        // `emitUndefined` for exactly this reason.
+        emitUndefined(ctx, fctx);
         break;
       default:
         if (field.type.kind === "ref" || field.type.kind === "ref_null") {
@@ -1941,8 +2064,7 @@ export function compileObjectLiteralForStruct(
       // defined (the `existingFuncIdx === undefined && !forkToPrimitive`
       // short-circuit above already `continue`d), but TS can't narrow it.
       if (existingFuncIdx === undefined) continue;
-      const localIdx = existingFuncIdx - ctx.numImportFuncs;
-      const existingFunc = ctx.mod.functions[localIdx];
+      const existingFunc = definedFuncAt(ctx, existingFuncIdx);
       if (!existingFunc) continue;
       const existingType = ctx.mod.types[existingFunc.typeIdx];
       if (!existingType || existingType.kind !== "func") continue;
@@ -1991,8 +2113,8 @@ export function compileObjectLiteralForStruct(
       if (rt && !isVoidType(rt)) methodResult = [resolveWasmType(ctx, rt)];
     }
     const freshTypeIdx = addFuncType(ctx, newParams, methodResult, `${fullName}__lit_type`);
-    const freshFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const freshFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, freshFuncIdx, {
       name: `${fullName}__lit${freshFuncIdx}`,
       typeIdx: freshTypeIdx, // seeded from this literal's params; body-compile may refine
       locals: [],
@@ -2267,7 +2389,7 @@ export function compileObjectLiteralForStruct(
       }
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
-      const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const getterFuncIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(getterName, getterFuncIdx);
 
       const getterFunc: WasmFunction = {
@@ -2277,7 +2399,7 @@ export function compileObjectLiteralForStruct(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(getterFunc);
+      pushDefinedFunc(ctx, getterFuncIdx, getterFunc);
 
       // Promote captured locals to globals so the getter body can access them
       promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
@@ -2367,7 +2489,7 @@ export function compileObjectLiteralForStruct(
       }
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
-      const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const setterFuncIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(setterName, setterFuncIdx);
 
       const setterFunc: WasmFunction = {
@@ -2377,7 +2499,7 @@ export function compileObjectLiteralForStruct(
         body: [],
         exported: false,
       };
-      ctx.mod.functions.push(setterFunc);
+      pushDefinedFunc(ctx, setterFuncIdx, setterFunc);
 
       // Promote captured locals to globals so the setter body can access them
       promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
@@ -2575,15 +2697,14 @@ export function compileObjectLiteralForStruct(
       // a prior literal's function was dropped. Resolving the slot blindly
       // then crashed on `undefined.typeIdx` (#1608). Treat an unresolvable
       // slot as "no existing function" and synthesize a fresh one.
-      const localIdx = existingFuncIdx !== undefined ? existingFuncIdx - ctx.numImportFuncs : -1;
-      const existingFunc = existingFuncIdx !== undefined && localIdx >= 0 ? ctx.mod.functions[localIdx] : undefined;
+      const existingFunc = existingFuncIdx !== undefined ? definedFuncAt(ctx, existingFuncIdx) : undefined;
       let methodFunc: WasmFunction;
       if (existingFunc !== undefined) {
         methodFunc = existingFunc;
         // Update type in case it was refined
         methodFunc.typeIdx = methodTypeIdx;
       } else {
-        const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+        const methodFuncIdx = mintDefinedFunc(ctx);
         ctx.funcMap.set(fullName, methodFuncIdx);
         methodFunc = {
           name: fullName,
@@ -2592,7 +2713,7 @@ export function compileObjectLiteralForStruct(
           body: [],
           exported: false,
         };
-        ctx.mod.functions.push(methodFunc);
+        pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
       }
 
       // Promote captured locals to globals so the method body can access them
@@ -2731,6 +2852,8 @@ export function compileObjectLiteralForStruct(
 
         // Return __create_generator or __create_async_generator depending on async flag
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
+        // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+        if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         methodFctx.body.push({ op: "local.get", index: bufferLocal });
         methodFctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -3663,6 +3786,9 @@ export function compileArrayLiteral(
         fctx.body.push({ op: "local.set", index: externLocal });
         const matVecInfo = getVecInfo(ctx, vecTypeIdx);
         if (!matVecInfo) continue;
+        // (#3100 S5) Standalone: protocol-materialize FIRST (custom-iterable
+        // drain / indexable passthrough) so the indexed reads below stay right.
+        emitStandaloneIterableMaterialize(ctx, fctx, externLocal);
         const matInstrs = buildVecFromExternref(ctx, fctx, externLocal, vecTypeIdx, matVecInfo);
         for (const instr of matInstrs) fctx.body.push(instr);
         const srcLocal = allocLocal(fctx, `__spread_mat_${fctx.locals.length}`, {

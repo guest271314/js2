@@ -40,28 +40,28 @@ bucket work #2856–#2859.
 
 ## Statements
 
-| Kind                  | Status      | Notes                                                                      | Tracking |
-| --------------------- | ----------- | -------------------------------------------------------------------------- | -------- |
-| `VariableStatement`   | mixed       | Single-binding `let/const/var` works. Destructuring init throws.           | #1372    |
-| `ExpressionStatement` | mixed       | Calls / assignments / pre-post `++ --` work. Other shapes throw.           | #1131    |
-| `IfStatement`         | ir-owned    | Both arms must be present in tail position; body-position `if` works.      | —        |
-| `ReturnStatement`     | ir-owned    | Must have an expression in Phase 1; `return;` (void) added in slice 14.    | #1228    |
-| `ForStatement`        | mixed       | Requires a condition; rejects bare `for(;;)`.                              | #1131    |
-| `ForOfStatement`      | mixed       | Destructuring init throws (slice 6 sentinel).                              | #1131    |
-| `WhileStatement`      | ir-owned    | —                                                                          | —        |
-| `TryStatement`        | mixed       | Basic try/catch lowered; finally + rethrow paths partial.                  | #1131    |
-| `ThrowStatement`      | ir-owned    | —                                                                          | —        |
-| `Block`               | ir-owned    | Plain statement lists; scope handling via LowerCtx.                        | —        |
-| `SwitchStatement`     | direct-only | No IR handler. Lowered in `src/codegen/statements/control-flow.ts`.        | (future) |
-| `BreakStatement`      | direct-only | Labeled / unlabeled break — needs CFG IR enhancements.                     | (future) |
-| `ContinueStatement`   | direct-only | Same.                                                                      | (future) |
-| `DoStatement`         | direct-only | Lower priority; rewrites cleanly to `while`.                               | (future) |
-| `LabeledStatement`    | direct-only | Needs labeled break/continue CFG support.                                  | (future) |
-| `ForInStatement`      | direct-only | Object iteration host-import based today.                                  | (future) |
-| `ClassDeclaration`    | mixed       | Methods adopted incrementally via #1370 (Phase B). Constructor in Phase C. | #1370    |
-| `ImportDeclaration`   | deferred    | Module-level concern, not function-body.                                   | —        |
-| `ExportDeclaration`   | deferred    | Module-level concern.                                                      | —        |
-| `ExportAssignment`    | deferred    | Module-level concern.                                                      | —        |
+| Kind                  | Status      | Notes                                                                                                                                   | Tracking |
+| --------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `VariableStatement`   | mixed       | Single-binding `let/const/var` works. Destructuring init throws.                                                                        | #1372    |
+| `ExpressionStatement` | mixed       | Calls / assignments / pre-post `++ --` work. Other shapes throw.                                                                        | #1131    |
+| `IfStatement`         | ir-owned    | Tail / early-return via block CFG; statement-`if` inside loop/try body buffers via `if.stmt` (#2952 slice 2).                           | —        |
+| `ReturnStatement`     | ir-owned    | Must have an expression in Phase 1; `return;` (void) added in slice 14.                                                                 | #1228    |
+| `ForStatement`        | mixed       | Requires a condition; rejects bare `for(;;)`.                                                                                           | #1131    |
+| `ForOfStatement`      | mixed       | Destructuring init throws (slice 6 sentinel).                                                                                           | #1131    |
+| `WhileStatement`      | ir-owned    | —                                                                                                                                       | —        |
+| `TryStatement`        | mixed       | Basic try/catch lowered; finally + rethrow paths partial.                                                                               | #1131    |
+| `ThrowStatement`      | ir-owned    | —                                                                                                                                       | —        |
+| `Block`               | ir-owned    | Plain statement lists; scope handling via LowerCtx.                                                                                     | —        |
+| `SwitchStatement`     | direct-only | No IR handler. Needs `br_table` + block-per-case (Design A, #2952 spec).                                                                | #2952    |
+| `BreakStatement`      | mixed       | Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break is slice 3. | #2952    |
+| `ContinueStatement`   | mixed       | Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue is slice 3.                             | #2952    |
+| `DoStatement`         | mixed       | Post-test loop claimed (reuses `while.loop` + `postCond`); unlabeled break/continue bodies claimed since slice 2.                       | #2952    |
+| `LabeledStatement`    | direct-only | Needs labeled break/continue CFG support.                                                                                               | #2952    |
+| `ForInStatement`      | direct-only | Object iteration host-import based today.                                                                                               | #2952    |
+| `ClassDeclaration`    | mixed       | Methods adopted incrementally via #1370 (Phase B). Constructor in Phase C.                                                              | #1370    |
+| `ImportDeclaration`   | deferred    | Module-level concern, not function-body.                                                                                                | —        |
+| `ExportDeclaration`   | deferred    | Module-level concern.                                                                                                                   | —        |
+| `ExportAssignment`    | deferred    | Module-level concern.                                                                                                                   | —        |
 
 ## Expressions
 
@@ -101,15 +101,15 @@ bucket work #2856–#2859.
 
 ## Declarations
 
-| Kind                                            | Status      | Notes                                                           | Tracking |
-| ----------------------------------------------- | ----------- | --------------------------------------------------------------- | -------- |
-| `FunctionDeclaration`                           | ir-owned    | The IR claim unit. Each rejection bucket reduces the claim set. | #1376    |
-| `MethodDeclaration`                             | mixed       | Adopted incrementally via #1370 Phase B class-shape registry.   | #1370    |
-| `ConstructorDeclaration`                        | direct-only | Phase C work; defensively rejected by from-ast.ts today.        | #1370    |
-| `GetAccessorDeclaration`                        | direct-only | `class-method` fallback bucket; phase B excludes accessors.     | #1370    |
-| `SetAccessorDeclaration`                        | direct-only | Same.                                                           | #1370    |
-| `EnumDeclaration`                               | direct-only | Compile-time only; emitted as constants by direct codegen.      | (future) |
-| `InterfaceDeclaration` / `TypeAliasDeclaration` | deferred    | Type-erased; no Wasm output.                                    | —        |
+| Kind                                            | Status      | Notes                                                              | Tracking |
+| ----------------------------------------------- | ----------- | ------------------------------------------------------------------ | -------- |
+| `FunctionDeclaration`                           | ir-owned    | The IR claim unit. Each rejection bucket reduces the claim set.    | #1376    |
+| `MethodDeclaration`                             | mixed       | #1370 Phase B; #3000-E adds subclass methods + `super.method()`.   | #1370    |
+| `ConstructorDeclaration`                        | mixed       | #3000-C ctor emission (`class.alloc`); #3000-E `super(...)` chain. | #3000    |
+| `GetAccessorDeclaration`                        | mixed       | #3000-B accessors; #3000-E subclass accessors (`Dog_get_breed`).   | #3000    |
+| `SetAccessorDeclaration`                        | mixed       | #3000-B accessors over the private slot.                           | #3000    |
+| `EnumDeclaration`                               | direct-only | Compile-time only; emitted as constants by direct codegen.         | (future) |
+| `InterfaceDeclaration` / `TypeAliasDeclaration` | deferred    | Type-erased; no Wasm output.                                       | —        |
 
 ## Selector buckets (one row = one reason from `src/ir/select.ts`)
 
@@ -117,23 +117,23 @@ These are the reasons a `FunctionDeclaration` ends up in `mixed` rather
 than `ir-owned`. Driving each unintended bucket to zero promotes the
 relevant kind row above.
 
-| Bucket reason                 | Category   | What promotes a row                                          |
-| ----------------------------- | ---------- | ------------------------------------------------------------ |
-| `body-shape-rejected`         | unintended | from-ast.ts handles every statement in the body              |
-| `external-call`               | unintended | Math.\* / parseInt / Console wired through IR (#1371)        |
-| `call-graph-closure`          | unintended | Callees of claimed funcs all claimable themselves            |
-| `param-shape-rejected`        | unintended | Destructuring params supported (#1372)                       |
-| `param-type-not-resolvable`   | unintended | TypeMap propagation reaches the param                        |
-| `return-type-not-resolvable`  | unintended | TypeMap propagation reaches the return                       |
-| `type-resolution-failure`     | unintended | Same                                                         |
-| `class-method`                | unintended | #1370 Phase B / C — class shape registry covers the member   |
-| `destructuring-param-complex` | unintended | Complex destructuring params lowered (subset of param-shape) |
-| `async-function`              | deferred   | Async bodies — CPS lowering tracked separately (#1373/#1796) |
-| `async-generator`             | deferred   | Out of scope long-term                                       |
-| `deferred-feature`            | deferred   | `eval` / `Proxy` / `with` — wont-fix                         |
-| `type-parameters`             | deferred   | Generics specialisation (future)                             |
-| `non-export-modifier`         | deferred   | `async` / declare-only — narrow                              |
-| `unnamed`                     | deferred   | Anonymous default exports                                    |
+| Bucket reason                 | Category   | What promotes a row                                                                                                                                   |
+| ----------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `body-shape-rejected`         | unintended | from-ast.ts handles every statement in the body                                                                                                       |
+| `external-call`               | unintended | Math.\* / parseInt / Console wired through IR (#1371)                                                                                                 |
+| `call-graph-closure`          | unintended | Callees of claimed funcs all claimable themselves                                                                                                     |
+| `param-shape-rejected`        | unintended | Destructuring params supported (#1372)                                                                                                                |
+| `param-type-not-resolvable`   | unintended | TypeMap propagation reaches the param                                                                                                                 |
+| `return-type-not-resolvable`  | unintended | TypeMap propagation reaches the return                                                                                                                |
+| `type-resolution-failure`     | unintended | Same                                                                                                                                                  |
+| `class-method`                | unintended | #1370/#3000 B-C-E — corpus bucket **0** (#3000-E); NOT yet strict (still covers computed/generator/abstract names, static super, subclass-of-builtin) |
+| `destructuring-param-complex` | unintended | Complex destructuring params lowered (subset of param-shape)                                                                                          |
+| `async-function`              | deferred   | Async bodies — CPS lowering tracked separately (#1373/#1796)                                                                                          |
+| `async-generator`             | deferred   | Out of scope long-term                                                                                                                                |
+| `deferred-feature`            | deferred   | `eval` / `Proxy` / `with` — wont-fix                                                                                                                  |
+| `type-parameters`             | deferred   | Generics specialisation (future)                                                                                                                      |
+| `non-export-modifier`         | deferred   | `async` / declare-only — narrow                                                                                                                       |
+| `unnamed`                     | deferred   | Anonymous default exports                                                                                                                             |
 
 ## How to update this table
 

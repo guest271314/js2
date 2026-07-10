@@ -12,9 +12,19 @@ import { reportErrorNoNode } from "../context/errors.js";
 import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
+import { emitUndefinedExtern } from "../any-helpers.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
 import { ensureSymbolCarrier } from "../symbol-native.js";
+// (#3100 S4) Native standalone iteration substrate: the four `__iterator*`
+// protocol ops, the bounded materializer `__array_from_iter_n`, and the
+// rest-slice `__extern_slice` all have Wasm-native DEFINED implementations.
+import {
+  ensureNativeArrayFromIterN,
+  ensureNativeExternSlice,
+  ensureNativeIteratorRuntime,
+} from "../iterator-native.js";
 import { shiftAsyncSideChannelFuncIdxs } from "../async-scheduler.js";
+import { inLiveShiftRange } from "../../emit/resolve-layout.js";
 
 /**
  * #1471: helper names that `addUnionImports` provides Wasm-native
@@ -160,7 +170,7 @@ export function shiftLateImportIndices(
     shifted.add(instrs);
     for (const instr of instrs) {
       if ("funcIdx" in instr && typeof (instr as any).funcIdx === "number") {
-        if ((instr as any).funcIdx >= importsBefore) {
+        if (inLiveShiftRange((instr as any).funcIdx, importsBefore)) {
           (instr as any).funcIdx += added;
         }
       }
@@ -233,7 +243,7 @@ export function shiftLateImportIndices(
   }
   for (const [name, idx] of ctx.funcMap) {
     if (importNames.has(name)) continue; // skip all imports
-    if (idx >= importsBefore) {
+    if (inLiveShiftRange(idx, importsBefore)) {
       ctx.funcMap.set(name, idx + added);
     }
   }
@@ -245,7 +255,7 @@ export function shiftLateImportIndices(
   // its own. All entries are DEFINED functions (indices >= numImportFuncs), so
   // every entry >= importsBefore moves up by `added`.
   for (const [name, idx] of ctx.nativeStrHelpers) {
-    if (idx >= importsBefore) {
+    if (inLiveShiftRange(idx, importsBefore)) {
       ctx.nativeStrHelpers.set(name, idx + added);
     }
   }
@@ -256,7 +266,7 @@ export function shiftLateImportIndices(
   // call one function too early; stack-balance then "fixed" the args against
   // the wrong callee signature and emitted invalid ref.casts.
   for (const [name, idx] of ctx.nativeRegexHelpers) {
-    if (idx >= importsBefore) {
+    if (inLiveShiftRange(idx, importsBefore)) {
       ctx.nativeRegexHelpers.set(name, idx + added);
     }
   }
@@ -272,7 +282,7 @@ export function shiftLateImportIndices(
   // first method call is often the first `__box_number` trigger; plain Map
   // usually imports `__box_number` earlier and dodged the window.
   for (const [name, idx] of ctx.mapHelpers) {
-    if (idx >= importsBefore) {
+    if (inLiveShiftRange(idx, importsBefore)) {
       ctx.mapHelpers.set(name, idx + added);
     }
   }
@@ -296,8 +306,8 @@ export function shiftLateImportIndices(
   // getFuncSignature on a stale index that now points at a late-added import
   // (e.g. __typeof_string), corrupting the rebuilt body.
   for (const t of ctx.pendingMethodTrampolines) {
-    if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += added;
-    if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += added;
+    if (inLiveShiftRange(t.methodFuncIdx, importsBefore)) t.methodFuncIdx += added;
+    if (inLiveShiftRange(t.trampolineFuncIdx, importsBefore)) t.trampolineFuncIdx += added;
   }
   // (#2941) Same lockstep for the native SYNC-generator resume-function indices.
   // `ctx.nativeGenerators[].resumeFuncIdx` is a plain cached number read at every
@@ -312,7 +322,7 @@ export function shiftLateImportIndices(
   // side-channel walks above. Inert unless native generators were emitted.
   if (ctx.nativeGenerators) {
     for (const info of ctx.nativeGenerators.values()) {
-      if (typeof info.resumeFuncIdx === "number" && info.resumeFuncIdx >= importsBefore) {
+      if (typeof info.resumeFuncIdx === "number" && inLiveShiftRange(info.resumeFuncIdx, importsBefore)) {
         info.resumeFuncIdx += added;
       }
     }
@@ -333,7 +343,7 @@ export function shiftLateImportIndices(
   shiftAsyncSideChannelFuncIdxs(ctx, importsBefore, added);
   // Shift export descriptors
   for (const exp of ctx.mod.exports) {
-    if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {
+    if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, importsBefore)) {
       exp.desc.index += added;
     }
   }
@@ -341,7 +351,7 @@ export function shiftLateImportIndices(
   for (const elem of ctx.mod.elements) {
     if (elem.funcIndices) {
       for (let i = 0; i < elem.funcIndices.length; i++) {
-        if (elem.funcIndices[i]! >= importsBefore) {
+        if (inLiveShiftRange(elem.funcIndices[i]!, importsBefore)) {
           elem.funcIndices[i]! += added;
         }
       }
@@ -349,7 +359,9 @@ export function shiftLateImportIndices(
   }
   // Shift declared func refs
   if (ctx.mod.declaredFuncRefs.length > 0) {
-    ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + added : idx));
+    ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) =>
+      inLiveShiftRange(idx, importsBefore) ? idx + added : idx,
+    );
   }
   // (#1712) The module start function index also moves if it was a defined
   // function at or above the insertion point. Mirrors the startFuncIdx shift
@@ -360,7 +372,7 @@ export function shiftLateImportIndices(
   // to live at __module_init's index (now an exported user function with a
   // result type), producing "invalid start function: non-zero parameter or
   // return count".
-  if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+  if (ctx.mod.startFuncIdx !== undefined && inLiveShiftRange(ctx.mod.startFuncIdx, importsBefore)) {
     ctx.mod.startFuncIdx += added;
   }
 }
@@ -443,6 +455,39 @@ export function ensureLateImport(
   if ((ctx.standalone || ctx.wasi) && name === "__box_symbol") {
     ensureSymbolCarrier(ctx);
     return ctx.funcMap.get(name);
+  }
+  // #3100 S4 — under no-JS-host mode the iteration-protocol ops (`__iterator`,
+  // `__iterator_next`, `__iterator_return`, `__iterator_rest`), the bounded
+  // iterable materializer `__array_from_iter_n` (#2904), and the rest-element
+  // slice `__extern_slice` are all emitted as native DEFINED functions
+  // (iterator-native.ts). Route by NAME at this single chokepoint so EVERY
+  // consumer — assignment array-destructuring, the custom-iterable drain,
+  // the literals rest drain, for-of rest — binds native with no per-site
+  // gating. Before this, each un-gated consumer leaked the `env::` import
+  // (e.g. `[a, b] = <any>` leaked `env::__array_from_iter_n`, the 60-row
+  // assignment/dstr cluster of the standalone JSONL; rest patterns leaked
+  // `env::__extern_slice`), breaking zero-import instantiation. MUST run
+  // BEFORE `refuseStandaloneObjectImport` — `__extern_slice` matches its
+  // `__extern_` refusal prefix. Registration is append-only (defined funcs,
+  // no import-index shift), the same invariant as the routes above.
+  if (ctx.standalone || ctx.wasi) {
+    if (name === "__array_from_iter_n") {
+      ensureNativeArrayFromIterN(ctx);
+      return ctx.funcMap.get(name);
+    }
+    if (name === "__extern_slice") {
+      ensureNativeExternSlice(ctx);
+      return ctx.funcMap.get(name);
+    }
+    if (
+      name === "__iterator" ||
+      name === "__iterator_next" ||
+      name === "__iterator_return" ||
+      name === "__iterator_rest"
+    ) {
+      ensureNativeIteratorRuntime(ctx);
+      return ctx.funcMap.get(name);
+    }
   }
   // #1472 Phase A — refuse dynamic-shape object/property host imports under
   // --target standalone with a clear compile error. We still register the
@@ -561,7 +606,7 @@ export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
       if (
         (instr.op === "call" || instr.op === "return_call" || instr.op === "ref.func") &&
         typeof a.funcIdx === "number" &&
-        a.funcIdx >= base
+        inLiveShiftRange(a.funcIdx, base)
       ) {
         a.funcIdx += added;
       }
@@ -589,23 +634,23 @@ export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
     if (n) definedNames.add(n);
   }
   for (const [name, idx] of ctx.funcMap) {
-    if (idx >= base && definedNames.has(name)) ctx.funcMap.set(name, idx + added);
+    if (inLiveShiftRange(idx, base) && definedNames.has(name)) ctx.funcMap.set(name, idx + added);
   }
   // Keep the helper-name map (read directly by string lowering) in lockstep —
   // every entry is a defined function by construction.
   for (const [name, idx] of ctx.nativeStrHelpers) {
-    if (idx >= base) ctx.nativeStrHelpers.set(name, idx + added);
+    if (inLiveShiftRange(idx, base)) ctx.nativeStrHelpers.set(name, idx + added);
   }
   // (#1913) Regex helper map moves in lockstep too — see the comment in
   // addLateImportBatch above.
   for (const [name, idx] of ctx.nativeRegexHelpers) {
-    if (idx >= base) ctx.nativeRegexHelpers.set(name, idx + added);
+    if (inLiveShiftRange(idx, base)) ctx.nativeRegexHelpers.set(name, idx + added);
   }
   // Shift export descriptors. Exports only ever reference defined functions in
   // this regime (helpers/runtime exports like `__vec_get`); a func export with
   // `index >= base` is a defined function whose true slot moved by `added`.
   for (const exp of ctx.mod.exports) {
-    if (exp.desc.kind === "func" && exp.desc.index >= base) {
+    if (exp.desc.kind === "func" && inLiveShiftRange(exp.desc.index, base)) {
       exp.desc.index += added;
     }
   }
@@ -677,13 +722,19 @@ export function ensureGetUndefined(ctx: CodegenContext): number | undefined {
 /**
  * Emit instructions that push the JS `undefined` value onto the stack.
  * Uses the __get_undefined host import when available; falls back to
- * ref.null.extern (indistinguishable from null) in standalone mode.
+ * ref.null.extern (indistinguishable from null) in standalone mode — unless
+ * the (#2106 S1) `undefinedSingleton` regime is active, in which case the
+ * distinct extern-wrapped tag-1 `$undefined` singleton is pushed instead
+ * (a GLOBAL read, not a func import, so the #329 late-import finalize shift
+ * is never driven — see the S1.0 reservation in `ensureAnyValueType`).
  */
 export function emitUndefined(ctx: CodegenContext, fctx: FunctionContext): void {
   const funcIdx = ensureGetUndefined(ctx);
   if (funcIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx });
+  } else if (emitUndefinedExtern(ctx, fctx)) {
+    // (#2106 S1) flag regime: `global.get $undefined; extern.convert_any`.
   } else {
     fctx.body.push({ op: "ref.null.extern" });
   }

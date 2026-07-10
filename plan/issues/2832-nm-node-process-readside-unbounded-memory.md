@@ -2,7 +2,7 @@
 id: 2832
 title: nm_js2wasm_node_process READ side buffers the whole input frame (unbounded memory)
 status: done
-sprint: current
+sprint: 69
 priority: high
 area: examples
 language_feature: native-messaging
