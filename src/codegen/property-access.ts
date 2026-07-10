@@ -3357,10 +3357,31 @@ function tryEmitConstructorViaTag(
   // undefined" — cascading to ~478 TypedArray tests (net -479). The fix restores
   // the pre-PR fall-through: no class-tag match ⇒ the original generic read.
   const resLocal = allocLocal(fctx, `__ctoridn_res_${fctx.locals.length}`, { kind: "externref" });
-  const externGetIdx =
-    ctx.standalone || ctx.wasi || ctx.strictNoHostImports
-      ? undefined
-      : ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  // (#3130) Standalone/WASI seed via the NATIVE `__extern_get` (the object
+  // runtime's defined reader), not a hard null. This arm fires for EVERY
+  // `any`-typed `.constructor` read once the module declares one tag-bearing
+  // user class — the test262 harness injects `class Test262Error`, so that is
+  // essentially every standalone program — and the old null seed meant the
+  // read NEVER reached the runtime reader. With fillExternGetErrorProps the
+  // native reader answers `.constructor` on a native `$Error_struct` with the
+  // SAME `__builtin_<Name>` carrier the bare identifier reads, so
+  // `reason.constructor === TypeError` (§27.2.1.3.2 resolve-settled-*-self)
+  // is genuine identity. For every other receiver the native reader preserves
+  // the old behaviour ($Object without a `constructor` prop / non-object →
+  // miss), so nothing regresses. Plain strictNoHostImports (gc, no-host)
+  // keeps the null seed unchanged.
+  let externGetIdx: number | undefined;
+  if (ctx.standalone || ctx.wasi) {
+    ensureObjectRuntime(ctx);
+    externGetIdx = ctx.funcMap.get("__extern_get");
+  } else if (!ctx.strictNoHostImports) {
+    externGetIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+  }
   if (externGetIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     // __extern_get(extern.convert_any(instLocal), "constructor")
@@ -3371,9 +3392,8 @@ function tryEmitConstructorViaTag(
     fctx.body.push({ op: "call", funcIdx: externGetIdx } as Instr);
     fctx.body.push({ op: "local.set", index: resLocal });
   } else {
-    // Standalone / WASI / no-host: no `__extern_get` import. Preserve the prior
-    // behaviour for a non-class receiver (null externref — there is no host
-    // constructor object to recover).
+    // No-host gc mode without the runtime reader: preserve the prior behaviour
+    // for a non-class receiver (null externref).
     fctx.body.push({ op: "ref.null.extern" } as Instr);
     fctx.body.push({ op: "local.set", index: resLocal });
   }
