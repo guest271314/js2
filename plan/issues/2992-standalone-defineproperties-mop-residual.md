@@ -1,7 +1,8 @@
 ---
 id: 2992
 title: "Standalone defineProperties MOP residual (~250: array/arguments own-prop MOP + accessor-attribute fidelity + destructive verifyProperty/tombstone survival)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-18th
 sprint: Backlog
 priority: high
 horizon: l
@@ -60,6 +61,47 @@ open-addressing read path in `__obj_find` / `__extern_get`
 
 Wants slicing into separate PRs:
 
-1. delete-tombstone-read survival (bounded — start here).
+1. delete-tombstone-read survival (bounded — start here). **SHIPPED — see slice-1 findings below.**
 2. array/arguments index + `length` own-prop MOP.
 3. accessor-attribute (get/set) define→gOPD fidelity.
+4. (NEW, found during slice 1) nominal-struct field delete fidelity — see below.
+
+## Slice 1 findings (measured 2026-07-10 on main 569e29b761, fable-18th)
+
+The headline repro was re-measured and confirmed still failing — but the root
+cause is NOT the tombstone machinery (`__obj_find`/`__extern_get` in
+`object-runtime.ts` handle tombstones correctly; delete→read inside a function
+works in every lane):
+
+- **Actual root cause:** the module-level statement collector in
+  `src/codegen/declarations.ts` recognises New/Call, ++/-- and assignment
+  BinaryExpressions, but `delete o.k` is a `ts.DeleteExpression` — its own
+  node kind, NOT a `PrefixUnaryExpression` — so a **top-level `delete`
+  statement was silently dropped from `__module_init`** (the issue's repro is
+  top-level). Reads then observed the stale value and `"k" in o` stayed true.
+  Affected ALL lanes (gc / standalone / wasi) identically, not just standalone.
+- **Fix (slice-1 PR):** collect `DeleteExpression` statements into
+  `__module_init`; also unwrap `void <expr>` in top-level statement position
+  (it was dropped the same way). Tests: `tests/issue-2992.test.ts` (12 cases,
+  gc + standalone: read-after-delete, `in`, define→delete→redefine→delete
+  cycle, parenthesized/void-wrapped, in-function control).
+- **NEW sub-bug (slice 4, standalone only, pre-existing):** when shape
+  inference promotes an all-prop-access object to a nominal struct
+  (`o.k = 1; delete o.k; o.k === undefined` with every site using `.k`), the
+  field is f64-typed: `delete` writes an `f64.const NaN` sentinel via the
+  post-`__delete_property` arm and `o.k === undefined` is constant-folded to
+  `i32.const 0` — the read can never observe undefined. Mixed elem/prop access
+  keeps the object dynamic and passes. Not a regression from slice 1 (failed
+  identically before, via the top-level drop).
+
+## Test Results (slice 1)
+
+- `tests/issue-2992.test.ts`: 12/12 pass (gc + standalone).
+- Delete-family sweep (`tests/equivalence/delete-operator`, `delete-sentinel`,
+  `issue-1821`, `issue-2130`, `issue-2726*`, `issue-1364b`): 43/44 pass — the
+  one failure (`delete-sentinel > delete string property makes it undefined`)
+  fails identically on unmodified main (pre-existing, in-function nominal-struct
+  case — same mechanism as the slice-4 sub-bug above).
+- Object/property sweep (`object-define-property*`, `object-keys`,
+  `object-mutability`, `hasownproperty-call`, `empty-object-widening`,
+  `numeric-key-object`): 52/52 pass.
