@@ -15,6 +15,9 @@ parent: 1042
 depends_on: [1042]
 related: [2906, 2957, 1373b]
 origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane was left byte-stable; convergence is its own measured step"
+loc-budget-allow:
+  - src/codegen/async-frame.ts
+  - src/codegen/declarations.ts
 ---
 
 # #2967 — One async lowering engine: fold the single-tail-await CPS lane into the host drive, then widen the shared gaps
