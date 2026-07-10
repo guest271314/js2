@@ -8441,21 +8441,9 @@ function resolveImport(
             if (!_isWasmStruct(v)) {
               _safeSet(self, "lastIndex", v);
             } else {
-              // (#3084) ALWAYS defer — including during a regex protocol call
-              // (`r.lastIndex = {valueOf(){…}}` inside a user-overridden `exec`
-              // invoked by @@match/@@replace/@@split). §22.2.6.8/11/14 store
-              // the assigned value verbatim and only READ it as
-              // `ToLength(? Get(rx, "lastIndex"))` in the EMPTY-match advance
-              // branch. V8's slow (modified-RegExp) protocol path is
-              // spec-compliant here — measured: with an overridden `exec`, an
-              // empty match fires the stored object's valueOf via that ToLength
-              // read; a non-empty match never reads it. The shim's
-              // Symbol.toPrimitive bridges that native read to the struct's
-              // compiled valueOf (a throw propagates as the program's own
-              // error), so the previous eager `_regexProtocolDepth > 0`
-              // coercion was both unnecessary (empty match: the shim fires) and
-              // spec-incorrect (non-empty match: valueOf must NOT fire —
-              // Symbol.match/g-match-no-coerce-lastindex.js).
+              // (#3084) ALWAYS defer, protocol call or not — §22.2.6.8/11/14
+              // store the value verbatim; only the empty-match advance reads it
+              // (ToLength → shim fires). See the _makeLastIndexShim doc block.
               _safeSet(self, "lastIndex", _makeLastIndexShim(v, callbackState));
             }
           };
