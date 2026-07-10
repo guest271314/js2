@@ -2004,28 +2004,6 @@ function appendDefaultReturn(fctx: FunctionContext, returnType: ValType | null):
   else if (returnType.kind === "externref") fctx.body.push({ op: "ref.null.extern" });
 }
 
-function getLine(node: ts.Node): number {
-  try {
-    const sf = node.getSourceFile();
-    if (!sf) return 0;
-    const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
-    return line + 1;
-  } catch {
-    return 0;
-  }
-}
-
-function getCol(node: ts.Node): number {
-  try {
-    const sf = node.getSourceFile();
-    if (!sf) return 0;
-    const { character } = sf.getLineAndCharacterOfPosition(node.getStart());
-    return character + 1;
-  } catch {
-    return 0;
-  }
-}
-
 /**
  * Register (on first use) a module-level mutable global that carries
  * "extra" runtime arguments from a call site to a callee whose body reads
