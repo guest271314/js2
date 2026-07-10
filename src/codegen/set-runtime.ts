@@ -35,7 +35,6 @@ import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import {
-  coerceSetArgToAnyref,
   compileCollectionElementArg,
   compileNativeCollectionIterator,
   ensureMapHelpers,

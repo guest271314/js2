@@ -2854,6 +2854,7 @@ export function compileObjectLiteralForStruct(
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
         // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
         if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
+        ctx.legacyGenBufferEmitted = true; // (#3132) sync OR async legacy buffer emitted
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         methodFctx.body.push({ op: "local.get", index: bufferLocal });
         methodFctx.body.push({ op: "local.get", index: pendingThrowLocal });
