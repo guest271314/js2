@@ -1,8 +1,11 @@
 ---
 id: 3090
 title: "Shrink codegen: delete dormant legacy direct-codegen handlers superseded by IR (~40–55K net LOC)"
-status: in-progress
-assignee: ttraenkler/fable-6th
+status: ready
+# Phase 0 (audit) landed 2026-07-10 by ttraenkler/fable-6th — see
+# "## Phase 0 audit landed" below. Umbrella stays open: next claimable slice
+# is Phase 2 (knip + unreferenced deletions, ~2.1K); handler deletions are
+# GATED (see the audit doc's G1–G4) — do not start Phase 1 before the gates.
 sprint: current
 created: 2026-07-08
 updated: 2026-07-10
@@ -31,7 +34,7 @@ That duplication is the single biggest reason the compiler is ~6.4× the
 size of a comparable linear-memory TS→Wasm compiler (Porffor: ~32K code
 vs our ~207K).
 
-`#2855` (+ `#2856`–`#2859`) drives the *fallback buckets* to zero and
+`#2855` (+ `#2856`–`#2859`) drives the _fallback buckets_ to zero and
 promotes reasons into `STRICT_IR_REASONS` — but it **does not delete** the
 now-dead legacy bodies. This issue is the complementary **subtraction**
 pass: actually remove the dormant code so the tree shrinks.
@@ -40,11 +43,11 @@ pass: actually remove the dormant code so the tree shrinks.
 
 `src/codegen/` = **154,938** code lines / 150 files. Three-way split:
 
-| Bucket | Code | Disposition |
-| --- | --: | --- |
-| **STAYS** — substrate/orchestrator the IR reuses (`index.ts`, `coercion-engine`, `js-tag`, `value-tags`, `native-strings`, `registry/`, `context/`, `regex/`, `statements/{loops,control-flow}`…) | ~35,221 | keep |
-| **RUNTIME** — stdlib *behavior* emission (`object-runtime`, `array-methods`, `property-access`, `native-regex`, `map-runtime`, `dataview`, generators…) — the IR backend calls it; a front-end swap does not remove the need to emit an array `.map` loop or a regex matcher | ~39,635 | **keep** |
-| **FRONTEND** — AST→Wasm dispatch & lowering that `from-ast.ts`/`lower.ts` replace (`expressions/`, operator/closure/literal/object lowering, statement lowering…) | ~80,082 | **deletable** |
+| Bucket                                                                                                                                                                                                                                                                       |    Code | Disposition   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | ------------- |
+| **STAYS** — substrate/orchestrator the IR reuses (`index.ts`, `coercion-engine`, `js-tag`, `value-tags`, `native-strings`, `registry/`, `context/`, `regex/`, `statements/{loops,control-flow}`…)                                                                            | ~35,221 | keep          |
+| **RUNTIME** — stdlib _behavior_ emission (`object-runtime`, `array-methods`, `property-access`, `native-regex`, `map-runtime`, `dataview`, generators…) — the IR backend calls it; a front-end swap does not remove the need to emit an array `.map` loop or a regex matcher | ~39,635 | **keep**      |
+| **FRONTEND** — AST→Wasm dispatch & lowering that `from-ast.ts`/`lower.ts` replace (`expressions/`, operator/closure/literal/object lowering, statement lowering…)                                                                                                            | ~80,082 | **deletable** |
 
 **Net estimate: ~40–55K code lines removed** after (a) subtracting ~8–10K
 of FRONTEND-classified files that are really shared emission passes
@@ -52,7 +55,7 @@ of FRONTEND-classified files that are really shared emission passes
 (b) offsetting ~15–25K of IR growth needed to finish the remaining
 `mixed`/`direct-only` kinds. That takes `src/` from ~207K → **~155–165K
 code (~20–27% smaller compiler)** with **no capability change** for the
-Phase‑1 slice. It does *not* close the gap to Porffor — RUNTIME (~40K) and
+Phase‑1 slice. It does _not_ close the gap to Porffor — RUNTIME (~40K) and
 WasmGC substrate (~35K) are intrinsic to targeting WasmGC with a full
 stdlib.
 
@@ -63,6 +66,7 @@ already `ir-owned` in `plan/log/ir-adoption.md` (22 kinds today), i.e. the
 FRONTEND-bucket lowering that is unreachable when `experimentalIR: true`.
 
 **Never touch:**
+
 - Any file in **STAYS** or **RUNTIME** (substrate + stdlib behavior).
 - **Deferred** kinds (`eval`, `with`, `Proxy`, `for-in`, async-generator…) —
   they remain direct-only by design; their handlers (e.g. `with-scope.ts`)
@@ -103,10 +107,34 @@ work), **delete its legacy handler in the same PR** rather than leaving it
 dormant. Add a "legacy LOC deleted" metric alongside the `#2855` ratchet so
 retirement is tracked as subtraction, not just bucket-zeroing.
 
+## Phase 0 audit landed (2026-07-10)
+
+Deliverables: `scripts/audit-legacy-reachability.mjs` (call-graph
+reachability, re-runnable, `--why` path tracing) +
+`plan/log/3090-phase0-legacy-delete-list.md` (ranked delete-list, hard
+numbers, kind→file mapping).
+
+**Hard numbers:** FRONTEND legacy-only = **59,976 fn-lines** across 35 files
+(ranked list in the doc); deletable-NOW (unreferenced) ≈ **2.1K fn-lines**
+(index.ts `collect*Imports` family ~1.4K, regex/vm.ts 245, strays).
+
+**Premise correction — handler deletion is GATED, not free:** (G1) the
+default pipeline legacy-compiles EVERY function and the IR merely overlays
+bodies (IR-first #2138 is flag-gated, not default); (G2) the whole-function
+claim unit means any rejected function needs the legacy handler for every
+kind it contains — `ir-owned` status does NOT make a handler dead; (G3)
+top-level statements always compile via legacy; (G4) ~47K fn-lines of
+RUNTIME stdlib emission are reachable ONLY via legacy dispatch — the IR
+needs its own entry points before front-end retirement. Revised phase order
+in the audit doc: Phase 2 (knip + unreferenced) first; handler deletions
+couple to gate-clearing slices (IR-first default, module-level adoption,
+per-kind bucket closure, IR→runtime entry points).
+
 ## Acceptance criteria
 
-- [ ] Phase 0 audit doc committed with a hard deletable-LOC number + ranked
-      per-file/per-kind delete-list.
+- [x] Phase 0 audit doc committed with a hard deletable-LOC number + ranked
+      per-file/per-kind delete-list. (2026-07-10,
+      `plan/log/3090-phase0-legacy-delete-list.md`)
 - [ ] `src/codegen/` shrinks by **≥ 30K code lines** net across Phases 1–2
       (stretch: ≥ 45K), measured by `tokei src` before/after (baseline
       `src` = 206,674 code; `src/codegen` = 154,938).
@@ -126,7 +154,7 @@ retirement is tracked as subtraction, not just bucket-zeroing.
 - **Don't confuse RUNTIME with FRONTEND** — `array-methods`/`object-runtime`/
   `native-regex` have zero IR imports today but emit behavior both paths
   need; deleting them breaks features. Only delete what Phase 0 proves is
-  reachable *solely* via the legacy front-end dispatch.
+  reachable _solely_ via the legacy front-end dispatch.
 - **Late-import funcidx discipline** — codegen is sensitive to function-index
   shifts; deleting a handler that registered helper imports can shift
   indices. Re-run the standalone floor on `merge_group` for any slice that
