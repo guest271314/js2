@@ -79,6 +79,7 @@ import {
   S5C_STRUCT_ACCESSOR_CLOSURE,
   buildAccessorClosure,
   ensureStructAccessorGlobal,
+  isDefinePropertyReceiverLiteral,
 } from "./struct-accessor-closure.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
@@ -1150,7 +1151,9 @@ export function compileObjectLiteral(
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
-    if (isAnyContext || isPureStringIndexEmpty) {
+    // (#3076) defineProperty({}) receiver → open $Object (standalone/wasi;
+    // rationale in isDefinePropertyReceiverLiteral, struct-accessor-closure.ts).
+    if (isAnyContext || isPureStringIndexEmpty || isDefinePropertyReceiverLiteral(ctx, expr)) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
@@ -2854,6 +2857,7 @@ export function compileObjectLiteralForStruct(
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
         // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
         if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
+        ctx.legacyGenBufferEmitted = true; // (#3132) sync OR async legacy buffer emitted
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         methodFctx.body.push({ op: "local.get", index: bufferLocal });
         methodFctx.body.push({ op: "local.get", index: pendingThrowLocal });

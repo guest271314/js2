@@ -24,7 +24,7 @@ import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
-import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
+import { emitDynGet, widenBooleanDynamicAccess } from "./dyn-read.js"; // (#2580 M2 slice 1) (#2984)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import {
@@ -73,6 +73,7 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { resolveStandaloneProtoMemberValueClosure } from "./native-proto-value-read.js";
 import {
   ensureArrayNativeProtoGlue,
   ensureObjectNativeProtoGlue,
@@ -533,7 +534,7 @@ const NUMBER_CONSTANT_PROPS = new Set([
  * `Math["PI"]` / `const k = "PI"; Math[k]`). Keeping these here means the
  * reflective read and the direct read never drift.
  */
-const MATH_CONSTANT_VALUES: Record<string, number> = {
+export const MATH_CONSTANT_VALUES: Record<string, number> = {
   PI: Math.PI,
   E: Math.E,
   LN2: Math.LN2,
@@ -543,7 +544,7 @@ const MATH_CONSTANT_VALUES: Record<string, number> = {
   LOG2E: Math.LOG2E,
   LOG10E: Math.LOG10E,
 };
-const NUMBER_CONSTANT_VALUES: Record<string, number> = {
+export const NUMBER_CONSTANT_VALUES: Record<string, number> = {
   EPSILON: Number.EPSILON,
   MAX_SAFE_INTEGER: Number.MAX_SAFE_INTEGER,
   MIN_SAFE_INTEGER: Number.MIN_SAFE_INTEGER,
@@ -586,7 +587,7 @@ function tryEmitBuiltinNamespaceConstantValue(
  * `TYPED_ARRAY_NAMES`. Single source of truth for both the static-read constant
  * emitter and the instance-read arm in the typed-array property block.
  */
-const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
+export const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
   Int8Array: 1,
   Uint8Array: 1,
   Uint8ClampedArray: 1,
@@ -616,7 +617,7 @@ const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
  * wrong, so they keep refusing (namespace static reads are a separate #2860
  * follow-up).
  */
-const BUILTIN_CTOR_ARITY: Record<string, number> = {
+export const BUILTIN_CTOR_ARITY: Record<string, number> = {
   Object: 1,
   Array: 1,
   Function: 1,
@@ -909,34 +910,6 @@ function makeBuiltinClosureFctx(
 }
 
 /**
- * (#2175 S0) Generalized native-method-closure factory. `kind`:
- *   - `"static"` — the existing receiver-less builtin-static behaviour
- *     (`Array.isArray`, `Object.keys`, `Object.getOwnPropertyDescriptor`),
- *     kept BYTE-IDENTICAL — delegates to the unchanged
- *     `ensureStandaloneBuiltinStaticMethodClosure` below.
- *   - `"method"` / `"getter"` — brand-keyed native-method/getter closures with
- *     an `externref this` first user param + a brand-recovery prologue,
- *     delegated to `ensureStandaloneNativeMethodClosure` (native-proto.ts).
- *
- * S0 reaches only the `"static"` path; S1 wires `"method"`/`"getter"` for
- * RegExp through the refusal site below.
- */
-function ensureStandaloneNativeMethodClosureLocal(
-  ctx: CodegenContext,
-  builtinName: string,
-  propName: string,
-  expr: ts.PropertyAccessExpression,
-  kind: "static" | "method" | "getter",
-  brand?: number,
-): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
-  if (kind !== "static") {
-    if (brand === undefined) return null;
-    return ensureStandaloneNativeMethodClosure(ctx, brand, propName, kind);
-  }
-  return ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
-}
-
-/**
  * (#2175 S1) Register a builtin's `$NativeProto` glue (so its proto object can
  * materialize and its members resolve to native-method closures) and return its
  * brand. Returns `undefined` for builtins not yet wired into the native-proto
@@ -1198,13 +1171,13 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
 
   const brand = tryEnsureNativeProtoBrand(ctx, builtinName);
   if (brand === undefined) return undefined;
-  const glue = getNativeProtoBuiltinGlue(ctx, brand);
-  if (!glue) return undefined;
 
   const member = expr.name.text;
-  const kind = glue.memberKind(member);
-  const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, kind);
-  if (!closure) return undefined;
+  // (#2984 Phase 2) Own-CSV gate + Object.prototype inheritance + un-wired-
+  // member refusal fallback — policy lives in native-proto-value-read.ts.
+  const resolved = resolveStandaloneProtoMemberValueClosure(ctx, brand, builtinName, member);
+  if (!resolved) return undefined;
+  const { closure, kind } = resolved;
 
   if (kind === "getter") {
     // (#2885 Site 3) A plain read of `<Builtin>.prototype.<getter>` must INVOKE
@@ -1246,15 +1219,18 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
   return closure.type;
 }
 
-function ensureStandaloneBuiltinStaticMethodClosure(
+export function ensureStandaloneBuiltinStaticMethodClosure(
   ctx: CodegenContext,
   builtinName: string,
   propName: string,
-  _expr: ts.PropertyAccessExpression,
+  _expr?: ts.PropertyAccessExpression,
 ): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
   const key = `${builtinName}.${propName}`;
   let paramTypes: ValType[];
   let returnType: ValType | null;
+  // (#2984 Phase 3) True for statics with no hand-written native body below:
+  // they reify with a catchable-TypeError body instead of returning null.
+  let genericThrowBody = false;
 
   switch (key) {
     case "Array.isArray":
@@ -1307,8 +1283,28 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }];
       returnType = { kind: "externref" };
       break;
-    default:
-      return null;
+    default: {
+      // (#2984 Phase 3) Any OTHER standard builtin static method — the
+      // `BUILTIN_STATIC_METHOD_ARITY` membership is the complete own
+      // function-valued static surface of the global ctors/namespaces —
+      // reifies as an identity-stable first-class closure whose BODY throws a
+      // catchable TypeError (the #2193/#2651/#2984-Phase-2 degrade-to-
+      // catchable pattern). The VALUE is spec-shaped: per-(builtin, method)
+      // meta subtype (`.name`/`.length` reflective reads) + module singleton,
+      // so `Object.getOwnPropertyDescriptor(Math, "atan2").value ===
+      // Math.atan2` and `Math.atan2 === Math.atan2` hold; only INVOKING the
+      // extracted value throws. Direct calls (`Math.atan2(y, x)`) never route
+      // here — they keep their dedicated call lowerings. Every shape reaching
+      // this branch was a hard refusal-CE before (#1907 static-value-read),
+      // so no currently-passing program changes.
+      const genericArity = BUILTIN_STATIC_METHOD_ARITY[builtinName]?.[propName];
+      if (genericArity === undefined) return null;
+      paramTypes = [];
+      for (let i = 0; i < genericArity; i++) paramTypes.push({ kind: "externref" });
+      returnType = { kind: "externref" };
+      genericThrowBody = true;
+      break;
+    }
   }
 
   const resultTypes = returnType ? [returnType] : [];
@@ -1407,6 +1403,13 @@ function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "any.convert_extern" } as Instr);
       closureFctx.body.push({ op: "call", funcIdx: rootIdx });
       closureFctx.body.push({ op: "extern.convert_any" } as Instr);
+    } else if (genericThrowBody) {
+      // (#2984 Phase 3) Degrade-to-catchable body: a real TypeError instance +
+      // `throw` — the EXACT helper the Phase-2 proto refusal bodies use,
+      // proven catchable through the closure-call path. The body ends in
+      // `throw`, so it validates against the declared externref result
+      // (unreachable tail).
+      emitThrowTypeError(ctx, closureFctx, `${key} is not yet implemented in --target standalone`);
     }
 
     funcIdx = mintDefinedFunc(ctx);
@@ -1424,7 +1427,13 @@ function ensureStandaloneBuiltinStaticMethodClosure(
   // subtype of the signature wrapper, so the reflective runtime natives can
   // `ref.test` it and answer its spec `name`/`length` own properties. All call
   // paths are unaffected (subtype of the wrapper the lifted func expects).
-  const meta = STANDALONE_STATIC_METHOD_META[key];
+  // (#2984 Phase 3) Generic statics derive their spec meta from the arity
+  // table (`.name` === the property key per §10.2.9); the hand-written table
+  // stays first so wired closures keep their exact meta (byte-identical).
+  const genericMetaArity = BUILTIN_STATIC_METHOD_ARITY[builtinName]?.[propName];
+  const meta =
+    STANDALONE_STATIC_METHOD_META[key] ??
+    (genericMetaArity !== undefined ? { name: propName, length: genericMetaArity } : undefined);
   if (meta) {
     const metaTypeIdx = ensureBuiltinFnMetaType(
       ctx,
@@ -3357,10 +3366,31 @@ function tryEmitConstructorViaTag(
   // undefined" — cascading to ~478 TypedArray tests (net -479). The fix restores
   // the pre-PR fall-through: no class-tag match ⇒ the original generic read.
   const resLocal = allocLocal(fctx, `__ctoridn_res_${fctx.locals.length}`, { kind: "externref" });
-  const externGetIdx =
-    ctx.standalone || ctx.wasi || ctx.strictNoHostImports
-      ? undefined
-      : ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  // (#3130) Standalone/WASI seed via the NATIVE `__extern_get` (the object
+  // runtime's defined reader), not a hard null. This arm fires for EVERY
+  // `any`-typed `.constructor` read once the module declares one tag-bearing
+  // user class — the test262 harness injects `class Test262Error`, so that is
+  // essentially every standalone program — and the old null seed meant the
+  // read NEVER reached the runtime reader. With fillExternGetErrorProps the
+  // native reader answers `.constructor` on a native `$Error_struct` with the
+  // SAME `__builtin_<Name>` carrier the bare identifier reads, so
+  // `reason.constructor === TypeError` (§27.2.1.3.2 resolve-settled-*-self)
+  // is genuine identity. For every other receiver the native reader preserves
+  // the old behaviour ($Object without a `constructor` prop / non-object →
+  // miss), so nothing regresses. Plain strictNoHostImports (gc, no-host)
+  // keeps the null seed unchanged.
+  let externGetIdx: number | undefined;
+  if (ctx.standalone || ctx.wasi) {
+    ensureObjectRuntime(ctx);
+    externGetIdx = ctx.funcMap.get("__extern_get");
+  } else if (!ctx.strictNoHostImports) {
+    externGetIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+  }
   if (externGetIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     // __extern_get(extern.convert_any(instLocal), "constructor")
@@ -3371,9 +3401,8 @@ function tryEmitConstructorViaTag(
     fctx.body.push({ op: "call", funcIdx: externGetIdx } as Instr);
     fctx.body.push({ op: "local.set", index: resLocal });
   } else {
-    // Standalone / WASI / no-host: no `__extern_get` import. Preserve the prior
-    // behaviour for a non-class receiver (null externref — there is no host
-    // constructor object to recover).
+    // No-host gc mode without the runtime reader: preserve the prior behaviour
+    // for a non-class receiver (null externref).
     fctx.body.push({ op: "ref.null.extern" } as Instr);
     fctx.body.push({ op: "local.set", index: resLocal });
   }
@@ -6285,7 +6314,7 @@ export function compilePropertyAccess(
   // (e.g., properties on Object, {}, undefined, or dynamically-typed values).
   // Determine the expected result type from the TS checker at the access site.
   const accessType = ctx.checker.getTypeAtLocation(expr);
-  const accessWasm = resolveWasmType(ctx, accessType);
+  const accessWasm = widenBooleanDynamicAccess(accessType, resolveWasmType(ctx, accessType)); // (#2984)
 
   // For struct types with the property, try to compile the object and do struct.get
   // but NEVER for class struct types — their fields are fixed at collection time
@@ -6446,7 +6475,23 @@ export function compilePropertyAccess(
             if (fieldKinds.size === 1) {
               const k = [...fieldKinds][0];
               if (k === "f64" || k === "i32") {
-                resultWasm = { kind: k } as ValType;
+                // (#2938) Preserve the #2030/#2785 boolean BRAND through the
+                // Phase-3 narrowing. When EVERY candidate field is a boolean-
+                // branded i32 (e.g. the native generator result's `done`,
+                // generators-native.ts ensureNativeGeneratorResultType), the
+                // narrowed read result is boolean too — the caller's
+                // i32→externref boxing then routes through `__box_boolean`
+                // (coerceType's #2785 brand-aware arm), so the test262 harness
+                // shape `const d: any = g.next().done; d === true` holds. A
+                // fresh unbranded `{kind:"i32"}` here ERASED the brand: the
+                // value re-boxed as $BoxedNumber(1), the any-`===` typeof
+                // partition saw number-vs-boolean, fell to ref identity, and
+                // answered UNEQUAL (the residual wrong-value failure of the
+                // #2938 no-yield relax — generators/no-yield.js, return.js).
+                const allBoolean =
+                  k === "i32" &&
+                  structCandidates.every((c) => c.fieldType.kind === "i32" && c.fieldType.boolean === true);
+                resultWasm = allBoolean ? { kind: "i32", boolean: true } : ({ kind: k } as ValType);
                 if (unboxIdx === undefined) {
                   unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
                   flushLateImportShifts(ctx, fctx);
@@ -6529,8 +6574,11 @@ export function compilePropertyAccess(
           // sees f64/i32 directly, no enclosing unbox needed. Falls
           // back to the legacy accessWasm-based return when no
           // narrowing was possible.
-          if (resultWasm.kind === "f64") return { kind: "f64" };
-          if (resultWasm.kind === "i32") return { kind: "i32" };
+          // (#2938) Return `resultWasm` itself for the narrowed primitives so
+          // the boolean brand (set above when all candidates are branded)
+          // survives to the caller's coercions — a fresh `{kind:"i32"}` here
+          // re-erased it.
+          if (resultWasm.kind === "f64" || resultWasm.kind === "i32") return resultWasm;
           if (accessWasm.kind === "f64") return { kind: "f64" };
           if (accessWasm.kind === "i32") return { kind: "i32" };
           return { kind: "externref" };

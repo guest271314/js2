@@ -1,10 +1,10 @@
 ---
 id: 2956
 title: "Linear backend consumes the IR front-end: wire the selector + LinearEmitter into generateLinearModule"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-07-02
-updated: 2026-07-09
+updated: 2026-07-10
 priority: medium
 horizon: xl
 feasibility: hard
@@ -198,3 +198,49 @@ file separately when L2 lands).
 XL total; L0+L1 ≈ one senior-dev budget window (Fable for L0's interface
 cut + L1's gate; the LinearIntegration itself is mechanical); L2+ are
 M-sized Opus slices banked by the ratchet.
+
+## Execution status — L1 LANDED (2026-07-10, fable-2938)
+
+**Slice L1 shipped** (this PR): `--target linear` consumes the IR front-end
+for selector-claimed numeric/control-flow top-level functions, gated on
+`JS2WASM_LINEAR_IR=1` (flag off ⇒ `generateLinearModule` byte-identical,
+proven in `tests/issue-2956.test.ts`).
+
+- **`src/ir/backend/linear-integration.ts`** (new) — the linear driver:
+  `planIrCompilation` → shared `lowerFunctionAstToIr` → `verifyIrFunction`
+  → `verifyIrBackendLegality("linear")` (#2954, the capability gate) →
+  `lowerIrFunctionBody` via `LinearEmitter` → ready-to-insert
+  `WasmFunction`s at the pre-assigned `funcMap` slots. Slice-1 resolver =
+  the four REQUIRED `IrLowerResolver` methods, name-based over
+  `ctx.funcMap`/`ctx.moduleGlobals`/`ctx.mod.types` (deduped
+  `internFuncType`); all optional shape hooks absent by design.
+- **Cross/self/mutual recursion works**: `calleeTypes` is pre-seeded from
+  annotations via from-ast's own `typeNodeToIr` (now exported — additive)
+  plus a bounded fixpoint over successful builds. `fib`, `even`/`odd`,
+  callers-of-claims all IR-compile.
+- **Demotion channel + ratchet** (acceptance criterion 3):
+  `pnpm run check:linear-ir` (`scripts/check-linear-ir.ts` +
+  `scripts/linear-ir-baseline.json`) — compiled count may not DECREASE, no
+  demotion bucket may INCREASE; `--update` banks progress. Seeded at
+  compiled=6 / `build:4` on the playground corpus.
+- **Validation**: `tests/issue-2956.test.ts` (5 cases: IR-claim + run
+  parity, flag-off byte-identity, collatz value parity, demote-and-
+  direct-compile, mutual recursion); full linear suite + cross-backend
+  diff 182/182; tsc clean.
+
+**L0 deviation (recorded for review):** L1 deliberately did NOT execute the
+L0 adapter extraction first. Every primitive the driver calls is already
+backend-neutral in its own module — nothing duplicates integration.ts's
+selection/typeMap/report logic (the forbidden drift-clone), and touching
+integration.ts would have collided with in-flight #3029-S3 (same
+extraction, owned there: "do it once, here"). When S3 lands, this driver
+becomes the `LinearIntegration` adapter implementation nearly verbatim —
+and the interface gets cut with TWO live consumers in view instead of one.
+
+**Remaining slices (unclaimed):** L2 (vec construction #1804-linear arm +
+linear `resolveVec` from-ast threading, refcells, aggregates via
+layout.ts), L3 (strings, after #2955), L4 (default-ON flip + fold the
+direct path's reject list into the ratchet). Acceptance criterion 2
+(cross-backend corpus rows flip `expectLinearUnsupported`) rides the L4
+default-ON flip — under the L1 flag the corpus rows are unchanged by
+construction.

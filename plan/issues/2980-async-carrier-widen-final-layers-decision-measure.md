@@ -1,7 +1,8 @@
 ---
 id: 2980
 title: "Standalone async widen — FINAL layers (async-fn drive −16 residual, Gap 5 for-await/async-gen −32) + the slice-1d carrier-widen DECISION MEASURE"
-status: ready
+status: done
+completed: 2026-07-10
 # measure phase delivered by ttraenkler/fable-5 (2026-07-02) — the four residual classes are the remaining work.
 # NB the 07-02 claim release had NOT landed on the issue-assignments ref; force-released
 # 2026-07-03 by the architect (`claim-issue.mjs --release 2980 ... --force`). Claimable now.
@@ -10,6 +11,11 @@ status: ready
 # the full decision measure — released back to `ready` for the next dev to
 # claim class 3 (independent, next-largest, −12) or pick up once #2906
 # slices 3/4 land (classes 2+4). See "## Class 1 landed" below.
+# 2026-07-10 (fable-2938): MEASUREMENT COMPLETE — all six buckets (incl. the
+# class-async supplement) re-measured at main@d7a1feaa1c: total +20, no bucket
+# ≤ −2 → rule 1 MET. The flip PR is NOT opened yet: gated on the #2978/#2833
+# pairing (bot-park-held) + stakeholder sign-off. See the 07-10 section below.
+# Claim released; the flip is an S slice once both gates clear.
 created: 2026-07-02
 updated: 2026-07-05
 priority: high
@@ -317,3 +323,101 @@ needs explicit stakeholder sign-off before merge.
 plain `yield <promise>` must Await; currently yields NaN) — a real host-free
 async-gen conformance win, ORTHOGONAL to the flip (the −4 files are legacy, not
 driven), banked separately.
+
+## CONFIRMATION RE-MEASURE incl. the class-async SIXTH bucket — 2026-07-10 (fable-2938, main@d7a1feaa1c)
+
+The 07-09 record above declared VERDICT: FLIP but its table omits the
+**class-async supplement**, which `plan/log/2980-carrier-widen-tradeoff.md` §6
+point 5 makes an explicit **sixth blocking bucket** (it was −2 at the 07-09
+tradeoff measure — a rule-1 blocker on its own). This run re-measures ALL SIX
+buckets fresh at main@`d7a1feaa1c` (post #3120/#3125/#3121 and the
+conservative-fallback layer `b66d7e2ceb`, all landed):
+
+| bucket               | n   | off | on  | net     | +fixed/−regressed |
+| -------------------- | --- | --- | --- | ------- | ----------------- |
+| async-function       | 60  | 32  | 35  | +3      | +4 / −1           |
+| for-await-of         | 60  | 14  | 18  | +4      | +4 / −0           |
+| async-generator      | 60  | 43  | 43  | +0      | +0 / −0           |
+| promise-then-all     | 60  | 18  | 30  | +12     | +18 / −6          |
+| await-expr           | 22  | 9   | 10  | +1      | +1 / −0           |
+| class-async (suppl.) | 60  | 46  | 46  | **+0**  | +3 / −3           |
+| **TOTAL**            | 322 |     |     | **+20** | +30 / −10         |
+
+**Rule 1 across all six buckets: MET** — positive total (+20), no bucket
+≤ −2 (worst is 0). The class-async supplement's 07-09 blocker (−2,
+`yield-promise-reject-next*`) is cleared by the conservative fallback: its 3
+residual regressions are now `illegal cast in __then_fulfill_0` /
+static-async-method shapes (filed-forward known-negatives inside a net-0
+bucket — non-blocking per rule 1). Also non-blocking, filed forward:
+promise-then-all's 6 in-bucket regs (thenable-assimilation edges —
+`resolve-thenable`, `resolve-poisoned-then`, `rxn-handler-*` — the #3125
+class, partially landed) and async-function's `evaluation-body.js`
+(pre-existing).
+
+Harness: the `scripts/measure/` recipe. This PR banks the missing piece into
+`scripts/measure/corpus.mjs`: the `class-async` bucket
+(`language/{expressions,statements}/class` filtered `/async/`, cap 60, per
+the tradeoff-doc appendix) plus a `MEASURE_BUCKET` env filter for cheap
+single-bucket re-runs. (Run guards for escaping wasm traps were already in
+`arm.mts`; one off-arm async-function file does crash an unguarded runner
+via an escaping null-deref rejection, so keep the guards.)
+
+### Flip status after this measure
+
+The measurement precondition is FULLY met. The flip PR (the two predicates
+`isStandalonePromiseActive` + `isStandaloneThenChainNativeActive`, nothing
+else) remains gated on the two NON-measurement conditions of the 07-09
+record:
+
+1. **#2978/#2934-3b pairing (PR #2833)** — the tradeoff doc §6 point 4 says
+   the pairing lands "before or with the flip". PR #2833 is currently
+   **bot-park-held** (`auto-park-bot:merge-group-failure`, 3 park cycles on
+   2026-07-10) — a real merged-state regression owned by that PR's author;
+   the flip waits for it.
+2. **Explicit stakeholder sign-off** (scoreboard-affecting change, per the
+   07-09 record).
+
+Escalated to the tech lead with this measure; #2980 claim released — the
+flip PR is an S slice for whoever holds the pen when #2833 lands + sign-off
+arrives.
+
+## ✅ THE FLIP — 2026-07-10 (fable-2938, stakeholder sign-off granted)
+
+Both non-measurement gates cleared on 2026-07-10: **PR #2833** (the
+#2978/#2934-3b pairing) merged at 15:16, and **explicit stakeholder
+sign-off** was granted (relayed by the tech lead). Per rule 1, the flip PR
+carries exactly the two predicates + this record:
+
+- `isStandalonePromiseActive` / `isStandaloneThenChainNativeActive` →
+  `ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx))`
+  — verbatim the MEASURED on-arm semantics (the conservative async-gen
+  fallback `b66d7e2ceb` included). The `JS2WASM_ASYNC_CARRIER_WIDEN`
+  instrument is retired (on-arm == production now); the harness stays in
+  `scripts/measure/` for future re-measures.
+- The former #2865 receiver-directed arm of the then-chain predicate
+  (`getDrainFuncIdxForWasiStart(ctx) !== null`) is subsumed: the widened arm
+  is a superset for every non-async-gen standalone module, and async-gen
+  modules measured host-clean (bucket net 0, zero regressions) with the
+  whole lane host per the fallback.
+- One consequential test update: `tests/issue-2978-forawait-rejected.test.ts`
+  "standalone carrier-off" case — post-flip that lane is carrier-ON, so the
+  rejected-promise for-await now delivers the ORIGINAL rejection reason
+  (spec-correct, identical to its wasi case) instead of the bounded-cap
+  TypeError. Expectation updated with provenance comment.
+- Production-behavior probe (no env): plain async module compiles host-free
+  (no `Promise_resolve` import); async-gen module keeps the host lane
+  (`Promise_reject` import present) — exactly the measured arms.
+- Local validation: issue-2978/2979/2980-carrier-fallback suites green;
+  tsc/prettier clean. NB `tests/issue-2865-standalone-async-await-unwrap.test.ts`
+  has 2 WASI-lane failures locally that reproduce IDENTICALLY on unmodified
+  main (pre-existing local-env artifact; wasi arm untouched by this flip;
+  green in CI on main) — not a flip effect.
+- The authoritative gate is the `merge_group` standalone lane (48k) — this
+  PR is scoreboard-affecting (~+20 construct-sampled; population estimate
+  per the tradeoff doc §4). `auto-park` catches any residual.
+
+**#2980 is DONE with this flip.** The #2867/#2895/#2906 async program now
+scores on the standalone lane. Filed-forward known-negatives (inside
+net-positive buckets): thenable-assimilation edges (#3125 class, 6 sampled
+files), `evaluation-body.js`, the 3 class-async static-async illegal-cast
+shapes. Follow-ups belong to their own issues.

@@ -35,6 +35,7 @@
 // `undefined` result uses the existing `emitUndefined` convention (host
 // `__get_undefined`, else `ref.null.extern`). No new host import.
 
+import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
@@ -44,7 +45,7 @@ import {
   ensureAnyFromExternHelper, // (#3053 U0) settled honest classifier (CS1b)
   ensureAnyToExternHelper, // (#3053 U0) key marshalling
 } from "./any-helpers.js";
-import { ensureGetUndefined } from "./expressions/late-imports.js";
+import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -1063,4 +1064,142 @@ function emitDynMemberGetSelfTestHost(ctx: CodegenContext, dmgIdx: number): void
       { op: "i32.eqz" } as Instr, // 1 iff the read produced a non-null result
     ],
   );
+}
+
+/**
+ * (#2984) True when a property-access site's TS type is boolean-like:
+ * `boolean`, a boolean literal, or a union of boolean literals with only
+ * `undefined`/`void`/`null` alongside (the ubiquitous lib shape
+ * `PropertyDescriptor.writable?: boolean` resolves to `boolean | undefined`,
+ * whose UNION type object carries no `BooleanLike` flag of its own — the
+ * members must be walked).
+ *
+ * Why it matters: a boolean-typed property read that resolves through the
+ * DYNAMIC fallback (`__extern_get` host-MOP read / member-get dispatcher /
+ * sidecar read) must NOT narrow to i32 via `__unbox_number` +
+ * `i32.trunc_sat_f64_s`. That pipeline is a ToNumber, not a boolean read: the
+ * standalone native `__unbox_number` yields NaN for a boxed boolean, so
+ * `Object.getOwnPropertyDescriptor(o, k).writable` came back as i32 0, and an
+ * any-context consumer (a test262-harness `assert.sameValue(desc.writable,
+ * true)` argument) then RE-boxed that 0 as a NUMBER — failing strict equality
+ * for every descriptor-attribute assertion in the standalone gOPD cluster
+ * (host only "passed" the harness shape by the ToNumber(true)=1 coincidence).
+ * Keeping the raw externref preserves BOTH the boolean box (value-correct
+ * native `===`) and `undefined` for an absent attribute (i32 narrowing erased
+ * it to `false`). Consumed by `compilePropertyAccess`'s dynamic-fallback
+ * region (property-access.ts).
+ */
+export function isBooleanLikeAccessType(t: ts.Type): boolean {
+  if ((t.flags & ts.TypeFlags.BooleanLike) !== 0) return true;
+  if ((t.flags & ts.TypeFlags.Union) !== 0) {
+    let sawBool = false;
+    for (const m of (t as ts.UnionType).types) {
+      if ((m.flags & ts.TypeFlags.BooleanLike) !== 0) {
+        sawBool = true;
+        continue;
+      }
+      if ((m.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) !== 0) continue;
+      return false;
+    }
+    return sawBool;
+  }
+  return false;
+}
+
+/**
+ * (#2984) The dynamic-fallback access-type widening consumed by
+ * `compilePropertyAccess` (property-access.ts): a boolean-like access type
+ * whose resolved Wasm type is i32 keeps the raw externref instead (see the
+ * rationale on `isBooleanLikeAccessType` above). Numeric narrowings and every
+ * non-boolean i32 (native `type i32 = number` annotations) pass through
+ * unchanged, so modules without boolean-typed dynamic-fallback reads are
+ * byte-identical.
+ */
+export function widenBooleanDynamicAccess(t: ts.Type, wasm: ValType): ValType {
+  return wasm.kind === "i32" && isBooleanLikeAccessType(t) ? { kind: "externref" } : wasm;
+}
+
+/**
+ * (#2984) `Object.getOwnPropertyDescriptor(this, "NaN"|"Infinity"|"undefined")`
+ * — the sloppy-mode global-`this` receiver. The compiler models an unbound
+ * top-level `this` as `undefined`, so the dynamic gOPD saw
+ * `gOPD(undefined, key)` → no descriptor; the test262
+ * `built-ins/{NaN,Infinity,undefined}` + gOPD 15.2.3.3-4-178..180 attribute
+ * asserts only "passed" through the pre-#2984 undefined→ToNumber(NaN)→i32
+ * 0 === false coincidence that the boolean-read fix retired. This emits a
+ * RUNTIME-guarded fold: a nullish receiver (the unbound global `this` — null
+ * extern on standalone, the non-null host `undefined` sentinel via
+ * `__extern_is_undefined` on the host lane) yields the spec §19.1.1–19.1.3
+ * value-property data descriptor `{ value, writable:false, enumerable:false,
+ * configurable:false }`; a REAL receiver (a host-dispatched body invoked with
+ * one) keeps the dynamic `__getOwnPropertyDescriptor` read, so an own "NaN"
+ * prop still wins. Only these three immutable global value props are folded —
+ * their descriptors are spec constants.
+ *
+ * Contract: the CALLER has already pushed the receiver as externref (this
+ * ordering is load-bearing — the receiver's own lowering may register late
+ * imports, e.g. `__get_undefined`, so every funcIdx here is captured AFTER
+ * it and flushed before use). Always consumes the receiver and leaves exactly
+ * one externref on the stack.
+ */
+export function emitGlobalThisGopdFold(ctx: CodegenContext, fctx: FunctionContext, key: string): void {
+  const recvTmp = allocLocal(fctx, `__gopd_this_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvTmp } as Instr);
+  const boxIdx =
+    key === "undefined" ? undefined : ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  const createIdx = ensureLateImport(
+    ctx,
+    "__create_descriptor",
+    [{ kind: "externref" }, { kind: "i32" }],
+    [{ kind: "externref" }],
+  );
+  const dynGopdIdx = ensureLateImport(
+    ctx,
+    "__getOwnPropertyDescriptor",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  const getUndefIdx = key === "undefined" ? ensureGetUndefined(ctx) : undefined;
+  addStringConstantGlobal(ctx, key);
+  flushLateImportShifts(ctx, fctx);
+  if (createIdx === undefined || dynGopdIdx === undefined || isUndefIdx === undefined) {
+    // Degenerate (imports unregisterable): preserve the one-externref contract.
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+  // nullish? (ref.is_null catches the standalone null-extern regime; the host
+  // `undefined` sentinel is a NON-null externref → __extern_is_undefined.)
+  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
+  fctx.body.push({ op: "call", funcIdx: isUndefIdx } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  const thenInstrs: Instr[] = [];
+  if (key === "undefined") {
+    // Regime-aware `undefined` (host sentinel / standalone singleton / null
+    // extern) — its import was pre-ensured above (getUndefIdx), so this
+    // detached-array emission cannot add a late import mid-build.
+    void getUndefIdx;
+    const savedBody = fctx.body;
+    fctx.body = thenInstrs;
+    emitUndefined(ctx, fctx);
+    fctx.body = savedBody;
+  } else {
+    thenInstrs.push({ op: "f64.const", value: key === "NaN" ? Number.NaN : Number.POSITIVE_INFINITY } as Instr);
+    if (boxIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+  }
+  thenInstrs.push({ op: "i32.const", value: 0 } as Instr); // writable/enumerable/configurable: false (§19.1)
+  thenInstrs.push({ op: "call", funcIdx: createIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: thenInstrs,
+    else: [
+      { op: "local.get", index: recvTmp } as Instr,
+      ...stringConstantExternrefInstrs(ctx, key),
+      { op: "call", funcIdx: dynGopdIdx } as Instr,
+    ],
+  } as Instr);
 }

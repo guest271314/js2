@@ -102,9 +102,13 @@ describe("#2671 — RegExp lastIndex value-preserving slot", () => {
   // Mirrors built-ins/RegExp/prototype/Symbol.replace/coerce-lastindex-err.js.
   // A lastIndex set with a throwing `valueOf` performed INSIDE a user-overridden
   // `exec` (invoked by RegExp.prototype[@@replace]'s empty-match advance) must
-  // surface the abrupt completion. Native @@replace does not ToLength the
-  // JS-visible lastIndex, so this set is coerced eagerly (protocol-depth > 0) and
-  // the throw propagates out of @@replace.
+  // surface the abrupt completion. (#3084) The set stores the deferred coercion
+  // shim VERBATIM per §22.2.6.11; V8's slow protocol path then performs the
+  // spec's `ToLength(? Get(rx, "lastIndex"))` read in the empty-match advance
+  // branch, which fires the shim's valueOf and propagates the throw out of
+  // @@replace. (The former eager protocol-depth coercion at assignment time was
+  // retired by #3084 — it fired valueOf even for NON-empty matches, violating
+  // Symbol.match/g-match-no-coerce-lastindex.js.)
   it("propagates a throwing lastIndex valueOf set during @@replace (overridden exec)", async () => {
     const exp = await run(`
       const r = /./g;

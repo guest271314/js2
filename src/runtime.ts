@@ -278,6 +278,29 @@ let _GeneratorInstancePrototypeCache: any = null;
 let _AsyncGeneratorInstancePrototypeCache: any = null;
 let _IteratorPrototypeCache: any = null;
 let _AsyncIteratorPrototypeCache: any = null;
+// (#3049) Shared `%ArrayIteratorPrototype%` stand-in for iterators the
+// `__iterator` host import SYNTHESIZES over compiled vec structs. §23.1.5.2:
+// array iterators are ObjectCreate(%ArrayIteratorPrototype%), whose
+// [[Prototype]] is %IteratorPrototype%. The old one-level chain made the
+// spec-shaped walk `getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
+// (hardcoded by tests + the runner's `Iterator` shim) overshoot the
+// helper-bearing proto onto Object.prototype → every
+// `Iterator.prototype.<helper>` lookup was undefined. One SHARED cached
+// middle object keeps getPrototypeOf identity stable across iterators.
+let _SynthArrayIteratorPrototypeCache: any = null;
+function _getSynthArrayIteratorPrototype(base: any): any {
+  if (_SynthArrayIteratorPrototypeCache) return _SynthArrayIteratorPrototypeCache;
+  const proto = Object.create(base ?? null);
+  _SynthArrayIteratorPrototypeCache = proto;
+  // §23.1.5.2.2 %ArrayIteratorPrototype% [ @@toStringTag ]
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "Array Iterator",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
 
 /**
  * Install a built-in method on a prototype with spec-mandated descriptor
@@ -5168,16 +5191,18 @@ const _hostProxyReverse = new WeakMap<object, any>();
 // unwraps the shim to the raw struct so an explicit `r.lastIndex` read keeps
 // object identity (`assert.sameValue(r.lastIndex, obj)`).
 //
-// Exception — a set that happens DURING a regex protocol call (`_regexProtocolDepth
-// > 0`), i.e. inside a user-overridden `exec` invoked by
-// RegExp.prototype[@@replace/@@split/…]: the native protocol then does NOT coerce
-// the JS-visible `lastIndex` (V8's @@replace skips the empty-match ToLength of
-// the property), so a deferred shim would never fire valueOf. Coerce eagerly
-// here so a throwing `valueOf` surfaces at the assignment (matching the spec's
-// "abrupt completion during coercion of lastIndex"), storing the resulting
-// number. Primitive numbers are always stored verbatim.
+// (#3084) A set DURING a regex protocol call (inside a user-overridden `exec`
+// invoked by RegExp.prototype[@@match/@@replace/@@split]) ALSO defers.
+// §22.2.6.8/11/14 store the assigned value verbatim; the property is only read
+// as `ToLength(? Get(rx, "lastIndex"))` in the EMPTY-match advance branch, and
+// V8's slow (modified-RegExp) protocol path performs exactly that read —
+// measured: empty match fires the shim's valueOf via the native ToLength;
+// non-empty match never reads it (so a throwing valueOf must NOT fire,
+// Symbol.match/g-match-no-coerce-lastindex.js). The former eager
+// protocol-depth coercion here fired valueOf unconditionally at assignment
+// time, which was spec-incorrect for the non-empty-match case.
+// Primitive numbers are always stored verbatim.
 const _lastIndexShimRaw = new WeakMap<object, any>();
-let _regexProtocolDepth = 0;
 function _makeLastIndexShim(
   struct: any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
@@ -5717,6 +5742,84 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
  * so the callability throws + size ToNumber coercion happen per spec. Scoped to
  * the 7 set-algebra methods only — no change to `_wrapForHost`'s own behaviour.
  */
+/**
+ * (#3049) Iterator-record faithfulness shim for the ES2025 Iterator helpers
+ * (`Iterator.prototype.map/filter/take/…`), which drive the RECEIVER via the
+ * spec iterator record (Call(next, iter) → Get(result, "done"/"value")).
+ * Compiled shapes break that: a raw-struct receiver has opaque reads; a
+ * `next` whose value is a Wasm closure struct isn't host-callable ("object is
+ * not a function" — the this-plain-iterator cluster); Wasm-struct step
+ * results have opaque done/value (infinite drive loop). The shim bridges the
+ * record methods callable and host-mirrors struct step results. Mirrors the
+ * `_setLikeRecordForHost` (#1627) precedent — scoped to the Iterator-helper
+ * dispatch sites only; no change to `_wrapForHost` itself.
+ */
+const _ITER_HELPER_NAMES = [
+  "map",
+  "filter",
+  "take",
+  "drop",
+  "flatMap",
+  "reduce",
+  "toArray",
+  "forEach",
+  "some",
+  "every",
+  "find",
+] as const;
+function _isIteratorHelperFn(f: any): boolean {
+  if (typeof f !== "function") return false;
+  const I: any = (globalThis as any).Iterator;
+  const p = I?.prototype;
+  if (p == null || typeof p !== "object") return false;
+  for (const n of _ITER_HELPER_NAMES) {
+    if (p[n] === f) return true;
+  }
+  return false;
+}
+function _iteratorRecordForHost(
+  v: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (v == null || typeof v !== "object") return v;
+  const exports = callbackState?.getExports();
+  const base = _isWasmStruct(v) ? _wrapForHost(v, exports) : v;
+  const wrapStep = (r: any): any =>
+    r != null && typeof r === "object" && _isWasmStruct(r) ? _wrapForHost(r, exports) : r;
+  const shim: any = Object.create(base);
+  // LAZY accessors, resolved only when the helper itself performs the spec
+  // `Get(iterator, "next")` — an EAGER read here fired user getter effects
+  // BEFORE the helper's own argument validation, breaking the
+  // `argument-effect-order.js` family (spec §: IsCallable(mapper) throws
+  // before GetIteratorDirect ever touches `next`). defineProperty (not `=`)
+  // because `base` may carry `next` as a getter-only accessor
+  // (`{ get next() {…} }`), which a proto-chain-walking assignment rejects.
+  const defineLazy = (k: string): void => {
+    Object.defineProperty(shim, k, {
+      get() {
+        let f: any = base[k]; // user getter effects fire exactly at the spec Get
+        if (f != null && typeof f === "object" && _isWasmStruct(f)) {
+          f = _maybeWrapCallableUnknownArity(f, callbackState);
+        }
+        if (typeof f !== "function") return f; // non-callable: let the helper throw per spec
+        const fn = f as Function;
+        return function (this: any, ...args: any[]) {
+          return wrapStep(fn.apply(base, args));
+        };
+      },
+      set(val: any) {
+        Object.defineProperty(shim, k, { value: val, writable: true, enumerable: true, configurable: true });
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  };
+  defineLazy("next");
+  defineLazy("return");
+  defineLazy("throw");
+  return shim;
+}
+
 function _setLikeRecordForHost(
   arg: any,
   exports: Record<string, Function> | undefined,
@@ -8438,13 +8541,10 @@ function resolveImport(
           return (self: any, v: any) => {
             if (!_isWasmStruct(v)) {
               _safeSet(self, "lastIndex", v);
-            } else if (_regexProtocolDepth > 0) {
-              // Set during a regex protocol method (overridden exec): the native
-              // protocol won't coerce the JS-visible lastIndex, so fire valueOf
-              // eagerly (a throw surfaces as the program's own error) and store
-              // the number.
-              _safeSet(self, "lastIndex", Number(_hostToPrimitive(v, "number", callbackState)));
             } else {
+              // (#3084) ALWAYS defer, protocol call or not — §22.2.6.8/11/14
+              // store the value verbatim; only the empty-match advance reads it
+              // (ToLength → shim fires). See the _makeLastIndexShim doc block.
               _safeSet(self, "lastIndex", _makeLastIndexShim(v, callbackState));
             }
           };
@@ -10967,6 +11067,13 @@ assert._isSameValue = isSameValue;
               wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
             }
           }
+          // (#3049) `Iterator.prototype.<helper>.call(iter, …)` — the receiver
+          // is consumed as a spec iterator record by the native/polyfill
+          // helper. Present it faithfully (closure-struct next/return bridged,
+          // Wasm-struct step results host-mirrored) via the record shim.
+          if ((method === "call" || method === "apply") && _isIteratorHelperFn(wrappedObj) && (args ?? []).length > 0) {
+            wrappedArgs[0] = _iteratorRecordForHost(args[0], callbackState);
+          }
           // #1637 — `Boolean.prototype.toString.call(prim)` / `.valueOf.call(prim)`
           // route here as obj=Boolean.prototype.method, method="call"/"apply".
           // Boolean primitives travel i32→externref via __box_number so the
@@ -11290,7 +11397,12 @@ assert._isSameValue = isSameValue;
             }
             throw new TypeError(method + " is not a function");
           }
-          const ret = fn.apply(wrappedObj, wrappedArgs);
+          // (#3049) Direct helper-method dispatch (`iter.map(cb)` on an
+          // externref/any receiver): shim the RECEIVER as a faithful iterator
+          // record (see _iteratorRecordForHost) so the native/polyfill helper
+          // can drive a compiled iterator.
+          const dispatchRecv = _isIteratorHelperFn(fn) ? _iteratorRecordForHost(obj, callbackState) : wrappedObj;
+          const ret = fn.apply(dispatchRecv, wrappedArgs);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
           if (
             (method === "exec" || method === "test") &&
@@ -11310,7 +11422,7 @@ assert._isSameValue = isSameValue;
               }
             }
           }
-          return ret === wrappedObj ? obj : _unwrapForHost(ret);
+          return ret === wrappedObj || ret === dispatchRecv ? obj : _unwrapForHost(ret);
         };
       // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
       // protocol invocation. The compiler resolves `regex[Symbol.replace]` to
@@ -11412,44 +11524,39 @@ assert._isSameValue = isSameValue;
           // ToString(arg) coercion finds the struct's toString/valueOf
           // closures via the host proxy.
           const wrappedArg0 = _isWasmStruct(arg0) ? _wrapForHost(arg0, exports) : arg0;
-          // (#2671) Track regex-protocol nesting so a `lastIndex` set performed
-          // by a user-overridden `exec` invoked from here coerces eagerly (the
-          // native protocol won't ToLength the JS-visible property). A counter,
-          // not a flag, so nested protocol calls (a replace callback that calls
-          // .match) restore the depth correctly; `finally` covers every return
-          // and any thrown abrupt completion.
-          _regexProtocolDepth++;
-          try {
-            // @@match/@@matchAll/@@search are 1-arg (string).
-            // @@replace is 2-arg: (string, replaceValue) — replaceValue may
-            //   be a function or a string.
-            // @@split is 2-arg: (string, limit) — limit is a number.
-            if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
-              return fn.call(regex, wrappedArg0);
-            }
-            if (symbolId === 8) {
-              // Treat missing arg1 (null from ref.null.extern padding) as
-              // undefined → ToString gives "undefined" per spec, matching
-              // `regex[Symbol.replace](str)` with no replaceValue.
-              if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
-              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
-            }
-            if (symbolId === 10) {
-              // split: missing limit (null padding) → call without second arg
-              // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
-              // would coerce null to 0 and return [] — wrong.
-              if (arg1 == null) return fn.call(regex, wrappedArg0);
-              // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
-              // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
-              // host proxy exposes the struct's valueOf/toString closure (#1331).
-              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
-            }
-            // Generic fallback
-            if (arg1 == null) return fn.call(regex, wrappedArg0);
-            return fn.call(regex, wrappedArg0, arg1);
-          } finally {
-            _regexProtocolDepth--;
+          // (#3084) No protocol-depth tracking here anymore: a `lastIndex` set
+          // performed by a user-overridden `exec` invoked from these protocols
+          // now ALWAYS stores the deferred shim; V8's spec-compliant slow path
+          // fires it via `ToLength(? Get(rx, "lastIndex"))` exactly in the
+          // empty-match advance branch (§22.2.6.8/11/14) and never otherwise.
+          //
+          // @@match/@@matchAll/@@search are 1-arg (string).
+          // @@replace is 2-arg: (string, replaceValue) — replaceValue may
+          //   be a function or a string.
+          // @@split is 2-arg: (string, limit) — limit is a number.
+          if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
+            return fn.call(regex, wrappedArg0);
           }
+          if (symbolId === 8) {
+            // Treat missing arg1 (null from ref.null.extern padding) as
+            // undefined → ToString gives "undefined" per spec, matching
+            // `regex[Symbol.replace](str)` with no replaceValue.
+            if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+          }
+          if (symbolId === 10) {
+            // split: missing limit (null padding) → call without second arg
+            // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
+            // would coerce null to 0 and return [] — wrong.
+            if (arg1 == null) return fn.call(regex, wrappedArg0);
+            // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
+            // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
+            // host proxy exposes the struct's valueOf/toString closure (#1331).
+            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+          }
+          // Generic fallback
+          if (arg1 == null) return fn.call(regex, wrappedArg0);
+          return fn.call(regex, wrappedArg0, arg1);
         };
       // Type.prototype.method.call(receiver, ...args) dispatch for built-in types.
       // Used when e.g. Array.prototype.every.call(functionObj, fn) — the receiver
@@ -12995,7 +13102,20 @@ assert._isSameValue = isSameValue;
           return (Promise as any).any.call(C, _toIterable(arr));
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
-      if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      if (name === "Promise_reject")
+        return (val: any) => {
+          // (#2978) Pre-mark the rejection as handled. Compiled code holds the
+          // promise as an opaque externref and may drop it without attaching a
+          // handler (e.g. the for-await sync drive's bounded step cap discards
+          // one rejected promise per iteration) — without this, each discarded
+          // rejection fires the host's unhandledRejection machinery, and a
+          // capped loop emits a 100k-event storm that vitest/CI runners count
+          // as errors. The no-op catch derives a separate promise; consumers of
+          // the returned promise observe the rejection unchanged.
+          const p = Promise.reject(val);
+          p.catch(() => {});
+          return p;
+        };
       // (#1042) async/await CPS scheduling primitives. The state machine
       // allocates one pending outer Promise per async function, then settles
       // it from a continuation that runs as a microtask. We stash the
@@ -13065,13 +13185,21 @@ assert._isSameValue = isSameValue;
           buf.push(v);
         };
       if (name === "__gen_yield_star")
-        return (buf: any[], iterable: any) => {
+        return (buf: any[], rawIterable: any) => {
           // Iterate the inner iterable and push all values into the outer buffer.
           // Per §27.5.3 yield* output, the inner generator's RETURN value is the
           // value of the `yield*` expression and must NOT leak into the outer
           // stream — `for...of`/manual iteration already stops at the inner
           // `done:true` result, so only the yielded (`done:false`) values are
           // pushed here. (#2035)
+          // (#3075) Under `--target standalone`/`wasi` the `yield*` operand is
+          // an opaque WasmGC `$Vec` struct, not a JS iterable — it has no
+          // `Symbol.iterator`, so this push loop silently drained ZERO values
+          // (the buffered generator then reported done immediately, the vacuous
+          // half of the for-await dstr cluster). Materialize it into a real JS
+          // array through the module's `__vec_len`/`__vec_get` exports first;
+          // non-vec / host iterables pass through unchanged.
+          const iterable = _materializeIterable(rawIterable, callbackState);
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {
               if (buf.length >= __EAGER_GEN_LIMIT) {
@@ -13275,12 +13403,17 @@ assert._isSameValue = isSameValue;
                 let i = 0;
                 // (#1367) Synthesized iterators MUST inherit from
                 // Iterator.prototype so .drop/.take/.map/.filter etc. resolve.
+                // (#3049) …but at spec DEPTH: iter → %ArrayIteratorPrototype%
+                // (shared stand-in) → %IteratorPrototype% (helpers), so the
+                // spec-shaped double-getPrototypeOf walk lands on the helper
+                // proto instead of overshooting it (see
+                // _getSynthArrayIteratorPrototype).
                 const iterProto = (
                   typeof (globalThis as any).Iterator === "function"
                     ? ((globalThis as any).Iterator as any).prototype
                     : null
                 ) as any;
-                const iterObj: any = iterProto ? Object.create(iterProto) : {};
+                const iterObj: any = iterProto ? Object.create(_getSynthArrayIteratorPrototype(iterProto)) : {};
                 iterObj.next = () => {
                   if (i >= len) return { value: undefined, done: true };
                   const val = vecGet(obj, i);

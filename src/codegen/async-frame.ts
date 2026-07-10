@@ -172,13 +172,23 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
  * `Promise_new_pending`/`Promise_settle_*`) instead of the native `$Promise`
  * callback list. One lowering engine, two settle primitives.
  *
- * **Deliberately disjoint from {@link asyncFnNeedsCps}**: every shape the
- * proven single-tail-await CPS lane accepts today keeps taking that lane
- * (byte-stable), so this predicate claims ONLY shapes that today fall through
- * to the legacy synchronous fakery and produce wrong values under genuine
- * suspension (measured 2026-07-02: multi-await → null, spill-across-await →
- * null, try/finally-across-await → null, rejected 2nd await → uncaught wasm
- * exception). Additive by construction: `false` ⇒ output unchanged.
+ * **(#2967 slice 1 — engine convergence)** This predicate now claims EVERY
+ * linear shape `planLinearAwaits` can drive, including the single-tail-await
+ * population the CPS lane (`asyncFnNeedsCps`) used to own exclusively — the
+ * #1042 `!asyncFnNeedsCps` disjointness exclusion is dropped. Single-await is
+ * the N=1 case of the N-state machine, so one engine drives both. Two
+ * deliberate carve-outs keep their CPS routing (see `decideAsyncActivation`,
+ * which checks host-drive FIRST and falls back to the CPS arm):
+ *   - binding-pattern / rest params (the guard below): the destructuring
+ *     prologue derives locals in the ENTRY fn that the fresh resume
+ *     FunctionContext never sees (same reason `isAsyncGenDriveCandidate`
+ *     rejects them), while the CPS continuation snapshots them by value from
+ *     the outer frame — correct-or-CPS, never correct-or-broken;
+ *   - lifted closures (arrow/fn-expr): re-laned back to CPS in
+ *     `planAsyncClosureActivation` (host-drive closures are the parked #2646
+ *     regression class).
+ * Pre-#2967 host-drive shapes (multi-await, try/finally-across-await) are
+ * unaffected — for them `asyncFnNeedsCps` was already false.
  */
 export function asyncFnNeedsHostDrive(
   ctx: CodegenContext,
@@ -190,8 +200,18 @@ export function asyncFnNeedsHostDrive(
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
-  // The single-tail-await CPS lane owns its shapes — never re-route them.
-  if (asyncFnNeedsCps(fn, plan)) return false;
+  // (#2967) Param-shape carve-out for the CPS-shaped population only: a
+  // binding-pattern / rest param destructures into prologue-derived locals of
+  // the ENTRY fn that the fresh resume FunctionContext never sees (the frame
+  // captures raw wasm params BY NAME — the async-gen gate rejects pattern
+  // params for exactly this). The CPS continuation instead snapshots those
+  // derived locals by value from the outer frame, so it handles them
+  // correctly: leave exactly the shapes CPS accepts on that lane. Non-CPS
+  // shapes with pattern params keep their pre-#2967 host-drive routing
+  // unchanged (their derived-local gap predates this flip; do not demote them
+  // to the legacy sync fakery, which is wrong under genuine suspension).
+  const hasPatternOrRestParam = fn.parameters.some((p) => !ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined);
+  if (hasPatternOrRestParam && asyncFnNeedsCps(fn, plan)) return false;
   const linear = planLinearAwaits(fn, plan);
   if (linear === null) return false;
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
@@ -765,8 +785,13 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // (#2906 slice 3d-i) An async GENERATOR builds its CFG from the yield-aware
   // `planAsyncGenCfg` (settleYield/settleDone terminators); every other async fn
   // uses the linear/while/for-await `planAsyncCfg`.
+  // (#3120) The implicit §27.6.3.8 yield-operand await is classified ONLY on
+  // the native-`$Promise` CARRIER lane — the same predicate the admission gate
+  // (`isAsyncGenDriveCandidate`) keyed the body's shape check on, so gate and
+  // planner always see the same segment split. Type queries go through
+  // `ctx.oracle` (the #1930 boundary), not the raw checker.
   const cfg = info.asyncGen
-    ? planAsyncGenCfg(info.decl)
+    ? planAsyncGenCfg(info.decl, isStandalonePromiseActive(ctx) ? { oracle: ctx.oracle } : null)
     : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
@@ -1763,6 +1788,9 @@ export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionL
   // — those bodies keep the legacy path (correct-or-legacy, #680 CE) until the
   // measured carrier widen. An await-free body is carrier-independent: every
   // promise the machine touches is minted by `__async_gen_next_<name>` itself.
+  // (#3120: a Promise-typed plain `yield P` deliberately stays PLAIN — and
+  // driven, byte-identically — on this lane; its implicit-await value gap is
+  // the carrier widen's to close. See ImplicitYieldAwaitMode in async-cps.ts.)
   if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl) && spillsSafe();
   return false;
 }
