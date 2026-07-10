@@ -660,18 +660,6 @@ function resolveArrayInfoForExpression(
   );
 }
 
-/**
- * Try to get the local index of the receiver expression (for reassigning
- * the array variable after mutating methods like push/pop/shift).
- */
-function getReceiverLocalIdx(fctx: FunctionContext, expr: ts.Expression): number | null {
-  if (ts.isIdentifier(expr)) {
-    const idx = fctx.localMap.get(expr.text);
-    return idx !== undefined ? idx : null;
-  }
-  return null;
-}
-
 /** Methods supported by the array-like (externref receiver) path.
  * NOTE: map/filter/reduce/reduceRight are excluded because:
  * - map/filter: `length: "Infinity"` → Infinity → 2B iterations → compile_timeout

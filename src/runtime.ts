@@ -12989,7 +12989,20 @@ assert._isSameValue = isSameValue;
           return (Promise as any).any.call(C, _toIterable(arr));
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
-      if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      if (name === "Promise_reject")
+        return (val: any) => {
+          // (#2978) Pre-mark the rejection as handled. Compiled code holds the
+          // promise as an opaque externref and may drop it without attaching a
+          // handler (e.g. the for-await sync drive's bounded step cap discards
+          // one rejected promise per iteration) — without this, each discarded
+          // rejection fires the host's unhandledRejection machinery, and a
+          // capped loop emits a 100k-event storm that vitest/CI runners count
+          // as errors. The no-op catch derives a separate promise; consumers of
+          // the returned promise observe the rejection unchanged.
+          const p = Promise.reject(val);
+          p.catch(() => {});
+          return p;
+        };
       // (#1042) async/await CPS scheduling primitives. The state machine
       // allocates one pending outer Promise per async function, then settles
       // it from a continuation that runs as a microtask. We stash the
@@ -13059,13 +13072,21 @@ assert._isSameValue = isSameValue;
           buf.push(v);
         };
       if (name === "__gen_yield_star")
-        return (buf: any[], iterable: any) => {
+        return (buf: any[], rawIterable: any) => {
           // Iterate the inner iterable and push all values into the outer buffer.
           // Per §27.5.3 yield* output, the inner generator's RETURN value is the
           // value of the `yield*` expression and must NOT leak into the outer
           // stream — `for...of`/manual iteration already stops at the inner
           // `done:true` result, so only the yielded (`done:false`) values are
           // pushed here. (#2035)
+          // (#3075) Under `--target standalone`/`wasi` the `yield*` operand is
+          // an opaque WasmGC `$Vec` struct, not a JS iterable — it has no
+          // `Symbol.iterator`, so this push loop silently drained ZERO values
+          // (the buffered generator then reported done immediately, the vacuous
+          // half of the for-await dstr cluster). Materialize it into a real JS
+          // array through the module's `__vec_len`/`__vec_get` exports first;
+          // non-vec / host iterables pass through unchanged.
+          const iterable = _materializeIterable(rawIterable, callbackState);
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {
               if (buf.length >= __EAGER_GEN_LIMIT) {
