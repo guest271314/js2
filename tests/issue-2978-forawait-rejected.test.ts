@@ -75,7 +75,16 @@ describe("#2978/#2934-3b: for-await over rejected-promise sync iterator", () => 
     expect(ex.readReasonOk()).toBe(1); // e === "reject"
   });
 
-  it("standalone carrier-off (scored lane today): bounded loud abort, close exactly once", async () => {
+  it("standalone (native carrier since the #2980 flip): rejection lands in catch, close exactly once", async () => {
+    // Pre-flip this lane was carrier-OFF: the rejected promise was an opaque
+    // host value, the bounded step cap aborted with its own TypeError, and
+    // this test asserted `readReasonOk() === 0`. The 2026-07-10 #2980 carrier
+    // widen puts standalone on the native `$Promise` lane (this module has no
+    // async generator, so `widenAsyncGenFallback` does not fire), which
+    // upgrades the shape to the FULL spec semantics — identical to the wasi
+    // case above: the ORIGINAL rejection reason reaches the user catch and
+    // IteratorClose runs exactly once. Still bounded wall-clock (pre-#2978
+    // this OOM'd at ~3 GB / ~14 s).
     const r = await compile(REPRO, { fileName: "t.ts", target: "standalone" });
     expect(r.success).toBe(true);
     const t0 = Date.now();
@@ -85,12 +94,9 @@ describe("#2978/#2934-3b: for-await over rejected-promise sync iterator", () => 
     );
     const elapsed = Date.now() - t0;
     const ex = instance.exports as unknown as Ex;
-    // The step cap fires: abrupt completion observed by the user catch, and
-    // IteratorClose ran exactly once. Bounded wall-clock (well under the 15 s
-    // runner timeout; pre-fix this OOM'd at ~3 GB / ~14 s).
     expect(ex.readCaught()).toBe(1);
     expect(ex.readReturnCount()).toBe(1);
-    expect(ex.readReasonOk()).toBe(0); // TypeError from the cap, not "reject" — host promise is opaque here
+    expect(ex.readReasonOk()).toBe(1); // e === "reject" — the real reason, not the cap TypeError
     expect(elapsed).toBeLessThan(10_000);
   });
 

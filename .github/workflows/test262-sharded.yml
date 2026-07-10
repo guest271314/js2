@@ -1840,6 +1840,16 @@ jobs:
           # baseline commit.
           node scripts/check-coercion-sites.mjs --update || \
             echo "WARN: coercion-site baseline update failed (non-fatal)"
+          # #3131 — LOC-budget baseline (also a pure source measure). PRs no
+          # longer commit bumps at all (the per-PR whole-tree bump made every
+          # open PR merge-conflict on scripts/loc-budget-baseline.json after
+          # every main advance — the churn that held the #2835 stack); this
+          # post-merge refresh is the SOLE writer. The PR gate itself is fully
+          # change-scoped against git (#3131), so the committed file only
+          # serves the --all audit and the no-git fallback. --update skips the
+          # write when only the date would change. Non-fatal.
+          node scripts/check-loc-budget.mjs --update || \
+            echo "WARN: loc-budget baseline update failed (non-fatal)"
           # Re-derive the landing-page feature-support badges (#2665). The
           # source of truth is now website/public/feature-examples.json (the
           # canonical per-feature aggregation written by build-data.js — it
@@ -1863,6 +1873,8 @@ jobs:
             # #2108 — coercion-site drift baseline, refreshed just above. Staged
             # so the new floor lands atomically with the merged source.
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — LOC-budget baseline, refreshed just above (sole writer).
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             # #2097 — the standalone high-water mark (raised just above when
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.
@@ -2014,6 +2026,11 @@ jobs:
             node scripts/check-coercion-sites.mjs --update || \
               echo "WARN: coercion-site baseline recompute on re-anchored tip failed (non-fatal)"
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — same stale-checkout guard for the LOC-budget baseline
+            # (also a pure source measure; main is its sole writer now).
+            node scripts/check-loc-budget.mjs --update || \
+              echo "WARN: loc-budget baseline recompute on re-anchored tip failed (non-fatal)"
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             if git diff --cached --quiet; then
               echo "Baseline already current on main (no delta after re-anchor) — nothing to push."
               PUSHED=1
