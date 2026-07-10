@@ -170,20 +170,15 @@ const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
 
 // (#2903) Method names whose CALL can mint a HOST promise in a standalone
 // module even while the native `$Promise` chain is active — the host-routed
-// combinators/instance methods (`Promise_allSettled`/`Promise_any`/
-// `Promise_finally`/`__array_from_async` imports). Matched on ANY receiver
-// (conservative: a false positive only preserves the pre-#2903 host fallback
-// arm). Plain `Promise.all`/`Promise.race` are NOT listed — those lower to the
-// host-free native combinators (#2919/#2867 Gap 4); only the
-// subclass-receiver form is flagged (inline check at the scan site).
-const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set([
-  "finally",
-  "allSettled",
-  "any",
-  "allKeyed",
-  "allSettledKeyed",
-  "fromAsync",
-]);
+// combinators/instance methods (`Promise_finally`/`__array_from_async`
+// imports). Matched on ANY receiver (conservative: a false positive only
+// preserves the pre-#2903 host fallback arm). Plain `Promise.all`/`race`/
+// (#3137) `allSettled`/`any` are NOT listed — those lower to the host-free
+// native combinators (#2919/#2867 Gap 4/#3137); only the subclass-receiver
+// form is flagged (inline check at the scan site — exotic shapes that fall to
+// the host path lazily register their `Promise_*` import, which the bridge's
+// funcMap producer check catches).
+const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set(["finally", "allKeyed", "allSettledKeyed", "fromAsync"]);
 
 /**
  * (#1700) Record TypedArray classifications for a user-exported function so
@@ -1134,7 +1129,10 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       if (
         calleeName !== undefined &&
         (HOST_PROMISE_SOURCE_METHOD_NAMES.has(calleeName) ||
-          ((calleeName === "all" || calleeName === "race") && !recvIsPromiseIdent))
+          // (#3137) native-combinator names: only the subclass-receiver form
+          // (`MyP.all(...)`) is host-routed; plain `Promise.<m>(...)` is native.
+          ((calleeName === "all" || calleeName === "race" || calleeName === "allSettled" || calleeName === "any") &&
+            !recvIsPromiseIdent))
       ) {
         ctx.moduleHasHostPromiseSource = true;
       }
@@ -1648,7 +1646,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     // import). Skip the unsatisfiable `Promise_all`/`Promise_race` pre-registration
     // here; the host path (generic iterables / subclass receivers) still
     // lazily `ensureLateImport`s it at the call site when actually needed.
-    if (isStandalonePromiseActive(ctx) && (method === "all" || method === "race")) continue;
+    // (#3137) `allSettled`/`any` are native on the same machinery now — same skip.
+    if (
+      isStandalonePromiseActive(ctx) &&
+      (method === "all" || method === "race" || method === "allSettled" || method === "any")
+    )
+      continue;
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
