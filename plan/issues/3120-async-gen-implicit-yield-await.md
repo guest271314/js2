@@ -98,13 +98,15 @@ Promise-typed local (`const p = ...; yield p`) and a `.then()` chain.
 **The fix — WHY it is shaped this way:**
 
 1. `analyzeAsyncGen` (async-cps.ts) gained an `implicitYieldAwait` mode
-   (`{checker} | null`, `ImplicitYieldAwaitMode`). Non-null mode classifies a
+   (`{oracle} | null`, `ImplicitYieldAwaitMode`). Non-null mode classifies a
    plain `yield E` whose operand is statically Promise-typed
-   (`isPromiseType`, or a union with a Promise constituent) as an
-   `awaited: E` segment — riding the SAME proven suspend+settleYield(fromSent)
-   lane as `yield await E` (which already rejects the current next()-promise
-   on a rejected operand). No emitter changes at all; the fix is pure
-   classification.
+   (`ctx.oracle.builtinReceiverOf(operand) === "Promise"`, or a union with a
+   builtin-Promise part — the #1930 oracle boundary; a raw-checker first cut
+   failed the quality gate's oracle ratchet and was migrated, verified
+   byte-identical) as an `awaited: E` segment — riding the SAME proven
+   suspend+settleYield(fromSent) lane as `yield await E` (which already
+   rejects the current next()-promise on a rejected operand). No emitter
+   changes at all; the fix is pure classification.
 
 2. **The mode is carrier-lane-scoped — this is the load-bearing decision.**
    The first cut classified unconditionally and immediately broke the #2980
