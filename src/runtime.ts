@@ -278,6 +278,29 @@ let _GeneratorInstancePrototypeCache: any = null;
 let _AsyncGeneratorInstancePrototypeCache: any = null;
 let _IteratorPrototypeCache: any = null;
 let _AsyncIteratorPrototypeCache: any = null;
+// (#3049) Shared `%ArrayIteratorPrototype%` stand-in for iterators the
+// `__iterator` host import SYNTHESIZES over compiled vec structs. §23.1.5.2:
+// array iterators are ObjectCreate(%ArrayIteratorPrototype%), whose
+// [[Prototype]] is %IteratorPrototype%. The old one-level chain made the
+// spec-shaped walk `getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
+// (hardcoded by tests + the runner's `Iterator` shim) overshoot the
+// helper-bearing proto onto Object.prototype → every
+// `Iterator.prototype.<helper>` lookup was undefined. One SHARED cached
+// middle object keeps getPrototypeOf identity stable across iterators.
+let _SynthArrayIteratorPrototypeCache: any = null;
+function _getSynthArrayIteratorPrototype(base: any): any {
+  if (_SynthArrayIteratorPrototypeCache) return _SynthArrayIteratorPrototypeCache;
+  const proto = Object.create(base ?? null);
+  _SynthArrayIteratorPrototypeCache = proto;
+  // §23.1.5.2.2 %ArrayIteratorPrototype% [ @@toStringTag ]
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "Array Iterator",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
 
 /**
  * Install a built-in method on a prototype with spec-mandated descriptor
@@ -5717,6 +5740,84 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
  * so the callability throws + size ToNumber coercion happen per spec. Scoped to
  * the 7 set-algebra methods only — no change to `_wrapForHost`'s own behaviour.
  */
+/**
+ * (#3049) Iterator-record faithfulness shim for the ES2025 Iterator helpers
+ * (`Iterator.prototype.map/filter/take/…`), which drive the RECEIVER via the
+ * spec iterator record (Call(next, iter) → Get(result, "done"/"value")).
+ * Compiled shapes break that: a raw-struct receiver has opaque reads; a
+ * `next` whose value is a Wasm closure struct isn't host-callable ("object is
+ * not a function" — the this-plain-iterator cluster); Wasm-struct step
+ * results have opaque done/value (infinite drive loop). The shim bridges the
+ * record methods callable and host-mirrors struct step results. Mirrors the
+ * `_setLikeRecordForHost` (#1627) precedent — scoped to the Iterator-helper
+ * dispatch sites only; no change to `_wrapForHost` itself.
+ */
+const _ITER_HELPER_NAMES = [
+  "map",
+  "filter",
+  "take",
+  "drop",
+  "flatMap",
+  "reduce",
+  "toArray",
+  "forEach",
+  "some",
+  "every",
+  "find",
+] as const;
+function _isIteratorHelperFn(f: any): boolean {
+  if (typeof f !== "function") return false;
+  const I: any = (globalThis as any).Iterator;
+  const p = I?.prototype;
+  if (p == null || typeof p !== "object") return false;
+  for (const n of _ITER_HELPER_NAMES) {
+    if (p[n] === f) return true;
+  }
+  return false;
+}
+function _iteratorRecordForHost(
+  v: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (v == null || typeof v !== "object") return v;
+  const exports = callbackState?.getExports();
+  const base = _isWasmStruct(v) ? _wrapForHost(v, exports) : v;
+  const wrapStep = (r: any): any =>
+    r != null && typeof r === "object" && _isWasmStruct(r) ? _wrapForHost(r, exports) : r;
+  const shim: any = Object.create(base);
+  // LAZY accessors, resolved only when the helper itself performs the spec
+  // `Get(iterator, "next")` — an EAGER read here fired user getter effects
+  // BEFORE the helper's own argument validation, breaking the
+  // `argument-effect-order.js` family (spec §: IsCallable(mapper) throws
+  // before GetIteratorDirect ever touches `next`). defineProperty (not `=`)
+  // because `base` may carry `next` as a getter-only accessor
+  // (`{ get next() {…} }`), which a proto-chain-walking assignment rejects.
+  const defineLazy = (k: string): void => {
+    Object.defineProperty(shim, k, {
+      get() {
+        let f: any = base[k]; // user getter effects fire exactly at the spec Get
+        if (f != null && typeof f === "object" && _isWasmStruct(f)) {
+          f = _maybeWrapCallableUnknownArity(f, callbackState);
+        }
+        if (typeof f !== "function") return f; // non-callable: let the helper throw per spec
+        const fn = f as Function;
+        return function (this: any, ...args: any[]) {
+          return wrapStep(fn.apply(base, args));
+        };
+      },
+      set(val: any) {
+        Object.defineProperty(shim, k, { value: val, writable: true, enumerable: true, configurable: true });
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  };
+  defineLazy("next");
+  defineLazy("return");
+  defineLazy("throw");
+  return shim;
+}
+
 function _setLikeRecordForHost(
   arg: any,
   exports: Record<string, Function> | undefined,
@@ -10967,6 +11068,13 @@ assert._isSameValue = isSameValue;
               wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
             }
           }
+          // (#3049) `Iterator.prototype.<helper>.call(iter, …)` — the receiver
+          // is consumed as a spec iterator record by the native/polyfill
+          // helper. Present it faithfully (closure-struct next/return bridged,
+          // Wasm-struct step results host-mirrored) via the record shim.
+          if ((method === "call" || method === "apply") && _isIteratorHelperFn(wrappedObj) && (args ?? []).length > 0) {
+            wrappedArgs[0] = _iteratorRecordForHost(args[0], callbackState);
+          }
           // #1637 — `Boolean.prototype.toString.call(prim)` / `.valueOf.call(prim)`
           // route here as obj=Boolean.prototype.method, method="call"/"apply".
           // Boolean primitives travel i32→externref via __box_number so the
@@ -11290,7 +11398,12 @@ assert._isSameValue = isSameValue;
             }
             throw new TypeError(method + " is not a function");
           }
-          const ret = fn.apply(wrappedObj, wrappedArgs);
+          // (#3049) Direct helper-method dispatch (`iter.map(cb)` on an
+          // externref/any receiver): shim the RECEIVER as a faithful iterator
+          // record (see _iteratorRecordForHost) so the native/polyfill helper
+          // can drive a compiled iterator.
+          const dispatchRecv = _isIteratorHelperFn(fn) ? _iteratorRecordForHost(obj, callbackState) : wrappedObj;
+          const ret = fn.apply(dispatchRecv, wrappedArgs);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
           if (
             (method === "exec" || method === "test") &&
@@ -11310,7 +11423,7 @@ assert._isSameValue = isSameValue;
               }
             }
           }
-          return ret === wrappedObj ? obj : _unwrapForHost(ret);
+          return ret === wrappedObj || ret === dispatchRecv ? obj : _unwrapForHost(ret);
         };
       // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
       // protocol invocation. The compiler resolves `regex[Symbol.replace]` to
@@ -13275,12 +13388,17 @@ assert._isSameValue = isSameValue;
                 let i = 0;
                 // (#1367) Synthesized iterators MUST inherit from
                 // Iterator.prototype so .drop/.take/.map/.filter etc. resolve.
+                // (#3049) …but at spec DEPTH: iter → %ArrayIteratorPrototype%
+                // (shared stand-in) → %IteratorPrototype% (helpers), so the
+                // spec-shaped double-getPrototypeOf walk lands on the helper
+                // proto instead of overshooting it (see
+                // _getSynthArrayIteratorPrototype).
                 const iterProto = (
                   typeof (globalThis as any).Iterator === "function"
                     ? ((globalThis as any).Iterator as any).prototype
                     : null
                 ) as any;
-                const iterObj: any = iterProto ? Object.create(iterProto) : {};
+                const iterObj: any = iterProto ? Object.create(_getSynthArrayIteratorPrototype(iterProto)) : {};
                 iterObj.next = () => {
                   if (i >= len) return { value: undefined, done: true };
                   const val = vecGet(obj, i);
