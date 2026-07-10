@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11745,
-    "fail": 3497,
+    "pass": 11760,
+    "fail": 3482,
     "ce": 143,
     "skip": 1,
     "total": 15386,
@@ -75,12 +75,12 @@
       },
       {
         "name": "generators",
-        "pass": 1020,
-        "fail": 356,
+        "pass": 1025,
+        "fail": 351,
         "ce": 15,
         "skip": 0,
         "total": 1391,
-        "pct": 73
+        "pct": 74
       },
       {
         "name": "TypedArray",
@@ -120,12 +120,12 @@
       },
       {
         "name": "arrow-function",
-        "pass": 401,
-        "fail": 53,
+        "pass": 406,
+        "fail": 48,
         "ce": 1,
         "skip": 0,
         "total": 455,
-        "pct": 88
+        "pct": 89
       },
       {
         "name": "Proxy",
@@ -781,21 +781,21 @@
   },
   {
     "edition": "ES2017",
-    "pass": 356,
-    "fail": 304,
+    "pass": 364,
+    "fail": 296,
     "ce": 7,
     "skip": 0,
     "total": 667,
-    "pct": 53,
+    "pct": 55,
     "features": [
       {
         "name": "async-functions",
-        "pass": 199,
-        "fail": 122,
+        "pass": 207,
+        "fail": 114,
         "ce": 3,
         "skip": 0,
         "total": 324,
-        "pct": 61
+        "pct": 64
       },
       {
         "name": "SharedArrayBuffer",
@@ -844,12 +844,12 @@
       },
       {
         "name": "arrow-function",
-        "pass": 29,
-        "fail": 26,
+        "pass": 37,
+        "fail": 18,
         "ce": 0,
         "skip": 0,
         "total": 55,
-        "pct": 53
+        "pct": 67
       },
       {
         "name": "default-parameters",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3340,
-    "fail": 884,
+    "pass": 3345,
+    "fail": 879,
     "ce": 27,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2488,
-        "fail": 770,
+        "pass": 2493,
+        "fail": 765,
         "ce": 26,
         "skip": 0,
         "total": 3284,
@@ -1125,21 +1125,21 @@
       },
       {
         "name": "arrow-function",
-        "pass": 15,
-        "fail": 31,
+        "pass": 20,
+        "fail": 26,
         "ce": 0,
         "skip": 0,
         "total": 46,
-        "pct": 33
+        "pct": 43
       },
       {
         "name": "async-functions",
-        "pass": 17,
-        "fail": 27,
+        "pass": 22,
+        "fail": 22,
         "ce": 0,
         "skip": 0,
         "total": 44,
-        "pct": 39
+        "pct": 50
       },
       {
         "name": "class",
