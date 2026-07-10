@@ -1053,6 +1053,97 @@ export function objectLiteralIsStandaloneAnyObjectCarrier(
   return ctxFact !== undefined && (ctxFact.kind === "any" || ctxFact.kind === "unknown");
 }
 
+/**
+ * (#1901/#2542, extracted for #3128) The standalone open-`$Object` divert
+ * decision for a NON-EMPTY object literal: `compileObjectLiteral` builds the
+ * literal as an open `$Object` handed back as **externref** (via
+ * `compileObjectLiteralAsExternref`) instead of a closed struct when this
+ * predicate answers true. Exported so CONSUMERS that pre-decide a slot type
+ * for the literal's value can make the IDENTICAL decision — the same
+ * lockstep discipline `objectLiteralSpreadTakesHostPath` (#2804) and
+ * `objectLiteralIsStandaloneAnyObjectCarrier` (#1930) established. The
+ * inlined-IIFE return-local typing (calls.ts, #3128) consults this: typing
+ * the ret-local from the TS struct type while the literal lowers dynamically
+ * made the ret-value coercion's `ref.test` arm silently null the result.
+ *
+ * Shape gate: standalone only; data props / spreads / plain-named method
+ * shorthand (#3099), no accessor / computed / symbol keys, not a parameter
+ * default. Context gate: requires an EXPLICIT any / unknown / `object`
+ * contextual type (#1897 — an ABSENT contextual type means consumers compile
+ * against the inferred struct), or a PURE string-index dictionary context
+ * (#2542).
+ */
+export function objectLiteralTakesStandaloneAnyObjectPath(
+  ctx: CodegenContext,
+  expr: ts.ObjectLiteralExpression,
+): boolean {
+  if (
+    !ctx.standalone ||
+    expr.properties.length === 0 ||
+    ts.isParameter(expr.parent) ||
+    // only data props / spreads / plain-named method shorthand we can build onto
+    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
+    // host accessor path). (#3099) Plain-named method shorthand is now buildable
+    // here — compileObjectLiteralAsExternref materializes it as a runtime own
+    // property closure — so a method-bearing any-context literal (`const h: any =
+    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
+    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
+    // whose method exists only in the compile-time member table.
+    !expr.properties.every(
+      (p) =>
+        ts.isPropertyAssignment(p) ||
+        ts.isShorthandPropertyAssignment(p) ||
+        ts.isSpreadAssignment(p) ||
+        isPlainNamedMethodDeclaration(p),
+    ) ||
+    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
+    // check return undefined/false for those).
+    !expr.properties.every(
+      (p) =>
+        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
+    )
+  ) {
+    return false;
+  }
+  const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
+  // Require an EXPLICIT any / unknown / `object` contextual type to divert to
+  // the open-`$Object` path. An ABSENT contextual type means TypeScript
+  // infers a concrete *struct* type for the literal — and every downstream
+  // consumer (member reads off the inferred-typed local, destructuring
+  // patterns, numeric coercion) compiles against that struct type. Routing
+  // such a literal to `$Object` makes the consumers null-deref (struct.get on
+  // a `$Object`) or mis-coerce (`(o as any) - 0` → 0 instead of NaN, the
+  // #1806/#1900 contract). This bit the -45 standalone gate (#1897): 116
+  // regressions across language/expressions/object (parenthesized literals,
+  // `var obj = ({var: 42})`) and for-of/for-await-of destructuring sources —
+  // all shapes with NO contextual type whose consumers use the struct path.
+  // The nested-property-value case (`g({x: {y: 5}})` inner `{y: 5}`, also no
+  // contextual type) is handled separately by construction-site recursion in
+  // compileObjectLiteralAsExternref, NOT by this gate.
+  const isAnyContextNonEmpty =
+    !!ctxTypeNonEmpty &&
+    ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
+      (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
+      (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
+  // (#2542) A STRING-INDEX-SIGNATURE contextual type — `{ [s: string]: T }` — is
+  // semantically an open dictionary: its sole purpose is runtime string-keyed
+  // access (`o[k]` with a runtime `k`). `resolveWasmType` already lowers such a
+  // type to externref for the binding (no named properties → falls through to
+  // `mapTsTypeToWasm` → externref), so the consuming local is externref and ALL
+  // reads/writes route through `__extern_get`/`__extern_set`. But the closed-
+  // struct literal path builds a nominal `struct.new` and `extern.convert_any`-
+  // wraps it; `__extern_get`'s `ref.test $Object` then can't match the struct, so
+  // `o[k]` returns 0 and `o[k] = v` is dropped. Building the literal as an open
+  // `$Object` (same as #1901's any-context route) makes every native reader find
+  // the property. Restricted to a PURE dictionary (no own named properties): a
+  // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
+  // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
+  // so diverting its literal to `$Object` would mismatch that struct local.
+  const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
+  const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
+  return isAnyContextNonEmpty || isPureStringIndexContext;
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1193,73 +1284,10 @@ export function compileObjectLiteral(
   // failure mode the gc/host R2 fast path avoids. Gating to `ctx.standalone`
   // keeps wasi byte-identical to main (the wasi extension is a tracked
   // follow-on; see plan/issues/1901). gc/host mode is untouched (not standalone).
-  if (
-    ctx.standalone &&
-    expr.properties.length > 0 &&
-    !ts.isParameter(expr.parent) &&
-    // only data props / spreads / plain-named method shorthand we can build onto
-    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
-    // host accessor path). (#3099) Plain-named method shorthand is now buildable
-    // here — compileObjectLiteralAsExternref materializes it as a runtime own
-    // property closure — so a method-bearing any-context literal (`const h: any =
-    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
-    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
-    // whose method exists only in the compile-time member table.
-    expr.properties.every(
-      (p) =>
-        ts.isPropertyAssignment(p) ||
-        ts.isShorthandPropertyAssignment(p) ||
-        ts.isSpreadAssignment(p) ||
-        isPlainNamedMethodDeclaration(p),
-    ) &&
-    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
-    // check return undefined/false for those).
-    expr.properties.every(
-      (p) =>
-        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
-    )
-  ) {
-    const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
-    // Require an EXPLICIT any / unknown / `object` contextual type to divert to
-    // the open-`$Object` path. An ABSENT contextual type means TypeScript
-    // infers a concrete *struct* type for the literal — and every downstream
-    // consumer (member reads off the inferred-typed local, destructuring
-    // patterns, numeric coercion) compiles against that struct type. Routing
-    // such a literal to `$Object` makes the consumers null-deref (struct.get on
-    // a `$Object`) or mis-coerce (`(o as any) - 0` → 0 instead of NaN, the
-    // #1806/#1900 contract). This bit the -45 standalone gate (#1897): 116
-    // regressions across language/expressions/object (parenthesized literals,
-    // `var obj = ({var: 42})`) and for-of/for-await-of destructuring sources —
-    // all shapes with NO contextual type whose consumers use the struct path.
-    // The nested-property-value case (`g({x: {y: 5}})` inner `{y: 5}`, also no
-    // contextual type) is handled separately by construction-site recursion in
-    // compileObjectLiteralAsExternref, NOT by this gate.
-    const isAnyContextNonEmpty =
-      !!ctxTypeNonEmpty &&
-      ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
-        (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
-        (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
-    // (#2542) A STRING-INDEX-SIGNATURE contextual type — `{ [s: string]: T }` — is
-    // semantically an open dictionary: its sole purpose is runtime string-keyed
-    // access (`o[k]` with a runtime `k`). `resolveWasmType` already lowers such a
-    // type to externref for the binding (no named properties → falls through to
-    // `mapTsTypeToWasm` → externref), so the consuming local is externref and ALL
-    // reads/writes route through `__extern_get`/`__extern_set`. But the closed-
-    // struct literal path builds a nominal `struct.new` and `extern.convert_any`-
-    // wraps it; `__extern_get`'s `ref.test $Object` then can't match the struct, so
-    // `o[k]` returns 0 and `o[k] = v` is dropped. Building the literal as an open
-    // `$Object` (same as #1901's any-context route) makes every native reader find
-    // the property. Restricted to a PURE dictionary (no own named properties): a
-    // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
-    // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
-    // so diverting its literal to `$Object` would mismatch that struct local.
-    const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
-    const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
-    if (isAnyContextNonEmpty || isPureStringIndexContext) {
-      const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
-      if (objResult) return objResult;
-      // fall through to the struct path if the $Object builder declined.
-    }
+  if (objectLiteralTakesStandaloneAnyObjectPath(ctx, expr)) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
+    if (objResult) return objResult;
+    // fall through to the struct path if the $Object builder declined.
   }
 
   // (#2837) A NON-EMPTY object literal initializing a variable that the detection

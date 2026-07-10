@@ -91,6 +91,7 @@ import {
   compileArrayConstructorCall,
   compileObjectLiteralAsExternref,
   compileSymbolCall,
+  objectLiteralTakesStandaloneAnyObjectPath,
   resolveComputedKeyExpression,
   resolvePropertyNameText,
 } from "../literals.js";
@@ -15219,7 +15220,42 @@ function compileCallExpression(
 
           // Determine return type from TS
           const iifeRetType = ctx.checker.getTypeAtLocation(expr);
-          const iifeWasmRetType = isVoidType(iifeRetType) ? null : resolveWasmType(ctx, iifeRetType);
+          let iifeWasmRetType = isVoidType(iifeRetType) ? null : resolveWasmType(ctx, iifeRetType);
+          // (#3128) The ret-local type must agree with what the returned
+          // expression will ACTUALLY lower to. Under standalone, an object
+          // literal in any/unknown/dictionary context diverts to the open
+          // `$Object` path and produces an **externref**
+          // (`objectLiteralTakesStandaloneAnyObjectPath`, the #1901/#2542
+          // gate) — but `resolveWasmType` types the ret local from the TS
+          // struct type. The return-site coercion externref→(ref null $struct)
+          // then goes through a `ref.test` arm that silently yields NULL
+          // (measured: `p2 = (function(){ return { a: (function(){ return
+          // p2; }) }; })()` — p2 read back null; the #3128-A cell write itself
+          // was correct, it faithfully wrote the nulled ret value). Mirror the
+          // literal's own divert decision here and widen the ret local to
+          // externref; struct-typed sibling returns coerce ref→externref
+          // losslessly (`extern.convert_any`). Scan only the IIFE's OWN
+          // returns — nested function boundaries keep their own return type.
+          if (iifeWasmRetType && (iifeWasmRetType.kind === "ref" || iifeWasmRetType.kind === "ref_null")) {
+            let divertedObjlitReturn = false;
+            const scanReturns = (node: ts.Node): void => {
+              if (divertedObjlitReturn) return;
+              if (ts.isFunctionLike(node) && node !== callee) return;
+              if (ts.isReturnStatement(node) && node.expression) {
+                let retExpr: ts.Expression = node.expression;
+                while (ts.isParenthesizedExpression(retExpr)) retExpr = retExpr.expression;
+                if (ts.isObjectLiteralExpression(retExpr) && objectLiteralTakesStandaloneAnyObjectPath(ctx, retExpr)) {
+                  divertedObjlitReturn = true;
+                  return;
+                }
+              }
+              forEachChild(node, scanReturns);
+            };
+            for (const stmt of bodyStmts) scanReturns(stmt);
+            if (divertedObjlitReturn) {
+              iifeWasmRetType = { kind: "externref" };
+            }
+          }
 
           if (iifeWasmRetType) {
             // Returning IIFE: allocate a result local, compile body into a block,

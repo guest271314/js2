@@ -3,7 +3,7 @@ id: 3128
 title: "Assignment lost when the RHS contains a closure capturing the assigned var (`p2 = p1.then(() => p2)`)"
 status: done
 completed: 2026-07-10
-assignee: ttraenkler/fable-3128
+assignee: ttraenkler/fable-3128 (rescued by ttraenkler/fable-18th)
 sprint: current
 created: 2026-07-10
 updated: 2026-07-10
@@ -14,7 +14,13 @@ task_type: bug
 area: codegen
 language_feature: closures
 goal: standalone-mode
-related: [3121, 3125, 2980, 3130]
+related: [3121, 3125, 2980, 3130, 3136]
+loc-budget-allow:
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/literals.ts
+  - src/codegen/closures.ts
+  - src/codegen/context/types.ts
 origin: "#3125 per-file drill — the resolve-settled-{fulfilled,rejected}-self.js widen regressions attributed to thenable assimilation in plan/log/2980-carrier-widen-tradeoff.md are actually THIS bug: p2 is null before .then() semantics ever matter"
 ---
 
@@ -171,3 +177,29 @@ widen lane): pass=20 fail=43 IDENTICAL before/after, zero flips.
 - Pre-existing standalone `===`-identity gap on any-routed $Promise values
   (`seen === p1` false with no self-capture involved — tag-5 host-only
   strict-eq arm) noted in #3130's notes; do not conflate with this bug.
+
+## Rescue addendum (fable-18th, 2026-07-10 — PR #2843 completed)
+
+The original PR validated its "standalone" cases with a `{ standalone: true }`
+compile option — which the pipeline IGNORES (`buildCodegenOptions` derives the
+codegen flag ONLY from `options.target === "standalone"`), so both lanes of
+the test matrix actually ran gc-host. On the REAL standalone lane
+(`target: "standalone"`) two residuals surfaced:
+
+1. **Inlined-IIFE ret-local type mismatch (fixed here).** An objlit returned
+   from the IIFE in any-context diverts to the open-`$Object` externref path
+   (#1901/#2542), but the ret local was typed from the TS struct type; the
+   return coercion's `ref.test` arm silently nulled the value — so row 3 of
+   the issue table still returned 9 standalone (the #3128-A cell write was
+   correct; it wrote the nulled ret value). Fix: extracted the divert
+   decision as `objectLiteralTakesStandaloneAnyObjectPath` (literals.ts) and
+   the inliner (calls.ts) now widens the ret local to externref when any of
+   the IIFE's own returns is a diverted objlit — the same lockstep-predicate
+   discipline as #2804/#1930.
+2. **Cell-read object identity loss (pre-existing, spun off as #3136).**
+   `closureRead() === p2` answers false standalone for the same object even
+   with no IIFE and no self-capture RHS. The test file pins identity on the
+   host lane and value-flow on standalone (`standaloneSrc` variants) until
+   #3136 lands.
+
+Tests: `tests/issue-3128.test.ts` 14/14 with the standalone lane now real.

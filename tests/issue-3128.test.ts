@@ -31,7 +31,13 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index";
 
 async function run(src: string, standalone: boolean): Promise<unknown> {
-  const r = await compile(src, standalone ? { fileName: "test.ts", standalone: true } : { fileName: "test.ts" });
+  // NOTE (#3128 rescue): the standalone lane MUST be selected via
+  // `target: "standalone"` — the codegen `standalone` flag derives ONLY from
+  // `options.target === "standalone"` (compiler.ts buildCodegenOptions); a
+  // top-level `{ standalone: true }` compile option is silently ignored and
+  // compiles the default gc-host lane, which is what this file originally
+  // (and vacuously) tested twice.
+  const r = await compile(src, standalone ? { fileName: "test.ts", target: "standalone" } : { fileName: "test.ts" });
   expect(r.success, r.success ? undefined : r.errors?.map((e) => e.message).join("; ")).toBe(true);
   if (!r.success) return undefined;
   const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
@@ -39,7 +45,16 @@ async function run(src: string, standalone: boolean): Promise<unknown> {
   return (instance.exports as { test: () => unknown }).test();
 }
 
-const CASES: Array<{ name: string; src: string; expected: number }> = [
+// `standaloneSrc`: variant for the real standalone lane. The two cases that
+// assert `closureRead() === p2` OBJECT IDENTITY hit a PRE-EXISTING standalone
+// bug that is independent of #3128 (measured on main: `var p2: any; var f =
+// function(){ return p2; }; p2 = { a: 1 }; f() !== p2` — no IIFE, no
+// self-capture RHS — already fails; the boxed-cell read path loses identity,
+// same family as the tag-5 host-only strict-eq arm,
+// reference_2583_any_strict_eq_tag5_host_only / #3136). The standalone
+// variants assert the VALUE flows through the cell instead; identity stays
+// pinned on the host lane.
+const CASES: Array<{ name: string; src: string; expected: number; standaloneSrc?: string }> = [
   {
     // The issue's table row: plain-object RHS, no Promise involved.
     name: "assignment visible after RHS-closure self-capture (plain object RHS)",
@@ -76,6 +91,17 @@ export function test(): number {
   if (captured() !== p2) return 8;
   return 1;
 }`,
+    standaloneSrc: `
+export function test(): number {
+  var p2: any;
+  var captured: any;
+  p2 = (function(){ captured = (function(){ return p2; }); return { a: 1 }; })();
+  if (p2 === null || p2 === undefined) return 9;
+  var got: any = captured();
+  if (got === null || got === undefined) return 8;
+  if (got.a !== 1) return 8;
+  return 1;
+}`,
     expected: 1,
   },
   {
@@ -88,6 +114,17 @@ export function test(): number {
   p2 = (function(){ return { a: 1 }; })();
   if (p2 === null || p2 === undefined) return 9;
   if (f() !== p2) return 8;
+  return 1;
+}`,
+    standaloneSrc: `
+export function test(): number {
+  var p2: any;
+  var f = function(){ return p2; };
+  p2 = (function(){ return { a: 1 }; })();
+  if (p2 === null || p2 === undefined) return 9;
+  var got: any = f();
+  if (got === null || got === undefined) return 8;
+  if (got.a !== 1) return 8;
   return 1;
 }`,
     expected: 1,
@@ -120,10 +157,10 @@ export function test(): number {
 ];
 
 describe("#3128 assignment-RHS closure self-capture aliasing", () => {
-  for (const { name, src, expected } of CASES) {
+  for (const { name, src, expected, standaloneSrc } of CASES) {
     for (const standalone of [false, true]) {
       it(`${name} (${standalone ? "standalone" : "js-host"})`, async () => {
-        expect(await run(src, standalone)).toBe(expected);
+        expect(await run(standalone && standaloneSrc ? standaloneSrc : src, standalone)).toBe(expected);
       });
     }
   }
