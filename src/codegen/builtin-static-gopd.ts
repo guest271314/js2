@@ -56,6 +56,7 @@
  * flush) BEFORE pushing operands, so a `false` return never leaves partial
  * instructions in `fctx.body`.
  */
+import { ts } from "../ts-api.js";
 import type { Instr } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
@@ -92,6 +93,126 @@ function resolveBoxNumber(ctx: CodegenContext, fctx: FunctionContext): number | 
   const idx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   return idx;
+}
+
+/**
+ * (#2984 bucket-1 "obj-VAR receivers") Resolve a gOPD receiver EXPRESSION to a
+ * builtin ctor/namespace name at compile time, following one level of
+ * reaching-def aliasing: `const/var m = Math; gOPD(m, "atan2")`. The Phase 3
+ * synthesis gate was purely syntactic (bare unshadowed builtin identifier);
+ * test262's 15.2.3.3-4-* fixtures overwhelmingly bind the receiver through a
+ * local first, which fell to the dynamic `__getOwnPropertyDescriptor` path and
+ * silently yielded `undefined` standalone.
+ *
+ * Soundness (conservative, AST-only — no checker, per the #1930 oracle
+ * ratchet): the alias is accepted ONLY when, within the local's whole
+ * enclosing function-like (or SourceFile) subtree,
+ *   1. EXACTLY ONE VariableDeclaration binds the name (no same-name shadow
+ *      ambiguity anywhere in the scope tree),
+ *   2. its initializer unwraps (parens / `as` / `!` / `<T>`) to an unshadowed
+ *      builtin identifier,
+ *   3. NO parameter, catch clause, function declaration, class, import, or
+ *      assignment/update expression anywhere in that subtree writes the name —
+ *      so the initializer is the unique reaching definition at every use.
+ * Anything else returns `undefined` and the caller keeps today's behavior.
+ * `builtinNames` is passed by the caller (calls.ts owns BUILTIN_CLASS_NAMES;
+ * importing it here would cycle).
+ */
+export function resolveBuiltinReceiverName(
+  fctx: FunctionContext,
+  expr: ts.Expression,
+  builtinNames: ReadonlySet<string>,
+): string | undefined {
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    while (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = cur.expression;
+    }
+    return cur;
+  };
+  const isShadowedBuiltin = (name: string): boolean =>
+    fctx.localMap.has(name) || (fctx.boxedCaptures?.has(name) ?? false);
+
+  const e = unwrap(expr as ts.Expression);
+  if (!ts.isIdentifier(e)) return undefined;
+  // Direct receiver — the Phase 3 gate, expressed here so callers have ONE entry.
+  if (builtinNames.has(e.text) && !isShadowedBuiltin(e.text)) return e.text;
+
+  // Alias receiver: find the enclosing function-like / SourceFile scope root.
+  const name = e.text;
+  let root: ts.Node = e;
+  while (root.parent) {
+    root = root.parent;
+    if (
+      ts.isFunctionDeclaration(root) ||
+      ts.isFunctionExpression(root) ||
+      ts.isArrowFunction(root) ||
+      ts.isMethodDeclaration(root) ||
+      ts.isConstructorDeclaration(root) ||
+      ts.isGetAccessorDeclaration(root) ||
+      ts.isSetAccessorDeclaration(root) ||
+      ts.isSourceFile(root)
+    ) {
+      break;
+    }
+  }
+
+  let decl: ts.VariableDeclaration | undefined;
+  let declCount = 0;
+  let otherBinderOrWrite = false;
+  const visit = (n: ts.Node): void => {
+    if (otherBinderOrWrite) return;
+    if (ts.isVariableDeclaration(n)) {
+      if (ts.isIdentifier(n.name) && n.name.text === name) {
+        declCount++;
+        decl = n;
+      } else if (!ts.isIdentifier(n.name)) {
+        // Destructuring can bind the name invisibly — scan its identifiers.
+        const scanBinding = (b: ts.Node): void => {
+          if (ts.isIdentifier(b) && b.text === name) otherBinderOrWrite = true;
+          ts.forEachChild(b, scanBinding);
+        };
+        scanBinding(n.name);
+      }
+    } else if ((ts.isParameter(n) || ts.isBindingElement(n)) && ts.isIdentifier(n.name) && n.name.text === name) {
+      otherBinderOrWrite = true;
+    } else if (ts.isCatchClause(n) && n.variableDeclaration) {
+      const vd = n.variableDeclaration;
+      if (ts.isIdentifier(vd.name) && vd.name.text === name) otherBinderOrWrite = true;
+    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name?.text === name) {
+      otherBinderOrWrite = true;
+    } else if (ts.isImportSpecifier(n) && n.name.text === name) {
+      otherBinderOrWrite = true;
+    } else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const lhs = unwrap(n.left);
+      if (ts.isIdentifier(lhs) && lhs.text === name) otherBinderOrWrite = true;
+    } else if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind >= ts.SyntaxKind.FirstCompoundAssignment &&
+      n.operatorToken.kind <= ts.SyntaxKind.LastCompoundAssignment
+    ) {
+      const lhs = unwrap(n.left);
+      if (ts.isIdentifier(lhs) && lhs.text === name) otherBinderOrWrite = true;
+    } else if (
+      (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      const operand = unwrap(n.operand);
+      if (ts.isIdentifier(operand) && operand.text === name) otherBinderOrWrite = true;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+
+  if (otherBinderOrWrite || declCount !== 1 || !decl?.initializer) return undefined;
+  const init = unwrap(decl.initializer);
+  if (ts.isIdentifier(init) && builtinNames.has(init.text) && !isShadowedBuiltin(init.text)) return init.text;
+  return undefined;
 }
 
 /** Emit `__create_descriptor(box(value), flags)` for a numeric constant. */

@@ -10,10 +10,34 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2984c
+assignee: ttraenkler/fable-6th
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Bucket-1 slice LANDED (2026-07-10, fable-6th) — alias (obj-VAR) gOPD receivers
+
+> PR: `issue-2984-gopd-runtime-dispatch`. Takes the "obj-VAR receivers"
+> entry of "Still remaining after Phase 3" bucket 1 — `var m = Math;
+> gOPD(m, "atan2")`, the dominant 15.2.3.3-4-* fixture shape, which fell to
+> the dynamic `__getOwnPropertyDescriptor` path and silently answered
+> `undefined` standalone (probe-verified on main @ 4ac4b6e01a).
+
+- `resolveBuiltinReceiverName` (builtin-static-gopd.ts): conservative,
+  AST-only reaching-def alias resolution — accepts an alias only when
+  exactly ONE declaration binds the name in the enclosing scope tree, its
+  initializer unwraps to an unshadowed builtin identifier, and nothing
+  writes/re-binds the name (params, catch, imports, `=`/compound/`++ --`
+  all decline). Declining keeps today's path bit-for-bit.
+- Wired at the calls.ts gOPD synthesis gate (replaces the bare-identifier
+  test; direct receivers resolve exactly as Phase 3 did).
+- `prove-emit-identity`: **IDENTICAL** (all 39 file,target emits vs main).
+  Tests: `tests/issue-2984-alias-receivers.test.ts` 7/7 (aliases, value
+  identity, absent-key, reassignment/shadow/non-builtin guards); phase-3
+  suite 11/11.
+- Still open in bucket 1 after this slice: arg-2 NAME COERCION (non-literal
+  keys — the `__get_builtin` CE family), global-object receivers
+  (`this`/`window`), gOPDs-plural residuals, `primitive-string(s)`.
 
 ## Phase 3 LANDED (2026-07-10, fable-2984c) — ctor/namespace-receiver static-property descriptor synthesis
 
