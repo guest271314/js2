@@ -24,7 +24,7 @@ import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
-import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
+import { emitDynGet, widenBooleanDynamicAccess } from "./dyn-read.js"; // (#2580 M2 slice 1) (#2984)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import {
@@ -3475,33 +3475,6 @@ function taViewReceiverTypeIdx(
   return undefined;
 }
 
-/**
- * (#2984) True when a property-access site's TS type is boolean-like:
- * `boolean`, a boolean literal, or a union of boolean literals with only
- * `undefined`/`void`/`null` alongside (the ubiquitous lib shape
- * `PropertyDescriptor.writable?: boolean` resolves to `boolean | undefined`,
- * whose UNION type object carries no `BooleanLike` flag of its own — the
- * members must be walked). Used to keep boolean-typed DYNAMIC fallback reads
- * as raw externref instead of narrowing through the numeric unbox pipeline
- * (see the `accessWasm` widening in `compilePropertyAccess`).
- */
-function isBooleanLikeAccessType(t: ts.Type): boolean {
-  if ((t.flags & ts.TypeFlags.BooleanLike) !== 0) return true;
-  if ((t.flags & ts.TypeFlags.Union) !== 0) {
-    let sawBool = false;
-    for (const m of (t as ts.UnionType).types) {
-      if ((m.flags & ts.TypeFlags.BooleanLike) !== 0) {
-        sawBool = true;
-        continue;
-      }
-      if ((m.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) !== 0) continue;
-      return false;
-    }
-    return sawBool;
-  }
-  return false;
-}
-
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -6332,28 +6305,7 @@ export function compilePropertyAccess(
   // (e.g., properties on Object, {}, undefined, or dynamically-typed values).
   // Determine the expected result type from the TS checker at the access site.
   const accessType = ctx.checker.getTypeAtLocation(expr);
-  let accessWasm = resolveWasmType(ctx, accessType);
-  // (#2984) A BOOLEAN-typed property read that resolves through the DYNAMIC
-  // fallback arms below (host-MOP `__extern_get` / member-get dispatcher /
-  // sidecar read) must NOT narrow to i32 via `__unbox_number` +
-  // `i32.trunc_sat_f64_s`. That pipeline is a ToNumber, not a boolean read:
-  // the standalone native `__unbox_number` yields NaN for a boxed boolean, so
-  // `Object.getOwnPropertyDescriptor(o, k).writable` (lib type `boolean`)
-  // came back as i32 0 — and the enclosing any-context consumer (a harness
-  // `assert.sameValue(desc.writable, true)` argument) then RE-boxed that 0 as
-  // a NUMBER (`__box_number`), failing strict equality against `true` for
-  // every descriptor-attribute assertion in the test262 gOPD cluster (host
-  // lane only "passed" by a double coincidence: host ToNumber(true)=1 and a
-  // numeric compare). Keeping the raw externref preserves BOTH the boolean
-  // box (value-correct native `===`) and `undefined` for an absent attribute
-  // (i32 narrowing erased it to `false`). Numeric (f64/i32-from-number)
-  // narrowing is untouched — arithmetic consumers depend on it — and the
-  // Phase-3 struct-candidate narrowing below still applies (typed struct
-  // FIELDS store genuine i32 booleans; that path is value-correct), so
-  // modules with no boolean-typed dynamic-fallback read are byte-identical.
-  if (accessWasm.kind === "i32" && isBooleanLikeAccessType(accessType)) {
-    accessWasm = { kind: "externref" };
-  }
+  const accessWasm = widenBooleanDynamicAccess(accessType, resolveWasmType(ctx, accessType)); // (#2984)
 
   // For struct types with the property, try to compile the object and do struct.get
   // but NEVER for class struct types — their fields are fixed at collection time

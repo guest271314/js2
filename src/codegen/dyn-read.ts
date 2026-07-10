@@ -35,6 +35,7 @@
 // `undefined` result uses the existing `emitUndefined` convention (host
 // `__get_undefined`, else `ref.null.extern`). No new host import.
 
+import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
@@ -1063,4 +1064,57 @@ function emitDynMemberGetSelfTestHost(ctx: CodegenContext, dmgIdx: number): void
       { op: "i32.eqz" } as Instr, // 1 iff the read produced a non-null result
     ],
   );
+}
+
+/**
+ * (#2984) True when a property-access site's TS type is boolean-like:
+ * `boolean`, a boolean literal, or a union of boolean literals with only
+ * `undefined`/`void`/`null` alongside (the ubiquitous lib shape
+ * `PropertyDescriptor.writable?: boolean` resolves to `boolean | undefined`,
+ * whose UNION type object carries no `BooleanLike` flag of its own — the
+ * members must be walked).
+ *
+ * Why it matters: a boolean-typed property read that resolves through the
+ * DYNAMIC fallback (`__extern_get` host-MOP read / member-get dispatcher /
+ * sidecar read) must NOT narrow to i32 via `__unbox_number` +
+ * `i32.trunc_sat_f64_s`. That pipeline is a ToNumber, not a boolean read: the
+ * standalone native `__unbox_number` yields NaN for a boxed boolean, so
+ * `Object.getOwnPropertyDescriptor(o, k).writable` came back as i32 0, and an
+ * any-context consumer (a test262-harness `assert.sameValue(desc.writable,
+ * true)` argument) then RE-boxed that 0 as a NUMBER — failing strict equality
+ * for every descriptor-attribute assertion in the standalone gOPD cluster
+ * (host only "passed" the harness shape by the ToNumber(true)=1 coincidence).
+ * Keeping the raw externref preserves BOTH the boolean box (value-correct
+ * native `===`) and `undefined` for an absent attribute (i32 narrowing erased
+ * it to `false`). Consumed by `compilePropertyAccess`'s dynamic-fallback
+ * region (property-access.ts).
+ */
+export function isBooleanLikeAccessType(t: ts.Type): boolean {
+  if ((t.flags & ts.TypeFlags.BooleanLike) !== 0) return true;
+  if ((t.flags & ts.TypeFlags.Union) !== 0) {
+    let sawBool = false;
+    for (const m of (t as ts.UnionType).types) {
+      if ((m.flags & ts.TypeFlags.BooleanLike) !== 0) {
+        sawBool = true;
+        continue;
+      }
+      if ((m.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null)) !== 0) continue;
+      return false;
+    }
+    return sawBool;
+  }
+  return false;
+}
+
+/**
+ * (#2984) The dynamic-fallback access-type widening consumed by
+ * `compilePropertyAccess` (property-access.ts): a boolean-like access type
+ * whose resolved Wasm type is i32 keeps the raw externref instead (see the
+ * rationale on `isBooleanLikeAccessType` above). Numeric narrowings and every
+ * non-boolean i32 (native `type i32 = number` annotations) pass through
+ * unchanged, so modules without boolean-typed dynamic-fallback reads are
+ * byte-identical.
+ */
+export function widenBooleanDynamicAccess(t: ts.Type, wasm: ValType): ValType {
+  return wasm.kind === "i32" && isBooleanLikeAccessType(t) ? { kind: "externref" } : wasm;
 }
