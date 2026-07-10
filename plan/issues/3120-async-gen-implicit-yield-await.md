@@ -4,6 +4,7 @@ title: "Standalone async-generator: plain `yield <promise>` skips the §27.6.3.8
 status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-3120
+pr: 2841
 sprint: current
 model: fable
 created: 2026-07-09
