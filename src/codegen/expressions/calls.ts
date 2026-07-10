@@ -20,6 +20,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
 import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
@@ -144,6 +145,7 @@ import {
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
+import { tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7685,6 +7687,25 @@ function compileCallExpression(
       };
       const propLiteral = literalKeyText(arg1);
 
+      // (#2984) `gOPD(this, "NaN"|"Infinity"|"undefined")` — the sloppy-mode
+      // GLOBAL `this` (no local binding, not a static-class context) folds at
+      // RUNTIME to the spec §19.1 value-property descriptor when nullish, and
+      // keeps the dynamic read for a real dispatched receiver. Full rationale
+      // on `emitGlobalThisGopdFold` (dyn-read.ts). Receiver is compiled FIRST
+      // (its lowering may add late imports) — the helper captures funcIdxs
+      // after it.
+      if (
+        arg0.kind === ts.SyntaxKind.ThisKeyword &&
+        (propLiteral === "NaN" || propLiteral === "Infinity" || propLiteral === "undefined") &&
+        fctx.localMap.get("this") === undefined &&
+        !(fctx.isStaticContext && fctx.enclosingClassName)
+      ) {
+        const thisType = compileExpression(ctx, fctx, arg0);
+        if (thisType && thisType.kind !== "externref") coerceType(ctx, fctx, thisType, { kind: "externref" });
+        emitGlobalThisGopdFold(ctx, fctx, propLiteral);
+        return { kind: "externref" };
+      }
+
       if (structName && propLiteral !== undefined) {
         const structTypeIdx = ctx.structMap.get(structName);
         const fields = ctx.structFields.get(structName);
@@ -7904,7 +7925,12 @@ function compileCallExpression(
         const protoGlue = protoBrand !== undefined ? getNativeProtoBuiltinGlue(ctx, protoBrand) : undefined;
         if (protoBrand !== undefined && protoGlue && protoGlue.memberCsv.split(",").includes(protoMember)) {
           const memberKind = protoGlue.memberKind(protoMember);
-          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, protoMember, memberKind);
+          // (#2984 Phase 2) Un-wired members reify as identity-stable throwing
+          // closures (see native-proto-value-read.ts) so the descriptor is
+          // spec-shaped and `desc.value === <Builtin>.prototype.<m>` holds.
+          const protoClosure = ensureStandaloneNativeMethodClosure(ctx, protoBrand, protoMember, memberKind, {
+            refusalBodyFallback: true,
+          });
           if (protoClosure) {
             if (memberKind === "getter") {
               // Accessor descriptor: get=<closure>, set=undefined,
@@ -7951,6 +7977,28 @@ function compileCallExpression(
             }
           }
         }
+      }
+
+      // (#2984 Phase 3) Standalone builtin-CTOR/NAMESPACE-receiver descriptor
+      // synthesis — `gOPD(Math, "atan2")`, `gOPD(Date, "prototype")`,
+      // `gOPD(Number, "MAX_VALUE")`, `gOPD(String, "length")`. The dynamic
+      // fallback below routes a builtin-identifier receiver through
+      // `__get_builtin`, which refuses-loud under standalone (#1472 Phase B) —
+      // every shape this arm intercepts was a hard CE on main, so synthesizing
+      // the §6.1.7.3 descriptor from the compile-time static-property tables
+      // (builtin-static-gopd.ts) is strictly regression-free. Unresolvable
+      // members (Symbol well-knowns / RegExp legacy statics / dynamic keys)
+      // fall through to the existing refusal; host/gc keeps the working
+      // `__get_builtin` host route untouched.
+      if (
+        ctx.standalone &&
+        propLiteral !== undefined &&
+        ts.isIdentifier(arg0) &&
+        BUILTIN_CLASS_NAMES.has(arg0.text) &&
+        !(fctx.localMap.has(arg0.text) || (fctx.boxedCaptures?.has(arg0.text) ?? false)) &&
+        tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, arg0.text, propLiteral)
+      ) {
+        return { kind: "externref" };
       }
 
       // Fallback: dynamic case — delegate to __getOwnPropertyDescriptor host import
