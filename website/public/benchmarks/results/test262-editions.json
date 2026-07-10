@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11737,
-    "fail": 3505,
+    "pass": 11738,
+    "fail": 3504,
     "ce": 143,
     "skip": 1,
     "total": 15386,
@@ -165,12 +165,12 @@
       },
       {
         "name": "Symbol.species",
-        "pass": 92,
-        "fail": 91,
+        "pass": 93,
+        "fail": 90,
         "ce": 0,
         "skip": 0,
         "total": 183,
-        "pct": 50
+        "pct": 51
       },
       {
         "name": "destructuring-assignment",
@@ -1027,8 +1027,8 @@
   {
     "edition": "ES2018",
     "pass": 3340,
-    "fail": 883,
-    "ce": 28,
+    "fail": 884,
+    "ce": 27,
     "skip": 0,
     "total": 4251,
     "pct": 79,
@@ -1036,8 +1036,8 @@
       {
         "name": "async-iteration",
         "pass": 2488,
-        "fail": 769,
-        "ce": 27,
+        "fail": 770,
+        "ce": 26,
         "skip": 0,
         "total": 3284,
         "pct": 76
