@@ -10,6 +10,8 @@ feasibility: hard
 area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2985, 2667]
+loc-budget-allow:
+  - src/codegen/declarations.ts
 origin: "#2985 sizing-pass split — the substrate-scale MOP remainder after the illegal-cast slice shipped in #2985"
 ---
 
