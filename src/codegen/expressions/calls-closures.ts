@@ -22,6 +22,68 @@ import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasm
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitClosureCallArgcExtras, emitResetArgcExtras, emitWrapperDynamicMethodCall } from "./calls.js";
 
+/**
+ * (#3033) Per-source-file set of member names the USER's own code defines as
+ * function-valued — prototype-method assignments (`P.prototype.check = fn`,
+ * including the alias form `var pp = P.prototype; pp.check = fn`), plain
+ * function-valued property assignments, function-valued object-literal
+ * properties / method shorthands, and class method names.
+ *
+ * `tryExternClassMethodOnAny` consults this to REFUSE binding an `any`-typed
+ * receiver's method call to an ambient extern class (lib.dom.d.ts et al.) by
+ * first-name-match when the program itself defines a member of that name. The
+ * concrete failure (#3033 acorn dogfood, minimal FF2 repro): `p.check()` on a
+ * fnctor instance first-matched **FontFaceSet.check** — a DOM API — so the
+ * user's `P.prototype.check` never ran and the call returned the import's
+ * boxed default. Refusal is semantically safe: the call falls through to the
+ * generic dynamic dispatch (`__extern_method_call` / fnctor-proto lookup),
+ * which resolves by the receiver's REAL runtime identity — the same reasoning
+ * as the existing hardcoded `slice`/`replace`/`forEach`/`some` refusals, made
+ * general for names the user demonstrably owns.
+ */
+const _userFunctionMemberNamesCache = new WeakMap<ts.SourceFile, Set<string>>();
+function getUserFunctionMemberNames(sf: ts.SourceFile): Set<string> {
+  const cached = _userFunctionMemberNamesCache.get(sf);
+  if (cached) return cached;
+  const names = new Set<string>();
+  const isFnValued = (e: ts.Expression): boolean =>
+    ts.isFunctionExpression(e) || ts.isArrowFunction(e) || ts.isIdentifier(e);
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      isFnValued(node.right)
+    ) {
+      // Identifier RHS is included conservatively (`pp.parseIdent = parseIdent`
+      // aliasing); it can only widen the refusal set, never mis-bind.
+      if (ts.isFunctionExpression(node.right) || ts.isArrowFunction(node.right)) {
+        names.add(node.left.name.text);
+      }
+    } else if (ts.isObjectLiteralExpression(node)) {
+      for (const prop of node.properties) {
+        if (ts.isMethodDeclaration(prop) && ts.isIdentifier(prop.name)) {
+          names.add(prop.name.text);
+        } else if (
+          ts.isPropertyAssignment(prop) &&
+          ts.isIdentifier(prop.name) &&
+          (ts.isFunctionExpression(prop.initializer) || ts.isArrowFunction(prop.initializer))
+        ) {
+          names.add(prop.name.text);
+        }
+      }
+    } else if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.members) {
+      for (const m of node.members) {
+        if (ts.isMethodDeclaration(m) && ts.isIdentifier(m.name)) names.add(m.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  _userFunctionMemberNamesCache.set(sf, names);
+  return names;
+}
+
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
   ctx: CodegenContext,
@@ -1020,6 +1082,16 @@ export function tryExternClassMethodOnAny(
   // (A genuinely-`Uint8ClampedArray`-typed receiver never reaches here — it is
   // handled by the native array-method path before the `any` fallback.)
   if (methodName === "forEach" || methodName === "some") return null;
+
+  // (#3033) If the program's OWN code defines a function-valued member of this
+  // name (prototype-method assignment, function-valued property, object-literal
+  // method, class method), the receiver is far more plausibly a user object
+  // than an ambient DOM/extern instance — and the first-match binding below
+  // would hijack the call to the extern import (acorn's `p.check()` bound to
+  // FontFaceSet_check; parseIdent/finishToken shadow DOM names too). Refuse and
+  // let the generic dynamic dispatch resolve by runtime identity — which also
+  // handles genuine extern receivers correctly host-side.
+  if (getUserFunctionMemberNames(expr.getSourceFile()).has(methodName)) return null;
 
   // (#1283) The dispatch below emits `externref` hints for every arg and
   // assumes the call's params are all-externref. When iterating in
