@@ -616,6 +616,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   skipSemanticDiagnostics: true,
                   target: TEST262_TARGET,
                   inferModuleStrictArguments,
+                  // (#3049 C1 / #3123) NO deferTopLevelInit here — this is the
+                  // multi-module FIXTURE compile, which already synthesizes
+                  // per-module init plumbing; adding the deferred-export flag
+                  // emitted a SECOND `__module_init` export in one binary
+                  // (V8 "Duplicate export name '__module_init'" CompileError —
+                  // the 6-file `language/module-code/*` regression that parked
+                  // the stack PR #2835/#2839 in the merge queue). Single-file
+                  // compiles (the worker path) still defer; the exec block
+                  // calls the exported __module_init after setExports when
+                  // present, and is a no-op for this `(start)`-model binary.
                   // (#2932) Without allowJs, TypeScript excludes the `.js`
                   // _FIXTURE root files from the program entirely — their
                   // top-level declarations are never codegen'd and every
@@ -667,6 +677,14 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   const { instance } = await WebAssembly.instantiate(result.binary, importObj as any);
                   if (typeof (importObj as any).setExports === "function") {
                     (importObj as any).setExports(instance.exports);
+                  }
+                  // (#3049 C1) Deferred top-level init (host lane): run the
+                  // exported __module_init now that setExports has wired the
+                  // runtime. Same try as instantiate + test(), so a top-level
+                  // throw keeps its pre-defer classification.
+                  const moduleInit = (instance.exports as any).__module_init;
+                  if (typeof moduleInit === "function") {
+                    moduleInit();
                   }
                   const testFn = (instance.exports as any).test;
                   if (typeof testFn !== "function") {
