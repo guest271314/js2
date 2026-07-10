@@ -2235,7 +2235,41 @@ function analyzeAsyncGen(
   for (const st of body.statements) {
     const e = ts.isExpressionStatement(st) ? st.expression : null;
     if (e !== null && ts.isYieldExpression(e)) {
-      if (e.asteriskToken !== undefined) return null; // `yield*` delegation — follow-up
+      if (e.asteriskToken !== undefined) {
+        // (#3132 S1) `yield* [e1, e2, …]` over an ARRAY LITERAL statically
+        // unrolls into per-element plain-yield segments — §27.5.3 delegation
+        // over an array forwards exactly the `done:false` element values, and
+        // an elision hole yields `undefined` (a `yield;` segment). Elements
+        // must be suspend-free and non-spread; any other `yield*` operand
+        // (identifiers, calls, strings, spread elements) keeps the legacy
+        // path (correct-or-legacy). This single gate propagates to
+        // `isBoundedAsyncGenBody` / `isAwaitFreeAsyncGenBody` /
+        // `isAsyncGenDriveCandidate` / `sourceNeedsGeneratorHostImports`, so
+        // the admitted bodies drop their `__gen_*` host-import leak in
+        // lockstep with the native emit.
+        const src = e.expression;
+        if (src === undefined || !ts.isArrayLiteralExpression(src)) return null;
+        for (const el of src.elements) {
+          if (ts.isSpreadElement(el)) return null; // spread — runtime drain, S3
+          if (ts.isOmittedExpression(el)) {
+            segments.push({ leads, awaited: null, plain: null }); // hole → yield undefined
+            leads = [];
+            continue;
+          }
+          if (containsAwaitOrYield(el)) return null; // nested suspend — S3
+          // (#3120) Promise-typed elements: yield* delegation does NOT apply
+          // the implicit AsyncGeneratorYield await to the *inner* iterator's
+          // values on the carrier lane distinction we model here — route them
+          // through the same mode check as a plain `yield el` for consistency.
+          if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, el)) {
+            segments.push({ leads, awaited: el, plain: null });
+          } else {
+            segments.push({ leads, awaited: null, plain: el });
+          }
+          leads = [];
+        }
+        continue;
+      }
       const operand = e.expression;
       if (operand === undefined) {
         segments.push({ leads, awaited: null, plain: null }); // `yield;`

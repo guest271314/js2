@@ -1547,6 +1547,18 @@ export interface CodegenContext {
    */
   asyncGenLegacyBufferEmitted?: boolean;
   /**
+   * (#3132) True once ANY generator (sync OR async) was emitted on the LEGACY
+   * eager-buffer path (`__create_generator` / `__create_async_generator`) —
+   * the superset of {@link asyncGenLegacyBufferEmitted}. The native
+   * `__iterator` HOSTGEN arm (#3075, iterator-native.ts) keys on this: it must
+   * fill exactly when a HOST generator object can exist at runtime. Keying on
+   * funcMap import presence instead (the eager `__gen_*` bundle registration)
+   * would PIN the whole bundle as referenced imports in an all-driven module,
+   * breaking the zero-import host-free contract for modules whose every
+   * generator lowered natively.
+   */
+  legacyGenBufferEmitted?: boolean;
+  /**
    * (#2980 conservative Promise-lane fallback) True when the module SOURCE has
    * ANY async generator, set in the pre-body `collectDeclarations` walk. On the
    * widened-standalone measure lane, `widenAsyncGenFallback` (async-scheduler.ts)

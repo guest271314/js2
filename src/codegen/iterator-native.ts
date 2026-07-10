@@ -130,6 +130,52 @@ const HEAP_TYPE_ARRAY = -22; // 0x6A
 const HEAP_TYPE_I31 = -20; // 0x6C
 
 /**
+ * (#3132 S1) IterRec kind tag for a DRIVEN native async-generator frame
+ * carrier (the `$AsyncFrame` struct `emitAsyncGenerator` returns, #2906
+ * 3d-i / #2865). The bounded 3d-ii CFG consumer only drives a direct-call
+ * source with a simple identifier binding, so a frame consumed through an
+ * identifier (`var it = g(); for await (const [x] of it)`) or any
+ * destructuring binding falls to the legacy sync `__iterator` lowering —
+ * which hard-cast trapped on the frame struct. This arm dispatches a
+ * per-producer type-switch over `ctx.asyncGenProducers`: `__iterator_next`
+ * calls the matching `__async_gen_next_<stem>` driver and reads the settled
+ * `$IteratorResult` off the minted `$Promise`. Await-free producers (the only
+ * ones driven under `--target standalone`, #2865/#2980) settle that promise
+ * SYNCHRONOUSLY inside the `next()` kick, so requiring FULFILLED is exact; a
+ * pending promise (carrier-lane awaited yield) traps loudly (`unreachable`) —
+ * the same loud-failure discipline as the pre-arm hard cast. The frame is
+ * held in `userIter` (field 3).
+ */
+const ITER_KIND_ASYNCGEN = 6;
+
+/** `$Promise` field layout (async-scheduler.ts): state(0) i32 — 1=FULFILLED —
+ *  and value(1) externref. */
+const PROMISE_FIELD_STATE = 0;
+const PROMISE_FIELD_VALUE = 1;
+const PROMISE_STATE_FULFILLED = 1;
+
+/** `__NativeGeneratorResult_externref` field layout (generators-native.ts
+ *  `ensureNativeGeneratorResultType`): value(0) externref, done(1) i32. */
+const AGEN_RESULT_FIELD_VALUE = 0;
+const AGEN_RESULT_FIELD_DONE = 1;
+
+/**
+ * (#3132 S1) Resolved fill-time deps of the ASYNCGEN arm. All DEFINED funcs /
+ * concrete type indices, resolved from funcMap/structMap at fill time (every
+ * producer has registered by finalize — `emitAsyncGenerator` runs during body
+ * compilation).
+ */
+interface AsyncGenCarrierDeps {
+  /** Per-producer dispatch: frame `ref.test stateTypeIdx` → its next driver
+   *  `__async_gen_next_<stem>(frame externref) -> externref ($Promise)`. */
+  producers: { stateTypeIdx: number; nextIdx: number }[];
+  /** `$Promise` struct typeIdx. */
+  promiseTypeIdx: number;
+  /** `__NativeGeneratorResult_externref` struct typeIdx. */
+  resultTypeIdx: number;
+}
+
+/**
  * (#3075) Resolved fill-time deps of the HOSTGEN arm — the legacy eager-buffer
  * generator HOST IMPORTS (`addGeneratorImports` bundle), present exactly when
  * some generator body in the module bailed to the host path
@@ -997,7 +1043,12 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // them (the common zero-import standalone module) every body below is
   // byte-identical.
   let hostDeps: HostGenDeps | undefined;
-  if (ctx.standalone || ctx.wasi) {
+  // (#3132) Gate on a legacy-buffer generator having actually EMITTED — not on
+  // the eagerly-registered `__gen_*` imports being in funcMap. In an
+  // all-driven module the bundle may be registered yet unreferenced (dead
+  // imports, eliminated); building the arm would pin them and break the
+  // zero-import host-free contract.
+  if ((ctx.standalone || ctx.wasi) && ctx.legacyGenBufferEmitted === true) {
     const genNextIdx = ctx.funcMap.get("__gen_next");
     const genResultDoneIdx = ctx.funcMap.get("__gen_result_done");
     const genResultValueIdx = ctx.funcMap.get("__gen_result_value");
@@ -1011,9 +1062,32 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
     }
   }
 
+  // (#3132 S1) ASYNCGEN-arm deps — the driven native async-generator frame
+  // carriers. Present exactly when some `emitAsyncGenerator` producer
+  // registered (standalone/wasi drive lane); each dispatches to its own
+  // `__async_gen_next_<stem>` driver. Modules without producers (or whose
+  // promise/result types never materialized) are byte-identical.
+  let agDeps: AsyncGenCarrierDeps | undefined;
+  if ((ctx.standalone || ctx.wasi) && ctx.asyncGenProducers !== undefined && ctx.asyncGenProducers.size > 0) {
+    const promiseTypeIdx = ctx.structMap.get("$Promise");
+    const resultTypeIdx = ctx.structMap.get("__NativeGeneratorResult_externref");
+    if (promiseTypeIdx !== undefined && resultTypeIdx !== undefined) {
+      const producers: { stateTypeIdx: number; nextIdx: number }[] = [];
+      const seenFrames = new Set<number>();
+      for (const p of ctx.asyncGenProducers.values()) {
+        const nextIdx = ctx.funcMap.get(p.nextHelperName);
+        if (nextIdx === undefined || seenFrames.has(p.stateTypeIdx)) continue;
+        seenFrames.add(p.stateTypeIdx);
+        producers.push({ stateTypeIdx: p.stateTypeIdx, nextIdx });
+      }
+      producers.sort((a, b) => a.stateTypeIdx - b.stateTypeIdx);
+      if (producers.length > 0) agDeps = { producers, promiseTypeIdx, resultTypeIdx };
+    }
+  }
+
   const types = iterRuntimeTypes(ctx);
   const familyArms = buildVecFamilyArms(ctx, types);
-  if (!deps && !objDeps && !hostDeps && familyArms.length === 0) return; // nothing to fill — byte-identical
+  if (!deps && !objDeps && !hostDeps && !agDeps && familyArms.length === 0) return; // nothing to fill — byte-identical
 
   const iteratorIdx = ctx.funcMap.get("__iterator");
   const iteratorNextIdx = ctx.funcMap.get("__iterator_next");
@@ -1021,9 +1095,9 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
 
   const iteratorFn = definedFuncAt(ctx, iteratorIdx);
   const iteratorNextFn = definedFuncAt(ctx, iteratorNextIdx);
-  if (iteratorFn) iteratorFn.body = buildIteratorBody(types, deps, familyArms, objDeps, hostDeps);
-  if ((deps || objDeps || hostDeps) && iteratorNextFn)
-    iteratorNextFn.body = buildIteratorNextBody(types, deps, objDeps, hostDeps);
+  if (iteratorFn) iteratorFn.body = buildIteratorBody(types, deps, familyArms, objDeps, hostDeps, agDeps);
+  if ((deps || objDeps || hostDeps || agDeps) && iteratorNextFn)
+    iteratorNextFn.body = buildIteratorNextBody(types, deps, objDeps, hostDeps, agDeps);
 
   // (#3100 S5) `__iterator_rest` was VEC-only — a USER record (custom iterable)
   // drained EMPTY under `[...iterable]` / `Array.from(iterable)`. Rebuild it
@@ -1034,11 +1108,12 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // (#3119) OBJ records drain through the SAME step-to-exhaustion arm (the
   // kind dispatch lives inside `__iterator_next`), so the guard admits every
   // step-driven kind the GetIterator ladder can produce in this module.
-  if (deps || objDeps || hostDeps) {
+  if (deps || objDeps || hostDeps || agDeps) {
     const stepKinds: number[] = [];
     if (deps) stepKinds.push(ITER_KIND_USER);
     if (objDeps) stepKinds.push(ITER_KIND_OBJ);
     if (hostDeps) stepKinds.push(ITER_KIND_HOSTGEN); // (#3075) drain via __iterator_next
+    if (agDeps) stepKinds.push(ITER_KIND_ASYNCGEN); // (#3132) drain via __iterator_next
     const iteratorRestIdx = ctx.funcMap.get("__iterator_rest");
     const iteratorRestFn = iteratorRestIdx !== undefined ? definedFuncAt(ctx, iteratorRestIdx) : undefined;
     if (iteratorRestFn) {
@@ -1322,8 +1397,37 @@ function buildIteratorBody(
   familyArms: Instr[] = [],
   objDeps?: ObjCarrierDeps,
   hostDeps?: HostGenDeps,
+  agDeps?: AsyncGenCarrierDeps,
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx } = types;
+
+  // (#3132 S1) ASYNCGEN arm — a DRIVEN async-generator `$AsyncFrame` carrier.
+  // One `ref.test` per registered producer frame type; a match wraps the frame
+  // in $IterRec{ASYNCGEN, vec:null, idx:0, userIter: frame}. GetIterator on an
+  // async generator is the identity (`@@asyncIterator` returns `this`). Fresh
+  // Instr objects per producer (#2169b). Placed after the vec/family arms
+  // (frames are structs, so they never reach the HOSTGEN host-external
+  // classification) and before the OBJ/USER arms.
+  const asyncGenArm: Instr[] = agDeps
+    ? agDeps.producers.flatMap((p): Instr[] => [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: ITER_KIND_ASYNCGEN } as Instr,
+            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: 0 } as Instr,
+            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "return" } as Instr,
+          ],
+          else: [],
+        } as Instr,
+      ])
+    : [];
   // VEC arm: $IterRec{VEC, vec, 0, userIter:null}. Field order/arity is
   // load-bearing — struct.new pushes all 4 fields (userIter = ref.null.extern).
   //
@@ -1459,6 +1563,7 @@ function buildIteratorBody(
       else: [],
     },
     ...familyArms,
+    ...asyncGenArm,
     ...hostArm,
     ...objArm,
     ...tail,
@@ -1643,6 +1748,7 @@ function buildIteratorNextBody(
   deps: UserCarrierDeps | undefined,
   objDeps?: ObjCarrierDeps,
   hostDeps?: HostGenDeps,
+  agDeps?: AsyncGenCarrierDeps,
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx, arrTypeIdx } = types;
 
@@ -1692,7 +1798,7 @@ function buildIteratorNextBody(
     },
   ];
 
-  if (!deps && !objDeps && !hostDeps) {
+  if (!deps && !objDeps && !hostDeps && !agDeps) {
     // Vec-only carrier: kind is always VEC, so emit the vec step directly with no
     // kind branch — byte-identical to the pre-#2038 runtime.
     return [
@@ -1858,18 +1964,107 @@ function buildIteratorNextBody(
       ]
     : vecStep;
 
-  // (#3075) Wrap a step chain in the kind==HOSTGEN dispatch when the host-gen
-  // arm is filled; pass-through otherwise (byte-identical).
-  const withHostDispatch = (inner: Instr[]): Instr[] =>
-    hostDeps
-      ? [
-          { op: "local.get", index: 1 },
-          { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
-          { op: "i32.const", value: ITER_KIND_HOSTGEN },
-          { op: "i32.eq" },
-          { op: "if", blockType: { kind: "empty" }, then: hostStep, else: inner } as Instr,
-        ]
-      : inner;
+  // (#3132 S1) The ASYNCGEN step — drive the frame carrier through its
+  // per-producer next driver, then read the SETTLED IteratorResult off the
+  // minted $Promise. Locals: 1=rec, 4=done, 5=value, 6=res (holds frame →
+  // promise → result across the phases). A frame matching no producer, or a
+  // promise not FULFILLED, traps loudly (`unreachable`) — same loud-failure
+  // discipline as the pre-arm hard cast (never a silent wrong value).
+  const asyncGenStep: Instr[] = agDeps
+    ? [
+        // res := rec.userIter (the frame externref)
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+        { op: "local.set", index: 6 },
+        // res := __async_gen_next_<matching>(res)  — per-producer dispatch
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            ...agDeps.producers.flatMap((p): Instr[] => [
+              { op: "local.get", index: 6 } as Instr,
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 6 } as Instr,
+                  { op: "call", funcIdx: p.nextIdx } as Instr,
+                  { op: "local.set", index: 6 } as Instr,
+                  { op: "br", depth: 1 } as Instr,
+                ],
+                else: [],
+              } as Instr,
+            ]),
+            // No producer matched — an ASYNCGEN record only wraps matched
+            // frames, so this is unreachable by construction.
+            { op: "unreachable" } as Instr,
+          ],
+        } as Instr,
+        // Require the next()-promise FULFILLED (await-free producers settle
+        // synchronously inside the kick; pending ⇒ loud trap).
+        { op: "local.get", index: 6 },
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_STATE } as Instr,
+        { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+        { op: "i32.ne" },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "unreachable" } as Instr], else: [] } as Instr,
+        // res := promise.value (the $IteratorResult, boxed externref)
+        { op: "local.get", index: 6 },
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_VALUE } as Instr,
+        { op: "local.set", index: 6 },
+        // done = result.done
+        { op: "local.get", index: 6 },
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.cast", typeIdx: agDeps.resultTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE } as Instr,
+        { op: "local.set", index: 4 },
+        // value = done ? undefined : result.value
+        { op: "local.get", index: 4 },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: [{ op: "ref.null.extern" } as Instr],
+          else: [
+            { op: "local.get", index: 6 } as Instr,
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.cast", typeIdx: agDeps.resultTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE } as Instr,
+          ],
+        } as Instr,
+        { op: "local.set", index: 5 },
+      ]
+    : [];
+
+  // (#3075/#3132) Wrap a step chain in the kind==HOSTGEN / kind==ASYNCGEN
+  // dispatches when the arms are filled; pass-through otherwise
+  // (byte-identical).
+  const withHostDispatch = (inner: Instr[]): Instr[] => {
+    let wrapped = inner;
+    if (agDeps) {
+      wrapped = [
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: ITER_KIND_ASYNCGEN },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: asyncGenStep, else: wrapped } as Instr,
+      ];
+    }
+    if (hostDeps) {
+      wrapped = [
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: ITER_KIND_HOSTGEN },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: hostStep, else: wrapped } as Instr,
+      ];
+    }
+    return wrapped;
+  };
 
   if (!deps) {
     // OBJ/HOSTGEN + VEC kinds only (no closed-struct USER carrier in this module).

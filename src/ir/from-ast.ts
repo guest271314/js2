@@ -1530,7 +1530,12 @@ function lowerArrayPattern(pattern: ts.ArrayBindingPattern, source: IrValueId, c
   }
 }
 
-function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
+// #2956 L1: exported so the linear IR driver (backend/linear-integration.ts)
+// can pre-seed `calleeTypes` from ANNOTATIONS with the exact same primitive
+// mapping this builder uses for its own params (self/mutual recursion needs
+// the callee signature before the callee has built). Export is additive —
+// no behavior change.
+export function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
   if (!node) throw new Error(`ir/from-ast: missing type annotation (${where})`);
   switch (node.kind) {
     case ts.SyntaxKind.NumberKeyword:

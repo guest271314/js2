@@ -73,3 +73,50 @@ prefixes against the node-acorn oracle).
 - compiled-acorn self-parses acorn.mjs past statement 238 (or the next-deeper
   gap is isolated + filed).
 - No test262 regression.
+
+## Progress (fable-3084, 2026-07-10) — Bug 1 of 2 fixed: extern-class name hijack; Bug 2 isolated
+
+The `x.var` throw decomposes into TWO stacked compiler bugs. This slice fixes
+the first and precisely isolates the second (satisfying the "next-deeper gap
+isolated + filed" acceptance arm; `x.var` itself still throws until Bug 2 lands).
+
+**Bug 1 (FIXED) — `any`-receiver method calls hijacked by ambient extern
+classes.** `tryExternClassMethodOnAny` (`src/codegen/expressions/calls-closures.ts`)
+resolves an `any`-receiver method call by FIRST-NAME-MATCH over every registered
+extern class (lib.dom.d.ts et al.). Minimal repro (from bisecting the acorn
+failure): `p.check()` on a module-level fnctor instance compiled to a
+**`FontFaceSet_check`** DOM import — the user's `P.prototype.check` never ran;
+the call returned the import's boxed default (`false`). This is the same hijack
+family as the historical one-off refusals (slice #1062, replace/replaceAll
+#1712, forEach/some #3014, isPrototypeOf #2994), generalized: the fix collects
+(per source file, cached) every member name the USER's own code defines as
+function-valued — prototype-method assignments incl. the acorn `var pp =
+Parser.prototype; pp.m = fn` alias form, function-valued property assignments,
+object-literal methods, class methods — and REFUSES extern-class first-match
+dispatch for those names. The call falls through to the generic dynamic
+dispatch (runtime-identity-correct for user AND host receivers).
+`tests/issue-3033.test.ts` (4 tests incl. a Map.get no-regression guard);
+dogfood `acorn.test.ts` green; issue-1283/1712/1062/3014 guards green.
+
+**Bug 2 (ISOLATED, still open — the remaining `x.var` blocker).** Inside
+compiled acorn, `parseIdentNode`'s `this.type` reads **undefined** when read
+into a LOCAL (`var ty = this.type`) or used in a CONDITION — while the SAME
+expression assigned to a MODULE GLOBAL reads the correct TokenType
+(`label=var`), and sibling fields (`this.value`, `this.pos`) read correctly in
+all contexts. So `else if (this.type.keyword)` is falsy → `this.unexpected()`
+→ the WebAssembly.Exception. Probes (patched-source, `.tmp/probe-3033-acorn*.mts`
+recipes): finishToken's own write+readback correct; `keywords["var"]` map +
+`.keyword`/truthiness correct; host-side `parser.type` also undefined
+(`__sget_type` dispatch returns nothing for the Parser shape). Minimal
+2-3-shape repros do NOT reproduce — the failure needs acorn's scale (dozens of
+struct shapes carrying a `type` field with HETEROGENEOUS types: string on every
+AST-Node shape vs TokenType-ref on Parser). Root likely in the per-name
+`__sget_<field>`/member-read shape dispatch or the typed-receiver struct-slot
+resolution under that heterogeneity (#2773 value-rep adjacent). NOT the
+first-match property-get path (`compileExternPropertyGet` is typed-className
+gated).
+
+**Also observed (flagged to tech lead, NOT this issue):** two pre-existing
+regressions on current upstream/main vs aaa14719 — `Iterator.{zip,zipKeyed}`
+basic-longest/strict vacuous fails, and `tests/issue-1888` "propagates NaN"
+(verified failing with this branch's changes stashed).

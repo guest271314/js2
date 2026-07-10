@@ -142,8 +142,16 @@ per-kind bucket closure, IR→runtime entry points).
       slice; equivalence suite green.
 - [ ] No file in the STAYS/RUNTIME buckets or any deferred-kind handler is
       modified by Phase 1.
-- [ ] `knip` wired into the `quality` CI job (Phase 2); no new orphaned
-      exports.
+- [x] Dead-export gate wired into the `quality` CI job (Phase 2); no new
+      orphaned exports. (2026-07-10 — implemented **dep-free** via the Phase 0
+      audit tool instead of `knip`: `pnpm run check:dead-exports` ratchets the
+      unreferenced set against `scripts/dead-export-baseline.json`, same
+      baseline/--update convention as the other quality ratchets. `knip` can
+      still be added later if repo-wide unused-dependency coverage is wanted;
+      for the #3090 enforcement goal the audit tool is a superset for
+      src/codegen and adds no dependency. Phase 2a PR #2856 deleted the dead
+      `collect*Imports` family (-1,474); Phase 2b PR #2858 the remaining
+      strays (-332).)
 
 ## Guardrails / hazards
 

@@ -417,6 +417,53 @@ const jsonPath = jsonIdx > -1 ? process.argv[jsonIdx + 1] : path.join(ROOT, ".tm
 mkdirSync(path.dirname(jsonPath), { recursive: true });
 writeFileSync(jsonPath, JSON.stringify({ cut: [...CUT], perFile }, null, 1));
 
+// ---------------------------------------------------------------------------
+// --check / --update — dead-export ratchet (#3090 Phase 2)
+//
+// `--check` fails when a NEW unreferenced top-level function appears in
+// `src/codegen/` vs `scripts/dead-export-baseline.json` (entries that
+// disappear are fine — that's deletion progress; refresh with `--update`).
+// False-positive escape hatches: a function referenced only from `tests/`
+// (the graph does not include tests) or only from class-method bodies
+// (not indexed) shows as unreferenced — verify with
+// `grep -rn <name> tests/` and, if live, bank it via `--update` with a
+// PR note.
+// ---------------------------------------------------------------------------
+const BASELINE_PATH = path.join(ROOT, "scripts", "dead-export-baseline.json");
+const currentDead = perFile
+  .flatMap((f) => f.fns.filter((fn) => fn.cls === "unreferenced").map((fn) => f.file + "#" + fn.name))
+  .sort();
+if (process.argv.includes("--update")) {
+  writeFileSync(BASELINE_PATH, JSON.stringify(currentDead, null, 1) + "\n");
+  console.log(`dead-export baseline updated: ${currentDead.length} entries`);
+  process.exit(0);
+}
+if (process.argv.includes("--check")) {
+  let baseline;
+  try {
+    baseline = new Set(JSON.parse(readFileSync(BASELINE_PATH, "utf-8")));
+  } catch {
+    console.error(`dead-export gate: missing/unreadable ${rel(BASELINE_PATH)} — run with --update to seed it.`);
+    process.exit(1);
+  }
+  const added = currentDead.filter((id) => !baseline.has(id));
+  const removed = [...baseline].filter((id) => !currentDead.includes(id));
+  if (removed.length)
+    console.log(
+      `dead-export gate: ${removed.length} baseline entries gone (progress — refresh with --update when convenient).`,
+    );
+  if (added.length) {
+    console.error(`dead-export gate: ${added.length} NEW unreferenced top-level function(s) in src/codegen/:`);
+    for (const id of added) console.error(`  ${id}`);
+    console.error(
+      "Either delete the dead function, or — if it is referenced only from tests/ or class-method bodies (audit blind spots) — verify with grep and refresh the baseline: node scripts/audit-legacy-reachability.mjs --update",
+    );
+    process.exit(1);
+  }
+  console.log(`dead-export gate: OK (${currentDead.length} known entries, 0 new)`);
+  process.exit(0);
+}
+
 const byBucket = { frontend: [], deferred: [], runtime: [], stays: [] };
 for (const f of perFile) byBucket[f.bucket].push(f);
 
