@@ -1,7 +1,7 @@
 ---
 id: 2984
 title: "Standalone gOPD-on-builtin descriptor MOP (~178: getOwnPropertyDescriptor on builtin objects / proto receivers)"
-status: ready
+status: in-progress
 sprint: current
 priority: high
 horizon: xl
@@ -10,10 +10,86 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/sr-gopd
+assignee: ttraenkler/fable-2984
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Slice 1 LANDED (2026-07-10, fable-2984) — the cluster's keystone was a boolean-typed dynamic-read bug, not the descriptor MOP
+
+> Re-measured against `origin/main` @ `cd9f2cfbfd` through the REAL runner
+> (`runTest262File`, standalone lane). Cluster state on the two directories
+> `built-ins/Object/getOwnPropertyDescriptor{,s}` (328 tests): **78 pass /
+> 178 fail / 72 CE**. The dominant failure was NOT a missing descriptor — it
+> was that descriptor-attribute ASSERTS fail even when the descriptor is
+> perfect.
+
+### Root cause (measured, WAT-verified)
+
+`assert.sameValue(desc.writable, true)` lowers `desc.writable` (lib type
+`boolean | undefined`) through `compilePropertyAccess`'s dynamic fallback:
+`__extern_get(desc, "writable")` → **`__unbox_number` + `i32.trunc_sat_f64_s`**
+(a ToNumber, not a boolean read) → i32 → the any-context arg consumer re-boxes
+via **`__box_number`**. The standalone native `__unbox_number` yields NaN for a
+boxed boolean → i32 0 → boxed NUMBER 0 → `0 === true` fails for EVERY
+attribute assertion, on every receiver (plain objects included). The host lane
+only "passed" the harness shape by a double coincidence (host ToNumber(true)=1,
+then a numeric compare); the local-bound shape `var w = desc.writable; typeof w`
+was `"undefined"` on BOTH lanes. Three probe shapes pinned it:
+inline `desc.writable === true` passed (different arm), computed-key
+`desc["writable"]` passed (dynamic all the way), only the checker-typed
+narrowing path broke.
+
+### Fix (PR: `issue-2984-gopd-builtin-mop`)
+
+`src/codegen/property-access.ts`: in the dynamic-fallback region of
+`compilePropertyAccess`, a **boolean-like access type keeps the raw externref**
+(no i32 narrowing through the numeric unbox pipeline). New helper
+`isBooleanLikeAccessType` walks union members (`boolean | undefined` carries no
+`BooleanLike` flag on the union object itself — that was the first-attempt
+trap). Preserves both the boolean box (value-correct native `===`) and
+`undefined` for absent attributes (the i32 path erased absent → `false`).
+Numeric narrowing and the Phase-3 struct-candidate narrowing are untouched, so
+modules without boolean-typed dynamic-fallback reads are byte-identical.
+
+### Measured effect (real runner, standalone lane)
+
+| Directory | before | after | Δ |
+| --- | --- | --- | --- |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` | 78 pass | **119 pass** | **+41, 0 regressions** |
+| `built-ins/Object/defineProperty` | 502 pass | **534 pass** | **+32, 0 regressions** |
+
+Host lane on the gOPD dirs: 301/328 before AND after (unchanged). The fix
+radiates suite-wide: every standalone test asserting a boolean property through
+a harness `assert.sameValue`/param was affected, so expect flips well beyond
+these directories (propertyHelper/verifyProperty clusters).
+
+### Remaining buckets (re-scoped 2026-07-10; the follow-up slices)
+
+After slice 1, the two gOPD dirs still have 137 fail / 72 CE:
+
+1. **~72 CE — ctor/namespace receivers** (`gOPD(String, "fromCharCode")`,
+   `gOPD(Array, "isArray")`, `gOPD(Math, "max")`, `gOPD(Object, "keys")`):
+   still the `__get_builtin` refusal from the dynamic-fallback routing in
+   `calls.ts`. Needs a Site-2-style synthesis for builtin-CTOR receivers
+   backed by a static-property descriptor table + first-class static-method
+   closures (`ensureStandaloneBuiltinStaticMethodClosure` covers only ~8
+   statics today). Biggest single remaining bucket.
+2. **~124 fail — undefined descriptor for un-reified receivers**: by receiver:
+   `Date.prototype` (44), `String.prototype` members not in the glue CSV (16),
+   global-object receivers `this`/`global` (11), `Object.prototype` (7),
+   `Number.prototype` (7), `Function.prototype` (5), `Boolean.prototype` (3),
+   Error-family protos (~6), plus misc `obj`-var receivers (17). Fix =
+   extend the #2885 Site-2 synthesis + `NativeProtoBuiltinGlue` member tables
+   to these builtins/members. Mechanical per-family work once the closure
+   refusal bodies exist (the #2193/#2651 degrade-to-catchable pattern).
+3. **gOPDs (plural) residuals**: `Object.getOwnPropertyDescriptors(Array.prototype)`
+   returns an object with no `forEach` entry (needs the same proto reification);
+   plain-object gOPDs now passes its attribute asserts after slice 1.
+4. Bucket-1 note: `gOPD(Array.prototype, "forEach")` on current main already
+   returns identity-correct `.value` (`d.value === Array.prototype.forEach`
+   passes — #2175 V2-S2 singletons). Only INVOKING the extracted value still
+   fails (blocked on #2949 method-value reification, as documented below).
 
 ## Problem
 

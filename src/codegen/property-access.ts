@@ -24,7 +24,7 @@ import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
-import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
+import { emitDynGet, widenBooleanDynamicAccess } from "./dyn-read.js"; // (#2580 M2 slice 1) (#2984)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import {
@@ -6305,7 +6305,7 @@ export function compilePropertyAccess(
   // (e.g., properties on Object, {}, undefined, or dynamically-typed values).
   // Determine the expected result type from the TS checker at the access site.
   const accessType = ctx.checker.getTypeAtLocation(expr);
-  const accessWasm = resolveWasmType(ctx, accessType);
+  const accessWasm = widenBooleanDynamicAccess(accessType, resolveWasmType(ctx, accessType)); // (#2984)
 
   // For struct types with the property, try to compile the object and do struct.get
   // but NEVER for class struct types — their fields are fixed at collection time

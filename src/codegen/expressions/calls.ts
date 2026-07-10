@@ -20,6 +20,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
 import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
@@ -7684,6 +7685,25 @@ function compileCallExpression(
         return undefined;
       };
       const propLiteral = literalKeyText(arg1);
+
+      // (#2984) `gOPD(this, "NaN"|"Infinity"|"undefined")` — the sloppy-mode
+      // GLOBAL `this` (no local binding, not a static-class context) folds at
+      // RUNTIME to the spec §19.1 value-property descriptor when nullish, and
+      // keeps the dynamic read for a real dispatched receiver. Full rationale
+      // on `emitGlobalThisGopdFold` (dyn-read.ts). Receiver is compiled FIRST
+      // (its lowering may add late imports) — the helper captures funcIdxs
+      // after it.
+      if (
+        arg0.kind === ts.SyntaxKind.ThisKeyword &&
+        (propLiteral === "NaN" || propLiteral === "Infinity" || propLiteral === "undefined") &&
+        fctx.localMap.get("this") === undefined &&
+        !(fctx.isStaticContext && fctx.enclosingClassName)
+      ) {
+        const thisType = compileExpression(ctx, fctx, arg0);
+        if (thisType && thisType.kind !== "externref") coerceType(ctx, fctx, thisType, { kind: "externref" });
+        emitGlobalThisGopdFold(ctx, fctx, propLiteral);
+        return { kind: "externref" };
+      }
 
       if (structName && propLiteral !== undefined) {
         const structTypeIdx = ctx.structMap.get(structName);
