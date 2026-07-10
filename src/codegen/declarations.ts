@@ -1057,6 +1057,19 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
   }
 
+  // (#2980) Flag any async generator for the widened-standalone Promise-lane
+  // fallback (see `moduleHasAsyncGen` in context/types.ts). Pre-body so a
+  // `Promise.reject` INSIDE the gen sees it.
+  if (
+    !ctx.moduleHasAsyncGen &&
+    (node as ts.Node & { asteriskToken?: ts.Node }).asteriskToken !== undefined &&
+    (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) &&
+    node.body !== undefined &&
+    hasAsyncModifier(node)
+  ) {
+    ctx.moduleHasAsyncGen = true;
+  }
+
   // ── collectArrayIteratorImports ──
   if (!state.arrayIteratorFound && ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
     const methodName = node.expression.name.text;
