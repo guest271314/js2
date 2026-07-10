@@ -720,6 +720,23 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) => hasAny(text, ["test262error"]),
   },
   {
+    // The runner's retry paths (poison retry, #1589 compile_timeout retry —
+    // tests/test262-shared.ts) record the fixed string "fail after retry"
+    // when the retried attempt ends in `fail` but the worker returned NO
+    // error text. The original attempt's message is lost, so the signature
+    // carries zero feature signal and no path/text bucket above can claim
+    // it (e.g. built-ins/Error/isError/non-error-objects-other-realm.js,
+    // the single unclassified record that parked PR #2846's merge_group).
+    // Root cause is runner-side message loss on retry, not a new codegen
+    // failure class — the same test fails with a classifiable assertion
+    // signature when it doesn't go through the retry path.
+    id: "retry-lost-error-text",
+    issues: ["#1589"],
+    label:
+      'Runner retry lost the failure message ("fail after retry": retried attempt failed with empty worker error text) — no feature signal to classify; fix is runner-side message preservation',
+    match: (_record, text) => hasAny(text, ["fail after retry"]),
+  },
+  {
     id: "misc-spec-tail",
     issues: ["#1577", "#779"],
     label: "Miscellaneous low-volume spec-completeness tail",

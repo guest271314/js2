@@ -143,6 +143,11 @@ jobs:
           # deferred/failed promote can't leave main drifted. Non-fatal.
           node scripts/check-coercion-sites.mjs --update || \
             echo "WARN: coercion-site baseline update failed (non-fatal)"
+          # #3131 — LOC-budget baseline (also a pure source measure; main is
+          # its sole writer now, PRs never commit it). Skips the write when
+          # only the date would change, so a stable main stays commit-free.
+          node scripts/check-loc-budget.mjs --update || \
+            echo "WARN: loc-budget baseline update failed (non-fatal)"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -164,6 +169,8 @@ jobs:
               git add -f website/public/benchmarks/results/test262-category-editions.json || true
             # #2108 — coercion-site drift baseline, refreshed just above.
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — LOC-budget baseline, refreshed just above (sole writer).
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             git add -f README.md ROADMAP.md CLAUDE.md plan/goals/goal-graph.md \
               2>/dev/null || true
           }
@@ -208,6 +215,11 @@ jobs:
             node scripts/check-coercion-sites.mjs --update || \
               echo "WARN: coercion-site baseline recompute on re-anchored tip failed (non-fatal)"
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — same stale-checkout guard for the LOC-budget baseline
+            # (pure source measure; main is its sole writer now).
+            node scripts/check-loc-budget.mjs --update || \
+              echo "WARN: loc-budget baseline recompute on re-anchored tip failed (non-fatal)"
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             if git diff --cached --quiet; then
               echo "Summary already current on main after re-anchor — nothing to push."
               PUSHED=1
