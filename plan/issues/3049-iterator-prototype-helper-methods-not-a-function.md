@@ -747,11 +747,15 @@ bridges `next`/`return`/`throw` callable and host-mirrors struct step results.
 Mirrors the `_setLikeRecordForHost` (#1627) precedent.
 
 **Measured (branch vs upstream/main-equivalent control, full 510-file
-`built-ins/Iterator` sweep + targeted cluster):** the original 21-file
-codegen-signature cluster goes 1 → 9+ pass (final count in the PR);
-`argument-effect-order.js` × 7 kept passing after the lazy rework; zero other
-flips. `tests/issue-3049.test.ts` (7 tests); iterator unit guards
-(1367/1464/3013/3023/iterators) 36/36.
+`built-ins/Iterator` sweep):** 267 → 281 pass — **+14 fail→pass, ZERO
+pass→fail**: `this-plain-iterator.js` × 8
+(drop/every/find/forEach/reduce/some/take/toArray),
+`Symbol.iterator/{return-val,is-function,name}.js`,
+`Symbol.dispose/{is-function,name}.js`, `reduce/argument-effect-order.js`;
+the other `argument-effect-order.js` × 7 kept passing after the lazy rework.
+`tests/issue-3049.test.ts` (7 tests); iterator unit guards
+(1367/1464/3013/3023/iterators) 36/36; extern-dispatch guards
+(1382/1627/2015) 41/41.
 
 ## Residuals (separate roots, NOT this issue's plumbing — follow-ups)
 
