@@ -10,10 +10,95 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2984
+assignee: ttraenkler/fable-2984b
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Phase 2 LANDED (2026-07-10, fable-2984b) — proto-receiver reification via refusal-body closures
+
+> PR: `issue-2984-gopd-proto-receivers`. Takes the **~124 un-reified proto
+> receivers** bucket (bucket 2 of "Remaining buckets" below).
+
+### Root cause (measured, code-pinned)
+
+The whole #2885 chain for `gOPD(<Builtin>.prototype, "<member>")` was already
+in place for Date/Object/Number/Boolean/Function/Error/String — brands wired in
+`tryEnsureNativeProtoBrand`, glues registered with complete member CSVs, the
+Site-2 synthesis gate passing. The single blocker:
+`emitProtoMemberBodyRefusal` (array-object-proto.ts) **returns `null`**, which
+aborts `ensureStandaloneNativeMethodClosure` (native-proto.ts) before the
+funcMap mint — so no closure exists, Site-2 falls through to the dynamic
+fallback, and the descriptor is `undefined`. Array passed because
+`emitArrayProtoMemberBody` returns `{kind:"externref"}` with a catchable-throw
+body for un-wired members (#2193) — the exact measured split
+(`gOPD(Array.prototype,"forEach")` full-shape PASS incl. identity vs `-1`
+undefined-descriptor for every other family).
+
+### Fix (three pieces)
+
+1. **`ensureStandaloneNativeMethodClosure` gains an opt-in
+   `refusalBodyFallback`** (native-proto.ts): when `emitMemberBody` refuses
+   (null) AND the caller opted in AND kind is `"method"`, mint the closure
+   anyway with an `emitThrowTypeError` body (the #2193/#2651
+   degrade-to-catchable pattern; `emitThrowTypeError` is the proven-catchable
+   helper — a first draft used `emitBrandCheckTypeError` and trapped).
+   **STRICTLY opt-in**: the refusal probe runs BEFORE the funcMap cache
+   lookup, so a fallback-minted closure never leaks to a non-opted-in caller.
+   This is load-bearing — `emitReflectiveNativeProtoClosureCall` (the route
+   behind `Object.prototype.hasOwnProperty.call(o,k)` /
+   `propertyIsEnumerable.call`, which the test262 propertyHelper uses on every
+   verifyProperty) RELIES on the null return to fall through to its working
+   legacy lowering; opting it in would mass-regress (measured on main: those
+   idioms pass TODAY via the fall-through).
+2. **New subsystem module `src/codegen/native-proto-value-read.ts`** —
+   `resolveStandaloneProtoMemberValueClosure`, the three-tier value-read
+   policy used by `tryCompileStandaloneBuiltinProtoMemberRead`
+   (property-access.ts): own-CSV member → brand closure w/ fallback;
+   **inherited member** (not own, advertised by Object.prototype's glue) →
+   OBJECT-brand singleton (spec: `Function.prototype.valueOf ===
+Object.prototype.valueOf`, Sputnik S15.3.4_A4 — this arm fixed the one
+   collateral regression the first draft caused); unknown member → null →
+   dynamic fall-through (no phantom closure; also closes the latent Array
+   any-name hole). gOPD Site-2 keeps own-property semantics (inherited →
+   `undefined` descriptor).
+3. **Site-2 (calls.ts) passes the opt-in** so the synthesized data descriptor
+   carries the SAME per-(brand,member) singleton as the plain value read —
+   `desc.value === Date.prototype.getTime` holds (`assert.sameValue`
+   identity, the dominant ES5 15.2.3.3-4-\* shape).
+
+### Measured (real runner, standalone lane, base = main @ 267a1d29499)
+
+| Sweep                                                                                | main                        | branch             | Δ                      |
+| ------------------------------------------------------------------------------------ | --------------------------- | ------------------ | ---------------------- |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` (328)                                | 122 pass / 134 fail / 72 CE | **199 / 57 / 72**  | **+77, 0 regressions** |
+| collateral (defineProperty + getOwnPropertyNames + Boolean + Function + Error, 1794) | 781 / 977 / 36              | **787 / 971 / 36** | **+6, 0 regressions**  |
+
+- Per-file diff: every flip is fail→pass (Date.prototype 44-test cluster,
+  String non-wired members, Object/Number/Boolean/Function/Error protos, plus
+  Function.prototype.call/toString Sputnik tests via the inheritance arm).
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits across
+  gc/standalone/wasi match the main baseline (the corpus exercises no refused
+  proto-member reads; non-opted-in callers keep the exact null contract).
+- `tests/issue-2984.test.ts` 16/16 (incl. a hasOwnProperty.call fall-through
+  GUARD test); related suites (2651/2861/2875/2876/2885/2896/2965 +
+  array-prototype-methods) 117/117.
+- loc-budget: policy extracted to the new module; residual +5 (calls.ts) / +1
+  (property-access.ts) reseeded via the sanctioned `--update` (#3131
+  change-scoped gate).
+
+### Still remaining after Phase 2 (the next slices)
+
+1. **~72 CE — ctor/namespace receivers** (`gOPD(String, "fromCharCode")`,
+   `gOPD(Math, "max")`): the `__get_builtin` refusal — needs Site-2-style
+   synthesis for builtin-CTOR receivers off a static-property descriptor
+   table (unchanged, biggest remaining bucket).
+2. **gOPD-dirs residual 57 fails**: `15.2.3.3-2-*` (arg-2 name coercion),
+   global-object receivers (`this`/`window`), `obj`-VAR receivers (need
+   runtime dispatch — Site-2 is syntactic), gOPDs-plural residuals
+   (`normal-object.js`, order/observability), `primitive-string(s)`.
+3. **`.value` INVOCATION** stays blocked on #2949 (pre-existing: extracted
+   `Array.prototype.pop` invocation null-derefs identically on main).
 
 ## Slice 1 LANDED (2026-07-10, fable-2984) — the cluster's keystone was a boolean-typed dynamic-read bug, not the descriptor MOP
 
@@ -54,10 +139,10 @@ modules without boolean-typed dynamic-fallback reads are byte-identical.
 
 ### Measured effect (real runner, standalone lane)
 
-| Directory | before | after | Δ |
-| --- | --- | --- | --- |
-| `built-ins/Object/getOwnPropertyDescriptor{,s}` | 78 pass | **119 pass** | **+41, 0 regressions** |
-| `built-ins/Object/defineProperty` | 502 pass | **534 pass** | **+32, 0 regressions** |
+| Directory                                       | before   | after        | Δ                      |
+| ----------------------------------------------- | -------- | ------------ | ---------------------- |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` | 78 pass  | **119 pass** | **+41, 0 regressions** |
+| `built-ins/Object/defineProperty`               | 502 pass | **534 pass** | **+32, 0 regressions** |
 
 Host lane on the gOPD dirs: 301/328 before AND after (unchanged). The fix
 radiates suite-wide: every standalone test asserting a boolean property through
@@ -119,11 +204,11 @@ to size the work and record why the existing machinery does not extend.
 > (gitignored) — reproduce with `compile(src, {target:'standalone'})` then
 > `WebAssembly.instantiate(r.binary, {})`.
 
-| Bucket | Original narrative | **Measured on current main** |
-| --- | --- | --- |
-| **(1) proto-receiver** `gOPD(Array.prototype,"forEach")` | returns `undefined` | **No longer `undefined`.** Returns a descriptor with **correct boolean attributes** (`writable:true, enumerable:false, configurable:true`) and a `.value` slot that is present but **broken**: `typeof d.value` is **codegen-path-dependent** (`"function"` when tested inline, `"object"` when bound to a `const` first — representation instability), the value is **non-invocable** (`d.value.call(arr, cb)` is a no-op / traps — `arr` unchanged), and **non-canonical** (`d.value !== Array.prototype.forEach`). Gap narrowed from "no descriptor" to "**`.value` is a non-first-class placeholder**". |
-| **(2) ctor-receiver** `gOPD(Array,"isArray")` | hard-CE `__get_builtin not yet supported` | **UNCHANGED** — still hard-CEs with `Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (#1472 Phase B)`. The refusal **string** is emitted by the generic refused-late-import path at `src/codegen/expressions/late-imports.ts:99`; the **routing** that reaches it (a builtin constructor used as a _dynamic_ gOPD receiver falling through to the `__get_builtin` shortcut) is in `src/codegen/property-access.ts` (the `__get_builtin` branch, see the refusal-context comments ~L192–208 / L403). |
-| **(3) plain-object accessor** `gOPD({get x(){…}}, "x")` | "returns a data descriptor / drops the accessor" | **Descriptor SHAPE is now correct**: `get`/`set` present, no own `value` (`hasOwnProperty("value")` false), `hasOwnProperty("get")` true, `enumerable`/`configurable` correct. **But INVOKING the accessor from the descriptor is not host-free**: `d.get()` pulls `env::WeakMap_get`, `d.set(v)` pulls `env::WeakMap_set` → **traps at instantiate under standalone** (missing import). A get+set literal (`{get x(){}, set x(v){}}`) also drags a `WeakMap` import even for the existence check on some shapes. Gap moved from "drops accessor" to "**accessor-closure invocation is not host-free**". |
+| Bucket                                                   | Original narrative                               | **Measured on current main**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **(1) proto-receiver** `gOPD(Array.prototype,"forEach")` | returns `undefined`                              | **No longer `undefined`.** Returns a descriptor with **correct boolean attributes** (`writable:true, enumerable:false, configurable:true`) and a `.value` slot that is present but **broken**: `typeof d.value` is **codegen-path-dependent** (`"function"` when tested inline, `"object"` when bound to a `const` first — representation instability), the value is **non-invocable** (`d.value.call(arr, cb)` is a no-op / traps — `arr` unchanged), and **non-canonical** (`d.value !== Array.prototype.forEach`). Gap narrowed from "no descriptor" to "**`.value` is a non-first-class placeholder**". |
+| **(2) ctor-receiver** `gOPD(Array,"isArray")`            | hard-CE `__get_builtin not yet supported`        | **UNCHANGED** — still hard-CEs with `Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (#1472 Phase B)`. The refusal **string** is emitted by the generic refused-late-import path at `src/codegen/expressions/late-imports.ts:99`; the **routing** that reaches it (a builtin constructor used as a _dynamic_ gOPD receiver falling through to the `__get_builtin` shortcut) is in `src/codegen/property-access.ts` (the `__get_builtin` branch, see the refusal-context comments ~L192–208 / L403).                                    |
+| **(3) plain-object accessor** `gOPD({get x(){…}}, "x")`  | "returns a data descriptor / drops the accessor" | **Descriptor SHAPE is now correct**: `get`/`set` present, no own `value` (`hasOwnProperty("value")` false), `hasOwnProperty("get")` true, `enumerable`/`configurable` correct. **But INVOKING the accessor from the descriptor is not host-free**: `d.get()` pulls `env::WeakMap_get`, `d.set(v)` pulls `env::WeakMap_set` → **traps at instantiate under standalone** (missing import). A get+set literal (`{get x(){}, set x(v){}}`) also drags a `WeakMap` import even for the existence check on some shapes. Gap moved from "drops accessor" to "**accessor-closure invocation is not host-free**".    |
 
 ### Shared root cause, confirmed by direct measurement
 
@@ -208,39 +293,39 @@ stored `$get`/`$set` closure via the `__call_accessor_get/set` drivers, threadin
 `this` through `__current_this` — all native, no host).
 
 **Finding 3 — the residual gap is NOT accessor-specific and has ~zero test262
-yield.** The only thing that fails is *invoking the getter/setter as a
-first-class value pulled from the descriptor*: `d.get.call(obj)` → `0` (should be
+yield.** The only thing that fails is _invoking the getter/setter as a
+first-class value pulled from the descriptor_: `d.get.call(obj)` → `0` (should be
 `5`), `d.get()` → traps. But this is a **general `Function.prototype.call`/
 `.apply`-on-a-first-class-closure-value** gap, not a descriptor/accessor bug — it
 reproduces with no descriptor at all:
 
-| probe (`--target standalone`) | result | expected |
-| --- | --- | --- |
-| `const m = o.m; m.call(o)` (method value, no `this`) | `0` | `5` |
-| `const m = o.m; m.call(o)` (method reads `this._x`) | `0` | `9` |
-| `const m = o.m; m.apply(o,[])` | `0` | `9` |
-| `const g = h; g.call(null)` (fn-decl value) | `0` | `7` |
-| `const m = o.m; m()` (direct, no `.call`) | `5` | `5` ✓ |
-| `const f = () => 5; f.call(null)` (arrow value) | `5` | `5` ✓ |
+| probe (`--target standalone`)                        | result | expected |
+| ---------------------------------------------------- | ------ | -------- |
+| `const m = o.m; m.call(o)` (method value, no `this`) | `0`    | `5`      |
+| `const m = o.m; m.call(o)` (method reads `this._x`)  | `0`    | `9`      |
+| `const m = o.m; m.apply(o,[])`                       | `0`    | `9`      |
+| `const g = h; g.call(null)` (fn-decl value)          | `0`    | `7`      |
+| `const m = o.m; m()` (direct, no `.call`)            | `5`    | `5` ✓    |
+| `const f = () => 5; f.call(null)` (arrow value)      | `5`    | `5` ✓    |
 
 Root cause: the `identifier.call(thisArg, …)` handler in
 `src/codegen/expressions/calls.ts` (~L4831-4838) statically resolves the closure
 and **drops `thisArg`**, treating every non-`$NativeProto` closure as
 `this`-ignoring; a receiver-extracted method / descriptor getter never gets its
-`this`. The `d.get.call(obj)` form is a *property-access* callee (not an
+`this`. The `d.get.call(obj)` form is a _property-access_ callee (not an
 identifier), so it doesn't even reach that arm — it falls through the generic
 closure-value dispatch, which has no path to recover the closure struct from an
 arbitrary `externref` and re-invoke it through `__call_fn_method_0/1` with
 `thisArg` bound. A correct fix is "route `.call`/`.apply` on a first-class
 closure value through the `__call_fn_method_N(thisArg, closure, …args)`
 dispatcher" — the **same method-value reification substrate that blocks buckets
-(1)+(2)** (D1 / #2949), *not* an independent accessor slice.
+(1)+(2)** (D1 / #2949), _not_ an independent accessor slice.
 
 **Finding 4 — no test262 gOPD test invokes the returned accessor.** In
 `test262/test/built-ins/Object/getOwnPropertyDescriptor/`, **zero** tests call
 `.get()`/`.set()`/`.get.call(…)` on the returned descriptor
 (`grep -rlE '\.get\.call|\.set\.call|desc\.get\(|\bget\(\)'` → 0). They assert
-descriptor *shape* only — which already passes (Finding 2). So the residual
+descriptor _shape_ only — which already passes (Finding 2). So the residual
 "invoke accessor host-free" work flips ≈0 test262 assertions here.
 
 **Corrected verdict for bucket (3):** it is **effectively done** for

@@ -156,3 +156,98 @@ describe("#2984 — gOPD(this, <global value prop>) fold", () => {
     expect(await runHost(REAL_RECEIVER_KEEPS_DYNAMIC)).toBe(1);
   });
 });
+
+// ─── Phase 2 (#2984): un-reified proto receivers ────────────────────────────
+//
+// Pre-phase-2, gOPD on Date/Object/Number/Boolean/Function/Error prototypes
+// (and String members outside the #2875 wired slice) returned `undefined`:
+// their glue's `emitMemberBody` REFUSES (returns null), which aborted
+// `ensureStandaloneNativeMethodClosure`, so the #2885 Site-2 synthesis fell
+// through to the dynamic fallback. The `refusalBodyFallback` opt-in mints an
+// identity-stable throwing closure instead (the #2193/#2651 degrade-to-
+// catchable pattern), shared by the gOPD synthesis AND the plain value read,
+// so the ES5 identity assertion (`desc.value === Date.prototype.getTime`)
+// holds. The reflective `.call` route deliberately does NOT opt in — the
+// hasOwnProperty.call fall-through guard below pins that.
+
+const ES5_FULL_SHAPE_DATE = `
+  var desc = Object.getOwnPropertyDescriptor(Date.prototype, "getTime");
+  if (desc === undefined) return -1;
+  if (desc.value !== Date.prototype.getTime) return -2;
+  if (desc.writable !== true) return -3;
+  if (desc.enumerable !== false) return -4;
+  if (desc.configurable !== true) return -5;
+  if (typeof desc.value !== "function") return -6;
+  return 1;
+`;
+
+const ES5_FULL_SHAPE_OBJECT_PROTO = `
+  var desc = Object.getOwnPropertyDescriptor(Object.prototype, "hasOwnProperty");
+  if (desc === undefined) return -1;
+  if (desc.value !== Object.prototype.hasOwnProperty) return -2;
+  if (desc.writable !== true) return -3;
+  return 1;
+`;
+
+const STRING_NON_WIRED_MEMBER = `
+  var desc = Object.getOwnPropertyDescriptor(String.prototype, "slice");
+  if (desc === undefined) return -1;
+  if (desc.value !== String.prototype.slice) return -2;
+  if (desc.writable !== true) return -3;
+  return 1;
+`;
+
+const UNKNOWN_MEMBER_UNDEFINED = `
+  var desc = Object.getOwnPropertyDescriptor(Date.prototype, "notARealMethod");
+  return desc === undefined ? 1 : -1;
+`;
+
+const REFUSAL_CLOSURE_META = `
+  var f = Date.prototype.getTime;
+  if (typeof f !== "function") return -1;
+  if (f.name !== "getTime") return -2;
+  if (f.length !== 0) return -3;
+  return 1;
+`;
+
+// GUARD: the reflective-call route must keep its working fall-through — the
+// factory's refusal fallback is opt-in precisely so this harness idiom
+// (`propertyHelper.js` uses it on every verifyProperty) never routes into a
+// throwing refusal body.
+const HAS_OWN_PROPERTY_CALL_GUARD = `
+  var o = { a: 1 };
+  if (Object.prototype.hasOwnProperty.call(o, "a") !== true) return -1;
+  if (Object.prototype.hasOwnProperty.call(o, "b") !== false) return -2;
+  if (Object.prototype.propertyIsEnumerable.call(o, "a") !== true) return -3;
+  return 1;
+`;
+
+describe("#2984 Phase 2 — gOPD on un-reified builtin proto receivers (standalone)", () => {
+  it("Date.prototype method: full ES5 descriptor shape incl. .value identity", async () => {
+    expect(await runStandalone(ES5_FULL_SHAPE_DATE)).toBe(1);
+  });
+
+  it("Object.prototype method: descriptor + .value identity", async () => {
+    expect(await runStandalone(ES5_FULL_SHAPE_OBJECT_PROTO)).toBe(1);
+  });
+
+  it("String.prototype member outside the wired slice: descriptor + identity", async () => {
+    expect(await runStandalone(STRING_NON_WIRED_MEMBER)).toBe(1);
+  });
+
+  it("unknown member still yields an undefined descriptor (no phantom closure)", async () => {
+    expect(await runStandalone(UNKNOWN_MEMBER_UNDEFINED)).toBe(1);
+  });
+
+  it("refusal closure carries spec .name/.length meta", async () => {
+    expect(await runStandalone(REFUSAL_CLOSURE_META)).toBe(1);
+  });
+
+  it("GUARD: hasOwnProperty.call / propertyIsEnumerable.call fall-through intact", async () => {
+    expect(await runStandalone(HAS_OWN_PROPERTY_CALL_GUARD)).toBe(1);
+  });
+
+  it("host lane: Date.prototype descriptor shape unchanged", async () => {
+    expect(await runHost(ES5_FULL_SHAPE_DATE)).toBe(1);
+  });
+});

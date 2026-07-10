@@ -73,6 +73,7 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { resolveStandaloneProtoMemberValueClosure } from "./native-proto-value-read.js";
 import {
   ensureArrayNativeProtoGlue,
   ensureObjectNativeProtoGlue,
@@ -1198,13 +1199,13 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
 
   const brand = tryEnsureNativeProtoBrand(ctx, builtinName);
   if (brand === undefined) return undefined;
-  const glue = getNativeProtoBuiltinGlue(ctx, brand);
-  if (!glue) return undefined;
 
   const member = expr.name.text;
-  const kind = glue.memberKind(member);
-  const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, kind);
-  if (!closure) return undefined;
+  // (#2984 Phase 2) Own-CSV gate + Object.prototype inheritance + un-wired-
+  // member refusal fallback — policy lives in native-proto-value-read.ts.
+  const resolved = resolveStandaloneProtoMemberValueClosure(ctx, brand, builtinName, member);
+  if (!resolved) return undefined;
+  const { closure, kind } = resolved;
 
   if (kind === "getter") {
     // (#2885 Site 3) A plain read of `<Builtin>.prototype.<getter>` must INVOKE
