@@ -1,7 +1,8 @@
 ---
 id: 3126
 title: "Typed ref-element array HOFs (find/filter/every/…): admit native closure dispatch — retires the typed string[] __make_callback leak (#3098 boundary) and fixes silent gc-lane no-ops on struct arrays"
-status: in-progress
+status: done
+completed: 2026-07-10
 assignee: ttraenkler/fable-3098r
 sprint: current
 model: fable
@@ -127,3 +128,45 @@ path).
 - The probe in the gate runs at most once per call site (only for ref-element
   receivers of the 10 methods) and is fully rolled back (#1919
   `probeCompiledType` restores body/locals/imports/errors).
+
+### Validation (all on the post-#2815 merge state)
+
+- `.tmp/probe-3098r-typedstr.mts`: all 9 previously-leaking shapes →
+  HOST-FREE PASS; `map`/`number[]` controls unchanged.
+- `.tmp/probe-3098r-gclane.mts`: gc struct-array find/filter/some → PASS
+  (was undefined/0/false).
+- `.tmp/probe-3126-edges.mts`: identifier-closure admission, 2-/3-arg arity,
+  chained filter→find, find/findLast miss → `undefined`, reduce seed-from-
+  first / empty-throw / reduceRight, native-string truthiness, forEach
+  capture, some early-exit, struct arrays, opaque-`any`-callback parity —
+  PASS on both lanes (parity cases byte-identical to main by sha256).
+- Explicit `thisArg` + function-expression callback: host-free PASS
+  (`.tmp/probe-3126-thisarg.mts`).
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) hashes across
+  gc/standalone/wasi vs BOTH main tips (pre- and post-#2815).
+- test262 cluster (`built-ins/Array/prototype/{map,filter,forEach,reduce,
+reduceRight,every,some,find,findIndex,findLast,findLastIndex}`, 1,699 files
+  × gc+standalone = 3,398 rows): **zero flips** either direction. Expected:
+  test262 sources are untyped JS (dynamic-lane receivers); the typed-lane fix
+  serves TS-typed user code and the standalone leak metric (same shape as
+  #3098's own cluster result).
+- `tests/issue-3126.test.ts`: 39 pass / 2 documented gc-lane skips; suites
+  3098/array-methods/array-prototype-methods/3031 all green (102 tests).
+- Gates: tsc, biome lint (error level), prettier, loc-budget (+65 in-module,
+  baseline regen), coercion-sites, speculative-rollback — all OK.
+
+### Discovered residuals (pre-existing, byte-identical to main — NOT this PR)
+
+1. **Identifier-held closure on a typed `string[]` HOF is wrong on BOTH
+   lanes** (`const f = (s: string) => …; a.find(f)` → miss standalone, "fn is
+   not a function" on gc). The call site never reaches the typed dispatch —
+   it routes through an `__apply_closure` dynamic path; branch emission is
+   byte-identical to main (sha256-verified). The gate's probe correctly
+   rejects it (`f` compiles to externref, no ClosureInfo). Adjacent to
+   #3015/#2939 — needs a PO issue on the identifier-callback compile shape.
+2. **gc-lane externref find/findLast miss `=== undefined` compares false**
+   (`["alpha"].find(s => s === "zz") === undefined` → false on the gc lane;
+   the miss sentinel is `ref.null.extern` and the comparison lowers to 0).
+   Pre-existing, emission byte-identical to main; the 2 `it.skip`s in
+   `tests/issue-3126.test.ts` document it. Needs a PO issue on the externref
+   miss-rep equality.
