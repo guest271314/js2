@@ -104,6 +104,17 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Dead-export gate (#3090 Phase 2)
+        # Fails when a NEW unreferenced top-level function appears in
+        # src/codegen/ vs scripts/dead-export-baseline.json (call-graph
+        # reachability; disappearing entries are deletion progress). Refresh
+        # with `node scripts/audit-legacy-reachability.mjs --update`. If a
+        # flagged function is referenced only from tests/ or class-method
+        # bodies (audit blind spots), verify with grep and bank it via
+        # --update with a PR note. Delete-list + method:
+        # plan/log/3090-phase0-legacy-delete-list.md.
+        run: pnpm run check:dead-exports
+
       - name: Oracle ratchet (#1930)
         # Fails when direct TS-checker usage grows under src/codegen/ —
         # new code must query ctx.oracle (src/checker/oracle.ts). Baseline:
