@@ -3295,8 +3295,24 @@ export function emitStandalonePromiseThen(
  * once the drive layer makes native async results observable.
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
-  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || ctx.standalone === true;
+  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
   return ctx.wasi === true;
+}
+
+/**
+ * (#2980 conservative Promise-lane fallback) On the widened-standalone measure
+ * lane, a module with ANY async generator keeps a host-MIXED promise pipeline
+ * (a legacy gen's yields flow through the host `__gen_*` buffer; `.next()` +
+ * `.then`/`.catch` over it stay host), so promoting Promise.resolve/reject
+ * construction, `await` unwrap, and `__get_caught_exception` to the native
+ * `$Promise` feeds native structs into host machinery that mishandles them —
+ * the 07-09 async-generator −4. Keeping BOTH gates off for such a module keeps
+ * the pipeline host-consistent (those files stay fully-host + passing). WASI +
+ * gc/host are unaffected (standalone-only check). Minimal-first flip-blocker
+ * fallback; a native-`$Promise`-into-host-`.then` bridge is a follow-up.
+ */
+function widenAsyncGenFallback(ctx: CodegenContext): boolean {
+  return ctx.moduleHasAsyncGen === true;
 }
 
 /**
@@ -3331,7 +3347,7 @@ const ASYNC_CARRIER_WIDEN_MEASURE = typeof process !== "undefined" && process.en
  * PATH B re-enables native chaining for standalone by widening this predicate.
  */
 export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
-  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || ctx.standalone === true;
+  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
   if (ctx.wasi === true) return true;
   // (#2865) `--target standalone` with the async-GENERATOR drive active: the
   // driven producers mint native `$Promise`s (`__async_gen_next_*` results, the

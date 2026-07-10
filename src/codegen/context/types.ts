@@ -399,6 +399,20 @@ export interface FunctionContext {
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
   /**
+   * (#3121) Names whose local slot was PROMOTED to a module global by
+   * `promoteAccessorCapturesToGlobals` (object-literal method / accessor /
+   * class-body capture). The promotion deletes the name from `localMap` so
+   * every subsequent reference in this function resolves through the promoted
+   * global (`ctx.capturedGlobals` / `ctx.capturedBoxGlobals`) — the SAME store
+   * the method body reads and writes. The orphaned slot still exists in
+   * `fctx.locals`, so the #1177 block-shadow rescan in `compileArrowAsClosure`
+   * must NOT resurrect it: capturing the stale slot forks the binding into a
+   * second store (a fresh ref cell over a dead local) that the method's
+   * global-routed writes never reach. Recorded per-fctx (not by bare name on
+   * ctx) so an unrelated same-named local in another function is unaffected.
+   */
+  promotedCaptureNames?: Set<string>;
+  /**
    * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
    * (closures.ts materializes each capture from `__self` field `i+1` into a
    * named local in the body prologue). The async drive lane compiles the body
@@ -1505,6 +1519,16 @@ export interface CodegenContext {
    * and break the zero-import (host-free) contract.
    */
   asyncGenLegacyBufferEmitted?: boolean;
+  /**
+   * (#2980 conservative Promise-lane fallback) True when the module SOURCE has
+   * ANY async generator, set in the pre-body `collectDeclarations` walk. On the
+   * widened-standalone measure lane, `widenAsyncGenFallback` (async-scheduler.ts)
+   * keeps BOTH carrier gates OFF for such a module — a native `$Promise` fed into
+   * the gen's legacy `__gen_*` buffer / host `.then` over `__gen_next` mishandles
+   * it (the 07-09 async-generator −4). Pre-body so a `Promise.reject` INSIDE the
+   * gen sees it. Read only under the measure — wasi + gc/host stay byte-identical.
+   */
+  moduleHasAsyncGen?: boolean;
   /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,

@@ -9413,9 +9413,9 @@ function compileCallExpression(
       if (isResolveReject) {
         const methodName = propAccess.name.text;
         // (#1326 Phase 1B) Standalone-mode `Promise.resolve(v)` /
-        // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new
-        // instead of calling the JS-host `Promise_resolve_import` /
-        // `Promise_reject_import` (unsatisfiable in WASI).
+        // `Promise.reject(r)` — emit Wasm-native `$Promise` struct.new instead
+        // of the JS-host `Promise_{resolve,reject}_import` (unsatisfiable in
+        // WASI). (#2980 async-gen fallback lives in `isStandalonePromiseActive`.)
         if (isStandalonePromiseActive(ctx)) {
           // Compile the value/reason argument FIRST into a side buffer
           // so the helper controls the final Wasm op order
