@@ -3673,6 +3673,12 @@ function compileStandalonePromiseThenCallback(
   const savedBody = fctx.body;
   fctx.savedBodies.push(savedBody);
   fctx.body = instrs;
+  // (#3137) Widen TUPLE-typed callback params to externref for this compile
+  // window — the native then-wrapper ABI delivers externref, and the
+  // contextually-inferred tuple struct (combinator over a tuple input) can
+  // never match the runtime results vec (see computeClosureWrapperSig).
+  const savedWidenTuple = ctx.widenTupleCallbackParams;
+  ctx.widenTupleCallbackParams = true;
   try {
     const type =
       ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)
@@ -3694,6 +3700,7 @@ function compileStandalonePromiseThenCallback(
     }
     return { instrs, closureInfo };
   } finally {
+    ctx.widenTupleCallbackParams = savedWidenTuple;
     fctx.savedBodies.pop();
     fctx.body = savedBody;
   }
@@ -9520,9 +9527,10 @@ function compileCallExpression(
         // compile-time collection projection; everything else except strings,
         // `number[]` vecs, and native-generator subjects takes the (#2922 arms
         // 2+3) dynamic `__combinator_to_vec` path (custom iterables drain,
-        // non-iterables reject with a native TypeError). `allSettled`/`any`
-        // and subclass capability-ctor receivers still fall through to the
-        // host path (follow-ups).
+        // non-iterables reject with a native TypeError). (#3137) `allSettled`/
+        // `any` take the same native arms (status objects / AggregateError via
+        // ensureSettledAnyCombinators); subclass capability-ctor receivers
+        // still fall through to the host path (follow-ups).
         const arg0 = expr.arguments[0];
         const nativeCombinatorEligible =
           isStandalonePromiseActive(ctx) &&

@@ -3904,6 +3904,12 @@ const COMBINATOR_FUNC_IDX_KEYS = [
   "allFulfillFuncIdx",
   "raceFulfillFuncIdx",
   "rejectFuncIdx",
+  // (#3137) allSettled/any wrappers — lazily minted (undefined on all/race-only
+  // modules; the shifter's typeof-number guard skips them).
+  "allSettledFulfillFuncIdx",
+  "allSettledRejectFuncIdx",
+  "anyRejectFuncIdx",
+  "aggErrNewFuncIdx",
 ] as const;
 
 /**

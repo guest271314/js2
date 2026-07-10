@@ -138,7 +138,12 @@ export function test(): number {
     expect(names).toContain("Promise_then");
   });
 
-  it("Promise.allSettled in the module keeps the host arm", async () => {
+  it("(#3137 update) Promise.allSettled is native now — the module goes fully host-free", async () => {
+    // Pre-#3137 this control asserted the host arm stayed (allSettled was a
+    // host-promise producer). #3137 lowers allSettled natively on the
+    // combinator machinery, so the producer flag no longer fires and the
+    // then-bridge miss arm is native too: zero imports (the compounding
+    // de-leak this gate was designed to enable).
     const result = await compileStandalone(
       DRAIN +
         `
@@ -148,10 +153,7 @@ export function test(): number {
   return 1;
 }`,
     );
-    const names = importNames(result);
-    expect(names).toContain("Promise_allSettled");
-    // then-chain host fallback stays because allSettled mints a HOST promise.
-    expect(names.some((n) => n === "Promise_then" || n === "Promise_then2")).toBe(true);
+    expect(importNames(result)).toEqual([]);
   });
 });
 
