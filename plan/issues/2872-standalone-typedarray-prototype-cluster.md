@@ -122,7 +122,9 @@ arg). The dominant forms — `new TA(n)`, `new TA([…])`, `new TA(arrayLike)`,
 downstream read returned 0/undefined and assert #1 failed. Traced via WAT dump:
 the callback body literally began `ref.null extern; local.tee $a`.
 
-**Landed in this slice (PR — branch `issue-2872-standalone-typedarray-proto`):**
+**Landed in this slice (PR #2881, branch `issue-2872-standalone-typedarray-proto`;
+the issue intentionally does NOT carry `pr:` frontmatter — it stays open as the
+cluster tracker, this PR is slice 1):**
 
 1. `emitTaDynCtorConstructFromLocals` (dataview-native.ts) — runtime
    `ref.test $__ta_ctor`-gated construct from pre-evaluated externref arg
