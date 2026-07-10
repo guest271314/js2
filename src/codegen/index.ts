@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { emitWasiErrorConstructor, fillExternGetErrorProps } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
@@ -2509,6 +2509,17 @@ export function generateModule(
     // value resolve its spec `name`/`length` at runtime, host-free. No-op when
     // no builtin closure was materialized (standalone only).
     fillBuiltinFnMeta(ctx);
+
+    // (#3130) Splice the `$Error_struct` arm into `__extern_get` so dynamic
+    // (`any`-receiver) reads of `err.message` / `err.name` / `err.stack` /
+    // `err.constructor` — and subclass own fields via the `$props` sidecar —
+    // resolve on native Error objects instead of missing to `undefined`.
+    // `err.constructor` answers the SAME `__builtin_<Name>` carrier global the
+    // bare `TypeError` identifier reads (#2907), so `reason.constructor ===
+    // TypeError` is genuine identity (the §27.2.1.3.2 resolve-settled-*-self
+    // acceptance shape). No-op unless the module constructs native errors
+    // (standalone/wasi only) — byte-identical otherwise.
+    fillExternGetErrorProps(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
