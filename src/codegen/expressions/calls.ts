@@ -145,7 +145,11 @@ import {
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
-import { resolveBuiltinReceiverName, tryEmitStandaloneBuiltinStaticGopd } from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers)
+import {
+  resolveBuiltinReceiverName,
+  tryEmitStandaloneBuiltinStaticGopd,
+  tryEmitStandaloneStructGopdKeyDispatch,
+} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -7999,6 +8003,19 @@ function compileCallExpression(
         if (builtinRecv !== undefined && tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, builtinRecv, propLiteral)) {
           return { kind: "externref" };
         }
+      }
+
+      // (#2984 arg-2 name coercion) Struct receiver + NON-literal key: runtime
+      // ToPropertyKey dispatch over the compile-time field set (the dynamic
+      // native below only walks $Objects, so a struct receiver always answered
+      // `undefined` — test262 15.2.3.3-2-*). See builtin-static-gopd.ts.
+      if (
+        ctx.standalone &&
+        propLiteral === undefined &&
+        structName &&
+        tryEmitStandaloneStructGopdKeyDispatch(ctx, fctx, arg0, arg1, structName)
+      ) {
+        return { kind: "externref" };
       }
 
       // Fallback: dynamic case — delegate to __getOwnPropertyDescriptor host import
