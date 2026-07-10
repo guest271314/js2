@@ -2,9 +2,9 @@
 id: 2967
 title: "Async engine convergence: retire emitAsyncStateMachine/splitBodyAtAwait onto the #2906 host-drive engine; widen planLinearAwaits gaps once for both lanes"
 status: in-progress
-assignee: ttraenkler/fable-senior1
+assignee: ttraenkler/fable-senior2
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-10
 priority: medium
 horizon: l
 feasibility: hard
@@ -95,3 +95,65 @@ acceptance check.
 - try/catch-across-await works on BOTH lanes (wasi + host) via the shared
   engine, with tests.
 - The two pre-existing bugs above triaged (fixed or split out).
+
+## Implementation notes (slice 1 — routing flip, 2026-07-10)
+
+Resumed from fable-senior1 (agent died mid-task with the implementation
+uncommitted in its worktree; work recovered, verified against current main,
+committed by fable-senior2).
+
+**What changed and WHY:**
+
+- `decideAsyncActivation` (`src/codegen/async-activation.ts`): host-drive is
+  now checked FIRST; the CPS arm is the fallback. Both engines return a real
+  host Promise and the call-site contract (`Promise_resolve` assimilation) is
+  engine-invariant, so the lowered *population* is unchanged — only the engine
+  per member flips.
+- `asyncFnNeedsHostDrive` (`src/codegen/async-frame.ts`): the #1042
+  `!asyncFnNeedsCps` disjointness exclusion is DROPPED — the N-state machine
+  claims the single-tail-await population (N=1 case). The lone-combinator and
+  spill-safe gates are kept verbatim.
+- **Carve-out 1 — pattern/rest params (CPS-shaped only)**: the destructuring
+  prologue derives locals in the ENTRY fn that the fresh resume
+  FunctionContext never sees (the frame captures raw wasm params BY NAME —
+  the async-gen gate rejects pattern params for the same reason). The CPS
+  continuation snapshots derived locals by value from the outer frame, so
+  those shapes stay CPS (correct-or-CPS, never correct-or-broken). Non-CPS
+  pattern-param shapes keep their pre-#2967 host-drive routing (pre-existing
+  gap, not widened here).
+- **Carve-out 2 — lifted closures**: `planAsyncClosureActivation` re-lanes
+  the CPS-shaped subset back onto CPS. Host-drive in the lifted-closure
+  context is the parked #2646 33-regression class (continuation
+  capture-struct / `__self` interplay unvalidated). The whole closure
+  population is byte-stable across this flip; closure migration is a later
+  slice and gates the final CPS deletion.
+- `declarations.ts` import registration: post-flip both predicates can be
+  true for one fn; registering the superset (CPS trio ⊂ host-drive six) is
+  hazard-free for every routing outcome.
+
+**Local validation (post upstream/main merge, 2026-07-10):**
+
+- `tests/issue-2967-engine-convergence.test.ts` — 10/10 pass (routing WAT
+  assertions + behavior incl. reject-path fidelity).
+- `tests/issue-1042-host-drive.test.ts`, `tests/issue-2957.test.ts`,
+  `tests/issue-2895-async-frame.test.ts`, `tests/async-await.test.ts` — 34/34.
+- `tests/async-census.test.ts`, `tests/issue-2906-async-multiawait.test.ts`,
+  `tests/issue-2174-async-closure-dynamic-call.test.ts` — pass.
+- `tests/promise-combinators.test.ts`: 2 failures ("undefined is not
+  iterable" on `Promise.all`/`Promise.race` with resolved values) —
+  **pre-existing**: reproduced identically on a pristine `upstream/main`
+  control worktree (531588802f). Not caused by the flip (that shape is a
+  lone-combinator await, which the gate still declines → routing unchanged).
+
+**Measured behavior delta (deliberate, an improvement):** a wasm-side throw
+AFTER resume now settles the result promise with the original Error payload
+(the frame engine's dispatch `try`/`catch $exn` → `Promise_settle_reject`
+unwraps the exn payload), where the CPS lane leaked a raw
+`WebAssembly.Exception` with no message. Promise-identity also differs
+observably (pre-allocated pending promise settled via `Promise_settle_resolve`
+vs `Promise_then2`'s chained promise) — the full-corpus A/B on this slice's PR
+CI is the gate; watch promise-identity + unhandled-rejection-timing buckets.
+
+**Next slices:** (2) delete CPS engine on a banked non-negative A/B;
+(3) widen `planLinearAwaits` (try/catch-across-await first); plus the
+producer fix (typed resume bindings, ratchet `call-arg-coerce` back to ≤6).
