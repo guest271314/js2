@@ -910,34 +910,6 @@ function makeBuiltinClosureFctx(
 }
 
 /**
- * (#2175 S0) Generalized native-method-closure factory. `kind`:
- *   - `"static"` — the existing receiver-less builtin-static behaviour
- *     (`Array.isArray`, `Object.keys`, `Object.getOwnPropertyDescriptor`),
- *     kept BYTE-IDENTICAL — delegates to the unchanged
- *     `ensureStandaloneBuiltinStaticMethodClosure` below.
- *   - `"method"` / `"getter"` — brand-keyed native-method/getter closures with
- *     an `externref this` first user param + a brand-recovery prologue,
- *     delegated to `ensureStandaloneNativeMethodClosure` (native-proto.ts).
- *
- * S0 reaches only the `"static"` path; S1 wires `"method"`/`"getter"` for
- * RegExp through the refusal site below.
- */
-function ensureStandaloneNativeMethodClosureLocal(
-  ctx: CodegenContext,
-  builtinName: string,
-  propName: string,
-  expr: ts.PropertyAccessExpression,
-  kind: "static" | "method" | "getter",
-  brand?: number,
-): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
-  if (kind !== "static") {
-    if (brand === undefined) return null;
-    return ensureStandaloneNativeMethodClosure(ctx, brand, propName, kind);
-  }
-  return ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
-}
-
-/**
  * (#2175 S1) Register a builtin's `$NativeProto` glue (so its proto object can
  * materialize and its members resolve to native-method closures) and return its
  * brand. Returns `undefined` for builtins not yet wired into the native-proto
