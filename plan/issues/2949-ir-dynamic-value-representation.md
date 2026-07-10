@@ -2,10 +2,10 @@
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
 status: in-progress
-assignee: ttraenkler/opus-s5-4
+assignee: ttraenkler/fable-11th
 sprint: current
 created: 2026-07-02
-updated: 2026-07-05
+updated: 2026-07-10
 priority: high
 horizon: xl
 feasibility: hard
@@ -17,6 +17,8 @@ language_feature: compiler-internals
 goal: ir-full-coverage
 related: [1852, 1926, 2138, 2135, 2855]
 origin: "2026-07-02 July Fable audit (plan/log/analysis-2026-07/00-ir-async-standalone-audit.md §1)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -318,10 +320,10 @@ lowering exists until slice 3), enforced by a new selector gate.
      re-assignment `y = <expr>` scans the RHS against the LHS's dyn-ness;
    - statement-position calls (a DROPPED dynamic result is fine — `drop`
      of the carrier ref validates).
-   Everything else — arithmetic, truthiness, property access, calling the
-   dyn value, mixed concrete/dynamic returns, dyn-into-concrete-param,
-   spread over a dyn-param callee — keeps the EXISTING rejection bucket
-   (`param-type-not-resolvable` / `return-type-not-resolvable`).
+     Everything else — arithmetic, truthiness, property access, calling the
+     dyn value, mixed concrete/dynamic returns, dyn-into-concrete-param,
+     spread over a dyn-param callee — keeps the EXISTING rejection bucket
+     (`param-type-not-resolvable` / `return-type-not-resolvable`).
 
    **Why precision instead of claim-then-demote:** (a) under
    `JS2WASM_IR_FIRST=1` a claimed+skipped function that build-demotes is a
@@ -362,7 +364,7 @@ lowering exists until slice 3), enforced by a new selector gate.
   today**: `export function f(x: any): any { return x; }` compiled
   `fast: true` emits `(param externref) (result externref)` on the IR path
   but `(param (ref null $AnyValue))` on the legacy path (`experimentalIR:
-  false`) — `resolvePositionType`'s AnyKeyword arm predates the mode split.
+false`) — `resolvePositionType`'s AnyKeyword arm predates the mode split.
   WAT-diff evidence in the slice-2 session. `dynamic` does NOT inherit
   this: `resolveDynamic()` mirrors `resolveWasmType`'s mode split, and the
   slice-2 tests assert the claimed function's `func $f` header is
@@ -413,16 +415,16 @@ real `compile()` calls) over the #2138-style corpus: 287 files = 13 playground
 examples + `examples/` + stride-200 test262 sample. Script pattern banked in
 the slice-2 session (`.tmp/claim-sweep.mts`, gitignored; STRIDE=200).
 
-| metric | main (4f68ed670) | slice 2 | delta |
-| --- | --- | --- | --- |
-| files compiled OK | 248/287 | 248/287 | 0 |
-| top-level fns (claim denominator) | 178 | 178 | 0 |
-| **claimed** | **13** | **13** | **0 (identical claim SET, per-file diff)** |
-| `return-type-not-resolvable` | 30 | 14 | **−16** |
-| `param-type-not-resolvable` | 3 | 1 | **−2** |
-| `body-shape-rejected` | 50 | 67 | **+17** |
-| `destructuring-param-complex` | 1 | 2 | +1 (re-bucket) |
-| post-claim demotions | 0 | 0 | 0 |
+| metric                            | main (4f68ed670) | slice 2 | delta                                      |
+| --------------------------------- | ---------------- | ------- | ------------------------------------------ |
+| files compiled OK                 | 248/287          | 248/287 | 0                                          |
+| top-level fns (claim denominator) | 178              | 178     | 0                                          |
+| **claimed**                       | **13**           | **13**  | **0 (identical claim SET, per-file diff)** |
+| `return-type-not-resolvable`      | 30               | 14      | **−16**                                    |
+| `param-type-not-resolvable`       | 3                | 1       | **−2**                                     |
+| `body-shape-rejected`             | 50               | 67      | **+17**                                    |
+| `destructuring-param-complex`     | 1                | 2       | +1 (re-bucket)                             |
+| post-claim demotions              | 0                | 0       | 0                                          |
 
 **The honest reading — the type gate was NOT the binding constraint at
 test262 scale; the body-shape gate is.** Unlocking dynamic types converts
@@ -456,7 +458,7 @@ so producers can widen past move-only. This replaces the staged
    provided by a new `IrLowerResolver.resolveDynamicLowering?()` in
    `integration.ts`. WasmGC fast/standalone: derives from
    `ensureAnyValueType` ($AnyValue = `{tag:i32, i32val, f64val, refval:eqref,
-   externval:externref}`; payload field by `jsTagUnboxKind`: i32→1, f64→2,
+externval:externref}`; payload field by `jsTagUnboxKind`: i32→1, f64→2,
    ref→3 for native refs / 4 for externref-shaped). Host (non-fast): the
    carrier is externref — box/unbox route through the EXISTING
    `__box_number`/`__unbox_number`/classifier import family, NOT struct
@@ -544,10 +546,10 @@ untouched. Decisions and the WHY:
    move-only scan never produces the flow. Dual direction (dynamic value →
    externref-val declared result) unchanged.
 6. **Host `Object` tag.test needs two reads** (`typeof === "object" &&
-   !ref.is_null` — host `typeof null === "object"` but Null is its own
+!ref.is_null` — host `typeof null === "object"` but Null is its own
    partition), so `emitTagTest` takes a lazy scratch-local allocator;
    `lower.ts` allocates one carrier-typed local per function (`$dyn_tag_
-   scratch`, same pattern as the bitwise/vec scratches). gc arms never use
+scratch`, same pattern as the bitwise/vec scratches). gc arms never use
    it. Host `Null` test is `ref.is_null` (JS null IS the null externref;
    undefined is a non-null host value).
 7. **Producer widening DESCOPED from this PR — with a load-bearing lattice
@@ -576,11 +578,10 @@ untouched. Decisions and the WHY:
    `struct.get` — producers must null-guard or normalize at entry
    (coherent with #2106 S1's $undefined singleton, tag 1 — same table,
    suspended, no live interlock: verified `issue-2106` is backlog/resume-
-   only, `$undefined` reservation in `ensureAnyValueType` matches
-   `JsTag.Undefined = 1`); (b) `unbox(String)` yields the extern-shaped
-   payload (externref) in BOTH modes — native-string consumers need a
-   convert+cast op that lands with the first string-consuming producer;
-   (c) `tag.test(Function)` is mechanical (tag 7) but closures BOX AS
+   only, `$undefined`reservation in`ensureAnyValueType`matches`JsTag.Undefined = 1`); (b) `unbox(String)`yields the extern-shaped
+payload (externref) in BOTH modes — native-string consumers need a
+convert+cast op that lands with the first string-consuming producer;
+(c)`tag.test(Function)` is mechanical (tag 7) but closures BOX AS
    tag-6 Object today — no producer may emit Function tests until #2963
    Phase 1 reifies function values (host/gc would diverge on them).
 
@@ -745,8 +746,7 @@ Two known concrete defects, both "function value lost its callable type":
 ### Sequencing
 
 slice 3 (lowering) → {slice 3b (any unification), A (#2963 P2)} → B/C in
-either order (both consume A's recovery helper). Producer widenings (step
-6) can proceed in parallel with A–C once slice 3 lands. Each slice: own
+either order (both consume A's recovery helper). Producer widenings (step 6) can proceed in parallel with A–C once slice 3 lands. Each slice: own
 PR, own claim-rate/CE-delta measurement, prove-emit-identity for
 untouched lanes.
 
@@ -764,8 +764,8 @@ mechanism, and the corrected next step below.
 
 Slice-3 note 7 flagged the specced "mixed-return box producer" as vacuous
 because `join(unknown, number) = number`. The honest correction was a
-return-WIDENING slice: *any dyn-shaped return arg ⇒ widen the return verdict
-to `dynamic` ⇒ box the concrete return arms*. The target population is a
+return-WIDENING slice: _any dyn-shaped return arg ⇒ widen the return verdict
+to `dynamic` ⇒ box the concrete return arms_. The target population is a
 function like `f(x){ if(c) return x; return 0; }` (x an unannotated → dynamic
 param): one arm moves a dynamic value, another returns a concrete literal, and
 the join **collapses** the return to concrete `f64` so the slice-2 move-only
@@ -775,7 +775,7 @@ scan rejects `return x` (dyn into concrete result).
 `dynamic ∨ x = dynamic` (840), but `unknown ∨ concrete = concrete` (841-842,
 the optimistic no-evidence arm). A dyn (=`unknown`) param arm joined with a
 concrete co-arm yields the concrete type — the return is NEVER lattice-dynamic
-from this mix. And two *distinct concrete* arms join to `union`
+from this mix. And two _distinct concrete_ arms join to `union`
 (propagate.ts:872), which is #2135's tagged-union rows, not the dynamic
 carrier. So a return is lattice-`dynamic` **only** when an arm is already
 dynamic (union-cap-overflow params) — the "rare sliver" slice-3 named.
@@ -811,12 +811,12 @@ dynamic (union-cap-overflow params) — the "rare sliver" slice-3 named.
    widen-intersect=**0** throughout), consistent with the ~8-per-4452 ceiling
    density. Crucially, even the ~8
    ceiling members corpus-wide (incl. `callbackfn`) are each blocked by a
-   NON-return cause per probe 2 — so the *true* return-widening flip set (return
+   NON-return cause per probe 2 — so the _true_ return-widening flip set (return
    arm is the SOLE blocker) is **empty** on this corpus, which is the decisive
    number, not the aggregate's sampled 0.
 
 **Honest reading:** this is not the fully-vacuous case (the box producer, which
-never fired) — the shape does exist (~8 ceiling). It is *vacuous-adjacent*: the
+never fired) — the shape does exist (~8 ceiling). It is _vacuous-adjacent_: the
 surviving population after body-shape + move-only gating is empty, because any
 function with a dyn param that also mixes returns invariably USES that param in
 the body (comparison/arith/property access), and that use is the binding
@@ -894,6 +894,7 @@ scratch:
   select.ts ~L925). **That bucket is exactly what this slice drains.**
 
 **What is MISSING (the work of this slice):**
+
 1. `src/ir/builder.ts` has **NO** `emitBox`/`emitUnbox`/`emitTagTest`
    methods (grep: 0 hits) — producers cannot construct the nodes yet.
 2. `src/ir/from-ast.ts` has no dynamic arm in `lowerBinary` (~L5218),
@@ -944,24 +945,25 @@ default; do not hand-roll it in from-ast for the general arms.
 ### 2. The conjunction problem — why sub-slices split mechanism-from-producer
 
 s4's reachable exemplar (`callbackfn`) needs truthiness-adjacent + relational
-+ property-access + dyn×dyn-eq **simultaneously**; a function claims only when
-EVERY dynamic body-use is handled. Therefore a per-form *producer* (scan-arm
-flip) will measure a claim delta of ~0 until the last form its reachable
-population needs also lands — the exact vacuity trap s4 hit. To stay landable
-without shipping dead lockstep-bearing code, decompose along the
-**mechanism / producer** seam, mirroring how slices 1–3 already split
-(lowering landed byte-inert; producers landed separately):
 
-- **Mechanism sub-slices (S5.0–S5.4): byte-inert, unit-proven, no scan
+- property-access + dyn×dyn-eq **simultaneously**; a function claims only when
+  EVERY dynamic body-use is handled. Therefore a per-form _producer_ (scan-arm
+  flip) will measure a claim delta of ~0 until the last form its reachable
+  population needs also lands — the exact vacuity trap s4 hit. To stay landable
+  without shipping dead lockstep-bearing code, decompose along the
+  **mechanism / producer** seam, mirroring how slices 1–3 already split
+  (lowering landed byte-inert; producers landed separately):
+
+* **Mechanism sub-slices (S5.0–S5.4): byte-inert, unit-proven, no scan
   change.** Each adds the handle method + builder emit + from-ast lowering
   arm for one form, but leaves `dynamicUsesAreMoveOnly` REJECTING it. So
   from-ast never sees the form in a claimed function yet → **zero compiled
   output changes** → self-proof is `prove-emit-identity.mjs` IDENTICAL (39
   hashes) PLUS slice-3-style unit tests that hand-build the IR and EXECUTE
   it against the production lowering. No claim, so no `JS2WASM_IR_FIRST`
-  lockstep liability (the s4 hazard is specifically a *claiming* producer
+  lockstep liability (the s4 hazard is specifically a _claiming_ producer
   with dead scan lockstep — a lowering-only slice has none).
-- **Producer sub-slice (S5.P): flips the scan arms for the landed forms
+* **Producer sub-slice (S5.P): flips the scan arms for the landed forms
   together + bundles return-widening + boxes concrete arms.** This is the
   ONLY slice that changes claims, gated on a reachability probe (§4), and it
   carries the real claim-rate measurement and full CI. It may split into
@@ -1019,7 +1021,7 @@ mechanism PRs first and rebase S5.P onto them.
 #### S5.2 — strict/loose equality lowering (mechanism, byte-inert)
 
 - **Files/functions:** `handles.ts`/`integration.ts`: `emitStrictEq(negate):
-  Instr[]` and `emitLooseEq(negate)` routing to `coercion-engine`'s
+Instr[]` and `emitLooseEq(negate)` routing to `coercion-engine`'s
   `__any_strict_eq`/`__any_eq` (both operands carrier-shaped). `builder.ts`:
   `emitDynEq(lhs, rhs, {negate, loose})` → i32. `from-ast.ts` `lowerBinary`
   (~L5218): for `===`/`!==`/`==`/`!=` when either operand is dynamic — box
@@ -1045,7 +1047,7 @@ mechanism PRs first and rebase S5.P onto them.
   S5.P to relational against a NUMERIC literal, where ToNumber(dyn) vs number
   is spec-complete, and reject dyn-string-relational to keep correctness).
 - **Files/functions:** `handles.ts`/`integration.ts`: `emitToNumber():
-  Instr[]` routing to `coercion-engine.emitToNumber` (carrier → f64).
+Instr[]` routing to `coercion-engine.emitToNumber` (carrier → f64).
   `builder.ts`: `emitDynToNumber(value)` → f64. `from-ast.ts` `lowerBinary`
   relational arm: `emitDynToNumber` on dyn operand(s), then the existing
   `f64.lt`/`gt`/… path.
@@ -1120,7 +1122,7 @@ mechanism PRs first and rebase S5.P onto them.
      `body-shape-rejected` / **post-claim demotions**) exactly as the
      slice-2 measurement table in this file.
   2. **PASS criteria:** `claimed` strictly increases; `param-/return-
-     type-not-resolvable` drops by the claim increase and does NOT reappear
+type-not-resolvable` drops by the claim increase and does NOT reappear
      as `body-shape-rejected` (that reappearance was s4's slice-2 signature
      of a vacuous type-gate move — here the body IS handled, so it must not
      recur); `post-claim demotions == 0` (the `JS2WASM_IR_FIRST` skipped-slot
@@ -1197,7 +1199,7 @@ Decisions and the WHY:
 
 1. **Result-type mapping mirrors the node contracts (nodes.ts §box/unbox/
    tag.test), not a new policy.** `emitBox → toType`; `emitTagTest → irVal
-   i32`; `emitUnbox → irVal(<payload ValType>)` where the payload kind comes
+i32`; `emitUnbox → irVal(<payload ValType>)` where the payload kind comes
    from the canonical `jsTagUnboxKind` (js-tag.ts): `i32` (NumberI32/Boolean),
    `f64` (NumberF64), `ref` (String/Object/Function). This is the SAME table
    the verifier (R2/R3) and the gc `payloadFieldIdx` use — one tag/payload
@@ -1263,7 +1265,7 @@ vs the branch base (`82dd5552c`). Decisions and the WHY:
 1. **A dedicated `IrInstrDynTruthy{value}` node (→ i32), NOT `unbox{Boolean}`.**
    The plan (§S5.1) is explicit: general JS `ToBoolean` (§7.1.2) is defined over
    EVERY partition (`0`/`NaN`/`""`/`null`/`undefined` falsy), whereas
-   `unbox{Boolean}` reads a *proven boolean's* payload and is valid only under a
+   `unbox{Boolean}` reads a _proven boolean's_ payload and is valid only under a
    `tag.test(Boolean)` proof. Truthiness needs no proof and no partition switch,
    so it is its own op. The node's blast radius is the usual `never`-exhaustive
    IR switch set (nodes.ts `forEachNestedBuffer`/`mapNestedBuffers`/`directUses`,
@@ -1382,7 +1384,7 @@ function). **prove-emit-identity: 39/39 IDENTICAL** vs the branch base
    `emitEqOperand` is identity, and `__any_strict_eq`/`__any_eq` are exactly what
    legacy `compileAnyBinaryDispatch` emits (byte-parity, and the tag-5 field-4
    classifier owns cross-type falsity + numeric-class `5 === 5.0` + `NaN === NaN
-   → false` via `f64.eq`). **But for the host (non-fast) externref carrier it is
+→ false` via `f64.eq`). **But for the host (non-fast) externref carrier it is
    WRONG.** I verified against the real compiler (probe on `compileAndInstantiate`
    of `function looseEq(a:any,b:any){return a==b?1:0}` in host mode): legacy host
    `"5" == 5 → 1`, `null == undefined → 1` (spec-correct). Routing the host path
@@ -1443,7 +1445,7 @@ function). **prove-emit-identity: 39/39 IDENTICAL** vs the branch base
   `__host_loose_eq`); and RUNTIME execution against the PRODUCTION
   `makeDynamicLowering` over a real `CodegenContext` in BOTH strategies —
   gc: strict/loose number eq incl. `NaN === NaN → 0` (spec-correct) and `0 ===
-  -0 → 1`, `!==` negation, numeric-CLASS (tag-2 i32 box === tag-3 f64 box),
+-0 → 1`, `!==` negation, numeric-CLASS (tag-2 i32 box === tag-3 f64 box),
   cross-type strict falsity (boxed number vs boxed boolean → 0); host: full
   spectrum via externref params — number/string/bool equality, cross-type
   falsity (`"5" === 5`, `true === 1` → 0), `NaN === NaN → 0`, null/undefined
@@ -1510,15 +1512,15 @@ vs the branch base (`e66b066d4`). Decisions and the WHY:
      `binary-ops.ts:1091-1096`) to "compile with numeric hint" → `__unbox_number`
      (`Number(v)`) per operand + numeric compare. String-correct via `Number()`.
    - **standalone**: a pure-Wasm runtime branch — `if both-are-strings →
-     lexicographic string compare, else → __any_to_f64 each + f64.lt` (the full
+lexicographic string compare, else → __any_to_f64 each + f64.lt` (the full
      ARC in Wasm; the else arm reads the box's f64 slot for a string → 0, a known
      legacy mixed-string/number gap).
-   The `__any_lt`/`__any_gt`/`__any_le`/`__any_ge` helper family EXISTS
-   (`any-helpers.ts:2466`, `__any_to_f64` both operands + `f64.op`) but is NOT the
-   path `a < b` on two `any` operands actually takes (relational falls through
-   dispatch). So there is no single "legacy relational helper" for me to route the
-   whole comparison through — the S5-plan design (ToNumber(dyn) + f64 compare) is
-   the numeric ARM of this ARC, deliberately implementing ONLY the numeric case.
+     The `__any_lt`/`__any_gt`/`__any_le`/`__any_ge` helper family EXISTS
+     (`any-helpers.ts:2466`, `__any_to_f64` both operands + `f64.op`) but is NOT the
+     path `a < b` on two `any` operands actually takes (relational falls through
+     dispatch). So there is no single "legacy relational helper" for me to route the
+     whole comparison through — the S5-plan design (ToNumber(dyn) + f64 compare) is
+     the numeric ARM of this ARC, deliberately implementing ONLY the numeric case.
 
 3. **Per-backend ToNumber routing (D4-faithful, byte-parity with each backend's
    ToNumber engine):**
@@ -1555,7 +1557,7 @@ vs the branch base (`e66b066d4`). Decisions and the WHY:
    the f64 operand hint, covering `dyn > 0` / `dyn <= 10`).
 
 5. **NaN is correct in both modes** — the numeric arm is a plain `f64.{lt,gt,le,
-   ge}`, and every relational compare with a NaN operand is `false` (§7.2.11).
+ge}`, and every relational compare with a NaN operand is `false` (§7.2.11).
    `undefined` ToNumbers to NaN → all relational false; `null` → 0; boolean →
    0/1. Verified at runtime in BOTH strategies (no S5.1-style inherited quirk —
    relational never touches `__any_unbox_bool`).
@@ -1623,15 +1625,15 @@ native-string VALUES in standalone (`const o: any = {v:"hi"}; o.v.length → 0`)
 #2580 M-series dyn-read substrate (`src/codegen/dyn-read.ts`) + #2896 fixed it.
 Four probes (banked in `.tmp/probe-s54-*.mts`), value returned [want]:
 
-| probe (host / standalone) | host | standalone |
-| --- | --- | --- |
-| `const o:any={v:"hello"}; o.v.length` [5] | 5 | 5 |
-| `const o:any={n:7}; o.n` [7] | 7 | 7 |
-| cross-`any`-boundary `reader(o).v.length`, `o={v:"hello"}` [5] | 5 | 5 |
-| cross-`any`-boundary `reader(o).v === "hi"` [1] | 1 | 1 |
-| dynamic-param `o[0]` on `[7,8,9]` [7] | 7 | (compiles) |
-| dynamic-param `o[i]` on `({a:5},"a")` [5] | 5 | (compiles) |
-| dynamic-param `o["k"]` on `{k:3}` [3] | 3 | (compiles) |
+| probe (host / standalone)                                      | host | standalone |
+| -------------------------------------------------------------- | ---- | ---------- |
+| `const o:any={v:"hello"}; o.v.length` [5]                      | 5    | 5          |
+| `const o:any={n:7}; o.n` [7]                                   | 7    | 7          |
+| cross-`any`-boundary `reader(o).v.length`, `o={v:"hello"}` [5] | 5    | 5          |
+| cross-`any`-boundary `reader(o).v === "hi"` [1]                | 1    | 1          |
+| dynamic-param `o[0]` on `[7,8,9]` [7]                          | 7    | (compiles) |
+| dynamic-param `o[i]` on `({a:5},"a")` [5]                      | 5    | (compiles) |
+| dynamic-param `o["k"]` on `{k:3}` [3]                          | 3    | (compiles) |
 
 So string values survive (host + standalone), and named + static-index +
 DYNAMIC-index reads all work in legacy. The "reader drops values" blocker is
@@ -1726,7 +1728,7 @@ __dyn_member_get(recv: <carrier>, key: <carrier>) -> <carrier>
   `__any_strict_eq`/`__any_to_f64` that S5.2/S5.3 route through cleanly).
 - Registered up-front by `preregisterDynamicSupport` (idempotent, funcidx-shift-
   safe), so the IR handle method stays a pure `readonly Instr[]` `[call
-  __dyn_member_get]` and the S5.0–3 body-only-shim contract is preserved.
+__dyn_member_get]` and the S5.0–3 body-only-shim contract is preserved.
 - Then S5.4 becomes the intended thin wiring: `IrDynamicLowering.emitMemberGet()`
   → `[call __dyn_member_get]`; `builder.emitDynMemberGet(recv,key) → dynamic`;
   the `from-ast` `lowerPropertyAccess`/`lowerElementAccess` dynamic-receiver arm.
@@ -1762,3 +1764,97 @@ mechanism substrate remains valuable regardless (consumed by the banked
 #2963/#2984/#3015 adoption slices). Run the §4 ceiling + real-selector probes on
 the reduced set BEFORE writing any S5.P scan-arm flip; build only a non-empty
 flip set.
+
+## Implementation Notes — S5.5 (fable-11th, 2026-07-10, branch `issue-2949-s5-5-dyn-arith`)
+
+S5.5 ships **dynamic numeric arithmetic** — the missing producer form the #3053
+U2 measurement named as its follow-up 2 (the reduce-style `obj[idx-1]` bodies
+need dynamic ARITHMETIC, not just member reads). Mechanism slice, byte-inert by
+construction (the move-only selector gate still rejects a dynamic-arithmetic
+body). **prove-emit-identity: 39/39 IDENTICAL** vs the branch base
+(`cda6ab047b`). Decisions and the WHY:
+
+1. **NO new IR nodes, NO handle/lowering changes — pure from-ast wiring of the
+   existing S5.1/S5.3 primitives.** Unlike S5.1–S5.3 (each added a node +
+   handle arm), the arithmetic forms decompose entirely into landed vocabulary:
+   `dyn.to_number` (S5.3) feeds the EXISTING f64 ops. The whole slice is two
+   from-ast arms:
+   - `tryLowerDynamicArithmetic` in `lowerBinary` (after the S5.3 relational
+     arm): `-`→`f64.sub`, `*`→`f64.mul`, `/`→`f64.div`, `%`→ the shared
+     exact-`__fmod` helper call (#2945/#2056 — the SAME `emitCall {FMOD_FN}`
+     the concrete `%` case emits, so every fmod edge — `x % 0`→NaN, `-0 % x`→
+     −0, sign-of-dividend — agrees bit-for-bit with legacy). Operands convert
+     via the S5.3 `relOperandToF64` (doc generalized, now shared): dynamic →
+     `dyn.to_number`, concrete f64 → as-is, anything else → `null` → clean
+     demote.
+   - `lowerPrefixUnary` dynamic arms: `-x` → `dyn.to_number` + `f64.neg`
+     (§13.5.5); `+x` → a BARE `dyn.to_number` (§13.5.4 Unary Plus IS
+     ToNumber); `!x` → `dyn.truthy` (S5.1) + `i32.eqz` (§13.5.7 — inherits
+     S5.1's documented gc boxed-NaN-is-truthy byte-parity quirk; host is
+     spec-correct).
+
+2. **Why these four binary operators are SPEC-COMPLETE under ToNumber (no
+   relational-style scope restriction needed):** `-`/`*`/`/`/`%` are pure
+   ToNumber operators (§13.7 multiplicative, §13.8.2 subtraction) —
+   ApplyStringOrNumericBinaryOperation with a numeric-only opText never takes
+   a string branch. So the S5.P scan may admit a dynamic arithmetic operand
+   against ANY counter-operand shape (unlike relational's numeric-literal-only
+   restriction): `"7" - "2"` is 5 by spec, and a string operand ToNumbers per
+   §7.1.4 (host `Number(v)`; the gc boxed-string→f64-slot gap matches legacy
+   `__any_sub`-family behavior — the documented S5.3 deferred imperfection,
+   same magnitude, same fix path). BigInt is out of IR scope.
+
+3. **`+` stays EXCLUDED (deliberate, pinned by test):** JS `+` is ToPrimitive
+   - string-concat-OR-add dispatch, not a ToNumber operator. The Row-7
+     `proveAdditiveOperand` gate (#2781) already demotes an unprovable-`any` `+`
+     to the SAFE legacy `emitAnyAdd`; a dynamic operand reaching the kind
+     dispatch demotes on the type-mismatch throw. A dynamic `+` producer needs
+     the ToPrimitive machinery — a separate slice if S5.P's probe shows the
+     population needs it.
+
+4. **Bitwise/shift ops stay rejected** (ToInt32/ToUint32 territory — needs a
+   `dyn`→i32 conversion policy; not in this slice, demotes cleanly).
+
+## Test Results — S5.5 (2026-07-10, fable-11th)
+
+- `tests/issue-2949-s5-5-dyn-arith.test.ts` — **8/8 pass**. NEW test approach
+  for a from-ast-only slice: the tests drive `lowerFunctionAstToIr` DIRECTLY
+  with `paramTypeOverrides: [dynamic]` (the exact selector/override contract)
+  on real parsed sources, then execute the from-ast OUTPUT against the
+  PRODUCTION `makeDynamicLowering` over a real `CodegenContext`:
+  - node shapes: `x - 1` emits ONE `dyn.to_number` (not the concrete literal)
+    - `f64.sub`; `x % y` routes through `__fmod` BY NAME; `+x` is a bare
+      `dyn.to_number` with NO unary op; `!x` uses `dyn.truthy`, NOT ToNumber;
+  - demotes pinned: `x + 1` (concat dispatch), `x - "a"` (string
+    counter-operand), `x & 1` (bitwise) all throw → legacy;
+  - gc runtime ($AnyValue): from-ast functions called through hand-built
+    box-wrappers (the slice-2 dyn-arg→dyn-param call shape) — dec/mul/div/
+    mod/neg/toNum over boxed numbers + Boolean-refined carriers, incl.
+    NaN propagation, −0 (`Object.is(-0 % 3, -0)`, `Object.is(-0, neg(0))`),
+    `x % 0 → NaN`, `1/0 → Infinity`, `0/0 → NaN`, fractional fmod;
+  - host runtime (externref): from-ast functions called DIRECTLY with real JS
+    values — `dec("5")=4`, `sub("7","2")=5` (`-` never concatenates),
+    `mul("abc",4)=NaN`, `dec(true)=0`, `dec(null)=-1`, `dec(undefined)=NaN`,
+    `toNum("42")=42`/`toNum("")=0`/`toNum(null)=0`, and the full `!x`
+    truthiness spectrum (0/NaN/""/null/undefined → 1; 5/"a"/{} → 0).
+- **Byte-inertness PROVEN**: `prove-emit-identity.mjs` baseline captured on
+  clean main (`cda6ab047b`, /workspace sync), check on this branch →
+  **IDENTICAL, all 39 (file,target) hashes** across gc/standalone/wasi.
+- `pnpm run check:ir-fallbacks` — OK, zero delta in every bucket, no
+  post-claim demotions (no selector/producer-admission change, as designed).
+- Adjacent #2949 suites all green: S5.0 8/8, S5.1 7/7, S5.2 7/7, S5.3 7/7,
+  slice 1 19/19, slice 2 22/22, slice 3 16/16, slice 3b 8/8 — **93/93**, plus
+  S5.5's 8 = 101 combined.
+- `npx tsc --noEmit` clean; prettier clean.
+
+**S5.P is next (the claim-flip)** — with S5.5 landed, the full form set the
+reachable population needs is now mechanism-complete: truthiness (S5.1) + eq
+(S5.2) + relational-vs-numeric (S5.3) + member/element read (#3053 U1/U2,
+scan ALREADY open for those) + numeric arithmetic (S5.5) + return-widening
+(bundled). Run the §4 anti-vacuity probes FIRST (ceiling + real-selector) on
+this full set — the `callbackfn` exemplar (`idx>0 && obj[idx]===cur &&
+obj[idx-1]===prev`) is now coverable in principle (relational + eq +
+element-access + `idx-1` arithmetic all exist). Build the scan flip ONLY for a
+measured non-empty flip set, with the slice-2-style claim-sweep table + full
+CI as the acceptance evidence, and lift gate 6 only after an `ir_first`-lane
+run shows zero dynamic-claim demotions.
