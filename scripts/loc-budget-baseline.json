@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-10",
   "threshold": 1500,
-  "totalCeiling": 390637,
+  "totalCeiling": 390876,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -10,7 +10,7 @@
     "src/codegen/array-object-proto.ts": 2028,
     "src/codegen/async-cps.ts": 2561,
     "src/codegen/async-frame.ts": 2024,
-    "src/codegen/async-scheduler.ts": 3950,
+    "src/codegen/async-scheduler.ts": 3935,
     "src/codegen/binary-ops.ts": 4474,
     "src/codegen/class-bodies.ts": 3033,
     "src/codegen/closures.ts": 5023,
@@ -53,11 +53,11 @@
     "src/compiler/early-errors/node-checks.ts": 1865,
     "src/emit/binary.ts": 1989,
     "src/ir/builder.ts": 1587,
-    "src/ir/from-ast.ts": 6653,
-    "src/ir/integration.ts": 2610,
+    "src/ir/from-ast.ts": 6684,
+    "src/ir/integration.ts": 2643,
     "src/ir/lower.ts": 3532,
     "src/ir/nodes.ts": 2926,
     "src/ir/select.ts": 3260,
-    "src/runtime.ts": 15722
+    "src/runtime.ts": 15840
   }
 }
