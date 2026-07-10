@@ -71,12 +71,29 @@ const BUCKETS = [
     dirs: ["language/expressions/await"],
     category: "language/await",
   },
+  // (#2980, 2026-07-10) The class-async SUPPLEMENT — the tradeoff doc
+  // (plan/log/2980-carrier-widen-tradeoff.md §6 point 5) makes this a SIXTH
+  // blocking bucket for rule 1 (the historical −601 blast radius the five
+  // construct buckets undersample): class bodies filtered to async
+  // method/element shapes.
+  {
+    bucket: "class-async",
+    n: 60,
+    dirs: ["language/expressions/class", "language/statements/class"],
+    filter: "async",
+    category: "language/class-async",
+  },
 ];
+
+// Optional single-bucket run: MEASURE_BUCKET=<name> node scripts/measure/corpus.mjs
+const only = process.env.MEASURE_BUCKET;
 
 const corpus = [];
 for (const b of BUCKETS) {
+  if (only && b.bucket !== only) continue;
   let files = [];
   for (const d of b.dirs) files.push(...walk(join(ROOT, d)));
+  if (b.filter) files = files.filter((f) => f.includes(b.filter));
   const picked = spread(files, b.n);
   for (const f of picked) corpus.push({ file: f, bucket: b.bucket, category: b.category });
   console.error(`${b.bucket}: ${files.length} available -> ${picked.length} sampled`);
