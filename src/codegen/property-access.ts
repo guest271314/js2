@@ -6480,7 +6480,9 @@ export function compilePropertyAccess(
                 // partition saw number-vs-boolean, fell to ref identity, and
                 // answered UNEQUAL (the residual wrong-value failure of the
                 // #2938 no-yield relax — generators/no-yield.js, return.js).
-                const allBoolean = k === "i32" && structCandidates.every((c) => c.fieldType.boolean === true);
+                const allBoolean =
+                  k === "i32" &&
+                  structCandidates.every((c) => c.fieldType.kind === "i32" && c.fieldType.boolean === true);
                 resultWasm = allBoolean ? { kind: "i32", boolean: true } : ({ kind: k } as ValType);
                 if (unboxIdx === undefined) {
                   unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
