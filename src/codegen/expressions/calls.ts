@@ -7990,11 +7990,10 @@ function compileCallExpression(
       // members (Symbol well-knowns / RegExp legacy statics / dynamic keys)
       // fall through to the existing refusal; host/gc keeps the working
       // `__get_builtin` host route untouched.
-      // (#2984 bucket-1) The receiver recognizer now also follows one level of
+      // (#2984 bucket-1) The receiver recognizer also follows one level of
       // reaching-def aliasing (`var m = Math; gOPD(m, "atan2")` — the dominant
-      // 15.2.3.3-4-* fixture shape), via the conservative AST-only resolver in
-      // builtin-static-gopd.ts. Direct unshadowed builtin identifiers resolve
-      // exactly as the Phase 3 gate did.
+      // 15.2.3.3-4-* fixture shape) via the conservative AST-only resolver in
+      // builtin-static-gopd.ts; direct unshadowed builtins resolve as before.
       if (ctx.standalone && propLiteral !== undefined) {
         const builtinRecv = resolveBuiltinReceiverName(fctx, arg0, BUILTIN_CLASS_NAMES);
         if (builtinRecv !== undefined && tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, builtinRecv, propLiteral)) {
