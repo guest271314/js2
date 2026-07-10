@@ -155,3 +155,35 @@ explicit form (parity-tested in tests/issue-3120.test.ts).
 - test262 async-gen cluster (1008 files: expressions/statements
   async-generator + AsyncGeneratorFunction/Prototype + AsyncIteratorPrototype)
   A/B main-vs-branch on both CI lanes (host + standalone) — see Test Results.
+
+## Test Results (fable-3120, 2026-07-10)
+
+**wasi direct-drive (the fix):** `yield Promise.reject(99)` → next1 REJECTED
+(was FULFILLED NaN); `yield Promise.resolve(7)` → 7 (was NaN); Promise-typed
+local → 7; `.then`-chained pending operand → suspends at kick, resumes to 8;
+`yield await` and `yield 5` controls unchanged.
+
+**test262 async-gen cluster A/B (1008 files), standalone lane** (the only CI
+lane where async-gen drive codegen runs): main-vs-branch runs of
+`runTest262File(..., "standalone")` are **line-for-line IDENTICAL — every
+status AND every per-file wasm_sha** (639 pass / 353 fail / 16 CE on both
+sides). Zero flips, zero byte drift.
+
+**Host lane:** structurally inert — `isAsyncGenDriveCandidate` is false on
+gc/host, so the classification code is unreachable; confirmed by the
+39/39 emit-identity corpus + the 8-shape byte-diff. (A full in-process host
+A/B is infeasible locally: test262 dstr tests poison shared globals —
+`Array.prototype[Symbol.iterator]` — which kills any single-process loop;
+the sharded CI gate with fork isolation is the authoritative host-lane check.)
+
+**Vitest:** tests/issue-3120.test.ts 8/8; 2906-3di producer, 2906-3dii
+consumer, 2980 carrier-fallback all green post-merge of origin/main
+(incl. #3125 native-resolve assimilation). The 2 failures in 2865 unwrap
+(`await a sync-fulfilled local promise`, `await over an arithmetic
+expression`) fail IDENTICALLY with main's async-cps/async-frame — verified
+pre-existing by control runs on both the old and post-#3125 base.
+
+**Conformance delta on current CI lanes: 0 by design** — the win is wasi-lane
+correctness today, and it banks automatically for standalone the moment the
+#2980 carrier widen turns `isStandalonePromiseActive` on there (the bounded
+gate + awaited classification then activate for standalone too).
