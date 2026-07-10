@@ -40530,7 +40530,7 @@
       "jsHtml": "<pre class=\"shiki material-theme-ocean\" style=\"background-color:#0F111A;color:#babed8\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> double </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> (</span><span style=\"color:#BABED8;font-style:italic\">x</span><span style=\"color:#89DDFF\">:</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#89DDFF\">):</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#C792EA\"> =></span><span style=\"color:#BABED8\"> x </span><span style=\"color:#89DDFF\">*</span><span style=\"color:#F78C6C\"> 2</span><span style=\"color:#89DDFF\">;</span></span>\n<span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> negate </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> (</span><span style=\"color:#BABED8;font-style:italic\">x</span><span style=\"color:#89DDFF\">:</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#89DDFF\">):</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#C792EA\"> =></span><span style=\"color:#89DDFF\"> -</span><span style=\"color:#BABED8\">x</span><span style=\"color:#89DDFF\">;</span></span>\n<span class=\"line\"><span style=\"color:#C792EA\">const</span><span style=\"color:#BABED8\"> add </span><span style=\"color:#89DDFF\">=</span><span style=\"color:#89DDFF\"> (</span><span style=\"color:#BABED8;font-style:italic\">a</span><span style=\"color:#89DDFF\">:</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#89DDFF\">,</span><span style=\"color:#BABED8;font-style:italic\"> b</span><span style=\"color:#89DDFF\">:</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#89DDFF\">):</span><span style=\"color:#FFCB6B\"> number</span><span style=\"color:#C792EA\"> =></span><span style=\"color:#BABED8\"> a </span><span style=\"color:#89DDFF\">+</span><span style=\"color:#BABED8\"> b</span><span style=\"color:#89DDFF\">;</span></span></code></pre>",
       "watHtml": "<pre class=\"shiki material-theme-ocean\" style=\"background-color:#0F111A;color:#babed8\" tabindex=\"0\"><code><span class=\"line\"><span style=\"color:#BABED8\">(</span><span style=\"color:#FFCB6B\">func</span><span style=\"color:#82AAFF\"> $__closure_2</span><span style=\"color:#BABED8\"> (</span><span style=\"color:#FFCB6B\">type</span><span style=\"color:#F78C6C\"> 1</span><span style=\"color:#BABED8\">)</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    local</span><span style=\"color:#89DDFF\">.get</span><span style=\"color:#F78C6C\"> 1</span></span>\n<span class=\"line\"><span style=\"color:#FFCB6B\">    f64</span><span style=\"color:#89DDFF\">.neg</span></span>\n<span class=\"line\"><span style=\"color:#BABED8\">  )</span></span></code></pre>",
       "testCategories": ["language/expressions/arrow-function", "language/expressions/async-arrow-function"],
-      "passCount": 401,
+      "passCount": 406,
       "totalCount": 455,
       "tests": [
         {
@@ -47044,7 +47044,7 @@
         "built-ins/GeneratorFunction",
         "built-ins/GeneratorPrototype"
       ],
-      "passCount": 1020,
+      "passCount": 1025,
       "totalCount": 1391,
       "tests": [
         {
@@ -68588,7 +68588,7 @@
         "language/expressions/async-function",
         "language/statements/async-function"
       ],
-      "passCount": 199,
+      "passCount": 207,
       "totalCount": 324,
       "tests": [
         {
@@ -72823,7 +72823,7 @@
         "language/expressions/async-generator",
         "language/statements/async-generator"
       ],
-      "passCount": 2489,
+      "passCount": 2494,
       "totalCount": 3286,
       "tests": [
         {
