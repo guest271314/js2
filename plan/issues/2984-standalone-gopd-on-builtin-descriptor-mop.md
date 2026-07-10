@@ -10,7 +10,7 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2984
+assignee: ttraenkler/fable-2984b
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
