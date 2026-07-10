@@ -111,11 +111,20 @@ function decideAsyncActivation(
   // JS-host lanes (never both wasi and standalone).
   if (!ctx.wasi && !ctx.standalone) {
     const asyncPlan = analyzeAsyncBody(ctx, decl);
-    if (asyncFnNeedsCps(decl, asyncPlan)) return { lane: "cps", plan: asyncPlan };
-    // (#1042 July re-scope) JS-host N-state resume machine with HOST-Promise
-    // settle adapters — claims the linear shapes the single-tail-await CPS lane
-    // rejects (multi-await, try/finally-across-await).
+    // (#2967 slice 1 — engine convergence) The #2906 N-state resume machine
+    // (host settle backend) is checked FIRST and now claims every linear shape
+    // it can drive, including the single-tail-await population the CPS lane
+    // used to own (see asyncFnNeedsHostDrive — the #1042 disjointness
+    // exclusion is dropped). Both engines return a real host Promise and the
+    // call-site contract (`Promise_resolve` assimilation) is engine-invariant,
+    // so the lowered POPULATION is unchanged — only the engine per member.
+    // The CPS arm remains as the fallback for the shapes planLinearAwaits
+    // cannot drive but splitBodyAtAwait can: the concise arrow body
+    // (`async x => await P`, non-block — closure path only) and the
+    // pattern/rest-param carve-out documented on asyncFnNeedsHostDrive.
+    // CPS deletion (#2967 step 3) happens once this flip's A/B is banked.
     if (asyncFnNeedsHostDrive(ctx, decl, asyncPlan)) return { lane: "host-drive", plan: asyncPlan };
+    if (asyncFnNeedsCps(decl, asyncPlan)) return { lane: "cps", plan: asyncPlan };
   }
 
   return null;
@@ -195,7 +204,7 @@ export function planAsyncClosureActivation(
   decl: ts.FunctionLikeDeclaration,
   isAsync: boolean,
 ): AsyncActivationPlan | null {
-  const decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
+  let decision = decideAsyncActivation(ctx, decl, isAsync, /*allowNonDeclaration*/ true);
   // (#2865) Exception to the phase-2 park below: the for-await-over-async-
   // GENERATOR consumer drive IS validated in the lifted-closure context (its
   // machine is self-contained — every suspension awaits the producer's own
@@ -206,6 +215,17 @@ export function planAsyncClosureActivation(
   // stays parked (the #2646 33-regression class).
   if (decision !== null && decision.lane === "drive" && asyncGenConsumerNeedsDrive(ctx, decl, decision.plan)) {
     return decision;
+  }
+  // (#2967 slice 1) The engine-convergence flip makes the host-drive machine
+  // claim the single-tail-await shapes in decideAsyncActivation — but ONLY for
+  // declarations. In the lifted-closure context host-drive is the parked #2646
+  // 33-regression class (continuation capture-struct / `__self` interplay not
+  // validated), so re-lane exactly the CPS-shaped subset back onto the proven
+  // CPS lane here, keeping the entire closure population byte-stable across
+  // the flip. Migrating closures onto the frame engine is #2967's later step
+  // (it gates the final CPS deletion).
+  if (decision !== null && decision.lane === "host-drive" && asyncFnNeedsCps(decl, decision.plan)) {
+    decision = { lane: "cps", plan: decision.plan };
   }
   // Phase-2 scope: closures activate ONLY the single-tail-await CPS lane. The
   // host-drive ("host-drive") and native-drive ("drive") lanes activate
