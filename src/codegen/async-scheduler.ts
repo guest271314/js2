@@ -3788,25 +3788,29 @@ export function emitStandalonePromiseThen(
  * #1326 — Check whether host-free Promise codegen (native `$Promise` carrier:
  * construction, async-fn return wrap, `await` unwrap) is active.
  *
- * **Gated on `ctx.wasi` only.** AG0 (#2865) briefly widened this to
- * `ctx.standalone` too, but ground-truth measurement (#2895 reconcile, against
- * the #2384 frame-core base) showed that widening is a NET REGRESSION on
- * standalone: the `flags:[async]` test262 harness uses synchronous-settlement
- * (`asyncTest(fn)` calls `fn()` then `$DONE()` with no microtask drain), so an
- * async fn that returns a native `$Promise` is observed as an undrained struct,
- * not a value → 32/202 async tests that PASS on baseline regress to FAIL, with
- * **no** offsetting await-unwrap gain (the await/async-function area itself went
- * 71→42 pass under the broad gate). The host-free standalone await win is
- * coupled to a real async drive layer (result `$Promise` + microtask drain that
- * the harness can settle), which is **PATH B (#2895)** — not bankable in a
- * bounded gate flip. So standalone reverts to baseline here (net-0, no
- * regression); WASI keeps the genuine native-`$Promise` behaviour + the await
- * NaN-fix. PATH B re-widens this (and {@link isStandaloneThenChainNativeActive})
- * once the drive layer makes native async results observable.
+ * **THE #2980 CARRIER WIDEN IS FLIPPED (2026-07-10, stakeholder-approved):**
+ * `--target standalone` now takes the native `$Promise` lane too, except for
+ * modules containing an async generator ({@link widenAsyncGenFallback} keeps
+ * their whole promise pipeline host-consistent). This is exactly the semantics
+ * the ratified rule-1 decision measure validated (plan/issues/2980):
+ * 07-09 full A/B net **+18** with the fallback (async-generator bucket
+ * −4→+0), 07-10 six-bucket confirmation net **+20** with NO bucket ≤ −2
+ * (class-async supplement included). The pairing constraint (#2978/#2934-3b,
+ * PR #2833) landed 2026-07-10 before this flip, per the tradeoff doc
+ * (plan/log/2980-carrier-widen-tradeoff.md §6.4).
+ *
+ * History (why this was wasi-only for so long): AG0 (#2865) widened
+ * prematurely and measured **−31** — the `flags:[async]` harness settles
+ * synchronously, so a native `$Promise` result was an undrained struct. The
+ * PATH-B drive layers (#2895/#2906 slices, #2483 host-drive, #3035 `.then`
+ * receiver bridge, #2979 value carrier) landed since; the 07-02 measure was
+ * still −51, and the residual classes were then fixed one by one (#3035,
+ * #2906 3d-i/ii/iii, the async-gen fallback) until the sign flipped. Both
+ * carrier gates flip TOGETHER (the AG0-safe coupling — no per-construct
+ * gating; see #2980 rule 2).
  */
 export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
-  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
-  return ctx.wasi === true;
+  return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
 }
 
 /**
@@ -3825,52 +3829,33 @@ function widenAsyncGenFallback(ctx: CodegenContext): boolean {
   return ctx.moduleHasAsyncGen === true;
 }
 
-/**
- * (#2980) MEASUREMENT INSTRUMENT for the slice-1d carrier widen decision — NOT
- * the widen itself. When the `JS2WASM_ASYNC_CARRIER_WIDEN` env var is `"1"`,
- * both carrier gates ({@link isStandalonePromiseActive} +
- * {@link isStandaloneThenChainNativeActive}) include `--target standalone`, so
- * the full-corpus A/B (gate on vs off) can be measured WITHOUT committing the
- * flip. Unset (the default, including all of CI), both gates are exactly
- * `ctx.wasi === true` — behaviour and output are unchanged. The real widen
- * lands as its own tiny PR ONLY on a measured net-positive corpus result
- * (#2867 slice-1d protocol; flipping both together is the AG0-safe coupling).
- */
-const ASYNC_CARRIER_WIDEN_MEASURE = typeof process !== "undefined" && process.env?.JS2WASM_ASYNC_CARRIER_WIDEN === "1";
+// (#2980) The `JS2WASM_ASYNC_CARRIER_WIDEN` measurement instrument is RETIRED
+// with the flip (2026-07-10): the measured on-arm IS now the production
+// behaviour of both carrier gates, so the env toggle would be a no-op. The
+// recorded A/B protocol + harness stay in `scripts/measure/` and
+// plan/issues/2980 for any future re-measure need.
 
 /**
- * (#2895) Gate for the **native `.then` / `.catch` chaining** lowering
- * (`emitStandalonePromiseThen`) specifically — narrower than
- * {@link isStandalonePromiseActive}.
+ * (#2895/#2980) Gate for the **native `.then` / `.catch` chaining** lowering
+ * (`emitStandalonePromiseThen`) — flipped WITH {@link isStandalonePromiseActive}
+ * (the AG0-safe coupling; #2980 rule 2: one gate, one flip, one measure).
  *
- * That lowering has a stack-imbalance at corpus scale under `--target
- * standalone` in async-method-in-class contexts
- * (`Promise.all(...).then(arrow).then($DONE, $DONE)` → "not enough arguments on
- * the stack for call"; a −601 standalone regression caught only in the
- * `merge_group`). It is superseded by the PATH B async result/drive rewrite
- * (#2895), so rather than deepen it now we scope it back to **WASI only** (where
- * it was validated) and let `--target standalone` fall through to the host-import
- * `.then` path — exactly the pre-AG0 standalone behaviour (fails to instantiate
- * cleanly, no invalid-Wasm), so no regression. The broad
- * {@link isStandalonePromiseActive} still keeps the host-free
- * `Promise.resolve`/`reject` construction + `await`-unwrap wins for standalone.
- * PATH B re-enables native chaining for standalone by widening this predicate.
+ * Widen safety, measured: the historical −601 stack-imbalance hazard of this
+ * lowering on `--target standalone` is retired by #3035's runtime `ref.test`
+ * receiver bridge (non-native receivers keep the exact host `.then` path) —
+ * the promise-then-all bucket measured **+12** under the widen (07-10
+ * confirmation A/B), with zero invalid-Wasm anywhere in the 322-file sample.
+ *
+ * Async-generator modules take {@link widenAsyncGenFallback} to the HOST lane
+ * entirely — including the former #2865 receiver-directed arm
+ * (`getDrainFuncIdxForWasiStart(ctx) !== null`), which this widened predicate
+ * subsumes for every other standalone module (the widen is a superset of
+ * "driven machinery registered"). That exact semantics — bridge off for
+ * async-gen modules, on for everything else — is what the rule-1 measure
+ * validated (async-generator bucket net 0, zero regressions).
  */
 export function isStandaloneThenChainNativeActive(ctx: CodegenContext): boolean {
-  if (ASYNC_CARRIER_WIDEN_MEASURE) return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
-  if (ctx.wasi === true) return true;
-  // (#2865) `--target standalone` with the async-GENERATOR drive active: the
-  // driven producers mint native `$Promise`s (`__async_gen_next_*` results, the
-  // consumer's result promise), which the host `.then` path cannot chain (an
-  // opaque struct to the host). Once THIS module has registered the native
-  // scheduler (only driven machinery does), `.then`/`.catch` compile the #3035
-  // runtime `ref.test` receiver bridge: a native `$Promise` receiver chains
-  // natively, anything else keeps the exact host path. Modules with no driven
-  // machinery are byte-identical (the predicate stays false — the scheduler is
-  // never registered for them). This is receiver-directed dispatch, NOT the
-  // #2980 carrier widen: `Promise.resolve`/statics/await lowering are untouched
-  // (`isStandalonePromiseActive` remains wasi-only pending the measured flip).
-  return ctx.standalone === true && getDrainFuncIdxForWasiStart(ctx) !== null;
+  return ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx));
 }
 
 /**
