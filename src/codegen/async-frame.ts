@@ -172,13 +172,23 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
  * `Promise_new_pending`/`Promise_settle_*`) instead of the native `$Promise`
  * callback list. One lowering engine, two settle primitives.
  *
- * **Deliberately disjoint from {@link asyncFnNeedsCps}**: every shape the
- * proven single-tail-await CPS lane accepts today keeps taking that lane
- * (byte-stable), so this predicate claims ONLY shapes that today fall through
- * to the legacy synchronous fakery and produce wrong values under genuine
- * suspension (measured 2026-07-02: multi-await → null, spill-across-await →
- * null, try/finally-across-await → null, rejected 2nd await → uncaught wasm
- * exception). Additive by construction: `false` ⇒ output unchanged.
+ * **(#2967 slice 1 — engine convergence)** This predicate now claims EVERY
+ * linear shape `planLinearAwaits` can drive, including the single-tail-await
+ * population the CPS lane (`asyncFnNeedsCps`) used to own exclusively — the
+ * #1042 `!asyncFnNeedsCps` disjointness exclusion is dropped. Single-await is
+ * the N=1 case of the N-state machine, so one engine drives both. Two
+ * deliberate carve-outs keep their CPS routing (see `decideAsyncActivation`,
+ * which checks host-drive FIRST and falls back to the CPS arm):
+ *   - binding-pattern / rest params (the guard below): the destructuring
+ *     prologue derives locals in the ENTRY fn that the fresh resume
+ *     FunctionContext never sees (same reason `isAsyncGenDriveCandidate`
+ *     rejects them), while the CPS continuation snapshots them by value from
+ *     the outer frame — correct-or-CPS, never correct-or-broken;
+ *   - lifted closures (arrow/fn-expr): re-laned back to CPS in
+ *     `planAsyncClosureActivation` (host-drive closures are the parked #2646
+ *     regression class).
+ * Pre-#2967 host-drive shapes (multi-await, try/finally-across-await) are
+ * unaffected — for them `asyncFnNeedsCps` was already false.
  */
 export function asyncFnNeedsHostDrive(
   ctx: CodegenContext,
@@ -190,8 +200,18 @@ export function asyncFnNeedsHostDrive(
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
-  // The single-tail-await CPS lane owns its shapes — never re-route them.
-  if (asyncFnNeedsCps(fn, plan)) return false;
+  // (#2967) Param-shape carve-out for the CPS-shaped population only: a
+  // binding-pattern / rest param destructures into prologue-derived locals of
+  // the ENTRY fn that the fresh resume FunctionContext never sees (the frame
+  // captures raw wasm params BY NAME — the async-gen gate rejects pattern
+  // params for exactly this). The CPS continuation instead snapshots those
+  // derived locals by value from the outer frame, so it handles them
+  // correctly: leave exactly the shapes CPS accepts on that lane. Non-CPS
+  // shapes with pattern params keep their pre-#2967 host-drive routing
+  // unchanged (their derived-local gap predates this flip; do not demote them
+  // to the legacy sync fakery, which is wrong under genuine suspension).
+  const hasPatternOrRestParam = fn.parameters.some((p) => !ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined);
+  if (hasPatternOrRestParam && asyncFnNeedsCps(fn, plan)) return false;
   const linear = planLinearAwaits(fn, plan);
   if (linear === null) return false;
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
