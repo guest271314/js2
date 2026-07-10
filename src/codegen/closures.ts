@@ -1730,7 +1730,7 @@ function ensureGenEagerFlag(ctx: CodegenContext): number {
  * receiver is call-time state the deferred `__call_fn_0` re-invocation
  * cannot rebind (#3032 W2 spills it).
  */
-function genBodyReferencesThis(node: ts.Node): boolean {
+export function genBodyReferencesThis(node: ts.Node): boolean {
   if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) return true;
   if (
     ts.isFunctionExpression(node) ||
