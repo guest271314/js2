@@ -768,9 +768,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // (#3120) The implicit §27.6.3.8 yield-operand await is classified ONLY on
   // the native-`$Promise` CARRIER lane — the same predicate the admission gate
   // (`isAsyncGenDriveCandidate`) keyed the body's shape check on, so gate and
-  // planner always see the same segment split.
+  // planner always see the same segment split. Type queries go through
+  // `ctx.oracle` (the #1930 boundary), not the raw checker.
   const cfg = info.asyncGen
-    ? planAsyncGenCfg(info.decl, isStandalonePromiseActive(ctx) ? { checker: ctx.checker } : null)
+    ? planAsyncGenCfg(info.decl, isStandalonePromiseActive(ctx) ? { oracle: ctx.oracle } : null)
     : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");

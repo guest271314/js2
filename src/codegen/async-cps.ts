@@ -21,6 +21,7 @@
 // The full lowering (segment emission, capture structs, Promise.then chaining)
 // lands in follow-up PRs. See plan/issues/backlog/1042-async-await-state-machine-lowering.md.
 
+import type { TypeOracle } from "../checker/oracle.js";
 import { isPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { forEachChild, ts } from "../ts-api.js";
@@ -2160,18 +2161,18 @@ interface AsyncGenYield {
 
 /**
  * (#3120) Classification mode for the implicit §27.6.3.8 yield-operand await.
- * Non-null (carrying the checker) ONLY on the native-`$Promise` CARRIER lane
- * (`isStandalonePromiseActive` — wasi today), where the suspend arm can
- * assimilate the awaited operand. `null` on the carrier-off standalone drive
- * lane: there the operand is host-constructed, the suspend arm would
- * mis-handle it, and — decisively — flipping the classification would demote
- * every promise-yield body from the (compiling, driven) await-free lane to
- * the legacy #680 CE, breaking the #2980 fallback's whole-module
- * host-consistency. So carrier-off keeps the pre-#3120 plain classification
- * byte-identically; the VALUE gap on that lane is the #2980 carrier widen's
- * to close, not a reason to stop compiling.
+ * Non-null (carrying the type oracle — the #1930 type-query boundary) ONLY on
+ * the native-`$Promise` CARRIER lane (`isStandalonePromiseActive` — wasi
+ * today), where the suspend arm can assimilate the awaited operand. `null` on
+ * the carrier-off standalone drive lane: there the operand is
+ * host-constructed, the suspend arm would mis-handle it, and — decisively —
+ * flipping the classification would demote every promise-yield body from the
+ * (compiling, driven) await-free lane to the legacy #680 CE, breaking the
+ * #2980 fallback's whole-module host-consistency. So carrier-off keeps the
+ * pre-#3120 plain classification byte-identically; the VALUE gap on that
+ * lane is the #2980 carrier widen's to close, not a reason to stop compiling.
  */
-type ImplicitYieldAwaitMode = { readonly checker: ts.TypeChecker } | null;
+type ImplicitYieldAwaitMode = { readonly oracle: TypeOracle } | null;
 
 /**
  * (#3120) Is the yield OPERAND statically Promise-typed? §27.6.3.8
@@ -2188,10 +2189,10 @@ type ImplicitYieldAwaitMode = { readonly checker: ts.TypeChecker } | null;
  * follow-up (it needs a runtime thenable probe in the settle arm, not a
  * static classification).
  */
-function yieldOperandIsPromiseTyped(checker: ts.TypeChecker, operand: ts.Expression): boolean {
-  const type = checker.getTypeAtLocation(operand);
-  if (isPromiseType(type)) return true;
-  return type.isUnion() && type.types.some(isPromiseType);
+function yieldOperandIsPromiseTyped(oracle: TypeOracle, operand: ts.Expression): boolean {
+  if (oracle.builtinReceiverOf(operand) === "Promise") return true;
+  const parts = oracle.unionPartsOf(operand);
+  return parts !== undefined && parts.some((p) => p.kind === "builtin" && p.name === "Promise");
 }
 
 /** The bounded async-gen body shape: ordered yield segments (each carrying its
@@ -2246,7 +2247,7 @@ function analyzeAsyncGen(
         if (containsAwaitOrYield(operand)) return null; // nested await/yield — follow-up
         // (#3120) On the carrier lane, a Promise-typed plain operand carries
         // the implicit AsyncGeneratorYield await — route it awaited.
-        if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.checker, operand)) {
+        if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, operand)) {
           segments.push({ leads, awaited: operand, plain: null });
         } else {
           segments.push({ leads, awaited: null, plain: operand });
