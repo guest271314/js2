@@ -3854,6 +3854,61 @@ function tryEmitAsyncGenNextDispatch(
   return { kind: "externref" };
 }
 
+/**
+ * (#2903) Host-import names that PRODUCE promises the standalone module did
+ * not mint natively. Checked (alongside the pre-body syntactic scan flag
+ * `ctx.moduleHasHostPromiseSource`) before replacing the `.then`/`.catch`
+ * bridge's host fallback arm with a native TypeError: if any of these is
+ * registered, a runtime receiver can genuinely be a HOST promise and the host
+ * arm must stay (exactly the pre-#2903 lowering — the module was irreducibly
+ * host-import-leaky anyway, so keeping the arm sacrifices zero host-free
+ * passes). All the *statically-detectable* producers register UPFRONT in the
+ * `collectPromiseImports` finalize (declarations.ts) — before any function
+ * body compiles — so this check is compile-order-safe for them; the
+ * lazily-registered producers (dynamic `import()`, `.finally(…)`) are covered
+ * by the pre-body syntactic scan instead.
+ *
+ * Deliberately NOT listed (upfront-registered even when the lowering is
+ * native, so funcMap presence is a false-positive that would forfeit the
+ * de-leak): `Promise_resolve`/`Promise_reject` (unconditionally native under
+ * `isStandalonePromiseActive`, expressions.ts) and `Promise_new` (native for
+ * inline executors via `emitStandalonePromiseFromExecutor`; the genuine host
+ * fallthrough in new-super.ts sets `ctx.moduleHasHostPromiseSource` at
+ * emission instead).
+ */
+const HOST_PROMISE_PRODUCER_IMPORTS = [
+  "Promise_all",
+  "Promise_race",
+  "Promise_allSettled",
+  "Promise_any",
+  "Promise_finally",
+  "__dynamic_import",
+  "__array_from_async",
+] as const;
+
+/**
+ * (#2903) True when the `.then`/`.catch` receiver bridge's miss arm can be
+ * NATIVE (a catchable TypeError) instead of the host `Promise_then*` fallback.
+ * Standalone-only (wasi keeps its `nullMiss` contract; gc/host never emits the
+ * bridge). Requires that the module provably cannot mint a host promise: no
+ * syntactic producer (pre-body scan, `moduleHasHostPromiseSource`) and no
+ * producer host import registered. Under that proof every runtime receiver
+ * that fails the `ref.test $Promise` is a non-promise (§27.2.5.4 step 2 —
+ * TypeError), and dropping the host arm removes the
+ * `Promise_then*`/`__make_callback` imports that kept ~626 otherwise-passing
+ * standalone modules host-import-leaky (measured 2026-07-10, see
+ * plan/issues/2903: 662 then-chain-only leaky passes, 626 with the host arm
+ * never CALLED at runtime).
+ */
+function standaloneThenMissArmCanBeNative(ctx: CodegenContext): boolean {
+  if (ctx.standalone !== true || ctx.wasi === true) return false;
+  if (ctx.moduleHasHostPromiseSource === true) return false;
+  for (const name of HOST_PROMISE_PRODUCER_IMPORTS) {
+    if (ctx.funcMap.has(name)) return false;
+  }
+  return true;
+}
+
 function emitStandaloneThenWithNativeFallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3904,7 +3959,20 @@ function emitStandaloneThenWithNativeFallback(
       fctx.savedBodies.push(outerBody);
       fctx.body = hostArm;
       try {
-        emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+        if (standaloneThenMissArmCanBeNative(ctx)) {
+          // (#2903) The module provably cannot mint a HOST promise (no
+          // syntactic producer, no producer import), so a receiver failing
+          // the `ref.test $Promise` is a non-promise: throw the §27.2.5.4
+          // step-2 TypeError NATIVELY instead of baking the dead host
+          // `Promise_then*` arm. This is what makes the whole module
+          // host-free — the host arm's `ensureLateImport` was the sole
+          // source of the `Promise_then*`/`__make_callback` leak in ~626
+          // otherwise-passing standalone modules. `throw` is terminal
+          // (stack-polymorphic), so the externref-typed arm validates.
+          emitThrowTypeError(ctx, fctx, `Promise.prototype.${method} called on a non-Promise receiver`);
+        } else {
+          emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+        }
       } finally {
         fctx.savedBodies.pop();
         fctx.body = outerBody;
