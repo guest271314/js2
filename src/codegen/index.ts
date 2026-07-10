@@ -380,13 +380,12 @@ function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.Sou
   let found = false;
   function walk(node: ts.Node): void {
     if (found) return;
-    if (ts.isNewExpression(node) && node.arguments && node.arguments.length >= 1) {
+    if (ts.isNewExpression(node)) {
       let callee: ts.Expression = node.expression;
       while (ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee) || ts.isNonNullExpression(callee)) {
         callee = callee.expression;
       }
-      const arg0 = node.arguments[0]!;
-      if (ts.isIdentifier(callee) && !ts.isNumericLiteral(arg0)) {
+      if (ts.isIdentifier(callee)) {
         // Static TA name (`new Uint8Array(buf)`) is handled by the static view
         // ctor path, never the dynamic one — skip it.
         if (!TA_NAMES.has(callee.text)) {
@@ -396,17 +395,43 @@ function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.Sou
           const decl = sym?.valueDeclaration;
           const isUserClass = decl !== undefined && ts.isClassDeclaration(decl);
           if (!isUserClass) {
-            // Buffer-typed first arg gates the dynamic TA construct (matches the
-            // runtime gate) — excludes `new fn(x)` on unrelated identifiers.
-            let arg0Sym: string | undefined;
-            try {
-              arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
-            } catch {
-              arg0Sym = undefined;
+            const arg0 = node.arguments && node.arguments.length >= 1 ? node.arguments[0]! : undefined;
+            // Buffer-typed first arg gates the dynamic TA construct (the #3054 D
+            // buffer form) — excludes `new fn(x)` on unrelated identifiers.
+            if (arg0 !== undefined && !ts.isNumericLiteral(arg0)) {
+              let arg0Sym: string | undefined;
+              try {
+                arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
+              } catch {
+                arg0Sym = undefined;
+              }
+              if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+                found = true;
+                return;
+              }
             }
-            if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
-              found = true;
-              return;
+            // (#2872) General dynamic-ctor forms — `new TA(3)`, `new TA([…])`,
+            // `new TA(otherTA)`, `new TA()` on a GENUINELY-dynamic callee (an
+            // `any`/`unknown`-typed param / variable / binding element declared
+            // in real source — the `testWithTypedArrayConstructors(TA => …)`
+            // harness shape). Mirrors `resolvesToDynamicAnyCtorValue`
+            // (new-super.ts): declaration-file symbols (ambient globals) and
+            // typed function/class bindings never set the flag, so ordinary
+            // `new F(...)` function-ctor modules stay byte-identical.
+            if (
+              decl !== undefined &&
+              !decl.getSourceFile().isDeclarationFile &&
+              (ts.isParameter(decl) || ts.isVariableDeclaration(decl) || ts.isBindingElement(decl))
+            ) {
+              try {
+                const calleeType = checker.getTypeAtLocation(callee);
+                if ((calleeType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+                  found = true;
+                  return;
+                }
+              } catch {
+                /* type resolution failure — leave the flag unset */
+              }
             }
           }
         }

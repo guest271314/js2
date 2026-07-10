@@ -261,6 +261,7 @@ import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
+  ensureTaDynFillHelper,
   getOrRegisterDvWindowType,
   isDataViewAccessor,
 } from "../dataview-native.js";
@@ -12810,6 +12811,60 @@ function compileCallExpression(
             reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
           }
           flushLateImportShifts(ctx, fctx);
+          // (#2872) `.fill` on a receiver that is a `$__ta_dyn_view` at RUNTIME
+          // (a dynamically-constructed TA — `new TA([…]).fill(8, 1)` in the
+          // testWithTypedArrayConstructors harness) must byte-encode into the
+          // view's shared buffer and return `this`; the dispatcher's open-object
+          // arm silently returned undefined and mutated nothing. Emit a
+          // runtime-gated two-arm: `ref.test $__ta_dyn_view` → the native
+          // `__ta_dyn_fill` helper, else → the ordinary dispatcher (closed
+          // structs / vec arms / open objects keep their EXACT behavior). The
+          // helper mints defined functions only (no imports — post-flush safe).
+          const taFillIdx =
+            methodName === "fill" && ctx.moduleUsesDynTaView && arity <= 3 ? ensureTaDynFillHelper(ctx) : undefined;
+          if (taFillIdx !== undefined && ctx.taDynViewTypeIdx >= 0) {
+            const dynIdx = ctx.taDynViewTypeIdx;
+            const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+            if (recvT && recvT.kind !== "externref") {
+              coerceType(ctx, fctx, recvT, { kind: "externref" });
+            } else if (recvT === null) {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            const recvLocal = allocLocal(fctx, `__tafill_recv_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: recvLocal });
+            const argLocals: number[] = [];
+            for (const arg of dispatchArgs) {
+              const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+              if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+              else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+              const aLocal = allocLocal(fctx, `__tafill_arg_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: aLocal });
+              argLocals.push(aLocal);
+            }
+            const thenArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+            for (let a = 0; a < 3; a++) {
+              thenArm.push(
+                a < argLocals.length
+                  ? ({ op: "local.get", index: argLocals[a]! } as Instr)
+                  : ({ op: "ref.null.extern" } as Instr),
+              );
+            }
+            thenArm.push({ op: "i32.const", value: arity } as Instr);
+            thenArm.push({ op: "call", funcIdx: taFillIdx } as Instr);
+            const elseArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+            for (const aLocal of argLocals) elseArm.push({ op: "local.get", index: aLocal } as Instr);
+            elseArm.push({ op: "call", funcIdx: dispatchIdx } as Instr);
+            fctx.body.push({ op: "local.get", index: recvLocal });
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: thenArm,
+              else: elseArm,
+            } as Instr);
+            return { kind: "externref" };
+          }
           // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
           if (recvType && recvType.kind !== "externref") {

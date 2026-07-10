@@ -1083,6 +1083,19 @@ export function tryExternClassMethodOnAny(
   // handled by the native array-method path before the `any` fallback.)
   if (methodName === "forEach" || methodName === "some") return null;
 
+  // (#2872) `fill` is a core Array.prototype / %TypedArray%.prototype method,
+  // but `CanvasRenderingContext2D` (and Path2D-adjacent DOM classes) also
+  // declare a `fill`. First-match iteration bound an `any`-typed receiver's
+  // `ta.fill(v)` to `CanvasRenderingContext2D_fill` — a host import the
+  // standalone runtime cannot satisfy (the dominant leak of the
+  // built-ins/TypedArray/prototype/fill standalone cluster; the receiver there
+  // is a dynamically-constructed TA view). On an `any` receiver `fill` is
+  // overwhelmingly an Array/TypedArray operation; refuse extern-class dispatch
+  // and let the generic dynamic dispatch (which now carries the native
+  // `$__ta_dyn_view` fill arm) resolve by runtime shape. Mirrors the `.slice` /
+  // `.replace` / `.forEach`/`.some` ambiguity refusals above.
+  if (methodName === "fill") return null;
+
   // (#3033) If the program's OWN code defines a function-valued member of this
   // name (prototype-method assignment, function-valued property, object-literal
   // method, class method), the receiver is far more plausibly a user object

@@ -1,18 +1,31 @@
 ---
 id: 2872
 title: "Standalone: TypedArray.prototype.* cluster (294 host-pass/standalone-fail, de-masked from #2862)"
-status: blocked
+status: ready
 created: 2026-06-30
+updated: 2026-07-11
 priority: high
 task_type: bug
 area: codegen
 goal: standalone
 sprint: current
 horizon: l
-related: [2860, 2870, 2862, 2651, 2885, 2876, 2893]
+related: [2860, 2870, 2862, 2651, 2885, 2876, 2893, 3054, 3057, 3058]
 umbrella: 2860
-blocked_on: 2893
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/array-methods.ts
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/expressions/calls-closures.ts
 ---
+
+> **UNBLOCKED 2026-07-11 (fable-harvest3):** the #2893 brand dependency landed
+> on main 2026-07-01 (PR #2395 merged — the "CONFIRMED BLOCKED" note below is
+> stale). Slice 1 (general dynamic construction + dyn-view `.fill`) is
+> implemented — see `## Progress (2026-07-11)` at the bottom; the issue stays
+> open for the follow-on slices listed there.
 
 ## Measure-first verdict (2026-07-01, sdev-tail) — CONFIRMED BLOCKED, brand not on main
 
@@ -96,3 +109,76 @@ group by the exact assertion that throws.
 
 (Large — split into sub-tasks per failing member family if the root causes
 diverge.)
+
+## Progress (2026-07-11, fable-harvest3) — Slice 1: dynamic construction + `.fill`
+
+**Root cause pinned (verify-first, current main):** the cluster is NOT
+primarily a method-body gap — it's a **construction** gap. Every harness test
+runs `testWithTypedArrayConstructors(function (TA) { new TA(…) … })` with an
+`any`-typed ctor param, and standalone dynamic `new TA(…)` supported ONLY the
+`(buffer[,off[,len]])` form (#3054 D, gated on a statically buffer-typed first
+arg). The dominant forms — `new TA(n)`, `new TA([…])`, `new TA(arrayLike)`,
+`new TA(otherTA)`, `new TA()` — all compiled to `ref.null.extern`, so every
+downstream read returned 0/undefined and assert #1 failed. Traced via WAT dump:
+the callback body literally began `ref.null extern; local.tee $a`.
+
+**Landed in this slice (PR #2881, branch `issue-2872-standalone-typedarray-proto`;
+the issue intentionally does NOT carry `pr:` frontmatter — it stays open as the
+cluster tracker, this PR is slice 1):**
+
+1. `emitTaDynCtorConstructFromLocals` (dataview-native.ts) — runtime
+   `ref.test $__ta_ctor`-gated construct from pre-evaluated externref arg
+   locals, arg-shape dispatch: byte-vec buffer (incl. resizable subtype) /
+   `$__ta_dyn_view` copy / registered plain-vec copy (f64·i32·externref) /
+   array-like `$Object` (`__extern_length` + `__extern_get_idx` walk) /
+   ToIndex count form (fresh zeroed buffer, RangeError on negative). Wired as
+   (a) the dynamic-new no-match base inside `emitDynamicNewFallback`
+   (class-bearing modules) and (b) the class-free direct path — both
+   noJsHost-only; a non-TA runtime callee still yields null-extern
+   (byte-identical to before, user classes never hijacked).
+2. `__ta_dyn_fill` native helper (§23.2.3.8) + a runtime two-arm at the
+   any-receiver dispatcher call site in calls.ts — value ToNumber'd on the
+   RUNTIME kind (Uint8Clamped clamp included), relative start/end clamped,
+   returns `this`.
+3. `.fill` added to the extern-class ambiguity refusals (calls-closures.ts) —
+   first-match binding hijacked any-receiver `.fill` to
+   `CanvasRenderingContext2D_fill` (the leak this issue's 2026-07-01 probe
+   measured).
+4. `moduleUsesDynTaView` pre-scan generalized to the count/array/zero-arg
+   shapes (any/unknown-typed callee only; still standalone/wasi-lane only —
+   host lane byte-identical). This also lights up the existing #3057 element
+   codec + #3058 read-method two-arms for these modules — a large share of the
+   measured yield came from that.
+5. 0-arg `indexOf`/`lastIndexOf`/`includes` skip the #3058 two-arm (the static
+   impls hard-error "requires 1 argument" → CE).
+
+**Measured (local full-dir scans, `runTest262File(..., "standalone")`, vs same
+scan on main @ ec5958aff018a):**
+
+| tree | main | branch | flips |
+| ---- | ---- | ------ | ----- |
+| built-ins/TypedArray/prototype (1,396) | 139 pass / 9 CE | 195 pass / 9 CE | **+60 / −4** |
+| built-ins/TypedArrayConstructors (736) | 125 pass / 65 CE | 130 pass / 65 CE | **+13 / −8** |
+
+Net **+65 honest pass**. The 12 pass→fail flips are de-masked VACUOUS passes
+(both sides of `assert.sameValue` were null before construction worked —
+`copyWithin/return-this.js`, `internals/DefineOwnProperty/*` etc.), not
+behavior regressions.
+
+**Follow-on slices (why the remaining ~1,000 fails stay):**
+
+- **`Function.prototype.bind` on closures is broken standalone** — returns a
+  non-callable. The MODERN harness (`testWithAllTypedArrayConstructors`) binds
+  every arg factory (`argFactory.bind(undefined, constructor)`), so every
+  `makeCtorArg`-style test fails at the harness level regardless of TA
+  support. Biggest single blocker; deserves its own issue+fix (filed as a
+  follow-up — see PR notes).
+- Per-method dyn-view arms: `copyWithin`/`reverse`/`sort`/`set`/`subarray`/
+  `join`… (the `__ta_dyn_fill` helper + dispatcher two-arm is the template).
+- `.buffer` accessor identity on `$__ta_dyn_view` (needed by `makeArrayBuffer`).
+- Iterable ctor arg (`new TA(iterable)`) — needs Symbol.iterator dispatch.
+- Strict-eq identity for dyn views: `dv === dv` is FALSE (the $AnyValue tag-5
+  arm answers 0 for non-strings; the general identity arm is deliberately
+  deferred to #2580 M2 — see the −162 dstr note in any-helpers.ts). Tests pass
+  today via the harness `isSameValue` NaN-fallback; a narrow
+  `$__ta_dyn_view`-only `ref.eq` arm is a candidate follow-up.
