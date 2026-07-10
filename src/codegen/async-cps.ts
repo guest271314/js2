@@ -2145,11 +2145,39 @@ function asyncGenBodyHasPatternLocals(fn: ts.FunctionLikeDeclaration): boolean {
 }
 
 /** One bounded async-gen yield statement: `yield await <awaited>` OR `yield <plain>`
- *  OR `yield;` (both null), plus the suspend-free LEAD statements preceding it. */
+ *  OR `yield;` (both null), plus the suspend-free LEAD statements preceding it.
+ *  (#3120) A plain `yield E` whose operand is STATICALLY Promise-typed is
+ *  classified `awaited: E` — §27.6.3.8 AsyncGeneratorYield performs
+ *  `Await(value)` on the operand before suspending, so a promise operand must
+ *  ride the suspend lane (settling the raw operand would deliver the promise
+ *  OBJECT, f64-coerced → NaN, and FULFIL where a rejecting operand must
+ *  reject). */
 interface AsyncGenYield {
   readonly leads: ts.Statement[];
   readonly awaited: ts.Expression | null;
   readonly plain: ts.Expression | null;
+}
+
+/**
+ * (#3120) Is the yield OPERAND statically Promise-typed? §27.6.3.8
+ * AsyncGeneratorYield awaits its operand implicitly, so a promise-typed plain
+ * `yield E` must route through the SAME suspend+settleYield(fromSent) lane as
+ * `yield await E`. Only the statically-known promise shape flips: a union
+ * with a Promise constituent awaits too (`Await` passes non-thenables through
+ * unchanged, so awaiting the union is always safe), while non-promise
+ * operands — and `any`-typed ones — stay on the plain fast path. Keeping
+ * `any` plain is deliberate: flipping it would demote every await-free
+ * `any`-yield body from the standalone carrier-off drive
+ * ({@link isAwaitFreeAsyncGenBody}, #2865) to the legacy path — a
+ * standalone-floor regression risk — for operands the direct-drive proof
+ * shows delivering correctly today. A runtime thenable hiding behind `any`
+ * is a follow-up (it needs a runtime thenable probe in the settle arm, not a
+ * static classification).
+ */
+function yieldOperandIsPromiseTyped(checker: ts.TypeChecker, operand: ts.Expression): boolean {
+  const type = checker.getTypeAtLocation(operand);
+  if (isPromiseType(type)) return true;
+  return type.isUnion() && type.types.some(isPromiseType);
 }
 
 /** The bounded async-gen body shape: ordered yield segments (each carrying its
@@ -2171,8 +2199,13 @@ interface AsyncGenShape {
  *  locals (spilled into the frame — see `computeAsyncGenSpills`). Still
  *  rejected (correct-or-legacy): `yield*`, yields nested inside expressions or
  *  control flow, `return` statements (need a settleReturn terminator),
- *  destructuring locals, and nested await/yield inside operands. */
-function analyzeAsyncGen(fn: ts.FunctionLikeDeclaration): AsyncGenShape | null {
+ *  destructuring locals, and nested await/yield inside operands.
+ *
+ *  (#3120) Classification needs the `checker`: a plain `yield E` with a
+ *  statically Promise-typed operand is an AWAITED segment (implicit
+ *  §27.6.3.8 `Await(operand)`), so all three consumers — the two gates and
+ *  {@link planAsyncGenCfg} — must see the SAME segment split. */
+function analyzeAsyncGen(checker: ts.TypeChecker, fn: ts.FunctionLikeDeclaration): AsyncGenShape | null {
   const body = fn.body;
   if (body === undefined || !ts.isBlock(body)) return null;
   if (asyncGenBodyHasPatternLocals(fn)) return null;
@@ -2191,7 +2224,13 @@ function analyzeAsyncGen(fn: ts.FunctionLikeDeclaration): AsyncGenShape | null {
         segments.push({ leads, awaited: operand.expression, plain: null });
       } else {
         if (containsAwaitOrYield(operand)) return null; // nested await/yield — follow-up
-        segments.push({ leads, awaited: null, plain: operand });
+        // (#3120) A Promise-typed plain operand carries the implicit
+        // AsyncGeneratorYield await — route it through the awaited lane.
+        if (yieldOperandIsPromiseTyped(checker, operand)) {
+          segments.push({ leads, awaited: operand, plain: null });
+        } else {
+          segments.push({ leads, awaited: null, plain: operand });
+        }
       }
       leads = [];
       continue;
@@ -2206,22 +2245,24 @@ function analyzeAsyncGen(fn: ts.FunctionLikeDeclaration): AsyncGenShape | null {
 }
 
 /** True when `fn` is a bounded 3d-i async-generator body drivable host-free. */
-export function isBoundedAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
-  return analyzeAsyncGen(fn) !== null;
+export function isBoundedAsyncGenBody(checker: ts.TypeChecker, fn: ts.FunctionLikeDeclaration): boolean {
+  return analyzeAsyncGen(checker, fn) !== null;
 }
 
 /**
  * (#2865) True when `fn` is a bounded async-generator body that is ALSO
- * await-free (`yield <plain>` / `yield;` only — no `yield await P`). This is
- * the shape drivable under `--target standalone` while the native-`$Promise`
- * CARRIER gate is still wasi-only (#2980): with the carrier off, an awaited
- * operand does not lower to a native `$Promise`, so a `yield await P` would
- * deliver the un-awaited promise OBJECT (wrong value). An await-free body is
- * carrier-independent — every promise the machine touches is minted by its own
+ * await-free (`yield <plain>` / `yield;` only — no `yield await P` and, per
+ * #3120, no Promise-typed plain `yield P` either, since that carries the
+ * implicit §27.6.3.8 await). This is the shape drivable under
+ * `--target standalone` while the native-`$Promise` CARRIER gate is still
+ * wasi-only (#2980): with the carrier off, an awaited operand does not lower
+ * to a native `$Promise`, so an awaited segment would deliver the un-awaited
+ * promise OBJECT (wrong value). An await-free body is carrier-independent —
+ * every promise the machine touches is minted by its own
  * `__async_gen_next_<name>` driver.
  */
-export function isAwaitFreeAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
-  const shape = analyzeAsyncGen(fn);
+export function isAwaitFreeAsyncGenBody(checker: ts.TypeChecker, fn: ts.FunctionLikeDeclaration): boolean {
+  const shape = analyzeAsyncGen(checker, fn);
   if (shape === null) return false;
   return shape.segments.every((y) => y.awaited === null);
 }
@@ -2257,9 +2298,11 @@ export function asyncGenOwnLocalDecls(fn: ts.FunctionLikeDeclaration): Map<strin
 }
 
 /**
- * Build the CFG for a bounded async-generator body. Dense ids in push order; a
- * `yield await P` contributes TWO states (await-suspend + yield-from-sent), a
- * plain `yield E` ONE, and a trailing `settleDone`:
+ * Build the CFG for a bounded async-generator body. Dense ids in push order; an
+ * AWAITED segment (`yield await P`, or — #3120 — a Promise-typed plain
+ * `yield P`, which carries the implicit §27.6.3.8 await) contributes TWO
+ * states (await-suspend + yield-from-sent), a non-promise plain `yield E`
+ * ONE, and a trailing `settleDone`:
  *
  *   yield await P:  Sk  [leads] suspend(P, resume→Sk+1)         (the await)
  *                   Sk+1 (resumeFrom binding:null) settleYield(fromSent, →Sk+2)
@@ -2276,8 +2319,8 @@ export function asyncGenOwnLocalDecls(fn: ts.FunctionLikeDeclaration): Map<strin
  * `next()` promise). Every other state is entered by a `next()` kick with
  * MODE_NEXT, so needs no prelude. Returns `null` for a non-bounded body.
  */
-export function planAsyncGenCfg(fn: ts.FunctionLikeDeclaration): AsyncCfgPlan | null {
-  const shape = analyzeAsyncGen(fn);
+export function planAsyncGenCfg(checker: ts.TypeChecker, fn: ts.FunctionLikeDeclaration): AsyncCfgPlan | null {
+  const shape = analyzeAsyncGen(checker, fn);
   if (shape === null) return null;
   const asLead = (stmts: readonly ts.Statement[]): AsyncCfgStmt[] => stmts.map((stmt) => ({ stmt, handler: 0 }));
   const states: AsyncCfgState[] = [];
