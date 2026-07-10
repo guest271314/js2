@@ -1358,6 +1358,12 @@ process.on("message", async (msg) => {
     // anything else → an honest runtime fail (never malformed-wasm
     // compile_error). Standalone/wasi modules don't export `__module_init`
     // (they keep `_start`), so this is a no-op for them.
+    // oracle-version-exempt: this arm re-hosts the EXISTING instantiate-throw
+    // classification (runtime-negative → pass, else fail+isException) at the
+    // explicit __module_init call site under deferTopLevelInit (#3123); the
+    // scoring RULE is byte-identical to the pre-defer catch below, so no
+    // existing row is re-scored by policy — row flips come only from the
+    // compiler changes, which the ordinary baseline diff scores normally.
     const moduleInit = instance.exports.__module_init;
     if (typeof moduleInit === "function") {
       try {
