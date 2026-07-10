@@ -1,9 +1,10 @@
 ---
 id: 2938
 title: "Standalone: native SYNC-generator resume substrate — widen native generator lowering to eliminate __create_generator / __gen_* host imports"
-status: blocked
-assignee: ttraenkler/sr-funcidx
+status: done
+assignee: ttraenkler/fable-2938
 created: 2026-07-01
+completed: 2026-07-10
 priority: high
 feasibility: hard
 task_type: feature
@@ -20,6 +21,45 @@ umbrella: 2860
 > in the merge race, so this pre-emptively re-id'd to #2938 to avoid a
 > merge_group dup-id-gate failure + auto-park churn). The funcIdx-shift
 > prerequisite is #2936 (PR #2444, merged).
+
+## ✅ RESOLUTION (2026-07-10, fable-2938) — substrate landed; `.done` boolean-brand residual fixed
+
+All the substrate pieces are on main: **PR #2445** (the no-yield relax, merged
+2026-07-04), **PR #2488** (#2979 `.value` UNDEF_F64 carrier), **PR #2458**
+(#2941 class-static funcIdx side-channel). This final PR fixes the last known
+follow-up gap from the Suspended Work note — **`.done` boxed as
+`$BoxedNumber(1)` instead of `$BoxedBoolean(true)`** (the #2785
+i32-brand-erasure class). Two erasure sites, both fixed:
+
+1. **`generators-native.ts tryCompileNativeGeneratorResultProperty`** — the
+   typed and open `.done` read arms returned an unbranded `{kind:"i32"}` (the
+   WIP commit `e69e2f6158` on this branch, completed here). Flips the
+   checker-typed IteratorResult path — measured A/B: the statement-form test262
+   repros `language/statements/generators/{no-yield,return}.js` flip
+   fail→pass with this alone.
+2. **`property-access.ts` Phase-3 consumer-side narrowing (#1269, ~L6465)** —
+   the dynamic any-receiver read (`const d: any = g.next().done`) narrowed the
+   multi-struct dispatch result to a FRESH `{kind:"i32"}` and returned another
+   fresh `{kind:"i32"}`, erasing the brand the candidates' struct field defs
+   carry (ensureNativeGeneratorResultType brands `done` per #3050). The value
+   then re-boxed via `__box_number` → number-vs-boolean typeof partition → ref
+   identity → `d === true` false. Fix: when EVERY candidate field is
+   boolean-branded i32, narrow to `{kind:"i32", boolean:true}` and return
+   `resultWasm` itself. Flips the any-local / any-param harness shapes
+   (WAT-traced; probe matrix 5/5, was 1/5).
+
+**Measured (local, standalone runner path):** pure-main = 4/4 repro FAIL;
+with this PR = `statements/generators/{no-yield,return}.js` PASS;
+`module-code/parse-err-hoist-lex-gen.js` (old parked blocker) PASS. Regression
+suite `tests/issue-2938.test.ts` (8 cases: any-local/any-param `=== true`,
+`!== 1`, `typeof`, with-yield false→true flip, typed direct + statement-form).
+
+**Residual (out of scope, pre-existing on main):**
+`language/expressions/generators/{no-yield,return}.js` fail on
+`assert.sameValue(result.value, undefined)` — the fn-EXPRESSION generator form
+is not a native candidate (leaks `__create_generator`), so the #2979 carrier
+fix doesn't reach its `.value`. Fails identically on pure main (no regression);
+needs the expression-form native lowering (a #2860 follow-up slice).
 
 ## ⚠️ RELAX ATTEMPTED — BLOCKED (2026-07-02, branch issue-2933-noyield-relax, stacked on #2936)
 

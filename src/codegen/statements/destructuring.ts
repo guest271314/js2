@@ -19,6 +19,9 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { resolveBindingElementType } from "../../checker/type-mapper.js";
+// (#3100 S4) The string-rest lowering builds the rest `string[]` natively from
+// the #1470 per-code-point char vec instead of the host `__extern_slice`.
+import { ensureStrToCharVecHelper } from "../native-strings.js";
 import {
   type BindingKind,
   buildDestructureNullThrow,
@@ -40,7 +43,7 @@ import {
   valTypesMatch,
 } from "../shared.js";
 import { collectInstrs } from "./shared.js";
-import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
+import { emitLocalTdzInit } from "./tdz.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "../expressions/proto-override.js";
 import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import { emitDrainCustomIterableToVec, isCustomIterable } from "../custom-iterable.js";
@@ -1291,29 +1294,91 @@ function compileStringDestructuring(
     const element = pattern.elements[i]!;
     if (ts.isOmittedExpression(element)) continue;
 
-    // Rest element: const [a, ...rest] = "hello" — convert to externref and use __extern_slice
+    // Rest element: const [a, ...rest] = "hello". (#3100 S4) Build the rest
+    // NATIVELY as a `string[]` nstrVec: `__str_to_char_vec` (#1470, per code
+    // point §22.1.5.1) then `array.copy` the tail from index `i`. The previous
+    // lowering converted the native-string STRUCT to externref and called the
+    // host `__extern_slice` — which (a) leaked an `env::` import standalone
+    // (zero-import instantiation failure) and (b) was broken in BOTH modes for
+    // the pre-declared `string[]` rest local: the host slice can't slice an
+    // opaque WasmGC struct, and the externref result can never satisfy the
+    // typed local's `ref.cast $nstrVec` (illegal cast). The native tail-copy is
+    // the same pattern as the vec rest in loops.ts (#2602).
     if (ts.isBindingElement(element) && element.dotDotDotToken) {
       if (ts.isIdentifier(element.name)) {
         const restName = element.name.text;
+        const { funcIdx: toCharVecIdx, vecTypeIdx: nstrVecTypeIdx } = ensureStrToCharVecHelper(ctx);
+        const nstrArrTypeIdx = getArrTypeIdxFromVec(ctx, nstrVecTypeIdx);
         let restIdx = fctx.localMap.get(restName);
         if (restIdx === undefined) {
-          restIdx = allocLocal(fctx, restName, { kind: "externref" });
+          restIdx = allocLocal(fctx, restName, { kind: "ref_null", typeIdx: nstrVecTypeIdx });
         }
-        // Use __extern_slice(str_as_externref, i)
-        let sliceIdx = ctx.funcMap.get("__extern_slice");
-        if (sliceIdx === undefined) {
-          const importsBefore = ctx.numImportFuncs;
-          const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-          addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-          shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-          sliceIdx = ctx.funcMap.get("__extern_slice");
-        }
-        if (sliceIdx !== undefined) {
-          // Convert string to externref
+        if (nstrArrTypeIdx >= 0) {
+          const cvLocal = allocLocal(fctx, `__sdstr_cv_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: nstrVecTypeIdx,
+          });
+          const restLenLocal = allocLocal(fctx, `__sdstr_rlen_${fctx.locals.length}`, { kind: "i32" });
+          const srcOffLocal = allocLocal(fctx, `__sdstr_off_${fctx.locals.length}`, { kind: "i32" });
+          const outArrLocal = allocLocal(fctx, `__sdstr_out_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: nstrArrTypeIdx,
+          });
+          // cv = __str_to_char_vec(str)
           fctx.body.push({ op: "local.get", index: tmpLocal });
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
-          fctx.body.push({ op: "f64.const", value: i });
-          fctx.body.push({ op: "call", funcIdx: sliceIdx });
+          if (resultType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "call", funcIdx: toCharVecIdx });
+          fctx.body.push({ op: "local.set", index: cvLocal });
+          // restLen = max(0, cv.len - i)
+          fctx.body.push({ op: "local.get", index: cvLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: nstrVecTypeIdx, fieldIdx: 0 });
+          fctx.body.push({ op: "i32.const", value: i });
+          fctx.body.push({ op: "i32.sub" });
+          fctx.body.push({ op: "local.tee", index: restLenLocal });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "i32.lt_s" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: restLenLocal } as Instr],
+            else: [],
+          } as Instr);
+          // srcOff = min(i, cv.len) — array.copy traps on srcOff > len even at
+          // count 0 (a short source string with a long fixed prefix).
+          fctx.body.push({ op: "local.get", index: cvLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: nstrVecTypeIdx, fieldIdx: 0 });
+          fctx.body.push({ op: "i32.const", value: i });
+          fctx.body.push({ op: "i32.lt_s" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: cvLocal } as Instr,
+              { op: "struct.get", typeIdx: nstrVecTypeIdx, fieldIdx: 0 } as Instr,
+            ],
+            else: [{ op: "i32.const", value: i } as Instr],
+          } as Instr);
+          fctx.body.push({ op: "local.set", index: srcOffLocal });
+          // out = array.new_default(restLen); array.copy out[0..] = cvData[srcOff..]
+          fctx.body.push({ op: "local.get", index: restLenLocal });
+          fctx.body.push({ op: "array.new_default", typeIdx: nstrArrTypeIdx });
+          fctx.body.push({ op: "local.set", index: outArrLocal });
+          fctx.body.push({ op: "local.get", index: outArrLocal });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.get", index: cvLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: nstrVecTypeIdx, fieldIdx: 1 });
+          fctx.body.push({ op: "local.get", index: srcOffLocal });
+          fctx.body.push({ op: "local.get", index: restLenLocal });
+          fctx.body.push({ op: "array.copy", dstTypeIdx: nstrArrTypeIdx, srcTypeIdx: nstrArrTypeIdx } as Instr);
+          // rest = $nstrVec{restLen, out}, coerced to the (possibly externref /
+          // pre-declared) rest local's type.
+          fctx.body.push({ op: "local.get", index: restLenLocal });
+          fctx.body.push({ op: "local.get", index: outArrLocal });
+          fctx.body.push({ op: "struct.new", typeIdx: nstrVecTypeIdx });
+          const restLocalType = getLocalType(fctx, restIdx);
+          if (restLocalType && !valTypesMatch({ kind: "ref", typeIdx: nstrVecTypeIdx }, restLocalType)) {
+            coerceType(ctx, fctx, { kind: "ref", typeIdx: nstrVecTypeIdx }, restLocalType);
+          }
           fctx.body.push({ op: "local.set", index: restIdx });
         }
       }

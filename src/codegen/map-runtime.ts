@@ -1159,21 +1159,6 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
 }
 
 /**
- * (#1103a) Coerce a freshly-compiled Map key/value argument to `anyref` — the
- * uniform slot type the runtime stores. Numbers arrive as `f64` and are boxed
- * via `__box_number` (the contract `__same_value_zero` / `__hash_anyref`
- * assume); native strings and other GC refs are already anyref subtypes;
- * externrefs externalize via `any.convert_extern`.
- */
-/**
- * (#2162) Re-exported for the Set runtime, which reuses the Map backing store
- * and needs the identical key/value → anyref boxing for its element arg.
- */
-export function coerceSetArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValType | null): void {
-  coerceArgToAnyref(ctx, fctx, t);
-}
-
-/**
  * (#2162) Re-exported for the WeakMap/WeakSet runtime, which reuses the Map
  * backing store and needs the identical key/value → anyref boxing.
  */
@@ -1203,7 +1188,21 @@ function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValTyp
       return;
     }
     case "i32": {
-      // boolean / small int → box as number for now (slice 1 number/string).
+      // (#2712 I2) A BRANDED boolean boxes via __box_boolean so the element/key
+      // reifies as a boolean, not the number 1/0 — `new Set([(n<2)]).has(1)` must
+      // be false and `.has(true)` true (SameValueZero on a boolean, not a number).
+      // __box_boolean is registered alongside __box_number by the callers'
+      // addUnionImports (same note as below), so a funcMap lookup avoids a
+      // mid-body import shift; falls through to the number box if absent.
+      if (t.boolean === true) {
+        const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+        if (boxBoolIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          return;
+        }
+      }
+      // small int → box as number.
       fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
       const boxIdx = ctx.funcMap.get("__box_number");
       if (boxIdx !== undefined) {

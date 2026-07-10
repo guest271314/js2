@@ -4,7 +4,8 @@ title: "architect spec: dynamic MOP extensions — Proxy trap dispatch, mutable 
 status: ready
 sprint: Backlog
 created: 2026-07-04
-updated: 2026-07-04
+updated: 2026-07-09
+assignee: ttraenkler/fable-3031 (apply slice only — released on merge; umbrella stays open)
 priority: high
 horizon: xl
 feasibility: hard
@@ -32,7 +33,7 @@ The #2175 spec (merged PR #2616) defines the **static** MOP substrate:
 `$NativeProto` (one shared heap type, brand-discriminated), the
 `BUILTIN_BRAND_TABLE`, the brand-keyed native-method-closure factory
 (`ensureStandaloneNativeMethodClosure`), and the brand-recovery prologue.
-Contracts C1–C3 there cover *reading* prototype objects and *dispatching*
+Contracts C1–C3 there cover _reading_ prototype objects and _dispatching_
 members on dynamic receivers when the chain is the **default, immutable**
 one.
 
@@ -42,7 +43,7 @@ and mutable**:
 1. **Proxy** — user-defined internal methods (§10.5), both lanes.
 2. **Dynamic prototype chains** — mutable `[[Prototype]]`
    (`Object.setPrototypeOf`, `__proto__`, `Object.create(p|null)`),
-   with mutation *visibility* in subsequent lookups.
+   with mutation _visibility_ in subsequent lookups.
 3. **`with`** — the scope-object form of the same ladder
    (HasBinding/Get/Set are literally MOP operations, §9.1.1.2).
 
@@ -61,14 +62,14 @@ getOwnPropertyDescriptor / defineProperty / getPrototypeOf /
 setPrototypeOf / apply / construct / with-HasBinding) classifies its
 receiver in this order:
 
-| # | Test | Route |
-|---|------|-------|
-| 1 | `ref.test $Proxy` | trap dispatch (`__proxy_*_dispatch`) — **always first**; a Proxy must intercept everything, including chain walks and `with` bindings |
-| 2 | `ref.test $Object` | own `$PropEntry` props → miss → chain walk via `$proto` (field 0), §0.2 |
-| 3 | `ref.test $NativeProto` | brand → #2175 member-closure table → miss → `$parent` chain walk |
-| 4 | closed WasmGC struct (typed user object) | shape-table reader (the #3027 substrate direction; until it lands, refusal/fallthrough per current behavior) |
-| 5 | host externref (js-host lane only) | host-import boundary (`__extern_*`) — the host runs its own MOP incl. host Proxies |
-| 6 | primitive box | wrapper-prototype route per #2175 |
+| #   | Test                                     | Route                                                                                                                                 |
+| --- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `ref.test $Proxy`                        | trap dispatch (`__proxy_*_dispatch`) — **always first**; a Proxy must intercept everything, including chain walks and `with` bindings |
+| 2   | `ref.test $Object`                       | own `$PropEntry` props → miss → chain walk via `$proto` (field 0), §0.2                                                               |
+| 3   | `ref.test $NativeProto`                  | brand → #2175 member-closure table → miss → `$parent` chain walk                                                                      |
+| 4   | closed WasmGC struct (typed user object) | shape-table reader (the #3027 substrate direction; until it lands, refusal/fallthrough per current behavior)                          |
+| 5   | host externref (js-host lane only)       | host-import boundary (`__extern_*`) — the host runs its own MOP incl. host Proxies                                                    |
+| 6   | primitive box                            | wrapper-prototype route per #2175                                                                                                     |
 
 **Mechanism ruling:** the existing **front-guard pattern** — `ref.test
 $Proxy` prepended to the shared native helpers (`__extern_get/set/has`,
@@ -120,8 +121,8 @@ relevant chain. Ruling (compile-away philosophy — pay only when used):
     the key is a literal; whole-brand otherwise).
   - `Object.setPrototypeOf(x, …)` / `x.__proto__ = …` where `x`'s static
     type maps to a brand → that brand dirty; receiver un-typeable → `"all"`.
-- A **dirty** `(brand, member)` demotes the static fast path *for that
-  member* to a `__chain_lookup` dynamic read. Clean programs (the
+- A **dirty** `(brand, member)` demotes the static fast path _for that
+  member_ to a `__chain_lookup` dynamic read. Clean programs (the
   overwhelming majority) stay **byte-identical** — this is the same S0
   acceptance discipline as #2175.
 - `Proxy` never enters the static path at all: a `new Proxy(...)` value has
@@ -136,10 +137,10 @@ relevant chain. Ruling (compile-away philosophy — pay only when used):
 
 ### 1.1 Current state (verified against upstream/main `8e8eb9832`, 2026-07-04)
 
-| Lane | Done | Missing |
-|------|------|---------|
+| Lane       | Done                                                                                                                                                                                                        | Missing                                                                                                                                                                                                                                                                                           |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | standalone | `$Proxy`/`$ProxyTraps` (12 fields) + dispatch for get/set/has/apply-base, deleteProperty, gOPD, getPrototypeOf, setPrototypeOf, isExtensible, preventExtensions, ownKeys, defineProperty (#1100, #1355 A–F) | **construct** trap; **revocable** synthesis; **Reflect.\*** wiring (setPrototypeOf/defineProperty/construct/getPrototypeOf/apply/isExtensible/preventExtensions CE before any trap runs); **§10.5 result-invariants** (slice G); present-but-non-callable-trap TypeError; trap-abrupt propagation |
-| host (gc) | #2615 (externref slot type), #2616 (non-callable trap TypeError), #2617 (boundary propagation), #2618 Slice 1 (lazy bridge + callable-target wrap, PR #1984) | apply rows (`p.call(a,b)`, `p(args)` with struct-typed trap params) + construct rows — **all bottlenecked on one keystone**, K1 below |
+| host (gc)  | #2615 (externref slot type), #2616 (non-callable trap TypeError), #2617 (boundary propagation), #2618 Slice 1 (lazy bridge + callable-target wrap, PR #1984)                                                | apply rows (`p.call(a,b)`, `p(args)` with struct-typed trap params) + construct rows — **all bottlenecked on one keystone**, K1 below                                                                                                                                                             |
 
 **Stale-doc note:** `built-ins/Proxy` is **already run** by the test262
 harness (`TEST_CATEGORIES`, `tests/test262-runner.ts:2753`; blanket skip
@@ -281,13 +282,13 @@ Because §0.1 front-guards live in the shared helpers:
 
 ### 2.1 Representation ruling — where the mutable slot lives **[FABLE]**
 
-| Value kind | [[Prototype]] slot | Mutable? |
-|---|---|---|
-| dynamic object (`$Object`) | `$proto` (field 0, already `mut`) | yes — `__object_setPrototypeOf` writes it (exists, round-trips host-free; verified in #3013) |
-| builtin/class prototype object (`$NativeProto`) | `$parent` (already `mut externref`) | yes — `Object.setPrototypeOf(RegExp.prototype, x)` is legal (§10.1.2); setPrototypeOf on a `$NativeProto` receiver writes `$parent` **and marks the brand dirty** (§0.3) |
-| closed WasmGC struct instance | none — its [[Prototype]] is its class's `__proto_<Name>` singleton, *by representation* | **not directly.** Ruling below |
-| `Proxy` | via `getPrototypeOf`/`setPrototypeOf` traps | trap-governed |
-| host externref (gc lane) | host object | host-governed |
+| Value kind                                      | [[Prototype]] slot                                                                      | Mutable?                                                                                                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| dynamic object (`$Object`)                      | `$proto` (field 0, already `mut`)                                                       | yes — `__object_setPrototypeOf` writes it (exists, round-trips host-free; verified in #3013)                                                                             |
+| builtin/class prototype object (`$NativeProto`) | `$parent` (already `mut externref`)                                                     | yes — `Object.setPrototypeOf(RegExp.prototype, x)` is legal (§10.1.2); setPrototypeOf on a `$NativeProto` receiver writes `$parent` **and marks the brand dirty** (§0.3) |
+| closed WasmGC struct instance                   | none — its [[Prototype]] is its class's `__proto_<Name>` singleton, _by representation_ | **not directly.** Ruling below                                                                                                                                           |
+| `Proxy`                                         | via `getPrototypeOf`/`setPrototypeOf` traps                                             | trap-governed                                                                                                                                                            |
+| host externref (gc lane)                        | host object                                                                             | host-governed                                                                                                                                                            |
 
 **Closed-struct ruling:** a closed struct has no proto slot; full per-object
 mutability requires the object to be **represented dynamically**. The
@@ -300,7 +301,7 @@ hack here. Sequencing: until #2949's demotion exists, `setPrototypeOf` on a
 provably-closed-struct receiver keeps current behavior (host lane: works —
 host object; standalone: routes to `__object_setPrototypeOf`, which
 requires `$Object` and misses). This spec defines the **target contract**;
-the closed-struct arm is marked *sequenced-behind-#2949*, not a slice here.
+the closed-struct arm is marked _sequenced-behind-#2949_, not a slice here.
 
 **Identity (#2585):** the chain representation is identity-correct —
 `$proto` holds the same GC ref, `__getPrototypeOf` returns it. What loses
@@ -365,7 +366,7 @@ host):
 - **Mutation visibility** — no caching layer exists on the dynamic read
   path today, and §0.2 keeps it that way: every dynamic lookup re-walks
   from the receiver, so `setPrototypeOf` is visible on the next lookup by
-  construction. The only visibility hazard is the *static* fast path,
+  construction. The only visibility hazard is the _static_ fast path,
   handled by §0.3's dirty demotion.
 
 ---
@@ -402,11 +403,11 @@ host):
    `compileWithStatement` / `compileClosedObjectLiteralTarget`. Bounded,
    no substrate dependency, ~55 files.
 2. **Substrate [owned by #3027, NOT here]: teach the dynamic reader to see
-   closed-struct fields.** The Tier-2 gap is *exactly* #3027's
+   closed-struct fields.** The Tier-2 gap is _exactly_ #3027's
    `$Object`-dynamic-reader gap (and #2580's family). Ruling: **no
    with-local struct-reflection hack** — when the #3027 shape-table reader
    lands, Tier-2 inherits it for free because it already routes through
-   `__extern_has`/the dynamic getter. `with` is a *consumer* of that
+   `__extern_has`/the dynamic getter. `with` is a _consumer_ of that
    substrate, never a second implementation.
 
 **Which wins at a given site:** Tier-1 whenever provable (faster,
@@ -427,7 +428,7 @@ soundness bug; a fall-through is only a perf/coverage loss.
   statically skip the check when no symbol-keyed member exists — document
   that proof).
 - Abrupt completions from the `has`/`get` steps (`unscopables-prop-get-err
-  .js`, `has-property-err.js`) must **propagate**, not be swallowed into
+.js`, `has-property-err.js`) must **propagate**, not be swallowed into
   the miss arm — audit `emitDynamicWithGet`'s fallback select for a
   catch-all that eats throws.
 
@@ -454,7 +455,7 @@ the **compile path already handles most of the `with` lane**. Ruling:
   compile-path counterpart). The @@unscopables filter (§3.3) lives in that
   shared surface so both consumers inherit it.
 - **IR note:** `with` stays in the IR `deferred-feature` bucket for the IR
-  *front-end* (the direct-AST path owns it) — the bucket exit #2929
+  _front-end_ (the direct-AST path owns it) — the bucket exit #2929
   mentions applies to interpreted code, not to a claim over compiled
   `with`. If the peer's interpreter spec rules otherwise, reconcile before
   either implements: one owner per execution context, one MOP surface.
@@ -463,23 +464,23 @@ the **compile path already handles most of the `with` lane**. Ruling:
 
 ## Slice table (dispatchable units, tier + sequencing)
 
-| Slice | Tier | Depends on | Files (primary) | Gate |
-|---|---|---|---|---|
-| **K1** inbound arg-marshalling keystone (2623-A) | FABLE | check #56 state first | `src/codegen/index.ts` (buildArgConversion, externToClosureParamRef), `src/runtime.ts` | full merge_group; host `Proxy/{apply,construct}` rows; hot-callback no-regression |
-| K1b host construct guard + constructable-forwarder (prototyped in #2618) | OPUS | K1 | `new-super.ts`, `calls.ts`, `runtime.ts` | host `construct/*` non-realm |
-| **K2** standalone `__construct_dispatch` + construct trap | FABLE | — (composes with K1 conceptually, independent code) | `object-runtime.ts`, `new-super.ts` | standalone `Proxy/construct/*`; `apply/*` via TRAP_APPLY |
-| P3 `Proxy.revocable` standalone (S0) | OPUS | — | `object-runtime.ts`, `calls.ts` | `revocable/**` (~14 CEs) |
-| P4 standalone `Reflect.*` wiring (S1) | OPUS | K2 for `Reflect.construct`; else — | `calls.ts` | `built-ins/Reflect` standalone CE bucket |
-| P5 §10.5 invariants + descriptor bits (G) | FABLE (bit-model ruling w/ #1460/#1462 owner) + OPUS (predicates) | #797/#1460/#1462 coordination | `object-runtime.ts`, `registry/proxy.ts` | `Proxy/**` invariant rows |
-| **C1** `__chain_lookup` walker + refactor for-in/`in`/getPrototypeOf onto it | FABLE (contract) / OPUS (refactor) | — | `object-runtime.ts` | miss-through-chain, null-proto, Proxy-in-chain equivalence tests |
-| C2 per-brand MOP-dirty demotion (§0.3) | FABLE | C1, #2175 S1 | `property-access.ts`, `native-proto.ts` | builtin-proto-member-overwrite tests; clean programs byte-identical |
-| C3 distinct native proto per externref subclass (#3013-B) | OPUS (design ratified in §2.2) | #2175 S1; C1 helpful | `class-bodies.ts`, `array-object-proto.ts` pattern | `regular-subclassing.js` + `__new_Object` cluster host-free; subclass-of-builtin matrix |
-| C4 `__proto__` literal/read/write + `Object.create(null)` termination | OPUS | C1 | `property-access.ts`, `object-runtime.ts`, `expressions.ts` | annexB `__proto__` + `Object/create` rows |
-| **W1** Tier-1 `with` over closed-struct targets | OPUS | — | `with-scope.ts` | ~55-file struct-target bucket in `language/statements/with`; soundness fall-throughs |
-| W2 @@unscopables + abrupt propagation in shared HasBinding | OPUS | — | `with-scope.ts`, `object-runtime.ts` | `unscopables-*`, `has-property-err.js` |
-| W3 `with (proxy)` verification (should be free) | OPUS | K2/P-slices as they land | tests only | `*-using-with.js` twins |
-| — closed-struct setPrototypeOf demotion | (sequenced behind **#2949**; not a slice here) | #2949/#2580 | — | — |
-| — tag-5 identity | (owned by **#2626**; do not touch) | value-rep substrate | — | — |
+| Slice                                                                        | Tier                                                              | Depends on                                          | Files (primary)                                                                        | Gate                                                                                    |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **K1** inbound arg-marshalling keystone (2623-A)                             | FABLE                                                             | check #56 state first                               | `src/codegen/index.ts` (buildArgConversion, externToClosureParamRef), `src/runtime.ts` | full merge_group; host `Proxy/{apply,construct}` rows; hot-callback no-regression       |
+| K1b host construct guard + constructable-forwarder (prototyped in #2618)     | OPUS                                                              | K1                                                  | `new-super.ts`, `calls.ts`, `runtime.ts`                                               | host `construct/*` non-realm                                                            |
+| **K2** standalone `__construct_dispatch` + construct trap                    | FABLE                                                             | — (composes with K1 conceptually, independent code) | `object-runtime.ts`, `new-super.ts`                                                    | standalone `Proxy/construct/*`; `apply/*` via TRAP_APPLY                                |
+| P3 `Proxy.revocable` standalone (S0)                                         | OPUS                                                              | —                                                   | `object-runtime.ts`, `calls.ts`                                                        | `revocable/**` (~14 CEs)                                                                |
+| P4 standalone `Reflect.*` wiring (S1)                                        | OPUS                                                              | K2 for `Reflect.construct`; else —                  | `calls.ts`                                                                             | `built-ins/Reflect` standalone CE bucket                                                |
+| P5 §10.5 invariants + descriptor bits (G)                                    | FABLE (bit-model ruling w/ #1460/#1462 owner) + OPUS (predicates) | #797/#1460/#1462 coordination                       | `object-runtime.ts`, `registry/proxy.ts`                                               | `Proxy/**` invariant rows                                                               |
+| **C1** `__chain_lookup` walker + refactor for-in/`in`/getPrototypeOf onto it | FABLE (contract) / OPUS (refactor)                                | —                                                   | `object-runtime.ts`                                                                    | miss-through-chain, null-proto, Proxy-in-chain equivalence tests                        |
+| C2 per-brand MOP-dirty demotion (§0.3)                                       | FABLE                                                             | C1, #2175 S1                                        | `property-access.ts`, `native-proto.ts`                                                | builtin-proto-member-overwrite tests; clean programs byte-identical                     |
+| C3 distinct native proto per externref subclass (#3013-B)                    | OPUS (design ratified in §2.2)                                    | #2175 S1; C1 helpful                                | `class-bodies.ts`, `array-object-proto.ts` pattern                                     | `regular-subclassing.js` + `__new_Object` cluster host-free; subclass-of-builtin matrix |
+| C4 `__proto__` literal/read/write + `Object.create(null)` termination        | OPUS                                                              | C1                                                  | `property-access.ts`, `object-runtime.ts`, `expressions.ts`                            | annexB `__proto__` + `Object/create` rows                                               |
+| **W1** Tier-1 `with` over closed-struct targets                              | OPUS                                                              | —                                                   | `with-scope.ts`                                                                        | ~55-file struct-target bucket in `language/statements/with`; soundness fall-throughs    |
+| W2 @@unscopables + abrupt propagation in shared HasBinding                   | OPUS                                                              | —                                                   | `with-scope.ts`, `object-runtime.ts`                                                   | `unscopables-*`, `has-property-err.js`                                                  |
+| W3 `with (proxy)` verification (should be free)                              | OPUS                                                              | K2/P-slices as they land                            | tests only                                                                             | `*-using-with.js` twins                                                                 |
+| — closed-struct setPrototypeOf demotion                                      | (sequenced behind **#2949**; not a slice here)                    | #2949/#2580                                         | —                                                                                      | —                                                                                       |
+| — tag-5 identity                                                             | (owned by **#2626**; do not touch)                                | value-rep substrate                                 | —                                                                                      | —                                                                                       |
 
 **Suggested order:** K1 → K1b (host Proxy lane closes) ∥ W1+W2 (independent,
 bounded) ∥ C1 → {C3, C4, K2} → P3/P4 → C2 → P5. K1 and C1 are the two
@@ -501,3 +502,116 @@ schedule-critical Fable slices; everything else fans out.
 - The host lane gets §10.5 invariants free from the engine; every
   standalone invariant slice must be `ctx.standalone`-gated so gc stays
   byte-inert (the #1355 slice-F pattern).
+
+## Re-verification (fable-arch, 2026-07-09 @ origin/main 928c85179)
+
+State advances since this spec was written — re-ground before dispatching:
+
+1. **P5's descriptor-bit dependency is SATISFIED.** `$PropEntry.$flags`
+   (writable/enumerable/configurable bits + internal-slot marker) exists
+   (`object-runtime.ts:90`), and native defineProperty already enforces the
+   non-configurable redefine TypeErrors (`object-runtime.ts:4988-5035`).
+   The §10.5 result-invariant predicates (P5) are now executable without
+   waiting on #797/#1460/#1462 — coordinate only with #2042's in-progress
+   descriptor work.
+2. **NEW GATE ahead of every P-slice: #3099.** Probe-verified: standalone
+   Proxy traps written in **method-shorthand** style (`{ get(t,k){…} }`,
+   test262's dominant shape) silently forward — the any-context object
+   literal never materializes shorthand methods as runtime own properties
+   on `$Object`, so `__proxy_create`'s trap read misses. Arrow-property
+   handlers fire correctly. Land #3099 FIRST, then re-measure standalone
+   Proxy before scoping K2/P3/P4/P5 — current standalone Proxy numbers
+   understate the substrate.
+3. Confirmed still open: `$ProxyTraps` has 12 fields, no `construct` (K2);
+   `Proxy.revocable` standalone is a CE (P3); `Reflect.construct`/
+   `Reflect.getPrototypeOf`-on-proxy standalone CE/trap (P4). K1's locus
+   (inbound arg-marshalling) is adjacent to the in-flight #3087 (dynamic
+   `new` on the gc lane) — claim-check #3087's branch before starting K1.
+
+## Apply slice — LANDED (fable-3031, 2026-07-09)
+
+**Scope**: the standalone `apply`-trap / dynamic-apply slice (the #3099
+follow-up: the 12th dark trap). K1 (host lane), K2 (construct), P3/P4/P5 and
+Parts 2–3 remain open — this umbrella issue stays `ready`.
+
+### What was actually broken (verify-first findings — the spec's "K1/K2" framing was partly off for this lane)
+
+The standalone `p(...)`-on-`any`-callee path (`tryEmitInlineDynamicCall`,
+`src/codegen/expressions/calls.ts`) had **three stacked defects**, only the
+third of which is the trap-dispatch gap the spec describes:
+
+1. **Stale captured helper indices → invalid Wasm** (why BOTH handler shapes
+   "emit invalid Wasm" per #3099's handoff): `__box_number`/`__unbox_number`
+   funcIdx were captured BEFORE `ensureLateImport("__get_undefined")` inserted
+   a real import; `flushLateImportShifts` repaired `funcMap` + emitted bodies
+   but NOT the captured locals, so every dispatch arm baked `call <box−1>` —
+   which lands on `__str_to_number` — and the module failed validation
+   (`call[0] expected externref, found call_ref of type f64`). The
+   stack-balance repair pass then *appended* a real `call __box_number` to fix
+   the arm's block-result type, masking the shape further. **Fix**: capture
+   AFTER the flush. (Host lane was immune: box/unbox are imports there, and
+   import indices don't shift on later import appends.)
+2. **`env.__get_undefined` host-import leak**: the arity-pad path called
+   `ensureLateImport` directly, bypassing `ensureGetUndefined`'s
+   `nativeStrings` gate — every padded standalone module demanded an env
+   import and was un-instantiable host-free. **Fix**: resolve the pad exactly
+   like `emitUndefined` (host import on host lane; #2106 S1 singleton or
+   `ref.null.extern` standalone).
+3. **No Proxy arm anywhere on the [[Call]] surface.** Fixed per the §0.1
+   front-guard ruling, three pieces:
+   - `__proxy_apply_dispatch(proxy, thisArg, argsVec)` native
+     (`object-runtime.ts`, §10.5.12): revoked → TypeError; `apply` trap
+     (field 3, wired at `__proxy_create` since #1100 but never dispatched) →
+     `Call(trap, handler, «target, thisArgument, argArray»)` via the new
+     reserved `__proxy_call_apply` driver (filled at FINALIZE →
+     `__call_fn_method_3`, same reserve-then-fill as the other 11); trap
+     absent → forward `Call(target, thisArg, args)` through `__apply_closure`.
+   - **$Proxy front-guard on `__apply_closure`** (fillApplyClosure) — the
+     bridge is a MOP entry point ([[Call]]), so EVERY consumer (method calls
+     on open receivers, a proxy installed as another proxy's trap,
+     groupBy/accessor drivers) intercepts proxy callees for free, and
+     proxy-of-proxy chains unwrap one guard hop at a time (no self-recursion
+     needed in the dispatch).
+   - **OUTERMOST `ref.test $Proxy` arm** at the inline dynamic-call site,
+     gated `ctx.standalone` AND (funcMap has `__proxy_create` OR a per-file
+     syntactic `new Proxy`/`Proxy.revocable` scan — the funcMap check alone
+     misses same-file call-before-creation compile order, the #2754 class).
+     Proxy-free programs never grow the arm.
+
+### Validation (PR #2815 — branch `issue-3031-proxy-apply-trap`)
+
+- **12/12 method-shorthand handler traps fire** (was 11/12 after #3099);
+  arrow-property parity too.
+- Trap semantics probed: argArray `.length`/indexing, target-callable-in-trap,
+  thisArg === undefined, absent-trap forward, proxy-of-proxy, proxy-as-method
+  (`o.m(…)` where `m` is a proxy — the front-guard path). All pass;
+  `tests/issue-3031-proxy-apply.test.ts` (11 cases) pins them.
+- **prove-emit-identity**: gc lane byte-identical across the whole corpus
+  (33/39 identical); 6 standalone/wasi drifts are the additive
+  `__proxy_apply_dispatch` + driver + front-guard growth in modules already
+  carrying the (unconditionally-registered) proxy runtime — same import sets,
+  all valid, consistent with how `__extern_get`'s guards keep the other 11
+  dispatchers live.
+- **Scoped test262 `built-ins/Proxy` standalone**: 67 pass / 53 CE → 67 pass /
+  50 CE, **zero pass→fail regressions**; the 3 flips are `*-realm.js` CE→fail
+  (the documented `$262.createRealm` deferral — now they compile).
+
+### Boundary — measured next levers for the dynamic-apply surface
+
+- **`.call`/`.apply` on ANY dynamic callable** — `f.call(...)` on a bare
+  `any`-typed closure silently returns undefined on main (pre-existing,
+  NOT proxy-specific; `__extern_method_call` answers only `$Object`
+  receivers and no Function.prototype MOP exists for callable values).
+  8 of the 14 `built-ins/Proxy/apply/*` rows hinge on exactly this. This is
+  the highest-leverage NEXT sub-slice of the dynamic-apply surface — fix it
+  generally (Function.prototype.call/apply/bind on the callable-classifier
+  arm, cf. #3098's spine), not proxy-only.
+- **Dynamic-call result → declared-`string` coercion** — pre-existing
+  ("Cannot convert object to primitive value" for bare closures too); the
+  trap's string RESULT is fine when consumed as `any`.
+- **Present-but-non-callable trap TypeError** (`trap-is-not-callable.js`) —
+  slice G / §1.6, unchanged.
+- **`*-realm.js`** — `$262.createRealm`, deferred as documented.
+- K1 (host-lane inbound marshalling), K2 (`construct` + `$ProxyTraps` field
+  13), P3 (revocable — still CE "#1472 Phase C"), P4 (Reflect.*), P5
+  (invariants): open, unchanged by this slice.

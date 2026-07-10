@@ -1,10 +1,13 @@
 ---
 id: 2978
 title: "Standalone async scheduler: for-await over a sync iterator yielding rejected promises loops forever (3GB JS-heap OOM)"
-status: ready
+status: done
+assignee: ttraenkler/fable-2978
+depends_on: []
 sprint: current
 created: 2026-07-02
-updated: 2026-07-05
+updated: 2026-07-10
+completed: 2026-07-10
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -13,12 +16,44 @@ architect_spec: done
 task_type: bug
 area: codegen
 goal: standalone
-related: [2934]
+related: [2934, 3121]
 umbrella: 2860
 horizon: l
 ---
 
 # Standalone async scheduler: rejected-promise for-await loops forever (OOM)
+
+## BLOCKED on #2895 (async-frame suspension) — do NOT re-pick as stale WIP (fable-3058, 2026-07-09)
+
+Two prior attempts parked here; both reached the **same root cause via WAT
+dump**, and I re-verified both load-bearing claims against **current main**
+before setting `status: blocked`. This is a **genuine architectural block**, not
+stale WIP — a re-merge + re-push parks a third time in the same defect.
+
+- The repro's `for await` over a **sync** struct-iterator routes to
+  `compileForOfDirectIterator` (`statements/loops.ts:~5115`), which drives the
+  loop **synchronously and never consults `stmt.awaitModifier`** (that check is
+  at `~:5199`, AFTER the direct-iterator path returns). There is **no async
+  state machine in the compiled function at all**.
+- Standalone promises are **host imports** (`env::Promise_reject/resolve`), not
+  native `$Promise` structs. `isStandalonePromiseActive` is **wasi-only**
+  (`async-scheduler.ts:~3298`; standalone only under the unset
+  `JS2WASM_ASYNC_CARRIER_WIDEN` measurement flag), so the native `$Promise`
+  reject machinery the architect's Part-B premise relies on **never runs** for
+  the scored standalone lane.
+- The OOM is therefore an **infinite synchronous loop** allocating host rejected
+  promises with no microtask yield → 3 GB JS-heap OOM. **No bounded synchronous
+  fix exists** (a host promise's rejection can't be observed synchronously). The
+  branch-2 1M step-cap band-aid changed OOM→loud-TypeError but isn't spec-correct
+  (test wants `returnCount===1`, `caught===true`, bounded mem).
+- Part A (the #2934-3b drop-arity validity fix) **cannot land alone** — making
+  the module valid is exactly what exposes the OOM to CI shard workers (the hard
+  pairing constraint).
+
+The correct fix is **real async-frame suspension for the sync-iterator
+for-await drive in the host-promise lane** (the #2895 machinery) or the #2980
+carrier widen. Unblock when #2895 lands; re-verify the two claims above still
+hold on that base first.
 
 ## Problem
 
@@ -158,6 +193,7 @@ into a state the drive loop reads as "step done → call next() again" → infin
 re-entry → unbounded allocation.
 
 **Where the machinery lives:**
+
 - `src/codegen/async-cps.ts` — `forAwaitPoints` (async-cps.ts:83, 121-129): the
   native for-await drive lane. A for-await body with NO other await points is
   driven here (async-cps.ts:73-83 comment). This is where the per-iteration
@@ -176,6 +212,7 @@ re-entry → unbounded allocation.
 **The fix (design):** in the for-await native drive (async-cps.ts), the awaited
 per-step value must be settled through the promise state machine and its
 **rejected** outcome must:
+
 1. Set the loop's `doneFlag` such that the post-loop / abrupt path runs
    IteratorClose **once** — reuse the existing `returnIdx`/`returnMethodIdx`
    IteratorClose emitted by the for-of drive (loops.ts:5036-5051 / the
@@ -233,10 +270,10 @@ refs are spot-on and the Part-A bug is confirmed present.**
 
 - **Part A bug confirmed live.** `statements/loops.ts:5045` calls
   `returnMethodIdx` (resolved at `:4917`, guarded by `if (returnMethodIdx !==
-  undefined)` at `:5036`) and `:5046` is the **unconditional `{ op: "drop" }`**
+undefined)` at `:5036`) and `:5046` is the **unconditional `{ op: "drop" }`**
   that underflows for a void `return()`. The arity-guard fix is exactly targeted.
   Sibling `__iterator_return` sites (`returnIdx` at `:5210`, refs `:5136/5399/
-  5419`) use the fixed-arity helper — unaffected, as the spec says.
+5419`) use the fixed-arity helper — unaffected, as the spec says.
 - **Part B anchors accurate.** `async-cps.ts` `forAwaitPoints` field at `:83`,
   collection at `:121/129`, native for-await drive at `:1527/1565–1568`.
   `async-scheduler.ts` `buildPromiseResolveValueBody` at `:961`, the
@@ -246,3 +283,98 @@ refs are spot-on and the Part-A bug is confirmed present.**
   module valid never exposes the OOM to CI shard workers) is sound — honor it.
 
 No downgrade. `architect_spec: done` is reliable.
+
+## Implementation notes (fable-2978, 2026-07-09/10) — re-grounding + the fix as built
+
+### Re-grounding: the #2895 block is STALE; two spec premises needed correction
+
+- **Unblocked.** The #2895 frame-suspension substrate IS on main (slices
+  1a/1b/1c + 1d-scaffolding — PRs #2384/#2393/#2394/#2404, validated host-free
+  on wasi). `depends_on` cleared.
+- **Correction 1 — the repro never touches the native for-await drive.** The
+  #2906 3b drive is gated by `forAwaitNeedsDrive` (async-cps.ts) to ARRAY
+  sources with a boxed element fact; a USER sync iterable resolves
+  `elementFactOf → unresolvable` → legacy. The actual codegen for the repro is
+  `compileForOfDirectIterator` (loops.ts) — the SYNC struct-iterator drive with
+  **no per-element Await at all** (fable-3100s4 verified independently:
+  compiled repro is byte-identical off/on the widen flag). So the fix target is
+  the sync drive, not `planForAwaitCfg` / the scheduler reaction wiring.
+- **Correction 2 — the OOM is NOT standalone-specific.** Verified empirically
+  (128 MB-capped subprocess): the valid-shaped repro OOMs on **gc-host,
+  standalone, AND wasi**. `asyncFnNeedsCps` requires ≥1 bare `awaitPoint`, so a
+  for-await-only async fn compiles as a SYNC body on the host lane too — same
+  un-awaited infinite drive. Part B therefore covers all three lanes, not just
+  the standalone scheduler.
+
+### The fix (all in `src/codegen/statements/loops.ts` + one shim line in `src/runtime.ts`)
+
+1. **Part A (#2934-3b validity)** — `returnMethodResultArity` computed from the
+   `return()` method's func type; every close-site `drop` is arity-guarded.
+   (The canonical test was invalid Wasm on ALL lanes — gc included — which is
+   why nothing OOM'd in CI yet.)
+2. **Part B, carrier lanes (wasi today; standalone under the #2980 widen)** —
+   `emitForAwaitElementUnwrap`: after the sync drive reads `result.value`
+   (externref — the carrier boxes `$Promise` to externref even on wasi,
+   verified by WAT), `ref.test $Promise` → state dispatch: REJECTED → `throw`
+   the reason via the shared exn tag; FULFILLED → unwrap one level (AG0-
+   consistent); PENDING → leave (AG0 limitation, bounded by the cap). The
+   promise ref is narrowed ONCE into a typed local (stack-balance repair-pass
+   hazard, #2895 slice-1b lesson).
+3. **Part B, close-on-throw for the direct path** — the direct struct-iterator
+   drive had NO close-on-throw at all (a throw inside the loop bypassed the
+   post-loop close → `returnCount === 0`). For `for await` loops with a
+   `return()` method the block/loop is now wrapped in try/catch_all: suppressed
+   `return()` call (§7.4.6 step 6 — a throwing `return()` loses to the original
+   rejection; pinned by test) + `rethrow`. Mirrors the \_\_iterator path's #1347
+   wrapper, including the +3 label-depth adjustment for outer break/continue.
+4. **Part B, host-promise lanes (gc-host, standalone carrier-off)** — a JS host
+   promise's state is NOT synchronously observable (fundamental: no sync state
+   read exists in JS), so no spec-correct sync fix exists there. Bounded guard:
+   `FOR_AWAIT_SYNC_DRIVE_STEP_CAP = 100_000` — a per-entry-zeroed counter that
+   throws a loud TypeError through the SAME close machinery (`return()` fires
+   exactly once, user catch observes an abrupt completion). Only on
+   `for await` sync drives; plain `for..of` is untouched (#2067). Transitional:
+   dead on any lane the carrier/frame drive covers.
+5. **Shim hardening** — `runtime.ts` `Promise_reject` pre-attaches a no-op
+   `catch` so a discarded rejected promise (one per capped iteration) doesn't
+   fire a 100k-event unhandledRejection storm in vitest/CI runners.
+
+### Measured outcomes (branch @ base 7b8ade85c7a58)
+
+- Issue repro: **wasi & widen-standalone: caught=true, e==="reject",
+  returnCount===1, host-free, <10 ms** (spec-correct). gc-host &
+  carrier-off-standalone: bounded loud fail in ~40 ms (was 3 GB OOM), close
+  exactly once.
+- Canonical `for-await-next-rejected-promise-close.js`: CE(invalid) → bounded
+  `fail` on both scored lanes. **Full pass on the widen lane is blocked by a
+  PRE-EXISTING closure-capture aliasing bug** (obj-literal method writes a
+  hoisted global while the harness arrow reads a ref-cell — repro'd on main
+  with a 5-line non-async shape) — filed as **#3121**; the rejection routing
+  itself is verified correct (`e === "reject"` assert passes).
+- Broad sweep (1,272 for-await + AsyncFromSync files, standalone lane): **no
+  file over 0.92 s** — no OOM/hang anywhere; 90 CE→bounded-fail exposures
+  (Part A working as intended, cap holding), plus dstr fixes. Diffed
+  branch-local vs main-local (control), not vs the CI baseline (drift).
+- Sibling shapes audited (bounded probes, all lanes): await-of-rejected in
+  loop body, array-of-rejected (vec lane), async-gen rejected-await — all
+  BOUNDED (no OOM class); their wrong-value residuals are pre-existing
+  #2865/#2906 gaps, unchanged by this fix.
+
+### Acceptance state
+
+- Repro terminates `returnCount===1`, `caught===true`, `e==="reject"`, bounded
+  memory: **met on the carrier lanes** (wasi now; standalone at the #2980
+  flip); on the pre-flip host-promise lanes it terminates bounded with
+  `returnCount===1`, `caught===true` and a loud TypeError (a host promise is
+  not synchronously observable — no spec-correct sync fix exists there, by
+  design the flip inherits the carrier fix).
+- Canonical file standalone `invalid → pass`: **partially met** — now
+  `invalid → bounded fail` on the scored lane; the widen-lane full pass is
+  blocked ONLY by the pre-existing #3121 capture-aliasing bug (rejection
+  routing itself verified correct there).
+- No CI worker OOM: **met** (1,272-file sweep × {standalone, gc, widen}, max
+  345 ms for the canonical file, no file >0.92 s).
+- 0 test262 regressions: **met** on branch-vs-main local controls
+  (standalone: 1 diff = the intended CE→fail; gc: same; widen: see sweep
+  note); async/generator/iterator equivalence suites green (63/63 targeted +
+  adjacent issue suites).

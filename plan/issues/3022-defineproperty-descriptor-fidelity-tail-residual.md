@@ -17,7 +17,7 @@ goal: spec-completeness
 test262_category: built-ins/Object/defineProperty, built-ins/Object/defineProperties
 test262_fail: 728
 related: [1334, 1629, 1629a, 1631, 2726]
-children: [3042, 3043, 3044, 3045, 3046]
+children: [3042, 3043, 3044, 3045, 3046, 3116]
 ---
 
 > **UMBRELLA (decomposed 2026-07-05, dev-2726).** This 728-fail blob is NOT a
@@ -125,7 +125,7 @@ minimal repro.
    returns nothing because `__register_fnctor_instance` is emitted **only for
    module-global constructor closures** (`new-super.ts` gates on
    `moduleGlobals/funcClosureGlobals`), so a **function-scope** `var Ctor =
-   function(){}` instance is never registered → `_fnctorInstanceCtor.get(inst)`
+function(){}` instance is never registered → `_fnctorInstanceCtor.get(inst)`
    is null. `15.2.3.6-3-1xx/2xx`. Fix touches #1712 closure/global machinery.
 
 4. **Fragmented long tail (~370).** Attribute-transition rules
@@ -153,14 +153,14 @@ to separate true root causes from shared symptoms.
 The dev-3022 causes 1–3 are the **senior** value-rep / exotic / closure clusters;
 the grab-bag (cause 4) splits into three cleaner pieces. Filed vs cause-scoped:
 
-| root cause | fails | scope | tracked as |
-|---|---|---|---|
-| **attribute round-trip fidelity** (writable/enumerable/configurable via `verifyProperty`, primitive values) | ~74 | **DEV** | **#3042** (filed) |
-| **illegal-transition + SameValue validation** (non-configurable redefine should-throw; +0/-0/NaN; false-positive Cannot-redefine) — dev-3022 cause 4 | ~50 | **SENIOR** | **#3043** (filed) |
-| **descriptor-shape codegen crashes** (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined) | ~16 | **DEV** | **#3044** (filed) |
-| **value round-trip: struct-widening vs sidecar read** (`value: undefined`/object read returns struct default, `SameValue`-differs) — dev-3022 cause 1 | ~40+ | **SENIOR** (value-rep, #1629 S3 / #2106) | cause-scoped, file when a senior picks it up |
-| **array exotic `[[DefineOwnProperty]]`** (plural `defineProperties(arr,…)`, array-index/`length` §10.4.2) — dev-3022 cause 2 | ~83 | **SENIOR** (array-exotic, #2186 vec) | cause-scoped |
-| **prototype-chain descriptor-field read** (inherited `value`/`get` dropped; function-scope fnctor instance not registered) — dev-3022 cause 3 | ~33 | **SENIOR** (#1712 closure/global machinery) | cause-scoped |
+| root cause                                                                                                                                            | fails | scope                                       | tracked as                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ------------------------------------------- | -------------------------------------------- |
+| **attribute round-trip fidelity** (writable/enumerable/configurable via `verifyProperty`, primitive values)                                           | ~74   | **DEV**                                     | **#3042** (filed)                            |
+| **illegal-transition + SameValue validation** (non-configurable redefine should-throw; +0/-0/NaN; false-positive Cannot-redefine) — dev-3022 cause 4  | ~50   | **SENIOR**                                  | **#3043** (filed)                            |
+| **descriptor-shape codegen crashes** (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined)                                                  | ~16   | **DEV**                                     | **#3044** (filed)                            |
+| **value round-trip: struct-widening vs sidecar read** (`value: undefined`/object read returns struct default, `SameValue`-differs) — dev-3022 cause 1 | ~40+  | **SENIOR** (value-rep, #1629 S3 / #2106)    | cause-scoped, file when a senior picks it up |
+| **array exotic `[[DefineOwnProperty]]`** (plural `defineProperties(arr,…)`, array-index/`length` §10.4.2) — dev-3022 cause 2                          | ~83   | **SENIOR** (array-exotic, #2186 vec)        | cause-scoped                                 |
+| **prototype-chain descriptor-field read** (inherited `value`/`get` dropped; function-scope fnctor instance not registered) — dev-3022 cause 3         | ~33   | **SENIOR** (#1712 closure/global machinery) | cause-scoped                                 |
 
 The three **cause-scoped** senior clusters keep their full repros in the dev-3022
 section above; they are deliberately NOT filed as separate issues yet (each is a
@@ -172,15 +172,15 @@ issues). #3042/#3044 are the immediately **dev-dispatchable** wins.
 Cross-tab (error string × feature) shows these are NOT one bug — they are
 internal `Object`/`Reflect` ops hitting a non-object receiver across ~7 features:
 
-| root cause | fails | scope | tracked as |
-|---|---|---|---|
-| **top-level `this` / global-object model** (`Object.defineProperty(this,…)` at script top level; global/eval var+func declaration binding) | ~89 | **ARCH/SENIOR** | folds into **#2726 (b)** — same structural root (top-level-`this`-as-global-object). Route to that issue's architect spec; do NOT dup. |
-| **class private-element brand check** (`Reflect.has` on non-object; private methods/generators/static-private) | ~8 | **DEV** | **#3045** (filed) |
-| **JSON.parse reviver `this`-binding** (reviver `this` must be the holder) | 4 | **DEV** | **#3046** (filed) |
-| **module namespace exotic object** (`Reflect.{has,deleteProperty,defineProperty,set,preventExtensions}` on `import * as ns`) | 10 | **SENIOR** (namespace-object representation) | cause-scoped, file on pickup |
-| **annexB `[[IsHTMLDDA]]`** (document.all emulation as `@@replace`/`@@match`) | 6 | DEFERRED (niche annexB) | note only |
-| **`$262.createRealm` cross-realm** (`create-proto-from-ctor-realm-*`; OArray undefined — realms unsupported) | 6 | DEFERRED (realm infra) | note only |
-| misc singletons (Date/Error/RegExp.prototype called-as-function, Proxy, typeof get-value, defineProperties edge) | ~5 | mixed | note only |
+| root cause                                                                                                                                 | fails | scope                                        | tracked as                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ----- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **top-level `this` / global-object model** (`Object.defineProperty(this,…)` at script top level; global/eval var+func declaration binding) | ~89   | **ARCH/SENIOR**                              | folds into **#2726 (b)** — same structural root (top-level-`this`-as-global-object). Route to that issue's architect spec; do NOT dup. |
+| **class private-element brand check** (`Reflect.has` on non-object; private methods/generators/static-private)                             | ~8    | **DEV**                                      | **#3045** (filed)                                                                                                                      |
+| **JSON.parse reviver `this`-binding** (reviver `this` must be the holder)                                                                  | 4     | **DEV**                                      | **#3046** (filed)                                                                                                                      |
+| **module namespace exotic object** (`Reflect.{has,deleteProperty,defineProperty,set,preventExtensions}` on `import * as ns`)               | 10    | **SENIOR** (namespace-object representation) | cause-scoped, file on pickup                                                                                                           |
+| **annexB `[[IsHTMLDDA]]`** (document.all emulation as `@@replace`/`@@match`)                                                               | 6     | DEFERRED (niche annexB)                      | note only                                                                                                                              |
+| **`$262.createRealm` cross-realm** (`create-proto-from-ctor-realm-*`; OArray undefined — realms unsupported)                               | 6     | DEFERRED (realm infra)                       | note only                                                                                                                              |
+| misc singletons (Date/Error/RegExp.prototype called-as-function, Proxy, typeof get-value, defineProperties edge)                           | ~5    | mixed                                        | note only                                                                                                                              |
 
 **Big finding:** ~89 of the 128 "non-object" fails share the **top-level-`this`-
 as-global-object** root cause — the SAME structural gap as the two remaining
@@ -197,3 +197,27 @@ highest-leverage item in the whole #3022 tail and is architect-gated.
   clusters (value-round-trip, array-exotic, prototype-chain) + module-namespace.
 - **ARCH-gated:** the ~89-fail top-level-`this`/global-object model → #2726 (b).
 - **DEFERRED:** annexB `[[IsHTMLDDA]]`, `$262.createRealm` realms.
+
+## Senior pickup (2026-07-09, fable-3022)
+
+Regrounded the full 570-file `definePropert{y,ies}` residual on current main
+with per-test intrinsic snapshot/restore (the process-isolation contamination
+fix) and cross-tabbed error signature × compiled-import signature. Empirical
+mechanism sizes (supersede the 2026-07-05 estimates): **Array receivers 236**,
+descriptor-reader/prototype-chain ~160, arguments receivers 57, accessor
+read-lane ~80, residual transition matrix small (most of the #3043 headline
+repros — +0/-0 SameValue, enumerable toggle, false-positive redefine — already
+pass post-#3042).
+
+- **#3116 (filed + landed this pickup):** array-exotic `[[DefineOwnProperty]]`
+  — element/length defines now write into the native vec (`__vec_set_elem` /
+  `__vec_set_len` exports + runtime `_vecDefineOwnProperty` §10.4.2), plus
+  `get/set: null` compile-time TypeError and the compile-time/runtime
+  descriptor-state veto. Cluster: 570 → 424 fails (**+146**).
+- **#3043 remains open** (claimed, fable-3022): residual matrix is now the
+  fully-static lane divergence (accessor `configurable:false→true` and
+  data→accessor on struct receivers compile away without runtime mirroring)
+  plus the non-callable-getter define-leak.
+- Next cause-scoped candidates: descriptor prototype-chain/fnctor reads
+  (~160, needs #1712 registration for function-scope ctors), accessor
+  read-lane on vec elements (~80), arguments-object exotic (~57).

@@ -1242,8 +1242,27 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // here without a TS checker. Defer those to inference from the
     // initializer — `typeNodeToIr` only fires for primitive type
     // keywords; everything else falls through to inference.
-    const annotated =
+    let annotated =
       d.type && isPrimitiveTypeNode(d.type) ? typeNodeToIr(d.type, `local ${name} of ${cx.funcName}`) : undefined;
+    // (#2856) `number[]` annotation → resolve the f64-element vec and use its
+    // struct ref as the annotated type. This is what gives an EMPTY literal
+    // initializer (`const arr: number[] = []`) the vec-typed hint
+    // `lowerArrayLiteral` needs to type its `vec.new_fixed`. Parity: the
+    // selector's `isPhase1TypeNode` accepts exactly this shape (ArrayTypeNode
+    // with a NumberKeyword element), so every claim reaches a hint here. A
+    // resolver that can't register the vec throws → clean demote to legacy.
+    if (annotated === undefined && d.type && ts.isArrayTypeNode(d.type)) {
+      if (d.type.elementType.kind !== ts.SyntaxKind.NumberKeyword) {
+        throw new Error(`ir/from-ast: array annotation on '${name}' must be number[] in ${cx.funcName}`);
+      }
+      const vec = cx.resolver?.resolveVecForElement?.({ kind: "f64" });
+      if (!vec) {
+        throw new Error(
+          `ir/from-ast: resolver cannot register vec for number[] annotation on '${name}' (${cx.funcName})`,
+        );
+      }
+      annotated = irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx });
+    }
     const hint: IrType = annotated ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
@@ -1481,7 +1500,12 @@ function lowerArrayPattern(pattern: ts.ArrayBindingPattern, source: IrValueId, c
   }
 }
 
-function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
+// #2956 L1: exported so the linear IR driver (backend/linear-integration.ts)
+// can pre-seed `calleeTypes` from ANNOTATIONS with the exact same primitive
+// mapping this builder uses for its own params (self/mutual recursion needs
+// the callee signature before the callee has built). Export is additive —
+// no behavior change.
+export function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrType {
   if (!node) throw new Error(`ir/from-ast: missing type annotation (${where})`);
   switch (node.kind) {
     case ts.SyntaxKind.NumberKeyword:
@@ -3483,6 +3507,60 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       throw new Error(`ir/from-ast: extern.call produced no result in ${cx.funcName}`);
     }
     return r;
+  }
+
+  // (#2856) `arr.push(v)` on a growable vec receiver. Rides the C2
+  // element-store helper: `__vec_elem_set_<vecTypeIdx>(recv, len, v)` writes
+  // at index == length, which is EXACTLY the legacy push semantics (grow the
+  // backing array when at capacity, store, length = idx + 1 — see
+  // src/codegen/vec-elem-set.ts). The length is read BEFORE the store.
+  // Restricted to a NON-NULL `(ref $vec)` receiver: `emitVecLen` struct-reads
+  // the receiver without a null guard, so a nullable receiver (`ref_null`,
+  // e.g. an unnarrowed param) demotes to legacy, which carries the runtime
+  // TypeError null-guard. Single-arg only (multi-arg push demotes); f64 /
+  // externref element vecs only (mirrors `lowerElementStore`).
+  {
+    const vecRecvVal = asVal(recvType);
+    if (methodName === "push" && vecRecvVal && vecRecvVal.kind === "ref") {
+      const vec = cx.resolver?.resolveVec?.(vecRecvVal);
+      if (vec) {
+        if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
+          throw new Error(
+            `ir/from-ast: .push with ${expr.arguments.length} args / spread not in IR scope (single plain arg only) (${cx.funcName})`,
+          );
+        }
+        const elem = vec.elementValType;
+        if (elem.kind !== "f64" && elem.kind !== "externref") {
+          throw new Error(`ir/from-ast: .push into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
+        }
+        // Old length — the store index. `emitVecLen` yields the f64 JS length.
+        const lenF64 = cx.builder.emitVecLen(recv);
+        const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
+        const valRaw = lowerExpr(expr.arguments[0]!, cx, irVal(elem));
+        let val: IrValueId;
+        if (elem.kind === "f64") {
+          const valTy = asVal(cx.builder.typeOf(valRaw));
+          if (valTy?.kind !== "f64") {
+            throw new Error(
+              `ir/from-ast: .push value ${describeIrType(cx.builder.typeOf(valRaw))} into f64 vec ` +
+                `not in IR scope (${cx.funcName})`,
+            );
+          }
+          val = valRaw;
+        } else {
+          val = coerceToExpectedExtern(valRaw, elem, cx, `value of .push`);
+        }
+        cx.builder.emitCall(
+          { kind: "func", name: `__vec_elem_set_${vec.vecStructTypeIdx}` },
+          [recv, lenI32, val],
+          null,
+        );
+        if (statementPosition) return null;
+        // Expression position: JS `push` returns the NEW length = old + 1.
+        const one = cx.builder.emitConst({ kind: "f64", value: 1 }, irVal({ kind: "f64" }));
+        return cx.builder.emitBinary("f64.add", lenF64, one, irVal({ kind: "f64" }));
+      }
+    }
   }
 
   if (recvType.kind !== "class") {
@@ -6040,9 +6118,6 @@ function relOperandToF64(v: IrValueId, t: IrType, cx: LowerCtx): IrValueId | nul
   return null;
 }
 
-/** Result-type hints aren't used in Phase 1 (we always know from the op). */
-export type _Unused = IrUnop;
-
 // ---------------------------------------------------------------------------
 // Closure / nested-function lowering (#1169c — IR Phase 4 Slice 3)
 // ---------------------------------------------------------------------------
@@ -6451,15 +6526,6 @@ function collectOuterWrites(fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.F
   forEachChild(body, visit);
   return writes;
 }
-
-// `closureSignatureEquals` is currently used elsewhere; keep an
-// explicit reference here so unused-export linting doesn't flag it
-// when only the lowerer consumes it.
-export const _CLOSURE_SIG_EQ_REF = closureSignatureEquals;
-
-// Reference ValType so the import isn't unused (used transitively via
-// signature param types but TS may not see it).
-export type _UnusedVal = ValType;
 
 // ---------------------------------------------------------------------------
 // Throw / try / catch / finally lowering (#1169h — IR Phase 4 Slice 9)

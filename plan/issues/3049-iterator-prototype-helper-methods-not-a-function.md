@@ -37,6 +37,7 @@ completion) — this is the built-in `%Iterator.prototype%` helper methods.
 ## Root-cause hypothesis
 
 The failing subset clusters on:
+
 - **`this-plain-iterator`** twins across every helper — calling a helper with a
   plain (non-generator) iterator receiver resolves the helper (or its inner
   `next`) to a non-function.
@@ -84,6 +85,7 @@ to the object carrying the helper methods.** It currently does not —
 `Iterator.prototype.<helper>` is `undefined` → "object is not a function".
 
 What I verified:
+
 - The 11 helpers (map/filter/take/drop/flatMap/reduce/some/find/every/forEach/
   toArray) **are implemented** in `runtime.ts` and installed by
   `_installIteratorHelperPolyfills()` (called from `buildImports`) onto `Iproto`
@@ -101,6 +103,7 @@ What I verified:
   `Object.prototype`, one level shy of (and never reaching) the helper proto.
 
 Two candidate emission sites, **neither chains to `%IteratorPrototype%`**:
+
 1. Compiled `%ArrayIteratorPrototype%` — `emitArrayIteratorPrototypeSingleton`
    (`src/codegen/array-object-proto.ts:2001`) builds it via `__new_plain_object()`
    and never sets its `[[Prototype]]` to the runtime `_getIteratorPrototype()`.
@@ -137,7 +140,7 @@ beyond this findings note.
 > history; do NOT implement from it.
 
 **Bumped `feasibility: hard` / `reasoning_effort: max` / `model: fable`.** dev-3042's
-first read ("bounded medium") is right about the *mechanism* but understates the
+first read ("bounded medium") is right about the _mechanism_ but understates the
 scope: the fix must make `getPrototypeOf(getPrototypeOf(arrayIter)) === the
 helper-bearing %IteratorPrototype%` hold **by object identity in BOTH lanes**
 (JS-host and standalone), for **four iterator kinds** (array / string / map /
@@ -185,7 +188,7 @@ resolves to a helper-less object and `<helper>` is `undefined`.
      `%ArrayIteratorPrototype%` so the runner's DOUBLE `getPrototypeOf` lands on
      the helper proto, not on `Object.prototype`). The current fallback is
      one-level (`Object.create(iterProto)`), so `getPrototypeOf(getPrototypeOf(
-     it))` overshoots — build `Object.create(Object.create(_getIteratorPrototype()))`
+it))` overshoots — build `Object.create(Object.create(_getIteratorPrototype()))`
      so the 2-hop walk lands exactly on the helper proto. dev-3042 drafted+reverted
      exactly this two-level fix in the fallback; it compiled clean but did not move
      the 27 because `[][Symbol.iterator]()` takes the `__call_@@iterator` arm, NOT
@@ -212,7 +215,7 @@ That singleton is built via `__new_plain_object()` and **never sets its
   methods — check whether one exists (grep `iterator_prototype` /
   `%IteratorPrototype%` in `src/codegen/` and `src/runtime-standalone*`); if the
   helpers are host-only today, standalone helper resolution is a **separate,
-  larger** slice — in that case scope Lane B to *chaining* to whatever standalone
+  larger** slice — in that case scope Lane B to _chaining_ to whatever standalone
   `%IteratorPrototype%` object exists (even if helper-less) so the identity graph
   is correct, and file a follow-up for standalone helper bodies. Use the same
   `__set_prototype` / `Object.setPrototypeOf` runtime the class-proto singletons
@@ -231,8 +234,8 @@ array-keyed). Whatever wrap/chain Lane A applies in `__iterator` is kind-agnosti
 ### Edge cases / regression guards
 
 - **#3013 identity assertion must still hold**: `getPrototypeOf([].values()) ===
-  getPrototypeOf([][Symbol.iterator]())` (same singleton) AND `!==
-  getPrototypeOf([1,2])` (distinct from Array.prototype). The Lane-A wrap must
+getPrototypeOf([][Symbol.iterator]())` (same singleton) AND `!==
+getPrototypeOf([1,2])` (distinct from Array.prototype). The Lane-A wrap must
   cache the `%ArrayIteratorPrototype%`-analog module-wide (one object) so all
   array iterators share it by identity — do NOT `Object.create` a fresh proto per
   `[][Symbol.iterator]()` call.
@@ -278,14 +281,17 @@ subsystem than the spec targets. Three distinct, independently-verified layers:
 
 The test262 runner injects, **at module top level**
 (`tests/test262-runner.ts:1939`):
+
 ```ts
 function Iterator(this: any): void {}
 (Iterator as any).prototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
 ```
+
 In **host/GC mode**, the module-init statement filter in
 `src/codegen/declarations.ts` (the `ts.isExpressionStatement` → `isBinaryExpression`
 arm, ~L4489–4524) **drops** a top-level `F.prototype = …` whose receiver `F` is a
 top-level function declaration:
+
 - L4496 keeps `F.prototype = …` **only for `ctx.standalone`**
   (`isFnctorPrototypeAssignTarget`).
 - L4518–4524 keeps `F.<staticprop> = …` for host/GC — but **explicitly excludes
@@ -293,13 +299,13 @@ top-level function declaration:
   `F.prototype = …` is "consumed by the compile-time fnctor-prototype lift."
 - **But that lift (`src/codegen/expressions/fnctor-prototype.ts`
   `tryCompileFnctorPrototypeAssign`, L189) is `if (!ctx.standalone) return
-  undefined` — STANDALONE-ONLY.** So in host mode nothing consumes it and the
+undefined` — STANDALONE-ONLY.** So in host mode nothing consumes it and the
   statement is dropped: **no `$__module_init` is emitted at all** for the fnctor-
   prototype form.
 
 Verified: `(F).prototype = {marker:42}` at top level → **no `$__module_init`,
 `test()` reads `undefined`** (`.tmp/probe-elide.mts`). The identical assignment
-*inside a function body* works. Consequence: the runner's `Iterator.prototype`
+_inside a function body_ works. Consequence: the runner's `Iterator.prototype`
 is never assigned; reads fall back to the auto-vivified helper-less `{}` (or
 `null`), so `Iterator.prototype.<helper>` is `undefined`/`null` →
 "object is not a function" / "Cannot read properties of null". This matches the
@@ -326,7 +332,7 @@ Independently true: the host vec fallback does a **one-level**
 `getPrototypeOf(getPrototypeOf(<arrayIter>))` overshoots to `Object.prototype`
 instead of the helper-bearing `%IteratorPrototype%`. A shared, identity-stable
 `%ArrayIteratorPrototype%` singleton (`Object.create(_getIteratorPrototype())`)
-inserted as the iterator's immediate proto fixes the *in-function* chain
+inserted as the iterator's immediate proto fixes the _in-function_ chain
 (verified: `directChain()` flips 0→1). **But this alone does NOT move the 27** —
 they never reach this runtime path because of Layers 1–2. (This is why
 dev-3042's drafted vec-fallback two-level fix "compiled clean but didn't move the
@@ -337,6 +343,7 @@ __call_@@iterator export: undefined`.)
 ### Why this is a STOP-AND-DOCUMENT (exceeds the spec)
 
 A complete host-lane fix must solve all three layers, spanning:
+
 1. `src/codegen/declarations.ts` — keep top-level `F.prototype = <expr>` in host
    `__module_init` (safe: the host lift is standalone-only, so no double-apply);
 2. the **module-init-before-`setExports`** timing (Layer 2) — the hard one. Options
@@ -367,7 +374,7 @@ documentation handoff (mirrors dev-3042's #2718).
 **Note the standalone lane (#3013) is separate and already correct** — `#3013`'s
 `emitArrayIteratorPrototypeSingleton` + compile-time `getPrototypeOf` resolution
 sidesteps Layers 1–2 entirely (no host import, no module-init throw). Extending
-standalone helper *bodies* onto that singleton (architect Lane B) remains a valid,
+standalone helper _bodies_ onto that singleton (architect Lane B) remains a valid,
 independent follow-up, but the harvested 27 are **host-lane** and gated on
 Layers 1–2.
 
@@ -391,7 +398,7 @@ All four cited sites confirmed on `origin/main` @ 52937f5:
 
 - **Layer 1 CONFIRMED.** `src/codegen/declarations.ts` top-level assignment
   filter: the `F.prototype = …` keep is `if (ctx.standalone &&
-  isFnctorPrototypeAssignTarget(ctx, expr.left))` (standalone-only), and the
+isFnctorPrototypeAssignTarget(ctx, expr.left))` (standalone-only), and the
   #2671 host/GC static-write keep **explicitly excludes** `prototype`
   (`expr.left.name.text !== "prototype"`) with the comment "consumed by the
   compile-time fnctor-prototype lift." That lift —
@@ -416,7 +423,7 @@ All four cited sites confirmed on `origin/main` @ 52937f5:
   before-`setExports` problem was already solved for the diff-test host lane by
   **#2796's `deferTopLevelInit`** — when set (and `!wasi`) the compiler
   **exports** `__module_init` and does **not** wire the `(start)` section, and
-  the host calls the exported `__module_init()` *after* `setExports`
+  the host calls the exported `__module_init()` _after_ `setExports`
   (`scripts/diff-test.ts` ~L222–230). That is dev-3049's Option C, already
   built and covered by `tests/issue-2796.test.ts`.
 - **Layer 3 CONFIRMED.** `src/runtime.ts` vec fallback (~L12524–12529) does a
@@ -435,12 +442,12 @@ primary fix.** Even if `getPrototypeOf(getPrototypeOf(x))` is folded to a host
 import returning `_getIteratorPrototype()`, the **argument** `x =
 [][Symbol.iterator]()` is still evaluated first and materialises an iterator
 via the `__iterator` host import → throws at init (Layer 2) unless the arg's
-evaluation is *elided*. Eliding a spec-observable sub-expression to dodge an
+evaluation is _elided_. Eliding a spec-observable sub-expression to dodge an
 init-time throw is a fragile, special-case compromise that only covers the
 exact `getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))` shape and leaves
-every *other* top-level host-import expression still broken. It does not solve
+every _other_ top-level host-import expression still broken. It does not solve
 the root (top-level code runs before the runtime is wired); it patches one
-syntactic shape. Keep A only as a possible micro-optimisation *after* C, never
+syntactic shape. Keep A only as a possible micro-optimisation _after_ C, never
 instead of it.
 
 **Option B — lazy/deferred vec iterator (`__iterator` returns an iterator whose
@@ -449,13 +456,13 @@ GetIterator "not iterable" throw (§7.4.2, thrown at `GetIterator` time) to
 first `IteratorStep` — an **observable timing change** that risks flipping
 negative tests that assert the throw at loop entry. (2) It is a broad semantic
 change to the single most-used iteration primitive. (3) It only fixes
-iterators; any *other* top-level host-import expression (e.g. a top-level
+iterators; any _other_ top-level host-import expression (e.g. a top-level
 `Object.getPrototypeOf`, `String.prototype` touch, struct introspection) still
 throws at init. Narrow coverage, broad risk.
 
 **Option C — run `__module_init` after `setExports` (the #1789/#2796
 mechanism). SELECTED.** It fixes the **root**: top-level code runs against a
-fully-wired runtime, which is *more* spec-correct (ES module top-level runs at
+fully-wired runtime, which is _more_ spec-correct (ES module top-level runs at
 load with all facilities present) and is exactly the model the standalone/WASI
 `_start` lane and the diff-test host lane already use. It fixes the whole class
 (every top-level host-import expression), not just iterators. And the machinery
@@ -468,6 +475,7 @@ Order matters: all three are required for the 27 to pass. Layers 1 and 3 are
 bounded and safe; Layer 2 is the scope decision.
 
 **Layer 1 fix — keep top-level `F.prototype = <expr>` in host `__module_init`.**
+
 - File: `src/codegen/declarations.ts`, the top-level assignment-statement filter
   (the `ts.isBinaryExpression` arm around L4489–4524).
 - Change: extend the #2671 host/GC static-write keep to **also** keep
@@ -477,14 +485,14 @@ bounded and safe; Layer 2 is the scope decision.
   mirroring the existing standalone keep. Either way the statement lands in
   `ctx.moduleInitStatements` so the ordinary property-write arm
   (`compileAssignment`) runs it at init.
-- **Safety (verified):** the host fnctor-prototype *lift*
+- **Safety (verified):** the host fnctor-prototype _lift_
   (`tryCompileFnctorPrototypeAssign`) is `if (!ctx.standalone) return undefined`
   — it never fires in host mode, so there is **no double-apply**. The comment
   that claims the lift consumes it is stale for host mode; fix the comment too.
 - Scope guard: restrict to `ts.isPropertyAccessExpression` with
   `ts.isIdentifier(expr.left.expression)` and
   `ctx.topLevelFunctionNames.has(name)` (same predicate the #2671 arm already
-  uses) so only `F.prototype = …` for a *top-level function* `F` is kept —
+  uses) so only `F.prototype = …` for a _top-level function_ `F` is kept —
   `obj.prototype = …` on an arbitrary receiver is unaffected.
 
 **Layer 2 fix — Option C via `deferTopLevelInit`.** Two staging choices (below).
@@ -492,6 +500,7 @@ No new compiler machinery; you are choosing where to flip the existing switch.
 
 **Layer 3 fix — two-level, identity-stable `%ArrayIteratorPrototype%` in the
 vec fallback.**
+
 - File: `src/runtime.ts` `__iterator` vec fallback (~L12524–12539).
 - Change: replace the one-level `Object.create(globalThis.Iterator.prototype)`
   with an iterator that inherits from a **module-wide cached**
@@ -525,7 +534,7 @@ Both use the already-built `deferTopLevelInit`. They differ only in blast radius
      path alone).
   2. `tests/test262-runner.ts` ~L3797 — after `setExports`, before `test()`,
      inside the **existing** try: `const mi = (instance.exports as any).__module_init;
-     if (typeof mi === "function") mi();`. (The single try/catch at L3787 already
+if (typeof mi === "function") mi();`. (The single try/catch at L3787 already
      wraps instantiate + setExports + `test()`, so a top-level throw simply moves
      from the instantiate line to this call — same catch, same negative-test
      bucketing. This is why C1's negative-test blast radius is small.)
@@ -535,8 +544,8 @@ Both use the already-built `deferTopLevelInit`. They differ only in blast radius
      rule; a mismatch would make the validator disagree with the sharded run).
   4. `tests/test262-shared.ts` ~L668–669 — after the `setExports` call, invoke
      the exported `__module_init()` the same way as (2).
-  - **Trade-off to name for the user:** C1 makes the *conformance corpus* run
-    with deferred init while a *production* host consumer still gets eager
+  - **Trade-off to name for the user:** C1 makes the _conformance corpus_ run
+    with deferred init while a _production_ host consumer still gets eager
     `(start)` init. For the 27 specifically this is defensible — the failing
     `Iterator.prototype = getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
     is a **runner-injected harness prelude**, not user code, and #2796 already
@@ -612,7 +621,7 @@ Both use the already-built `deferTopLevelInit`. They differ only in blast radius
   `Object.create` a fresh proto per `[][Symbol.iterator]()` call.
 - **Generator receivers unaffected:** Layer 3 only touches the array/vec
   fallback; generators already chain `instance → %GeneratorPrototype% →
-  _getIteratorPrototype()` (runtime.ts:418/517). Confirm a `function*(){}`
+_getIteratorPrototype()` (runtime.ts:418/517). Confirm a `function*(){}`
   iterator's `.map` still resolves.
 - **`return()` forwarding** (`drop/return-is-forwarded.js`,
   `filter/exhaustion-does-not-call-return.js`): once the helper resolves, its
@@ -641,3 +650,72 @@ Both use the already-built `deferTopLevelInit`. They differ only in blast radius
    regressions and the string/map/set `this-plain-iterator` twins.
 4. **Full `merge_group`** — C1 reshapes host init timing corpus-wide; broad-impact,
    no scoped sweep suffices. Standalone floor must stay green (Lane B untouched).
+
+## Yield measurement + execution-layer wall (2026-07-09, fable-3022)
+
+**Measured EARLY per the mirage-history caution — the prototype-chain fix yields
+only 1/24, blocked by a distinct execution-layer wall. Do NOT re-attempt as a
+prototype-chain fix alone.**
+
+### The dev-3042 prototype-chain root cause is real but insufficient
+
+The host `[][Symbol.iterator]()` (verified: routes through the `env::__iterator`
+host import → the vec-synthesis branch, runtime.ts ~13239) builds the array
+iterator as a **one-level** `Object.create(globalThis.Iterator.prototype)`. The
+spec chain is two-level (`arrayIter → %ArrayIteratorPrototype% →
+%IteratorPrototype%`, §23.1.5.2), and the runner reads the helper proto via
+`getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))` (test262-runner.ts:2001).
+One level too shallow ⇒ that walk lands on `getPrototypeOf(Iproto)` =
+`Object.prototype` (no helpers).
+
+I drafted the two-level fix (a shared `_getArrayIteratorPrototype()` middle layer
+chained to the helper-bearing proto). **Verified in isolation it works**:
+`getPrototypeOf(getPrototypeOf([1,2,3][Symbol.iterator]())).map` becomes a
+function. But the full-runner yield on the 24 codegen-signature target files was
+**1/24** (`Symbol.iterator/return-val.js` only; likely already passing).
+
+### The dominant blocker — module-global function-`prototype` assignment does not
+
+### round-trip inherited members across a function boundary
+
+Isolated the wall (probes in `.tmp`, reproduced with a plain user function too,
+so it is NOT `Iterator`-name-specific):
+
+```
+function G(){}                                              // module top level
+(G as any).prototype = getPrototypeOf(getPrototypeOf([][Symbol.iterator]()));
+export function test(): number {
+  var back = (G as any).prototype;   // back is a non-null object …
+  return typeof back.map;            // … but back.map is UNDEFINED (returns 2)
+}
+```
+
+- Assign + read **inside the same function** ⇒ round-trips (back.map is a
+  function; `back === src`).
+- Assign at **module top level**, read **in a different function** ⇒ `back` is
+  non-null but every INHERITED member (`.map`, from `back`'s own prototype
+  chain) reads `undefined`.
+
+So the runner's harness shim itself (`function Iterator(){}; Iterator.prototype =
+<helperProto>` at preamble top level, read inside the compiled `test()`) loses
+the helper proto's chain. This is a compiled \*\*function-`prototype`-field storage
+
+- externref-object member-read** issue (the stored JS object's prototype chain is
+  not consulted on a cross-function `.member` read — smells like an
+  externref→anyref→externref boxing / struct-field round-trip that drops the JS
+  identity, #679 territory), **not\*\* the Iterator-helper surface.
+
+### Recommendation
+
+- The prototype-chain fix is correct and spec-aligned but yields ~+0 alone and
+  carries regression risk on the hot array-iterator path (for-of / spread /
+  destructuring all go through `__iterator`), so it is **not** worth shipping in
+  isolation. Reverted.
+- The real gate is the **module-global function-`prototype` assignment /
+  cross-function inherited-member read** wall. File/route THAT as the blocker
+  (execution-layer, externref-prototype-storage), then the chain fix + it
+  together unlock the cluster. Until then #3049 stays blocked on the execution
+  layer — matches the prior +1-not-27 handback.
+
+`status: ready` kept (not claiming further); the chain-fix draft is documented
+above for whoever resumes after the assignment-wall lands.

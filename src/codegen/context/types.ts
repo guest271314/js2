@@ -324,6 +324,29 @@ export interface NativeGeneratorInfo {
    * without an iterable-delegation site).
    */
   iterableDelegationSlots?: { fieldIdx: number }[];
+  /**
+   * (#3050) Field index of the i32 pending-completion kind (0 none / 1 return /
+   * 2 throw) consumed by a state-lowered finally's exit router. Present only
+   * when the generator has a yielding finally (appended LAST in the state
+   * struct so all other field indices are unaffected). The completion payloads
+   * ride the existing `abrupt` (return value) / `error` (thrown value) fields.
+   */
+  pendingFieldIdx?: number;
+  /**
+   * (#3050) Capturing NESTED generator: number of leading synthetic capture
+   * params preceding the user params in `paramNames`/`paramTypes` (the state
+   * struct stores them as ordinary `param_*` fields). The factory's wasm
+   * signature carries them first — call sites already prepend them via
+   * `ctx.nestedFuncCaptures`, identical to a lifted capturing function.
+   */
+  leadingCaptureCount?: number;
+  /**
+   * (#3050) The subset of leading captures that ride as ref CELLS (mutable /
+   * already-boxed captures). The resume function registers each in its
+   * `boxedCaptures` so identifier reads/writes inside resume states deref the
+   * shared cell — writes propagate to the enclosing frame.
+   */
+  leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
@@ -375,6 +398,36 @@ export interface FunctionContext {
   generatorReturnDepth?: number;
   /** Map from variable name → ref cell info (for mutable closure captures) */
   boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /**
+   * (#3121) Names whose local slot was PROMOTED to a module global by
+   * `promoteAccessorCapturesToGlobals` (object-literal method / accessor /
+   * class-body capture). The promotion deletes the name from `localMap` so
+   * every subsequent reference in this function resolves through the promoted
+   * global (`ctx.capturedGlobals` / `ctx.capturedBoxGlobals`) — the SAME store
+   * the method body reads and writes. The orphaned slot still exists in
+   * `fctx.locals`, so the #1177 block-shadow rescan in `compileArrowAsClosure`
+   * must NOT resurrect it: capturing the stale slot forks the binding into a
+   * second store (a fresh ref cell over a dead local) that the method's
+   * global-routed writes never reach. Recorded per-fctx (not by bare name on
+   * ctx) so an unrelated same-named local in another function is unaffected.
+   */
+  promotedCaptureNames?: Set<string>;
+  /**
+   * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
+   * (closures.ts materializes each capture from `__self` field `i+1` into a
+   * named local in the body prologue). The async drive lane compiles the body
+   * in a FRESH resume FunctionContext whose frame captured only the closure's
+   * PARAMS — so the resume prologue must re-materialize these capture locals
+   * from the frame-captured `__self` before any body statement compiles.
+   * `castToTypeIdx` is set when `__self`'s param type is the wrapper base
+   * struct (needs a `ref.cast` to the concrete capture struct first).
+   */
+  selfCaptureLayout?: {
+    selfParamName: string;
+    structTypeIdx: number;
+    castToTypeIdx: number | null;
+    entries: { name: string; fieldIdx: number; localType: ValType }[];
+  };
   /**
    * (#2976) Per-activation memo locals for capture-carrying nested function
    * declarations referenced as VALUES: funcName → local holding the
@@ -982,6 +1035,22 @@ export interface CodegenContext {
    */
   usesArrayHoles: boolean;
   /**
+   * (#2001 S2 / merge-group park on PR #2832) Set by the same
+   * `scanForArrayHoles` pre-scan when the module WRITES an index property onto
+   * `Array.prototype` (`Object.defineProperty(Array.prototype, "0", …)`,
+   * `Array.prototype[0] = …`, `Reflect.defineProperty(Array.prototype, …)`).
+   * §23.1.3.* HOF visit-skips are keyed on `HasProperty(O, k)` — which is TRUE
+   * for a hole whose index is inherited from `Array.prototype` — but the flat
+   * WasmGC vec cannot model prototype-index inheritance. When this flag is set
+   * the module-wide HOF hole visit-skip (`shouldHoleSkip`) is disabled and
+   * holes fall back to the S1 visit-with-`undefined` behavior, which matches
+   * the observable result for the dominant test262 shape (inherited accessor
+   * without a getter ⇒ [[Get]] yields `undefined`). Clear — the common case —
+   * keeps the spec-correct skip. See the regressed trio
+   * `built-ins/Array/prototype/{every,filter,some}/*-c-i-22.js`.
+   */
+  arrayProtoIndexDirty: boolean;
+  /**
    * (#2083) Set true the first time `getOrRegisterVecType` is asked for a vec
    * type from a genuine usage site (an array literal, array method, for-of over
    * an array, TypedArray, etc.) — i.e. the module materialises at least one
@@ -1186,6 +1255,17 @@ export interface CodegenContext {
    */
   proxyDispatchReserved?: boolean;
   /**
+   * (#3125) Set when the native-Promise thenable-assimilation substrate
+   * reserved its `__promise_has_callable_then` predicate placeholder
+   * (`ensurePromiseThenableSubstrate`, async-scheduler.ts). The predicate needs
+   * the FULL closed-struct + closure shape sets, which are only complete at
+   * FINALIZE, so the body is filled by `fillPromiseThenableHelpers`
+   * (closed-method-dispatch.ts) — same reserve-then-fill pattern as
+   * `applyClosureReserved` (#1719). Only set under standalone/wasi, so the
+   * GC/host path stays byte-identical.
+   */
+  promiseThenableReserved?: boolean;
+  /**
    * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
    * was reserved at an any-receiver call site (standalone/wasi). The placeholder
    * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
@@ -1235,6 +1315,22 @@ export interface CodegenContext {
    * `fillMemberGetDispatch`; populated in BOTH gc/host and standalone.
    */
   memberGetDispatchNames?: Set<string>;
+  /**
+   * (#2963) Class-METHOD arms for the `__get_member_<name>` dispatcher:
+   * propName → the receiver-typed arms that answer the canonical method-value
+   * singleton (the SAME per-`<Owner>_<method>` cache global the typed
+   * `C.prototype.m` read mints via `emitCachedMethodClosureAccess`), so a
+   * dynamic `any`-receiver read `c.m` is `===` the typed read. Recorded at
+   * reserve time (`ensureMethodArmsForProp` — the singleton machinery must be
+   * minted at compile time, never at finalize); consumed by
+   * `fillMemberGetDispatch`, which re-resolves the trampoline/cache-global
+   * indices BY NAME (shift-safe). Arms are children-first so an override's
+   * arm shadows the superclass arm under WasmGC subtyping.
+   */
+  memberGetMethodArms?: Map<
+    string,
+    { receiverStructTypeIdx: number; methodFullName: string; closureStructTypeIdx: number; depth: number }[]
+  >;
   /**
    * (#2831) Per-target-vec-type host-externref → wasm-vec materializer helpers.
    * Maps a vec struct typeIdx (`$__vec_*`) → the reserved helper function NAME
@@ -1431,6 +1527,47 @@ export interface CodegenContext {
   nativeGeneratorResultTypeIdx: number;
   /** Function declarations lowered to Wasm-native generator state machines (#680). */
   nativeGenerators: Map<string, NativeGeneratorInfo>;
+  /**
+   * (#2865) Async-generator PRODUCERS driven on the async-frame machine, keyed
+   * by sanitized stem (the `__async_gen_next_<stem>` suffix). Populated by
+   * `emitAsyncGenerator`; consumed by (a) the `.next()` runtime dispatch chain
+   * in calls.ts and (b) the stem-collision guard in `isAsyncGenDriveCandidate`
+   * (two same-named gens in different scopes would otherwise share one
+   * `__async_gen_next_<stem>` helper typed for the FIRST gen's frame — a
+   * guaranteed `ref.cast` trap for the second).
+   */
+  asyncGenProducers?: Map<string, { stateTypeIdx: number; nextHelperName: string; decl: ts.Node }>;
+  /**
+   * (#2865) True once ANY async generator was emitted on the LEGACY buffer path
+   * (`__create_async_generator`). The `.next()` runtime dispatch chain uses this
+   * to decide its miss arm: with legacy receivers possible it must fall back to
+   * the host `__gen_next`; in an all-driven module it emits a plain null instead
+   * — referencing `__gen_next` there would force an otherwise-dead host import
+   * and break the zero-import (host-free) contract.
+   */
+  asyncGenLegacyBufferEmitted?: boolean;
+  /**
+   * (#3132) True once ANY generator (sync OR async) was emitted on the LEGACY
+   * eager-buffer path (`__create_generator` / `__create_async_generator`) —
+   * the superset of {@link asyncGenLegacyBufferEmitted}. The native
+   * `__iterator` HOSTGEN arm (#3075, iterator-native.ts) keys on this: it must
+   * fill exactly when a HOST generator object can exist at runtime. Keying on
+   * funcMap import presence instead (the eager `__gen_*` bundle registration)
+   * would PIN the whole bundle as referenced imports in an all-driven module,
+   * breaking the zero-import host-free contract for modules whose every
+   * generator lowered natively.
+   */
+  legacyGenBufferEmitted?: boolean;
+  /**
+   * (#2980 conservative Promise-lane fallback) True when the module SOURCE has
+   * ANY async generator, set in the pre-body `collectDeclarations` walk. On the
+   * widened-standalone measure lane, `widenAsyncGenFallback` (async-scheduler.ts)
+   * keeps BOTH carrier gates OFF for such a module — a native `$Promise` fed into
+   * the gen's legacy `__gen_*` buffer / host `.then` over `__gen_next` mishandles
+   * it (the 07-09 async-generator −4). Pre-body so a `Promise.reject` INSIDE the
+   * gen sees it. Read only under the measure — wasi + gc/host stay byte-identical.
+   */
+  moduleHasAsyncGen?: boolean;
   /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,

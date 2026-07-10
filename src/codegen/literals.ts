@@ -28,6 +28,7 @@ import {
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitStandaloneIterableMaterialize } from "./iterator-native.js"; // (#3100 S5)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
@@ -78,6 +79,7 @@ import {
   S5C_STRUCT_ACCESSOR_CLOSURE,
   buildAccessorClosure,
   ensureStructAccessorGlobal,
+  isDefinePropertyReceiverLiteral,
 } from "./struct-accessor-closure.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
@@ -319,10 +321,45 @@ export function compileObjectLiteralAsExternref(
       fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "call", funcIdx: setIdx });
     }
-    // MethodDeclaration is not reached here for the any-context route — object
-    // literals with methods take compileObjectLiteralWithAccessors (accessors) or
-    // emitObjectMethodAsClosure on the struct path. A plain method in an
-    // any-context literal falls through (skipped) — covered by S2 follow-on.
+    // (#3099) Method shorthand (`{ m() {…} }`) — materialize the method as a REAL
+    // runtime own property so runtime-keyed consumers (`__extern_get`,
+    // `Object.keys`, the `__proxy_*` trap reads of a shorthand handler, spread,
+    // for-in) find it, exactly like the arrow-property arm above. Previously this
+    // fell through (skipped), so a shorthand handler's traps silently forwarded
+    // and `Object.keys`/`o[k]` missed the method. Mirrors the MethodDeclaration
+    // arm in `compileObjectLiteralWithAccessors` (below): compile the method as a
+    // closure via `emitObjectLiteralMethodFn` (standalone → host-free closure;
+    // gc/host → `__make_*_callback` bridge) and store it with `__extern_set`. Only
+    // PLAIN identifier/string/numeric names are handled here — computed/symbol
+    // method keys route to the accessor/host path upstream, matching the
+    // data-property arm above (which skips `keyText === undefined`).
+    else if (ts.isMethodDeclaration(prop)) {
+      let methodName: string | undefined;
+      if (ts.isIdentifier(prop.name)) methodName = prop.name.text;
+      else if (ts.isStringLiteral(prop.name)) methodName = prop.name.text;
+      // Canonicalize a numeric method key (`{ 0x10() {} }` → "16") to match the
+      // data-property arm's `resolvePropertyNameText`, so store and read agree.
+      else if (ts.isNumericLiteral(prop.name)) methodName = String(Number(prop.name.text));
+      if (methodName === undefined) continue; // computed/symbol key — handled upstream
+      const setIdx = ensureLateImport(
+        ctx,
+        "__extern_set",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (setIdx === undefined) continue;
+      // Stack: [obj, key, closure] → __extern_set(obj, key, value).
+      addStringConstantGlobal(ctx, methodName);
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+      const ok = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression);
+      // On decline (e.g. generator/async shorthand `compileArrowAsClosure`
+      // rejects — see issue note 2), store `undefined` to keep the stack balanced,
+      // matching the sibling arm's `ref.null.extern` fallback.
+      if (!ok) fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "call", funcIdx: setIdx });
+    }
   }
 
   fctx.body.push({ op: "local.get", index: objLocal });
@@ -1114,7 +1151,9 @@ export function compileObjectLiteral(
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
-    if (isAnyContext || isPureStringIndexEmpty) {
+    // (#3076) defineProperty({}) receiver → open $Object (standalone/wasi;
+    // rationale in isDefinePropertyReceiverLiteral, struct-accessor-closure.ts).
+    if (isAnyContext || isPureStringIndexEmpty || isDefinePropertyReceiverLiteral(ctx, expr)) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
@@ -1158,13 +1197,27 @@ export function compileObjectLiteral(
     ctx.standalone &&
     expr.properties.length > 0 &&
     !ts.isParameter(expr.parent) &&
-    // only data props / spreads we can build onto a $Object (no accessor /
-    // method / mixed shapes that need the struct or host accessor path).
+    // only data props / spreads / plain-named method shorthand we can build onto
+    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
+    // host accessor path). (#3099) Plain-named method shorthand is now buildable
+    // here — compileObjectLiteralAsExternref materializes it as a runtime own
+    // property closure — so a method-bearing any-context literal (`const h: any =
+    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
+    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
+    // whose method exists only in the compile-time member table.
     expr.properties.every(
-      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+      (p) =>
+        ts.isPropertyAssignment(p) ||
+        ts.isShorthandPropertyAssignment(p) ||
+        ts.isSpreadAssignment(p) ||
+        isPlainNamedMethodDeclaration(p),
     ) &&
-    // and no computed/symbol keys (resolvePropertyNameText returns undefined).
-    expr.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
+    // check return undefined/false for those).
+    expr.properties.every(
+      (p) =>
+        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
+    )
   ) {
     const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
     // Require an EXPLICIT any / unknown / `object` contextual type to divert to
@@ -1437,6 +1490,21 @@ export function resolveConstantExpression(ctx: CodegenContext, expr: ts.Expressi
   }
 
   return undefined;
+}
+
+/**
+ * (#3099) True for a method-shorthand property with a PLAIN compile-time key
+ * (`m() {}`, `"m"() {}`, `0() {}`) — the shapes `compileObjectLiteralAsExternref`
+ * materializes as a runtime own-property closure. Computed / well-known-symbol
+ * method keys (`[Symbol.iterator]() {}`, `[expr]() {}`) return false so they keep
+ * routing to the accessor / host / struct path upstream, which handles the
+ * Symbol-boxing those require.
+ */
+export function isPlainNamedMethodDeclaration(prop: ts.ObjectLiteralElementLike): boolean {
+  return (
+    ts.isMethodDeclaration(prop) &&
+    (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name) || ts.isNumericLiteral(prop.name))
+  );
 }
 
 /**
@@ -2795,6 +2863,9 @@ export function compileObjectLiteralForStruct(
 
         // Return __create_generator or __create_async_generator depending on async flag
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
+        // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+        if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
+        ctx.legacyGenBufferEmitted = true; // (#3132) sync OR async legacy buffer emitted
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         methodFctx.body.push({ op: "local.get", index: bufferLocal });
         methodFctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -3727,6 +3798,9 @@ export function compileArrayLiteral(
         fctx.body.push({ op: "local.set", index: externLocal });
         const matVecInfo = getVecInfo(ctx, vecTypeIdx);
         if (!matVecInfo) continue;
+        // (#3100 S5) Standalone: protocol-materialize FIRST (custom-iterable
+        // drain / indexable passthrough) so the indexed reads below stay right.
+        emitStandaloneIterableMaterialize(ctx, fctx, externLocal);
         const matInstrs = buildVecFromExternref(ctx, fctx, externLocal, vecTypeIdx, matVecInfo);
         for (const instr of matInstrs) fctx.body.push(instr);
         const srcLocal = allocLocal(fctx, `__spread_mat_${fctx.locals.length}`, {

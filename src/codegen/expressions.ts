@@ -18,6 +18,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
+  getDrainFuncIdxForWasiStart,
   getOrRegisterPromiseType,
   isStandalonePromiseActive,
   emitDrainMicrotasks,
@@ -63,7 +64,7 @@ import { compileConditionalExpression, compileYieldExpression } from "./expressi
 import { compileArrowFunction } from "./closures.js";
 
 // Property access + binary ops (used inside compileExpressionInner)
-import { compileBinaryExpression } from "./binary-ops.js";
+import { brandBooleanBinaryResult, compileBinaryExpression } from "./binary-ops.js";
 import { compileArrayLiteral, compileObjectLiteral } from "./literals.js";
 import { compileElementAccess, compilePropertyAccess, maybeWrapAnyReadEqualityCarrier } from "./property-access.js";
 import { compileTaggedTemplateExpression, compileTemplateExpression } from "./string-ops.js";
@@ -1215,7 +1216,7 @@ function compileExpressionInner(
         return compileHostInstanceOf(ctx, fctx, expr);
       }
     }
-    return compileBinaryExpression(ctx, fctx, expr);
+    return brandBooleanBinaryResult(expr.operatorToken.kind, compileBinaryExpression(ctx, fctx, expr));
   }
 
   if (ts.isTypeOfExpression(expr)) {
@@ -1244,10 +1245,20 @@ function compileExpressionInner(
     if (ts.isIdentifier(expr.expression) && expr.expression.text === "__drain_microtasks") {
       // Gate on the native-`$Promise` CARRIER (not merely `isAsyncDriveActive`):
       // emit the real drain only where the drive layer actually produces native
-      // promises. With the carrier `wasi`-only today, `--target standalone` and
-      // the gc lane get a void no-op (no microtask infra registered, output
-      // unchanged); the #2895-1d carrier re-widen auto-activates it for standalone.
-      if (isStandalonePromiseActive(ctx)) emitDrainMicrotasks(ctx, fctx);
+      // promises. With the carrier `wasi`-only today the gc lane gets a void
+      // no-op (no microtask infra registered, output unchanged).
+      //
+      // (#2865) `--target standalone` addendum: the async-GENERATOR drive is now
+      // active under standalone (carrier-independent — its promises are minted
+      // by `__async_gen_next_*`), so when THIS module has already registered the
+      // native microtask queue, emit the real drain too. Modules with no driven
+      // machinery keep the byte-identical no-op (`getDrainFuncIdxForWasiStart`
+      // is null when the queue was never registered). Function bodies compile in
+      // source order, so a harness-appended `__drain_microtasks()` call compiles
+      // after every producer/consumer registration.
+      if (isStandalonePromiseActive(ctx) || getDrainFuncIdxForWasiStart(ctx) !== null) {
+        emitDrainMicrotasks(ctx, fctx);
+      }
       return VOID_RESULT;
     }
     const callStart = fctx.body.length;
