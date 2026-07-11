@@ -15,6 +15,8 @@ language_feature: builtins
 goal: standalone-mode
 related: [2963, 3006, 2984, 2999]
 origin: "task #55 identity-substrate tail re-measured on current main (2026-07-10) — the live remainder after #3006/#2965/#2988 landed"
+loc-budget-allow:
+  - src/codegen/property-access.ts
 ---
 
 # #3133 — plain-object/array `.constructor` reads undefined standalone
