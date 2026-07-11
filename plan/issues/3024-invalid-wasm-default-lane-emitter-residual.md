@@ -4,7 +4,7 @@ title: "codegen: invalid Wasm binary emission residual — default (JS-host) lan
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-04
+updated: 2026-07-11
 priority: high
 horizon: m
 feasibility: medium
@@ -16,6 +16,9 @@ goal: correctness
 test262_category: language/expressions/object/dstr, built-ins/AsyncFromSyncIteratorPrototype, language/expressions/in
 test262_ce: 131
 related: []
+loc-budget-allow:
+  - src/codegen/expressions/unary-updates.ts
+  - src/codegen/type-coercion.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
@@ -31,14 +34,14 @@ several `standalone-invalid-wasm-*` issues already tracked (#2039, #2878,
 
 ## Breakdown by validator error
 
-| reason | count |
-|---|--:|
-| `call[N]` expected `(ref null T)`, found other | 14 |
-| `struct.new` — not enough args | 11 |
-| `local.set` expected `(ref null T)` | 7 |
-| `fN.ne`/`fN.trunc` expected `fN`, found `externref` | 13 (7+6) |
-| `array.set` type error inside `__vec_from_extern` | (part of remainder) |
-| other/remainder | ~76 |
+| reason                                              |               count |
+| --------------------------------------------------- | ------------------: |
+| `call[N]` expected `(ref null T)`, found other      |                  14 |
+| `struct.new` — not enough args                      |                  11 |
+| `local.set` expected `(ref null T)`                 |                   7 |
+| `fN.ne`/`fN.trunc` expected `fN`, found `externref` |            13 (7+6) |
+| `array.set` type error inside `__vec_from_extern`   | (part of remainder) |
+| other/remainder                                     |                 ~76 |
 
 Failing function names cluster around `test` (64 — top-level test body),
 `testCompoundAssignment` (11), `__closure_*` (async-gen closures),
@@ -84,21 +87,28 @@ by shared mechanism, the **`fN.ne`/`fN.trunc` expected fN found externref** rows
 13). Verified on default `gc` lane (`compile(src, {})`, `WebAssembly.compile`).
 
 ### Minimal repro (default gc lane → invalid Wasm)
+
 ```ts
-export function test(): number { var x = 3; x = x * eval("var x = 2;"); return x; }
+export function test(): number {
+  var x = 3;
+  x = x * eval("var x = 2;");
+  return x;
+}
 // → f64.mul[0] expected type f64, found local.tee of type externref
 ```
+
 `x *= eval("var x = 2;")` fails identically (compound-assign desugars to `x = x * …`).
 
 ### Discriminators (why the bucket is narrow — all verified)
-| variant | result |
-|---|---|
+
+| variant                                                 | result      |
+| ------------------------------------------------------- | ----------- |
 | `x * eval("var x = 2;")` (same-name var-declaring eval) | **INVALID** |
-| `x * eval("var y = 2;")` (different name) | VALID |
-| `x * eval("2")` (eval, no var-decl) | VALID |
-| `x += eval("var x = 2;")` (`+` / `+=`) | VALID |
-| `eval("var x = 2;"); x *= 4;` (eval as separate stmt) | VALID |
-| `x * e()` where `e():any` (any RHS, no eval) | VALID |
+| `x * eval("var y = 2;")` (different name)               | VALID       |
+| `x * eval("2")` (eval, no var-decl)                     | VALID       |
+| `x += eval("var x = 2;")` (`+` / `+=`)                  | VALID       |
+| `eval("var x = 2;"); x *= 4;` (eval as separate stmt)   | VALID       |
+| `x * e()` where `e():any` (any RHS, no eval)            | VALID       |
 
 So the trigger is precisely: a **non-strict direct `eval` that declares a `var` of
 the SAME name** as a numeric local used as an operand of a **numeric-only**
@@ -107,6 +117,7 @@ string-or-number lowering coerces the operand); a separate-statement eval is
 immune (only the operand of the SAME expression is mis-typed).
 
 ### Root cause (representation vs static-type DESYNC)
+
 `eval("var x = …")` promotes the binding `x`'s **slot** to `externref` (the
 dynamic / eval-reachable representation, so the eval can read/redefine it), while
 the TS checker still types `x` as `number`. The numeric-operator codegen emits a
@@ -115,13 +126,14 @@ raw `local.get`/`local.tee` of the externref slot but treats the operand as `f64
 `f64.mul`/`f64.ne`/… directly on an externref → `expected fN, found externref`.
 
 ### Fix LOCATION (verified by elimination — turnkey)
+
 - **NOT `compileBinaryNumeric`** (binary-ops.ts ~156): it `return null`s on the
   `any` guard (L169) because the eval RHS is typed `any`, so the multiply is NOT
   emitted there. I applied the slot-type-trust fix there and it did **not** change
   the repro — confirming the emit is elsewhere. (Reverted; do not re-attempt there.)
 - **The emit is in the general `compileBinaryExpression`** (binary-ops.ts ~254,
   the mixed `number × any` arithmetic path — note the pre-existing "the receiver
-  `id` is typed `number`/`any`, so the operand's *TS* type…" desync comment at
+  `id` is typed `number`/`any`, so the operand's _TS_ type…" desync comment at
   ~L1141). The fix mirrors the **`in`-operator precedent** (binary-ops.ts
   ~L605-618, "Trust the ACTUAL slot type: if the receiver is an identifier whose
   local slot is externref/anyref…"): before emitting the numeric op, if an
@@ -130,6 +142,7 @@ raw `local.get`/`local.tee` of the externref slot but treats the operand as `f64
   `externref → f64` coercion (`coerceType(…, {kind:"f64"}, "number")`).
 
 ### Blast radius (why this is banked, not landed, at 4% budget)
+
 This is a **shared desync class**, not one operator: the same "static type says
 `number`, slot is `externref` (eval-promoted / dynamically boxed)" mismatch is the
 likely root of the issue's other rows — `fN.ne`/`fN.trunc` externref (13),
@@ -141,6 +154,7 @@ budget. Banked as a turnkey next step; the `in`-operator precedent makes the
 localized `compileBinaryExpression` fix low-risk for a fresh window.
 
 ### Not started (roll forward)
+
 - The `__vec_from_extern_*` `array.set` bucket and async-gen `__closure_*` buckets
   (issue's approach steps 2–3) are un-investigated here.
 
@@ -152,6 +166,7 @@ localized `compileBinaryExpression` fix low-risk for a fresh window.
 numeric-operator eval sub-cluster (the `x op eval("var x = …")` shape).
 
 ### The banked "trust slot type at the numeric path" fix is UNSAFE — disproven
+
 The sr-interp banked plan (mirror the `in`-operator precedent: at the numeric
 emit, if an identifier operand's slot is externref, coerce) **cannot work as
 written**. Instrumentation on current `main` shows both the failing case
@@ -163,7 +178,9 @@ by the time the op emits. So slot-kind + reported-type at the emit point does
 `compileIdentifier` emits for a `number`-narrowed externref local.
 
 ### True root cause (verified by WAT diff + `compileIdentifierCore` instrument)
+
 It is a **timing / mid-expression slot-promotion** bug, not a numeric-path bug:
+
 1. `x` starts as an `f64` local. In `x * eval("var x = 2;")`, the LEFT operand
    `x` compiles first → emits a raw `local.get` of the f64 slot, no unbox.
 2. The RIGHT operand `eval("var x = 2;")` is a constant string, so
@@ -177,10 +194,12 @@ It is a **timing / mid-expression slot-promotion** bug, not a numeric-path bug:
    externref slot) are both invalidated.
 
 ### The safe fix (byte-inert, proven)
+
 Detect the **primitive→externref slot flip across operand compilation** by
 snapshotting the identifier operand's slot kind before compiling and comparing
 after — a flip only ever happens on this eval-redeclaration path, so ordinary
 code is untouched.
+
 - `src/codegen/binary-ops.ts` (`compileBinaryExpression`): snapshot
   `leftSlotBefore`/`rightSlotBefore`; if an operand flipped primitive→externref,
   re-label its type `externref` so the existing numeric externref-unbox path
@@ -199,6 +218,7 @@ loops, strings, objects, any, bitwise, for-of) is **byte-identical** (sha256) to
 `issue-2045` suites (38 tests) pass.
 
 ### Still open (roll forward — NOT this PR)
+
 - `{} << 0` / non-object numeric operands (`private-field-rhs-non-object.js`) —
   a DISTINCT root cause (object left operand of a shift, no eval involved).
 - `__vec_from_extern_*` `array.set`, async-gen `__closure_*`, `struct.new` arg
@@ -215,6 +235,7 @@ pattern with an object-literal default, e.g.
 `const { w: { x, y, z } = { x: 4, y: 5, z: 6 } } = { w: { x: undefined, z: 7 } }`.
 
 ### Root cause (orphaned buffer misses the field-pad patch — verified by instrument)
+
 An anonymous struct registered for the RHS (or param OUTER-default) **sub-object**
 `{ x, z }` (2 fields) is later **grown** to 3 fields by the nested pattern's
 DEFAULT literal `{ x, y, z }`: both resolve to the SAME `__anon_N`, and when the
@@ -234,9 +255,11 @@ Same bug **class** as the #2503 / #2158 / #779d param-branch late-shift fixes, b
 for the field-pad patch and for the **outer** destructuring/param-default body.
 
 ### Fix (register the orphaned body in `ctx.liveBodies` for the destructure window)
+
 Byte-inert, mirrors the existing `liveBodies` precedents. Three call-sites, each
 registering the current (outer-materialization-holding) `fctx.body`/`liftedFctx.body`
 around the destructure that compiles the nested default, then removing it:
+
 - `src/codegen/statements/destructuring.ts` (`compileObjectDestructuring`) — the
   variable-declaration path (`const/let/var/for` object destructuring).
 - `src/codegen/function-body.ts` — top-level function-declaration params.
@@ -245,6 +268,7 @@ around the destructure that compiles the nested default, then removing it:
   `dflt-obj-ptrn-prop-obj` cases, which route through `compileNestedFunctionDeclaration`).
 
 ### Proofs
+
 - Repro + discriminators VALIDATE (`WebAssembly.compile`): `x`-only, `default-fires`,
   `full-object-bypass` all VALID; the `rhs-has-all3` / `default-2fields` controls
   were already valid and stay valid.
@@ -263,12 +287,13 @@ around the destructure that compiles the nested default, then removing it:
   the new `tests/issue-3024.test.ts` (4 tests).
 
 ### Still open (roll forward — NOT this PR)
+
 - The remaining ~104 default-lane invalid-Wasm files are scattered across ~40
   distinct signatures (mostly singletons): `f64.local.tee`/`externref.local.get`
   numeric/eval residue, `__cb_0` / `Parent_new` / iterator-close shapes, the
   `Array.from` source-object-iterator pair, `class super in-static-methods`,
   `AsyncFromSyncIteratorPrototype`. These are independent root causes tracked under
-  this same issue; this PR clears the largest *concentrated* remaining cluster only.
+  this same issue; this PR clears the largest _concentrated_ remaining cluster only.
 
 ---
 
@@ -278,6 +303,7 @@ Re-harvested the 214 stale-cache invalid-Wasm candidates against **current
 `origin/main`** via `runTest262File` (default gc lane, oracle path). **The stale
 cache badly overstates** — the two biggest cache clusters are already fixed on
 main and must NOT be re-chased:
+
 - `extern.convert_any expected shared anyref, found array.get` (cache 53) — now
   mostly **Temporal `skip`** (not a real default-lane floor loss).
 - `struct.new expected f#, found ref.as_non_null of type (ref N)` (cache 34) — the
@@ -285,36 +311,41 @@ main and must NOT be re-chased:
   **compile validly** (now `pass` or plain oracle-fail), cleared by #2666 + follow-ons.
 
 ### Actual current-main residual: **102 files across ~40 signatures, largest 7**
+
 No concentrated cheap slice remains. Top real signatures (function `test` dominates, 54):
 
-| reason (numbers normalised) | count |
-|---|--:|
-| `call[#] expected (ref null #)` (loose group, mixed root causes) | 12 |
-| `fN.ne expected fN, found local.tee of type externref` | 7 |
-| `array.set expected i#, found call of externref` | 4 |
-| `array.set expected externref, found local.get of f#` | 4 |
-| `call expected fN, found if of (ref null #)` | 4 |
-| `struct.set expected (ref null #)` | 4 |
-| `call expected externref, found ref.func of (ref #)` | 4 |
-| `type error in fallthru (expected externref, got (ref null #))` | 4 |
-| `call expected externref, found fN.mul of fN` | 4 |
-| everything else | ≤3 each (mostly singletons) |
+| reason (numbers normalised)                                      |                       count |
+| ---------------------------------------------------------------- | --------------------------: |
+| `call[#] expected (ref null #)` (loose group, mixed root causes) |                          12 |
+| `fN.ne expected fN, found local.tee of type externref`           |                           7 |
+| `array.set expected i#, found call of externref`                 |                           4 |
+| `array.set expected externref, found local.get of f#`            |                           4 |
+| `call expected fN, found if of (ref null #)`                     |                           4 |
+| `struct.set expected (ref null #)`                               |                           4 |
+| `call expected externref, found ref.func of (ref #)`             |                           4 |
+| `type error in fallthru (expected externref, got (ref null #))`  |                           4 |
+| `call expected externref, found fN.mul of fN`                    |                           4 |
+| everything else                                                  | ≤3 each (mostly singletons) |
 
 ### The largest real cluster (`fN.ne`, 7) is the #2657 family — CROSS-STATEMENT variant
+
 All 7 are `language/line-terminators/S7.3_A7_T1..T7`. Despite the `line-terminators`
 name, the trigger is the **eval-var-promotion desync of #2657**, in the variant
 #2657 explicitly left open ("separate-statement eval → thought immune"):
 
 Minimal repro (default gc lane → INVALID; `f64.ne[0] expected f64, found local.tee externref`):
+
 ```ts
-function test(){
-  var y=2,z=3;
-  var x=y+z;
-  if (x !== 5) throw 1;      // fN.ne read of x's slot emitted HERE (f64)
-  eval("var x = y+z; r=x;");  // LATER stmt: inlined var x re-decl flips x slot f64→externref
+function test() {
+  var y = 2,
+    z = 3;
+  var x = y + z;
+  if (x !== 5) throw 1; // fN.ne read of x's slot emitted HERE (f64)
+  eval("var x = y+z; r=x;"); // LATER stmt: inlined var x re-decl flips x slot f64→externref
 }
 test();
 ```
+
 Discriminators (verified): plain `var x` redeclaration (no eval) → VALID; eval with
 no prior `var x`+`x!==5` → VALID; top-level (unwrapped) → VALID (only fails inside the
 harness `test()` fn, where `x` is a function local). So the precise trigger is: a
@@ -324,17 +355,18 @@ harness `test()` fn, where `x` is a function local). So the precise trigger is: 
 **retroactively invalidating the already-emitted f64 read in the earlier statement**.
 
 ### Why banked, not landed (blast radius; no bounded byte-inert slice exists)
+
 #2657's landed fix is a **within-expression** before/after slot snapshot — it cannot
-cover this case because the flip happens in a *later statement* than the read, so
+cover this case because the flip happens in a _later statement_ than the read, so
 there is no consumer-side "after" to snapshot. The only fixes are (a) suppress the
 spurious f64→externref downgrade at the redeclaration re-type when the inlined
-initializer is statically numeric (an *untypeable foreign AST node* ≠ a genuinely
+initializer is statically numeric (an _untypeable foreign AST node_ ≠ a genuinely
 dynamic binding), or (b) a post-emit patch that re-coerces prior reads when a slot
 flips. **Both are broad-impact codegen** and (a) directly touches the promotion
-contract #2657 *relies on* (its coercion depends on the flip firing) — so it needs
+contract #2657 _relies on_ (its coercion depends on the flip firing) — so it needs
 full test262 CI, not a low-budget land. Turnkey next step for a fresh window:
 option (a) in `src/codegen/statements/variables.ts` (redeclaration re-type), gated
-to "existing slot is concrete numeric AND new type is externref *only* via
+to "existing slot is concrete numeric AND new type is externref _only_ via
 untypeable-node fallback", validated against the #2657 suite + these 7 files.
 
 Everything below the top cluster is ≤4 files/signature — genuine independent
@@ -342,3 +374,63 @@ singletons (iterator-close `__cb_N`, `__vec_from_extern` element-rep, async-gen
 `__closure_N`, `Parent_new` super-in-ctor, `__obj_meth_tramp_*_valueOf`), each its
 own root cause. No cheap concentrated default-lane slice exists at this point;
 future work on #3024 is per-root-cause, not per-cluster.
+
+---
+
+## Landed: inc/dec element write-back rep coercion + `__vec_from_extern` i64 arm (fable-wasm, 2026-07-11)
+
+**Fresh measurement (2026-07-11, current main, `runTest262File` over the 214
+stale-cache candidates): 86 still-invalid** (opus-3024's 102 had drifted down
+further via unrelated merges). This slice clears the two `array.set`
+element-rep clusters (8 files, all prefix/postfix-inc/dec) → **78 remain**,
+zero new invalid signatures.
+
+### Root cause 1 — inc/dec vec write-back stores the raw numeric local
+
+`compileMemberIncDec` vec arm (`src/codegen/expressions/unary-updates.ts`):
+the READ coerces `elemType → f64`, but the WRITE-BACK passed the raw
+f64/i32 `newTmp` local to `emitBoundsGuardedArraySet` with **no
+f64→elemType coercion**. On an externref-element array (`arguments[i]++`,
+`any[]` element inc/dec) the emitted `array.set` got
+`expected externref, found local.get of type f64` — the `testcase`
+cluster (`11.3.1-2-3` / `11.3.2-2-3-s` / `11.4.4-2-3-s` / `11.4.5-2-3-s`,
+4 files, now **pass** end-to-end). Fix: route the new value through
+`coerceType({kind:numType} → elemType)` into a properly-typed store local
+(`makeStoreLocal`); also widen a non-fast i32 element read via
+`f64.convert_i32_s` before the f64 arithmetic (same desync, read side).
+Byte-inert when `elemType === numType` (the only previously-valid shapes).
+
+### Root cause 2 — `buildElemCoerce` had no i64 arm
+
+`buildVecFromExternref` (`src/codegen/type-coercion.ts`): BigInt (i64)
+element arrays fell through to the empty terminal case, leaving the
+externref element on the stack where the i64 `array.set` expects an i64 —
+the `__vec_from_extern_*` cluster (prefix/postfix-inc/dec `bigint.js`,
+4 files, now **valid Wasm**; runtime BigInt semantics remain #1349-gated
+so they are plain oracle-fails, not compile errors). Fix: i64 arm —
+`__to_bigint` when registered (§7.1.13 ToBigInt, precision-preserving),
+else `__unbox_number` + `i64.trunc_sat_f64_s`, else drop/`i64.const 0`.
+
+### Proofs
+
+- Repro probes: `arguments[1]++/--/++prefix`, `any[]` inc/dec, `[0n]`
+  element inc/dec all VALID (were INVALID); controls unchanged.
+- All 4 `testcase`-cluster test262 files **pass** via `runTest262File`;
+  all 4 bigint files validate (fail only on BigInt semantics).
+- Full 214-candidate re-harvest: 86 → **78**, exactly the 8 target files,
+  no new signatures.
+- 12-program corpus (arrays, loops, obj-prop/local inc-dec, strings,
+  closures, classes, for-of, typed-i32-fast, compound-elem, nested-dstr)
+  **byte-identical** (sha256) to current main.
+- New `tests/issue-3024-incdec-element.test.ts` (8 tests) passes; adjacent
+  suites (issue-3024, 1720, 2656, 2666, 2675, 2831, 1135, 2162b — 61
+  tests) show zero NEW failures (the 2 fails are pre-existing on main,
+  verified by control runs).
+
+### Still open (roll forward)
+
+The remaining 78 are the scattered per-root-cause singletons listed above
+(largest: the 7-file `fN.ne` cross-statement eval-promotion family — banked,
+broad-impact, needs a full-CI window; then the 6-file `object/dstr`
+`meth-ary-ptrn-(rest-)elision` `call[#] expected (ref null #), found f#`
+cluster).

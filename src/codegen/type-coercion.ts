@@ -370,6 +370,21 @@ export function buildVecFromExternref(
       }
       return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" }];
     }
+    // (#3024) i64 (BigInt) element arrays previously fell through to the empty
+    // terminal arm, leaving the externref element on the stack where the i64
+    // `array.set` expects an i64 → invalid Wasm (`array.set expected type i64,
+    // found call of type externref`; the postfix/prefix-inc/dec bigint.js
+    // family). Unbox via §7.1.13 ToBigInt when the module registered it
+    // (precision-preserving, identity on a JS bigint); otherwise the legacy
+    // number-unbox + trunc keeps the module valid.
+    if (et.kind === "i64") {
+      const toBigIdx = ctx.funcMap.get("__to_bigint");
+      if (toBigIdx !== undefined) return [{ op: "call", funcIdx: toBigIdx } as Instr];
+      if (unboxIdx !== undefined) {
+        return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i64.trunc_sat_f64_s" } as Instr];
+      }
+      return [{ op: "drop" } as Instr, { op: "i64.const", value: 0n } as Instr];
+    }
     if (et.kind === "externref") return [];
     if (et.kind === "ref" || et.kind === "ref_null") {
       const elemTypeIdx = (et as { typeIdx: number }).typeIdx;
