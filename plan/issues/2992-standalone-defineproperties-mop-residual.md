@@ -68,7 +68,7 @@ Wants slicing into separate PRs:
 1. delete-tombstone-read survival (bounded — start here). **SHIPPED — see slice-1 findings below.**
 2. array/arguments index + `length` own-prop MOP. **BLOCKED on the vec-receiver own-prop substrate (see slice-3 findings) — no bounded slice (#2986 agrees).**
 3. accessor-attribute (get/set) define→gOPD fidelity. **SHIPPED (with the broader §10.1.6.3 partial-descriptor MERGE) — see slice-3 findings below.**
-4. (NEW, found during slice 1) nominal-struct field delete fidelity — see below.
+4. (NEW, found during slice 1) nominal-struct field delete fidelity — see below. **SHIPPED (standalone `{}`-widening shape) — see slice-4 findings below.**
 5. (NEW, found during slice 3) accessor/own-prop MOP on CLOSED-STRUCT receivers (`__extern_get` accessor arm misses; hasOwnProperty/delete invisible) — the biggest residual cluster (4-75/4-82-* family), substrate-adjacent to slice 2 and slice 4.
 
 ## Slice 1 findings (measured 2026-07-10 on main 569e29b761, fable-18th)
@@ -150,6 +150,41 @@ preventExtensions, create, gOPD, Reflect, Array.prototype, Boolean) still
 pass; equivalence `object-define-property*`, `define-property-typeerror`,
 `hasownproperty-call`: 46/46; `tests/issue-2992.test.ts` 12/12;
 new `tests/issue-2992-accessor-merge.test.ts` 18/18 (gc + standalone).
+
+## Slice 4 findings (measured 2026-07-11 on main 2ff0db4f0a, fable-sub2)
+
+The headline nominal-struct delete repro is fixed for the **empty-`{}`-widening
+shape** (the issue's documented case): `delete varName.prop` /
+`delete varName[k]` is now an `$Object`-hash consumer for the widening
+decision in `src/codegen/declarations.ts` (`markStandaloneDeleteTargets`,
+standalone-gated). A widened closed-struct field can only take a type-shaped
+SENTINEL on delete (f64 → NaN, ref → null; `typeof-delete.ts`), and the
+statically-typed read const-folds `o.k === undefined` to false — so the var
+now stays a `$Object`, where the slice-1 `__delete_property` tombstones give
+correct delete → read / `in` / hasOwnProperty / typeof semantics.
+
+Measured: probe matrix 10/10 (top-level + in-function, f64 + string fields,
+delete→redefine cycle, parenthesized target, elem-access delete, no-delete
+widening control, cross-var control); `tests/issue-2992-delete-widening.test.ts`
+12 pass + 2 documented gc-lane skips; +3 flips in the 80-file defineProperty
+gap sample and +2/9 in the `language/expressions/delete` standalone gap;
+142/142 baseline-pass sweep and the 50-test equivalence regression set clean.
+
+**Documented residuals (fail identically on unmodified main — NOT regressions):**
+
+- **gc-lane twin**: the top-level widened-struct delete has the same
+  sentinel/const-fold bug in the gc/host lane; this slice is standalone-gated
+  (host poison needs the #2937/#2944 `objectHashConsumerTypes` escape
+  discipline — separate risk profile).
+- **Non-empty literal receivers** (`const o = { name: "hello" }; delete
+  o.name`) — closed-struct-literal shape (fails in gc too; the pre-existing
+  `delete-sentinel` equivalence failure). Extending #2837's
+  `collectGrowableObjectLiterals` triggers with delete-targets is the likely
+  lever, but its consumer-safety guard needs its own validation pass.
+- **Two-`{}`-var type-interning hazard**: when ANOTHER var's widening interns
+  the shared `{}` literal ts.Type in `anonTypeMap`, the poisoned var's `{}`
+  initializer can still compile to the OTHER var's struct (pre-existing
+  type-identity hazard, fails identically on main).
 
 ## Test Results (slice 1)
 
