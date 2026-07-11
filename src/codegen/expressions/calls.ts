@@ -156,10 +156,12 @@ import {
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
+  isSymbolSpeciesKeyExpression,
   resolveBuiltinReceiverName,
+  tryEmitStandaloneBuiltinSpeciesGopd,
   tryEmitStandaloneBuiltinStaticGopd,
   tryEmitStandaloneStructGopdKeyDispatch,
-} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion)
+} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion + @@species)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -270,7 +272,9 @@ import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
+  ensureTaDynCopyWithinHelper,
   ensureTaDynFillHelper,
+  ensureTaDynReverseHelper,
   getOrRegisterDvWindowType,
   isDataViewAccessor,
 } from "../dataview-native.js";
@@ -8369,6 +8373,24 @@ function compileCallExpression(
         }
       }
 
+      // (#2984 "builtin receiver + non-literal key") `gOPD(<Ctor>,
+      // Symbol.species)` — the dominant NON-literal-key builtin-receiver shape
+      // (26 standalone CEs: built-ins/*/Symbol.species/*). The @@species own
+      // property is an ACCESSOR `{get: "get [Symbol.species]" (returns this),
+      // set: undefined, e:false, c:true}`; synthesize it from the per-ctor
+      // getter singleton (builtin-static-gopd.ts). Every intercepted shape
+      // CE'd via the `__get_builtin` refusal below, so the arm is strictly
+      // additive; non-owner receivers / other symbol keys (Symbol well-knowns,
+      // RegExp annex-B legacy statics) keep the refusal. Both operands are
+      // side-effect-free (builtin/alias identifier + `Symbol.species` fold),
+      // so neither is compiled — same discipline as the Phase-3 literal arm.
+      if (ctx.standalone && propLiteral === undefined && isSymbolSpeciesKeyExpression(fctx, arg1)) {
+        const builtinRecv = resolveBuiltinReceiverName(fctx, arg0, BUILTIN_CLASS_NAMES);
+        if (builtinRecv !== undefined && tryEmitStandaloneBuiltinSpeciesGopd(ctx, fctx, builtinRecv)) {
+          return { kind: "externref" };
+        }
+      }
+
       // (#2984 arg-2 name coercion) Struct receiver + NON-literal key: runtime
       // ToPropertyKey dispatch over the compile-time field set (the dynamic
       // native below only walks $Objects, so a struct receiver always answered
@@ -13133,17 +13155,25 @@ function compileCallExpression(
             reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
           }
           flushLateImportShifts(ctx, fctx);
-          // (#2872) `.fill` on a receiver that is a `$__ta_dyn_view` at RUNTIME
-          // (a dynamically-constructed TA — `new TA([…]).fill(8, 1)` in the
-          // testWithTypedArrayConstructors harness) must byte-encode into the
+          // (#2872) A mutating `%TypedArray%.prototype` method on a receiver
+          // that is a `$__ta_dyn_view` at RUNTIME (a dynamically-constructed TA
+          // — `new TA([…]).fill(8, 1)` / `.copyWithin(0,2)` / `.reverse()` in
+          // the testWithTypedArrayConstructors harness) must operate on the
           // view's shared buffer and return `this`; the dispatcher's open-object
           // arm silently returned undefined and mutated nothing. Emit a
           // runtime-gated two-arm: `ref.test $__ta_dyn_view` → the native
-          // `__ta_dyn_fill` helper, else → the ordinary dispatcher (closed
-          // structs / vec arms / open objects keep their EXACT behavior). The
-          // helper mints defined functions only (no imports — post-flush safe).
-          const taFillIdx =
-            methodName === "fill" && ctx.moduleUsesDynTaView && arity <= 3 ? ensureTaDynFillHelper(ctx) : undefined;
+          // `__ta_dyn_<m>` helper, else → the ordinary dispatcher (closed
+          // structs / vec arms / open objects keep their EXACT behavior). All
+          // three helpers share the `(recv, v1, v2, v3, argc)` signature (unused
+          // slots padded with `ref.null.extern`), so ONE emit block serves them
+          // (slice-1 fill path is byte-identical — same helper funcIdx/arity).
+          // Helpers mint defined functions only (no imports — post-flush safe).
+          let taFillIdx: number | undefined;
+          if (ctx.moduleUsesDynTaView && arity <= 3) {
+            if (methodName === "fill") taFillIdx = ensureTaDynFillHelper(ctx);
+            else if (methodName === "copyWithin") taFillIdx = ensureTaDynCopyWithinHelper(ctx);
+            else if (methodName === "reverse") taFillIdx = ensureTaDynReverseHelper(ctx);
+          }
           if (taFillIdx !== undefined && ctx.taDynViewTypeIdx >= 0) {
             const dynIdx = ctx.taDynViewTypeIdx;
             const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
@@ -15244,7 +15274,24 @@ function compileCallExpression(
             const hasBoxedName = localSlot?.name?.startsWith(`__boxed_`) ?? false;
             candidateIsBoxed = isRefCellTyped && hasBoxedName;
           }
-          if (fctx.boxedCaptures?.has(cap.name) || candidateIsBoxed) {
+          // (#3024) Method/accessor capture promotion (#2029/#3039/#3121,
+          // closures.ts) moves a boxed capture's cell into a module global and
+          // DELETES the localMap binding so post-promotion code in the
+          // enclosing function routes through the global. `boxedCaptures`
+          // still has the name, so without this arm the branch below resolved
+          // `localMap.get(name) ?? cap.outerLocalIdx` → the STALE pre-boxing
+          // raw slot (an f64/i32 local) and baked `local.get <raw>` where the
+          // callee expects the ref cell → invalid Wasm (`call[0] expected
+          // (ref null N), found local.get of type f64`; the test262
+          // object/dstr meth-ary-ptrn-elision family). Source the SAME shared
+          // cell from the promotion global instead (live write-through — the
+          // method body and the enclosing function read/write this cell too).
+          const promotedBoxGlobal =
+            fctx.localMap.get(cap.name) === undefined ? ctx.capturedBoxGlobals?.get(cap.name) : undefined;
+          if (promotedBoxGlobal !== undefined && fctx.boxedCaptures?.has(cap.name)) {
+            fctx.body.push({ op: "global.get", index: promotedBoxGlobal.globalIdx });
+            fctx.body.push({ op: "ref.as_non_null" });
+          } else if (fctx.boxedCaptures?.has(cap.name) || candidateIsBoxed) {
             // Already a ref cell — pass the ref cell reference directly
             const currentLocalIdx = fctx.localMap.get(cap.name) ?? cap.outerLocalIdx;
             fctx.body.push({ op: "local.get", index: currentLocalIdx });

@@ -858,6 +858,29 @@ function compileMemberIncDec(
         const numType = ctx.fast && elemType.kind === "i32" ? ("i32" as const) : ("f64" as const);
         const op = numType === "i32" ? i32Op : f64Op;
 
+        // (#3024) A non-fast i32 element is read raw (the coerce above skips
+        // i32) but the arithmetic below runs in f64 — widen the read so the
+        // local.tee/f64.add sequence sees an f64, not an i32 (invalid Wasm).
+        if (elemType.kind === "i32" && numType === "f64") {
+          fctx.body.push({ op: "f64.convert_i32_s" });
+        }
+
+        // (#3024) The write-back below stores `newTmp` (an f64/i32 NUMERIC
+        // local) straight into the element array. When the element rep is not
+        // that numeric kind (externref elements — `arguments[i]++`, `any[]`
+        // increments — or i64/packed reps), the raw store is INVALID Wasm
+        // (`array.set expected externref, found local.get of type f64`).
+        // Route the new value through coerceType into a properly-typed local
+        // and store THAT. Byte-inert when elemType already matches numType.
+        const makeStoreLocal = (newTmp: number): number => {
+          if (elemType.kind === numType) return newTmp;
+          const storeTmp = allocLocal(fctx, `__incdec_store_${fctx.locals.length}`, elemType);
+          fctx.body.push({ op: "local.get", index: newTmp });
+          coerceType(ctx, fctx, { kind: numType }, elemType);
+          fctx.body.push({ op: "local.set", index: storeTmp });
+          return storeTmp;
+        };
+
         if (mode === "postfix") {
           const oldTmp = allocLocal(fctx, `__incdec_old_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.tee", index: oldTmp });
@@ -870,7 +893,7 @@ function compileMemberIncDec(
           const newTmp = allocLocal(fctx, `__incdec_new_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.set", index: newTmp });
           // Store: arr.data[idx] = new (bounds-guarded)
-          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, newTmp, arrayTypeIdx);
+          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, makeStoreLocal(newTmp), arrayTypeIdx);
           fctx.body.push({ op: "local.get", index: oldTmp });
           return { kind: numType };
         } else {
@@ -883,7 +906,7 @@ function compileMemberIncDec(
           const newTmp = allocLocal(fctx, `__incdec_new_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.set", index: newTmp });
           // Store: arr.data[idx] = new (bounds-guarded)
-          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, newTmp, arrayTypeIdx);
+          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, makeStoreLocal(newTmp), arrayTypeIdx);
           fctx.body.push({ op: "local.get", index: newTmp });
           return { kind: numType };
         }
