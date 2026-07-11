@@ -60,6 +60,14 @@ export function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[]
       baseTypeIdxs.push(root);
     }
   }
+  // (#3140) The native bound-function carrier (`$__bound_fn`, minted by a
+  // standalone `Function.prototype.bind` site) is callable: it must classify
+  // as `"function"` (typeof / __is_closure / the `.length` arity read) exactly
+  // like a closure wrapper. Registered lazily — absent (-1) in bind-free
+  // modules, so those stay byte-identical.
+  if (ctx.boundFnTypeIdx >= 0 && !seenBase.has(ctx.boundFnTypeIdx)) {
+    baseTypeIdxs.push(ctx.boundFnTypeIdx);
+  }
   return baseTypeIdxs;
 }
 

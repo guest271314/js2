@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10243,
-    "fail": 2731,
+    "pass": 10261,
+    "fail": 2713,
     "ce": 101,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11772,
-    "fail": 3470,
+    "pass": 11809,
+    "fail": 3433,
     "ce": 143,
     "skip": 1,
     "total": 15386,
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3367,
-    "fail": 857,
+    "pass": 3376,
+    "fail": 848,
     "ce": 27,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2502,
-        "fail": 756,
+        "pass": 2510,
+        "fail": 748,
         "ce": 26,
         "skip": 0,
         "total": 3284,
@@ -1161,12 +1161,12 @@
       },
       {
         "name": "Promise.prototype.finally",
-        "pass": 12,
-        "fail": 17,
+        "pass": 13,
+        "fail": 16,
         "ce": 0,
         "skip": 0,
         "total": 29,
-        "pct": 41
+        "pct": 45
       },
       {
         "name": "regexp-lookbehind",
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 937,
-    "fail": 922,
+    "pass": 936,
+    "fail": 923,
     "ce": 19,
     "skip": 18,
     "total": 1896,
@@ -1471,8 +1471,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 542,
-        "fail": 476,
+        "pass": 541,
+        "fail": 477,
         "ce": 8,
         "skip": 0,
         "total": 1026,
@@ -1480,8 +1480,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 346,
-        "fail": 341,
+        "pass": 345,
+        "fail": 342,
         "ce": 1,
         "skip": 0,
         "total": 688,
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3360,
-    "fail": 833,
+    "pass": 3363,
+    "fail": 830,
     "ce": 41,
     "skip": 0,
     "total": 4234,
@@ -2213,12 +2213,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 261,
-        "fail": 156,
+        "pass": 264,
+        "fail": 153,
         "ce": 15,
         "skip": 0,
         "total": 432,
-        "pct": 60
+        "pct": 61
       },
       {
         "name": "class-static-fields-private",
@@ -2784,12 +2784,12 @@
   },
   {
     "edition": "ES2024",
-    "pass": 454,
-    "fail": 184,
+    "pass": 460,
+    "fail": 178,
     "ce": 7,
     "skip": 0,
     "total": 645,
-    "pct": 70,
+    "pct": 71,
     "features": [
       {
         "name": "TypedArray",
@@ -2856,12 +2856,12 @@
       },
       {
         "name": "Array.fromAsync",
-        "pass": 73,
-        "fail": 22,
+        "pass": 79,
+        "fail": 16,
         "ce": 0,
         "skip": 0,
         "total": 95,
-        "pct": 77
+        "pct": 83
       },
       {
         "name": "SharedArrayBuffer",
@@ -3191,17 +3191,17 @@
   },
   {
     "edition": "ES2025",
-    "pass": 1057,
-    "fail": 217,
+    "pass": 1065,
+    "fail": 209,
     "ce": 0,
     "skip": 0,
     "total": 1274,
-    "pct": 83,
+    "pct": 84,
     "features": [
       {
         "name": "iterator-helpers",
-        "pass": 329,
-        "fail": 64,
+        "pass": 330,
+        "fail": 63,
         "ce": 0,
         "skip": 0,
         "total": 393,
@@ -3209,12 +3209,12 @@
       },
       {
         "name": "explicit-resource-management",
-        "pass": 261,
-        "fail": 80,
+        "pass": 268,
+        "fail": 73,
         "ce": 0,
         "skip": 0,
         "total": 341,
-        "pct": 77
+        "pct": 79
       },
       {
         "name": "regexp-modifiers",

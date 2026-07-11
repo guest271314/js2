@@ -115,6 +115,16 @@ export interface AsyncSchedulerState {
   /** Whether `__drain_microtasks` has been added to the module's exports. */
   drainExported: boolean;
 
+  // ── (#2903) native `Promise.prototype.finally` runtime (§27.2.5.3) ──────
+  /** `$__finally_restore_caps { chained (ref $Promise), value externref, isReject i32 }` typeIdx. -1 until registered. */
+  finallyRestoreCapsTypeIdx: number;
+  /** Func idx of `__finally_restore_settle(caps, _) -> externref` — re-settles `chained` with the ORIGINAL value/reason. -1 until registered. */
+  finallyRestoreSettleFuncIdx: number;
+  /** Func idx of `__finally_restore_reject(caps, reason) -> externref` — onFinally's result rejected: override with ITS reason. -1 until registered. */
+  finallyRestoreRejectFuncIdx: number;
+  /** Func idx of `__finally_after(result, chained, value, isReject)` — PromiseResolve(onFinally()) then restore. -1 until registered. */
+  finallyAfterFuncIdx: number;
+
   // ── #2632 Phase 1 — timer heap + run-loop reactor ──────────────────────
   /** `$__arr_timer_func` funcref-array typeIdx (timer callback storage). -1 until registered. */
   timerFuncArrTypeIdx: number;
@@ -215,6 +225,10 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       promiseResolveValueFuncIdx: -1,
       thenWrapperCounter: 0,
       drainExported: false,
+      finallyRestoreCapsTypeIdx: -1,
+      finallyRestoreSettleFuncIdx: -1,
+      finallyRestoreRejectFuncIdx: -1,
+      finallyAfterFuncIdx: -1,
       timerFuncArrTypeIdx: -1,
       timerI64ArrTypeIdx: -1,
       timerI32ArrTypeIdx: -1,
@@ -3784,6 +3798,384 @@ export function emitStandalonePromiseThen(
   );
 }
 
+// ─── (#2903) native `Promise.prototype.finally` (§27.2.5.3) ─────────────────
+//
+// `p.finally(onFinally)` lowers onto the existing native then machinery with
+// TWO dedicated reaction wrappers instead of the `.then` handler wrappers:
+//
+//   thenFinally(value):  r = onFinally();  PromiseResolve(r) → then settle the
+//                        chained promise with the ORIGINAL value (resolve-value,
+//                        so a promise-valued original still assimilates);
+//   catchFinally(reason): r = onFinally(); PromiseResolve(r) → then REJECT the
+//                        chained promise with the ORIGINAL reason (thrower).
+//
+// In both arms `onFinally` is invoked with ZERO arguments, its return value is
+// observable only through PromiseResolve (a rejected/throwing result OVERRIDES
+// the settlement with its own reason — §27.2.5.3 steps 5-7), and a plain
+// return preserves the original settlement (value identity included — the
+// value rides an externref field, never a host roundtrip). Non-callable /
+// absent `onFinally` degrades to the identity pass-through chain, exactly
+// `then(onFinally, onFinally)` with non-callable handlers (§27.2.5.3 step 3).
+//
+// The "wait for onFinally's result" step reuses `__promise_resolve_value` on a
+// throwaway pending `$Promise` (`tmp`) whose reaction node is pre-attached:
+// settling tmp (directly for a plain result, after adoption for a promise/
+// thenable result) fires `__finally_restore_settle` / `__finally_restore_reject`
+// as microtasks, which then settle the chained promise. This composes the
+// substrate exactly like the combinators do — no forked scheduling machinery.
+
+/**
+ * Idempotently register the module-level finally runtime: the restore-caps
+ * struct and the three shared helpers. Standalone/wasi only (callers are gated
+ * on `isStandaloneThenChainNativeActive`); never touches gc/host output.
+ */
+function ensurePromiseFinallyRuntime(ctx: CodegenContext): void {
+  ensurePromiseSettleFunctions(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.finallyAfterFuncIdx !== -1) return;
+
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const callbackTypeIdx = getOrRegisterPromiseCallbackType(ctx);
+
+  // $__finally_restore_caps { chained (ref $Promise), value externref, isReject i32 }
+  const capsName = "$__finally_restore_caps";
+  const capsFields = [
+    { name: "chained", type: { kind: "ref", typeIdx: promiseTypeIdx } as ValType, mutable: false },
+    { name: "value", type: { kind: "externref" } as ValType, mutable: false },
+    { name: "isReject", type: { kind: "i32" } as ValType, mutable: false },
+  ];
+  const capsTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({ kind: "struct", name: capsName, fields: capsFields });
+  ctx.structMap.set(capsName, capsTypeIdx);
+  ctx.typeIdxToStructName.set(capsTypeIdx, capsName);
+  ctx.structFields.set(
+    capsName,
+    capsFields.map((f) => ({ name: f.name, type: f.type, mutable: f.mutable })),
+  );
+  state.finallyRestoreCapsTypeIdx = capsTypeIdx;
+
+  const restoreSettleFuncIdx = mintDefinedFunc(ctx);
+  const restoreRejectFuncIdx = mintDefinedFunc(ctx);
+  const afterFuncIdx = mintDefinedFunc(ctx);
+  state.finallyRestoreSettleFuncIdx = restoreSettleFuncIdx;
+  state.finallyRestoreRejectFuncIdx = restoreRejectFuncIdx;
+  state.finallyAfterFuncIdx = afterFuncIdx;
+
+  // __finally_restore_settle(caps, _ignored) — onFinally's result settled OK:
+  // re-settle `chained` with the ORIGINAL outcome. Fulfil path routes through
+  // resolve-value (a promise-valued original assimilates, mirroring the spec
+  // valueThunk → then-resolution); reject path is a direct reject (rejection
+  // reasons are never assimilated).
+  pushDefinedFunc(ctx, restoreSettleFuncIdx, {
+    name: "__finally_restore_settle",
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals: [{ name: "$caps", type: { kind: "ref", typeIdx: capsTypeIdx } }],
+    body: [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: capsTypeIdx } as Instr,
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 2 } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "call", funcIdx: state.promiseRejectFuncIdx },
+        ],
+        else: [
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "call", funcIdx: state.promiseResolveValueFuncIdx },
+        ],
+      } as Instr,
+    ],
+    exported: false,
+  });
+  ctx.funcMap.set("__finally_restore_settle", restoreSettleFuncIdx);
+
+  // __finally_restore_reject(caps, reason) — onFinally's result REJECTED (or a
+  // thenable it returned rejected): the chained promise rejects with THAT
+  // reason, overriding the original settlement (§27.2.5.3 — a throwing/
+  // rejecting onFinally wins).
+  pushDefinedFunc(ctx, restoreRejectFuncIdx, {
+    name: "__finally_restore_reject",
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals: [],
+    body: [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: capsTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: state.promiseRejectFuncIdx },
+    ],
+    exported: false,
+  });
+  ctx.funcMap.set("__finally_restore_reject", restoreRejectFuncIdx);
+
+  // __finally_after(result, chained, value, isReject) — the spec
+  // "p2 = PromiseResolve(C, onFinally()); p2.then(restore)" step: build a
+  // throwaway pending promise with the restore reaction PRE-attached, then
+  // resolve it with `result` (direct fulfil for plain values, adoption for a
+  // `$Promise`, PromiseResolveThenableJob for user thenables — all via
+  // `__promise_resolve_value`). The pre-attach keeps the reaction ordering a
+  // microtask behind the result settling, matching the `.then` hop.
+  const afterTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "ref", typeIdx: promiseTypeIdx }, { kind: "externref" }, { kind: "i32" }],
+    [],
+    "$__finally_after_type",
+  );
+  pushDefinedFunc(ctx, afterFuncIdx, {
+    name: "__finally_after",
+    typeIdx: afterTypeIdx,
+    locals: [
+      { name: "$caps", type: { kind: "externref" } },
+      { name: "$tmp", type: { kind: "ref", typeIdx: promiseTypeIdx } },
+    ],
+    body: [
+      // caps = $__finally_restore_caps{chained, value, isReject}
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "struct.new", typeIdx: capsTypeIdx } as Instr,
+      { op: "extern.convert_any" },
+      { op: "local.set", index: 4 },
+      // tmp = $Promise{PENDING, null, node(restoreSettle, caps, restoreReject, caps, null)}
+      { op: "i32.const", value: PROMISE_STATE_PENDING },
+      { op: "ref.null.extern" },
+      { op: "ref.func", funcIdx: restoreSettleFuncIdx },
+      { op: "local.get", index: 4 },
+      { op: "ref.func", funcIdx: restoreRejectFuncIdx },
+      { op: "local.get", index: 4 },
+      { op: "ref.null.extern" },
+      { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+      { op: "extern.convert_any" },
+      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+      { op: "local.set", index: 5 },
+      // Resolve(tmp, result) — fires/enqueues the restore reaction.
+      { op: "local.get", index: 5 },
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: state.promiseResolveValueFuncIdx },
+      { op: "drop" },
+    ],
+    exported: false,
+  });
+  ctx.funcMap.set("__finally_after", afterFuncIdx);
+}
+
+/**
+ * Emit one per-site finally reaction wrapper (microtask signature). Invokes the
+ * user `onFinally` closure with ZERO user arguments inside a try/catch (a throw
+ * rejects the chained promise immediately — no restore step), then hands its
+ * result to `__finally_after` together with the original settlement.
+ */
+function emitFinallyWrapperFunction(ctx: CodegenContext, info: ClosureInfo, isReject: boolean): number {
+  ensurePromiseFinallyRuntime(ctx);
+  ensureUnionHelpersForThenWrapper(ctx, info);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  const capsTypeIdx = getOrRegisterThenCapsType(ctx);
+  const wrapperId = state.thenWrapperCounter++;
+  const wrapperName = `__finally_${isReject ? "reject" : "fulfill"}_${wrapperId}`;
+  const capLocal = 2;
+  const callbackLocal = 3;
+  const resultLocal = 4;
+  const reasonLocal = 5;
+  const funcIdx = mintDefinedFunc(ctx);
+
+  const locals: LocalDef[] = [
+    { name: "$caps", type: { kind: "ref", typeIdx: capsTypeIdx } },
+    { name: "$callback", type: { kind: "ref", typeIdx: info.structTypeIdx } },
+    { name: "$result", type: { kind: "externref" } },
+    { name: "$reason", type: { kind: "externref" } },
+  ];
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: capsTypeIdx },
+    { op: "local.set", index: capLocal },
+    { op: "local.get", index: capLocal },
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.structTypeIdx },
+    { op: "local.set", index: callbackLocal },
+  ];
+
+  const exnTag = ensureExnTag(ctx);
+  const tryBody: Instr[] = [{ op: "local.get", index: callbackLocal }];
+  // §27.2.5.3: onFinally is called with NO arguments — every declared param
+  // gets its type default (undefined/zero), never the settlement value.
+  for (const paramType of info.paramTypes) pushDefaultForType(tryBody, paramType);
+  tryBody.push(
+    { op: "local.get", index: callbackLocal },
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "call_ref", typeIdx: info.funcTypeIdx },
+  );
+  coerceStackValueToExternref(ctx, tryBody, info.returnType);
+  tryBody.push(
+    { op: "local.set", index: resultLocal },
+    // __finally_after(result, chained, originalValue, isReject)
+    { op: "local.get", index: resultLocal },
+    { op: "local.get", index: capLocal },
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: isReject ? 1 : 0 },
+    { op: "call", funcIdx: state.finallyAfterFuncIdx },
+  );
+
+  body.push({
+    op: "try",
+    blockType: { kind: "empty" },
+    body: tryBody,
+    catches: [
+      {
+        tagIdx: exnTag,
+        body: [
+          { op: "local.set", index: reasonLocal },
+          { op: "local.get", index: capLocal },
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: reasonLocal },
+          { op: "call", funcIdx: state.promiseRejectFuncIdx },
+          { op: "drop" },
+        ],
+      },
+    ],
+  } as Instr);
+  body.push({ op: "ref.null.extern" });
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: wrapperName,
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals,
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set(wrapperName, funcIdx);
+  return funcIdx;
+}
+
+/**
+ * (#2903) Emit standalone-mode `promise.finally(onFinally)` on the native
+ * `$Promise` then machinery. Consumes `promiseInstrs` (an externref that MUST
+ * be a `$Promise` — callers bridge/refuse non-natives) and leaves the chained
+ * promise as externref on the stack. A null `onFinally` (absent / non-callable
+ * / nullish argument) degrades to the identity pass-through chain
+ * (`then(onFinally, onFinally)` with non-callable handlers, §27.2.5.3 step 3).
+ */
+export function emitStandalonePromiseFinally(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  promiseInstrs: Instr[],
+  onFinally: StandalonePromiseThenCallback | null,
+): void {
+  if (onFinally === null) {
+    emitStandalonePromiseThen(ctx, fctx, promiseInstrs, null, null);
+    return;
+  }
+  ensurePromiseSettleFunctions(ctx);
+  ensurePromiseFinallyRuntime(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const callbackTypeIdx = getOrRegisterPromiseCallbackType(ctx);
+  const capsTypeIdx = getOrRegisterThenCapsType(ctx);
+
+  // Register the per-site wrappers BEFORE any body emission (funcIdx bake
+  // discipline — #1677/#1809).
+  const fulfillWrapperFuncIdx = emitFinallyWrapperFunction(ctx, onFinally.closureInfo, false);
+  const rejectWrapperFuncIdx = emitFinallyWrapperFunction(ctx, onFinally.closureInfo, true);
+
+  const promiseLocal = allocLocal(fctx, `__finally_promise_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: promiseTypeIdx,
+  });
+  const chainedLocal = allocLocal(fctx, `__finally_chained_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: promiseTypeIdx,
+  });
+  const capsLocal = allocLocal(fctx, `__finally_caps_${fctx.locals.length}`, { kind: "externref" });
+
+  for (const instr of promiseInstrs) fctx.body.push(instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "local.set", index: promiseLocal });
+
+  // Chained promise starts pending with no callbacks.
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "local.set", index: chainedLocal });
+
+  // ONE caps struct serves both arms (both wrappers read the same closure +
+  // chained promise). The closure instrs are spliced exactly ONCE — aliasing
+  // one Instr[] into two branches double-bumps under the late-import shifter
+  // (see reference_shared_instr_object_dce_double_remap).
+  for (const instr of onFinally.instrs) fctx.body.push(instr);
+  fctx.body.push({ op: "local.get", index: chainedLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: capsTypeIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.set", index: capsLocal });
+
+  fctx.body.push(
+    { op: "local.get", index: promiseLocal },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
+        { op: "local.get", index: capsLocal },
+        { op: "local.get", index: promiseLocal },
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "call", funcIdx: state.enqueueFuncIdx },
+      ],
+      else: [
+        { op: "local.get", index: promiseLocal },
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "i32.const", value: PROMISE_STATE_REJECTED },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
+            { op: "local.get", index: capsLocal },
+            { op: "local.get", index: promiseLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "call", funcIdx: state.enqueueFuncIdx },
+          ],
+          else: [
+            // Pending receiver: prepend a reaction node (same discipline as
+            // emitStandalonePromiseThen).
+            { op: "local.get", index: promiseLocal },
+            { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
+            { op: "local.get", index: capsLocal },
+            { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
+            { op: "local.get", index: capsLocal },
+            { op: "local.get", index: promiseLocal },
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    { op: "local.get", index: chainedLocal },
+    { op: "extern.convert_any" } as Instr,
+  );
+}
+
 /**
  * #1326 — Check whether host-free Promise codegen (native `$Promise` carrier:
  * construction, async-fn return wrap, `await` unwrap) is active.
@@ -3883,6 +4275,11 @@ const ASYNC_SCHEDULER_FUNC_IDX_KEYS = [
   "identityFulfillWrapperFuncIdx",
   "identityRejectWrapperFuncIdx",
   "promiseResolveValueFuncIdx",
+  // (#2903) native `.finally` runtime — `emitStandalonePromiseFinally` /
+  // `emitFinallyWrapperFunction` bake `ref.func`/`call` from these.
+  "finallyRestoreSettleFuncIdx",
+  "finallyRestoreRejectFuncIdx",
+  "finallyAfterFuncIdx",
   "timerAddFuncIdx",
   "timerCancelFuncIdx",
   "timerPeekDeadlineFuncIdx",

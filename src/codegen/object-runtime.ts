@@ -67,7 +67,13 @@ import {
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecBaseType } from "./registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterBoundFnType,
+  getOrRegisterVecBaseType,
+} from "./registry/types.js";
+import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { ensureSymbolCarrier } from "./symbol-native.js";
@@ -9038,8 +9044,252 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     );
   }
 
+  const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
+
+  // (#3140) $__bound_fn front-guard — the same ladder-step pattern as the $Proxy
+  // guard above, for the native bound-function carrier `{target, thisArg,
+  // boundArgs}` minted by a standalone `Function.prototype.bind` site. Unwrap
+  // ONE bound layer per hop: merged = boundArgs ++ args, then recurse into this
+  // bridge with (target, boundThis, merged) — [[BoundThis]] wins over the
+  // caller-provided receiver (§10.4.1.1), and bound-of-bound chains compose one
+  // guard hop at a time. Guard not emitted when no bind site minted the carrier
+  // (`ctx.boundFnTypeIdx < 0`) — byte-identical for bind-free modules.
+  const objVecNewIdx2 = ctx.funcMap.get("__objvec_new");
+  const objVecPushIdx2 = ctx.funcMap.get("__objvec_push");
+  if (ctx.boundFnTypeIdx >= 0 && objVecNewIdx2 !== undefined && objVecPushIdx2 !== undefined) {
+    const bfIdx = ctx.boundFnTypeIdx;
+    // Locals appended after `n` (params fn/recv/args = 0..2, n = 3): bf=4,
+    // merged=5, bsrc=6, bk=7, blen=8.
+    const bfLocal = 3 + locals.length; // params(3) + existing locals ([n]) → 4
+    const mergedLocal = bfLocal + 1;
+    const srcLocal = bfLocal + 2;
+    const kLocal = bfLocal + 3;
+    const lenLocal = bfLocal + 4;
+    locals.push(
+      { name: "bf", type: { kind: "ref_null", typeIdx: bfIdx } },
+      { name: "merged", type: { kind: "externref" } },
+      { name: "bsrc", type: { kind: "externref" } },
+      { name: "bk", type: { kind: "f64" } },
+      { name: "blen", type: { kind: "f64" } },
+    );
+    // for (k = 0; k < len(src); k++) objvec_push(merged, get_idx(src, k))
+    const copyLoop = (): Instr[] => {
+      const loopBody: Instr[] = [
+        { op: "local.get", index: kLocal } as Instr,
+        { op: "local.get", index: lenLocal } as Instr,
+        { op: "f64.ge" } as Instr,
+        { op: "br_if", depth: 1 } as Instr,
+        { op: "local.get", index: mergedLocal } as Instr,
+        { op: "local.get", index: srcLocal } as Instr,
+        { op: "local.get", index: kLocal } as Instr,
+        { op: "call", funcIdx: externGetIdxArr } as Instr,
+        { op: "call", funcIdx: objVecPushIdx2 } as Instr,
+        { op: "local.get", index: kLocal } as Instr,
+        { op: "f64.const", value: 1 } as Instr,
+        { op: "f64.add" } as Instr,
+        { op: "local.set", index: kLocal } as Instr,
+        { op: "br", depth: 0 } as Instr,
+      ];
+      return [
+        { op: "local.get", index: srcLocal } as Instr,
+        { op: "call", funcIdx: externLengthIdx } as Instr,
+        { op: "local.set", index: lenLocal } as Instr,
+        { op: "f64.const", value: 0 } as Instr,
+        { op: "local.set", index: kLocal } as Instr,
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+        } as Instr,
+      ];
+    };
+    body.unshift(
+      { op: "local.get", index: 0 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.test", typeIdx: bfIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "ref.cast", typeIdx: bfIdx } as Instr,
+          { op: "local.set", index: bfLocal } as Instr,
+          // merged = objvec_new()
+          { op: "call", funcIdx: objVecNewIdx2 } as Instr,
+          { op: "local.set", index: mergedLocal } as Instr,
+          // copy boundArgs then call-args
+          { op: "local.get", index: bfLocal } as Instr,
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 2 } as Instr,
+          { op: "local.set", index: srcLocal } as Instr,
+          ...copyLoop(),
+          { op: "local.get", index: 2 } as Instr,
+          { op: "local.set", index: srcLocal } as Instr,
+          ...copyLoop(),
+          // return __apply_closure(target, boundThis, merged)  [self-recursion]
+          { op: "local.get", index: bfLocal } as Instr,
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 0 } as Instr,
+          { op: "local.get", index: bfLocal } as Instr,
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: mergedLocal } as Instr,
+          { op: "call", funcIdx: bridgeIdx } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+    );
+  }
+
   bridgeFn.body = body;
-  bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
+  bridgeFn.locals = locals;
+}
+
+/**
+ * (#3140) Reserve `__bind_dyn(recv, argsVec) → externref` — the dynamic
+ * `Function.prototype.bind` route for an `any`-typed receiver (the test262
+ * TypedArray harness `argFactory.bind(undefined, constructor)` shape, where
+ * `argFactory` carries no TS call signatures so the typed `compileFunctionBind`
+ * route never fires). Reserve-then-fill (#1719): the body needs the COMPLETE
+ * closure-classifier root list, which is only settled at finalize —
+ * {@link fillBindDynHelper} fills it there. `argsVec` is a `$ObjVec` of
+ * `[thisArg, ...partialArgs]` built at the call site.
+ */
+export function reserveBindDynHelper(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__bind_dyn");
+  if (existing !== undefined) return existing;
+  ensureObjectRuntime(ctx); // __extern_method_call / __extern_get_idx / __extern_length + $ObjVec
+  ensureObjVecBuilders(ctx);
+  reserveApplyClosure(ctx); // the unwrap front-guard lives in fillApplyClosure
+  getOrRegisterBoundFnType(ctx);
+  addStringConstantGlobal(ctx, "bind"); // the fill's legacy-fallback method name
+  const externref: ValType = { kind: "externref" };
+  const typeIdx = addFuncType(ctx, [externref, externref], [externref]);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__bind_dyn",
+    typeIdx,
+    locals: [],
+    // Placeholder — filled at finalize by fillBindDynHelper. `unreachable`
+    // keeps the stub valid if the fill were ever skipped.
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  });
+  ctx.funcMap.set("__bind_dyn", funcIdx);
+  return funcIdx;
+}
+
+/**
+ * (#3140) Fill `__bind_dyn` at FINALIZE (closure roots settled):
+ *
+ *   any = any.convert_extern(recv)
+ *   if <recv is a callable — closure-classifier roots (incl. $__bound_fn)>:
+ *     thisArg  = __extern_get_idx(args, 0)          // absent → undefined/null
+ *     bound    = fresh $ObjVec of args[1..]
+ *     return extern($__bound_fn{recv, thisArg, bound})
+ *   return __extern_method_call(recv, "bind", args)  // legacy open-object route
+ */
+export function fillBindDynHelper(ctx: CodegenContext): void {
+  const helperIdx = ctx.funcMap.get("__bind_dyn");
+  if (helperIdx === undefined) return;
+  const helperFn = definedFuncAt(ctx, helperIdx);
+  if (!helperFn) return;
+  const bfIdx = ctx.boundFnTypeIdx;
+  const externLengthIdx = ctx.funcMap.get("__extern_length");
+  const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx");
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new");
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  const methodCallIdx = ctx.funcMap.get("__extern_method_call");
+  if (
+    bfIdx < 0 ||
+    externLengthIdx === undefined ||
+    externGetIdxIdx === undefined ||
+    objVecNewIdx === undefined ||
+    objVecPushIdx === undefined
+  ) {
+    helperFn.body = [{ op: "ref.null.extern" } as Instr];
+    helperFn.locals = [];
+    return;
+  }
+
+  // params: recv=0, args=1; locals: any=2 (anyref), thisv=3, bargs=4 (externref),
+  // k=5, len=6 (f64).
+  const ANY = 2;
+  const THISV = 3;
+  const BARGS = 4;
+  const K = 5;
+  const LEN = 6;
+  const mintArm: Instr[] = [
+    // thisArg = args[0]
+    { op: "local.get", index: 1 } as Instr,
+    { op: "f64.const", value: 0 } as Instr,
+    { op: "call", funcIdx: externGetIdxIdx } as Instr,
+    { op: "local.set", index: THISV } as Instr,
+    // bound = objvec_new(); for (k=1; k<len; k++) push(bound, args[k])
+    { op: "call", funcIdx: objVecNewIdx } as Instr,
+    { op: "local.set", index: BARGS } as Instr,
+    { op: "local.get", index: 1 } as Instr,
+    { op: "call", funcIdx: externLengthIdx } as Instr,
+    { op: "local.set", index: LEN } as Instr,
+    { op: "f64.const", value: 1 } as Instr,
+    { op: "local.set", index: K } as Instr,
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: K } as Instr,
+            { op: "local.get", index: LEN } as Instr,
+            { op: "f64.ge" } as Instr,
+            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: BARGS } as Instr,
+            { op: "local.get", index: 1 } as Instr,
+            { op: "local.get", index: K } as Instr,
+            { op: "call", funcIdx: externGetIdxIdx } as Instr,
+            { op: "call", funcIdx: objVecPushIdx } as Instr,
+            { op: "local.get", index: K } as Instr,
+            { op: "f64.const", value: 1 } as Instr,
+            { op: "f64.add" } as Instr,
+            { op: "local.set", index: K } as Instr,
+            { op: "br", depth: 0 } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    // return extern($__bound_fn{recv, thisArg, bound})
+    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: THISV } as Instr,
+    { op: "local.get", index: BARGS } as Instr,
+    { op: "struct.new", typeIdx: bfIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+    { op: "return" } as Instr,
+  ];
+
+  const body: Instr[] = [
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: ANY } as Instr,
+    ...buildClosureRefTestArms(ctx, ANY, mintArm),
+  ];
+  if (methodCallIdx !== undefined) {
+    body.push(
+      { op: "local.get", index: 0 } as Instr,
+      ...stringConstantExternrefInstrs(ctx, "bind"),
+      { op: "local.get", index: 1 } as Instr,
+      { op: "call", funcIdx: methodCallIdx } as Instr,
+    );
+  } else {
+    body.push({ op: "ref.null.extern" } as Instr);
+  }
+  helperFn.body = body;
+  helperFn.locals = [
+    { name: "any", type: { kind: "anyref" } },
+    { name: "thisv", type: { kind: "externref" } },
+    { name: "bargs", type: { kind: "externref" } },
+    { name: "k", type: { kind: "f64" } },
+    { name: "len", type: { kind: "f64" } },
+  ];
 }
 
 /**
