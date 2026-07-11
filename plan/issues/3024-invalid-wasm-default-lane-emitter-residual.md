@@ -17,8 +17,7 @@ test262_category: language/expressions/object/dstr, built-ins/AsyncFromSyncItera
 test262_ce: 131
 related: []
 loc-budget-allow:
-  - src/codegen/expressions/unary-updates.ts
-  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
@@ -434,3 +433,67 @@ The remaining 78 are the scattered per-root-cause singletons listed above
 broad-impact, needs a full-CI window; then the 6-file `object/dstr`
 `meth-ary-ptrn-(rest-)elision` `call[#] expected (ref null #), found f#`
 cluster).
+
+---
+
+## Landed: capturing-fn call after method capture promotion (fable-wasm, 2026-07-11, slice 2)
+
+**PR:** `issue-3024-promoted-capture-call` — clears the 6-file `object/dstr`
+`{meth,gen-meth,async-gen-meth}-ary-ptrn-(rest-ary-)elision` cluster
+(`call[#] expected (ref null #), found local.get of type f#` in `test`).
+Post-slice-1 harvest: 78 → **72**, zero new signatures.
+
+### Root cause (stale `boxedCaptures` branch after #3121 promotion)
+
+The trigger is NOT destructuring: it is a local that is (a) closure-MUTATED by
+a nested function (boxed to a ref cell, `fctx.boxedCaptures`) and (b) also
+referenced by an object-literal METHOD. Compiling the object literal runs the
+accessor/method capture promotion (#2029/#3039/#3121, `closures.ts`): the
+shared cell is aliased into a module global (`ctx.capturedBoxGlobals`) and the
+`localMap` binding is DELETED (closures.ts ~L609) so post-promotion enclosing-
+function code routes through the global. But the direct-call capture-prepend
+(`compileCallExpression`, calls.ts ~L15260) checked `boxedCaptures` FIRST and
+resolved `fctx.localMap.get(name) ?? cap.outerLocalIdx` — the stale pre-boxing
+RAW f64 slot — baking `local.get <f64>` where the callee signature expects the
+ref cell. The correct `capturedBoxGlobals` arm existed (#2029 family A) but was
+unreachable behind the `boxedCaptures` branch.
+
+Verified by instrument: at the `g2()` call, `localMap=undefined boxed=true
+boxGlobal=true` → fallback to `cap.outerLocalIdx` (the raw f64).
+
+### Fix (calls.ts, narrow)
+
+Before the `boxedCaptures` branch: when `localMap.get(cap.name)` is undefined
+AND `ctx.capturedBoxGlobals` has the name, source the SAME shared cell from
+the promotion global (`global.get` + `ref.as_non_null`). Live write-through is
+preserved — the callee mutation, the method body, and the enclosing function
+all share one cell (proven at runtime: g2 `+=1` → method reads 1 → method
+`+=10` → enclosing reads 11). The old fallback in this configuration was
+ALWAYS invalid Wasm, so no valid module changes shape.
+
+### Proofs
+
+- 13 discriminator probes VALID (generator/non-generator mutator, normal and
+  destructuring method params, elision/binding patterns); all previously-valid
+  controls unchanged.
+- test262: 3 of the 6 files now **pass** end-to-end
+  (`*-rest-ary-elision.js`); the 3 `*-ptrn-elision.js` flip CE→plain fail on a
+  DISTINCT bug (the param-elision destructure advances the iterator twice —
+  `assert.sameValue(second, 0)` fails; see roll-forward below).
+- Full 214-candidate re-harvest: 78 → **72**, exactly this cluster, no new
+  signatures.
+- 12-program corpus **byte-identical** (sha256) to main.
+- New `tests/issue-3024-promoted-capture-call.test.ts` (5 tests, runtime
+  write-through assertions) passes; adjacent promotion suites (issue-3121,
+  issue-3039, issue-2029-tagged-template-capture-local-index,
+  issue-3024-incdec-element — 30 tests) pass.
+
+### Still open (roll forward)
+
+- **NEW (distinct root cause):** array-binding-pattern ELISION in a method
+  param over-steps the iterator (one extra IteratorStep) — turns the 3
+  `*-ptrn-elision.js` files into semantic fails now that they validate.
+- The remaining 72 invalid-Wasm files: 7-file `fN.ne` cross-statement
+  eval-promotion family (banked, broad-impact), then ≤4-file singletons
+  (`__obj_meth_tramp_*_valueOf`, `struct.set (ref null #)`, `call expected
+  externref found ref.func`, Atomics `__cb_#` fallthru, `i#.lt_s` …).
