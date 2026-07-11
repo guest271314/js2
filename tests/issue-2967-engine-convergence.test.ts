@@ -4,14 +4,12 @@
 // `$AsyncFrame` resume machine with the host settle backend (#1042), so ONE
 // engine drives every linear shape (single-await is the N=1 case).
 //
-// Deliberate carve-outs (this slice keeps them on the proven CPS lane):
-//   - lifted closures (arrow / fn-expr): host-drive closures are the parked
-//     #2646 33-regression class — `planAsyncClosureActivation` re-lanes the
-//     CPS-shaped subset back to CPS, byte-stable across the flip;
-//   - binding-pattern / rest params: the destructuring prologue derives locals
-//     in the ENTRY fn that the fresh resume FunctionContext never sees (the
-//     same reason `isAsyncGenDriveCandidate` rejects pattern params); the CPS
-//     continuation snapshots them by value, so those shapes stay CPS.
+// The slice-1 carve-outs are since retired: lifted closures were admitted in
+// slice 2a (with the #2873 park-fix hazard gate), concise arrow bodies in
+// slice 2b-1, and binding-pattern params in slice 2b-2 (derived prologue
+// locals ride the frame as live-initialized spill fields). The only CPS
+// re-lanes left are hazard DECLINES (cell-boxed spills / cell-boxed derived
+// params), not population carve-outs.
 //
 // Structural assertions read the binaryen-emitted WAT for the
 // `__async_resume_f<name>` resume function — the frame engine's signature
@@ -65,7 +63,10 @@ describe("#2967 routing — one engine on the JS-host lane", () => {
     expect(wat).toContain("__async_resume_fanon");
   });
 
-  it("a binding-pattern-param declaration stays on the CPS lane (derived prologue locals)", async () => {
+  it("a binding-pattern-param declaration drives the frame engine (slice 2b-2 — derived locals ride as live-initialized spills)", async () => {
+    // Slice 1 kept this shape on CPS (the resume fn never saw the prologue-
+    // derived locals); slice 2b-2 captures them into the frame, so the
+    // carve-out is retired and the decl mints a resume fn like any other.
     const wat = await watOf(`
       async function f({ a }: { a: number }): Promise<number> {
         const v = await Promise.resolve(a).then((y: number) => y + 1);
@@ -73,8 +74,7 @@ describe("#2967 routing — one engine on the JS-host lane", () => {
       }
       export async function main(): Promise<number> { return await f({ a: 20 }); }
     `);
-    expect(wat).not.toContain("__async_resume_ff");
-    // main has plain params — it flips to host-drive like any other decl.
+    expect(wat).toContain("__async_resume_ff");
     expect(wat).toContain("__async_resume_fmain");
   });
 
@@ -418,5 +418,107 @@ describe("#2967 slice 2b — concise arrow bodies on the frame engine", () => {
       export function main(): number { g(20); return 1; }
     `);
     expect(wat).toContain("__async_resume_fanon");
+  });
+});
+
+describe("#2967 slice 2b-2 — pattern/rest params on the frame engine", () => {
+  it("object-pattern param decl routes host-drive and the derived bindings survive the await", async () => {
+    const wat = await watOf(`
+      async function f({ a, b }: { a: number; b: number }): Promise<number> {
+        const x = await Promise.resolve(a).then((v: number) => v + 0);
+        return x + b;
+      }
+      export function main(): any { return f({ a: 40, b: 2 }); }
+    `);
+    expect(wat).toContain("__async_resume_ff");
+    const exports = await compileToWasm(`
+      async function f({ a, b }: { a: number; b: number }): Promise<number> {
+        const x = await Promise.resolve(a).then((v: number) => v + 0);
+        return x + b;
+      }
+      export function main(): any { return f({ a: 40, b: 2 }); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("array-pattern param decl: derived bindings read AFTER the await", async () => {
+    const exports = await compileToWasm(`
+      async function f([a, b]: number[]): Promise<number> {
+        const x = await Promise.resolve(2).then((v: number) => v + 0);
+        return a + b + x;
+      }
+      export function main(): any { return f([30, 10]); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a derived binding MUTATED before the await keeps the mutation after resume (the CPS snapshot semantics — spill store-back)", async () => {
+    const exports = await compileToWasm(`
+      async function m({ a }: { a: number }): Promise<number> {
+        a = a + 1;
+        const x = await Promise.resolve(40).then((v: number) => v + 0);
+        return a + x;
+      }
+      export function main(): any { return m({ a: 1 }); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("an identifier REST param is a raw wasm param (caller-built vec) — captured by name, drives fine", async () => {
+    const exports = await compileToWasm(`
+      async function r(...xs: number[]): Promise<number> {
+        const x = await Promise.resolve(2).then((v: number) => v + 0);
+        return xs[0] + xs[1] + x;
+      }
+      export function main(): any { return r(30, 10); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("MULTI-await pattern-param body (the pre-2b-2 host-drive derived-local gap) now delivers the derived value", async () => {
+    // Pre-2b-2 this shape already routed host-drive (it was never CPS-shaped),
+    // but the derived binding `a` was a default-initialized externref spill the
+    // resume fn never saw a real value for. Live-initialized capture fixes it.
+    const exports = await compileToWasm(`
+      async function g({ a }: { a: number }): Promise<number> {
+        const x = await Promise.resolve(20).then((v: number) => v + 0);
+        const y = await Promise.resolve(20).then((v: number) => v + 0);
+        return a + x + y;
+      }
+      export function main(): any { return g({ a: 2 }); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("concise arrow WITH a pattern param (2b-1 × 2b-2)", async () => {
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async ({ a }: { a: number }): Promise<number> => await Promise.resolve(a).then((y: number) => y * 2);
+        return g({ a: 21 });
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a derived binding mutably captured by a NESTED fn re-lanes to CPS (cell hazard — correct-or-CPS routing pin)", async () => {
+    // `bump` cell-boxes `a` at its creation site; the frame's derived spill
+    // field (typed from the entry local) can neither store the cell at the
+    // suspend store-back nor re-materialize it on resume. The hazard gate
+    // keeps this CPS-shaped body on CPS: no resume fn is minted. This pins
+    // ROUTING only — main routes this exact shape to the SAME CPS emitter
+    // (via the old pattern carve-out), and that lane loses the through-cell
+    // mutation (returns 1, not 42) there too: a pre-existing CPS cell quirk
+    // that #2967 phase 3 (cell-aware frame layout) retires together with
+    // this decline.
+    const wat = await watOf(`
+      async function h({ a }: { a: number }): Promise<number> {
+        const bump = function (): void { a = 41; };
+        bump();
+        const x = await Promise.resolve(1).then((v: number) => v + 0);
+        return a + x;
+      }
+      export function main(): any { return h({ a: 0 }); }
+    `);
+    expect(wat).not.toContain("__async_resume_fh");
   });
 });
