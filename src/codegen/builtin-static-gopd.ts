@@ -66,6 +66,7 @@ import { nativeStringLiteralInstrs, stringConstantExternrefInstrs } from "./nati
 import {
   BUILTIN_CTOR_ARITY,
   ensureStandaloneBuiltinStaticMethodClosure,
+  ensureStandaloneSpeciesGetterClosure,
   MATH_CONSTANT_VALUES,
   NUMBER_CONSTANT_VALUES,
   TYPED_ARRAY_BYTES_PER_ELEMENT,
@@ -314,6 +315,97 @@ export function tryEmitStandaloneBuiltinStaticGopd(
   // surface is fully covered above, so the member is genuinely absent.
   if (builtinName === "Symbol" || builtinName === "RegExp") return false;
   fctx.body.push({ op: "ref.null.extern" } as Instr);
+  return true;
+}
+
+/**
+ * (#2984 "builtin receiver + non-literal key") The constructors whose OWN
+ * property surface includes the `@@species` accessor (§ "get <Ctor>
+ * [ @@species ]"): Array §23.1.2.5, ArrayBuffer §25.1.5.3, SharedArrayBuffer
+ * §25.2.4.3, Map §24.1.2.2, Set §24.2.2.2, Promise §27.2.4.4, RegExp §22.2.6.2.
+ * (%TypedArray% also owns one, but its gOPD receiver in the corpus is a
+ * harness-bound `Object.getPrototypeOf(Int8Array)` var the conservative alias
+ * resolver declines — out of scope for this slice. The CONCRETE TypedArray
+ * ctors inherit @@species and do NOT own it, so they are correctly absent.)
+ */
+const SPECIES_OWNER_CTORS: ReadonlySet<string> = new Set([
+  "Array",
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "Map",
+  "Set",
+  "Promise",
+  "RegExp",
+]);
+
+/**
+ * True when a gOPD KEY expression is the well-known symbol read
+ * `Symbol.species` (unwrapping parens/`as`/`!`), with `Symbol` unshadowed.
+ * This is the dominant NON-LITERAL builtin-receiver key in the corpus
+ * (`built-ins/*/ Symbol.species; /*` — 26 standalone CEs measured 2026-07-11):
+ * the key never reaches `literalKeyText`, so the shape fell through to the
+ * dynamic fallback and hit the `__get_builtin` standalone refusal (#1472
+ * Phase B) as a hard CE.
+ */
+export function isSymbolSpeciesKeyExpression(fctx: FunctionContext, expr: ts.Expression): boolean {
+  let e = expr;
+  while (
+    ts.isParenthesizedExpression(e) ||
+    ts.isAsExpression(e) ||
+    ts.isNonNullExpression(e) ||
+    ts.isTypeAssertionExpression(e)
+  ) {
+    e = e.expression;
+  }
+  return (
+    ts.isPropertyAccessExpression(e) &&
+    !ts.isPrivateIdentifier(e.name) &&
+    e.name.text === "species" &&
+    ts.isIdentifier(e.expression) &&
+    e.expression.text === "Symbol" &&
+    !(fctx.localMap.has("Symbol") || (fctx.boxedCaptures?.has("Symbol") ?? false))
+  );
+}
+
+/**
+ * Synthesize the §6.1.7.3 ACCESSOR descriptor for
+ * `Object.getOwnPropertyDescriptor(<Ctor>, Symbol.species)`:
+ * `{ get: <"get [Symbol.species]" singleton>, set: undefined,
+ *    enumerable: false, configurable: true }`.
+ * Leaves one externref (the descriptor `$Object`) on the stack and returns
+ * `true`; returns `false` — with NOTHING pushed — for non-@@species-owner
+ * receivers (caller keeps today's `__get_builtin` refusal; every intercepted
+ * owner shape was a hard CE, so the arm is strictly additive).
+ *
+ * Late-funcidx discipline: the `__create_accessor_descriptor` native is
+ * resolved (+ flushed) BEFORE the getter closure funcIdx is minted/captured,
+ * so the `ref.func` the singleton materializer bakes into `fctx.body` cannot
+ * go stale from this arm's own import addition (and `fctx.body` is
+ * shift-covered for later ones).
+ */
+export function tryEmitStandaloneBuiltinSpeciesGopd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  builtinName: string,
+): boolean {
+  if (!SPECIES_OWNER_CTORS.has(builtinName)) return false;
+  const createAccIdx = ensureLateImport(
+    ctx,
+    "__create_accessor_descriptor",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (createAccIdx === undefined) return false;
+  const closure = ensureStandaloneSpeciesGetterClosure(ctx, builtinName);
+  if (!closure) return false;
+  // (#2175 V2-S2) Identity-stable getter singleton — repeated gOPD calls yield
+  // the SAME `.get` function object.
+  fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
+  fctx.body.push({ op: "extern.convert_any" } as Instr); // get
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
+  fctx.body.push({ op: "i32.const", value: FLAG_CONFIGURABLE } as Instr); // {e:false, c:true}
+  fctx.body.push({ op: "call", funcIdx: createAccIdx } as Instr);
   return true;
 }
 
