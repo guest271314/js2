@@ -10,12 +10,12 @@
   },
   {
     "edition": "ES5",
-    "pass": 10261,
+    "pass": 10265,
     "fail": 2713,
-    "ce": 101,
+    "ce": 97,
     "skip": 0,
     "total": 13075,
-    "pct": 78,
+    "pct": 79,
     "features": [
       {
         "name": "caller",
@@ -1463,8 +1463,8 @@
   {
     "edition": "ES2020",
     "pass": 936,
-    "fail": 923,
-    "ce": 19,
+    "fail": 927,
+    "ce": 15,
     "skip": 18,
     "total": 1896,
     "pct": 49,
@@ -1472,8 +1472,8 @@
       {
         "name": "BigInt",
         "pass": 541,
-        "fail": 477,
-        "ce": 8,
+        "fail": 481,
+        "ce": 4,
         "skip": 0,
         "total": 1026,
         "pct": 53
