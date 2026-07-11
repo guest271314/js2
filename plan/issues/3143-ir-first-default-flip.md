@@ -1,10 +1,12 @@
 ---
 id: 3143
 title: "Flip IR-first (JS2WASM_IR_FIRST) to default — clears gate G1 of the legacy-frontend retirement"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
+assignee: ttraenkler/fable-shrink
 created: 2026-07-11
 updated: 2026-07-11
+completed: 2026-07-11
 priority: high
 horizon: m
 feasibility: medium
@@ -49,3 +51,26 @@ until IR-first is the default*, because the overlay keeps every handler reachabl
 - IR-first is the default compile mode; overlay path behind the escape-hatch env only.
 - test262 net ≥ 0 on merge_group; ir-fallback baseline unchanged or lower.
 - `plan/log/3090-phase0-legacy-delete-list.md` G1 marked cleared (unblocks Phase 3a).
+
+## Implementation notes (2026-07-11, fable-shrink)
+
+- Gate line (`src/codegen/index.ts` ~:2100): `!explicitlyDisabledEnv(JS2WASM_IR_FIRST)`
+  — default ON under `experimentalIR`; only explicit `0`/`false` disables
+  (one-release escape hatch). `disableIrFirst` (#2973 eval/new-Function
+  sub-compiles) unchanged.
+- **New gate 7** (`irFirstBodyHasNullish`, `src/codegen/ir-first-gate.ts`):
+  functions containing `??`/`??=` stay compile-twice. `lowerNullish` covers
+  only reference-shaped operand pairs; without the gate the flip promoted the
+  documented metered `??` residual demote (#2135) to a skipped-slot hard
+  compile error (caught by `tests/issue-2135.test.ts` pre-PR). Retire the
+  gate when `lowerNullish` covers all operand shapes.
+- Off-arm test/sweep stubs switched from unset/`""` to explicit `"0"`
+  (issue-2138/2951/2945/2972, `scripts/ir-first-sweep.mts`).
+- Coordinated with fable-irflip: buckets = body-shape-rejected 15 (never
+  claimed → out of the A/B population), post-claim demotions 0; no file
+  conflict (they work in `src/ir/*`).
+- STRICT_IR_REASONS banking (plan step 4) deliberately deferred to a
+  follow-up PR so the flip's A/B stays clean.
+- The `test262-sharded.yml` `ir_first` dispatch input is now vestigial
+  (its `'1'` equals the default); repurpose to `'0'` later if a legacy-lane
+  measurement is ever needed.
