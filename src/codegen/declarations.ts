@@ -170,15 +170,18 @@ const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
 
 // (#2903) Method names whose CALL can mint a HOST promise in a standalone
 // module even while the native `$Promise` chain is active — the host-routed
-// combinators/instance methods (`Promise_finally`/`__array_from_async`
-// imports). Matched on ANY receiver (conservative: a false positive only
-// preserves the pre-#2903 host fallback arm). Plain `Promise.all`/`race`/
-// (#3137) `allSettled`/`any` are NOT listed — those lower to the host-free
-// native combinators (#2919/#2867 Gap 4/#3137); only the subclass-receiver
-// form is flagged (inline check at the scan site — exotic shapes that fall to
-// the host path lazily register their `Promise_*` import, which the bridge's
-// funcMap producer check catches).
-const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set(["finally", "allKeyed", "allSettledKeyed", "fromAsync"]);
+// combinators/instance methods (`__array_from_async` etc. imports). Matched on
+// ANY receiver (conservative: a false positive only preserves the pre-#2903
+// host fallback arm). Plain `Promise.all`/`race`/(#3137) `allSettled`/`any`
+// are NOT listed — those lower to the host-free native combinators
+// (#2919/#2867 Gap 4/#3137); `.finally` is NOT listed since it lowers to the
+// native §27.2.5.3 machinery on Promise/any receivers under the active lane
+// (#2903 sub-front — this un-flags every `.finally`-using module for the
+// then-bridge de-leak); only the subclass-receiver combinator form is flagged
+// (inline check at the scan site — exotic shapes that fall to the host path
+// lazily register their `Promise_*` import, which the bridge's funcMap
+// producer check catches).
+const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set(["allKeyed", "allSettledKeyed", "fromAsync"]);
 
 /**
  * (#1700) Record TypedArray classifications for a user-exported function so
@@ -1091,9 +1094,9 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
 
   // (#2903) Flag any construct that can mint a HOST promise in a standalone
   // module while the native `$Promise` chain is active: dynamic `import()`,
-  // host-routed combinators (`allSettled`/`any`/`allKeyed`/`allSettledKeyed`;
-  // subclass-receiver `all`/`race`), the host-routed `.finally(…)` instance
-  // method, and `Array.fromAsync`. The `.then`/`.catch` receiver bridge keys
+  // host-routed combinators (`allKeyed`/`allSettledKeyed`; subclass-receiver
+  // `all`/`race`/`allSettled`/`any`), `Array.fromAsync`, and (below, separate
+  // block) `class X extends Promise`. The `.then`/`.catch` receiver bridge keys
   // its miss arm on this (see `moduleHasHostPromiseSource` in
   // context/types.ts): no producer in the module ⇒ the host fallback arm is
   // provably dead ⇒ it is replaced by a native TypeError, dropping the
@@ -1134,6 +1137,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
             !recvIsPromiseIdent))
       ) {
         ctx.moduleHasHostPromiseSource = true;
+      }
+    }
+  }
+
+  // (#2903 finally sub-front) A `class X extends Promise` in the module is a
+  // host-promise producer in its own right: subclass construction and the
+  // inherited statics (`X.resolve()`/`X.reject()`) route through host imports
+  // (`__new_Promise` + the symbol-derived static-method import), so their
+  // results are HOST promises that a native then/finally bridge miss arm must
+  // keep the host fallback for. This was previously masked for the
+  // subclass-`finally` tests by the (now-removed) `.finally` syntactic flag —
+  // the subclass shape needs its own flag, keyed on the heritage clause
+  // (pre-body, so a textually-later class declaration is still seen).
+  if (
+    ctx.standalone === true &&
+    ctx.wasi !== true &&
+    ctx.moduleHasHostPromiseSource !== true &&
+    (ts.isClassDeclaration(node) || ts.isClassExpression(node))
+  ) {
+    for (const clause of node.heritageClauses ?? []) {
+      if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+      for (const typeRef of clause.types) {
+        if (ts.isIdentifier(typeRef.expression) && typeRef.expression.text === "Promise") {
+          ctx.moduleHasHostPromiseSource = true;
+        }
       }
     }
   }
