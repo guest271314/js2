@@ -366,3 +366,53 @@ the frame engine** (fix the capture-struct/`__self` interplay in the
 lifted-closure context), **2b — pattern/rest params** (spill the
 prologue-derived locals into the frame), **2c — delete CPS**. Widening
 (try/catch-across-await) remains slice 3.
+
+## Phase 3 spec — cell-aware frame layout (the true 2c gate; 2026-07-11)
+
+After 2b the CPS population is only the **hazard re-lanes**: (class 1)
+spill/derived locals cell-boxed by a nested mutable capture; (class 2)
+non-resume-binding ref-typed spill guesses. Deleting CPS now would strand
+those on the legacy sync fakery (wrong under suspension — the await-using
+microtask cluster rides the class-1 decline TODAY). So 2c decomposes:
+
+**3a — retire class 1 by FORCE-BOXING (design verified against source):**
+
+- Key verified mechanics: (i) the resume prologue's `allocLocal(name)` makes
+  a segment lead's `let`/`const` REUSE that binding
+  (variables.ts `isHoistedLetConst`: `existingIdx >= params.length`), so the
+  #2692 let/const eager-boxing race does NOT apply inside the resume fn;
+  (ii) the declaration-init path is already box-aware
+  (variables.ts `boxedForInitStore`, #1177/#2692 — writes the init through
+  the cell when `fctx.boxedCaptures` has the name); (iii) closure creation
+  ALIASES a pre-existing `boxedCaptures` cell instead of re-boxing
+  (closures.ts `alreadyBoxed` branch).
+- Therefore: for each spill (or 2b-2 derived-param) name matching the class-1
+  predicate, type its frame field `(ref null $__ref_cell_<declaredT>)`;
+  create the cell at the ENTRY fn's frame `struct.new`
+  (body-local: `struct.new $cell(<default>)`; derived param: box the live
+  entry local — reuse the `derivedSpillInit` hook); in the resume prologue,
+  restore the cell local, bind the NAME to it, and register
+  `resumeFctx.boxedCaptures.set(name, {refCellTypeIdx, valType})`. Reads /
+  writes / declaration-inits / nested-capture aliasing then all flow through
+  existing machinery; `storeSpills` stores the cell ref (field type matches);
+  cell IDENTITY survives suspends (same heap object restored), so nested
+  closures observe post-await writes and vice versa.
+- The predicate does NOT need to exactly mirror closures.ts's boxing
+  decision: force-boxing is SELF-FULFILLING (over-approximation just adds an
+  indirection, still correct). This also fixes the latent declaration-lane
+  class-1 hazard (no corpus instance, slice-1 note).
+- Retires: `asyncClosureCellSpillHazard` class-1 arm, `patternParamCellHazard`
+  re-lane, and the 2b-2 non-CPS cell caveat. Own PR + merge_group A/B (the
+  await-using cluster flips lanes).
+
+**3b — class 2 (rep-divergence)**: smaller corpus (the fromAsync
+`const expected = [prom]` shape). Candidate: pre-bind the hazardous name to
+an EXTERNREF local (uniform boundary rep, field externref) and let the
+dynamic-read ladders handle it; the blocker to verify is the mid-body retype
+paths (#3037-style slot retyping re-allocs the local, orphaning the prologue
+binding). If that verification fails, 3b may fold into #3134 (the Promise<T>
+slot-rep fix) which removes the known divergence source.
+
+**2c — delete** `emitAsyncStateMachine`/`splitBodyAtAwait`/`compileNestedAwait`
+CPS arm/`asyncCpsActive` plumbing/CPS-only import detection once 3a+3b land
+(or 3a lands and 3b's population is measured ≈0 on the corpus).
