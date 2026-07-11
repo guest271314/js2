@@ -1,7 +1,8 @@
 ---
 id: 3141
 title: "Self-hosted stdlib pilot: compile math-helpers as TS builtin source through our own IR pipeline (porffor model)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-selfhost
 sprint: Backlog
 created: 2026-07-11
 updated: 2026-07-11
