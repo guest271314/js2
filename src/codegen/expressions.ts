@@ -156,6 +156,13 @@ export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./
  * Used to determine whether the result needs Promise.resolve() wrapping (#919).
  */
 function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  // (#2903) `.finally(...)` nodes lowered to the NATIVE §27.2.5.3 machinery
+  // already return a `$Promise` — the fulfilled-wrap would double-wrap (and
+  // its try/catch_all would null a rejection reason). The per-node marker is
+  // set by the calls.ts finally arms at lowering time, so this check is in
+  // exact lockstep with the route actually emitted; the legacy host route
+  // (producer modules, gc/host lane) never marks and KEEPS the wrap.
+  if (ctx.standaloneNativeFinallyNodes?.has(expr) === true) return false;
   // Built-in Promise static methods already return a Promise object. Wrapping
   // `Promise.resolve(v)` in another `Promise.resolve(...)` is harmless in the
   // JS host due to native assimilation, but standalone `$Promise` currently has

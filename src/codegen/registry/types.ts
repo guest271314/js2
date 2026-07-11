@@ -408,6 +408,36 @@ export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
 }
 
 /**
+ * (#3140) Get or register `$__bound_fn` — the standalone/WASI native
+ * bound-function carrier minted by `Function.prototype.bind`:
+ * `{target: externref, thisArg: externref, boundArgs: externref}` where
+ * `boundArgs` holds a boxed `$ObjVec` of the partial-application arguments.
+ * Invocation unwraps through the `__apply_closure` front-guard (prepending
+ * `boundArgs` and recursing on `target`, so bound-of-bound chains compose);
+ * the closure classifier (`closure-classifier.ts`) counts it callable so
+ * `typeof bound === "function"`. A plain struct (NOT a vec/closure subtype) so
+ * it never collides with other `ref.test`s. Registered late+once, memoized on
+ * `ctx.boundFnTypeIdx`. Byte-inert: only emitted when a standalone `.bind(...)`
+ * site compiles.
+ */
+export function getOrRegisterBoundFnType(ctx: CodegenContext): number {
+  if (ctx.boundFnTypeIdx >= 0) return ctx.boundFnTypeIdx;
+  const idx = ctx.mod.types.length;
+  const name = "__bound_fn";
+  const fields = [
+    { name: "target", type: { kind: "externref" as const }, mutable: false },
+    { name: "thisArg", type: { kind: "externref" as const }, mutable: false },
+    { name: "boundArgs", type: { kind: "externref" as const }, mutable: false },
+  ];
+  ctx.mod.types.push({ kind: "struct", name, fields });
+  ctx.boundFnTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, fields);
+  return idx;
+}
+
+/**
  * (#3054 C) Get or register the `$__resizable_ab` struct — a WasmGC SUBTYPE of the
  * ArrayBuffer backing vec `$__vec_i32_byte`, carrying one extra `maxByteLength`
  * field:
