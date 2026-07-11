@@ -772,7 +772,37 @@ export interface LinearAwaitPlan {
 export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): LinearAwaitPlan | null {
   if (plan.awaitPoints.length === 0) return null;
   const body = fn.body;
-  if (body === undefined || !ts.isBlock(body)) return null;
+  if (body === undefined) return null;
+  if (!ts.isBlock(body)) {
+    // (#2967 slice 2b) CONCISE arrow body. The one drivable concise shape is
+    // `async (…) => await P` (possibly parenthesized) — semantically
+    // `{ return await P; }`, i.e. the single-segment isReturnAwait plan. This
+    // is exactly the concise population the CPS lane (`splitBodyAtAwait`)
+    // owned, so admitting it here moves those closures onto the frame engine
+    // (observable only via the closure activation path — declarations never
+    // have concise bodies). Any richer concise body (`=> f(await P)`,
+    // `=> (await P) + 1`) has its await NESTED in an expression — not
+    // linear-canonical, keep the legacy/CPS fallback.
+    let e: ts.Expression = body;
+    while (ts.isParenthesizedExpression(e)) e = e.expression;
+    if (!ts.isAwaitExpression(e)) return null;
+    if (plan.awaitPoints.length !== 1 || plan.awaitPoints[0] !== e) return null;
+    return {
+      segments: [
+        {
+          leadStmts: [],
+          awaitedExpr: e.expression,
+          resumeBinding: null,
+          isReturnAwait: true,
+          awaitInTry: false,
+          leadInTry: [],
+        },
+      ],
+      tail: [],
+      tailInTry: [],
+      finalizer: null,
+    };
+  }
 
   const awaitSet = new Set<ts.AwaitExpression>(plan.awaitPoints);
   const st: LowerState = {
