@@ -1,8 +1,11 @@
 ---
 id: 3140
 title: "Standalone: Function.prototype.bind on a closure returns a non-callable — blocks the entire modern test262 TypedArray harness (makeCtorArg)"
-status: ready
+status: done
+completed: 2026-07-11
+assignee: ttraenkler/fable-harvest3
 created: 2026-07-11
+updated: 2026-07-11
 priority: high
 task_type: bug
 area: codegen, runtime
@@ -12,8 +15,57 @@ sprint: current
 horizon: m
 related: [2872, 2860, 2876, 3016]
 umbrella: 2860
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
+  - src/codegen/registry/types.ts
+  - src/codegen/closure-classifier.ts
+  - src/codegen/context/types.ts
+  - src/codegen/context/create-context.ts
 origin: "2026-07-11 — discovered by fable-harvest3 during #2872 slice 1 (dynamic TA construction): every makeCtorArg-style TypedArray test fails at the HARNESS level because argFactory.bind(undefined, constructor) is not callable"
 ---
+
+## Implemented (2026-07-11, fable-harvest3)
+
+**Root cause (two layers):** (a) the typed `compileFunctionBind` route degraded
+to *identity-bind* under standalone (returned the target, DROPPED partial
+args — the #1632a documented gap); (b) an `any`-typed receiver (`argFactory`
+is an array element — no TS call signatures) never routed there at all: it fell
+to the open-object dispatcher arm and returned `undefined`.
+
+**Fix — native `$__bound_fn {target, thisArg, boundArgs}` carrier:**
+
+1. `getOrRegisterBoundFnType` (registry/types.ts), memoized on
+   `ctx.boundFnTypeIdx`; byte-inert for bind-free modules.
+2. `compileFunctionBind` standalone arm mints the carrier (spec §20.2.3.2
+   evaluation order: target → thisArg → partials, each once).
+3. Any-receiver `.bind` routes through **reserve-then-fill `__bind_dyn`**
+   (object-runtime.ts): the callable gate needs the COMPLETE closure-classifier
+   root list, only settled at finalize (#1896 hazard) — callable → mint;
+   anything else → the legacy `__extern_method_call(recv, "bind", args)` route
+   (undefined), so non-callables keep prior behavior.
+4. `fillApplyClosure` gains a `$__bound_fn` front-guard (the #3031 $Proxy
+   ladder pattern): unwraps ONE bound layer per hop — merged = boundArgs ++
+   args, [[BoundThis]] wins over the caller receiver (§10.4.1.1), recursion on
+   the target composes bound-of-bound.
+5. `tryEmitInlineDynamicCall` (bare `bound(...)` calls) gains an unwrap arm,
+   pre-scanned via `sourceHasBindCall` for compile-order independence.
+6. The closure classifier counts the carrier callable → `typeof bound ===
+   "function"`, `__is_closure`, typeof-object exclusion — one predicate, all
+   consumers.
+
+**Measured (standalone lane, local scans vs pre-fix):**
+`built-ins/Function/prototype/bind`: 16 → 27 pass (**+14 / −3**; the 3 flips
+are `Object.defineProperty`-on-the-carrier tests that previously passed by the
+identity-bind accident). `built-ins/TypedArray/prototype`: unchanged — the
+harness's NEXT gate is `Array.from({length}, fn)` / `Array.from(iterable)`
+(leaks `__make_callback` / `__array_from`), which is the follow-up lever.
+
+**Residuals (follow-ups):** bound-fn `.length`/`.name` fidelity (carrier
+reports arity 0); `Object.defineProperty` on a bound fn; `new bound(...)`
+[[Construct]]; the `Array.from` mapper/iterable standalone gap (blocks the
+makeCtorArg family — next slice of the #2872/#2860 line).
 
 # Standalone: `fn.bind(...)` on a closure is not callable
 
