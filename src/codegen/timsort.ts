@@ -23,7 +23,6 @@ import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
 // ---------------------------------------------------------------------------
 const L = (i: number): Instr => ({ op: "local.get", index: i });
 const LS = (i: number): Instr => ({ op: "local.set", index: i });
-const LT = (i: number): Instr => ({ op: "local.tee", index: i });
 const I = (v: number): Instr => ({ op: "i32.const", value: v });
 
 const ADD: Instr = { op: "i32.add" };
