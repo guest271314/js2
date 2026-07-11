@@ -9424,6 +9424,16 @@ assert._isSameValue = isSameValue;
                 /* not a field */
               }
             }
+            // (#3139) Inherited `length` through the fnctor instance→ctor
+            // prototype chain (§7.3.2 Get is prototype-inclusive). The classic
+            // shape: `foo.prototype = new Array(1,2,3); var f = new foo();
+            // Array.prototype.every.call(f, cb)` — the compiled array-generic
+            // loop reads the receiver's length via THIS import, and the live
+            // length lives on the Array-valued prototype (the walk's vec arm
+            // serves it). Own reads above always shadow. Requires the #3138
+            // call-site instance→ctor registration to have linked the instance.
+            const pd = _fnctorProtoLookup(obj, "length", exports);
+            if (pd) return toLength(coerceLen(pd.get ? pd.get.call(obj) : pd.value));
             return 0;
           }
           const len = obj.length;
@@ -9474,6 +9484,14 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${strKey}`];
           if (typeof getter === "function") return getter(obj);
+          // (#3139) Inherited index through the fnctor instance→ctor prototype
+          // chain (`foo.prototype = new Array(11,22,33); new foo()[1]` → 22).
+          // Sits BEFORE the Object.prototype extended-index table below because
+          // the receiver's own [[Prototype]] chain shadows %Object.prototype%.
+          if (_isWasmStruct(obj)) {
+            const pd = _fnctorProtoLookup(obj, strKey, exports);
+            if (pd) return pd.get ? pd.get.call(obj) : pd.value;
+          }
           // (#2580 M3 B-protoextend) Inherited indexed data/accessor on the
           // Object.prototype chain. Reached only after own fields + sidecar +
           // own accessor descriptors miss — so a real array / $Vec / receiver
@@ -9545,6 +9563,10 @@ assert._isSameValue = isSameValue;
               /* getter not defined for this struct variant — fall through */
             }
           }
+          // (#3139) Inherited index through the fnctor instance→ctor prototype
+          // chain (HasProperty §7.3.12 is prototype-inclusive). Before the
+          // Object.prototype table for the same shadowing reason as get_idx.
+          if (_isWasmStruct(obj) && _fnctorProtoLookup(obj, strKey, exports) !== undefined) return 1;
           // (#2580 M3 B-protoextend) Inherited index on the Object.prototype
           // chain. HasProperty (§7.3.12) walks `[[Prototype]]`; an array-like
           // plain-object receiver inherits `Object.prototype[i]`. Presence is
