@@ -2,7 +2,7 @@
 id: 2992
 title: "Standalone defineProperties MOP residual (~250: array/arguments own-prop MOP + accessor-attribute fidelity + destructive verifyProperty/tombstone survival)"
 status: in-progress
-assignee: ttraenkler/fable-18th
+assignee: ttraenkler/fable-sub2
 sprint: Backlog
 priority: high
 horizon: l
@@ -12,6 +12,8 @@ goal: standalone-mode
 related: [2965, 2985, 2667]
 loc-budget-allow:
   - src/codegen/declarations.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/object-ops.ts
 origin: "#2985 sizing-pass split — the substrate-scale MOP remainder after the illegal-cast slice shipped in #2985"
 ---
 
@@ -64,9 +66,10 @@ open-addressing read path in `__obj_find` / `__extern_get`
 Wants slicing into separate PRs:
 
 1. delete-tombstone-read survival (bounded — start here). **SHIPPED — see slice-1 findings below.**
-2. array/arguments index + `length` own-prop MOP.
-3. accessor-attribute (get/set) define→gOPD fidelity.
+2. array/arguments index + `length` own-prop MOP. **BLOCKED on the vec-receiver own-prop substrate (see slice-3 findings) — no bounded slice (#2986 agrees).**
+3. accessor-attribute (get/set) define→gOPD fidelity. **SHIPPED (with the broader §10.1.6.3 partial-descriptor MERGE) — see slice-3 findings below.**
 4. (NEW, found during slice 1) nominal-struct field delete fidelity — see below.
+5. (NEW, found during slice 3) accessor/own-prop MOP on CLOSED-STRUCT receivers (`__extern_get` accessor arm misses; hasOwnProperty/delete invisible) — the biggest residual cluster (4-75/4-82-* family), substrate-adjacent to slice 2 and slice 4.
 
 ## Slice 1 findings (measured 2026-07-10 on main 569e29b761, fable-18th)
 
@@ -95,6 +98,58 @@ works in every lane):
   `i32.const 0` — the read can never observe undefined. Mixed elem/prop access
   keeps the object dynamic and passes. Not a regression from slice 1 (failed
   identically before, via the top-level drop).
+
+## Slice 3 findings (measured 2026-07-11 on main 026f40f771, fable-sub2)
+
+Fresh-baseline re-measure (2026-07-11 standalone jsonl, post-slice-1): the
+`defineProperty`/`defineProperties` standalone-fail/host-pass gap is **560**.
+Root-caused via the real runner pipeline (`runTest262File(..., "standalone")`
+— reduced probes MISLEAD here because the runner wraps the test body in
+`export function test()`, which changes shape inference):
+
+- **Partial-descriptor redefine CLOBBERED (fixed this slice):**
+  `__defineProperty_value` / `__defineProperty_accessor` blanket-inserted on
+  redefine — unspecified attributes reset to false, a flags-only define
+  clobbered [[Value]] with null, and FLAG_ACCESSOR (+ live get/set halves) was
+  wiped. Both appliers now MERGE in place per §10.1.6.3, driven by the
+  specified-bits (3/4/5 existing; NEW bits 8/9 = get/set specified,
+  standalone-gated at call sites, legacy no-bits ⇒ replace-both).
+- **Accessor identity (fixed):** `get: someIdentifier` re-synthesized a fresh
+  closure from the AST (`emitAccessorRefValue` standalone arm) — gOPD read
+  back a different function (`desc.get === getFunc` false). Identifiers now
+  compile to their live closure VALUE (driver-invocable; verified via the
+  dynamic-descriptor path which always stored raw values).
+- **Explicit `get: undefined` / `set: undefined` (fixed):** dropped at the
+  call site; now routed as PRESENT accessor fields (specified bit + null
+  half), so 15.2.3.6-4-439-style gOPD `hasOwnProperty("get")` passes and a
+  later data-redefine on the non-configurable accessor throws.
+- **Non-configurable accessor validation (fixed):** the accessor applier had
+  NO §10.1.6.3 rejections — configurable/enumerable flips, data→accessor
+  conversion, and get/set SameValue changes on a non-configurable property
+  now throw catchable TypeErrors; new-key define on a non-extensible object
+  throws (was a silent no-op).
+- **Explicit `get: null` → TypeError is implemented but only observable under
+  the `undefinedSingleton` regime (#2106, default OFF)** — legacy regime
+  cannot distinguish stored null from undefined, so those ~6 tests stay red.
+- **Out of slice (measured, blocked on the vec/closed-struct receiver
+  substrate — same wall as #2986's sizing):** (a) exotic DESCRIPTOR receivers
+  (array/arguments/function/Error descriptors, incl. inherited fields) — even
+  plain expando reads fail on those receivers; (b) array-index/length
+  attribute MOP (~109 "expected TypeError" tests, slice 2); (c) accessor
+  define on CLOSED-STRUCT receivers (runner-wrapped `var obj = {}` with pure
+  prop access) — `__extern_get` accessor-arm reads miss; affects the large
+  4-75/4-82-* residual. All shapes fail identically on unmodified main
+  (verified) — no regression from this slice.
+
+Measured sample flips (runner pipeline, standalone): 11 of 144 sampled gap
+tests flip to pass (4-439, 7-6-a-105, 7-6-a-38-1, 4-336, 4-373, 4-381, 4-430,
+4-448, 4-454, 4-457, 4-508); merge semantics also serve every
+verifyProperty-style partial redefine outside these buckets. Regression
+sweeps: 142/142 baseline-passing tests (defineProperty/ies, freeze, seal,
+preventExtensions, create, gOPD, Reflect, Array.prototype, Boolean) still
+pass; equivalence `object-define-property*`, `define-property-typeerror`,
+`hasownproperty-call`: 46/46; `tests/issue-2992.test.ts` 12/12;
+new `tests/issue-2992-accessor-merge.test.ts` 18/18 (gc + standalone).
 
 ## Test Results (slice 1)
 

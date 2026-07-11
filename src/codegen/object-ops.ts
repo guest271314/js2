@@ -1332,6 +1332,12 @@ export function compileObjectDefineProperty(
   // For `get: identifierRef` / `set: identifierRef` — not inline function nodes but expression refs
   let getExpr: ts.Expression | undefined;
   let setExpr: ts.Expression | undefined;
+  // (#2992 S3) explicit `get: undefined` / `set: undefined` — a PRESENT
+  // accessor field per ToPropertyDescriptor (§6.2.5.6), routed as an accessor
+  // define with an empty half under standalone (host mode keeps its
+  // `emitDefinePropertyDescRuntime` route below, which handles presence).
+  let getExplicitUndefined = false;
+  let setExplicitUndefined = false;
   if (ts.isObjectLiteralExpression(descArg)) {
     for (const prop of descArg.properties) {
       if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
@@ -1378,6 +1384,11 @@ export function compileObjectDefineProperty(
           !(init.kind === ts.SyntaxKind.NullKeyword)
         ) {
           getExpr = init;
+        } else if (ts.isIdentifier(init) && init.text === "undefined") {
+          // (#2992 S3) `get: undefined` is still a PRESENT [[Get]] field per
+          // ToPropertyDescriptor — the define creates/merges an ACCESSOR
+          // property whose get half is undefined (15.2.3.6-4-439).
+          getExplicitUndefined = true;
         }
       }
       // set: someIdentifier (function reference, not inline)
@@ -1394,6 +1405,9 @@ export function compileObjectDefineProperty(
           !(init.kind === ts.SyntaxKind.NullKeyword)
         ) {
           setExpr = init;
+        } else if (ts.isIdentifier(init) && init.text === "undefined") {
+          // (#2992 S3) `set: undefined` — see the get half above.
+          setExplicitUndefined = true;
         }
       }
     }
@@ -1442,7 +1456,14 @@ export function compileObjectDefineProperty(
   {
     const hasData = valueExpr !== undefined || descWritable !== undefined || writableDynamic;
     const hasAccessor =
-      getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
+      getNode !== undefined ||
+      setNode !== undefined ||
+      getExpr !== undefined ||
+      setExpr !== undefined ||
+      // (#2992 S3, standalone) explicit `get: undefined`/`set: undefined` are
+      // present accessor fields for the §6.2.5.6 step-4 conflict too. Host
+      // mode keeps its runtime-route handling (byte-inert).
+      (ctx.standalone && (getExplicitUndefined || setExplicitUndefined));
     if (hasData && hasAccessor) {
       // Compile obj/prop for side effects then throw.
       const t1 = compileExpression(ctx, fctx, objArg);
@@ -2388,6 +2409,8 @@ export function compileObjectDefineProperty(
       setNode,
       getExpr,
       setExpr,
+      getExplicitUndefined,
+      setExplicitUndefined,
     );
   }
 }
@@ -2471,10 +2494,14 @@ function emitRuntimeFlagsF64(
   writableDyn: ts.Expression | undefined,
   enumerableDyn: ts.Expression | undefined,
   configurableDyn: ts.Expression | undefined,
+  // (#2992 S3) extra static bits OR'd into the flag word — the accessor
+  // [[Get]]/[[Set]] "specified" bits 8/9. Callers pass 0 (default) everywhere
+  // the encoding must stay byte-identical.
+  extraStaticBits = 0,
 ): void {
   const hasDynamic = writableDyn !== undefined || enumerableDyn !== undefined || configurableDyn !== undefined;
   if (!hasDynamic) {
-    const flags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, hasValue);
+    const flags = computeRuntimeFlags(descWritable, descEnumerable, descConfigurable, hasValue) | extraStaticBits;
     fctx.body.push({ op: "f64.const", value: flags });
     return;
   }
@@ -2482,7 +2509,7 @@ function emitRuntimeFlagsF64(
   //   - bit 7 (hasValue)
   //   - bit 3/4/5 (specified) for all dynamic flags
   //   - bit 3/4/5 (specified) + value bit for any statically-folded flags
-  let staticBase = 0;
+  let staticBase = extraStaticBits;
   if (hasValue) staticBase |= 1 << 7;
   if (descWritable !== undefined) {
     staticBase |= 1 << 3;
@@ -2792,6 +2819,26 @@ function emitAccessorFn(
  */
 function emitAccessorRefValue(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): boolean {
   if (ctx.standalone) {
+    // (#2992 S3) `get: someIdentifier` — compile the identifier's VALUE (the
+    // live host-free closure) instead of re-synthesizing a fresh closure from
+    // its AST. The re-synthesis lost function identity: gOPD read back a
+    // DIFFERENT function object, so `desc.get === getFunc` was always false
+    // (15.2.3.6-4-* accessor fidelity family). A closure value is directly
+    // invocable by the accessor get/set drivers (#1636-S1), verified via the
+    // dynamic-descriptor path which has always stored raw values. Non-
+    // identifier shapes keep the AST fallback.
+    if (ts.isIdentifier(expr)) {
+      const t = compileExpression(ctx, fctx, expr, { kind: "externref" });
+      if (t) {
+        if (t.kind === "ref" || t.kind === "ref_null") {
+          fctx.body.push({ op: "extern.convert_any" } as Instr);
+        } else if (t.kind !== "externref") {
+          coerceType(ctx, fctx, t, { kind: "externref" });
+        }
+        return true;
+      }
+      return false;
+    }
     const funcNode = resolveExprToFuncNode(ctx, expr);
     if (!funcNode) return false;
     return emitAccessorFn(ctx, fctx, funcNode as unknown as ts.FunctionExpression);
@@ -2824,6 +2871,8 @@ function emitExternDefinePropertyNoValue(
   setNode: ts.MethodDeclaration | ts.SetAccessorDeclaration | ts.FunctionExpression | ts.ArrowFunction | undefined,
   getExpr?: ts.Expression,
   setExpr?: ts.Expression,
+  getExplicitUndefined = false,
+  setExplicitUndefined = false,
 ): ValType | null {
   // Compile obj
   const objType = compileExpression(ctx, fctx, objArg);
@@ -2854,7 +2903,13 @@ function emitExternDefinePropertyNoValue(
 
   // For accessor descriptors (get/set), skip compiling descArg for side effects —
   // we'll compile getter/setter directly as JS-callable callbacks below.
-  const isAccessorDesc = !!(getNode || setNode || getExpr || setExpr);
+  // (#2992 S3, standalone) explicit `get: undefined` / `set: undefined` are
+  // PRESENT accessor fields (ToPropertyDescriptor §6.2.5.6) — route them to
+  // the accessor applier with the half's "specified" bit and a null slot, so
+  // the property becomes an accessor visible to gOPD (15.2.3.6-4-439). Host
+  // mode keeps its `emitDefinePropertyDescRuntime` presence handling.
+  const isAccessorDesc =
+    !!(getNode || setNode || getExpr || setExpr) || (ctx.standalone && (getExplicitUndefined || setExplicitUndefined));
   if (!isAccessorDesc) {
     // Compile descriptor for side effects:
     // - non-accessor descriptors are applied through the flag-only runtime
@@ -3010,6 +3065,14 @@ function emitExternDefinePropertyNoValue(
         undefined,
         accDyn.enumerableDyn,
         accDyn.configurableDyn,
+        // (#2992 S3) [[Get]]/[[Set]] "specified" bits (8/9) — the standalone
+        // accessor applier MERGES a partial descriptor (absent half preserves
+        // the live half, §10.1.6.3). Standalone-gated so the gc/host lane's
+        // f64 flag consts stay byte-identical.
+        ctx.standalone
+          ? (getNode || getExpr || getExplicitUndefined ? 1 << 8 : 0) |
+              (setNode || setExpr || setExplicitUndefined ? 1 << 9 : 0)
+          : 0,
       );
 
       const accFuncIdx = ensureLateImport(
@@ -3715,6 +3778,9 @@ export function compileObjectDefineProperties(
           if (dpGetNode) {
             if (!emitAccessorFn(ctx, fctx, dpGetNode as unknown as ts.FunctionExpression))
               fctx.body.push({ op: "ref.null.extern" });
+          } else if (dpGetExpr && ctx.standalone) {
+            // (#2992 S3) identity-preserving direct value — see emitAccessorRefValue.
+            if (!emitAccessorRefValue(ctx, fctx, dpGetExpr)) fctx.body.push({ op: "ref.null.extern" });
           } else if (dpGetExpr) {
             const gFuncNode = resolveExprToFuncNode(ctx, dpGetExpr);
             if (gFuncNode) {
@@ -3731,6 +3797,9 @@ export function compileObjectDefineProperties(
           if (dpSetNode) {
             if (!emitAccessorFn(ctx, fctx, dpSetNode as unknown as ts.FunctionExpression))
               fctx.body.push({ op: "ref.null.extern" });
+          } else if (dpSetExpr && ctx.standalone) {
+            // (#2992 S3) identity-preserving direct value — see emitAccessorRefValue.
+            if (!emitAccessorRefValue(ctx, fctx, dpSetExpr)) fctx.body.push({ op: "ref.null.extern" });
           } else if (dpSetExpr) {
             const sFuncNode = resolveExprToFuncNode(ctx, dpSetExpr);
             if (sFuncNode) {
@@ -3753,6 +3822,9 @@ export function compileObjectDefineProperties(
             undefined,
             dpAccDyn.enumerableDyn,
             dpAccDyn.configurableDyn,
+            // (#2992 S3) [[Get]]/[[Set]] specified bits — see the
+            // emitExternDefinePropertyNoValue twin. Standalone-gated.
+            ctx.standalone ? (dpGetNode || dpGetExpr ? 1 << 8 : 0) | (dpSetNode || dpSetExpr ? 1 << 9 : 0) : 0,
           );
           const accIdx = ensureLateImport(
             ctx,
