@@ -3885,6 +3885,29 @@ export function getOrCreateFuncRefWrapperTypes(
 }
 
 /**
+ * (#2873 park fix) The ROOT funcref-wrapper struct type — the FIRST wrapper
+ * `getOrCreateFuncRefWrapperTypes` created in this module. Every later
+ * per-signature wrapper struct is a `sub final` of it (see the star chaining
+ * above), so the root is the ONLY wrapper type a `ref.test`/`ref.cast` is
+ * guaranteed to accept for a closure value of ANY signature's wrapper.
+ *
+ * Why callers need it: wrapper structs are all layout-identical
+ * `(struct (field funcref))`, but WasmGC isorecursive canonicalization keys on
+ * (fields, supertype, finality) — a `sub final $root` sibling does NOT
+ * canonicalize with the root or with another sibling. A call site that casts a
+ * closure value to the wrapper of its *declared* signature therefore nulls out
+ * whenever the value was allocated under a different signature's wrapper
+ * (e.g. an activated async closure: its wrapper is minted for the REWRITTEN
+ * `... -> externref` Promise signature, while an `fn: () => void` param casts
+ * to the void wrapper) — unless creation ORDER happened to make the declared
+ * wrapper the root. Cast to the root instead and discriminate on the funcref's
+ * exact type (which encodes the true signature).
+ */
+export function getFuncRefWrapperRootTypeIdx(ctx: CodegenContext): number | undefined {
+  return (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx;
+}
+
+/**
  * (#2976) Emit the memoized, `ref.is_null`-guarded VALUE instance of a
  * capture-carrying nested function declaration:
  *
