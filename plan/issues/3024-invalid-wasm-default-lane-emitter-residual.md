@@ -16,6 +16,9 @@ goal: correctness
 test262_category: language/expressions/object/dstr, built-ins/AsyncFromSyncIteratorPrototype, language/expressions/in
 test262_ce: 131
 related: []
+loc-budget-allow:
+  - src/codegen/expressions/unary-updates.ts
+  - src/codegen/type-coercion.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
