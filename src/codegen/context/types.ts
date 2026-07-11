@@ -1930,6 +1930,17 @@ export interface CodegenContext {
    */
   taDynViewTypeIdx: number;
   /**
+   * (#3140) Type index for `$__bound_fn` — the standalone/WASI native
+   * bound-function carrier minted by `Function.prototype.bind`:
+   * `{target: externref, thisArg: externref, boundArgs: externref ($ObjVec)}`.
+   * `__apply_closure` carries a front-guard that unwraps it (prepending
+   * `boundArgs`) and the closure classifier treats it as callable, so
+   * `typeof bound === "function"` and bound-of-bound chains work. Registered
+   * late+once; -1 = not yet registered. Byte-inert: only emitted when a
+   * standalone `.bind(...)` site compiles.
+   */
+  boundFnTypeIdx: number;
+  /**
    * (#3057) Set by a module pre-scan when the source contains a dynamic
    * `new <ctorVar>(bufferArg)` (a `$__ta_dyn_view`-producing construct). Enables the
    * runtime-kind element byte-codec arm on the generic dynamic index path (`ta[i]` /
