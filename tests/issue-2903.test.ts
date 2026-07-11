@@ -120,7 +120,13 @@ export function test(): number {
 });
 
 describe("#2903 — producer modules KEEP the host fallback arm (behavior preserved)", () => {
-  it(".finally in the module keeps the host arm (module stays host-routed)", async () => {
+  it("(finally sub-front update) .finally is native now — the module goes fully host-free", async () => {
+    // Pre-native this control asserted the host arm stayed (.finally was a
+    // host-promise producer via the syntactic scan). The finally sub-front
+    // lowers .finally natively (§27.2.5.3 on the then machinery,
+    // tests/issue-2903-finally.test.ts), so the producer flag no longer fires
+    // and the whole then-finally chain drops its host imports — the
+    // compounding de-leak this gate was designed to enable.
     const result = await compileStandalone(
       DRAIN +
         `
@@ -128,14 +134,12 @@ let hit = 0;
 export function test(): number {
   Promise.resolve(3).then((v: any) => { hit += v; }).finally(() => { hit += 10; });
   __drain_microtasks();
-  return hit;
+  return hit === 13 ? 1 : 0;
 }`,
     );
-    const names = importNames(result);
-    // .finally is host-routed (a host-promise producer): the .then bridge must
-    // keep its host fallback arm, so the module still imports the host chain.
-    expect(names).toContain("Promise_finally");
-    expect(names).toContain("Promise_then");
+    expect(importNames(result)).toEqual([]);
+    const { instance } = await WebAssembly.instantiate(result.binary!, {});
+    expect((instance.exports as { test(): number }).test()).toBe(1);
   });
 
   it("(#3137 update) Promise.allSettled is native now — the module goes fully host-free", async () => {
