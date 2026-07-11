@@ -10,12 +10,83 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-16th
+assignee: ttraenkler/fable-sub1
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Slice "@@species key" LANDED (2026-07-11, fable-sub1) — builtin receiver + non-literal key
+
+> PR: `issue-2984-gopd-builtin-key-dispatch`. Takes the "builtin receiver +
+> non-literal key (the `__get_builtin` CE family)" residual of bucket 1. The
+> suite-wide `__get_builtin` non-pass cluster is 565; the gOPD-at-flagged-line
+> subset is only **38**, decomposing (measured 2026-07-11 off the standalone
+> baseline JSONL + flagged-source-line classification): **26 × `gOPD(<Ctor>,
+> Symbol.species)`** (the dominant non-literal-key shape) + 12 × RegExp annex-B
+> legacy accessors (open universe — deliberately refused). The remaining ~527
+> are NOT gOPD — they are direct unimplemented static-method calls
+> (`Atomics.*` 213, `Iterator.zip/zipKeyed/concat/from` ~99, `String.raw` 22,
+> `BigInt.asIntN/asUintN` 20, `Map.groupBy` 12, …), i.e. separate
+> builtin-surface work, not descriptor MOP.
+
+### Root cause
+
+Both compile-time synthesis gates (Phase-3 builtin-static + the #2874 struct
+key dispatch) require a LITERAL key. `Symbol.species` is a
+PropertyAccessExpression, so `gOPD(Array, Symbol.species)` fell through to the
+dynamic fallback, which routes a builtin-identifier receiver through
+`__get_builtin` → hard CE standalone (#1472 Phase B).
+
+### Fix (PR: `issue-2984-gopd-builtin-key-dispatch`)
+
+- `isSymbolSpeciesKeyExpression` (builtin-static-gopd.ts): syntactic
+  recognizer for the unshadowed `Symbol.species` key (unwraps parens/`as`/`!`).
+- `tryEmitStandaloneBuiltinSpeciesGopd` (builtin-static-gopd.ts): for the
+  @@species-owner ctors (Array/ArrayBuffer/SharedArrayBuffer/Map/Set/Promise/
+  RegExp — the complete spec set; concrete TypedArray ctors INHERIT, don't
+  own) emits `__create_accessor_descriptor(get, undefined, {e:false,c:true})`.
+  Non-owners / other symbol keys keep the loud refusal (strictly additive:
+  every intercepted shape CE'd).
+- `ensureStandaloneSpeciesGetterClosure` (property-access.ts): per-ctor
+  `get [Symbol.species]` closure — body is spec step 1 ("Return the this
+  value", param 1), meta subtype `species:<Ctor>` (name
+  `"get [Symbol.species]"`, length 0 per §10.2.9) so the reflective
+  `__builtinfn_*` natives answer propertyHelper's runtime
+  `verifyProperty(desc.get, "name"|"length")` reads; identity-stable via the
+  #2175 V2-S2 singleton; registered in
+  `nativeProtoReceiverClosureStructTypes` (meta type ONLY — the shared
+  signature-wrapper base is untouched) so a statically-resolvable
+  `g.call(thisVal)` threads the receiver.
+- Thin gate in calls.ts after the Phase-3 arm (`ctx.standalone && propLiteral
+  === undefined && isSymbolSpeciesKeyExpression`), receiver via the bucket-1
+  alias resolver. Host/gc byte-inert.
+
+### Measured (real runner, standalone lane, base = origin/main @ 026f40f771 merged)
+
+| Sweep                                             | before          | after              | Δ                        |
+| ------------------------------------------------- | --------------- | ------------------ | ------------------------ |
+| `built-ins/*/Symbol.species/*` (29)               | 0 / 5 / 24 CE   | **18 / 11 / 0 CE** | **+18 pass, 0 regressions** |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` (328) | 281 / 47 / 0 | **281 / 47 / 0**   | unchanged (0 regressions) |
+
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits match the
+  main-state baseline (host/gc/wasi inert; corpus has no species gOPD).
+- `tests/issue-2984-species.test.ts` 9/9 (accessor shape, identity stability,
+  per-ctor distinctness, getter name/length meta, reflective gOPD-on-getter,
+  alias receiver, non-owner refusal GUARD, shadowed-Symbol GUARD, host-lane
+  compile).
+- Still failing in the species dirs (NOT this slice): `return-value.js` ×6 —
+  `gOPD(...).get.call(thisVal)` invokes a descriptor-extracted closure value
+  (the #2949 first-class-closure `.call` substrate gap; the getter itself
+  returns `this` correctly when the closure resolves statically);
+  `TypedArray/Symbol.species/*` ×4 — receiver is the harness's
+  `Object.getPrototypeOf(Int8Array)` var, which the conservative alias
+  resolver declines; `Promise/symbol-species.js` — propertyHelper
+  verify-chain trips an unrelated null-access.
+- loc-budget: +20 in calls.ts (the thin gate) covered by the
+  `loc-budget-allow` frontmatter above (#3131); the synthesis lives in the
+  subsystem module.
 
 ## Slice "arg-2 name coercion" LANDED (2026-07-10, fable-16th) — struct-receiver runtime key dispatch
 

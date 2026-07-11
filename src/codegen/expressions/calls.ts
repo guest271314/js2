@@ -156,10 +156,12 @@ import {
 } from "../native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
+  isSymbolSpeciesKeyExpression,
   resolveBuiltinReceiverName,
+  tryEmitStandaloneBuiltinSpeciesGopd,
   tryEmitStandaloneBuiltinStaticGopd,
   tryEmitStandaloneStructGopdKeyDispatch,
-} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion)
+} from "../builtin-static-gopd.js"; // (#2984 Phase 3 + bucket-1 alias receivers + arg-2 name coercion + @@species)
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -8367,6 +8369,24 @@ function compileCallExpression(
       if (ctx.standalone && propLiteral !== undefined) {
         const builtinRecv = resolveBuiltinReceiverName(fctx, arg0, BUILTIN_CLASS_NAMES);
         if (builtinRecv !== undefined && tryEmitStandaloneBuiltinStaticGopd(ctx, fctx, builtinRecv, propLiteral)) {
+          return { kind: "externref" };
+        }
+      }
+
+      // (#2984 "builtin receiver + non-literal key") `gOPD(<Ctor>,
+      // Symbol.species)` — the dominant NON-literal-key builtin-receiver shape
+      // (26 standalone CEs: built-ins/*/Symbol.species/*). The @@species own
+      // property is an ACCESSOR `{get: "get [Symbol.species]" (returns this),
+      // set: undefined, e:false, c:true}`; synthesize it from the per-ctor
+      // getter singleton (builtin-static-gopd.ts). Every intercepted shape
+      // CE'd via the `__get_builtin` refusal below, so the arm is strictly
+      // additive; non-owner receivers / other symbol keys (Symbol well-knowns,
+      // RegExp annex-B legacy statics) keep the refusal. Both operands are
+      // side-effect-free (builtin/alias identifier + `Symbol.species` fold),
+      // so neither is compiled — same discipline as the Phase-3 literal arm.
+      if (ctx.standalone && propLiteral === undefined && isSymbolSpeciesKeyExpression(fctx, arg1)) {
+        const builtinRecv = resolveBuiltinReceiverName(fctx, arg0, BUILTIN_CLASS_NAMES);
+        if (builtinRecv !== undefined && tryEmitStandaloneBuiltinSpeciesGopd(ctx, fctx, builtinRecv)) {
           return { kind: "externref" };
         }
       }
