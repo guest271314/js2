@@ -29,7 +29,13 @@ import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c)
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
-import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
+import {
+  ensureObjVecBuilders,
+  ensureObjectGroupBy,
+  ensureObjectRuntime,
+  reserveApplyClosure,
+  reserveBindDynHelper,
+} from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseFinally,
@@ -78,6 +84,7 @@ import {
   ensureExnTag,
   ensureI32Condition,
   getArrTypeIdxFromVec,
+  getOrRegisterBoundFnType,
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   hoistLetConstWithTdz,
@@ -434,6 +441,36 @@ function receiverMayBeProxy(ctx: CodegenContext, argExpr: ts.Expression): boolea
  * (`project_proxy_no_ts_type_brand`), so the gate is syntactic by design.
  */
 const sourceCreatesProxyCache = new WeakMap<ts.SourceFile, boolean>();
+
+/**
+ * (#3140) True when the source contains any `<expr>.bind(...)` call — a
+ * `$__bound_fn` carrier may then exist at runtime, so the dynamic-call
+ * dispatch must carry the unwrap arm even when the bind SITE compiles after
+ * this call site (compile-order independence; mirrors `sourceCreatesProxy`).
+ */
+const sourceHasBindCallCache = new WeakMap<ts.SourceFile, boolean>();
+function sourceHasBindCall(sf: ts.SourceFile): boolean {
+  const cached = sourceHasBindCallCache.get(sf);
+  if (cached !== undefined) return cached;
+  let found = false;
+  if (sf.text.includes(".bind(")) {
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "bind"
+      ) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  sourceHasBindCallCache.set(sf, found);
+  return found;
+}
 function sourceCreatesProxy(sf: ts.SourceFile): boolean {
   const cached = sourceCreatesProxyCache.get(sf);
   if (cached !== undefined) return cached;
@@ -1861,6 +1898,48 @@ function countSpecLength(params: ts.NodeArray<ts.ParameterDeclaration>): number 
  * receiver returns null (e.g. unresolvable identifier); callers retain the
  * old "throws on missing receiver" behaviour in that case.
  */
+/**
+ * (#3140) Mint a native `$__bound_fn` value from PRE-EVALUATED externref
+ * locals: `{target, thisArg, boundArgs}` where `boundArgs` is a fresh `$ObjVec`
+ * of the partial-application args. Leaves the boxed externref on the stack.
+ * The carrier is unwrapped by the `__apply_closure` front-guard (boundArgs
+ * prepended, recursion on target — bound-of-bound composes) and classified
+ * callable by `closure-classifier.ts` (`typeof bound === "function"`).
+ * Standalone/WASI lane only (the $ObjVec builders are the native ones).
+ */
+function emitBoundFnValueFromLocals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  targetLocal: number,
+  thisArgLocal: number | undefined,
+  partialArgLocals: readonly number[],
+): void {
+  const { newIdx: objVecNewIdx, pushIdx: objVecPushIdx } = ensureObjVecBuilders(ctx);
+  // Reserve the closure bridge so `fillApplyClosure` (which carries the
+  // $__bound_fn unwrap front-guard) is guaranteed to run for this module even
+  // when the bind result is never visibly called from compiled code paths that
+  // would otherwise reserve it.
+  reserveApplyClosure(ctx);
+  const bfIdx = getOrRegisterBoundFnType(ctx);
+  fctx.body.push({ op: "local.get", index: targetLocal });
+  if (thisArgLocal !== undefined) {
+    fctx.body.push({ op: "local.get", index: thisArgLocal });
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  const argsVecLocal = allocLocal(fctx, `__bindfn_args_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+  fctx.body.push({ op: "local.set", index: argsVecLocal });
+  for (const aLocal of partialArgLocals) {
+    fctx.body.push({ op: "local.get", index: argsVecLocal });
+    fctx.body.push({ op: "local.get", index: aLocal });
+    fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+  }
+  fctx.body.push({ op: "local.get", index: argsVecLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: bfIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+}
+
 function compileFunctionBind(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1870,19 +1949,36 @@ function compileFunctionBind(
   const externRef: ValType = { kind: "externref" };
   const i32Ty: ValType = { kind: "i32" };
 
-  // Standalone (--target wasi / noJsHost): no JS host → identity-bind degraded.
-  // Drop partial args, push the receiver as externref, return it unchanged.
+  // (#3140) Standalone (--target wasi / noJsHost): no JS host — mint the native
+  // `$__bound_fn` carrier {target, thisArg, boundArgs}. Replaces the #1632a
+  // identity-bind degrade (which DROPPED the partial args, so the test262
+  // TypedArray harness `argFactory.bind(undefined, constructor)` lost the bound
+  // ctor and every makeCtorArg-style test failed at the harness level).
+  // Evaluation order per §20.2.3.2: target (receiver), then thisArg, then
+  // partials — each exactly once, into externref locals.
   if (ctx.standalone || noJsHost(ctx)) {
-    for (const arg of expr.arguments) {
-      const t = compileExpression(ctx, fctx, arg);
-      if (t !== null) fctx.body.push({ op: "drop" });
-    }
     const recvType = compileExpression(ctx, fctx, propAccess.expression, externRef);
     if (recvType === null) {
       fctx.body.push({ op: "ref.null.extern" });
     } else if (recvType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" });
+      coerceType(ctx, fctx, recvType, externRef);
     }
+    const targetLocal = allocLocal(fctx, `__bindfn_tgt_${fctx.locals.length}`, externRef);
+    fctx.body.push({ op: "local.set", index: targetLocal });
+    const argLocals: number[] = [];
+    for (const arg of expr.arguments) {
+      const src = ts.isSpreadElement(arg) ? arg.expression : arg;
+      const t = compileExpression(ctx, fctx, src, externRef);
+      if (t === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (t.kind !== "externref") {
+        coerceType(ctx, fctx, t, externRef);
+      }
+      const aLocal = allocLocal(fctx, `__bindfn_arg_${fctx.locals.length}`, externRef);
+      fctx.body.push({ op: "local.set", index: aLocal });
+      argLocals.push(aLocal);
+    }
+    emitBoundFnValueFromLocals(ctx, fctx, targetLocal, argLocals[0], argLocals.slice(1));
     return externRef;
   }
 
@@ -3152,7 +3248,13 @@ function tryEmitInlineDynamicCall(
   // K1 inbound-marshalling keystone, not this dispatch.
   const wantProxyArm =
     ctx.standalone === true && (ctx.funcMap.has("__proxy_create") || sourceCreatesProxy(expr.getSourceFile()));
-  if (allCandidates.length === 0 && !wantProxyArm) return null;
+  // (#3140) A `$__bound_fn` (native Function.prototype.bind carrier) may reach a
+  // bare dynamic call (`bound(...)`) — add an unwrap arm when a bind site minted
+  // the carrier in this module.
+  const wantBoundArm =
+    (ctx.standalone === true || ctx.wasi === true) &&
+    (ctx.boundFnTypeIdx >= 0 || sourceHasBindCall(expr.getSourceFile()));
+  if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm) return null;
 
   // Dedupe by funcTypeIdx — concrete subtypes share funcTypeIdx with their
   // base wrapper; one dispatch arm per unique funcref type is enough.
@@ -3253,7 +3355,22 @@ function tryEmitInlineDynamicCall(
       proxyArm = { proxyTypeIdx, dispatchIdx, vecNewIdx: vecBuilders.newIdx, vecPushIdx: vecBuilders.pushIdx };
     }
   }
-  if (candidates.length === 0 && proxyArm === undefined) return null;
+  // (#3140) Bound-function [[Call]] arm pieces — same DEFINED-only invariant as
+  // the proxy pieces above (reserveApplyClosure mints a defined placeholder).
+  let boundArm: { bfTypeIdx: number; applyIdx: number; vecNewIdx: number; vecPushIdx: number } | undefined;
+  if (wantBoundArm) {
+    const vecBuilders = ensureObjVecBuilders(ctx);
+    const applyIdx = reserveApplyClosure(ctx);
+    boundArm = {
+      // Register on demand — the bind SITE may compile after this call site
+      // (the pre-scan `sourceHasBindCall` covers that order).
+      bfTypeIdx: getOrRegisterBoundFnType(ctx),
+      applyIdx,
+      vecNewIdx: vecBuilders.newIdx,
+      vecPushIdx: vecBuilders.pushIdx,
+    };
+  }
+  if (candidates.length === 0 && proxyArm === undefined && boundArm === undefined) return null;
 
   // Compile callee (externref) → anyref → temp local.
   const calleeType = compileExpression(ctx, fctx, expr.expression);
@@ -3417,6 +3534,39 @@ function tryEmitInlineDynamicCall(
     dispatch = [
       { op: "local.get", index: anyLocal } as Instr,
       { op: "ref.test", typeIdx: proxyArm.proxyTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: armBody,
+        else: dispatch,
+      } as Instr,
+    ];
+  }
+
+  // (#3140) Bound-function [[Call]] arm: `bound(...)` where `bound` is a
+  // `$__bound_fn` minted by a standalone `.bind(...)` site. Pack the args into
+  // a `$ObjVec` and route through `__apply_closure`, whose fill-time front
+  // guard unwraps the carrier (prepends [[BoundArguments]], applies
+  // [[BoundThis]], recurses on the target — bound-of-bound composes).
+  if (boundArm !== undefined) {
+    const vecLocal = allocLocal(fctx, `__dyn_bargs_${fctx.locals.length}`, { kind: "externref" });
+    const armBody: Instr[] = [
+      { op: "call", funcIdx: boundArm.vecNewIdx } as Instr,
+      { op: "local.set", index: vecLocal } as Instr,
+    ];
+    for (const argLocal of argLocals) {
+      armBody.push({ op: "local.get", index: vecLocal } as Instr);
+      armBody.push({ op: "local.get", index: argLocal } as Instr);
+      armBody.push({ op: "call", funcIdx: boundArm.vecPushIdx } as Instr);
+    }
+    armBody.push({ op: "local.get", index: anyLocal } as Instr);
+    armBody.push({ op: "extern.convert_any" } as Instr);
+    armBody.push({ op: "ref.null.extern" } as Instr); // recv — [[BoundThis]] wins in the guard
+    armBody.push({ op: "local.get", index: vecLocal } as Instr);
+    armBody.push({ op: "call", funcIdx: boundArm.applyIdx } as Instr);
+    dispatch = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx: boundArm.bfTypeIdx } as Instr,
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
@@ -13035,6 +13185,51 @@ function compileCallExpression(
               then: thenArm,
               else: elseArm,
             } as Instr);
+            return { kind: "externref" };
+          }
+          // (#3140) `.bind` on an `any`-typed receiver that is a CLOSURE at
+          // RUNTIME — the test262 TypedArray harness shape
+          // (`argFactory.bind(undefined, constructor)` where `argFactory` is an
+          // array element). The typed `compileFunctionBind` route requires TS
+          // call signatures, so an `any` receiver fell to the open-object
+          // dispatcher arm and returned undefined (a non-callable — every
+          // makeCtorArg-style test then failed at the harness level). Emit the
+          // closure-classifier runtime arms: a callable receiver mints the
+          // native `$__bound_fn` carrier; anything else keeps the EXACT
+          // dispatcher path (closed-struct `bind` methods, open objects).
+          if (methodName === "bind" && (ctx.standalone || ctx.wasi)) {
+            // Reserve-then-fill (#1719 discipline): the callable test needs the
+            // COMPLETE closure-classifier root list, which is only settled at
+            // finalize — baking `buildClosureRefTestArms` here would miss every
+            // closure registered after this call site compiles (#1896's exact
+            // hazard). `__bind_dyn(recv, argsVec)` is filled by
+            // `fillBindDynHelper`: callable → mint `$__bound_fn`; anything else
+            // → the open-object `__extern_method_call(recv, "bind", args)`
+            // legacy route (undefined), preserving prior behavior.
+            const bindDynIdx = reserveBindDynHelper(ctx);
+            flushLateImportShifts(ctx, fctx);
+            const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+            if (recvT && recvT.kind !== "externref") {
+              coerceType(ctx, fctx, recvT, { kind: "externref" });
+            } else if (recvT === null) {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            const recvLocal = allocLocal(fctx, `__bindany_recv_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: recvLocal });
+            const { newIdx: bvNewIdx, pushIdx: bvPushIdx } = ensureObjVecBuilders(ctx);
+            const vecLocal = allocLocal(fctx, `__bindany_vec_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "call", funcIdx: bvNewIdx });
+            fctx.body.push({ op: "local.set", index: vecLocal });
+            for (const arg of dispatchArgs) {
+              fctx.body.push({ op: "local.get", index: vecLocal });
+              const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+              if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+              else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+              fctx.body.push({ op: "call", funcIdx: bvPushIdx });
+            }
+            fctx.body.push({ op: "local.get", index: recvLocal });
+            fctx.body.push({ op: "local.get", index: vecLocal });
+            fctx.body.push({ op: "call", funcIdx: bindDynIdx });
             return { kind: "externref" };
           }
           // Receiver as externref.

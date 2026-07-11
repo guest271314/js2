@@ -65,6 +65,7 @@ import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import {
   fillApplyClosure,
+  fillBindDynHelper,
   fillBuiltinFnMeta,
   fillExternGetIdxVecArms,
   fillExternIsArray,
@@ -2473,6 +2474,11 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
+    // closure root is registered (the callable gate needs the COMPLETE
+    // classifier list). No-op when no standalone `.bind`-on-any site reserved it.
+    fillBindDynHelper(ctx);
 
     // (#1100) Fill the reserved standalone Proxy trap-invoke drivers
     // (`__proxy_call_{get,set,has}`) now that `__call_fn_method_2/3/4` are
@@ -15418,6 +15424,7 @@ export {
   addFuncType,
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
+  getOrRegisterBoundFnType,
   getOrRegisterRefCellType,
   getOrRegisterResizableAbType,
   getOrRegisterTemplateVecType,
