@@ -242,3 +242,35 @@ export function irFirstBodyReadsStringElement(fn: ts.FunctionDeclaration): boole
   scan(fn.body);
   return found;
 }
+
+/**
+ * (#3143 gate 7) Nullish-coalescing residual: `lowerNullish` (from-ast.ts)
+ * only lowers `??` when both operands are the SAME reference-shaped type;
+ * numeric/string/mismatched operand pairs throw a clean post-claim fallback
+ * to legacy. Under the overlay that demote is metered and harmless — but a
+ * skipped IR-first slot would promote it to a hard compile error (the
+ * `unreachable` placeholder must never ship). Keep any function containing
+ * `??` / `??=` on the compile-twice path until `lowerNullish` covers every
+ * operand shape. The IR body still ships via the overlay whenever it builds,
+ * so this gate costs only the redundant legacy compile — never correctness.
+ * Syntactic and conservative on purpose (same philosophy as gates 4/5): the
+ * gate must never disagree with the builder in the dangerous direction.
+ */
+export function irFirstBodyHasNullish(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.body) return false;
+  let found = false;
+  const scan = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      (node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+        node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionEqualsToken)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, scan);
+  };
+  scan(fn.body);
+  return found;
+}

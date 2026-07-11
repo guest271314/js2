@@ -31,6 +31,7 @@ import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
 import {
   collectModuleTopLevelNames,
+  irFirstBodyHasNullish,
   irFirstBodyReadsHostNode,
   irFirstBodyReadsStringElement,
 } from "./ir-first-gate.js";
@@ -1363,6 +1364,14 @@ function truthyEnv(v: string | undefined): boolean {
   return v === "1" || v === "true";
 }
 
+/**
+ * (#3143) Escape-hatch check for default-ON env flags: only an explicit
+ * `0`/`false` disables. Unset / empty / any other value means "default on".
+ */
+function explicitlyDisabledEnv(v: string | undefined): boolean {
+  return v === "0" || v === "false";
+}
+
 export function irVerifierHardFailureEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return truthyEnv(env.JS2WASM_IR_VERIFY_HARD) || truthyEnv(env.CI) || env.NODE_ENV === "test" || truthyEnv(env.VITEST);
 }
@@ -1464,6 +1473,14 @@ interface IrOverlayPlan {
  *      host-global receivers), load-bearing the moment #2856's extern-in-IR
  *      selector arm lands: host-node functions stay compile-twice until that
  *      lowering is proven, keeping the flag-on measurement clean.
+ *   5. (#2972) Its body has no non-lowerable string element read (gate 5,
+ *      inline below).
+ *   6. (#2949) It is not dynamic-signature — the move-only dynamic surface
+ *      stays compile-twice (gate 6, inline below).
+ *   7. (#3143) Its body contains no `??`/`??=` — `lowerNullish` only covers
+ *      reference-shaped operand pairs; the residual demote must stay a
+ *      metered legacy fallback (see `irFirstBodyHasNullish`), never a
+ *      skipped-slot hard error.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1501,6 +1518,7 @@ function computeIrFirstSkipSet(
     if (fn.asteriskToken && !generatorsSkippable) continue;
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
+    if (irFirstBodyHasNullish(fn)) continue; // gate 7 — `??` residual demote (#3143)
     // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
     // under IR-first while the dynamic surface is move-only (no box/unbox
     // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
@@ -1720,7 +1738,7 @@ export function generateModule(
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
   // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
   irCompiledFuncs?: readonly string[];
-  // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
+  // #2138 — legacy bodies skipped under IR-first (default as of #3143; undefined when disabled).
   irFirstSkipped?: readonly string[];
 } {
   const mod = createEmptyModule();
@@ -2069,22 +2087,25 @@ export function generateModule(
     // No-op unless a function declaration is reassigned.
     registerReassignedFunctionGlobals(ctx, [ast.sourceFile]);
 
-    // (#2138) IR-first compile-once inversion — flag-gated investigation.
-    // Default OFF: with `JS2WASM_IR_FIRST` unset this block is dead and the
-    // pipeline below is byte-identical to the legacy order (IR planning runs
-    // AFTER the body pass, inside the experimentalIR overlay). With the flag
-    // set (+ experimentalIR), the IR plan is computed BEFORE
-    // `compileDeclarations` and legacy body emission is skipped for claimed
-    // functions that pass `computeIrFirstSkipSet`'s gates — those slots get
-    // an `unreachable` placeholder that the IR overlay MUST overwrite (a
-    // post-claim IR failure on a skipped function is promoted to a hard
-    // compile error below, never a silent legacy demote).
+    // (#2138) IR-first compile-once inversion.
+    // (#3143) Default ON — this clears gate G1 of the legacy-frontend
+    // retirement (plan/log/3090-phase0-legacy-delete-list.md): with IR-first
+    // the IR plan is computed BEFORE `compileDeclarations` and legacy body
+    // emission is skipped for claimed functions that pass
+    // `computeIrFirstSkipSet`'s gates — those slots get an `unreachable`
+    // placeholder that the IR overlay MUST overwrite (a post-claim IR
+    // failure on a skipped function is promoted to a hard compile error
+    // below, never a silent legacy demote). Selector-REJECTED functions are
+    // never claimed and still compile via the legacy path, unchanged.
+    // Escape hatch (one release, #3143): `JS2WASM_IR_FIRST=0` restores the
+    // old overlay order (legacy compiles everything, IR overwrites after).
     // (#2973) `disableIrFirst` opts a compile out of the IR-first inversion
     // regardless of the ambient env flag — semantics-critical sub-compiles
     // (eval / new Function host shims) set it so a post-claim IR-first hard
     // error is not swallowed by the shim's fallback catch into a silent
     // `undefined`. The ordinary IR overlay (`experimentalIR`) still runs.
-    const irFirst = !!options?.experimentalIR && !options?.disableIrFirst && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    const irFirst =
+      !!options?.experimentalIR && !options?.disableIrFirst && !explicitlyDisabledEnv(process.env.JS2WASM_IR_FIRST);
     let irPlan: IrOverlayPlan | null = null;
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {

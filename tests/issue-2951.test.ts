@@ -31,8 +31,10 @@ afterEach(() => {
 });
 
 async function compileWith(source: string, opts: Parameters<typeof compile>[1], irFirst: boolean) {
+  // (#3143) IR-first is default-ON; the off-arm must use the explicit "0"
+  // escape hatch (unset now means ON).
   if (irFirst) process.env.JS2WASM_IR_FIRST = "1";
-  else Reflect.deleteProperty(process.env, "JS2WASM_IR_FIRST");
+  else process.env.JS2WASM_IR_FIRST = "0";
   return compile(source, opts);
 }
 
@@ -80,7 +82,7 @@ describe("#2951 gate-2 — IR-first generator skip-set narrowing", () => {
     expect(res.irFirstSkipped ?? []).not.toContain("g");
   });
 
-  it("flag OFF: skip machinery is inert (irFirstSkipped undefined)", async () => {
+  it("flag OFF (=0 escape hatch, #3143): skip machinery is inert (irFirstSkipped undefined)", async () => {
     const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, /* irFirst */ false);
     expect(res.success).toBe(true);
     expect(res.irFirstSkipped).toBeUndefined();

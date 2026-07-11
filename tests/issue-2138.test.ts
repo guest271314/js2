@@ -9,8 +9,9 @@
 // (by the IR) instead of twice (legacy body thrown away, IR body kept).
 //
 // Contract under test:
-//   1. Flag OFF (default): behavior unchanged — no skip telemetry, and the
-//      pipeline order is literally the pre-#2138 one (plan after body pass).
+//   1. Flag OFF (`JS2WASM_IR_FIRST=0` escape hatch — the default is ON as of
+//      #3143): behavior unchanged — no skip telemetry, and the pipeline
+//      order is literally the pre-#2138 one (plan after body pass).
 //   2. Flag ON, fully-claimed closure: legacy bodies skipped, IR bodies
 //      ship, results correct.
 //   3. Flag ON, partially-claimed program: un-claimed functions keep their
@@ -29,10 +30,9 @@ import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
 async function compileFlag(on: boolean, src: string): Promise<CompileResult> {
-  // "" is falsy for the codegen's truthyEnv reader — equivalent to unset for
-  // the flag check (and biome's noDelete forbids `delete process.env.X`;
-  // note `process.env.X = undefined` would coerce to the STRING "undefined").
-  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "");
+  // (#3143) IR-first is default-ON: only the explicit "0"/"false" escape
+  // hatch disables it, so the off-arm stubs "0" (unset/"" now mean ON).
+  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "0");
   try {
     return await compile(src, { fileName: "issue-2138.ts" });
   } finally {
@@ -98,7 +98,7 @@ export function m(a: number, b: number): number {
 `;
 
 describe("#2138 IR-first compile-once inversion (JS2WASM_IR_FIRST)", () => {
-  it("flag OFF (default): no skip telemetry, program runs", async () => {
+  it("flag OFF (JS2WASM_IR_FIRST=0 escape hatch, #3143): no skip telemetry, program runs", async () => {
     const r = await compileFlag(false, FIB_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(r.irFirstSkipped).toBeUndefined();

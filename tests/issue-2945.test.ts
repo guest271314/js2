@@ -37,7 +37,8 @@ async function instantiate(r: CompileResult): Promise<Record<string, Function>> 
 }
 
 async function compileFlag(irFirst: boolean, src: string): Promise<CompileResult> {
-  vi.stubEnv("JS2WASM_IR_FIRST", irFirst ? "1" : "");
+  // (#3143) IR-first is default-ON; off-arm uses the explicit "0" escape hatch.
+  vi.stubEnv("JS2WASM_IR_FIRST", irFirst ? "1" : "0");
   try {
     return await compile(src, { fileName: "issue-2945.ts" });
   } finally {
