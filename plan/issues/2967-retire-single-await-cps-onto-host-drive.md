@@ -21,6 +21,8 @@ loc-budget-allow:
   - src/codegen/declarations.ts
   - src/codegen/expressions/calls.ts
   - src/codegen/closures.ts
+  # phase 3a: the #2623 cell-of-cell registration fix + its WHY comment (+13)
+  - src/codegen/statements/nested-declarations.ts
 ---
 
 # #2967 — One async lowering engine: fold the single-tail-await CPS lane into the host drive, then widen the shared gaps
