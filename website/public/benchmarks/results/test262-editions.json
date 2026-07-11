@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10265,
-    "fail": 2713,
-    "ce": 97,
+    "pass": 10267,
+    "fail": 2714,
+    "ce": 94,
     "skip": 0,
     "total": 13075,
     "pct": 79,
@@ -58,8 +58,8 @@
   {
     "edition": "ES2015",
     "pass": 11809,
-    "fail": 3433,
-    "ce": 143,
+    "fail": 3434,
+    "ce": 142,
     "skip": 1,
     "total": 15386,
     "pct": 77,
@@ -67,8 +67,8 @@
       {
         "name": "destructuring-binding",
         "pass": 2172,
-        "fail": 333,
-        "ce": 28,
+        "fail": 334,
+        "ce": 27,
         "skip": 0,
         "total": 2533,
         "pct": 86
@@ -76,8 +76,8 @@
       {
         "name": "generators",
         "pass": 1034,
-        "fail": 342,
-        "ce": 15,
+        "fail": 343,
+        "ce": 14,
         "skip": 0,
         "total": 1391,
         "pct": 74
@@ -1026,18 +1026,18 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3376,
-    "fail": 848,
-    "ce": 27,
+    "pass": 3377,
+    "fail": 849,
+    "ce": 25,
     "skip": 0,
     "total": 4251,
     "pct": 79,
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2510,
-        "fail": 748,
-        "ce": 26,
+        "pass": 2511,
+        "fail": 749,
+        "ce": 24,
         "skip": 0,
         "total": 3284,
         "pct": 76
@@ -1080,12 +1080,12 @@
       },
       {
         "name": "generators",
-        "pass": 179,
-        "fail": 148,
-        "ce": 2,
+        "pass": 180,
+        "fail": 149,
+        "ce": 0,
         "skip": 0,
         "total": 329,
-        "pct": 54
+        "pct": 55
       },
       {
         "name": "object-rest",
