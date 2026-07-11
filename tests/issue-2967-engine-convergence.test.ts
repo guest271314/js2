@@ -323,16 +323,13 @@ describe("#2967 slice 2a PARK FIX (PR #2873, merge_group 29120059791)", () => {
     expect(exports.readAcc()).toBe(42);
   });
 
-  it("a body local mutably captured by a NESTED fn and live across the await re-lanes off host-drive (cell-spill hazard, the struct.set[1] wasm_compile class)", async () => {
-    // `flag` is cell-boxed at `set`'s creation (nested fn writes it) but the
-    // frame spill field was typed i32 from the declaration — pre-fix host-drive
-    // emitted `struct.set[1] expected i32, found (ref null N)` (invalid Wasm,
-    // the await-using microtask cluster). The hazard gate re-lanes this body
-    // exactly as pre-slice-2a (CPS here — single canonical await), so no
-    // `__async_resume_fanon` is minted and the module VALIDATES (watOf asserts
-    // both). Behavior parity with main is byte-level, not re-asserted here —
-    // the CPS cell handling has its own pre-existing quirks that #2967 phase 3
-    // (cell-aware frame layout) retires together with this decline.
+  it("a body local mutably captured by a NESTED fn and live across the await now DRIVES via a force-boxed cell field (#2967 phase 3a — the class-1 decline is retired)", async () => {
+    // `flag` is cell-boxed by `set`'s creation. Pre-3a the frame spill field
+    // was typed from the declaration (the struct.set[1] wasm_compile class),
+    // so this body was DECLINED to CPS. 3a types the field as the ref CELL,
+    // creates the cell at the entry struct.new, and routes the declaration
+    // init / reads / writes / capture aliasing through boxedCaptures — so the
+    // shape drives, validates, and the nested write is visible after resume.
     const wat = await watOf(`
       export function main(): any {
         const g = async function (): Promise<number> {
@@ -345,7 +342,20 @@ describe("#2967 slice 2a PARK FIX (PR #2873, merge_group 29120059791)", () => {
         return g();
       }
     `);
-    expect(wat).not.toContain("__async_resume_fanon");
+    expect(wat).toContain("__async_resume_fanon");
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async function (): Promise<number> {
+          let flag: number = 0;
+          const set = function (): void { flag = 40; };
+          set();
+          const a = await Promise.resolve(2).then((x: number) => x + 0);
+          return flag + a;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
   });
 
   it("a ref-typed spill guess (array-literal local live across the await) re-lanes off host-drive (rep-divergence hazard class)", async () => {
@@ -500,16 +510,12 @@ describe("#2967 slice 2b-2 — pattern/rest params on the frame engine", () => {
     await expect(settled(exports.main())).resolves.toBe(42);
   });
 
-  it("a derived binding mutably captured by a NESTED fn re-lanes to CPS (cell hazard — correct-or-CPS routing pin)", async () => {
-    // `bump` cell-boxes `a` at its creation site; the frame's derived spill
-    // field (typed from the entry local) can neither store the cell at the
-    // suspend store-back nor re-materialize it on resume. The hazard gate
-    // keeps this CPS-shaped body on CPS: no resume fn is minted. This pins
-    // ROUTING only — main routes this exact shape to the SAME CPS emitter
-    // (via the old pattern carve-out), and that lane loses the through-cell
-    // mutation (returns 1, not 42) there too: a pre-existing CPS cell quirk
-    // that #2967 phase 3 (cell-aware frame layout) retires together with
-    // this decline.
+  it("a derived binding mutably captured by a NESTED fn now DRIVES and the through-cell mutation is CORRECT (#2967 phase 3a — fixes the CPS cell quirk)", async () => {
+    // Pre-3a this shape was declined to CPS (patternParamCellHazard), where
+    // the through-cell mutation was LOST (returned 1, not 42 — a pre-existing
+    // CPS quirk, same on main's old pattern carve-out). 3a force-boxes the
+    // derived binding into a live cell field: `bump`'s write lands in the
+    // cell the frame restores after resume — routing AND value both fixed.
     const wat = await watOf(`
       async function h({ a }: { a: number }): Promise<number> {
         const bump = function (): void { a = 41; };
@@ -519,6 +525,62 @@ describe("#2967 slice 2b-2 — pattern/rest params on the frame engine", () => {
       }
       export function main(): any { return h({ a: 0 }); }
     `);
-    expect(wat).not.toContain("__async_resume_fh");
+    expect(wat).toContain("__async_resume_fh");
+    const exports = await compileToWasm(`
+      async function h({ a }: { a: number }): Promise<number> {
+        const bump = function (): void { a = 41; };
+        bump();
+        const x = await Promise.resolve(1).then((v: number) => v + 0);
+        return a + x;
+      }
+      export function main(): any { return h({ a: 0 }); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+});
+
+describe("#2967 phase 3a — cell-aware frame layout (force-boxed class-1 spills)", () => {
+  it("cell IDENTITY survives the suspend: a nested closure's writes before AND after the await accumulate", async () => {
+    const exports = await compileToWasm(`
+      async function f(): Promise<number> {
+        let acc: number = 0;
+        const add = function (n: number): void { acc = acc + n; };
+        add(20);
+        const x = await Promise.resolve(2).then((v: number) => v + 0);
+        add(20);
+        return acc + x;
+      }
+      export function main(): any { return f(); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a force-boxed RESUME BINDING is delivered THROUGH the cell (emitDeliver struct.set) and the nested write persists across the later await", async () => {
+    const exports = await compileToWasm(`
+      async function g(): Promise<number> {
+        let x: number = await Promise.resolve(20).then((v: number) => v + 0);
+        const bump = function (): void { x = x + 1; };
+        bump();
+        const y = await Promise.resolve(21).then((v: number) => v + 0);
+        return x + y;
+      }
+      export function main(): any { return g(); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("multi-await: the nested closure reads the POST-resume value written by a later state", async () => {
+    const exports = await compileToWasm(`
+      async function f(): Promise<number> {
+        let acc: number = 1;
+        const read = function (): number { return acc; };
+        const a = await Promise.resolve(20).then((v: number) => v + 0);
+        acc = a + 1;
+        const b = await Promise.resolve(20).then((v: number) => v + 0);
+        return read() + b + 1;
+      }
+      export function main(): any { return f(); }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
   });
 });
