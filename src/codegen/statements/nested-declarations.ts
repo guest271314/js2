@@ -983,7 +983,20 @@ export function compileNestedFunctionDeclaration(
         name: c.name,
         outerLocalIdx: c.localIdx,
         mutable: c.mutable,
-        valType: c.type,
+        // (#2623 / #2967 3a) A mutable capture whose outer slot is ALREADY the
+        // canonical ref cell registers its INNER value type, NOT the cell
+        // type: every call-site consumer derives the capture-param cell via
+        // `getOrRegisterRefCellType(valType)`, so registering the cell type
+        // would make them build a CELL-OF-CELL — mismatching the lifted fn's
+        // single-cell param (valueCaptureParamTypes threads `c.type`
+        // unchanged for alreadyBoxed) and casting the outer cell to the
+        // unrelated cell-of-cell type (an "illegal cast" trap; exposed by the
+        // async frame's force-boxed spill cells, latent for any
+        // boxed-before-declaration outer slot). `alreadyBoxed ⟺ a
+        // boxedCaptures entry exists` in the declaring fctx, so the call
+        // site's already-boxed branch passes the existing cell and its
+        // derived cell type now matches the lifted param exactly.
+        valType: c.mutable && c.alreadyBoxed ? (c.boxedValType ?? { kind: "f64" as const }) : c.type,
         hasTdzFlag: c.hasTdzFlag,
         outerTdzFlagIdx: c.tdzFlagIdx,
       })),
