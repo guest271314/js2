@@ -18,7 +18,15 @@ goal: ir-full-coverage
 depends_on: [2856]
 related: [2138, 3090, 2855]
 origin: "plan/bloat-reduction-battle-plan.md slice 4; gate G1 in plan/log/3090-phase0-legacy-delete-list.md"
+loc-budget-allow:
+  - src/codegen/index.ts
 ---
+
+<!-- loc-budget-allow rationale (#3131): the flip's +21 in the barrel/driver
+`src/codegen/index.ts` is the `explicitlyDisabledEnv` escape-hatch helper +
+the gate-7 docblock and gate line, which structurally belong to the IR-first
+pipeline block in `generateModule`. Gate-7's own scan helper went into the
+subsystem module `src/codegen/ir-first-gate.ts`, not the barrel. -->
 
 # #3143 — Make IR-first compilation the default (gate G1)
 
