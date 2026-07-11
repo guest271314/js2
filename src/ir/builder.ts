@@ -900,6 +900,52 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * (#3144) Emit `class.instanceof` — `value instanceof <targetShape.className>`.
+   * `value` must be an `IrType.class` SSA def (non-null class carrier).
+   * Result type: i32 (JS boolean; 0/1).
+   */
+  emitClassInstanceOf(value: IrValueId, targetShape: IrClassShape): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "val", val: { kind: "i32" } };
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({
+      kind: "class.instanceof",
+      value,
+      targetShape,
+      result,
+      resultType,
+    });
+    return result;
+  }
+
+  /**
+   * (#3144) Emit `class.static_call` for `C.m(args)` on a local user class.
+   * No receiver (legacy statics take no `self` param). `resultType` is the
+   * static descriptor's `returnType` (`null` for void → returns `null`).
+   */
+  emitClassStaticCall(
+    shape: IrClassShape,
+    methodName: string,
+    args: readonly IrValueId[],
+    resultType: IrType | null,
+  ): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
+    this.pushInstr({
+      kind: "class.static_call",
+      shape,
+      methodName,
+      args: [...args],
+      result,
+      resultType,
+    });
+    return result;
+  }
+
   // --- extern class ops (#1169i — slice 10) -------------------------------
 
   /**

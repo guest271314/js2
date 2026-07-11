@@ -828,6 +828,18 @@ export function lowerIrFunctionBody<S>(
     }
     return dynTagScratchIdx;
   };
+  // (#3144) — i32 scratch local for multi-tag `class.instanceof` compares
+  // (the receiver's `__tag` is read once, compared against each compatible
+  // tag). Lazily allocated, one per function, reused across every
+  // `class.instanceof` in the body (same pattern as the scratch slots above).
+  let instanceofTagScratchIdx: number | null = null;
+  const ensureInstanceofTagScratch = (): number => {
+    if (instanceofTagScratchIdx === null) {
+      instanceofTagScratchIdx = func.params.length + locals.length;
+      locals.push({ name: "$instanceof_tag_scratch", type: { kind: "i32" } });
+    }
+    return instanceofTagScratchIdx;
+  };
 
   // #1126 Stage 3 — best-effort `typeOf` that returns null instead of
   // throwing. Used by the fast-path operand inspection in `case "binary"`
@@ -1797,6 +1809,75 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
         }
         emitValue(instr.receiver, out);
+        for (const a of instr.args) emitValue(a, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
+        });
+        return;
+      }
+      case "class.instanceof": {
+        // (#3144) `value instanceof <target>` — read the receiver struct's
+        // hidden `__tag` (slot 0) and compare against the TARGET class's
+        // instanceof-compatible tag set (own + descendants), mirroring the
+        // legacy `compileInstanceOf` non-nullable-ref path. The IR class
+        // carrier is a non-null `(ref $Struct)`, so no null arm exists.
+        const recvT = typeOf(instr.value);
+        if (recvT.kind !== "class") {
+          throw new Error(`ir/lower: class.instanceof value must be class IrType, got ${recvT.kind} (${func.name})`);
+        }
+        const recvCl = resolver.resolveClass?.(recvT.shape);
+        if (!recvCl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${recvT.shape.className} (${func.name})`);
+        }
+        const targetCl = resolver.resolveClass?.(instr.targetShape);
+        if (!targetCl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.targetShape.className} (${func.name})`);
+        }
+        const tags = targetCl.instanceOfTags;
+        emitValue(instr.value, out);
+        if (tags.length === 0) {
+          // Tag-less target class — legacy parity: evaluate LHS, false.
+          emitter.pushRaw(out, { op: "drop" });
+          emitter.pushRaw(out, { op: "i32.const", value: 0 });
+          return;
+        }
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: recvCl.structTypeIdx,
+          fieldIdx: recvCl.fieldIdx("__tag"),
+        });
+        if (tags.length === 1) {
+          emitter.pushRaw(out, { op: "i32.const", value: tags[0]! });
+          emitter.pushRaw(out, { op: "i32.eq" });
+          return;
+        }
+        // Multiple compatible tags: (tag == t0) || (tag == t1) || … via an
+        // i32 scratch local (same shape as legacy's multi-tag emission).
+        const scratch = ensureInstanceofTagScratch();
+        emitter.pushRaw(out, { op: "local.set", index: scratch });
+        emitter.pushRaw(out, { op: "local.get", index: scratch });
+        emitter.pushRaw(out, { op: "i32.const", value: tags[0]! });
+        emitter.pushRaw(out, { op: "i32.eq" });
+        for (let i = 1; i < tags.length; i++) {
+          emitter.pushRaw(out, { op: "local.get", index: scratch });
+          emitter.pushRaw(out, { op: "i32.const", value: tags[i]! });
+          emitter.pushRaw(out, { op: "i32.eq" });
+          emitter.pushRaw(out, { op: "i32.or" });
+        }
+        return;
+      }
+      case "class.static_call": {
+        // (#3144) `C.m(args)` — legacy statics take NO self param
+        // (class-bodies.ts: `methodParams = isStatic ? [] : [self]`), so
+        // emission is args then a direct call by collision-relocated key.
+        const cl = resolver.resolveClass?.(instr.shape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.shape.className} (${func.name})`);
+        }
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
@@ -3110,6 +3191,10 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [...instr.args, instr.self];
     case "class.super_call":
       return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];

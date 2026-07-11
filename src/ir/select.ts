@@ -2655,6 +2655,23 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       if (rightUndef) return isPhase1Expr(expr.left, scope, localClasses);
       if (leftUndef) return isPhase1Expr(expr.right, scope, localClasses);
     }
+    // (#3144) `x instanceof C` where C names a LOCAL class (unshadowed).
+    // `instanceof` stays table-deferred for the general/dynamic case
+    // (`binaryOpCapability`), but this shape has an IR lowering:
+    // `class.instanceof`, a static `__tag` compare mirroring legacy
+    // `compileInstanceOf`. from-ast's `lowerInstanceOf` mirrors this arm
+    // exactly (identifier RHS, unshadowed, projected local class); a
+    // class-typed LHS emits the tag check, never-class representations fold
+    // to false, dynamic/extern LHS demotes cleanly (claim-partial, like the
+    // `new C(...)` arm below).
+    if (
+      binOp === ts.SyntaxKind.InstanceOfKeyword &&
+      ts.isIdentifier(expr.right) &&
+      localClasses.has(expr.right.text) &&
+      !scope.has(expr.right.text)
+    ) {
+      return isPhase1Expr(expr.left, scope, localClasses);
+    }
     if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
@@ -2730,6 +2747,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         if (expr.arguments.length !== wantArgs) return shapeNo("expr-modmap-arity", expr);
         for (const arg of expr.arguments) {
           if (ts.isSpreadElement(arg)) return shapeNo("expr-modmap-spread", arg);
+          if (!isPhase1Expr(arg, scope, localClasses)) return false;
+        }
+        return true;
+      }
+      // (#3144) Static method call `C.m(args)` — the receiver is a bare
+      // LOCAL class identifier (never in scope, so the generic receiver
+      // check below would reject it). from-ast's static-call arm mirrors
+      // this shape exactly and resolves the `"static"` member descriptor
+      // (projected by `buildIrClassShapes`); a call to a member that did
+      // not project demotes cleanly (claim-partial, like `new C(...)`).
+      // Lowering: `class.static_call` → `call $<C>_<m>` with args only
+      // (legacy statics take no `self` param).
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        localClasses.has(expr.expression.expression.text)
+      ) {
+        for (const arg of expr.arguments) {
+          if (ts.isSpreadElement(arg)) return false;
           if (!isPhase1Expr(arg, scope, localClasses)) return false;
         }
         return true;

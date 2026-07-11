@@ -140,6 +140,12 @@ export function analyzeEscape(
         raise(instr.receiver, "opaque");
         for (const a of instr.args) raise(a, "opaque");
         break;
+      // (#3144): static method call — opaque callee body, args escape.
+      // class.instanceof only READS the receiver's tag (no escape), so it
+      // deliberately has no case here (falls to the default read handling).
+      case "class.static_call":
+        for (const a of instr.args) raise(a, "opaque");
+        break;
       case "closure.call":
         raise(instr.callee, "opaque");
         for (const a of instr.args) raise(a, "opaque");
