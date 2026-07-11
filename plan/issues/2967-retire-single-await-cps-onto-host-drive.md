@@ -2,9 +2,9 @@
 id: 2967
 title: "Async engine convergence: retire emitAsyncStateMachine/splitBodyAtAwait onto the #2906 host-drive engine; widen planLinearAwaits gaps once for both lanes"
 status: in-progress
-assignee: ttraenkler/fable-senior2
+assignee: ttraenkler/fable-senior
 created: 2026-07-02
-updated: 2026-07-10
+updated: 2026-07-11
 priority: medium
 horizon: l
 feasibility: hard
@@ -18,6 +18,8 @@ origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane
 loc-budget-allow:
   - src/codegen/async-frame.ts
   - src/codegen/declarations.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/closures.ts
 ---
 
 # #2967 — One async lowering engine: fold the single-tail-await CPS lane into the host drive, then widen the shared gaps
@@ -110,7 +112,7 @@ committed by fable-senior2).
 - `decideAsyncActivation` (`src/codegen/async-activation.ts`): host-drive is
   now checked FIRST; the CPS arm is the fallback. Both engines return a real
   host Promise and the call-site contract (`Promise_resolve` assimilation) is
-  engine-invariant, so the lowered *population* is unchanged — only the engine
+  engine-invariant, so the lowered _population_ is unchanged — only the engine
   per member flips.
 - `asyncFnNeedsHostDrive` (`src/codegen/async-frame.ts`): the #1042
   `!asyncFnNeedsCps` disjointness exclusion is DROPPED — the N-state machine
@@ -200,6 +202,7 @@ frame), bare-await + promise-return adoption (the 23rd), rejection. All pass.
 
 Three PRE-EXISTING boundaries probed and control-verified identical on
 pristine main (NOT slice-2a scope):
+
 - `(): Promise<T>`-typed runner boundary → NaN (#3134);
 - `cb: any` / untyped-param call → the callee body compiles to
   `return ref.null` (general any-callee gap; even SYNC closures return null
@@ -212,6 +215,82 @@ Remaining CPS population after 2a: concise arrow bodies
 (`async x => await P`, non-block — planLinearAwaits can't drive), and the
 pattern/rest-param carve-out. Those are slice 2b's to migrate; deletion (2c)
 follows.
+
+## Slice 2a park fix (2026-07-11, PR #2873 bot park — merge_group run 29120059791)
+
+The merge_group A/B for the closure flip came back **net −36** (37
+regressions / 1 improvement; buckets null_deref 32 + wasm_compile 5, all 37
+with wasm-hash changes), and auto-park held the PR. Root-caused to TWO
+distinct emit bugs in the newly-admitted class — NOT the `__self`/capture
+interplay the slice-2a rationale above assumed #2865 had fixed, and NOT the
+"pre-existing any-callee gap" triage note (control disproved: all 37 files
+PASS on pristine main, where these closures never reach host-drive):
+
+1. **Wrapper-struct RTT mismatch at the typed-param call boundary (32
+   null_derefs).** Activating the async machine rewrites the closure's
+   result to externref (the Promise), so the value site allocates the
+   closure under the `(...) -> externref` signature's funcref-wrapper
+   struct. A TYPED consumer (`asyncTest(fn: () => void)` — the test262
+   harness shim) casts the incoming externref to the wrapper of its
+   _declared_ signature instead. Wrapper structs are layout-identical but
+   chained `sub final` under the FIRST wrapper the module created, so
+   WasmGC canonicalization does NOT merge them — the cast nulls out and the
+   funcref fetch traps ("dereferencing a null pointer in asyncTest()").
+   Whether a module survived was pure wrapper-creation ORDER (a body using
+   only `asyncTest` casts against the root wrapper and works; adding
+   `assert.throwsAsync` — `() => any`, compiled first — makes the
+   externref-result wrapper the root and every void-typed cast a sibling
+   downcast). Main "passes" these files only because the legacy path
+   compiles the closures as SYNC VOID functions, so declared == actual
+   wrapper. **Fix (emit repair, calls.ts callable-param dispatch): cast the
+   externref callee to the wrapper ROOT (the guaranteed supertype of every
+   wrapper), fetch the funcref from the root's field 0, and re-cast self
+   per dispatch arm to that candidate's struct.** The funcref `ref.test`
+   (exact signature) keeps doing the discrimination it always did. This
+   also fixes the same latent order-dependence for covariant SYNC closures
+   (`() => string` passed as `() => void`) — the old "V8 canonicalizes
+   same-layout structs" comment was wrong for the chained wrappers.
+   Modules whose declared wrapper already IS the root emit byte-identically.
+
+2. **Frame spill layout vs body-compile local rebinding (5 wasm_compile).**
+   The spill fields are typed from `resolveSpillLocalValType` (TS declared
+   type) BEFORE the body compiles, but body compilation can lawfully rebind
+   or re-type the local: (a) a body local mutably captured by a NESTED
+   closure gets CELL-BOXED at the closure's creation site (localMap →
+   `(ref null $cell)`), so the suspend spill-back emits `struct.set[1]
+expected i32, found (ref null N)` (await-using microtask tests,
+   asyncDispose invokes-return); (b) a ref-typed guess can diverge from the
+   body's inferred rep (`const expected = [prom]` → spill guess
+   vec<externref>, body vec of the #3134-unwrapped struct —
+   fromAsync/async-iterable-input-does-not-await-input). **Fix (admission
+   tightening, `asyncClosureCellSpillHazard` in async-frame.ts): decline
+   host-drive for a closure whose spill set contains a body-declared local
+   that is (class 1) nested-captured ∧ assigned, or (class 2) a
+   non-resume-binding ref/ref_null spill guess.** Hazardous bodies re-lane
+   exactly as pre-slice-2a (CPS if CPS-shaped, else legacy) until the frame
+   layout is made cell-/rep-aware (phase 3). The same hazards exist
+   latently on the DECLARATION host-drive lane (slice 1, on main) — no
+   corpus instance, left untouched deliberately.
+
+Measured (branch, post-fix): the full 37-file regressed set **37/37 pass**
+via `runTest262File` (A/B control: all 37 pass on pristine main, 4 sampled +
+2 wasm_compile reproduced failing on the pre-fix branch). Directory sweep of
+the affected suites — fromAsync (95), await-using (+syntax), AsyncDisposable-
+Stack/disposeAsync, AsyncFromSyncIteratorPrototype/throw; 210 files — vs the
+js-host baseline: **0 regressions, +17 improvements** (fromAsync
+mapfn-throws-close-iterator ×4, this-constructor-unsettable-closes ×2,
+intrinsic-iterator-symbols; await-using initializer-dispose ordering ×4;
+AsyncFromSync throw paths ×6) — the intended win of real async closures over
+the legacy sync-void lowering. engine-convergence suite 20/20 (3 new
+park-fix cases codifying both mechanisms); issue-2957/1042-host-drive/2895/
+async-await/async-census 47/47; closure/callback equivalence suites green
+(2 pre-existing main-identical failures in optional-direct-closure-call,
+wasi trio in 2906-gap3 — control-verified).
+
+Follow-up candidates filed in-issue (not blocking): the property-call closure
+dispatch (calls-closures.ts) still casts to the declared wrapper — same
+latent order-dependence, no corpus hit; declaration-lane spill hazards
+(above); making the frame layout cell-aware retires the class-1 decline.
 
 ## Slice 2b (part 1) — concise arrow bodies (2026-07-10)
 

@@ -413,6 +413,18 @@ export interface FunctionContext {
    */
   promotedCaptureNames?: Set<string>;
   /**
+   * (#3128) Function-expression / arrow nodes INLINED into this function's
+   * body by the IIFE-inlining path (calls.ts). Their AST function boundary
+   * does NOT exist in the emitted Wasm — their locals live in THIS fctx's
+   * frame. The closure capture-mutability analysis (`compileArrowAsClosure`
+   * `writtenInOuter`) must walk PAST these nodes when locating the enclosing
+   * scope: a closure nested inside an inlined IIFE that captures a var of the
+   * REAL enclosing function would otherwise scan only the IIFE body, miss the
+   * outer write, and capture the var BY VALUE — a stale copy the outer
+   * assignment never reaches (`p2 = (function(){ return () => p2; })()`).
+   */
+  inlinedIifeNodes?: Set<ts.Node>;
+  /**
    * (#2865) The `__self` capture-struct layout of a LIFTED CLOSURE body
    * (closures.ts materializes each capture from `__self` field `i+1` into a
    * named local in the body prologue). The async drive lane compiles the body
@@ -567,6 +579,18 @@ export interface FunctionContext {
    * heavy f64 -> ToInt32 -> f64 round-trip.
    */
   i32CoercedLocals?: Set<string>;
+  /**
+   * (#3123) let-bindings declared as a fnctor-subclass class instance
+   * (`class C extends F`, F a top-level plain function) that are REASSIGNED
+   * with a value of another static type — at runtime they can hold a HOST
+   * object (e.g. `iterator = iterator.drop(0)` stores the Iterator-helper
+   * wrapper minted by F's live prototype methods). The pre-hoist allocator
+   * widens their slot to externref (a `(ref $C)` slot would null the host
+   * value through the guarded cast), and the class-method-call ladder
+   * dispatches member calls on them DYNAMICALLY (`__extern_method_call`) so
+   * the runtime value — struct instance or host object — decides.
+   */
+  fnctorWidenedLocals?: Set<string>;
   /**
    * #1197: Set of let/const locals declared as `number[]` whose element
    * storage can safely lower to `i32` instead of `f64` (every write site is
@@ -1443,6 +1467,16 @@ export interface CodegenContext {
    * upstream), so the typed `arr.forEach(cb)` hot path is never touched.
    */
   forceExternrefCallbackParams?: boolean;
+  /**
+   * (#3137) True while compiling a native `.then`/`.catch` callback closure
+   * (`compileStandalonePromiseThenCallback` window). TUPLE-typed callback
+   * params widen to externref in `computeClosureWrapperSig`: the native
+   * then-wrapper ABI always delivers externref, and a combinator results vec
+   * can never be the contextually-inferred tuple struct — the unguarded
+   * `ref.cast` trapped (illegal cast in `__then_fulfill_N`, the #3137
+   * allSettled harness class). Every other closure compile is unaffected.
+   */
+  widenTupleCallbackParams?: boolean;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
   closureMap: Map<string, ClosureInfo>;
   /** Map from closure struct type index → closure metadata (for anonymous closures) */
@@ -1568,6 +1602,37 @@ export interface CodegenContext {
    * gen sees it. Read only under the measure — wasi + gc/host stay byte-identical.
    */
   moduleHasAsyncGen?: boolean;
+  /**
+   * (#2903) True when the module SOURCE contains any construct that can mint a
+   * HOST promise under `--target standalone` while the native `$Promise` chain
+   * is active: dynamic `import()`, host-routed combinators
+   * (`Promise.allSettled`/`any`/`allKeyed`/`allSettledKeyed`, subclass
+   * `X.all`/`X.race`), `.finally(…)` (host-routed instance method), or
+   * `Array.fromAsync`. Set in the pre-body `collectDeclarations` walk (same
+   * discipline as {@link moduleHasAsyncGen} so compile order cannot miss a
+   * textually-later producer). The `.then`/`.catch` receiver bridge
+   * (`emitStandaloneThenWithNativeFallback`, calls.ts) keys its miss arm on
+   * this: with NO host-promise source in the module every runtime promise is a
+   * native `$Promise`, so the host fallback arm is provably dead and is
+   * replaced by a native TypeError — dropping the `Promise_then*` /
+   * `__make_callback` host imports that kept ~626 otherwise-passing standalone
+   * modules host-import-leaky (unscored under the honest #2879 metric).
+   * Unset/false on the gc/host and wasi lanes (setter is standalone-gated).
+   */
+  moduleHasHostPromiseSource?: boolean;
+  /**
+   * (#2903 finally sub-front) `.finally(...)` CallExpression nodes that were
+   * lowered to the NATIVE §27.2.5.3 machinery (`emitStandalonePromiseFinally`)
+   * — set by the calls.ts finally arms, read by `isAsyncCallExpression`
+   * (expressions.ts) to skip the async-call fulfilled-wrap for exactly these
+   * nodes: the native lowering already returns a `$Promise`, so the wrap would
+   * double-wrap, while the legacy host route (producer modules) still NEEDS
+   * the wrap (byte/behaviour parity with pre-native output). A per-node marker
+   * keeps the two decisions structurally in lockstep — the wrap check runs
+   * AFTER the call compiled, when funcMap-dependent predicates may have
+   * drifted.
+   */
+  standaloneNativeFinallyNodes?: Set<ts.Node>;
   /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
@@ -1877,6 +1942,17 @@ export interface CodegenContext {
    * -1 = not yet registered. Byte-inert: only emitted for a dynamic `new ctor(…)`.
    */
   taDynViewTypeIdx: number;
+  /**
+   * (#3140) Type index for `$__bound_fn` — the standalone/WASI native
+   * bound-function carrier minted by `Function.prototype.bind`:
+   * `{target: externref, thisArg: externref, boundArgs: externref ($ObjVec)}`.
+   * `__apply_closure` carries a front-guard that unwraps it (prepending
+   * `boundArgs`) and the closure classifier treats it as callable, so
+   * `typeof bound === "function"` and bound-of-bound chains work. Registered
+   * late+once; -1 = not yet registered. Byte-inert: only emitted when a
+   * standalone `.bind(...)` site compiles.
+   */
+  boundFnTypeIdx: number;
   /**
    * (#3057) Set by a module pre-scan when the source contains a dynamic
    * `new <ctorVar>(bufferArg)` (a `$__ta_dyn_view`-producing construct). Enables the

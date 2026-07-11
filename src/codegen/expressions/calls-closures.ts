@@ -1081,7 +1081,44 @@ export function tryExternClassMethodOnAny(
   // the `.slice` and `.replace`/`.replaceAll` ambiguity refusals above.
   // (A genuinely-`Uint8ClampedArray`-typed receiver never reaches here — it is
   // handled by the native array-method path before the `any` fallback.)
-  if (methodName === "forEach" || methodName === "some") return null;
+  //
+  // (#3139) Extended to the REST of the Array.prototype iteration/search
+  // generics for the same reason and with the same fallback: the mis-bind is
+  // not merely a standalone leak — `Uint8ClampedArray_every` runs the host
+  // %TypedArray% bridge on a receiver with no [[TypedArrayName]] slot, so a
+  // fnctor-instance array-like (`foo.prototype = new Array(1,2,3); new
+  // foo().every(cb)`, the 15.4.4.x applied-to-object test262 family) silently
+  // iterates ZERO elements. The generic `__extern_method_call` /
+  // `__proto_method_call` paths dispatch on the runtime shape and (post-#3138
+  // + the #3139 prototype-inclusive `__extern_length`/`__extern_get_idx`/
+  // `__extern_has_idx` handlers) resolve inherited length/elements correctly.
+  // `indexOf`/`lastIndexOf` are String∩Array-ambiguous exactly like `.slice`.
+  if (
+    methodName === "forEach" ||
+    methodName === "some" ||
+    methodName === "every" ||
+    methodName === "filter" ||
+    methodName === "map" ||
+    methodName === "reduce" ||
+    methodName === "reduceRight" ||
+    methodName === "indexOf" ||
+    methodName === "lastIndexOf"
+  ) {
+    return null;
+  }
+
+  // (#2872) `fill` is a core Array.prototype / %TypedArray%.prototype method,
+  // but `CanvasRenderingContext2D` (and Path2D-adjacent DOM classes) also
+  // declare a `fill`. First-match iteration bound an `any`-typed receiver's
+  // `ta.fill(v)` to `CanvasRenderingContext2D_fill` — a host import the
+  // standalone runtime cannot satisfy (the dominant leak of the
+  // built-ins/TypedArray/prototype/fill standalone cluster; the receiver there
+  // is a dynamically-constructed TA view). On an `any` receiver `fill` is
+  // overwhelmingly an Array/TypedArray operation; refuse extern-class dispatch
+  // and let the generic dynamic dispatch (which now carries the native
+  // `$__ta_dyn_view` fill arm) resolve by runtime shape. Mirrors the `.slice` /
+  // `.replace` / `.forEach`/`.some` ambiguity refusals above.
+  if (methodName === "fill") return null;
 
   // (#3033) If the program's OWN code defines a function-valued member of this
   // name (prototype-method assignment, function-valued property, object-literal

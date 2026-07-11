@@ -2,9 +2,9 @@
 id: 2903
 title: "standalone: residual env.__make_callback leak is host-backed builtin methods (Promise.then/.catch, Iterator helpers), NOT a callback-representation gap"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-06-30
-updated: 2026-06-30
+updated: 2026-07-11
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -12,8 +12,22 @@ task_type: research+bugfix
 area: codegen
 language_feature: closures, promises, iterator-helpers
 goal: host-independence
-related: [2070, 2075, 399, 1326, 1326c, 2895, 2861]
+related: [2070, 2075, 399, 1326, 1326c, 2895, 2861, 2860, 2980]
 origin: "2026-06-30 standalone __make_callback leak-front investigation (sendev-callback). Verified on main @ 1a53bd8d4, target standalone."
+# (#3102/#3131) intended growth for the #2903 sub-front-1 de-leak: the module
+# producer scan (declarations/types), the bridge miss-arm gate (calls.ts) and
+# the Promise_new host-fallthrough flag (new-super.ts).
+# (finally sub-front) the native §27.2.5.3 machinery lives with the then
+# machinery in async-scheduler.ts; expressions.ts gains the per-node
+# no-double-wrap marker check in isAsyncCallExpression. (NOTE: keep this
+# list comment-free — parseFrontmatterList stops at the first non-item line.)
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+  - src/codegen/declarations.ts
+  - src/codegen/context/types.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/async-scheduler.ts
+  - src/codegen/expressions.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
@@ -116,3 +130,156 @@ scheduler and can proceed in parallel once their native bodies are scoped.
   affected tests.
 - gc/host byte-output unchanged (the host path stays for JS-host mode).
 - Full `merge_group` net-positive, zero regression.
+
+---
+
+## Landed: sub-front 1 — `.then`/`.catch` bridge dead host-arm de-leak (fable-harvest1, 2026-07-10)
+
+**PR:** `issue-2903-then-chain-deleak`. **Measured yield: +625 host_free_pass**
+(the honest #2879 scored metric) with **zero regressions** across every
+measured set.
+
+### The post-flip re-ground (why sub-front 1 changed shape)
+
+This issue predates the #2980 carrier-widen FLIP (landed 2026-07-10, PR
+#2867). Post-flip, sub-front 1's premise ("the callback must be host-callable
+because the host implements `.then`") no longer holds: the bridge
+(`emitStandaloneThenWithNativeFallback`, calls.ts) chains native `$Promise`
+receivers natively — but it still baked the host `Promise_then*` path into its
+`ref.test $Promise` MISS arm, and `emitHostPromiseThenFallback` +
+`compileArrowAsCallback` `ensureLateImport`ed `Promise_then/then2/catch` +
+`__make_callback` into every standalone module using `.then`/`.catch`.
+
+**Runtime-counted measurement over the whole standalone baseline** (post-flip
+`test262-standalone-current.jsonl`, main@34e3812): 662 leaky passes whose ONLY
+leaks are then-chain imports; instrumented stubs show the host arm is **never
+CALLED in 626 of them** (dead arm — pure accounting loss), live in 36 (31 via
+OTHER `__make_callback` sites — Iterator helpers/TypedArray/proxy-toString —
+and 4-5 via `.finally`). A 217-file "near-miss" set (then-chain + ≤3 other
+imports) splits 90 async-gen-fallback (bridge inactive) / 26 dynamic-import /
+~15 allSettled-any-finally chains (genuinely live bridge misses on HOST
+promises) / rest other-site `__make_callback`.
+
+### The fix (module-level host-promise-source proof)
+
+The miss arm becomes a **native catchable TypeError** (§27.2.5.4 step 2) —
+dropping the imports — exactly when the module **provably cannot mint a host
+promise**:
+
+1. **Pre-body syntactic scan** (`ctx.moduleHasHostPromiseSource`,
+   declarations.ts collect walk, same discipline as `moduleHasAsyncGen`):
+   dynamic `import()`, `.finally(…)`, `allSettled`/`any`/`allKeyed`/
+   `allSettledKeyed`/`fromAsync` calls, subclass-receiver `all`/`race`.
+   Order-safe for the lazily-registered producers.
+2. **funcMap producer check** at bridge emit (`Promise_all/race/allSettled/
+   any/finally`, `__dynamic_import`, `__array_from_async`) — the static
+   producers register UPFRONT in the `collectPromiseImports` finalize, so this
+   is order-safe for them. `Promise_resolve`/`Promise_reject`/`Promise_new`
+   are deliberately NOT checked (upfront-registered even when the lowering is
+   native → false positive that forfeits the de-leak); the genuine
+   `Promise_new` host fallthrough (non-inline executor, new-super.ts) sets the
+   module flag at emission instead.
+
+Modules WITH a producer keep the exact pre-#2903 host arm — they were
+irreducibly host-import-leaky anyway (the producer import itself), so this
+sacrifices zero scored passes.
+
+### Proofs
+
+- 662-set re-measure on the branch: **625 flip to host-free pass**, 36 keep
+  their (live) host arms and keep passing, zero pass→fail/CE, 1 pre-existing
+  `ret=2` unchanged.
+- Near-miss 217-set: **217/217 still pass** (dynamic-import/allSettled/any/
+  finally/async-gen behavior preserved).
+- `prove-emit-identity`: all 39 (file,target) sha-identical vs main —
+  **gc + wasi byte-untouched** (wasi `nullMiss`/zero-import contract intact,
+  `tests/issue-1326.test.ts` green).
+- 90-file stride sample of standalone async FAILS: zero fail→CE (the throw
+  arm validates everywhere), zero unexpected movement.
+- New `tests/issue-2903.test.ts` (9 tests): host-free `.then(a,b)`/`.catch`/
+  chained/`new Promise(inline)` + catchable-TypeError miss arm + producer
+  controls (`.finally`, `Promise.allSettled` keep host arms) + gc/wasi lanes.
+
+---
+
+## Landed: finally sub-front — native `Promise.prototype.finally` (fable-finally, 2026-07-11)
+
+**PR:** `issue-2903-native-finally`. **Measured yield over the whole
+`built-ins/Promise` tree (652 files, main@32e1399 vs branch): pass 255→256
+(+1), host_free_pass 241→247 (+6), zero HF losses.** Only 2 test262 files
+outside the tree use `.finally(` (both top-level-await, skipped), so this is
+the full corpus yield. `prove-emit-identity`: all 39 (file,target) emits
+sha-identical vs main.
+
+### Why native (what was actually broken on main)
+
+Pre-native, standalone `.finally` on a native `$Promise` receiver routed to
+the host `Promise_finally` import, which received a WasmGC struct the host
+cannot chain — the import THREW (`p.finally is not a function`), and the
+async-call `catch_all` wrap (expressions.ts `wrapAsyncCallInTryCatch`)
+swallowed the throw into a rejected-with-NULL `$Promise`. Net effect measured
+on main: the onFinally callback silently DROPPED and the rejection reason
+identity LOST (a probe chain `reject(err).finally(f).then(_, r)` delivered
+`r = null`). Several dir "passes" were `$DONE(null)`-accidents of exactly this.
+
+### The lowering
+
+- `emitStandalonePromiseFinally` + `ensurePromiseFinallyRuntime`
+  (async-scheduler.ts): per-site fulfill/reject wrappers call onFinally with
+  ZERO args via `call_ref` (try/catch → a throwing onFinally rejects the
+  chained promise), then `__finally_after(result, chained, value, isReject)`
+  runs the spec `PromiseResolve(onFinally()).then(restore)` step: a throwaway
+  pending `$Promise` with the restore reaction PRE-attached is resolved with
+  the result (`__promise_resolve_value` — plain fulfil / promise adoption /
+  thenable job all reuse the existing substrate). `__finally_restore_settle`
+  re-settles the chained promise with the ORIGINAL value (resolve-value) or
+  reason (direct reject); `__finally_restore_reject` OVERRIDES with the
+  onFinally-result rejection (§27.2.5.3 thrower/valueThunk semantics).
+  New scheduler funcIdx side-channels are in ASYNC_SCHEDULER_FUNC_IDX_KEYS
+  (the #2918 late-import lockstep).
+- calls.ts: Promise-receiver + any-receiver `.finally` arms mirror the
+  then/catch bridge (`emitStandaloneFinallyWithNativeFallback`; wasi = direct
+  cast / nullMiss). Zero-arg `.finally()` admitted only on the native lane.
+- **Producer modules keep the EXACT legacy host route** — the native arms are
+  gated on `standaloneThenMissArmCanBeNative` (wasi excepted), because a
+  host-promise receiver misses `ref.test $Promise` and the host arm needs the
+  async-call fulfilled-wrap to keep behaving as on main (measured:
+  subclass-`finally` passes depend on it). The wrap decision is kept in exact
+  lockstep with the lowering via a per-node marker
+  (`ctx.standaloneNativeFinallyNodes`, read by `isAsyncCallExpression`) —
+  funcMap-dependent predicates can drift between the two evaluation points.
+- De-leak: `"finally"` removed from `HOST_PROMISE_SOURCE_METHOD_NAMES`
+  (declarations.ts) — `.finally`-using modules un-flag for the sub-front-1
+  then-bridge de-leak (HF gains include `allSettled/race
+  resolved-then-catch-finally.js`). NEW producer flag: `class X extends
+  Promise` (heritage scan) — subclass statics mint host promises through a
+  symbol-derived import (`FileSystemDirectoryHandle_resolve` — the mislabeled
+  lib-interface name) that no funcMap producer list can enumerate; the
+  `.finally` syntactic flag had been masking this hole.
+
+### Known accepted delta (documented, not a gate regression)
+
+`prototype/finally/rejected-observable-then-calls-argument.js`: main "passed"
+leak-satisfied ONLY because the broken host route nulled the reason
+(`$DONE(null)` = falsy = pass). Natively the reason arrives correctly, but the
+test's `reason === myError` compare then hits the PRE-EXISTING tag-5
+`__any_strict_eq` identity gap (`$AnyValue` object×object → constant 0; the
+proper three-way classifier is flag-gated OFF pending #2580 M2 / #3032 — the
+dstr-unmask −162 minefield; do NOT flip it piecemeal). The compile-order
+mechanism: any module whose FIRST native-promise machinery registration
+precedes a later closure compiling `any === any` routes that closure's eq
+through the broken helper — already true on main for `.then().then(cb)`
+chains (that is `rejected-observable-then-calls.js`'s main failure). Not
+host-free on main ⇒ no host_free_pass/floor/gc-lane gate sees it.
+
+### Remaining sub-fronts (issue stays open)
+
+- **Iterator.prototype.* helpers native bodies** (sub-front 2) and
+  **TypedArray callback methods** (sub-front 4) — the 31 live
+  `__make_callback` residuals.
+- The 69-fail "Promise resolve or reject function is not callable" cluster in
+  `built-ins/Promise/{all,race,any,allSettled}` (custom-capability tests over
+  host combinator imports) is a **different mechanism** (combinator
+  capability protocol, #2671's standalone twin) — not part of #2903.
+- Tag-5 `__any_strict_eq` object identity (`===` through `$AnyValue` boxes) —
+  owned by #2580 M2 / #3032, NOT this issue; see the accepted-delta note.

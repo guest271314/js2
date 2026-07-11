@@ -43,6 +43,7 @@ import {
   getOrRegisterVecType,
   hoistLetConstWithTdz,
   hoistVarDeclarations,
+  isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
 } from "./index.js";
@@ -1632,6 +1633,25 @@ export function computeClosureWrapperSig(
     if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
       wasmType = { kind: "externref" };
     }
+    // (#3137) TUPLE-typed params of a native `.then`/`.catch` callback widen to
+    // externref. TS contextually types combinator callbacks over tuple inputs
+    // as tuples (`Promise.allSettled([x]).then((rs) => …)` ⇒ rs:
+    // `[PromiseSettledResult<…>]`, lowered to a concrete 1-field struct), but
+    // the native then-wrapper ABI always delivers externref — the combinator
+    // results vec can never BE that tuple struct, so the wrapper's `ref.cast`
+    // trapped (illegal cast in __then_fulfill_N). Widened, the body reads the
+    // value through the dynamic reader (vec length/index + status objects),
+    // which is representation-correct for both the combinator vec and a
+    // genuine tuple value. Scoped to the then-callback compile window
+    // (`widenTupleCallbackParams`, set in compileStandalonePromiseThenCallback)
+    // so every other closure compile is byte-identical.
+    if (
+      ctx.widenTupleCallbackParams === true &&
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      isTupleType(paramType)
+    ) {
+      wasmType = { kind: "externref" };
+    }
     arrowParams.push(wasmType);
   }
 
@@ -1921,6 +1941,25 @@ export function compileArrowAsClosure(
   // shadow set, so the param's own binding names stay excluded.
   collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
+  // (#3040) Parameter DEFAULT initializers can reference enclosing-scope names
+  // that appear NOWHERE in the body — e.g. `f = async function*([x] = iter)`
+  // where `iter` is an outer local used ONLY in the default. The body-only scan
+  // above misses them, so such a name is never captured and the lifted
+  // default-init reads a null local, which then destructures to "Cannot
+  // destructure null". This is the function-expression / arrow twin of the
+  // FunctionDeclaration fix in statements/nested-declarations.ts (the async-gen /
+  // gen / fn EXPRESSION variants of the `ary-init-iter-close` cluster lower here,
+  // not through the declaration path). Scan each parameter subtree (its
+  // `= <default>` initializer AND nested binding-pattern element defaults like
+  // `[x = outer]`) with `ownLocals` as the shadow set so the destructured binding
+  // names and earlier params stay local while free references in the defaults
+  // become captures. Placed BEFORE the transitive-capture loop so a default that
+  // calls a capturing nested function also pulls in that function's transitive
+  // captures.
+  for (const p of arrow.parameters) {
+    collectReferencedIdentifiers(p, referencedNames, ownLocals);
+  }
+
   // Transitively add captures needed by called nested functions.
   // E.g. if this closure calls g() and g has nestedFuncCaptures {first, second},
   // this closure must also capture first and second so it can pass ref cells to g.
@@ -1943,6 +1982,12 @@ export function compileArrowAsClosure(
   } else {
     collectWrittenIdentifiers(body, writtenInClosure, ownLocals);
   }
+  // (#3040) Symmetric with the referencedNames scan above: a param default that
+  // ASSIGNS an outer var (rare, e.g. `[x] = (outer = 5, [outer])`) must keep that
+  // capture boxed rather than snapshotted.
+  for (const p of arrow.parameters) {
+    collectWrittenIdentifiers(p, writtenInClosure, ownLocals);
+  }
 
   // Also detect variables written in the enclosing scope (not just the closure).
   // If the outer function writes to a captured variable, the capture must use a
@@ -1955,16 +2000,38 @@ export function compileArrowAsClosure(
     try {
       // Find the symbol for this variable
       const sym = ctx.checker.getSymbolAtLocation(ts.isBlock(body) ? (body.statements[0] ?? body) : body);
-      // Use the enclosing function body to find all writes to this name
+      // Use the enclosing function body to find all writes to this name.
+      // (#3128) Walk PAST function nodes the call-site inliner flattened into
+      // this fctx (`fctx.inlinedIifeNodes`): an inlined IIFE is not a real
+      // scope boundary in the emitted Wasm — its "locals" live in fctx's
+      // frame, so writes to the captured name in the REAL enclosing body
+      // (e.g. `p2 = (function(){ return () => p2; })()`) must count as outer
+      // writes. Stopping at the erased boundary made the capture by-value:
+      // a stale copy the outer assignment never reached.
+      //
+      // Shadow guard: only walk past an inlined IIFE that does NOT itself
+      // declare `name` (params / own function-scoped decls). If it does, the
+      // capture refers to the IIFE's OWN binding — an outer same-named write
+      // targets a DIFFERENT variable and must not force-box the shadow
+      // (`var x=1; (function(){ var x=5; return ()=>x; })(); x=2;` — the
+      // closure must keep seeing 5).
+      const iifeDeclaresName = (fn: ts.Node): boolean => {
+        const own = new Set<string>();
+        addFunctionOwnLocals(fn, own);
+        return own.has(name);
+      };
       let enclosing: ts.Node | undefined = arrow.parent;
       while (
         enclosing &&
-        !ts.isFunctionDeclaration(enclosing) &&
-        !ts.isFunctionExpression(enclosing) &&
-        !ts.isArrowFunction(enclosing) &&
-        !ts.isMethodDeclaration(enclosing) &&
-        !ts.isConstructorDeclaration(enclosing) &&
-        !ts.isSourceFile(enclosing)
+        (!(
+          ts.isFunctionDeclaration(enclosing) ||
+          ts.isFunctionExpression(enclosing) ||
+          ts.isArrowFunction(enclosing) ||
+          ts.isMethodDeclaration(enclosing) ||
+          ts.isConstructorDeclaration(enclosing) ||
+          ts.isSourceFile(enclosing)
+        ) ||
+          ((fctx.inlinedIifeNodes?.has(enclosing) ?? false) && !iifeDeclaresName(enclosing)))
       ) {
         enclosing = enclosing.parent;
       }
@@ -3815,6 +3882,29 @@ export function getOrCreateFuncRefWrapperTypes(
   ctx.funcRefWrapperCache.set(sigKey, closureInfo);
 
   return { structTypeIdx, liftedFuncTypeIdx, closureInfo };
+}
+
+/**
+ * (#2873 park fix) The ROOT funcref-wrapper struct type — the FIRST wrapper
+ * `getOrCreateFuncRefWrapperTypes` created in this module. Every later
+ * per-signature wrapper struct is a `sub final` of it (see the star chaining
+ * above), so the root is the ONLY wrapper type a `ref.test`/`ref.cast` is
+ * guaranteed to accept for a closure value of ANY signature's wrapper.
+ *
+ * Why callers need it: wrapper structs are all layout-identical
+ * `(struct (field funcref))`, but WasmGC isorecursive canonicalization keys on
+ * (fields, supertype, finality) — a `sub final $root` sibling does NOT
+ * canonicalize with the root or with another sibling. A call site that casts a
+ * closure value to the wrapper of its *declared* signature therefore nulls out
+ * whenever the value was allocated under a different signature's wrapper
+ * (e.g. an activated async closure: its wrapper is minted for the REWRITTEN
+ * `... -> externref` Promise signature, while an `fn: () => void` param casts
+ * to the void wrapper) — unless creation ORDER happened to make the declared
+ * wrapper the root. Cast to the root instead and discriminate on the funcref's
+ * exact type (which encodes the true signature).
+ */
+export function getFuncRefWrapperRootTypeIdx(ctx: CodegenContext): number | undefined {
+  return (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx;
 }
 
 /**

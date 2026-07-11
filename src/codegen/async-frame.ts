@@ -699,6 +699,140 @@ function isNestedScope(node: ts.Node): boolean {
 }
 
 /**
+ * (#2967 slice 2a park fix — PR #2873) TRUE when a host-drive lowering of this
+ * async closure body would spill a CELL-BOXED local through a frame field typed
+ * for the local's DECLARED ValType — invalid Wasm.
+ *
+ * Mechanism: a body-declared local that a NESTED function-like captures
+ * *mutably* gets CELL-BOXED at the nested closure's creation site
+ * (closures.ts capture analysis: `isMutable` → `struct.new $__ref_cell_T` +
+ * localMap rebind to the cell local). The async frame's spill layout is
+ * computed BEFORE body compilation from `resolveSpillLocalValType` (the
+ * declared type, e.g. i32 for a boolean), so when that local is also LIVE
+ * ACROSS AN AWAIT the suspend spill-back emits
+ * `struct.set <frame> <i32 field> (local.get <(ref null $cell)>)` — the
+ * merge_group `struct.set[1] expected i32, found (ref null N)` wasm_compile
+ * failure (5 files: await-using microtask tests, Array.fromAsync
+ * does-not-await-input, AsyncIteratorPrototype asyncDispose). And even where
+ * the field type happens to line up, the cell local is NOT re-materialized on
+ * resume, so post-await reads deref a null cell.
+ *
+ * The predicate is a conservative syntactic over-approximation of
+ * "cell-boxed ∧ spilled": body-declared ∧ referenced inside a nested
+ * function-like ∧ assigned anywhere in the body (the closures.ts
+ * `writtenInClosure ∪ writtenInOuter` boxing trigger) ∧ in the computed spill
+ * set. Cells that never cross an await (created and consumed within one CFG
+ * state) are fine and stay admitted. Callers route a hazardous body back to
+ * the pre-slice-2a lanes (CPS / legacy), where main's lowering handles it.
+ *
+ * A SECOND divergence class is flagged the same way: a non-resume-binding
+ * body local whose `resolveSpillLocalValType` guess is a REF type
+ * (`ref`/`ref_null` — a typed struct or vec). That guess comes from the TS
+ * declared type resolved BEFORE the body compiles, and the body's inferred
+ * rep can lawfully differ (array-literal vec element specialization; the
+ * #3134 `Promise<T>` unwrap typing `const expected = [prom]` as a vec of the
+ * unwrapped STRUCT while the stored value is an externref Promise) — the
+ * spill store then fails validation (`struct.set[1] expected (ref null A),
+ * found (ref null B)` — the fromAsync does-not-await-input file). Primitive /
+ * externref guesses are rep-stable; resume-binding spills use
+ * `resumeBindingValType`, which matches the SENT-coercion target by
+ * construction — both stay admitted.
+ *
+ * NOTE: the same layout hazards exist in principle for async DECLARATIONS
+ * (host-drive since slice 1) — no corpus instance regressed there, so the
+ * declaration lane is left untouched; making the frame layout genuinely
+ * cell- and rep-aware is the structural follow-up (#2967 phase 3).
+ */
+export function asyncClosureCellSpillHazard(
+  ctx: CodegenContext,
+  decl: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): boolean {
+  const body = decl.body;
+  if (body === undefined) return false;
+  const declByName = collectVarDeclsByName(decl);
+  if (declByName.size === 0) return false;
+
+  // Names referenced anywhere inside a nested function-like (capture candidates).
+  const referencedInNested = new Set<string>();
+  // Names assigned anywhere in the async body, incl. inside nested closures
+  // (mirrors the closures.ts `writtenInClosure ∪ writtenInOuter` boxing rule).
+  const assigned = new Set<string>();
+
+  const noteAssignment = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(node.left)
+    ) {
+      assigned.add(node.left.text);
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand)
+    ) {
+      assigned.add(node.operand.text);
+    }
+  };
+
+  const collectNestedRefs = (node: ts.Node): void => {
+    noteAssignment(node);
+    if (ts.isIdentifier(node)) {
+      // Skip pure property-name positions (`a.b`'s `b`, `{ b: 1 }`'s `b`).
+      const p = node.parent;
+      const isPropName =
+        p !== undefined &&
+        ((ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isPropertyAssignment(p) && p.name === node));
+      if (!isPropName) referencedInNested.add(node.text);
+      return;
+    }
+    forEachChild(node, collectNestedRefs);
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (isNestedScope(node)) {
+      forEachChild(node, collectNestedRefs);
+      return;
+    }
+    noteAssignment(node);
+    forEachChild(node, walk);
+  };
+  forEachChild(body, walk);
+
+  const paramNames: string[] = [];
+  for (const p of decl.parameters) {
+    if (ts.isIdentifier(p.name)) paramNames.push(p.name.text);
+  }
+  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
+  if (spillNames.length === 0) return false;
+
+  // Resume-binding names use `resumeBindingValType` (rep-consistent with the
+  // SENT coercion) — only NON-binding locals carry the ref-typed-guess hazard.
+  const resumeBindingNames = new Set<string>();
+  const linear = planLinearAwaits(decl, plan);
+  if (linear !== null) {
+    for (const seg of linear.segments) {
+      if (seg.resumeBinding) resumeBindingNames.add(seg.resumeBinding.name);
+    }
+  }
+
+  for (let i = 0; i < spillNames.length; i++) {
+    const name = spillNames[i]!;
+    if (!declByName.has(name)) continue;
+    // Class 1: cell-boxed (mutably captured by a nested fn) local spilled
+    // across an await — the spill field was typed for the pre-boxing local.
+    if (referencedInNested.has(name) && assigned.has(name)) return true;
+    // Class 2: ref-typed spill guess for a plain body local — the body's
+    // inferred rep can diverge from the TS-resolved guess.
+    const t = spillTypes[i]!;
+    if ((t.kind === "ref" || t.kind === "ref_null") && !resumeBindingNames.has(name)) return true;
+  }
+  return false;
+}
+
+/**
  * Defensive check of the {@link AsyncCfgPlan} emitter contract (see the
  * contract block in async-cps.ts). Returns a human-readable violation, or
  * `null` when the plan is emittable. Cheap (O(states)); run once per machine so

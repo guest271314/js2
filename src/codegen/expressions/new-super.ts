@@ -28,6 +28,7 @@ import {
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
 import {
   emitDynamicTaViewConstruct,
+  emitTaDynCtorConstructFromLocals,
   emitTaViewConstruct,
   emitTaViewConstructWindowed,
   getOrRegisterDvWindowType,
@@ -1221,6 +1222,84 @@ function compileFnctorNewAsObject(ctx: CodegenContext, fctx: FunctionContext, fn
  * 3. Create a constructor function that allocates the struct, binds `this`, runs the body, returns the struct.
  * 4. Cache the struct type and constructor so subsequent `new Foo()` calls reuse them.
  */
+/**
+ * (#3138) Call-site instance→ctor registration for FUNCTION-SCOPE fnctors.
+ *
+ * The #1712 registration (`__register_fnctor_instance`, ctor PROLOGUE) reads
+ * the ctor closure from a module GLOBAL (`moduleGlobals`/`funcClosureGlobals`)
+ * — which does not exist when the fnctor is a function-local binding
+ * (`export function test() { var Ctor = function(){}; … new Ctor(); }`, the
+ * test262 wrap shape). The prologue (inside the synthesized
+ * `__fnctor_<Name>_new`) cannot see the caller's local, so for that case the
+ * link is registered at the CALL SITE, where the closure local IS in scope.
+ * Without the link, `_fnctorProtoLookup` misses and every INHERITED read off
+ * the instance — including ToPropertyDescriptor's prototype-inclusive Get
+ * (#2680) when the instance is used as a property DESCRIPTOR — silently drops
+ * (the `15.2.3.6-3-129` inherited-attribute family).
+ *
+ * Emitted with the ctor-call result (`(ref null $__fnctor_<Name>)`) on the
+ * stack; restores that exact value/type, so downstream consumers are
+ * unaffected:
+ *
+ *   local.tee $__fnctor_reg_tmp      ;; keep the typed instance
+ *   extern.convert_any               ;; instance → externref
+ *   local.get $<funcName>            ;; closure value (+ convert if a GC ref)
+ *   call $__register_fnctor_instance
+ *   local.get $__fnctor_reg_tmp      ;; restore
+ *
+ * Gates (all must hold; any miss = status quo, no emission):
+ *  - host lane only (`!ctx.standalone && !ctx.wasi`) — the sidecar/proto-walk
+ *    machinery is JS-host; standalone stays byte-identical;
+ *  - the module-global gate MISSED (module-global fnctors keep the prologue
+ *    registration — byte-identical for them);
+ *  - `fctx.localMap` has a slot for `funcName` holding the closure VALUE
+ *    (externref or a GC ref). Ref-cell boxed captures are skipped — the raw
+ *    local is the CELL, not the closure, and registering the cell identity
+ *    would poison the WeakMap;
+ *  - runtime handlers are null-tolerant, so a hoisted `new` before the
+ *    assignment registers nothing (status quo) instead of trapping.
+ *
+ * Late-import discipline: `ensureLateImport` + ONE `flushLateImportShifts`
+ * AFTER the ctor call is already emitted, then a FRESH `funcMap` lookup for
+ * the register import (the #2608 "one terminal flush, never mid-emission"
+ * rule; the flush repairs the just-emitted ctor-call index if the import
+ * insertion shifted defined functions).
+ */
+function emitCallSiteFnctorRegistration(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  instanceTypeIdx: number,
+): void {
+  if (ctx.standalone || ctx.wasi) return;
+  if (ctx.moduleGlobals.get(funcName) !== undefined || ctx.funcClosureGlobals.get(funcName) !== undefined) {
+    return; // module-global fnctor — the ctor-prologue registration (#1712) owns it
+  }
+  const slot = fctx.localMap.get(funcName);
+  if (slot === undefined) return;
+  if (fctx.boxedCaptures?.has(funcName)) return; // slot holds a ref CELL, not the closure
+  const slotType = getLocalType(fctx, slot);
+  if (!slotType) return;
+  const isExtern = slotType.kind === "externref" || slotType.kind === "ref_extern";
+  const isGcRef =
+    slotType.kind === "ref" || slotType.kind === "ref_null" || slotType.kind === "anyref" || slotType.kind === "eqref";
+  if (!isExtern && !isGcRef) return; // numeric/funcref slot — not a closure value
+  ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+  flushLateImportShifts(ctx, fctx);
+  const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+  if (regIdx === undefined) return;
+  const tmp = allocLocal(fctx, `__fnctor_reg_tmp_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: instanceTypeIdx,
+  });
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.get", index: slot });
+  if (!isExtern) fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "call", funcIdx: regIdx });
+  fctx.body.push({ op: "local.get", index: tmp });
+}
+
 function compileNewFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1499,6 +1578,10 @@ function compileNewFunctionDeclaration(
   const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
   maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
+  // (#3138) Function-scope fnctor: link instance → ctor closure at the call
+  // site (the ctor prologue can't — no module global to read). No-op for
+  // module-global fnctors / standalone / non-closure slots.
+  emitCallSiteFnctorRegistration(ctx, fctx, funcName, structTypeIdx);
   return { kind: "ref", typeIdx: structTypeIdx };
 }
 
@@ -2468,6 +2551,18 @@ function emitDynamicNewFallback(
     fctx.body.push({ op: "call", funcIdx: hostFuncIdx });
     fctx.body = savedBody2;
     noMatchBase = base;
+  } else if (noJsHost(ctx) && !useRuntimeArgv) {
+    // (#2872) Standalone/WASI unknown-ctor base: the runtime value may be a
+    // first-class `$__ta_ctor` (the TypedArray-harness `function (TA) { new
+    // TA(3) / new TA([…]) }` shape — the callee matched no user-class tag).
+    // Route through the runtime-gated general TA construct; any other runtime
+    // value keeps the pre-existing null-extern outcome (the ref.test declines).
+    const base: Instr[] = [];
+    const savedBase = fctx.body;
+    fctx.body = base;
+    emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    fctx.body = savedBase;
+    noMatchBase = base;
   } else {
     noMatchBase = [{ op: "ref.null.extern" }];
   }
@@ -3010,6 +3105,19 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
     ) {
       return { kind: "externref" };
+    }
+    // (#2903) This is the genuine HOST `new Promise` fallthrough (executor not
+    // native-lowerable) — the runtime value is a host promise, so the
+    // `.then`/`.catch` bridge's miss arm must keep its host fallback for the
+    // rest of this module. (`Promise_new` funcMap presence can't signal this:
+    // it is upfront-registered for every syntactic `new Promise` even when the
+    // lowering is native.) Order caveat: a bridge compiled BEFORE this point
+    // already chose its arm; acceptable — the affected shape (a `.then` in an
+    // earlier function over a later non-inline-executor promise) now throws a
+    // catchable TypeError instead of host-chaining, and can only occur in
+    // modules that were irreducibly host-import-leaky anyway.
+    if (ctx.standalone === true && ctx.wasi !== true) {
+      ctx.moduleHasHostPromiseSource = true;
     }
     let funcIdx =
       ctx.funcMap.get("Promise_new") ??
@@ -4211,6 +4319,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
         maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: finalIdx });
+        // (#3138) Function-scope fnctor: call-site instance→ctor link (the
+        // cached arm bypasses compileNewFunctionDeclaration's emission).
+        emitCallSiteFnctorRegistration(ctx, fctx, fnName, cachedFnCtor.structTypeIdx);
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
     }
@@ -4661,6 +4772,43 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           }
         }
         if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
+          return { kind: "externref" };
+        }
+        // (#2872) Standalone/WASI class-free module: emitDynamicNewFallback
+        // declined (no struct-backed class candidates), so `new TA(n)` / `new
+        // TA([…])` / `new TA()` on an `any`-bound ctor previously fell through
+        // to the (absent) `__new_<name>` import → `ref.null.extern`, which made
+        // every `testWithTypedArrayConstructors` body read 0/undefined. Route
+        // the genuinely-dynamic callee through the same runtime `$__ta_ctor`
+        // construct arm the class-bearing no-match base uses; a non-TA runtime
+        // value still yields null-extern (byte-identical outcome to before).
+        if (
+          noJsHost(ctx) &&
+          resolvesToDynamicAnyCtorValue(ctx, dynCallee) &&
+          !(expr.arguments ?? []).some((a) => ts.isSpreadElement(a))
+        ) {
+          const taCalleeTy = compileExpression(ctx, fctx, dynCallee, { kind: "externref" });
+          if (taCalleeTy && taCalleeTy.kind !== "externref") {
+            coerceType(ctx, fctx, taCalleeTy, { kind: "externref" });
+          } else if (taCalleeTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          const taDescLocal = allocLocal(fctx, `__dtac_desc_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "local.set", index: taDescLocal });
+          const taArgLocals: number[] = [];
+          for (const arg of expr.arguments ?? []) {
+            const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (aTy && aTy.kind !== "externref") {
+              coerceType(ctx, fctx, aTy, { kind: "externref" });
+            } else if (aTy === null) {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            const aLocal = allocLocal(fctx, `__dtac_arg_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: aLocal });
+            taArgLocals.push(aLocal);
+          }
+          emitTaDynCtorConstructFromLocals(ctx, fctx, taDescLocal, taArgLocals);
           return { kind: "externref" };
         }
       }
