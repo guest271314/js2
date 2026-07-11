@@ -57,20 +57,6 @@ export function addFuncType(ctx: CodegenContext, params: ValType[], results: Val
   return idx;
 }
 
-function valTypeEq(a: ValType, b: ValType): boolean {
-  if (a.kind !== b.kind) return false;
-  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
-    return a.typeIdx === (b as { typeIdx: number }).typeIdx;
-  }
-  // (#2846) Keep the two i64 brands non-equal so `funcTypeEq` (structural-match
-  // callers) does not re-merge a bigint-branded i64 with a plain i64 — mirrors
-  // the `funcTypeKey` `:big` bucket above and the #2795 i32 precedent.
-  if (a.kind === "i64") {
-    return Boolean((a as { bigint?: true }).bigint) === Boolean((b as { bigint?: true }).bigint);
-  }
-  return true;
-}
-
 /**
  * Get or register a Wasm array type for a given element kind.
  * Reuses existing registrations so each element type only gets one array type.

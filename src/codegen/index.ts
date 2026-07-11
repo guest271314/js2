@@ -13368,8 +13368,8 @@ function collectExternFromDeclareVar(ctx: CodegenContext, decl: ts.VariableDecla
   // (#1103a) In standalone / nativeStrings mode, `Map` is served by the
   // WasmGC-native runtime (map-runtime.ts) intercepted at the call sites.
   // Skip registering it as an externClass from the lib `declare var Map`
-  // declaration — otherwise `registerExternClassImports` eagerly emits a
-  // `Map_new` host import the standalone module can't satisfy.
+  // declaration — otherwise the extern-class import registration eagerly
+  // emits a `Map_new` host import the standalone module can't satisfy.
   if (className === "Map" && ctx.nativeStrings) return;
   if (ctx.externClasses.has(className)) return;
 
@@ -13574,41 +13574,6 @@ function collectMixinMembers(
           }
         }
       }
-    }
-  }
-}
-
-function registerExternClassImports(ctx: CodegenContext, info: ExternClassInfo): void {
-  // Constructor
-  const ctorTypeIdx = addFuncType(ctx, info.constructorParams, [{ kind: "externref" }]);
-  addImport(ctx, "env", `${info.importPrefix}_new`, {
-    kind: "func",
-    typeIdx: ctorTypeIdx,
-  });
-
-  // Methods
-  for (const [methodName, sig] of info.methods) {
-    const methodTypeIdx = addFuncType(ctx, sig.params, sig.results);
-    addImport(ctx, "env", `${info.importPrefix}_${methodName}`, {
-      kind: "func",
-      typeIdx: methodTypeIdx,
-    });
-  }
-
-  // Property getters and setters
-  for (const [propName, propInfo] of info.properties) {
-    const getterTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [propInfo.type]);
-    addImport(ctx, "env", `${info.importPrefix}_get_${propName}`, {
-      kind: "func",
-      typeIdx: getterTypeIdx,
-    });
-
-    if (!propInfo.readonly) {
-      const setterTypeIdx = addFuncType(ctx, [{ kind: "externref" }, propInfo.type], []);
-      addImport(ctx, "env", `${info.importPrefix}_set_${propName}`, {
-        kind: "func",
-        typeIdx: setterTypeIdx,
-      });
     }
   }
 }

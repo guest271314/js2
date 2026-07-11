@@ -11,12 +11,13 @@
 //   - `analyzeAsyncBody` is real and pure — it walks the body, finds await
 //     points, and computes the live-local set carried across each await. No
 //     codegen side effects. This is what the tests exercise.
-//   - `emitAsyncStateMachine` / `compileNestedAwait` are present but inert:
-//     the activation hook in function-body.ts is NOT wired in this PR, and the
-//     `asyncCpsActive` gate (see ASYNC_CPS_ENABLED) is hardcoded false, so the
-//     emit path is never reached. Emitted Wasm is byte-identical to before —
-//     same inert-first pattern as #1586 (alloc sites) and #1587 (ownership).
-//   - `emitAsyncStateMachineFromIr` is a stub returning false (#1373b fills it).
+//   - `emitAsyncStateMachine` is present but inert: the activation hook in
+//     function-body.ts is NOT wired in this PR, and the `asyncCpsActive` gate
+//     (see ASYNC_CPS_ENABLED) is hardcoded false, so the emit path is never
+//     reached. Emitted Wasm is byte-identical to before — same inert-first
+//     pattern as #1586 (alloc sites) and #1587 (ownership).
+//     (The `compileNestedAwait` / `emitAsyncStateMachineFromIr` stubs were
+//     removed as dead in #3090; #1373b re-adds the IR entry point when real.)
 //
 // The full lowering (segment emission, capture structs, Promise.then chaining)
 // lands in follow-up PRs. See plan/issues/backlog/1042-async-await-state-machine-lowering.md.
@@ -545,33 +546,6 @@ function emitMakeContinuationCallback(
   // `makeCbIdx` is the stable pre-registered index (collectAsyncCpsImports
   // prepass), passed by the driver — never a late import here.
   fctx.body.push({ op: "call", funcIdx: makeCbIdx } as Instr);
-}
-
-/**
- * Compile a nested `await` encountered while the surrounding
- * {@link emitAsyncStateMachine} is driving the body (e.g. `await (x + await y)`).
- *
- * PR1: stub. Nested awaits within a single segment are a follow-up; the joint
- * spec §6.2 lists `return await` as the only tail case required in Slice 2A.
- */
-export function compileNestedAwait(ctx: CodegenContext, _fctx: FunctionContext, expr: ts.AwaitExpression): never {
-  reportError(
-    ctx,
-    expr,
-    "internal: nested await not yet supported (#1042 PR1 skeleton; follow-up PR adds segment-internal await continuations)",
-  );
-  // reportError does not return control flow that TS can prove; satisfy `never`.
-  throw new Error("unreachable");
-}
-
-/**
- * IR entry point (Phase 2B / #1373b). Same machinery, IR input.
- *
- * PR1: stub returning `false` (means "did not handle; caller uses legacy
- * path"). #1373b fills this in.
- */
-export function emitAsyncStateMachineFromIr(): boolean {
-  return false;
 }
 
 /**

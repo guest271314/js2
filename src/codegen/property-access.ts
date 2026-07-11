@@ -888,7 +888,7 @@ function reportUnsupportedStandaloneBuiltinValueRead(ctx: CodegenContext, builti
   );
 }
 
-function makeBuiltinClosureFctx(
+export function makeBuiltinClosureFctx(
   name: string,
   selfType: ValType,
   paramTypes: ValType[],

@@ -3128,35 +3128,6 @@ function emitToStringResultToF64ByKind(ctx: CodegenContext, fctx: FunctionContex
 }
 
 /**
- * Emit a safe externref-to-f64 conversion that handles GC struct references.
- *
- * When an externref might hold a WasmGC struct (e.g., from `extern.convert_any`
- * on an object literal), calling the JS host `Number(v)` throws
- * "Cannot convert object to primitive value". This function emits inline Wasm
- * that uses `__typeof_number` to check if the externref is a JS number before
- * calling `__unbox_number`. For non-number externrefs (including GC structs),
- * it returns NaN per JS ToNumber semantics for objects without valueOf.
- *
- * Expects one externref on the stack; leaves one f64.
- */
-export function emitSafeExternrefToF64(ctx: CodegenContext, fctx: FunctionContext): void {
-  addUnionImports(ctx);
-  const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-  // (#1379) `__unbox_number` calls JS `Number(v)` which implements the spec
-  // ToNumber operation: null→0, undefined→NaN, "1"→1, "abc"→NaN, true→1,
-  // and ToPrimitive→Number for objects (with #1319's fix that returns
-  // "[object Object]" for wasm-structs without conversion methods, this
-  // path no longer throws on plain GC structs). Pre-#1379 we gated the
-  // call behind a `__typeof_number` check and returned NaN otherwise —
-  // that broke `var x = null; ++x` (expected 1, got NaN), `var x = "1";
-  // x--` (expected 0, got NaN), and the rest of the
-  // language/expressions/{prefix,postfix}-{increment,decrement} cluster.
-  // Routing through `__unbox_number` directly gives spec-correct ToNumeric
-  // for the f64 numeric path.
-  fctx.body.push({ op: "call", funcIdx: unboxIdx });
-}
-
-/**
  * Emit instructions that push the JS `undefined` value onto the stack (#737).
  * Uses the __get_undefined host import when available; falls back to
  * ref.null.extern (indistinguishable from null) in standalone mode.
