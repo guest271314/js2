@@ -17,6 +17,7 @@ related: [2906, 2957, 1373b]
 origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane was left byte-stable; convergence is its own measured step"
 loc-budget-allow:
   - src/codegen/async-frame.ts
+  - src/codegen/async-cps.ts
   - src/codegen/declarations.ts
   - src/codegen/expressions/calls.ts
   - src/codegen/closures.ts
