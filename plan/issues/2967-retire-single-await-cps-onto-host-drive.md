@@ -416,3 +416,47 @@ slot-rep fix) which removes the known divergence source.
 **2c — delete** `emitAsyncStateMachine`/`splitBodyAtAwait`/`compileNestedAwait`
 CPS arm/`asyncCpsActive` plumbing/CPS-only import detection once 3a+3b land
 (or 3a lands and 3b's population is measured ≈0 on the corpus).
+
+## Phase 3a — IMPLEMENTED (2026-07-11, this PR)
+
+Exactly per the spec above; notes on what the implementation surfaced:
+
+- `buildAsyncFrameInfo` computes `spillCellInfo` (spill idx → cell type +
+  inner valType) with the shared `collectNestedRefsAndAssigns` predicate;
+  flagged fields are typed `(ref null $__ref_cell_<T>)`. Body locals require
+  `isSpillSafeType(valType)` (the entry cell needs an inert default) — the
+  non-defaultable residue is ref-typed and thus already class-2-declined on
+  the closure path. Derived params force-box for ANY valType (live init).
+  Async-generator frames untouched (`asteriskToken` guard).
+- The resume prologue registers flagged names in `resumeFctx.boxedCaptures`
+  (CLONING the outer-shared map first — mutating `info.boxedCaptures` in
+  place would pollute the activating fctx) and `emitDeliver` writes a
+  force-boxed resume binding THROUGH the cell (`struct.set` field 0), since
+  its slot now holds the cell ref, not the value.
+- The 2b-2 `patternParamCellHazard` decline and the #2873 class-1 arm of
+  `asyncClosureCellSpillHazard` are removed. Class 2 (ref-typed spill-guess
+  rep divergence) is now the ONLY CPS re-lane (→ 3b / #3134).
+- **Latent #2623 consumer bug exposed and fixed** (the one real corpus
+  regression pre-fix): `nestedFuncCaptures` registered `valType: c.type` —
+  for a mutable capture whose outer slot was ALREADY the canonical cell,
+  that is the CELL type, and every call-site consumer derives the capture
+  param via `getOrRegisterRefCellType(valType)` → a CELL-OF-CELL, then casts
+  the real cell to it — "illegal cast" trap (test262 fromAsync
+  sync-iterable-with-rejecting-thenable-closes: a nested GENERATOR with a
+  `finally` mutating a captured counter; pre-3a the async body never had a
+  pre-boxed slot at nested-decl compile time, so the bug was latent).
+  Registration now stores the INNER value type for mutable alreadyBoxed
+  captures; the lifted param (`valueCaptureParamTypes` threads the cell
+  unchanged) and the call site's derived type then agree, and the
+  already-boxed branch passes the existing cell.
+
+Validation: engine-convergence suite (incl. 3 new 3a cases: cell identity
+across suspend, boxed resume-binding delivery, post-resume write visible to
+the nested closure; the two former routing pins INVERTED to drive+correct —
+the derived-param cell shape now returns the value CPS got WRONG); corpus
+sweep of await-using + AsyncDisposableStack + fromAsync (134 files): 80
+pass, 0 regressions vs the js-host baseline (remaining fails
+baseline-identical, incl. an identical illegal-cast failure mode on
+mapfn-result-awaited-once-per-iteration); issue-1712's single fail
+control-verified identical on pristine main (2ff0db4f0a). merge_group A/B
+is the hard gate (the await-using cluster flips CPS→drive).
