@@ -16,6 +16,9 @@ language_feature: strings
 goal: ir-full-coverage
 related: [2953, 679, 2949]
 origin: "2026-07-02 July Fable audit §5 (identical source builds different IR per string mode)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
 ---
 
 # #2955 — identical source builds different IR depending on nativeStrings
