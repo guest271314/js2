@@ -27,6 +27,62 @@ loc-budget-allow:
 > implemented — see `## Progress (2026-07-11)` at the bottom; the issue stays
 > open for the follow-on slices listed there.
 
+## Progress (2026-07-11, fable-sub1) — Slice 2: dyn-view `copyWithin` + `reverse`
+
+Per-method dyn-view arms, the follow-on the slice-1 note flagged
+(`copyWithin`/`reverse` — the `__ta_dyn_fill` two-arm template). Both operate
+on a runtime `$__ta_dyn_view` receiver (the
+`testWithTypedArrayConstructors(TA => new TA(…).copyWithin(…)/.reverse())`
+harness shape).
+
+**Landed (branch `issue-2872-ta-proto-methods`):**
+
+1. `ensureTaDynCopyWithinHelper` (dataview-native.ts) — §23.2.3.5. `to`/`from`/
+   `final` relative indices clamped `[0,len]`, `count = min(final-from,
+   len-to)`, one `array.copy` of `count*elemSize` bytes (memmove-correct for
+   overlap, so no direction split). No per-element decode/encode — raw bytes
+   move verbatim, element-kind-agnostic.
+2. `ensureTaDynReverseHelper` (dataview-native.ts) — §23.2.3.21. In-place
+   `elemSize`-byte-block swap over `[0, floor(len/2))` through a scratch byte.
+3. Shared preamble/relative-index helpers (`pushTaDynMethodPreamble`,
+   `pushTaDynRelativeIndex`) — independent clones of the slice-1 fill internals
+   so **fill's emitted bytes are untouched** (`prove-emit-identity` IDENTICAL).
+4. All three helpers carry the SAME `(recv, v1, v2, v3, argc)` signature
+   (reverse's trailing slots unused) so ONE calls.ts dispatcher two-arm serves
+   them; the slice-1 fill emit path is byte-identical (same helper funcIdx).
+5. `copyWithin`/`reverse` added to the any-receiver extern-class ambiguity
+   refusal (calls-closures.ts) — first-match bound `ta.reverse()` to
+   `Uint8ClampedArray_reverse` (a host import → standalone instantiate trap);
+   now they resolve by runtime shape like `fill`.
+
+**Measured (real runner, standalone lane, vs baseline):**
+
+| tree | Δ |
+| ---- | - |
+| `TypedArray{,Constructors}/prototype/{copyWithin,reverse}` (89) | **+5 pass / 0 regressions** |
+
+The +5 are the non-harness copyWithin tests (`detached-buffer`,
+`return-abrupt-from-{start,end,target}`, `return-this`). The bulk of the 75
+remaining fails are **harness-blocked on `.bind`** (#3140): every
+`testWithTypedArrayConstructors` test runs `argFactory.bind(undefined,
+constructor)` — a closure `.bind` that returns a non-callable standalone — so
+it throws at the harness before reaching the method. This slice is the
+prerequisite method work; the reachable yield jumps once #3140 lands (the arms
+already run correctly under the callback harness, proven by the unit suite).
+
+- `tests/issue-2872-copywithin-reverse.test.ts` 12/12 (mutation on every kind,
+  negative/relative clamps, explicit-end window, multi-byte element moves,
+  returns-this via content-aliasing since dyn-view strict-eq is deferred #2580
+  M2, plain-array non-hijack GUARD, static-lane control); slice-1 suite 13/13.
+- `prove-emit-identity`: IDENTICAL (39/39) — host/gc byte-inert, corpus has no
+  dyn-view copyWithin/reverse.
+- loc-budget: dataview-native.ts (+453) / calls.ts (+10) covered by the
+  `loc-budget-allow` frontmatter above.
+
+**Remaining follow-ons:** `.bind`-on-closure (#3140, THE cluster unblock);
+per-method arms for `set`/`subarray`/`sort`/`join`/`slice`/`with`; `.buffer`
+identity on dyn views; iterable ctor arg; dyn-view strict-eq (#2580 M2).
+
 ## Measure-first verdict (2026-07-01, sdev-tail) — CONFIRMED BLOCKED, brand not on main
 
 Do **not** dispatch the residual TypedArray.prototype *method* native-body work
