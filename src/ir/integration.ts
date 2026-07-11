@@ -2634,6 +2634,24 @@ class ClassRegistry {
     }
     allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
 
+    // (#3144) instanceof-compatible tags: own tag + every transitive
+    // descendant's. Mirrors legacy `collectInstanceOfTags` (typeof-delete.ts)
+    // exactly — the walk finds children via `classParentMap` (child → parent)
+    // so `class.instanceof` compares the identical set `compileInstanceOf`
+    // emits. Empty when the class has no tag (lowering folds to false).
+    const collectTags = (className: string, seen: Set<string>): number[] => {
+      if (seen.has(className)) return []; // circular-inheritance guard
+      seen.add(className);
+      const ownTag = ctx.classTagMap.get(className);
+      if (ownTag === undefined) return [];
+      const tags = [ownTag];
+      for (const [child, parent] of ctx.classParentMap) {
+        if (parent === className) tags.push(...collectTags(child, seen));
+      }
+      return tags;
+    };
+    const instanceOfTags = collectTags(shape.className, new Set());
+
     const lowering: IrClassLowering = {
       structTypeIdx,
       fieldIdx: (name: string): number => {
@@ -2645,6 +2663,7 @@ class ClassRegistry {
       },
       constructorFuncName,
       initFuncName,
+      instanceOfTags,
       methodFuncName: (name: string): string => {
         // Returns a NAME — the resolver's `resolveFunc` maps it to the
         // funcIdx via `ctx.funcMap`, which the legacy collection pass
