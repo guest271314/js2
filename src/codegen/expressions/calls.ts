@@ -32,6 +32,7 @@ import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import { ensureObjVecBuilders, ensureObjectGroupBy, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitMicrotaskEnqueue,
+  emitStandalonePromiseFinally,
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
@@ -3874,8 +3875,12 @@ function tryEmitAsyncGenNextDispatch(
  * passes). All the *statically-detectable* producers register UPFRONT in the
  * `collectPromiseImports` finalize (declarations.ts) — before any function
  * body compiles — so this check is compile-order-safe for them; the
- * lazily-registered producers (dynamic `import()`, `.finally(…)`) are covered
- * by the pre-body syntactic scan instead.
+ * lazily-registered producers (dynamic `import()`, subclass-of-Promise
+ * statics) are covered by the pre-body syntactic scan instead. `.finally(…)`
+ * is NO LONGER a producer on the active native lane (it lowers to the native
+ * §27.2.5.3 machinery, #2903 finally sub-front); `Promise_finally` stays
+ * listed below as the funcMap backstop for the residual host-routed shapes
+ * (producer modules' legacy route, carrier-fallback modules).
  *
  * Deliberately NOT listed (upfront-registered even when the lowering is
  * native, so funcMap presence is a false-positive that would forfeit the
@@ -3981,6 +3986,116 @@ function emitStandaloneThenWithNativeFallback(
           emitThrowTypeError(ctx, fctx, `Promise.prototype.${method} called on a non-Promise receiver`);
         } else {
           emitHostPromiseThenFallback(ctx, fctx, recvLocal, method, onFulfilledArg, onRejectedArg);
+        }
+      } finally {
+        fctx.savedBodies.pop();
+        fctx.body = outerBody;
+      }
+    }
+
+    const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: nativeArm,
+      else: hostArm,
+    } as Instr);
+  } finally {
+    for (const b of liveBuffers) ctx.liveBodies.delete(b);
+  }
+}
+
+/**
+ * (#2903) The pre-native host `.finally` path (`Promise_finally` late import) —
+ * kept as the receiver bridge's miss arm ONLY when the module can genuinely
+ * mint a host promise (`standaloneThenMissArmCanBeNative` false). Mirrors
+ * {@link emitHostPromiseThenFallback}: emits against the ALREADY-EVALUATED
+ * receiver local (no second receiver compile).
+ */
+function emitHostPromiseFinallyFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvLocal: number,
+  onFinallyArg: ts.Expression | undefined,
+): void {
+  const paramTypes: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
+  let funcIdx =
+    ctx.funcMap.get("Promise_finally") ?? ensureLateImport(ctx, "Promise_finally", paramTypes, [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  funcIdx = ctx.funcMap.get("Promise_finally") ?? funcIdx;
+
+  if (funcIdx === undefined) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  if (onFinallyArg) {
+    const cbType = compileExpression(ctx, fctx, onFinallyArg, { kind: "externref" });
+    if (cbType && cbType.kind !== "externref") coerceType(ctx, fctx, cbType, { kind: "externref" });
+  } else {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  const finalIdx = ctx.funcMap.get("Promise_finally") ?? funcIdx;
+  fctx.body.push({ op: "call", funcIdx: finalIdx } as Instr);
+}
+
+/**
+ * (#2903) `.finally` runtime dispatch on standalone/WASI native `$Promise`
+ * receivers — the finally twin of {@link emitStandaloneThenWithNativeFallback}.
+ * A `ref.test $Promise` HIT lowers §27.2.5.3 natively
+ * (`emitStandalonePromiseFinally`); the MISS arm is a native catchable
+ * TypeError when the module provably cannot mint a host promise, the exact
+ * pre-#2903 `Promise_finally` host call when it can, and a plain null under
+ * wasi (`nullMiss` — zero-import contract).
+ */
+function emitStandaloneFinallyWithNativeFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverExpr: ts.Expression,
+  onFinallyArg: ts.Expression | undefined,
+  opts?: { nullMiss?: boolean },
+): void {
+  const liveBuffers: Instr[][] = [];
+  try {
+    const recvLocal = allocLocal(fctx, `__finally_recv_${fctx.locals.length}`, { kind: "externref" });
+    const recvType = compileExpression(ctx, fctx, receiverExpr, { kind: "externref" });
+    if (recvType && recvType.kind !== "externref") {
+      coerceType(ctx, fctx, recvType, { kind: "externref" });
+    }
+    fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+    const onFinally = compileStandalonePromiseThenCallback(ctx, fctx, onFinallyArg, liveBuffers);
+
+    const outerBody = fctx.body;
+    const nativeArm: Instr[] = [];
+    ctx.liveBodies.add(nativeArm);
+    liveBuffers.push(nativeArm);
+    fctx.savedBodies.push(outerBody);
+    fctx.body = nativeArm;
+    try {
+      emitStandalonePromiseFinally(ctx, fctx, [{ op: "local.get", index: recvLocal } as Instr], onFinally);
+    } finally {
+      fctx.savedBodies.pop();
+      fctx.body = outerBody;
+    }
+
+    const hostArm: Instr[] = [];
+    if (opts?.nullMiss === true) {
+      hostArm.push({ op: "ref.null.extern" } as Instr);
+    } else {
+      ctx.liveBodies.add(hostArm);
+      liveBuffers.push(hostArm);
+      fctx.savedBodies.push(outerBody);
+      fctx.body = hostArm;
+      try {
+        if (standaloneThenMissArmCanBeNative(ctx)) {
+          emitThrowTypeError(ctx, fctx, "Promise.prototype.finally called on a non-Promise receiver");
+        } else {
+          emitHostPromiseFinallyFallback(ctx, fctx, recvLocal, onFinallyArg);
         }
       } finally {
         fctx.savedBodies.pop();
@@ -10735,7 +10850,24 @@ function compileCallExpression(
     // compiled async function returns through host Promise path — v1 regression)
     {
       const method = propAccess.name.text;
-      if ((method === "then" || method === "catch" || method === "finally") && expr.arguments.length >= 1) {
+      // (#2903) `.finally` takes the NATIVE §27.2.5.3 lowering only when the
+      // module provably cannot mint a HOST promise (or under wasi, whose
+      // zero-import contract has no host route at all). Producer modules keep
+      // the EXACT legacy host `Promise_finally` lowering — including the
+      // async-call fulfilled-wrap in expressions.ts — because their receivers
+      // can be host promises the native machinery cannot chain (measured:
+      // subclass-`finally` tests pass through the host route only WITH the
+      // wrap). Zero-arg `.finally()` is admitted ONLY when the native lowering
+      // will consume it; every other lane keeps the historical ≥1-argument
+      // gate so its generic paths (and bytes) are untouched.
+      const nativeFinallyActive =
+        method === "finally" &&
+        isStandaloneThenChainNativeActive(ctx) &&
+        (ctx.wasi === true || standaloneThenMissArmCanBeNative(ctx));
+      if (
+        (method === "then" || method === "catch" || method === "finally") &&
+        (expr.arguments.length >= 1 || nativeFinallyActive)
+      ) {
         const receiverTsType = ctx.checker.getTypeAtLocation(propAccess.expression);
         const recvSym = receiverTsType.getSymbol()?.name;
         const apparentSym = ctx.checker.getApparentType(receiverTsType).getSymbol()?.name;
@@ -10755,10 +10887,23 @@ function compileCallExpression(
         // byte-identical.
         if (
           !isPromiseReceiver &&
-          (method === "then" || method === "catch") &&
+          (method === "then" || method === "catch" || (method === "finally" && nativeFinallyActive)) &&
           (receiverTsType.flags & ts.TypeFlags.Any) !== 0 &&
           isStandaloneThenChainNativeActive(ctx)
         ) {
+          // (#2903) `.finally` on an any-typed receiver takes the same runtime
+          // `ref.test $Promise` bridge as `.then`/`.catch` — a native receiver
+          // chains through the native §27.2.5.3 lowering; a miss is the native
+          // TypeError (null under wasi). Producer modules never reach this arm
+          // (`nativeFinallyActive` false) and keep their pre-native generic
+          // path.
+          if (method === "finally") {
+            (ctx.standaloneNativeFinallyNodes ??= new Set()).add(expr);
+            emitStandaloneFinallyWithNativeFallback(ctx, fctx, propAccess.expression, expr.arguments[0], {
+              nullMiss: ctx.wasi === true,
+            });
+            return { kind: "externref" };
+          }
           emitStandaloneThenWithNativeFallback(
             ctx,
             fctx,
@@ -10839,6 +10984,32 @@ function compileCallExpression(
                 undefined,
                 expr.arguments[0],
               );
+            }
+            return { kind: "externref" };
+          }
+
+          // (#2903) Native `.finally(onFinally)` — §27.2.5.3 over the native
+          // then machinery. Replaces the host `Promise_finally` route (which
+          // under the native carrier received a `$Promise` GC struct the host
+          // cannot chain: callback silently dropped, reason identity lost —
+          // measured broken on main 2026-07-11). WASI takes the direct
+          // unconditional-cast lowering (zero-import contract, same shape as
+          // `.then`/`.catch` above); standalone takes the receiver bridge.
+          // Producer modules (`nativeFinallyActive` false) fall through to the
+          // exact legacy host route below.
+          if (nativeFinallyActive) {
+            (ctx.standaloneNativeFinallyNodes ??= new Set()).add(expr);
+            if (ctx.wasi === true) {
+              const liveBuffers: Instr[][] = [];
+              try {
+                const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
+                const onFinally = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
+                emitStandalonePromiseFinally(ctx, fctx, promiseInstrs, onFinally);
+              } finally {
+                for (const b of liveBuffers) ctx.liveBodies.delete(b);
+              }
+            } else {
+              emitStandaloneFinallyWithNativeFallback(ctx, fctx, propAccess.expression, expr.arguments[0]);
             }
             return { kind: "externref" };
           }

@@ -1621,6 +1621,19 @@ export interface CodegenContext {
    */
   moduleHasHostPromiseSource?: boolean;
   /**
+   * (#2903 finally sub-front) `.finally(...)` CallExpression nodes that were
+   * lowered to the NATIVE §27.2.5.3 machinery (`emitStandalonePromiseFinally`)
+   * — set by the calls.ts finally arms, read by `isAsyncCallExpression`
+   * (expressions.ts) to skip the async-call fulfilled-wrap for exactly these
+   * nodes: the native lowering already returns a `$Promise`, so the wrap would
+   * double-wrap, while the legacy host route (producer modules) still NEEDS
+   * the wrap (byte/behaviour parity with pre-native output). A per-node marker
+   * keeps the two decisions structurally in lockstep — the wrap check runs
+   * AFTER the call compiled, when funcMap-dependent predicates may have
+   * drifted.
+   */
+  standaloneNativeFinallyNodes?: Set<ts.Node>;
+  /**
    * Function declarations pre-registered during module-pass eager class body
    * compilation. The entry has a reserved `mod.functions` slot and signature,
    * but its body still belongs to the normal nested-function hoist pass.
