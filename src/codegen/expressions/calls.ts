@@ -270,7 +270,9 @@ import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
+  ensureTaDynCopyWithinHelper,
   ensureTaDynFillHelper,
+  ensureTaDynReverseHelper,
   getOrRegisterDvWindowType,
   isDataViewAccessor,
 } from "../dataview-native.js";
@@ -13133,17 +13135,25 @@ function compileCallExpression(
             reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
           }
           flushLateImportShifts(ctx, fctx);
-          // (#2872) `.fill` on a receiver that is a `$__ta_dyn_view` at RUNTIME
-          // (a dynamically-constructed TA — `new TA([…]).fill(8, 1)` in the
-          // testWithTypedArrayConstructors harness) must byte-encode into the
+          // (#2872) A mutating `%TypedArray%.prototype` method on a receiver
+          // that is a `$__ta_dyn_view` at RUNTIME (a dynamically-constructed TA
+          // — `new TA([…]).fill(8, 1)` / `.copyWithin(0,2)` / `.reverse()` in
+          // the testWithTypedArrayConstructors harness) must operate on the
           // view's shared buffer and return `this`; the dispatcher's open-object
           // arm silently returned undefined and mutated nothing. Emit a
           // runtime-gated two-arm: `ref.test $__ta_dyn_view` → the native
-          // `__ta_dyn_fill` helper, else → the ordinary dispatcher (closed
-          // structs / vec arms / open objects keep their EXACT behavior). The
-          // helper mints defined functions only (no imports — post-flush safe).
-          const taFillIdx =
-            methodName === "fill" && ctx.moduleUsesDynTaView && arity <= 3 ? ensureTaDynFillHelper(ctx) : undefined;
+          // `__ta_dyn_<m>` helper, else → the ordinary dispatcher (closed
+          // structs / vec arms / open objects keep their EXACT behavior). All
+          // three helpers share the `(recv, v1, v2, v3, argc)` signature (unused
+          // slots padded with `ref.null.extern`), so ONE emit block serves them
+          // (slice-1 fill path is byte-identical — same helper funcIdx/arity).
+          // Helpers mint defined functions only (no imports — post-flush safe).
+          let taFillIdx: number | undefined;
+          if (ctx.moduleUsesDynTaView && arity <= 3) {
+            if (methodName === "fill") taFillIdx = ensureTaDynFillHelper(ctx);
+            else if (methodName === "copyWithin") taFillIdx = ensureTaDynCopyWithinHelper(ctx);
+            else if (methodName === "reverse") taFillIdx = ensureTaDynReverseHelper(ctx);
+          }
           if (taFillIdx !== undefined && ctx.taDynViewTypeIdx >= 0) {
             const dynIdx = ctx.taDynViewTypeIdx;
             const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });

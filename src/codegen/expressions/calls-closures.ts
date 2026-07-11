@@ -1120,6 +1120,16 @@ export function tryExternClassMethodOnAny(
   // `.replace` / `.forEach`/`.some` ambiguity refusals above.
   if (methodName === "fill") return null;
 
+  // (#2872 slice 2) `copyWithin` / `reverse` — core Array.prototype /
+  // %TypedArray%.prototype mutators with the same first-match hijack hazard as
+  // `fill` (an ambient extern class declaring the name binds an `any`-typed
+  // `ta.copyWithin(…)`/`ta.reverse()` to a host import the standalone runtime
+  // cannot satisfy). On an `any` receiver these are overwhelmingly Array/TA
+  // operations; refuse extern-class dispatch so the generic dynamic dispatch
+  // (which now carries the native `$__ta_dyn_view` copyWithin/reverse arms)
+  // resolves by runtime shape. Mirrors the `fill` refusal above.
+  if (methodName === "copyWithin" || methodName === "reverse") return null;
+
   // (#3033) If the program's OWN code defines a function-valued member of this
   // name (prototype-method assignment, function-valued property, object-literal
   // method, class method), the receiver is far more plausibly a user object
