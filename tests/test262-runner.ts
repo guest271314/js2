@@ -1687,9 +1687,18 @@ function assert_notSameValue_bool(actual: any, expected: boolean): void {
   }
 
   if (needsCompareArray) {
+    // (#3151) Params are `any`, NOT `any[]`. The real harness `compareArray`
+    // (harness/assert.js) is untyped, so `a`/`b` are effectively `any` and
+    // `a.length`/`a[i]` go through the DYNAMIC reader — which recognizes a
+    // runtime `$__ta_dyn_view` TypedArray (the `new TA(makeCtorArg(…))` harness
+    // shape). An `any[]` annotation instead emits WasmGC ARRAY ops, which a
+    // dyn-view is not, so every `compareArray(<TA>, <arr>)` returned 0 and
+    // gated the whole standalone TypedArray.prototype harness cluster (#2872).
+    // `any` reads plain arrays identically (verified), so no real-array caller
+    // changes.
     p += `
 
-function compareArray(a: any[], b: any[]): number {
+function compareArray(a: any, b: any): number {
   if (a.length !== b.length) return 0;
   for (let i: number = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return 0;
@@ -1699,9 +1708,10 @@ function compareArray(a: any[], b: any[]): number {
   }
 
   if (needsAssertCompareArray) {
+    // (#3151) `any`, not `any[]` — see the compareArray note above.
     p += `
 
-function assert_compareArray(actual: any[], expected: any[]): void {
+function assert_compareArray(actual: any, expected: any): void {
   __assert_count = __assert_count + 1;
   if (actual.length !== expected.length) { if (!__fail) __fail = __assert_count; return; }
   for (let i: number = 0; i < actual.length; i++) {
