@@ -60,6 +60,7 @@ import {
   compileArrowAsClosure,
   compileArrowFunction,
   computeClosureWrapperSig,
+  getFuncRefWrapperRootTypeIdx,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
 } from "../closures.js";
@@ -262,6 +263,7 @@ import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
+  ensureTaDynFillHelper,
   getOrRegisterDvWindowType,
   isDataViewAccessor,
 } from "../dataview-native.js";
@@ -12981,6 +12983,60 @@ function compileCallExpression(
             reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
           }
           flushLateImportShifts(ctx, fctx);
+          // (#2872) `.fill` on a receiver that is a `$__ta_dyn_view` at RUNTIME
+          // (a dynamically-constructed TA — `new TA([…]).fill(8, 1)` in the
+          // testWithTypedArrayConstructors harness) must byte-encode into the
+          // view's shared buffer and return `this`; the dispatcher's open-object
+          // arm silently returned undefined and mutated nothing. Emit a
+          // runtime-gated two-arm: `ref.test $__ta_dyn_view` → the native
+          // `__ta_dyn_fill` helper, else → the ordinary dispatcher (closed
+          // structs / vec arms / open objects keep their EXACT behavior). The
+          // helper mints defined functions only (no imports — post-flush safe).
+          const taFillIdx =
+            methodName === "fill" && ctx.moduleUsesDynTaView && arity <= 3 ? ensureTaDynFillHelper(ctx) : undefined;
+          if (taFillIdx !== undefined && ctx.taDynViewTypeIdx >= 0) {
+            const dynIdx = ctx.taDynViewTypeIdx;
+            const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+            if (recvT && recvT.kind !== "externref") {
+              coerceType(ctx, fctx, recvT, { kind: "externref" });
+            } else if (recvT === null) {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+            const recvLocal = allocLocal(fctx, `__tafill_recv_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: recvLocal });
+            const argLocals: number[] = [];
+            for (const arg of dispatchArgs) {
+              const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+              if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+              else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+              const aLocal = allocLocal(fctx, `__tafill_arg_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: aLocal });
+              argLocals.push(aLocal);
+            }
+            const thenArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+            for (let a = 0; a < 3; a++) {
+              thenArm.push(
+                a < argLocals.length
+                  ? ({ op: "local.get", index: argLocals[a]! } as Instr)
+                  : ({ op: "ref.null.extern" } as Instr),
+              );
+            }
+            thenArm.push({ op: "i32.const", value: arity } as Instr);
+            thenArm.push({ op: "call", funcIdx: taFillIdx } as Instr);
+            const elseArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+            for (const aLocal of argLocals) elseArm.push({ op: "local.get", index: aLocal } as Instr);
+            elseArm.push({ op: "call", funcIdx: dispatchIdx } as Instr);
+            fctx.body.push({ op: "local.get", index: recvLocal });
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: thenArm,
+              else: elseArm,
+            } as Instr);
+            return { kind: "externref" };
+          }
           // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
           if (recvType && recvType.kind !== "externref") {
@@ -14408,10 +14464,27 @@ function compileCallExpression(
           // Save closure ref to a local
           let closureLocal: number;
           let rawCalleeLocal: number | undefined;
+          // (#2873 park fix) Struct type the externref callee is cast to. The
+          // declared-signature wrapper (`matchedStructTypeIdx`) only accepts
+          // values whose ACTUAL signature wrapper is the same type — but the
+          // wrapper chain is a star of `sub final` siblings under the FIRST
+          // wrapper created, so a value allocated under a different signature's
+          // wrapper (an activated ASYNC closure whose result was rewritten to
+          // externref/Promise while the param says `() => void`; a covariant
+          // sync closure like `() => string` passed as `() => void`) nulls the
+          // guarded cast and the funcref fetch below traps "dereferencing a
+          // null pointer" (the 32-file asyncTest() merge_group cluster on PR
+          // #2873 — creation ORDER decided which modules survived). Cast to the
+          // wrapper ROOT instead — the guaranteed supertype of every wrapper —
+          // and let the per-candidate funcref `ref.test` (which encodes the
+          // exact signature) discriminate; each dispatch arm re-casts self to
+          // its own candidate's struct type.
+          let closureCastStructIdx = matchedStructTypeIdx;
           if (innerResultType?.kind === "externref") {
+            closureCastStructIdx = getFuncRefWrapperRootTypeIdx(ctx) ?? matchedStructTypeIdx;
             const closureRefType: ValType = {
               kind: "ref_null",
-              typeIdx: matchedStructTypeIdx,
+              typeIdx: closureCastStructIdx,
             };
             closureLocal = allocLocal(fctx, `__callable_param_${fctx.locals.length}`, closureRefType);
             // (#1712) Keep the raw externref callee around for the host-callable
@@ -14422,7 +14495,7 @@ function compileCallExpression(
             rawCalleeLocal = allocLocal(fctx, `__callable_raw_${fctx.locals.length}`, { kind: "externref" });
             fctx.body.push({ op: "local.tee", index: rawCalleeLocal });
             fctx.body.push({ op: "any.convert_extern" });
-            emitGuardedRefCast(fctx, matchedStructTypeIdx);
+            emitGuardedRefCast(fctx, closureCastStructIdx);
             fctx.body.push({ op: "local.set", index: closureLocal });
           } else {
             const closureRefType: ValType = innerResultType ?? {
@@ -14605,11 +14678,14 @@ function compileCallExpression(
           }
 
           // Extract funcref from the closure struct (field 0) — null-check → TypeError (#728)
+          // (#2873) Fetched via the CAST struct type (the wrapper root on the
+          // externref path) — field 0 (funcref) is the root's own field, so the
+          // read is valid for a closure of ANY wrapper subtype.
           fctx.body.push({ op: "local.get", index: closureLocal });
-          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureCastStructIdx });
           fctx.body.push({
             op: "struct.get",
-            typeIdx: matchedStructTypeIdx,
+            typeIdx: closureCastStructIdx,
             fieldIdx: 0,
           });
 
@@ -14622,7 +14698,16 @@ function compileCallExpression(
             fctx.body.push({ op: "local.set", index: funcrefLocal });
             // Push self (null-check)
             fctx.body.push({ op: "local.get", index: closureLocal });
-            emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+            emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureCastStructIdx });
+            // (#2873) Root-typed local → the single candidate's self param type.
+            // The guarded funcref cast below already gates the call (TypeError
+            // on signature mismatch); a value that passes it is of the matched
+            // wrapper (or a capture subtype), so this cast succeeds for every
+            // value that reaches the call — and traps no earlier than the old
+            // struct.get-on-null did for mismatched shapes.
+            if (closureCastStructIdx !== matchedStructTypeIdx) {
+              fctx.body.push({ op: "ref.cast_null", typeIdx: matchedStructTypeIdx } as Instr);
+            }
             // Push args
             for (const al of argLocals) {
               fctx.body.push({ op: "local.get", index: al });
@@ -14670,10 +14755,18 @@ function compileCallExpression(
               // but call_ref expects (ref $specificStruct). We use ref.cast to cast
               // closureLocal to the funcref's expected struct type.
               const fcCallBody: Instr[] = [];
-              // Push self (cast to the funcref's expected struct type)
+              // Push self (cast to the funcref's expected struct type).
+              // (#2873) Compare against the LOCAL's static type (the wrapper
+              // root on the externref path), not the declared wrapper: an arm
+              // only runs when its funcref `ref.test` matched, and a closure's
+              // struct is always its funcref-signature's wrapper (or a capture
+              // subtype of it), so the downcast from the root succeeds exactly
+              // on the live arm. NB the old "V8 canonicalizes same-layout
+              // structs" claim is FALSE for the wrapper chain — `sub final
+              // $root` siblings do not canonicalize together; only root-casts
+              // are universal.
               fcCallBody.push({ op: "local.get", index: closureLocal });
-              if (fc.structTypeIdx !== matchedStructTypeIdx) {
-                // V8 canonicalizes same-layout structs, so this cast succeeds
+              if (fc.structTypeIdx !== closureCastStructIdx) {
                 fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx });
               }
               // Push args

@@ -3224,6 +3224,12 @@ export function compileArrayMethodCall(
     !dynViewTwoArmActive.has(callExpr) &&
     ts.isPropertyAccessExpression(propAccess) &&
     DYN_VIEW_READ_METHODS.has(methodName) &&
+    // (#2872) The static per-method impls the arms route to hard-require their
+    // search/index argument (`indexOf requires 1 argument` reportError). A
+    // 0-arg call (`ta.indexOf()` — legal JS, searches `undefined`) must NOT be
+    // promoted from the tolerant generic ladder into that hard CE — skip the
+    // wrap and keep the pre-#2872 lowering for it.
+    (callExpr.arguments.length >= 1 || methodName === "toLocaleString") &&
     ts.isIdentifier(propAccess.expression) &&
     dynViewReceiverIsExternref(fctx, propAccess.expression.text)
   ) {
