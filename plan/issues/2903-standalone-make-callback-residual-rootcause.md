@@ -17,14 +17,15 @@ origin: "2026-06-30 standalone __make_callback leak-front investigation (sendev-
 # (#3102/#3131) intended growth for the #2903 sub-front-1 de-leak: the module
 # producer scan (declarations/types), the bridge miss-arm gate (calls.ts) and
 # the Promise_new host-fallthrough flag (new-super.ts).
+# (finally sub-front) the native §27.2.5.3 machinery lives with the then
+# machinery in async-scheduler.ts; expressions.ts gains the per-node
+# no-double-wrap marker check in isAsyncCallExpression. (NOTE: keep this
+# list comment-free — parseFrontmatterList stops at the first non-item line.)
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
   - src/codegen/declarations.ts
   - src/codegen/context/types.ts
   - src/codegen/expressions/new-super.ts
-  # (finally sub-front) native §27.2.5.3 machinery lives with the then
-  # machinery in async-scheduler.ts; expressions.ts gains the per-node
-  # no-double-wrap marker check in isAsyncCallExpression.
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions.ts
 ---
