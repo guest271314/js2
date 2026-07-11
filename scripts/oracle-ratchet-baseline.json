@@ -215,6 +215,12 @@
   },
   "preauthorized": [
     {
+      "file": "src/codegen/property-access.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3133: classifyPlainCtorReceiverNamespace consults checker.isArrayType/isTupleType on the ALREADY-COMPUTED receiver ts.Type (objType) to route plain-object/array .constructor reads to the Object/Array namespace-object singletons. ctx.oracle exposes only node-based TypeFact (typeFactOf(node)), not ts.Type-based array/tuple predicates; re-deriving a TypeFact from the node would diverge from the objType the surrounding lowering already dispatched on. Same rationale as the #3000 Phase-1b entry."
+    },
+    {
       "file": "src/codegen/index.ts",
       "field": "getTypeAtLocation",
       "extra": 1,
