@@ -176,19 +176,17 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
  * linear shape `planLinearAwaits` can drive, including the single-tail-await
  * population the CPS lane (`asyncFnNeedsCps`) used to own exclusively — the
  * #1042 `!asyncFnNeedsCps` disjointness exclusion is dropped. Single-await is
- * the N=1 case of the N-state machine, so one engine drives both. Two
- * deliberate carve-outs keep their CPS routing (see `decideAsyncActivation`,
- * which checks host-drive FIRST and falls back to the CPS arm):
- *   - binding-pattern / rest params (the guard below): the destructuring
- *     prologue derives locals in the ENTRY fn that the fresh resume
- *     FunctionContext never sees (same reason `isAsyncGenDriveCandidate`
- *     rejects them), while the CPS continuation snapshots them by value from
- *     the outer frame — correct-or-CPS, never correct-or-broken;
- *   - lifted closures (arrow/fn-expr): re-laned back to CPS in
- *     `planAsyncClosureActivation` (host-drive closures are the parked #2646
- *     regression class).
- * Pre-#2967 host-drive shapes (multi-await, try/finally-across-await) are
- * unaffected — for them `asyncFnNeedsCps` was already false.
+ * the N=1 case of the N-state machine, so one engine drives both.
+ *
+ * (#2967 slice 2 status) The two slice-1 carve-outs are now migrated:
+ * closures were admitted in slice 2a (`planAsyncClosureActivation`, with the
+ * #2873 park-fix hazard gate), and binding-pattern params in slice 2b-2 —
+ * their prologue-derived locals ride the frame as live-initialized spill
+ * fields (see `emitAsyncFrameStateMachine`). The only remaining CPS re-lanes
+ * are hazard DECLINES (cell-boxed spills / cell-boxed derived params), not
+ * population carve-outs. Pre-#2967 host-drive shapes (multi-await,
+ * try/finally-across-await) are unaffected — for them `asyncFnNeedsCps` was
+ * already false.
  */
 export function asyncFnNeedsHostDrive(
   ctx: CodegenContext,
@@ -200,18 +198,27 @@ export function asyncFnNeedsHostDrive(
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
-  // (#2967) Param-shape carve-out for the CPS-shaped population only: a
-  // binding-pattern / rest param destructures into prologue-derived locals of
-  // the ENTRY fn that the fresh resume FunctionContext never sees (the frame
-  // captures raw wasm params BY NAME — the async-gen gate rejects pattern
-  // params for exactly this). The CPS continuation instead snapshots those
-  // derived locals by value from the outer frame, so it handles them
-  // correctly: leave exactly the shapes CPS accepts on that lane. Non-CPS
-  // shapes with pattern params keep their pre-#2967 host-drive routing
-  // unchanged (their derived-local gap predates this flip; do not demote them
-  // to the legacy sync fakery, which is wrong under genuine suspension).
-  const hasPatternOrRestParam = fn.parameters.some((p) => !ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined);
-  if (hasPatternOrRestParam && asyncFnNeedsCps(fn, plan)) return false;
+  // (#2967 slice 2b-2) Binding-pattern params are now DRIVEN: the entry fn's
+  // destructuring prologue has already derived the bound locals by the time
+  // the activation emits (maybeActivateAsync / the closure body emit both run
+  // AFTER the param prologue), so `emitAsyncFrameStateMachine` captures them
+  // into the frame as LIVE-INITIALIZED spill fields (initialized from the
+  // entry locals at struct.new, restored on every resume, stored back at
+  // every suspend — which also preserves the CPS lane's
+  // mutation-before-the-await semantics). Rest params never needed a
+  // carve-out at all: an identifier rest param IS a raw wasm param (the
+  // caller builds the vec — ctx.funcRestParams), captured by name like any
+  // other param. The ONE remaining pattern hazard is a derived binding that a
+  // NESTED function-like captures mutably: body compile cell-boxes it
+  // (localMap rebind), and the cell is neither re-materialized on resume nor
+  // type-compatible with the derived spill field — the same class-1 hazard
+  // asyncClosureCellSpillHazard declines for body locals. Those shapes stay
+  // CPS when CPS can take them (correct-or-CPS); non-CPS hazardous shapes
+  // keep their pre-#2967 host-drive routing (that gap predates the flip and
+  // is #2967 phase 3's cell-aware layout to retire — do not demote them to
+  // the legacy sync fakery, which is wrong under genuine suspension).
+  const hasPatternParam = fn.parameters.some((p) => !ts.isIdentifier(p.name));
+  if (hasPatternParam && patternParamCellHazard(fn) && asyncFnNeedsCps(fn, plan)) return false;
   const linear = planLinearAwaits(fn, plan);
   if (linear === null) return false;
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
@@ -261,6 +268,13 @@ export interface AsyncFrameInfo {
   spillTypes: ValType[];
   /** First struct field index where spills start. FrameLayout. */
   spillFieldOffset: number;
+  /**
+   * (#2967 slice 2b-2) Spill index → ENTRY-fn local index for pattern-DERIVED
+   * param bindings. Only meaningful inside the activating fctx: at frame
+   * struct.new these spill fields are initialized from the listed live locals
+   * (post-destructuring-prologue values) instead of `defaultSpillInstr`.
+   */
+  derivedSpillInit?: Map<number, number>;
   /** Field index of the result `$Promise` the async fn returns / settles. */
   resultPromiseFieldIdx: number;
   /**
@@ -351,6 +365,7 @@ export function buildAsyncFrameInfo(
   paramTypes: ValType[],
   promiseTypeIdx: number,
   hostImports?: HostAsyncImports,
+  derivedParams?: DerivedParamCapture[],
 ): AsyncFrameInfo {
   const functionName = asyncFnName(decl);
 
@@ -373,7 +388,30 @@ export function buildAsyncFrameInfo(
   }
 
   const spillFieldOffset = PARAM_FIELD_OFFSET + paramTypes.length;
-  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
+  // (#2967 slice 2b-2) Pattern-DERIVED param bindings ride the frame as
+  // LIVE-INITIALIZED spill fields: excluded from the liveness-computed spill
+  // set (whose entries the resume fn expects a segment lead to initialize —
+  // a derived binding has no lead statement, and its declared-type GUESS
+  // would be an externref default anyway), then appended with their ACTUAL
+  // entry-local ValTypes. `derivedSpillInit` maps their spill indices to the
+  // entry locals so `emitAsyncFrameStateMachine` initializes the fields with
+  // the post-prologue values at struct.new instead of inert defaults. As
+  // ordinary (mutable) spill fields they are restored on every resume AND
+  // stored back at every suspend, so a mutation before an await survives it —
+  // the same observable semantics the CPS continuation snapshot gave them.
+  const derived = derivedParams ?? [];
+  const { spillNames, spillTypes } = computeAsyncSpills(
+    ctx,
+    decl,
+    plan,
+    derived.length === 0 ? paramNames : paramNames.concat(derived.map((d) => d.name)),
+  );
+  const derivedSpillInit = new Map<number, number>();
+  for (const d of derived) {
+    derivedSpillInit.set(spillNames.length, d.entryLocalIdx);
+    spillNames.push(d.name);
+    spillTypes.push(d.type);
+  }
   for (let i = 0; i < spillNames.length; i++) {
     stateFields.push({
       name: `spill_${spillNames[i]}`,
@@ -415,6 +453,7 @@ export function buildAsyncFrameInfo(
     spillNames,
     spillTypes,
     spillFieldOffset,
+    derivedSpillInit: derivedSpillInit.size > 0 ? derivedSpillInit : undefined,
     resultPromiseFieldIdx,
     promiseTypeIdx,
     host: hostImports !== undefined,
@@ -753,10 +792,56 @@ export function asyncClosureCellSpillHazard(
   const declByName = collectVarDeclsByName(decl);
   if (declByName.size === 0) return false;
 
-  // Names referenced anywhere inside a nested function-like (capture candidates).
+  const { referencedInNested, assigned } = collectNestedRefsAndAssigns(body);
+
+  const paramNames: string[] = [];
+  for (const p of decl.parameters) {
+    if (ts.isIdentifier(p.name)) paramNames.push(p.name.text);
+  }
+  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
+  if (spillNames.length === 0) return false;
+
+  // Resume-binding names use `resumeBindingValType` (rep-consistent with the
+  // SENT coercion) — only NON-binding locals carry the ref-typed-guess hazard.
+  const resumeBindingNames = new Set<string>();
+  const linear = planLinearAwaits(decl, plan);
+  if (linear !== null) {
+    for (const seg of linear.segments) {
+      if (seg.resumeBinding) resumeBindingNames.add(seg.resumeBinding.name);
+    }
+  }
+
+  for (let i = 0; i < spillNames.length; i++) {
+    const name = spillNames[i]!;
+    if (!declByName.has(name)) continue;
+    // Class 1: cell-boxed (mutably captured by a nested fn) local spilled
+    // across an await — the spill field was typed for the pre-boxing local.
+    if (referencedInNested.has(name) && assigned.has(name)) return true;
+    // Class 2: ref-typed spill guess for a plain body local — the body's
+    // inferred rep can diverge from the TS-resolved guess.
+    const t = spillTypes[i]!;
+    if ((t.kind === "ref" || t.kind === "ref_null") && !resumeBindingNames.has(name)) return true;
+  }
+  return false;
+}
+
+/**
+ * (#2967 slice 2b-2 / 2a park fix shared analysis) Conservative syntactic
+ * capture/assignment survey of an async body, mirroring the closures.ts
+ * cell-boxing trigger (`writtenInClosure ∪ writtenInOuter`):
+ *   - `referencedInNested`: names referenced anywhere inside a nested
+ *     function-like (capture candidates);
+ *   - `assigned`: names assigned anywhere in the body, incl. inside nested
+ *     closures.
+ * A name in BOTH sets is cell-boxed at the nested closure's creation site
+ * (localMap rebind to a `(ref null $cell)` local) — the class-1 frame-layout
+ * hazard for anything the frame spills or re-materializes by declared type.
+ */
+function collectNestedRefsAndAssigns(body: ts.Node): {
+  referencedInNested: Set<string>;
+  assigned: Set<string>;
+} {
   const referencedInNested = new Set<string>();
-  // Names assigned anywhere in the async body, incl. inside nested closures
-  // (mirrors the closures.ts `writtenInClosure ∪ writtenInOuter` boxing rule).
   const assigned = new Set<string>();
 
   const noteAssignment = (node: ts.Node): void => {
@@ -800,36 +885,76 @@ export function asyncClosureCellSpillHazard(
     forEachChild(node, walk);
   };
   forEachChild(body, walk);
+  return { referencedInNested, assigned };
+}
 
-  const paramNames: string[] = [];
-  for (const p of decl.parameters) {
-    if (ts.isIdentifier(p.name)) paramNames.push(p.name.text);
-  }
-  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
-  if (spillNames.length === 0) return false;
-
-  // Resume-binding names use `resumeBindingValType` (rep-consistent with the
-  // SENT coercion) — only NON-binding locals carry the ref-typed-guess hazard.
-  const resumeBindingNames = new Set<string>();
-  const linear = planLinearAwaits(decl, plan);
-  if (linear !== null) {
-    for (const seg of linear.segments) {
-      if (seg.resumeBinding) resumeBindingNames.add(seg.resumeBinding.name);
+/**
+ * (#2967 slice 2b-2) Every identifier bound by a binding-PATTERN parameter of
+ * `fn` (recursing through nested patterns; includes rest ELEMENTS inside a
+ * pattern like `[a, ...rest]`). These are the names the entry fn's
+ * destructuring prologue derives into locals — the frame must capture them for
+ * the resume fn to see them. Identifier params (incl. an identifier REST
+ * param, whose vec the CALLER builds) are raw wasm params and are NOT listed.
+ */
+function collectPatternParamBindingNames(fn: ts.FunctionLikeDeclaration): string[] {
+  const out: string[] = [];
+  const walkPattern = (pattern: ts.BindingPattern): void => {
+    for (const el of pattern.elements) {
+      if (!ts.isBindingElement(el)) continue; // OmittedExpression (array holes)
+      if (ts.isIdentifier(el.name)) out.push(el.name.text);
+      else walkPattern(el.name);
     }
+  };
+  for (const p of fn.parameters) {
+    if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) walkPattern(p.name);
   }
+  return out;
+}
 
-  for (let i = 0; i < spillNames.length; i++) {
-    const name = spillNames[i]!;
-    if (!declByName.has(name)) continue;
-    // Class 1: cell-boxed (mutably captured by a nested fn) local spilled
-    // across an await — the spill field was typed for the pre-boxing local.
-    if (referencedInNested.has(name) && assigned.has(name)) return true;
-    // Class 2: ref-typed spill guess for a plain body local — the body's
-    // inferred rep can diverge from the TS-resolved guess.
-    const t = spillTypes[i]!;
-    if ((t.kind === "ref" || t.kind === "ref_null") && !resumeBindingNames.has(name)) return true;
+/**
+ * (#2967 slice 2b-2) TRUE when a pattern-derived param binding is mutably
+ * captured by a nested function-like — body compile would cell-box it, which
+ * the frame's derived-param spill field can neither store (type mismatch at
+ * the suspend store-back) nor re-materialize on resume. The class-1 hazard of
+ * {@link asyncClosureCellSpillHazard}, applied to derived param names (which
+ * that predicate skips via its `declByName` gate). Callers re-lane hazardous
+ * CPS-shaped bodies to CPS; #2967 phase 3 (cell-aware layout) retires this.
+ */
+function patternParamCellHazard(fn: ts.FunctionLikeDeclaration): boolean {
+  const body = fn.body;
+  if (body === undefined) return false;
+  const derived = collectPatternParamBindingNames(fn);
+  if (derived.length === 0) return false;
+  const { referencedInNested, assigned } = collectNestedRefsAndAssigns(body);
+  return derived.some((n) => referencedInNested.has(n) && assigned.has(n));
+}
+
+/**
+ * (#2967 slice 2b-2) Resolve the pattern-derived param bindings of `decl`
+ * against the ACTIVATING FunctionContext — must be called AFTER the param
+ * destructuring prologue has run (both activation entry points are), so each
+ * derived name maps to a live entry local whose ValType is the ACTUAL local
+ * rep (no TS-resolved guess → no rep-divergence hazard). Names the prologue
+ * did not materialize are skipped (they stay exactly as broken/absent as on
+ * the legacy path — never worse).
+ */
+export interface DerivedParamCapture {
+  name: string;
+  type: ValType;
+  /** Local index in the ACTIVATING (entry) fctx — used only at frame struct.new. */
+  entryLocalIdx: number;
+}
+
+function collectDerivedPatternParams(decl: ts.FunctionLikeDeclaration, fctx: FunctionContext): DerivedParamCapture[] {
+  const out: DerivedParamCapture[] = [];
+  for (const name of collectPatternParamBindingNames(decl)) {
+    const idx = fctx.localMap.get(name);
+    if (idx === undefined) continue;
+    const type = idx < fctx.params.length ? fctx.params[idx]!.type : fctx.locals[idx - fctx.params.length]?.type;
+    if (type === undefined) continue;
+    out.push({ name, type, entryLocalIdx: idx });
   }
-  return false;
+  return out;
 }
 
 /**
@@ -1805,7 +1930,12 @@ export function emitAsyncFrameStateMachine(
   const promiseTypeIdx = host ? -1 : getOrRegisterPromiseType(ctx);
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
-  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports);
+  // (#2967 slice 2b-2) Both activation entry points run AFTER the param
+  // destructuring prologue, so every pattern-derived binding is a live entry
+  // local here — capture them into the frame as live-initialized spill fields
+  // (see buildAsyncFrameInfo). Empty for identifier-only params (byte-inert).
+  const derivedParams = collectDerivedPatternParams(decl, fctx);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports, derivedParams);
   // (#2865) A CLOSURE consumer (arrow / fn-expr, #2957 phase 2) may capture
   // outer locals as ref cells (leading params of the lifted fn). The cells ride
   // into frame param fields like ordinary params; the resume body must deref
@@ -1847,7 +1977,16 @@ export function emitAsyncFrameStateMachine(
     fctx.body.push({ op: "local.get", index: i });
   }
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    // (#2967 slice 2b-2) A pattern-derived param spill field starts LIVE (the
+    // entry prologue's post-destructure value from its entry local); all other
+    // spill fields start inert and are initialized by their owning segment's
+    // lead statements in the resume fn.
+    const derivedInitLocal = info.derivedSpillInit?.get(i);
+    if (derivedInitLocal !== undefined) {
+      fctx.body.push({ op: "local.get", index: derivedInitLocal });
+    } else {
+      fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    }
   }
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
