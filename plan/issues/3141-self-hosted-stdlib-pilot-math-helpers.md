@@ -1,11 +1,12 @@
 ---
 id: 3141
 title: "Self-hosted stdlib pilot: compile math-helpers as TS builtin source through our own IR pipeline (porffor model)"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-selfhost
 sprint: Backlog
 created: 2026-07-11
 updated: 2026-07-11
+completed: 2026-07-11
 priority: high
 horizon: l
 feasibility: hard
@@ -64,3 +65,72 @@ string-rep interaction, minimal intrinsics surface, dense test262 Math coverage.
 
 - No big-bang stdlib conversion; one family only.
 - No new host imports (dual-mode rule: standalone-native required).
+
+## Result (2026-07-11, fable-selfhost) — VERDICT: GO
+
+Pilot delivered BEYOND the minimum scope: **nine** helpers converted (the whole
+derived family — sinh/cosh/tanh, asinh/acosh/atanh, cbrt, expm1, log1p), not
+just one. The thesis is PROVEN: builtins written as ordinary TS source in the
+IR-claimable subset compile through our own pipeline into drop-in replacements
+for hand-emitted `Instr[]`, with **zero dialect gaps hit** — from-ast accepted
+every construct on the first run.
+
+### What shipped
+
+- `src/stdlib/math.ts` (205 raw lines, ~95 lines of actual TS function bodies)
+  — the nine builtins as source, with the dialect rules documented.
+- `src/codegen/stdlib-selfhost.ts` (161 lines, one-time reusable driver) —
+  parse → `lowerFunctionAstToIr` → verify → hygiene passes (memoized as a
+  context-free `IrFunction`, symbolic refs per #1131 §1.2) → per-compilation
+  `lowerIrFunctionToWasm` against the live ctx → `pushDefinedFunc`. Sibling
+  calls (`Math_exp`) resolve by funcMap name at lowering time — self-hosted
+  code composes with hand-written helpers, enabling leaf-first incremental
+  conversion of any family.
+- `src/codegen/math-helpers.ts`: **−316 lines** of hand assembly deleted
+  (1,688 → 1,394).
+- `tests/issue-3141.test.ts` — specials + accuracy, host AND standalone.
+
+### Proof (all green)
+
+1. **Bit-exactness**: 36,477-case sweep vs an exact JS port of the deleted
+   hand algorithms — ZERO mismatches (±0, NaN, ±Inf, denormals, domain edges,
+   Taylor thresholds, 4k random values across 60 orders of magnitude).
+2. **Containment**: programs NOT using the nine methods produce byte-identical
+   binaries branch-vs-main (SHA-compared, incl. a still-hand-written
+   sin/pow/log2 user).
+3. **Both pure-Wasm lanes**: `target: standalone` and `target: wasi` compile
+   and pass specials with zero host imports.
+4. `tests/math-inline.test.ts` 49/49; LOC-budget gate OK (net +72, no
+   allowance needed); IR-fallback gate OK.
+
+### Measurements (the go/no-go data)
+
+| Metric | Value |
+| --- | --- |
+| Hand-emission deleted | 316 lines |
+| Replacement TS-source bodies | ~95 lines (**3.3× body compression**) |
+| One-time driver (amortizes over all families) | 161 lines |
+| Net this PR (raw src/) | +72 (driver-dominated; next family is pure deletion) |
+| Marginal cost of family N+1 | TS source only — no new infrastructure |
+| Dialect gaps hit | **0** (workarounds: `x !== x` for NaN-in, `0/0` for NaN-out, `> MAX_VALUE` for ±Inf — no from-ast changes needed) |
+
+Extrapolation: finishing the math family (sin/cos/exp/log/atan/tan/atan2/pow/
+log2/log10 cores, ~1.05k hand lines remaining, all expressible in the proven
+dialect TODAY) → math-helpers.ts collapses to a ~250-line registration shell,
+net ≈ −0.8k. At the measured 3.3× (conservative vs porffor's 5–8× on larger
+families where hand-emission overhead is worse), the ~76k stdlib mass reduces
+by ~45–55k as the battle plan estimated — the pilot CONFIRMS the plan's number.
+
+### Caveats / notes for scale-up
+
+- The IR's loop/try op families are WasmGC-`Instr[]`-only today (#1584 §2a), so
+  loop-bearing self-hosted bodies serve the WasmGC backend; the linear backend
+  needs the a1..a6 trait migration before it can consume them (it does not
+  consume math-helpers today either, so nothing regressed).
+- The driver's resolver deliberately throws on globals/named-types/objects —
+  string/array families will need it widened to delegate to integration.ts's
+  `makeResolver` machinery (small refactor, listed in the scale-up plan).
+- `NaN`/`Infinity` identifiers in from-ast would be a nice QoL precursor but
+  are NOT blocking (pilot shipped without them).
+
+**Scale-up roadmap: `plan/self-hosting-scale-up.md`** (battle-plan slice 9).
