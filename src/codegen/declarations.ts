@@ -2549,6 +2549,24 @@ export function collectEmptyObjectWidening(
             markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
+          // (#2992 S4, standalone) `delete varName.prop` / `delete varName[k]`
+          // is an `$Object`-hash consumer too: a widened closed-struct FIELD
+          // cannot represent a deleted property — the struct-delete arm
+          // (typeof-delete.ts) writes a type-shaped SENTINEL (f64 → NaN,
+          // ref → null) into the fixed slot, and a statically-f64 read makes
+          // `o.k === undefined` CONST-FOLD to false, so the read can never
+          // observe the deletion (the issue's headline nominal-struct repro;
+          // also the pre-existing `delete-sentinel` string-field equivalence
+          // failure). Poison the widening so the var stays a `$Object`, where
+          // `__delete_property` tombstones give correct delete → read / `in` /
+          // hasOwnProperty semantics. Standalone-gated: the host lane's
+          // sidecar + live-mirror handles struct deletes (byte-inert).
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneDeleteTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
           // this receiver used a *dynamic* (non-inline-literal) descriptor, the
           // struct-widening fast path is unsound — the dynamic define is applied
@@ -2931,6 +2949,34 @@ function isAccessorDescriptor(descArg: ts.Expression): boolean {
  * matching the existing widening pre-pass (aliasing is a shared, documented
  * limitation — see the issue's `## Deferred`).
  */
+/**
+ * (#2992 S4, standalone-only caller) Poison `varName` when it is the receiver
+ * of any `delete varName.prop` / `delete varName[<expr>]` in the scanned
+ * statements. A widened closed struct cannot drop a field, so the delete arm's
+ * sentinel write (NaN / null) lies to every later read (`o.k === undefined`
+ * const-folds false on an f64 field). Keeping the var a `$Object` routes the
+ * delete through the `__delete_property` tombstone machinery, which slice 1
+ * (#2872) already proved correct in every lane. Parenthesized targets
+ * (`delete (o.k)`) are unwrapped like the module-init collector does.
+ */
+function markStandaloneDeleteTargets(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isDeleteExpression(n)) {
+      let target: ts.Expression = n.expression;
+      while (ts.isParenthesizedExpression(target)) target = target.expression;
+      if (
+        (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) &&
+        ts.isIdentifier(target.expression) &&
+        target.expression.text === varName
+      ) {
+        poisonSet.add(varName);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
 function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
   const isVarRef = (n: ts.Node): boolean => ts.isIdentifier(n) && n.text === varName;
 
