@@ -2,7 +2,7 @@
 id: 2967
 title: "Async engine convergence: retire emitAsyncStateMachine/splitBodyAtAwait onto the #2906 host-drive engine; widen planLinearAwaits gaps once for both lanes"
 status: in-progress
-assignee: ttraenkler/fable-2967
+assignee: ttraenkler/fable-senior
 created: 2026-07-02
 updated: 2026-07-11
 priority: medium
@@ -17,6 +17,7 @@ related: [2906, 2957, 1373b]
 origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane was left byte-stable; convergence is its own measured step"
 loc-budget-allow:
   - src/codegen/async-frame.ts
+  - src/codegen/async-cps.ts
   - src/codegen/declarations.ts
   - src/codegen/expressions/calls.ts
   - src/codegen/closures.ts
@@ -291,6 +292,68 @@ Follow-up candidates filed in-issue (not blocking): the property-call closure
 dispatch (calls-closures.ts) still casts to the declared wrapper — same
 latent order-dependence, no corpus hit; declaration-lane spill hazards
 (above); making the frame layout cell-aware retires the class-1 decline.
+
+## Slice 2b (part 1) — concise arrow bodies (2026-07-10)
+
+`planLinearAwaits` now admits the ONE drivable concise shape:
+`async (…) => await P` (possibly parenthesized) → the single-segment
+isReturnAwait plan (semantically `{ return await P; }`). Exactly the concise
+population `splitBodyAtAwait` owned, so those closures move onto the frame
+engine (concise bodies exist only on arrows — observable only through the
+slice-2a closure admission; declarations and the wasi closure park are
+byte-stable). Richer concise bodies (`=> (await P) + 1` — await nested in an
+expression) are NOT linear-canonical and keep the legacy fallback; their
+wrong legacy VALUE (NaN) is pre-existing and belongs to slice 3's
+nested/buried-await widening. Remaining CPS population after 2b-1:
+pattern/rest-param shapes only (2b-2).
+
+## Slice 2b (part 2) — pattern/rest params (2026-07-11)
+
+The last CPS _population_ carve-out is retired. Mechanism (async-frame.ts) —
+**pattern-DERIVED param bindings ride the frame as LIVE-INITIALIZED spill
+fields**, chosen over "extra param fields" deliberately:
+
+- Both activation entry points (`maybeActivateAsync`, the closure body emit)
+  run AFTER the entry fn's param destructuring prologue, so every derived
+  binding is a live entry local at `emitAsyncFrameStateMachine` time.
+  `collectDerivedPatternParams` resolves each bound name through
+  `fctx.localMap` and takes the local's ACTUAL wasm ValType — no TS-resolved
+  guess, so the #2873 class-2 rep-divergence hazard cannot apply to them.
+- `buildAsyncFrameInfo` excludes the derived names from the liveness-computed
+  spill set and appends them as spill entries; `info.derivedSpillInit` maps
+  their spill indices to entry locals, and the frame `struct.new` initializes
+  those fields from the live locals instead of `defaultSpillInstr`.
+- Being ordinary MUTABLE spill fields, they are restored at every resume
+  re-entry AND stored back at every suspend (`storeSpills`) — which preserves
+  the CPS continuation's snapshot semantics for a binding MUTATED before the
+  await (param fields, by contrast, are immutable and never stored back; a
+  param-field capture would silently lose such mutations for exactly the
+  population being migrated).
+- Rest params never needed the carve-out: an identifier rest param IS a raw
+  wasm param (the caller builds the vec — `ctx.funcRestParams`), captured by
+  name like any other param. Gate dropped; regression-tested.
+- The routing gate keeps ONE decline: a derived binding mutably captured by a
+  NESTED function-like (body compile cell-boxes it — the #2873 class-1 hazard
+  applied to derived names, which `asyncClosureCellSpillHazard` skips via its
+  `declByName` gate). `patternParamCellHazard` re-lanes those CPS-shaped
+  bodies to CPS (correct-or-CPS; the CPS lane's own through-cell mutation
+  loss there is pre-existing — same emitter main routes that shape to).
+  Phase 3 (cell-aware layout) retires the decline.
+- Bonus fixes: (a) non-CPS pattern shapes that ALREADY routed host-drive (the
+  pre-#2967 derived-local gap — default-initialized externref spills the
+  resume fn never saw a value for) now deliver correct values; (b) the same
+  applies on the WASI drive lane (`asyncFnNeedsDrive` never gated patterns),
+  since the capture mechanism is lane-independent.
+
+Byte-stability: identifier-only-param functions produce an empty
+`derivedParams` list → frame layout and emission byte-identical.
+
+Local validation: engine-convergence 32/32 (7 new 2b-2 cases: object/array
+patterns, mutation-before-await, rest, multi-await pattern gap, concise×
+pattern, cell-hazard routing pin); 1042-host-drive/2957/2895/async-await/
+async-census/2906-multiawait/2174 60/60. Remaining CPS population after 2b:
+NONE (only hazard re-lanes). 2c (delete the CPS engine) is unblocked pending
+this slice's merge_group A/B.
 
 ## Slice 2 re-scope (why deletion isn't next)
 

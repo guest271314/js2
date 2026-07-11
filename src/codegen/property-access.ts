@@ -33,7 +33,11 @@ import {
   pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
-import { emitBuiltinConstructorIdentity, isBuiltinConstructorIdentityName } from "./builtin-static-globals.js";
+import {
+  emitBuiltinConstructorIdentity,
+  emitBuiltinNamespaceObject,
+  isBuiltinConstructorIdentityName,
+} from "./builtin-static-globals.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -884,7 +888,7 @@ function reportUnsupportedStandaloneBuiltinValueRead(ctx: CodegenContext, builti
   );
 }
 
-function makeBuiltinClosureFctx(
+export function makeBuiltinClosureFctx(
   name: string,
   selfType: ValType,
   paramTypes: ValType[],
@@ -3663,6 +3667,40 @@ export function compilePropertyAccess(
         fctx.body.push({ op: "drop" });
       }
       return emitBuiltinConstructorIdentity(ctx, fctx, builtinName);
+    }
+  }
+
+  // (#3133) Standalone `.constructor` on a PLAIN-OBJECT or ARRAY receiver → the
+  // SAME identity-stable namespace-object singleton the bare `Object` / `Array`
+  // identifier resolves to (`emitBuiltinNamespaceObject`, identifiers.ts ~769).
+  // #3006 deliberately EXCLUDED `Object`/`Array` from its per-builtin ctor
+  // singletons because their bare values already carry genuine namespace-object
+  // identity — but the `.constructor` READ path for their instances was never
+  // routed anywhere, so `({}).constructor` / `[1].constructor` /
+  // `Object.prototype.constructor` / `Array.prototype.constructor` fell through
+  // to the dynamic `$Object` own-prop read and returned `undefined`
+  // (`({}).constructor === Object` → false). Routing the read to the SAME
+  // per-name `__builtin_<Name>` global makes the identity GENUINELY true (same
+  // WasmGC object, `ref.eq`) while the swap-wrong-builtin cross-check
+  // (`({}).constructor === Array`) stays GENUINELY false (distinct singletons).
+  //
+  // Conservative gates: static-type-driven like the #3006 arm above; declines
+  // (falls through, current behavior) for any/unknown/union receivers, callables,
+  // receivers whose type declares a USER-written `constructor` member, and — as
+  // a module-wide guard against runtime shadowing — any module that assigns to
+  // or deletes a `.constructor` property anywhere. Standalone-only: gc/host mode
+  // keeps the genuine `Object_get_constructor` host read.
+  if (ctx.standalone && propName === "constructor") {
+    const nsName = classifyPlainCtorReceiverNamespace(ctx, objType);
+    if (nsName !== undefined && !moduleTouchesConstructorProp(expr.getSourceFile())) {
+      // Evaluate the receiver for its side effects (spec: MemberExpression is
+      // evaluated), then discard it — the constructor identity is static.
+      const objResult = compileExpression(ctx, fctx, expr.expression);
+      if (objResult) {
+        fctx.body.push({ op: "drop" });
+      }
+      const t = emitBuiltinNamespaceObject(ctx, fctx, nsName);
+      if (t) return t.kind === "externref" ? t : { kind: "externref" };
     }
   }
 
@@ -8523,4 +8561,93 @@ export function compileElementAccessBody(
     emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx, externUndefOobArr, taSignednessArr);
   }
   return valueType;
+}
+
+/**
+ * (#3133) Classify a `.constructor` receiver whose constructor is one of the
+ * two namespace-object builtins (`Object` / `Array`) that #3006 deliberately
+ * left out of `BUILTIN_CONSTRUCTOR_IDENTITY_NAMES`. Returns the namespace name
+ * to route the read to, or `undefined` to decline (fall through to the current
+ * lowering). Deliberately conservative:
+ *
+ * - declines `any` / `unknown` (the #2026 tag-dispatch arm owns those) and
+ *   union/intersection receivers;
+ * - array/tuple static types (checker-confirmed) → `"Array"` — covers `[1]`,
+ *   `Array.prototype` (typed `any[]`), `new Array(n)`;
+ * - the `Object` interface itself → `"Object"` — covers `Object.prototype`,
+ *   `new Object()`, `Object(x)` results;
+ * - anonymous object-literal shapes (`{}` / `{ a: 1 }`) → `"Object"`, but only
+ *   when the type is not callable/constructable and does not declare a
+ *   USER-written `constructor` member (a user `{ constructor: v }` keeps its
+ *   own property read).
+ */
+function classifyPlainCtorReceiverNamespace(ctx: CodegenContext, objType: ts.Type): "Object" | "Array" | undefined {
+  if (
+    (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Union | ts.TypeFlags.Intersection)) !==
+    0
+  ) {
+    return undefined;
+  }
+  const checkerAny = ctx.checker as unknown as {
+    isArrayType?: (t: ts.Type) => boolean;
+    isTupleType?: (t: ts.Type) => boolean;
+  };
+  if (checkerAny.isArrayType?.(objType) || checkerAny.isTupleType?.(objType)) return "Array";
+  if ((objType.flags & ts.TypeFlags.Object) === 0) return undefined;
+  const symName = objType.getSymbol()?.name;
+  if (symName === "Array" || symName === "ReadonlyArray") return "Array";
+  if (symName === "Object") return "Object";
+  // "__object" = object-LITERAL expression types only. Deliberately NOT
+  // "__type" (type-literal annotations like `const o: {} = new A()`), where the
+  // annotation says nothing about the runtime constructor.
+  if (symName === "__object") {
+    if (objType.getCallSignatures().length > 0 || objType.getConstructSignatures().length > 0) return undefined;
+    // A user-declared `constructor` member (non-lib declaration) keeps its own
+    // property read; a lib-inherited `constructor` (Object.prototype) is fine.
+    const ctorProp = objType.getProperty("constructor");
+    if (ctorProp !== undefined && (ctorProp.declarations ?? []).some((d) => !d.getSourceFile().isDeclarationFile)) {
+      return undefined;
+    }
+    return "Object";
+  }
+  return undefined;
+}
+
+/**
+ * (#3133) Module-wide shadowing guard for the static `.constructor` identity
+ * fold: if the module ever ASSIGNS to or DELETES a `.constructor` property
+ * (any receiver — syntactic scan, cached per source file), decline the fold so
+ * runtime-shadowed reads keep their current dynamic behavior.
+ */
+const constructorPropTouchCache = new WeakMap<ts.SourceFile, boolean>();
+function moduleTouchesConstructorProp(sourceFile: ts.SourceFile): boolean {
+  let touched = constructorPropTouchCache.get(sourceFile);
+  if (touched === undefined) {
+    touched = false;
+    const isCtorMember = (e: ts.Expression): boolean =>
+      (ts.isPropertyAccessExpression(e) && e.name.text === "constructor") ||
+      (ts.isElementAccessExpression(e) &&
+        ts.isStringLiteralLike(e.argumentExpression) &&
+        e.argumentExpression.text === "constructor");
+    const walk = (node: ts.Node): void => {
+      if (touched) return;
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        isCtorMember(node.left)
+      ) {
+        touched = true;
+        return;
+      }
+      if (ts.isDeleteExpression(node) && isCtorMember(node.expression)) {
+        touched = true;
+        return;
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(sourceFile);
+    constructorPropTouchCache.set(sourceFile, touched);
+  }
+  return touched;
 }

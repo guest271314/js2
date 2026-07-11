@@ -16,6 +16,9 @@ language_feature: strings
 goal: ir-full-coverage
 related: [2953, 679, 2949]
 origin: "2026-07-02 July Fable audit §5 (identical source builds different IR per string mode)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
 ---
 
 # #2955 — identical source builds different IR depending on nativeStrings
@@ -189,3 +192,47 @@ gate unchanged; `issue-1232`/`issue-1248`/`issue-2002`/`issue-2192b` suites
 from-ast: 4 remain (the 3263/3275/5846 coercion-demote class, 3432
 number-toString capability, 4155 for-of strategy — Slices 2–4 in the map
 above).
+
+## Number-box capability slice (2026-07-10, fable-10th) — sites 3245+4018 (map lines) → `hasHostNumberBox`
+
+The two **number-box** reads (the re-measured map's "NOT string polymorphism"
+pair) are relocated: `coerceToExpectedExtern`'s f64→externref `__box_number`
+arm and `coerceReturnValue`'s externref→f64 `__unbox_number` arm no longer
+read `nativeStrings?.() === false` — they consult a resolver-owned capability
+predicate, `IrFromAstResolver.hasHostNumberBox()`, implemented in
+`integration.ts` (`makeFromAstResolver`) as exactly `!ctx.nativeStrings`.
+Byte-inert relocation: the predicate's truth table is identical to the old
+in-place proxy reads in both modes (including the resolver-absent case:
+`undefined === false` and `undefined === true` are both false → demote).
+
+Two constraints recorded for whoever widens this later (per the Slice-2
+pattern discussion with fable-2856):
+
+- **The capability answer must stay a build-time answer** — the demote arm
+  (the `coerceToExpectedExtern` throw / the #1798-gate slip in
+  `coerceReturnValue`) is a claim/demote decision and there is no lower-time
+  demote channel. Same constraint as the Slice-2 `stringMethodPlan` callback;
+  this predicate is the boolean sibling of that lower-time-owned query shape
+  (a full plan-object wasn't needed — the arm bodies are mode-invariant, only
+  availability varies).
+- **Widening is a semantic follow-up, not this slice**: allowing the box pair
+  under a native-strings HOST compile, or lowering to `$AnyValue` boxing in
+  standalone instead of demoting, changes claim behavior and **must be
+  validated against the standalone floor** (`merge_group`), because the
+  standalone demote arm is load-bearing.
+
+**Verification**: sha256-identical compiled binaries vs pristine base in BOTH
+modes over a 17-source corpus (14 playground examples + targeted box/unbox +
+string-iter snippets): host `b246b07133d1be80`, native `097a7d8abc01e23a`,
+12 compiled / 2 pre-existing CEs per mode, unchanged. `tsc --noEmit` clean;
+prettier clean; `issue-2856-extern-in-ir` + `issue-2856-vec-push` +
+`ir-frontend-widening` 39/39; `ir-algorithms-cluster` (covers the
+`coerceReturnValue` unbox arm) 18/18.
+
+**Remaining after this slice** (from-ast functional `nativeStrings` reads):
+the string-rep coercion/demote class (`coerceToExpectedExtern` string arm +
+the string→externref arm + the undefined-test at the map's 5815), the
+number-`toString` capability site (string-rep-coupled: the host import's
+return IS host-mode's string carrier), `lowerStringMethodCall` (Slice 2, PR
+#2857, landed 2026-07-10), and the for-of strategy switch. `status` stays
+`ready`.
