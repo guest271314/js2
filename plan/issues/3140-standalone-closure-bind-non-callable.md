@@ -64,8 +64,50 @@ harness's NEXT gate is `Array.from({length}, fn)` / `Array.from(iterable)`
 
 **Residuals (follow-ups):** bound-fn `.length`/`.name` fidelity (carrier
 reports arity 0); `Object.defineProperty` on a bound fn; `new bound(...)`
-[[Construct]]; the `Array.from` mapper/iterable standalone gap (blocks the
-makeCtorArg family — next slice of the #2872/#2860 line).
+[[Construct]]; the `Array.from` standalone gap below.
+
+## Banked intel — the NEXT rock on this line: `Array.from` standalone (per lead throttle, 2026-07-11)
+
+Deliberately NOT started this budget window (lead directive). Verified probe
+(mini repro, current main + this fix):
+
+```ts
+// leaks env::__make_callback + env::__array_from → instantiation failure
+function makeArray(TA: any, x: any) {
+  if (isPrimitive(x)) {
+    var n = Number(x);
+    if (!(n >= 0 && n < 9007199254740992)) return x;
+    return Array.from({ length: n }, function () { return "0"; }); // ← __make_callback
+  }
+  return Array.from(x); // ← __array_from
+}
+```
+
+- This is the test262 harness `makeArray`/`makeArrayLike`/`makeIterable`/
+  `makeArrayBuffer` COMMON PREFIX (`harness/testTypedArray.js`) — with #2872
+  slice 1 (dynamic TA construction, PR #2881) and this bind fix (PR #2884)
+  landed, `Array.from` is the LAST harness-level gate before the whole
+  makeCtorArg-style `built-ins/TypedArray/prototype/**` family (hundreds of
+  files) can execute their bodies. Highest-multiplier next slice.
+- Two distinct shapes to fix (both leak on the default `Array.from` call
+  path in calls.ts):
+  1. `Array.from(arrayLikeOrIterable)` — 1-arg → leaks `env::__array_from`.
+     A native `__array_from_iter_n` ALREADY exists (#2904/#3100 S4,
+     `ensureNativeArrayFromIterN`, iterator-native.ts) and `ensureLateImport`
+     routes `__array_from_iter_n` to it under noJsHost — the 1-arg
+     `Array.from` call site just doesn't route through it for all shapes.
+  2. `Array.from(x, mapFn)` — mapper → leaks `env::__make_callback` (host
+     closure bridge). Standalone should invoke the mapper via
+     `__apply_closure` (the same native bridge #3140's bound-fn guard and the
+     HOF arms use — see `NATIVE_HOF_METHODS`/`ensureNativeArrayHof` for the
+     established per-element callback pattern).
+- Array-like sources (`{length, 0: …}`) can reuse the `__extern_length` +
+  `__extern_get_idx` walk (#2872's array-like construct arm is the template).
+- Measure guide: `built-ins/TypedArray/prototype/fill` standalone was 46
+  fail / 5 pass after PR #2881+#2884; the makeCtorArg tests fail at
+  `assert #1` with the factory loop dying inside `makeArray`. Post-fix,
+  expect the passthrough/array/arraylike factory combinations to execute —
+  re-scan `built-ins/TypedArray/prototype` + `built-ins/Array/from`.
 
 # Standalone: `fn.bind(...)` on a closure is not callable
 
