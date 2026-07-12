@@ -13,8 +13,12 @@ import {
   isPrimitiveWrapperSubclassUnsupported,
 } from "./builtin-tags.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
+// (#3132 S2a) Bounded async-generator METHOD drive: no-`this`/`super`/
+// `arguments` methods route through the same native producer as fn
+// declarations/expressions (the drive gate self-limits to standalone/wasi).
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
+import { genBodyReferencesThis, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
 import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
-import { emitCachedFuncClosureAccess } from "./closures.js"; // (#3123) fnctor parent closure for instance registration
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
@@ -2304,6 +2308,27 @@ function compileClassBodiesInner(
         // resume function + `.next()/.return()/.throw()` dispatch are already
         // representation-agnostic. No host imports, instantiates standalone.
         compileNativeGeneratorFunction(ctx, fctx, member, nativeGenInfo);
+        fctx.body.push({ op: "return" });
+      } else if (
+        isGeneratorMethod &&
+        isAsyncMethod &&
+        member.body &&
+        // (#3132 S2a) Bounded async-generator METHOD drive — same interception
+        // as function-body.ts (declarations) / closures.ts (expressions), for
+        // the receiver-free subset: a body that never touches `this`/`super`
+        // (one walk covers both) or `arguments` needs no receiver threading
+        // into the `$AsyncFrame`, so `emitAsyncGenerator` applies verbatim
+        // (the frame captures fctx.params — including the synthetic receiver
+        // param of an instance method — as inert param fields). The drive gate
+        // (`isAsyncGenDriveCandidate`) self-limits to the standalone/wasi
+        // lanes and enforces the bounded body + stem-collision rules; every
+        // other shape keeps the legacy eager-buffer path below
+        // (correct-or-legacy).
+        !genBodyReferencesThis(member.body) &&
+        !bodyUsesArguments(member.body) &&
+        isAsyncGenDriveCandidate(ctx, member)
+      ) {
+        emitAsyncGenerator(ctx, fctx, member);
         fctx.body.push({ op: "return" });
       } else if (isGeneratorMethod && member.body) {
         // Generator method: eagerly evaluate body, collect yields into a buffer,

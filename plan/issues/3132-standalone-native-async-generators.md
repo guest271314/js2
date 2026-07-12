@@ -16,6 +16,8 @@ related: [3075, 2906, 2865, 2938, 2936, 2980, 2895, 2922, 1042, 3120]
 created: 2026-07-10
 updated: 2026-07-10
 assignee: ttraenkler/fable-3075
+loc-budget-allow:
+  - src/codegen/class-bodies.ts
 origin: "FABLE task 30 — env::__create_async_generator touches ~2,800 leaky-passes (largest unowned chunk of the standalone-vs-host gap)."
 ---
 
@@ -85,6 +87,30 @@ to`isBoundedAsyncGenBody`/`isAwaitFreeAsyncGenBody`/`isAsyncGenDriveCandidate`/`
   fn expressions; needs receiver/`this` threading into the frame
   (`readsCurrentThis`). CAUTION: #2938's relax found the class-STATIC sync-gen
   emit path broken — audit the static path before admitting methods.
+  - **S2 audit (2026-07-10, fable-3075)**: class methods branch at
+    class-bodies.ts ~2258 (`isGeneratorMethod && nativeGenInfo` → native sync
+    factory; else legacy buffer). An async route would sit BEFORE the legacy
+    buffer arm: `isAsyncMethod && isAsyncGenDriveCandidate(ctx, member)` →
+    `emitAsyncGenerator(ctx, fctx, member)`. Open questions: (a) instance
+    methods carry the receiver as fctx param 0 — `buildAsyncFrameInfo`
+    captures fctx.params into frame param fields, but the RESUME body's
+    `this` resolution against a frame field is unproven; start with the
+    bounded no-`this`/no-`super`/no-`arguments`/no-capture subset (covers the
+    assert-only zero-yield corpus bodies); (b) stem naming/collision — the
+    producer registry keys `sanitizeTypeName(asyncFnName(decl))`, which must
+    be the `${className}_${methodName}` funcMap key for methods; (c) the
+    duplicate-name / computed-name method hazards from #2938 apply verbatim.
+    Object-literal methods (literals.ts ~2854) additionally run through the
+    closure trampoline — audit `__argc_default` interplay (#2581) first.
+  - **S2a SHIPPED (2026-07-10, follow-up PR)**: the receiver-free CLASS-method
+    subset (`!genBodyReferencesThis && !bodyUsesArguments &&
+isAsyncGenDriveCandidate`) routes through `emitAsyncGenerator` — covers
+    the zero-/plain-yield and (with S1) `yield*`-literal method bodies,
+    instance AND static, host-free. Probes: zero-yield/plain/static/yield\*
+    methods correct with zero gen imports; `this`-reading bodies stay legacy.
+    Scans (class/elements async-gen n=10, expressions/async-generator n=31)
+    identical to control. REMAINING for full S2: receiver-threading
+    (`this`-reading bodies) + object-literal methods (trampoline audit).
 - **S3 — general `yield*` / control-flow yields**: CFG loop states over the
   native `__iterator` protocol (runtime loop, not static unroll).
 - **S4 — `return` in async-gen body**: needs a settleReturn terminator.
