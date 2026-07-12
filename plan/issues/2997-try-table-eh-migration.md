@@ -235,8 +235,8 @@ Recommended handling: let the **emitter** insert the wrapper blocks and, in the
 same pass, rewrite outward branch depths — reuse the existing
 `bumpOuterBranchDepths` walker (lines 57–82; it already treats `try` as a label
 op — **add `try_table` to its `isLabelOp` set at line 78**) to add `+N` to
-`br`/`br_if`/`br_table` targets that escape the try_table body. Internal
-branches (targeting labels created _inside_ the body) keep their relative depth.
+`br`/`br_if`/`br_table` targets that escape the try*table body. Internal
+branches (targeting labels created \_inside* the body) keep their relative depth.
 This is the single most error-prone part — spec a dedicated unit test matrix
 (break/continue/return-inside-try-with-finally, `continue outer`, nested try)
 mirroring the #993/#1858 finally cases.

@@ -125,7 +125,7 @@ independently — #2169b, #1302's DataView case, #2564's tag-cascade).
    Delete the local `const seen = new WeakSet<object>()` in each (:151,
    :166). In `eliminateDeadImports`, create **two** pass-scoped sets before
    Phase 5 — `const seenF = new WeakSet<object>(); const seenT = new
-   WeakSet<object>();` — and pass `seenF` to every `remapFuncIdxInBody`
+WeakSet<object>();` — and pass `seenF` to every `remapFuncIdxInBody`
    call (:411, :459, :474) and `seenT` to every `remapTypeIdxInBody` call
    (:412, :460, :475). Two sets, not one: a given instruction carries BOTH
    a `funcIdx` and a `typeIdx`-family operand in some ops (`call_indirect`),
