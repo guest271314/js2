@@ -55,6 +55,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import { ensureNativeArrayHof } from "./hof-native.js";
 import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
 import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
@@ -3044,7 +3045,29 @@ const DYN_VIEW_READ_METHODS = new Set<string>([
   // up via the {@link BOOLEAN_RESULT_METHODS} boxing fix below.
   "reduce",
   "reduceRight",
+  // (#3162) `find`/`findIndex` — the two-arm materializes the dyn view to an
+  // `$__vec_f64` and (standalone only) runs the #3098 native `__hof_<name>`
+  // loop over it (see {@link FIND_METHODS} and the THEN-arm Fix-B route in
+  // {@link emitDynViewMethodTwoArm}). Routing through `__hof_find` — not the
+  // legacy `compileArrayFind` re-entry — gives the correct `undefined`
+  // (`ref.null.extern`) not-found sentinel and thisArg threading; the legacy
+  // re-entry boxed a NaN sentinel (`__box_number`) that failed
+  // `assert.sameValue(result, undefined)`. Gated to standalone in the two-arm
+  // predicate (`__hof_*` is standalone-only); gc/host keeps the existing path.
+  "find",
+  "findIndex",
 ]);
+
+/**
+ * (#3162) Two-arm methods whose THEN arm (materialized `$__vec_f64`) is routed
+ * through the #3098 native `__hof_<name>` substrate instead of the legacy
+ * `compileArrayMethodCall` re-entry — the substrate returns an externref result
+ * with the spec `undefined` not-found sentinel and threads `thisArg`. Only
+ * `find`/`findIndex` (the legacy `compileArrayFind` NaN sentinel + missing
+ * thisArg was the soundness/semantics gap). `reduce`/`reduceRight` keep their
+ * existing re-entry (byte-identical, no not-found sentinel to mis-box).
+ */
+const FIND_METHODS = new Set<string>(["find", "findIndex"]);
 
 /**
  * (#2872) Dyn-view read-side methods whose result is a BOOLEAN (`true`/`false`),
@@ -3167,6 +3190,15 @@ function emitDynViewMethodTwoArm(
   const receiverExpr = propAccess.expression;
   if (!ts.isIdentifier(receiverExpr)) return undefined;
   const name = receiverExpr.text;
+  // (#3162 Fix B) Pre-ensure the standalone native `__hof_<name>` loop for
+  // find/findIndex BEFORE emitting any arm/receiver code, so the append-only
+  // defined-func mint (and any union-import registration it triggers) settles
+  // the funcIdx space up front — nothing is buffered yet to be shifted (mirrors
+  // the setupArrayLoop pre-flush discipline). undefined ⇒ helper unavailable
+  // (non-standalone or missing deps): the THEN arm falls back to the legacy
+  // `compileArrayMethodCall` re-entry.
+  const hofMethodIdx =
+    ctx.standalone && FIND_METHODS.has(methodName) ? ensureNativeArrayHof(ctx, methodName) : undefined;
   const dynIdx = getOrRegisterTaDynViewType(ctx);
 
   // Compile the receiver ONCE → externref → recvExt; recvAny (anyref) for ref.test/cast.
@@ -3197,11 +3229,50 @@ function emitDynViewMethodTwoArm(
   const f64VecIdx = emitTaDynViewToVec(ctx, fctx, dvLocal);
   const matLocal = allocLocal(fctx, `__dvm_mat_${fctx.locals.length}`, { kind: "ref", typeIdx: f64VecIdx });
   fctx.body.push({ op: "local.set", index: matLocal } as Instr);
-  const savedBind = fctx.localMap.get(name);
-  fctx.localMap.set(name, matLocal);
-  const rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
-  if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
-  else fctx.localMap.delete(name);
+  let rThen: ValType | null | undefined | typeof VOID_RESULT;
+  if (hofMethodIdx !== undefined) {
+    // (#3162 Fix B) find/findIndex over the materialized `$__vec_f64`: route
+    // through the #3098 native `__hof_<name>(recv, cb, thisArg) -> externref`
+    // loop instead of re-entering `compileArrayFind` (whose f64-vec impl boxes
+    // a NaN "not found" sentinel and drops thisArg). `__extern_get_idx` accepts
+    // a real `$__vec_*` receiver, so we pass the materialized vec as externref;
+    // the helper returns the matched element / index / undefined as externref
+    // directly, so the arm is already the unified `externref` branch rep (no
+    // `coerceArmToExternref` fixup). The callback is compiled once per arm as an
+    // externref closure (the ELSE arm re-dispatch compiles it again — double
+    // mint is tolerated bloat, same as reduce/reduceRight; not a soundness bug).
+    fctx.body.push({ op: "local.get", index: matLocal } as Instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    // arg0 = callback → externref
+    const cbArg = callExpr.arguments[0]!;
+    if (ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)) {
+      const at = compileArrowAsClosure(ctx, fctx, cbArg);
+      if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+      else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+    } else {
+      const at = compileExpression(ctx, fctx, cbArg, { kind: "externref" });
+      if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+      else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    // arg1 = thisArg → externref (undefined when omitted). Spec evaluates the
+    // args once; the ELSE arm re-evaluates for its own path (both arms are
+    // guarded by the runtime ref.test, so exactly one executes).
+    if (callExpr.arguments.length >= 2) {
+      const tt = compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "externref" });
+      if (tt && tt.kind !== "externref") coerceType(ctx, fctx, tt, { kind: "externref" });
+      else if (tt === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+    } else {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    fctx.body.push({ op: "call", funcIdx: hofMethodIdx } as Instr);
+    rThen = { kind: "externref" };
+  } else {
+    const savedBind = fctx.localMap.get(name);
+    fctx.localMap.set(name, matLocal);
+    rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
+    if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
+    else fctx.localMap.delete(name);
+  }
   const thenOk = coerceArmToExternref(ctx, fctx, rThen, false, BOOLEAN_RESULT_METHODS.has(methodName));
 
   // --- ELSE arm (exact existing non-dyn-view impl) — re-dispatch the WHOLE call
@@ -3271,6 +3342,10 @@ export function compileArrayMethodCall(
     !dynViewTwoArmActive.has(callExpr) &&
     ts.isPropertyAccessExpression(propAccess) &&
     DYN_VIEW_READ_METHODS.has(methodName) &&
+    // (#3162) find/findIndex only join the two-arm under standalone — their
+    // correct THEN arm is the standalone-only #3098 `__hof_<name>` substrate
+    // (see FIND_METHODS). In gc/host mode they stay on the pre-existing path.
+    (!FIND_METHODS.has(methodName) || ctx.standalone) &&
     // (#2872) The static per-method impls the arms route to hard-require their
     // search/index argument (`indexOf requires 1 argument` reportError). A
     // 0-arg call (`ta.indexOf()` — legal JS, searches `undefined`) must NOT be
