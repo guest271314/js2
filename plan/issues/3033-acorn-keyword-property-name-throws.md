@@ -2,7 +2,7 @@
 id: 3033
 title: "compiled-acorn THROWS parsing a KEYWORD used as a property name (`x.var`, `x.function`, `x.if`) — the next-deeper acorn self-parse blocker after #2853"
 status: in-progress
-assignee: ttraenkler/dev-3051c
+assignee: ttraenkler/dev-b2b-memberread
 loc-budget-allow:
   - src/codegen/index.ts
 sprint: current
