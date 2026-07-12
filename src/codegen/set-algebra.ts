@@ -30,7 +30,7 @@ import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
-import { ensureMapHelpers } from "./map-runtime.js";
+import { COLLECTION_KIND, ensureMapHelpers } from "./map-runtime.js";
 import { emitSetBrandCheck, ensureSetHelpers } from "./set-runtime.js";
 
 const TOMBSTONE_BIT = 0x40000000; // mirrors map-runtime.ts
@@ -148,6 +148,7 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   // ── union(a,b): copy all of a, then all of b (set_add dedups). ───────────
   {
     const body: Instr[] = [
+      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
       { op: "call", funcIdx: mapNew } as Instr,
       { op: "local.set", index: RES } as Instr,
       { op: "i32.const", value: 0 } as Instr,
@@ -176,6 +177,7 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
     const body: Instr[] = [
+      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
       { op: "call", funcIdx: mapNew } as Instr,
       { op: "local.set", index: RES } as Instr,
       { op: "i32.const", value: 0 } as Instr,
@@ -201,6 +203,7 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
       } as Instr,
     ];
     const body: Instr[] = [
+      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
       { op: "call", funcIdx: mapNew } as Instr,
       { op: "local.set", index: RES } as Instr,
       { op: "i32.const", value: 0 } as Instr,
@@ -229,6 +232,7 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
       { op: "if", blockType: { kind: "empty" }, then: addValToResult(), else: [] } as Instr,
     ];
     const body: Instr[] = [
+      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
       { op: "call", funcIdx: mapNew } as Instr,
       { op: "local.set", index: RES } as Instr,
       { op: "i32.const", value: 0 } as Instr,

@@ -23,7 +23,7 @@ import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } f
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
-import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
+import { isCollectionReflectiveCallShape, tryCompileCollectionReflectiveCall } from "../collections-brand.js"; // (#2604/#3171) {Map,Set,WeakMap,WeakSet}.prototype.METHOD.call brand-check
 import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.js"; // (#1983 / #3123)
 import { ensureIterStepScratchGlobal, ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain / (#3146) Iterator-statics intrinsics
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
@@ -5484,18 +5484,20 @@ function compileCallExpression(
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
 
-      // (#2604) Reflective `Set.prototype.METHOD.call(recv, …)` /
-      // `inst.METHOD.call(recv, …)` — brand-check the receiver ([[SetData]]) and
-      // dispatch to the native Set runtime. Runs BEFORE the generic #2193
-      // member-closure recovery (which has no native-Set knowledge), and only
-      // matches a Set data-method closure under nativeStrings, so it ADDS a
-      // Set-specific pre-check without rewriting the generic path. addUnionImports
-      // up-front (mirrors extern.ts's direct-path setup) so the arg-boxing
-      // `__box_number` the dispatch emits is registered without a mid-body shift.
-      if (isSetReflectiveCallShape(ctx, expr)) {
+      // (#2604/#3171) Reflective `X.prototype.METHOD.call(recv, …)` /
+      // `inst.METHOD.call(recv, …)` for the four keyed collections — brand-check
+      // the receiver ([[MapData]]/[[SetData]]/[[WeakMapData]]/[[WeakSetData]],
+      // struct + COLLECTION_KIND tag) and dispatch to the native collection
+      // runtimes. Runs BEFORE the generic #2193 member-closure recovery (which
+      // has no native-collection knowledge), and only matches a collection
+      // method closure under nativeStrings, so it ADDS a collection-specific
+      // pre-check without rewriting the generic path. addUnionImports up-front
+      // (mirrors extern.ts's direct-path setup) so the arg-boxing `__box_number`
+      // the dispatch emits is registered without a mid-body shift.
+      if (isCollectionReflectiveCallShape(ctx, expr)) {
         addUnionImports(ctx);
-        const setReflResult = tryCompileSetReflectiveCall(ctx, fctx, expr);
-        if (setReflResult !== undefined) return setReflResult;
+        const collReflResult = tryCompileCollectionReflectiveCall(ctx, fctx, expr);
+        if (collReflResult !== undefined) return collReflResult;
       }
 
       // (#2193 PR-B) Reflective `m.call/apply(thisArg, …)` on a value-erased
