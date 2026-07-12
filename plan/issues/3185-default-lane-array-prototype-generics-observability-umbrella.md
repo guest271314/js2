@@ -71,6 +71,20 @@ Top error shapes across those method dirs (mechanism signal):
   exclusion note at `src/codegen/array-methods.ts:664-666` (different callback
   signature on the array-like path) — a known-incomplete edge.
 
+## Child slices (filed 2026-07-12)
+
+Decomposed into 3 M-sized method-family slices over the default JS-host lane
+(disjoint from the standalone #3169/#3180 receiver-ladder tests). Each slice
+folds in the trap-first mandate (§4) for its own methods:
+
+- **#3199** — fold/predicate family: reduce/reduceRight/every/some (~283), P1.
+- **#3200** — iteration/producer family: forEach/map/filter/flatMap (~204), P1.
+- **#3201** — search + structural family:
+  indexOf/lastIndexOf/slice/splice/sort/concat/pop (~312), P1 — owns the
+  30 trap-class fails (land first).
+
+This issue stays the tracking umbrella.
+
 ## Acceptance criteria (umbrella)
 
 1. Child slices filed per mechanism above (trap slice first), each with

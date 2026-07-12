@@ -1,7 +1,9 @@
 ---
 id: 3183
 title: "standalone: any-typed array receiver — for-in enumerates ZERO keys and string-key reads answer undefined (dynamic-path vec arms missing in __object_keys_forin / __extern_has / __extern_get)"
-status: ready
+status: done
+assignee: ttraenkler/dev-vec-arms
+completed: 2026-07-12
 created: 2026-07-12
 priority: high
 feasibility: medium
@@ -15,6 +17,21 @@ sprint: current
 horizon: m
 related: [3179, 3176, 3173, 3169, 2860]
 origin: "Split out of #3179 during root-cause diagnosis (2026-07-12). #3179's PR fixed the illegal-cast trap face (emitArrayForIn); this issue is the remaining any-typed-receiver face."
+# The dynamic for-in / string-key vec arms are new native-runtime codegen that
+# belongs in object-runtime.ts (the dynamic-reader helpers it splices into all
+# live there — fillExternGetIdxVecArms / fillExternArrayLikeStructArms /
+# fillExternGetErrorProps are its siblings); the index.ts delta is just the
+# import + one finalize call. Both are intended feature growth, not barrel bloat.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
+# The vec arms REUSE the engine's existing coercion helpers — `number_toString`
+# (canonical Number::toString for the enumerated index keys) and
+# `__str_to_number` (§7.1.4.1 StringToNumber for the string index key) — they do
+# NOT hand-roll a fresh ToString/ToNumber matrix. The gate counts the added call
+# sites; this is intended reuse of the single engine, so grant the allowance.
+coercion-sites-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 # #3183 — standalone: dynamic-path helpers lack vec arms → any-typed arrays enumerate empty / read undefined
@@ -116,3 +133,46 @@ byte-identical).
 
 Pre-existing on main AND after #3179's fix (this issue's scope):
 `.tmp/repro-3179-{h,l,m}.ts` → 0 iterations (expected 2/2/2).
+
+## Resolution (2026-07-12)
+
+Implemented as `fillDynamicForinVecArms` (`src/codegen/object-runtime.ts`),
+wired into the finalize sequence in `src/codegen/index.ts` right after
+`fillExternArrayLikeStructArms`. It PREPENDS a self-contained
+`ref.test $__vec_base`-guarded arm into each of the three helpers (the
+`fillExternGetErrorProps` splice discipline — append locals, never renumber;
+falls through untouched on a non-vec receiver so host/non-vec output is
+byte-identical). `__str_to_number` is emitted eagerly in the standalone block of
+`ensureObjectRuntime` for a stable finalize funcIdx (measured to add 0 bytes —
+it was already always emitted in standalone).
+
+Deviation from the plan: the plan said `__extern_has_idx` was already
+`$__vec_base`-aware — it was NOT (only `$ObjVec`/`$Object`). Rather than inline
+the bounds in `__extern_has`'s arm (duplicating logic — anti-bloat), this PR
+GENERALISES `__extern_has_idx` with a single guarded `$__vec_base` branch
+(length read uniformly through the supertype, same `trunc_sat` bounds as
+`__extern_get_idx`'s vec arm; the `$ObjVec` fast path is untouched since a vec
+is not a `$ObjVec`). `__extern_has`'s numeric arm then delegates to it, so HAS
+and GET stay in agreement and the #2066 liveness guard never skips a readable
+index. The generalisation also fixes `__extern_has_idx` for any other caller
+that passes a real array carrier.
+
+Verified standalone (zero host imports, `tests/issue-3183.test.ts`, 11 cases):
+- face A: `for (k in [5,6])` → 2; aliased `number[]` sum → 60; empty → 0.
+- face B: `a["1"]` → 8, `a["2"]` → 9, `a["length"]` → 3.
+- face C: for-in body `arr[k]` sum → 18.
+- OOB / non-numeric / non-length key → undefined (→ 0). Plain-object for-in and
+  string-key reads unchanged.
+
+Size: +294 bytes for an array-using standalone module; 0 bytes for array-free.
+`quality` cheap gates green locally: `check:issue-ids:against-main`,
+`check:ir-fallbacks` (no bucket growth). For-in regression suite
+(issue-2572-standalone-forin / issue-2964 / issue-forin / issue-2541) all green.
+
+### Out of scope (follow-up): the WRITE path
+`var a: any = new Array(); a[0] = 42; a["0"]` still reads 0 — the dynamic
+STORE `__extern_set(a, idx, v)` is NOT `$__vec_base`-aware, so writes to an
+any-typed vec do not land (and `new Array()` starts empty, so for-in over it
+also yields nothing). This is a distinct write-path gap in `__extern_set`, not
+one of the three READ helpers this issue scopes. READS of pre-populated vec data
+(array literals, aliased typed arrays) all work.

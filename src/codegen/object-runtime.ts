@@ -65,6 +65,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import {
@@ -213,6 +214,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const objArrayLikeArms = ctx.standalone;
   if (objArrayLikeArms) {
     emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+    // (#3183) `__str_to_number` (§7.1.4.1 StringToNumber) is the scanner the
+    // finalize-time `$__vec_base` arms of `__extern_get`/`__extern_has` use to
+    // turn a string element key ("0".."n-1", from a for-in loop or a computed
+    // `arr[k]` with a string `k`) into the numeric index they delegate on. It is
+    // otherwise emitted on demand, so register it eagerly here (a DEFINED func —
+    // no import shift) to give the arms a stable, shift-maintained funcIdx at
+    // finalize; dead-elimination prunes it when no arm references it.
+    emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
     addUnionImportsViaRegistry(ctx);
   }
 
@@ -4455,8 +4464,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // ── __extern_has_idx(externref v, f64 idx) -> i32 ─────────────────────────
   //
   // Standalone HasProperty(O, ToString(idx)) for array-like indexed access.
-  // Recognises a wrapped $ObjVec: present iff 0 <= i32(idx) < len. Any
-  // non-$ObjVec value returns 0 (matches the host import's null fallback).
+  // Recognises a wrapped $ObjVec, a real array carrier (`$__vec_base`, #3183)
+  // and an array-like `$Object`: present iff 0 <= i32(idx) < len. Any other
+  // value returns 0 (matches the host import's null fallback).
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=i
   {
@@ -4483,11 +4493,47 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           },
         ]
       : [];
+    // (#3183) `$__vec_base` arm: a real array literal / array result boxed to
+    // externref is a `__vec_<elemKind>` struct subtyping `$__vec_base`, which is
+    // NOT a `$ObjVec` — so without this arm a numeric HasProperty on an
+    // any-typed vec (`n in arr`, or the for-in liveness guard's index probe via
+    // `__extern_has`'s #3183 arm) answered 0. Length (field 0) is readable
+    // uniformly through the supertype regardless of element kind (mirrors the
+    // #2186 `__extern_length` arm); present iff 0 <= trunc_sat(idx) < len.
+    // Checked before the `$ObjVec` arm (a vec is not an $ObjVec, so the $ObjVec
+    // fast path is untouched). Standalone-gated; host import owns the path in
+    // gc/host mode.
+    const vecBaseHasIdx = objArrayLikeArms ? getOrRegisterVecBaseType(ctx) : -1;
+    const vecHasArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: vecBaseHasIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "i32.trunc_sat_f64_s" },
+              { op: "local.tee", index: 3 },
+              { op: "i32.const", value: 0 },
+              { op: "i32.ge_s" },
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: vecBaseHasIdx },
+              { op: "struct.get", typeIdx: vecBaseHasIdx, fieldIdx: 0 },
+              { op: "i32.lt_s" },
+              { op: "i32.and" },
+              { op: "return" },
+            ],
+          } as Instr,
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       ...objHasArm,
+      ...vecHasArm,
       { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
@@ -10067,6 +10113,292 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
     // Defensive: preamble shape changed — prepend the arms after a fresh setup
     // is not safe, so skip rather than risk an unbalanced body.
     return;
+  }
+}
+
+/**
+ * (#3183) Finalize-time `$__vec_base` arms for the standalone DYNAMIC-path
+ * for-in / string-key helpers `__object_keys_forin` / `__extern_has` /
+ * `__extern_get`.
+ *
+ * When the receiver's STATIC type is `any`, `resolveArrayInfo` fails and both
+ * for-in and a computed `arr[k]` route through the dynamic `$Object` runtime.
+ * A real JS array in standalone is a `__vec_<elemKind>` struct subtyping
+ * `$__vec_base` (#2186), NOT a `$Object` — so these three helpers, which treat
+ * "not `$Object`" as "no properties", made an any-typed array enumerate ZERO
+ * keys and answer `undefined` for every string-key read. Vec-awareness had been
+ * retrofitted piecemeal (`__extern_length` #2186, `__extern_get_idx` #2190,
+ * `__to_primitive` #2358, closed-struct trio #3169) but these three were the
+ * remaining gap. This fill closes it, reusing the existing vec-aware helpers:
+ *   - `__object_keys_forin`: enumerate index keys "0".."len-1" (a vec has no
+ *     expando properties, so the index keys are exact) by pushing
+ *     `number_toString(f64(i))` into a fresh `$ObjVec`. Mirrors the inline key
+ *     loop `emitArrayForIn` emits for a statically-typed array.
+ *   - `__extern_has`: `"length"` → 1; else delegate a numeric string key to
+ *     `__extern_has_idx(v, n)` — which this same PR generalised to be
+ *     `$__vec_base`-aware (it was `$ObjVec`/`$Object`-only). It uses the same
+ *     trunc_sat bounds as `__extern_get_idx`'s vec arm, so HAS and GET stay in
+ *     agreement and the #2066 per-visit liveness guard never skips a readable
+ *     index.
+ *   - `__extern_get`: `"length"` → `__box_number(f64(len))`; else delegate a
+ *     numeric string key to `__extern_get_idx(v, n)` (already vec-aware, handles
+ *     OOB → undefined). A non-string / non-numeric / non-"length" key answers
+ *     the undefined miss, same as before.
+ *
+ * The numeric-key path parses the string via `__str_to_number` (§7.1.4.1),
+ * emitted eagerly for standalone in `ensureObjectRuntime`. Strict
+ * CanonicalNumericIndexString would reject non-canonical keys ("00", "1.5");
+ * for-in-produced keys are always canonical, so `__str_to_number` acceptance is
+ * a benign superset (and matches `__extern_get_idx`'s own trunc-based indexing).
+ *
+ * Each arm is a self-contained, `ref.test $__vec_base`-guarded block PREPENDED
+ * at body index 0 (the `fillExternGetErrorProps` discipline): it returns on a
+ * vec match and falls through untouched for every non-vec receiver, so host /
+ * non-vec output stays byte-identical. Locals are APPENDED (never renumber the
+ * existing ones). Standalone-only — gated on `ctx.standalone`; host mode's JS
+ * `__extern_*` imports own these paths.
+ */
+export function fillDynamicForinVecArms(ctx: CodegenContext): void {
+  if (!ctx.standalone) return; // host imports own the dynamic path
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  if (anyStrTypeIdx < 0) return;
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  const numToStringIdx = ctx.funcMap.get("number_toString");
+  const strToNumIdx = ctx.funcMap.get("__str_to_number");
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx");
+  const externHasIdxIdx = ctx.funcMap.get("__extern_has_idx");
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new");
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
+
+  const findFn = (name: string) => ctx.mod.functions.find((f) => f.name === name);
+
+  // `key == "length"` (key already known to be a $AnyString) — flatten it and
+  // compare against the literal via `__str_equals`. Leaves an i32 on the stack.
+  const keyIsLength = (): Instr[] | null =>
+    strFlattenIdx === undefined || strEqualsIdx === undefined
+      ? null
+      : [
+          { op: "local.get", index: 1 } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+          { op: "call", funcIdx: strFlattenIdx } as Instr,
+          ...nativeStringLiteralInstrs(ctx, "length"),
+          { op: "call", funcIdx: strEqualsIdx } as Instr,
+        ];
+
+  // ── __object_keys_forin: enumerate "0".."len-1" ──
+  const keysFn = findFn("__object_keys_forin");
+  if (keysFn && numToStringIdx !== undefined && objVecNewIdx !== undefined && objVecPushIdx !== undefined) {
+    // params: 0=obj ; append locals: kAny(anyref) kVec(externref) kLen(i32) kI(i32)
+    const kAny = 1 + keysFn.locals.length;
+    const kVec = kAny + 1;
+    const kLen = kAny + 2;
+    const kI = kAny + 3;
+    keysFn.locals.push(
+      { name: "__vec_any", type: { kind: "anyref" } },
+      { name: "__vec_out", type: { kind: "externref" } },
+      { name: "__vec_len", type: { kind: "i32" } },
+      { name: "__vec_i", type: { kind: "i32" } },
+    );
+    const arm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: kAny },
+      { op: "ref.test", typeIdx: vecBaseIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "call", funcIdx: objVecNewIdx },
+          { op: "local.set", index: kVec },
+          { op: "local.get", index: kAny },
+          { op: "ref.cast", typeIdx: vecBaseIdx },
+          { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 },
+          { op: "local.set", index: kLen },
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: kI },
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: kI },
+                  { op: "local.get", index: kLen },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
+                  // __objvec_push(vec, number_toString(f64(i)))
+                  { op: "local.get", index: kVec },
+                  { op: "local.get", index: kI },
+                  { op: "f64.convert_i32_s" },
+                  { op: "call", funcIdx: numToStringIdx },
+                  { op: "call", funcIdx: objVecPushIdx },
+                  { op: "local.get", index: kI },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: kI },
+                  { op: "br", depth: 0 },
+                ],
+              },
+            ],
+          },
+          { op: "local.get", index: kVec },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    keysFn.body.splice(0, 0, ...arm);
+  }
+
+  // ── __extern_has: "length" → 1; numeric index → __extern_has_idx ──
+  const hasFn = findFn("__extern_has");
+  if (hasFn && externHasIdxIdx !== undefined) {
+    // params: 0=obj 1=key ; append locals: hAny(anyref) hN(f64)
+    const hAny = 2 + hasFn.locals.length;
+    const hN = hAny + 1;
+    hasFn.locals.push({ name: "__vec_any", type: { kind: "anyref" } }, { name: "__vec_n", type: { kind: "f64" } });
+    const lenArm = keyIsLength();
+    // Delegate the numeric-index presence check to `__extern_has_idx`, which is
+    // now `$__vec_base`-aware (#3183) and uses the SAME trunc_sat bounds as
+    // `__extern_get_idx`'s vec arm — so HAS and GET stay in agreement and the
+    // #2066 per-visit liveness guard never skips a readable index.
+    const numericArm: Instr[] =
+      strToNumIdx !== undefined
+        ? [
+            { op: "local.get", index: 1 } as Instr,
+            { op: "call", funcIdx: strToNumIdx } as Instr,
+            { op: "local.tee", index: hN } as Instr,
+            { op: "local.get", index: hN } as Instr,
+            { op: "f64.eq" } as Instr, // n == n (reject NaN, i.e. non-numeric)
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 0 } as Instr,
+                { op: "local.get", index: hN } as Instr,
+                { op: "call", funcIdx: externHasIdxIdx } as Instr,
+                { op: "return" } as Instr,
+              ],
+            } as Instr,
+          ]
+        : [];
+    const strKeyBody: Instr[] = [
+      ...(lenArm
+        ? ([
+            ...lenArm,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+            } as Instr,
+          ] as Instr[])
+        : []),
+      ...numericArm,
+    ];
+    const arm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: hAny },
+      { op: "ref.test", typeIdx: vecBaseIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // string key?
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: anyStrTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: strKeyBody,
+          } as Instr,
+          // vec receiver, non-string / non-index / non-length key → absent
+          { op: "i32.const", value: 0 },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    hasFn.body.splice(0, 0, ...arm);
+  }
+
+  // ── __extern_get: "length" → box(len); numeric index → __extern_get_idx ──
+  const getFn = findFn("__extern_get");
+  if (getFn && externGetIdxIdx !== undefined) {
+    // params: 0=obj 1=key ; append locals: gAny(anyref) gN(f64)
+    const gAny = 2 + getFn.locals.length;
+    const gN = gAny + 1;
+    getFn.locals.push({ name: "__vec_any", type: { kind: "anyref" } }, { name: "__vec_n", type: { kind: "f64" } });
+    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+    const lenArm = keyIsLength();
+    const numericArm: Instr[] =
+      strToNumIdx !== undefined
+        ? [
+            { op: "local.get", index: 1 } as Instr,
+            { op: "call", funcIdx: strToNumIdx } as Instr,
+            { op: "local.tee", index: gN } as Instr,
+            { op: "local.get", index: gN } as Instr,
+            { op: "f64.eq" } as Instr, // n == n
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 0 } as Instr,
+                { op: "local.get", index: gN } as Instr,
+                { op: "call", funcIdx: externGetIdxIdx } as Instr,
+                { op: "return" } as Instr,
+              ],
+            } as Instr,
+          ]
+        : [];
+    const lenBody: Instr[] =
+      lenArm && boxNumberIdx !== undefined
+        ? [
+            ...lenArm,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: gAny } as Instr,
+                { op: "ref.cast", typeIdx: vecBaseIdx } as Instr,
+                { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 } as Instr,
+                { op: "f64.convert_i32_s" } as Instr,
+                { op: "call", funcIdx: boxNumberIdx } as Instr,
+                { op: "return" } as Instr,
+              ],
+            } as Instr,
+          ]
+        : [];
+    const arm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: gAny },
+      { op: "ref.test", typeIdx: vecBaseIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // string key?
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: anyStrTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...lenBody, ...numericArm],
+          } as Instr,
+          // vec receiver, unresolved key → undefined miss
+          ...getMiss(),
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    getFn.body.splice(0, 0, ...arm);
   }
 }
 
