@@ -42,11 +42,19 @@ Error-shape census:
 
 ## Slices (file children as picked up)
 
-1. **[S, ready-first] Runner artifact**: `wrapTest` collides with tests that
-   themselves export/declare `test` → `Duplicate export name 'test'` (6
-   records). Fix in the wrap layer (`tests/test262-runner.ts`, wrapTest
-   region ~`:2713-2866` handles module-scope hoists already). Pure
-   harness-honesty win.
+1. **[S, ready-first] Runner artifact — ✅ DONE (2026-07-12, dev-find-wasm)**.
+   The 6 `Duplicate export name 'test'` records were NOT a test's own `test`
+   export (none exist) — they are the `top-level-await/syntax/*-await-expr-obj-literal.js`
+   tests whose `await { function() {} }` operand misparses. The runner compiles
+   the top-level-await body SYNCHRONOUSLY (wrapTest TLA path emits it at module
+   top level, not inside `async`), so TS treats `await` as an identifier and the
+   trailing `{ … }` as a *block statement*, which swallows the wrapper's
+   `export function test()` during error recovery. Fix: `parenthesizeAwaitBraceOperand`
+   rewrites `await { … }` → `await ({ … })` in the TLA path (a no-op in a real
+   async context), so the `{ … }` parses as the await operand in every position
+   (top-level statement, `typeof`/`void`, for-header, `export var/let x = await {…}`).
+   Measured: TLA-syntax dir 205→211 compileOK / 6→0 CE, zero regressions.
+   Tests: `tests/issue-3188.test.ts`.
 2. **Module early errors (17)** — duplicate exports, undefined export names,
    `import`/`export` position errors: enforce at compile time via the TS
    checker diagnostics or a targeted static-semantics pass (same pattern as
@@ -67,8 +75,9 @@ Error-shape census:
 
 ## Acceptance criteria (umbrella)
 
-1. Slice 1 landed (6 records flip; wrapTest no longer collides with a `test`
-   export).
+1. ✅ Slice 1 landed (6 `top-level-await/syntax/*-obj-literal` records flip
+   compile_error→pass; the misparse no longer swallows the wrapper's `test`
+   export). Umbrella stays `ready` for slices 2-4.
 2. Children filed for slices 2-4 with measured test lists.
 3. `language/module-code` non-pass < 100 (from 174) as children land.
 

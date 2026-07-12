@@ -2271,6 +2271,105 @@ function allowProxyTraps(overrides: any): any {
   return p;
 }
 
+/**
+ * (#3188 slice 1) Parenthesize the object-literal operand of an `await`:
+ * `await {…}` → `await ({…})`. In a genuine async/TLA context `await { … }`
+ * is an AwaitExpression whose operand is an ObjectLiteral, but the runner
+ * compiles the top-level-await body SYNCHRONOUSLY (the wrapTest TLA path emits
+ * it at module top level, not inside an `async` function), so TS treats `await`
+ * as an identifier and the following `{ … }` as a *block statement*. That block
+ * (`{ function() {} }` in these `await-expr-obj-literal` tests) then swallows the
+ * wrapper's trailing `export function test()` during error recovery, yielding a
+ * spurious `Duplicate identifier 'test'` / `Duplicate export name 'test'` — 6
+ * `language/module-code/top-level-await/syntax/*-obj-literal.js` records failed
+ * as a pure runner artifact. Parenthesizing forces the `{…}` to parse as the
+ * await operand in every position (top-level statement, `typeof`/`void`, a
+ * for-header, and `export var/let x = await {…}` initializers), a semantic
+ * no-op in a real async context. Balanced-brace scan skips string/template/
+ * comment spans so an `await {` inside a literal is never rewritten.
+ */
+export function parenthesizeAwaitBraceOperand(body: string): string {
+  if (!/\bawait\s*\{/.test(body)) return body;
+  let out = "";
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    const c = body[i]!;
+    // Skip string / template literals.
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        out += body[i];
+        if (body[i] === "\\") {
+          i++;
+          if (i < n) out += body[i];
+          i++;
+          continue;
+        }
+        if (body[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // Skip line / block comments.
+    if (c === "/" && body[i + 1] === "/") {
+      const nl = body.indexOf("\n", i);
+      const end = nl === -1 ? n : nl;
+      out += body.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (c === "/" && body[i + 1] === "*") {
+      const end = body.indexOf("*/", i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += body.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    // Match `await` <ws> `{` at a word boundary.
+    if (
+      body.startsWith("await", i) &&
+      (i === 0 || !/[A-Za-z0-9_$]/.test(body[i - 1]!)) &&
+      !/[A-Za-z0-9_$]/.test(body[i + 5] ?? "")
+    ) {
+      let j = i + 5;
+      while (j < n && /\s/.test(body[j]!)) j++;
+      if (body[j] === "{") {
+        // Find the matching close brace (respecting nested braces + string spans).
+        let depth = 0;
+        let k = j;
+        let str: string | null = null;
+        for (; k < n; k++) {
+          const ch = body[k]!;
+          if (str) {
+            if (ch === "\\") {
+              k++;
+              continue;
+            }
+            if (ch === str) str = null;
+            continue;
+          }
+          if (ch === '"' || ch === "'" || ch === "`") str = ch;
+          else if (ch === "{") depth++;
+          else if (ch === "}" && --depth === 0) break;
+        }
+        // Emit `await ( {…} )`, preserving the original whitespace run.
+        out += body.slice(i, j) + "(" + body.slice(j, k + 1) + ")";
+        i = k + 1;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 export function wrapTest(
   source: string,
   meta?: Test262Meta,
@@ -2897,7 +2996,13 @@ export function wrapTest(
   // where `await` parses correctly — and leave `test()` as a trivial probe of
   // `__fail`. The `export function test` already marks the file as a module,
   // so module-goal top-level await is valid.
+  //
+  // (#3188 slice 1) The obj-literal operand form `await { … }` still misparses
+  // even at module top level (synchronous compile ⇒ `await` is an identifier ⇒
+  // `{ … }` is a block that swallows the trailing `export function test`), so
+  // parenthesize the operand first — see parenthesizeAwaitBraceOperand.
   if (resolvedMeta.features?.includes("top-level-await")) {
+    const tlaBody = parenthesizeAwaitBraceOperand(bodyForFunc);
     const tlaPreBody = `${strictDirective}
 ${preamble}
 ${hoistedDecls}
@@ -2913,7 +3018,7 @@ export function test(): number {
     const metaBlockTla = source.match(/\/\*---[\s\S]*?---\*\//);
     const metaLinesTla = metaBlockTla ? metaBlockTla[0].split("\n").length - 1 : 0;
     return {
-      source: tlaPreBody + bodyForFunc.trim() + "\n" + tlaPostBody,
+      source: tlaPreBody + tlaBody.trim() + "\n" + tlaPostBody,
       bodyLineOffset: tlaBodyLineOffset - metaLinesTla,
     };
   }
