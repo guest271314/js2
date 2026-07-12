@@ -1,0 +1,98 @@
+---
+id: 3169
+title: "standalone: Array.prototype callback methods (reduce/reduceRight/filter/some/every/map/forEach) over array-like receivers via .call/.apply (519 gap tests)"
+status: ready
+created: 2026-07-12
+updated: 2026-07-12
+priority: high
+feasibility: hard
+task_type: bug
+area: codegen
+es_edition: multi
+language_feature: array-methods
+goal: standalone
+umbrella: 2860
+sprint: current
+horizon: l
+related: [2860, 2670, 3015, 3126, 3098, 2872]
+origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+---
+
+# #3169 — standalone: Array.prototype callback methods over array-like receivers
+
+## Problem
+
+**519 host-pass tests are not host-free-standalone passes** under
+`built-ins/Array/prototype/{reduce,reduceRight,filter,some,every,map,forEach}`
+(measured 2026-07-12: `test262-current.jsonl` vs
+`test262-standalone-current.jsonl` from `loopdive/js2wasm-baselines`, fetched
+via `scripts/fetch-baseline-jsonl.mjs`; gap = host `status==pass` ∧ standalone
+NOT a host-free pass, official scope, matched by file+strict). This is the
+single largest uncovered method-family cluster in the #2860 gap.
+
+The dominant failure shape is **not** the inline-arrow fast path (that is
+native already) — it is the ES5-era conformance corpus applying the generic
+methods to **array-like receivers**:
+
+```js
+// built-ins/Array/prototype/reduce/15.4.4.21-9-c-ii-29.js and ~500 siblings
+var obj = { 0: 11, 1: 12, length: 2 };
+Array.prototype.reduce.call(obj, callbackfn, 1);   // returned 2 — assert #1
+```
+
+plus hole semantics (`HasProperty` before `Get`), `this`-binding of the
+callback, deleted-during-iteration mutation rules, and `length` clamping /
+`ToUint32` coercion on the receiver — all spec steps the native vec-only HOF
+lowering skips.
+
+## Root cause (measured signature)
+
+`fail: returned 2 — assert #1 … Array.prototype.reduce.call(obj, …)` dominates
+(hundreds of rows). The native HOF path (`src/codegen/hof-native.ts`,
+`src/codegen/array-methods.ts`) only accepts real vec receivers; a `$Object`
+array-like routed through `.call/.apply` either misroutes or produces wrong
+element/hole semantics. A smaller sub-bucket is method-as-VALUE
+(`TypeError: Array.prototype.forEach is not yet callable as a value`) — shared
+root cause with #3170; fix the receiver ladder here, the value-read there.
+
+## ANTI-BLOAT directive (stakeholder standing rule: generalize, don't fork)
+
+Do NOT write a parallel "array-like HOF" handler. Extend the EXISTING
+machinery:
+
+- **`src/codegen/closed-method-dispatch.ts`** — the closed-method dispatcher
+  already brands vec receivers (`$__vec_base` arm). Add ONE generic
+  `$Object`-receiver arm per method family that walks `0..ToLength(length)`
+  through the existing dynamic reader (`src/codegen/dyn-read.ts` /
+  `member-get-dispatch.ts`), with a `HasProperty` gate for holes — the same
+  ladder shape #3126 used to admit native closure dispatch for typed
+  ref-element arrays, and #3098's native callback-dispatch substrate for the
+  callback invocation (NO `__make_callback` / `__call_1_f64` reintroduction).
+- Sibling pattern to copy: **#2872** (TypedArray.prototype cluster) and
+  **#3126** (typed ref-elem HOF admission) — both widened an existing dispatch
+  ladder instead of adding a handler.
+- #3015 (ready, low) covers the narrow opaque-externref-callback-param leak in
+  the same methods — different root cause (callback rep, not receiver rep).
+  Coordinate: this issue owns the RECEIVER ladder; don't absorb #3015's
+  callback-rep fix unless it falls out for free.
+- **#2670 (in-progress, sd-2670, sprint 67) is the HOST-lane twin** — same
+  generic-array-like-receiver spec algorithm, but its ~1017 tests FAIL on the
+  host lane (disjoint from this issue's 519, which host-PASS). By construction
+  the test sets don't overlap, but the mechanism does. Before claiming: check
+  the #2670 branch state (`sd-2670` has no lock on `issue-assignments`, last
+  update 2026-06-25 — likely stale); if partial #2670 work landed, remeasure
+  and build the standalone ladder on top of it, not beside it.
+
+## Acceptance criteria
+
+- ≥350 of the 519 measured gap tests under
+  `built-ins/Array/prototype/{reduce,reduceRight,filter,some,every,map,forEach}`
+  flip to **host-free** standalone passes (no leaked `env::` imports).
+- Sample tests that must pass standalone host-free:
+  - `test/built-ins/Array/prototype/reduce/15.4.4.21-9-c-ii-29.js`
+  - `test/built-ins/Array/prototype/map/15.4.4.19-8-c-ii-1.js`
+  - `test/built-ins/Array/prototype/every/15.4.4.16-7-c-ii-9.js`
+- Zero host-mode regressions; zero standalone high-water regressions
+  (`check-standalone-highwater.mjs`); all changes exercised on both lanes in CI.
+- One PR; if the receiver ladder lands but a residual sub-bucket (>50 tests)
+  remains, file a follow-on instead of scope-creeping.
