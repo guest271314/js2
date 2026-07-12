@@ -30,13 +30,16 @@ import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
+import { emitSetAlgebraAnyArgDispatch, ensureSetAlgebraAnyDispatch } from "./collections-es2025.js";
 import { COLLECTION_KIND, ensureMapHelpers } from "./map-runtime.js";
 import { emitSetBrandCheck, ensureSetHelpers } from "./set-runtime.js";
 
 const TOMBSTONE_BIT = 0x40000000; // mirrors map-runtime.ts
 const M_ENTRIES = 1;
 const M_ENTRYCOUNT = 2;
+const F_KEY = 0;
 const F_VALUE = 1;
+void F_VALUE; // layout doc — the walks project F_KEY (see entryValue)
 const F_HASH = 3;
 
 const SET_ALGEBRA_SET_OPS = new Set(["union", "intersection", "difference", "symmetricDifference"]);
@@ -88,11 +91,14 @@ function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp
   } as Instr;
 }
 
-/** entry.value (anyref) onto the stack. */
+/** entry element (anyref) onto the stack — the entry's KEY. For a Set entry
+ *  key === value, so this is the element either way; for a MAP argument
+ *  (#3172 `combines-Map`) the spec's GetSetRecord `keys()` yields the map's
+ *  KEYS, so the walk must project F_KEY, not F_VALUE. */
 function entryValue(ctx: CodegenContext, entryTmp: number): Instr[] {
   return [
     { op: "local.get", index: entryTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
   ];
 }
 
@@ -368,23 +374,28 @@ export function tryCompileNativeSetAlgebraCall(
   if (ctx.mapTypeIdx < 0) return undefined;
   const helperIdx = ctx.mapHelpers.get(`__set_${methodName}`);
   if (helperIdx === undefined) return undefined;
+  // (#3172) Emit the runtime any-dispatcher (native fast lane + set-LIKE
+  // GetSetRecord lane) NOW — before any receiver/arg instruction is baked —
+  // so its transitive registrations (object runtime, iterator substrate,
+  // union imports) can never shift an already-emitted funcidx (#1719).
+  ensureSetAlgebraAnyDispatch(ctx, methodName);
 
   // receiver → ref $Map
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (!castToMap(ctx, fctx, recvType)) return undefined;
-  // (#2607) GetSetRecord(arg) argument validation — spec 24.2.1.2 step 1 ("If
-  // obj is not an Object, throw a TypeError") + steps 7-10 (has/keys must be
-  // callable). A non-Set argument (primitive `1`/`""`/`true`/`Symbol()`, or a
-  // plain object / array that is not the `$Map` backing struct) throws a
-  // *catchable* TypeError — NOT a `ref.cast` trap (illegal cast) and NOT a host
-  // fall-through (which silently completes / leaks `env`). Reuses #2604's
-  // `emitSetBrandCheck` (`ref.test $Map` → throw-or-cast), which leaves the
-  // validated `(ref $Map)` on the stack. A genuine set-LIKE object (size/has/
-  // keys on an `any`) is conservatively rejected here — that data path is
-  // #2580 M2 (dynamic property read), currently failing anyway (no regression).
+  // (#3172) GetSetRecord(arg) — spec 24.2.1.2. The argument dispatches at
+  // RUNTIME through `__set_<m>_any` (collections-es2025.ts): a real native
+  // collection takes the fast two-`$Map` kernel; a genuine set-LIKE object
+  // (numeric `size`, callable `has`/`keys`) drives the spec algorithm over
+  // its record; anything else throws a catchable TypeError from the size
+  // coercion (undefined/NaN/BigInt size — covers every primitive/plain-object
+  // row #2607 used to reject via the struct-only brand check).
   const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!);
-  emitSetBrandCheck(ctx, fctx, argType);
+  const anyResult = emitSetAlgebraAnyArgDispatch(ctx, fctx, methodName, argType);
+  if (anyResult !== undefined) return anyResult;
 
+  // Fallback (any-dispatch unavailable): the #2607 struct-only brand check.
+  emitSetBrandCheck(ctx, fctx, argType);
   fctx.body.push({ op: "call", funcIdx: helperIdx });
   return isSetOp ? ({ kind: "ref", typeIdx: ctx.mapTypeIdx } as ValType) : ({ kind: "i32" } as ValType);
 }

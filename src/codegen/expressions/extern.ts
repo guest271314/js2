@@ -9,6 +9,7 @@ import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, ExternClassInfo, FunctionContext, RestParamInfo } from "../context/types.js";
+import { compileCollectionGetOrInsert } from "../collections-es2025.js";
 import { addUnionImports, getArrTypeIdxFromVec } from "../index.js";
 import { tryCompileNativeMapMethodCall } from "../map-runtime.js";
 import { tryCompileNativeSetMethodCall } from "../set-runtime.js";
@@ -62,6 +63,21 @@ function compileExternMethodCall(
     // so the Map dispatch never adds an import mid-body — a late import would
     // retrigger the #1677 native-string finalize-shift and corrupt __str_flatten.
     addUnionImports(ctx);
+    // (#3172) ES2025 getOrInsert / getOrInsertComputed — native emplace over
+    // the shared $Map (collections-es2025.ts).
+    if (methodName === "getOrInsert" || methodName === "getOrInsertComputed") {
+      const args = callExpr.arguments;
+      const goiResult = compileCollectionGetOrInsert(
+        ctx,
+        fctx,
+        propAccess.expression,
+        args[0],
+        args[1],
+        methodName === "getOrInsertComputed",
+        /* weakKeys */ false,
+      );
+      if (goiResult !== undefined) return goiResult;
+    }
     const mapResult = tryCompileNativeMapMethodCall(ctx, fctx, propAccess, callExpr);
     if (mapResult !== undefined) return mapResult;
   }
@@ -88,6 +104,21 @@ function compileExternMethodCall(
   // Route to the native weak-collection runtime (reuses the Map backing store).
   if ((className === "WeakMap" || className === "WeakSet") && ctx.nativeStrings) {
     addUnionImports(ctx);
+    // (#3172) WeakMap.prototype.getOrInsert(Computed) — same emplace kernels
+    // with the §24.5.1 CanBeHeldWeakly key gate.
+    if (className === "WeakMap" && (methodName === "getOrInsert" || methodName === "getOrInsertComputed")) {
+      const args = callExpr.arguments;
+      const goiResult = compileCollectionGetOrInsert(
+        ctx,
+        fctx,
+        propAccess.expression,
+        args[0],
+        args[1],
+        methodName === "getOrInsertComputed",
+        /* weakKeys */ true,
+      );
+      if (goiResult !== undefined) return goiResult;
+    }
     const weakResult = tryCompileNativeWeakMethodCall(ctx, fctx, className, propAccess, callExpr);
     if (weakResult !== undefined) return weakResult;
   }

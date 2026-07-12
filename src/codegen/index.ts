@@ -58,6 +58,7 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
 import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
@@ -2579,6 +2580,12 @@ export function generateModule(
     // dispatcher the thenable job invokes. Read-only over funcMap. No-op unless
     // the async scheduler's thenable substrate reserved it (standalone/wasi).
     fillPromiseThenableHelpers(ctx);
+
+    // (#3172) Fill the reserved `__setrec_field_{size,has,keys}` GetSetRecord
+    // readers — one ref.test arm per closed struct carrying the field, bottom
+    // arm = $Object `__extern_get`. Read-only over funcMap. No-op unless a
+    // set-algebra any-dispatch site reserved them (standalone/nativeStrings).
+    fillSetRecFieldGetters(ctx);
 
     // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
     // that EVERY struct type (incl. late-registered fnctor structs like acorn's
