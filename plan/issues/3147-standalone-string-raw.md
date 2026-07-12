@@ -1,7 +1,8 @@
 ---
 id: 3147
 title: "standalone: String.raw (22 __get_builtin CEs)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-close
 sprint: current
 priority: high
 horizon: m
