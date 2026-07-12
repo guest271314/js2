@@ -32,6 +32,7 @@ import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./regis
 import type { InnerResult } from "./shared.js";
 import { compileArrowAsClosure, compileExpression, VOID_RESULT } from "./shared.js";
 import { isNullOrUndefinedLiteral } from "./destructuring-params.js";
+import { emitReceiverBrandCheck, type ReceiverBrandSpec } from "./receiver-brand.js";
 import { coercionInstrs } from "./type-coercion.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
@@ -60,11 +61,31 @@ export const MAP_LAYOUT = {
   M_ENTRIES: 1,
   M_ENTRYCOUNT: 2,
   M_LIVECOUNT: 3,
+  /** (#3171) Immutable collection-kind tag (COLLECTION_KIND), appended LAST so
+   *  every pre-existing field index stays valid. */
+  M_KIND: 4,
   F_KEY: 0,
   F_VALUE: 1,
   F_HASH: 3,
   TOMBSTONE_BIT,
 } as const;
+
+/**
+ * (#3171) Which keyed collection a `$Map` struct instance backs. All four
+ * collections share the `$Map` hash table (Set/WeakSet store key === value), so
+ * struct identity alone cannot distinguish `[[MapData]]` / `[[SetData]]` /
+ * `[[WeakMapData]]` / `[[WeakSetData]]` for the spec receiver brand checks
+ * (`Map.prototype.get.call(new Set())` must throw a TypeError). The immutable
+ * `kind` field (MAP_LAYOUT.M_KIND), stamped at construction by `__map_new`,
+ * carries the brand.
+ */
+export const COLLECTION_KIND = {
+  MAP: 0,
+  SET: 1,
+  WEAKMAP: 2,
+  WEAKSET: 3,
+} as const;
+export type CollectionKind = (typeof COLLECTION_KIND)[keyof typeof COLLECTION_KIND];
 
 /**
  * Register the WasmGC struct/array types backing the native Map. Idempotent.
@@ -123,6 +144,8 @@ export function ensureMapRuntimeTypes(ctx: CodegenContext): void {
       },
       { name: "entryCount", type: { kind: "i32" }, mutable: true },
       { name: "liveCount", type: { kind: "i32" }, mutable: true },
+      // (#3171) COLLECTION_KIND brand tag, trailing + immutable — see MAP_LAYOUT.
+      { name: "kind", type: { kind: "i32" }, mutable: false },
     ],
   } as StructTypeDef);
   ctx.structMap.set("Map", ctx.mapTypeIdx);
@@ -520,7 +543,10 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
   // pass (declareHashLocals) to guarantee indices 1..7 line up; see below.
   fixHashLocals(ctx);
 
-  // ── __map_new() -> ref $Map ─────────────────────────────────────────────
+  // ── __map_new(kind: i32) -> ref $Map ────────────────────────────────────
+  // (#3171) `kind` is the COLLECTION_KIND brand tag (0=Map 1=Set 2=WeakMap
+  // 3=WeakSet) stamped immutably at construction — every construction site
+  // (new-super.ts ctors, set-algebra results, groupBy) passes its brand.
   {
     const body: Instr[] = [
       // buckets: array.new i32 of length INIT_CAP, all -1
@@ -536,9 +562,11 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       // entryCount=0, liveCount=0
       { op: "i32.const", value: 0 },
       { op: "i32.const", value: 0 },
+      // kind (trailing brand field)
+      { op: "local.get", index: 0 },
       { op: "struct.new", typeIdx: ctx.mapTypeIdx },
     ];
-    addMapFunc(ctx, "__map_new", [], [mref], [], body);
+    addMapFunc(ctx, "__map_new", [i32], [mref], [], body);
   }
 
   const hashIdx = ctx.mapHelpers.get("__hash_anyref")!;
@@ -1216,6 +1244,7 @@ export function ensureMapGroupBy(ctx: CodegenContext): number {
   //         6=keyExt(externref) 7=keyAny(anyref) 8=groupAny(anyref)
   //         9=groupExt(externref) 10=args(externref)
   const body: Instr[] = [
+    { op: "i32.const", value: COLLECTION_KIND.MAP }, // (#3171) groupBy returns a real Map
     { op: "call", funcIdx: mapNewIdx },
     { op: "local.set", index: 2 },
     { op: "local.get", index: 0 },
@@ -1570,13 +1599,18 @@ export function tryCompileNativeCollectionForEach(
   propAccess: ts.PropertyAccessExpression,
   callExpr: ts.CallExpression,
   isSet: boolean,
+  // (#3171) Reflective `X.prototype.forEach.call(recv, cb)` re-entry: receiver
+  // and callback come from the `.call` argument list, and the receiver goes
+  // through the shared brand-check preamble (catchable TypeError on a
+  // wrong-brand receiver) instead of the static trapping cast.
+  reflective?: { recvExpr: ts.Expression; cbArg: ts.Expression | undefined; brand: ReceiverBrandSpec },
 ): InnerResult | undefined {
   if (!ctx.nativeStrings) return undefined;
   if (propAccess.name.text !== "forEach") return undefined;
   ensureMapHelpers(ctx);
   if (ctx.mapTypeIdx < 0) return undefined;
 
-  const cbArg = callExpr.arguments[0];
+  const cbArg = reflective !== undefined ? reflective.cbArg : callExpr.arguments[0];
   if (cbArg === undefined) return undefined;
   // Only handle Wasm-closure callbacks (arrow / function expr / named fn ref).
   const willBeClosure =
@@ -1593,16 +1627,21 @@ export function tryCompileNativeCollectionForEach(
   const F_HASH = 3;
   const anyref: ValType = { kind: "anyref" };
 
-  // Receiver → ref $Map, stored in a temp.
-  const recvType = compileExpression(ctx, fctx, propAccess.expression);
-  if (recvType === null) return undefined;
-  if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
-  } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
-  } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
-    return undefined;
+  // Receiver → ref $Map, stored in a temp. Reflective callers brand-check
+  // (catchable TypeError); the direct path keeps the static cast/bail.
+  const recvType = compileExpression(ctx, fctx, reflective !== undefined ? reflective.recvExpr : propAccess.expression);
+  if (reflective !== undefined) {
+    emitReceiverBrandCheck(ctx, fctx, recvType, reflective.brand);
+  } else {
+    if (recvType === null) return undefined;
+    if (recvType.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
+      return undefined;
+    }
   }
   const mTmp = allocLocal(fctx, `__mfe_m_${fctx.locals.length}`, {
     kind: "ref",
@@ -1814,6 +1853,10 @@ export function emitCollectionIteratorVec(
   receiver: ts.Expression,
   kind: "keys" | "values" | "entries",
   isSet: boolean,
+  // (#3171) Reflective `X.prototype.{keys,values,entries}.call(recv)` re-entry:
+  // the receiver goes through the shared brand-check preamble (catchable
+  // TypeError on a wrong-brand receiver) instead of the static cast/bail.
+  brand?: ReceiverBrandSpec,
 ): InnerResult | undefined {
   if (!ctx.nativeStrings) return undefined;
   ensureMapHelpers(ctx);
@@ -1842,16 +1885,21 @@ export function emitCollectionIteratorVec(
     objVecPushIdx = builders.pushIdx;
   }
 
-  // Receiver → ref $Map, stored in a temp.
+  // Receiver → ref $Map, stored in a temp. Reflective callers brand-check
+  // (catchable TypeError); the direct path keeps the static cast/bail.
   const recvType = compileExpression(ctx, fctx, receiver);
-  if (recvType === null) return undefined;
-  if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
-  } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
-  } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
-    return undefined;
+  if (brand !== undefined) {
+    emitReceiverBrandCheck(ctx, fctx, recvType, brand);
+  } else {
+    if (recvType === null) return undefined;
+    if (recvType.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
+      return undefined;
+    }
   }
   const mTmp = allocLocal(fctx, `__mit_m_${fctx.locals.length}`, {
     kind: "ref",
