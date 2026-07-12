@@ -2,10 +2,13 @@
 id: 3107
 title: "Cast-debt codemod: eliminate 10,678 'as Instr' + 129 'as unknown as Instr' + shrink 579 'as any'"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-09
-updated: 2026-07-09
-priority: medium
+updated: 2026-07-12
+priority: high
+# 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
+# Re-measured: 13,359 `as Instr` occurrences in src/ today. Also subsumes the
+# residual value of #1582 (PR #341 rebase — closed as superseded).
 horizon: m
 feasibility: medium
 model: opus

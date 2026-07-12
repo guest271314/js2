@@ -738,19 +738,20 @@ const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set<string>([
 
 /**
  * (#1461/#54) Whether an array-like `.call(...)` over a non-array receiver is
- * refused under `--target standalone`/`wasi`. Beyond the static
- * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set, `reduce`/`reduceRight` are
- * refused ONLY in their no-initial-value form (the forward hole-scan trips a
- * module-finalization func-index shift → invalid Wasm). The with-initial-value
- * form compiles to valid, host-free Wasm and is allowed through.
+ * refused under `--target standalone`/`wasi` — now only the static
+ * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set (currently empty).
+ *
+ * (#3169) The `reduce`/`reduceRight` NO-INITIAL-VALUE refusal is retired: the
+ * M2.2c "forward hole-scan trips a module-finalization func-index shift" bug
+ * it guarded against is gone — the loop re-resolves `__extern_has_idx` /
+ * `__extern_get_idx` / `__is_truthy` BY NAME after the receiver+callback
+ * compiles (the #16 discipline, see `hasIdxFnNow` below), so no baked funcIdx
+ * can go stale-low. The no-init form now compiles the §23.1.3.24 step-6
+ * hole-scan seed (first HasProperty index → acc) natively, host-free.
  */
 function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallExpression): boolean {
-  if (STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) return true;
-  if (methodName === "reduce" || methodName === "reduceRight") {
-    // args: [receiver, callback, initialValue?]. No initial value ⇒ refuse.
-    return callExpr.arguments.length < 3;
-  }
-  return false;
+  void callExpr;
+  return STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName);
 }
 
 /**
@@ -3020,7 +3021,38 @@ const ARRAY_METHODS = new Set([
  * `sort` — Bucket B, need write-back) and species/new-view producers (`slice`/`subarray`/
  * `map`/`filter`/`with`/`toSorted`/`toReversed` — Bucket C, need real-buffer identity).
  */
-const DYN_VIEW_READ_METHODS = new Set<string>(["at", "indexOf", "lastIndexOf", "includes", "toLocaleString"]);
+const DYN_VIEW_READ_METHODS = new Set<string>([
+  "at",
+  "indexOf",
+  "lastIndexOf",
+  "includes",
+  "toLocaleString",
+  // (#2872) Read-side CALLBACK methods that return a scalar (NO new TypedArray
+  // allocation) with Array-identical semantics. The two-arm materializes the
+  // dyn-view to an `$__vec_f64` and re-enters the ORDINARY array-method HOF impl
+  // — reusing the existing native array-HOF machinery verbatim (no per-method TA
+  // handler). Scoped to `reduce`/`reduceRight` in this slice: they measured
+  // clean (+2 pass, 0 CE, 0 regression). Deliberately EXCLUDED pending
+  // follow-ups: `find`/`findIndex` (the materialized `find` impl emits invalid
+  // wasm on the `predicate-call-changes-value` shape — type mismatch in the
+  // arm), `findLast`/`findLastIndex` (the array impl misses a `__call_1_f64`
+  // registration on this path → CE), `every`/`some`/`forEach` (detached-buffer
+  // tests regress — the materialization snapshots before a mid-callback detach),
+  // `map`/`filter` (return a NEW same-kind TA, not an f64-vec), `sort`/`toSorted`
+  // (TA default comparator is NUMERIC, not Array's lexicographic), `with`/
+  // `toReversed` (new TAs). `includes` (above) is boolean-returning and lights
+  // up via the {@link BOOLEAN_RESULT_METHODS} boxing fix below.
+  "reduce",
+  "reduceRight",
+]);
+
+/**
+ * (#2872) Dyn-view read-side methods whose result is a BOOLEAN (`true`/`false`),
+ * so the two-arm boxes the impl's raw i32 via `__box_boolean` (not the generic
+ * number box) — see {@link coerceArmToExternref}. `includes` was already in the
+ * read set and shared the same latent mis-box.
+ */
+const BOOLEAN_RESULT_METHODS = new Set<string>(["every", "some", "includes"]);
 
 /**
  * (#3058) Call expressions whose dyn-view two-arm ELSE arm is CURRENTLY re-dispatching
@@ -3059,6 +3091,14 @@ function coerceArmToExternref(
   fctx: FunctionContext,
   r: ValType | null | undefined | typeof VOID_RESULT,
   treatNullAsVoid = false,
+  // (#2872) When the arm result is a BOOLEAN-returning method (`every`/`some`/
+  // `includes`), its impl leaves a raw i32 (0/1). The generic `coerceType`
+  // i32→externref path boxes it as a NUMBER (`__box_number`), so the boxed
+  // result is `0`/`1`, not `false`/`true` — `result === false` then fails
+  // (truthiness still works, which masked this). Box via `__box_boolean` so the
+  // spec `assert.sameValue(…, false)` identity holds. Falls back to the generic
+  // number box when the native helper is unavailable (byte-identical to before).
+  boolResult = false,
 ): boolean {
   if (r === undefined || r === null) {
     // THEN arm (treatNullAsVoid=false): a null/undefined from the recursive f64-vec
@@ -3075,6 +3115,13 @@ function coerceArmToExternref(
     return true;
   }
   const vt = r as ValType;
+  if (boolResult && vt.kind === "i32") {
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+    if (boxBoolIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+      return true;
+    }
+  }
   if (vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
   return true;
 }
@@ -3155,7 +3202,7 @@ function emitDynViewMethodTwoArm(
   const rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
   if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
   else fctx.localMap.delete(name);
-  const thenOk = coerceArmToExternref(ctx, fctx, rThen);
+  const thenOk = coerceArmToExternref(ctx, fctx, rThen, false, BOOLEAN_RESULT_METHODS.has(methodName));
 
   // --- ELSE arm (exact existing non-dyn-view impl) — re-dispatch the WHOLE call
   // through compileExpression so the caller's host/externref fallback (which lives
@@ -6763,18 +6810,38 @@ function emitArrayCallbackArgsPlumbing(
  * externref. Mirrors the array-elem coercion paths used by emitArgumentsVecBody.
  */
 function emitElemBoxToExternref(ctx: CodegenContext, arrTypeIdx: number, getOp: string): Instr[] {
-  void ctx;
-  void arrTypeIdx;
-  void getOp;
-  // The element is on top of stack from the array.get. We don't reliably know
-  // its concrete ValType at this layer, but in practice this dispatcher only
-  // fires when numParams=0 (callback declares no formals). For that case the
-  // value is unused inside the body and just needs ANY externref placeholder
-  // so the extras vec has the right length. Use a null externref — the
-  // arguments[0] slot will be undefined / null which matches what tests with
-  // 0-formal callbacks observe.
-  // Drop the loaded element and push ref.null.extern.
-  return [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+  // (#3165) Box the loaded element (top of stack) to externref for the extras
+  // vec. The previous stub DROPPED the element and pushed a null externref on
+  // the claim that a 0-formal callback never reads its `arguments[0]` — false:
+  // the test262 `predicate-call-parameters` family (~186 standalone fails,
+  // TypedArray/Array callbackfn-arguments tests) does exactly
+  // `sample.findIndex(function() { results.push(arguments); })` and asserts
+  // `arguments[0]` is the element. The element's concrete ValType is the
+  // backing ARRAY type's element def; packed i8/i16 arrays surface as i32 on
+  // the stack via `array.get_s`/`array.get_u`.
+  //
+  // Boundary: a `$Hole` sentinel in a holey externref array rides through
+  // as-is (the inline param path's holeToUndefined mapping is not applied
+  // here) — same visibility as before for that edge; the numeric fast paths
+  // are exact.
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  const elem = arrDef && arrDef.kind === "array" ? (arrDef.element as ValType) : undefined;
+  const undefFallback: Instr[] = [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+  if (!elem) return undefFallback;
+  if (elem.kind === "externref") return [];
+  if (elem.kind === "ref" || elem.kind === "ref_null") return [{ op: "extern.convert_any" } as Instr];
+  const boxIdx = ctx.funcMap.get("__box_number");
+  const loadsAsI32 = elem.kind === "i32" || getOp === "array.get_s" || getOp === "array.get_u";
+  if (elem.kind === "f64") {
+    return boxIdx !== undefined ? [{ op: "call", funcIdx: boxIdx } as Instr] : undefFallback;
+  }
+  if (loadsAsI32) {
+    return boxIdx !== undefined
+      ? [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr]
+      : undefFallback;
+  }
+  // Unboxable element kind (i64/v128/…) — keep the undefined placeholder.
+  return undefFallback;
 }
 
 /**

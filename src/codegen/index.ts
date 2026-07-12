@@ -5,7 +5,7 @@ import { emitWasiErrorConstructor, fillExternGetErrorProps } from "./registry/er
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
@@ -59,6 +59,8 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
+import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -68,6 +70,7 @@ import {
   fillApplyClosure,
   fillBindDynHelper,
   fillBuiltinFnMeta,
+  fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
   fillExternIsArray,
   fillProxyDispatch,
@@ -107,7 +110,6 @@ import {
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
-  isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
@@ -1139,7 +1141,12 @@ function buildIrClassShapes(
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Methods — instance methods only, re-derived from the AST.
-    const methods: { name: string; params: IrType[]; returnType: IrType | null }[] = [];
+    const methods: {
+      name: string;
+      params: IrType[];
+      returnType: IrType | null;
+      memberKind?: "method" | "getter" | "setter" | "static";
+    }[] = [];
     let methodsOk = true;
     for (const member of stmt.members) {
       if (!ts.isMethodDeclaration(member) || !member.name) continue;
@@ -1180,6 +1187,75 @@ function buildIrClassShapes(
       methods.push({ name: methodName, params, returnType });
     }
     if (!methodsOk) continue;
+
+    // (#3144) Accessor + static-method descriptor projections — BEST-EFFORT:
+    // an unprojectable accessor/static is simply skipped (a claimed use then
+    // misses the descriptor at from-ast and demotes that one function),
+    // never rejecting the WHOLE class like the instance-method loop above
+    // would (which would regress classes that project today). Getters carry
+    // the property name with `memberKind: "getter"` ([] -> T); setters
+    // `"setter"` ([T] -> null); statics `"static"` (no `this` param at the
+    // Wasm level — invoked via `class.static_call`). Instance-member lookups
+    // filter on `memberKind`, so these never leak into `class.call`
+    // resolution.
+    for (const member of stmt.members) {
+      if (!member.name || !ts.isIdentifier(member.name)) continue;
+      const memberName = member.name.text;
+      if (ts.isGetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (!sig) continue;
+        const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+        if (isVoidType(retTs)) continue; // void getter — degenerate, skip
+        const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [], returnType: ir, memberKind: "getter" });
+      } else if (ts.isSetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        if (member.parameters.length !== 1) continue;
+        const p = member.parameters[0]!;
+        if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) continue;
+        const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [ir], returnType: null, memberKind: "setter" });
+      } else if (
+        ts.isMethodDeclaration(member) &&
+        hasStaticModifier(member) &&
+        !hasAbstractModifier(member) &&
+        !member.asteriskToken
+      ) {
+        const params: IrType[] = [];
+        let ok = true;
+        for (const p of member.parameters) {
+          if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) {
+            ok = false;
+            break;
+          }
+          const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+          if (!ir) {
+            ok = false;
+            break;
+          }
+          params.push(ir);
+        }
+        if (!ok) continue;
+        let returnType: IrType | null = null;
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (sig) {
+          const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+          if (!isVoidType(retTs)) {
+            const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+            if (!ir) continue;
+            returnType = ir;
+          }
+        }
+        // A same-name instance method + static method share ONE legacy
+        // funcMap key (`${className}_${name}` — class-bodies.ts skips the
+        // second registration), so resolving either would call the wrong
+        // body. Project the static only when no instance member takes the
+        // name (from-ast then demotes the ambiguous call cleanly).
+        if (methods.some((m) => m.name === memberName && (m.memberKind ?? "method") === "method")) continue;
+        methods.push({ name: memberName, params, returnType, memberKind: "static" });
+      }
+    }
 
     out.set(className, {
       className,
@@ -2387,6 +2463,11 @@ export function generateModule(
     }
     fillNativeIteratorLateArms(ctx);
 
+    // (#2903) Rebuild the Iterator-helper steppers (iter-hof-native.ts) with
+    // per-producer driven-generator arms + the positive-admission classifier.
+    // Read-only per #1719; no-op unless a helper call site reserved them.
+    fillIterHofSteppers(ctx);
+
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
     // combinator drain and the native iterator carrier can never disagree).
@@ -2522,6 +2603,12 @@ export function generateModule(
     // the async scheduler's thenable substrate reserved it (standalone/wasi).
     fillPromiseThenableHelpers(ctx);
 
+    // (#3172) Fill the reserved `__setrec_field_{size,has,keys}` GetSetRecord
+    // readers — one ref.test arm per closed struct carrying the field, bottom
+    // arm = $Object `__extern_get`. Read-only over funcMap. No-op unless a
+    // set-algebra any-dispatch site reserved them (standalone/nativeStrings).
+    fillSetRecFieldGetters(ctx);
+
     // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
     // that EVERY struct type (incl. late-registered fnctor structs like acorn's
     // `$__fnctor_Parser`) is known — so each `any`-receiver `obj.<name> = v` write
@@ -2551,6 +2638,14 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+
+    // (#3169) Splice CLOSED-STRUCT array-like arms into the standalone
+    // dynamic-reader trio (`__extern_length`/`__extern_get_idx`/
+    // `__extern_has_idx`) now that the struct-type table is complete — a plain
+    // `{0:x, 1:y, length:n}` literal (a closed nominal struct, NOT `$Object`)
+    // becomes readable by the generic `Array.prototype.<HOF>.call(obj, cb)`
+    // loop. Standalone only (no-op otherwise).
+    fillExternArrayLikeStructArms(ctx);
 
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
@@ -2583,6 +2678,12 @@ export function generateModule(
     // (necessary because __vec_len returns 0 for both empty arrays and
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
+
+    // #2623 P-7 (B-1): emit __closure_arity(externref) -> i32 so the JS-side
+    // dynamic bridge can dispatch host→wasm method callbacks at the closure's
+    // REAL declared arity (exact `arguments.length` reflection) instead of the
+    // highest emitted __call_fn_method_N.
+    emitClosureArityExport(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -5128,6 +5229,85 @@ function emitIsClosureExport(ctx: CodegenContext): void {
 
   mod.exports.push({
     name: "__is_closure",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
+ * Emit `__closure_arity(externref) -> i32` (#2623 P-7 / B-1). Returns the
+ * DECLARED formal-parameter count of a registered Wasm closure struct, or -1
+ * when the value is not a closure. Used by the JS-side dynamic bridge
+ * (`_wrapWasmClosureUnknownArity`) to dispatch a host→wasm method callback at
+ * `max(args.length, realArity)` instead of always the HIGHEST emitted
+ * `__call_fn_method_N`: dispatching at max-N padded the arg vector with
+ * undefineds that the #820l argc/extras plumbing cannot distinguish from real
+ * arguments, so the callee's `arguments.length` reported the dispatcher arity
+ * (V8's native `.finally` invokes a patched `then` with exactly 2 args; the
+ * wasm-side `then` observed `arguments.length === 5` — the test262
+ * `Promise/prototype/finally/invokes-then-with-*` assert-#3 failure and the
+ * #2614 assert-#2 finding).
+ *
+ * Dispatch shape mirrors `__call_fn_N` (per-shape funcref extraction via
+ * {@link buildFuncrefExtraction}, then a `ref.test` chain over the distinct
+ * closure FUNC types — the func type determines the formal count). No-op when
+ * the module has no closures, exactly like `__is_closure`.
+ */
+function emitClosureArityExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  const seenFuncTypeIdx = new Set<number>();
+  const entries: { funcTypeIdx: number; selfTypeIdx: number; closureArity: number }[] = [];
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    if (seenFuncTypeIdx.has(info.funcTypeIdx)) continue;
+    seenFuncTypeIdx.add(info.funcTypeIdx);
+    const funcTypeDef = mod.types[info.funcTypeIdx];
+    const selfParam = funcTypeDef?.kind === "func" ? funcTypeDef.params[0] : undefined;
+    const selfTypeIdx =
+      selfParam && (selfParam.kind === "ref" || selfParam.kind === "ref_null")
+        ? (selfParam as { typeIdx: number }).typeIdx
+        : typeIdx;
+    entries.push({ funcTypeIdx: info.funcTypeIdx, selfTypeIdx, closureArity: info.paramTypes.length });
+  }
+  if (entries.length === 0) return;
+
+  const arityTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_arity_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // Locals: 0 = value externref (param), 1 = anyref, 2 = funcref.
+  const anyLocal = 1;
+  const funcLocal = 2;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: anyLocal } as Instr,
+    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+  ];
+  for (const entry of entries) {
+    body.push({ op: "local.get", index: funcLocal } as Instr);
+    body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: entry.closureArity } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: -1 } as Instr);
+
+  mod.functions.push({
+    name: "__closure_arity",
+    typeIdx: arityTypeIdx,
+    locals: [
+      { name: "__any", type: { kind: "anyref" } },
+      { name: "__funcref", type: { kind: "funcref" } },
+    ],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__closure_arity",
     desc: { kind: "func", index: funcIdx },
   });
 }
@@ -12034,23 +12214,18 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (typeArgs.length > 0) {
         const inner = typeArgs[0]!;
         if (isVoidType(inner)) return { kind: "externref" }; // Promise<void> → externref (no value)
-        // (#2905) Under the native `$Promise` carrier (isStandalonePromiseActive
-        // — today WASI, widened to standalone by #2895 slice 1d) a STORED/TYPED
-        // `Promise<T>` is a real `$Promise` externref (produced by wrapAsyncReturn
-        // at the call site / the drive-layer result), NOT the unwrapped `T`.
-        // Lower the value slot to externref so it matches the value end-to-end;
-        // storing the externref into an f64/struct slot would otherwise coerce
-        // `externref → f64` via __unbox_number = NaN (or an illegal struct cast).
-        //
-        // GC/host stays byte-identical: the unwrap-to-T contract only held
-        // because async fns are compiled synchronously, which is exactly when the
-        // carrier is OFF. An async fn's OWN wasm return signature pre-unwraps via
-        // unwrapPromiseType (function-body.ts / declarations.ts), so this branch
-        // is only hit for *value* slots (bindings / params / fields / non-async
-        // returns), never an async fn's own result type. externref is a leaf
-        // valtype — registers no new type, so no DCE remap / funcIdx churn.
-        if (isStandalonePromiseActive(ctx)) return { kind: "externref" };
-        return resolveWasmType(ctx, inner, _depth + 1, _visited);
+        // (#2905/#3134) A `Promise<T>` VALUE slot (local/param/field/non-async
+        // return/vec element) lowers to externref on EVERY lane — it holds a
+        // real promise, not the unwrapped `T`. Unwrapping to `T` (f64) then
+        // `__unbox_number`'d a real promise externref → NaN; externref serves
+        // the legacy sync-fakery rep too (an async call compiled synchronously
+        // returns the unwrapped f64, which boxes at the coerce and unboxes /
+        // `Promise_resolve`-assimilates on use). Unifying the rep also fixes a
+        // `Promise<T>[]` element (frame spill guess now matches the stored
+        // promise → unblocks #2967 2c class-2). An async fn's OWN return
+        // pre-unwraps via `unwrapPromiseType` before this branch. externref is
+        // a leaf valtype (no DCE/funcIdx churn). Broad rep change → full-CI A/B.
+        return { kind: "externref" };
       }
       return { kind: "externref" }; // bare Promise without type arg
     }
@@ -12181,6 +12356,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (name && !ctx.structMap.has(name)) {
       name = ctx.classExprNameMap.get(name) ?? name;
     }
+    // (#3051 Slice 3, NARROWED after the PR-#2910 merge_group park) Accessor-
+    // bearing ANONYMOUS object types are NOT blanket-lowered to externref here:
+    // #2724's guard in ensureStructForType deliberately keeps getter-ONLY
+    // literal types registered as structs because the object-REST copy paths
+    // (`{...x} = { get v() {…} }`, for-await rest) steer by that registration
+    // (struct→externref→__extern_rest_object); unregistering routed them to the
+    // externref-rest path which never invokes the getter (regressed
+    // dstr/obj-rest-getter-abrupt-get-error in the merge_group re-validation).
+    // The host-object-representation fix for CLOSURE RETURNS lives at the two
+    // return-type resolution sites in closures.ts via
+    // `resolveWasmTypeForClosureReturn` instead.
     // Check named structs (interfaces, type aliases)
     if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
       // (#1366a) Externref-backed user classes (e.g. `class Sub extends Error`)
@@ -12235,6 +12421,52 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   }
 
   return mapTsTypeToWasm(tsType, ctx.checker, ctx.fast);
+}
+
+/**
+ * (#3051 Slice 3) True when the object type carries at least one property
+ * declared as an OBJECT-LITERAL get/set accessor (`{ get x() {…} }` /
+ * `{ set x(v) {…} }`). Such values are runtime-represented as HOST plain
+ * objects (see `compileObjectLiteralWithAccessors`, #1239). Class/interface
+ * accessors (declaration parent is not an ObjectLiteralExpression) do NOT
+ * qualify — those instances keep their struct representation.
+ */
+function typeHasObjLitAccessorProperty(tsType: ts.Type): boolean {
+  for (const p of tsType.getProperties()) {
+    const decls = p.getDeclarations?.() ?? p.declarations;
+    if (!decls) continue;
+    for (const d of decls) {
+      if (
+        (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
+        d.parent != null &&
+        ts.isObjectLiteralExpression(d.parent)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * (#3051 Slice 3, narrowed) Resolve a CLOSURE/CALLBACK return type, lowering
+ * accessor-bearing anonymous object-literal types to externref. The runtime
+ * value of `{ get index() {…} }` is a HOST plain object
+ * (`compileObjectLiteralWithAccessors`, #1239); typing the closure's wasm
+ * return as the checker's struct made the return-path coercion
+ * externref→struct null-drop on the failed `ref.test` (type-coercion.ts) —
+ * a `regexp.exec` override returning a poisoned `{ get index() { throw … } }`
+ * arrived at V8's @@replace protocol as `null` (= no match) and the getter
+ * never fired (the test262 `result-get-*-err` cluster). Scoped to RETURN-type
+ * resolution ONLY: blanket-lowering these types in `resolveWasmType` broke the
+ * #2724 object-REST steering (see the note in `resolveWasmType`).
+ */
+export function resolveWasmTypeForClosureReturn(ctx: CodegenContext, retType: ts.Type): ValType {
+  const symName = retType.getSymbol()?.name;
+  if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(retType)) {
+    return { kind: "externref" };
+  }
+  return resolveWasmType(ctx, retType);
 }
 
 /**
@@ -12612,7 +12844,18 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
         : [];
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
-    const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    // (#3024) STABLE handle (#1916 S3), not the legacy live-regime
+    // `numImportFuncs + functions.length`. This pre-mint runs during the
+    // DECLARATION SCAN (via the collectEmptyObjectWidening /
+    // collectGrowableObjectLiterals pre-passes' resolveWasmType), BEFORE the
+    // import collectors — a live index minted here goes stale the moment any
+    // collector prepends an import without a fixup, and `definedFuncAt` then
+    // fails to resolve it at literal-compile time, forking a duplicate method
+    // body while trampolines keep forwarding into the stale (import-range)
+    // index ("call[0] expected externref/f64, found …" — the Array.prototype
+    // S15.4.4.x A2 valueOf cluster). A stable handle is layout-independent:
+    // shift walkers skip it and resolution happens at emit.
+    const methodFuncIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
@@ -12622,7 +12865,7 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
       body: [],
       exported: false,
     };
-    ctx.mod.functions.push(methodFunc);
+    pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
   }
 }
 
@@ -14357,22 +14600,74 @@ export function collectEnumDeclarations(ctx: CodegenContext, sourceFile: ts.Sour
  * Used by BOTH the `var` hoister and the let/const declaration path so the slot
  * type is uniform (a `var` reuses its hoisted slot, so both sites MUST agree).
  *
- * IMPORTANT — trigger on the `void`-EXPRESSION INITIALIZER ONLY, not on a bare
- * "purely `undefined`/`void` declared type". A binding can be `undefined`-typed
- * for unrelated reasons (e.g. `const afterA = obj.a` reading an optional
- * `a?: number` after `delete obj.a`), and those MUST stay a numeric slot — the
- * delete / optional-property machinery encodes `undefined` as an f64 sNaN
+ * IMPORTANT — the `void`-EXPRESSION arm triggers on the INITIALIZER ONLY, not on
+ * a bare "purely `undefined`/`void` declared type". A binding can be
+ * `undefined`-typed for unrelated reasons (e.g. `const afterA = obj.a` reading an
+ * optional `a?: number` after `delete obj.a`), and those MUST stay a numeric slot
+ * — the delete / optional-property machinery encodes `undefined` as an f64 sNaN
  * sentinel and relies on the local being f64/i32 so `afterA === undefined`
  * detects the sentinel. Forcing those to externref boxes the sentinel via
  * `__box_number` and breaks the `=== undefined` check (regressed
  * delete-sentinel #1112). The `void 0` expression is the precise, narrow signal
  * for the acorn evolving-local idiom.
+ *
+ * (#3033) SECOND arm — a member read off a DYNAMIC (externref) receiver whose
+ * static type collapses to `undefined`. compiled-acorn's `pp$5.parseIdentNode`
+ * does `var ty = this.type` where `this` is the Parser fnctor instance
+ * (externref) but the checker — unable to resolve the untyped `this`'s shape —
+ * types `this.type` as pure `undefined`. `resolveWasmType(undefined)` is a
+ * numeric (i32) slot, so the RUNTIME value (a TokenType read dynamically through
+ * `__extern_get`, returned as externref) was truncated to the i32
+ * undefined-sentinel on store → `ty` read back `undefined`, and `x.var` (any
+ * `<expr>.<keyword>` property name) threw. The read goes through the dynamic
+ * host path (receiver externref) and returns externref, so the slot must be
+ * externref to hold it. Distinguished from the #1112 sentinel case by the
+ * receiver's wasm type: an optional field off a KNOWN struct receiver resolves
+ * to `ref $struct` (NOT externref), so this arm does not fire for it and the
+ * numeric sentinel is preserved. An externref slot holding a genuine runtime
+ * `undefined` still compares `=== undefined` (the `emitUndefined` singleton), so
+ * a dynamic read that really is undefined is unaffected.
  */
-export function varBindingNeedsExternrefForUndefined(decl: ts.VariableDeclaration | undefined): boolean {
+export function varBindingNeedsExternrefForUndefined(
+  decl: ts.VariableDeclaration | undefined,
+  ctx?: CodegenContext,
+): boolean {
   // `var x = (void 0)` / `var x = void <expr>` — strip parens to find the void.
   let init = decl?.initializer;
   while (init && ts.isParenthesizedExpression(init)) init = init.expression;
-  return init !== undefined && ts.isVoidExpression(init);
+  if (init === undefined) return false;
+  if (ts.isVoidExpression(init)) return true;
+  // (#3033) Dynamic-receiver member read whose static type is purely undefined.
+  if (ctx !== undefined && (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init))) {
+    const declType = ctx.checker.getTypeAtLocation(decl!);
+    const isPurelyUndefinedOrVoid = (declType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0;
+    if (isPurelyUndefinedOrVoid && undefinedTypedMemberReadProducesExternref(ctx, init)) return true;
+  }
+  return false;
+}
+
+/**
+ * (#3033 Bug 2a/2b) Shared predicate: a property/element access whose STATIC
+ * type is purely `undefined`/`void` — the checker could not resolve the member
+ * (untyped `this` receiver in a prototype-function, heterogeneous shapes, …) —
+ * but whose RECEIVER produces an externref at runtime is a DYNAMIC member
+ * read: its runtime value is externref, NOT the numeric undefined-sentinel
+ * `resolveWasmType(undefined)` would give it. Recursive, so a CHAINED read
+ * (`this.type.keyword` — Bug 2b) is recognized: the receiver `this.type` is
+ * itself such a read. Used by BOTH the var/let slot typing
+ * (`varBindingNeedsExternrefForUndefined`, Bug 2a) and the property-access
+ * dynamic-receiver admission (`compilePropertyAccess` isExternObj, Bug 2b) so
+ * the two stay in lockstep — no parallel branch.
+ */
+export function undefinedTypedMemberReadProducesExternref(ctx: CodegenContext, expr: ts.Expression): boolean {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (!ts.isPropertyAccessExpression(e) && !ts.isElementAccessExpression(e)) return false;
+  const t = ctx.checker.getTypeAtLocation(e);
+  if ((t.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return false;
+  const recvType = ctx.checker.getTypeAtLocation(e.expression);
+  if (resolveWasmType(ctx, recvType).kind === "externref") return true;
+  return undefinedTypedMemberReadProducesExternref(ctx, e.expression);
 }
 
 export function hoistVarDeclarations(
@@ -14527,7 +14822,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl)
+      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, ctx)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);

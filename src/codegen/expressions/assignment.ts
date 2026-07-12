@@ -81,6 +81,7 @@ import {
 import { emitMappedArgParamSync, emitMappedArgReverseSync } from "./logical-ops.js";
 import { resolveStructName, resolveStructNameForExpr } from "./misc.js";
 import { tryCompileStandaloneRegExpLastIndexWrite } from "../regexp-standalone.js";
+import { tryCompileStandaloneDetachedWrite } from "../dataview-native.js"; // (#3173) $DETACHBUFFER marker write
 import { getOrRegisterErrorStructType } from "../registry/error-types.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
@@ -3282,6 +3283,17 @@ function compilePropertyAssignment(
   {
     const standaloneLastIndexWrite = tryCompileStandaloneRegExpLastIndexWrite(ctx, fctx, target, value);
     if (standaloneLastIndexWrite !== undefined) return standaloneLastIndexWrite;
+  }
+
+  // (#3173) `buf.__detached__ = true` — the test262 `$DETACHBUFFER` shim's
+  // marker write. Standalone marks the i32_byte buffer vec detached
+  // (length = −1) so the DataView accessor / byteLength detached-buffer
+  // TypeErrors fire; the host lane keeps its runtime-sidecar path untouched.
+  {
+    const detachedWrite = tryCompileStandaloneDetachedWrite(ctx, fctx, target, value, (e, hint) =>
+      compileExpression(ctx, fctx, e, hint),
+    );
+    if (detachedWrite !== undefined) return detachedWrite;
   }
 
   // Compile-away: if the target object is frozen, emit TypeError throw
@@ -6901,6 +6913,59 @@ function compilePropertyCompoundAssignmentExternref(
     flushLateImportShifts(ctx, fctx);
     if (getIdx === undefined) return null;
     fctx.body.push({ op: "call", funcIdx: getIdx });
+  }
+
+  // (#2850) `obj.prop += rhs` on a dynamic (externref/any) receiver: JS `+` is
+  // NOT numeric-only — §13.15.3 string-concatenates when either primitive is a
+  // string. The unconditional `__unbox_number → f64.add → __box_number` chain
+  // below turned acorn's `state.lastStringValue += codePointToString(ch)` into
+  // NaN, which broke EVERY multi-named-group regex ("Duplicate capture group
+  // name" — both names keyed "NaN") and EVERY `\p{…}/u` property escape
+  // ("Invalid property name" — the property name string was NaN). Route the
+  // `+=` current-value/RHS pair through the runtime-dispatched JS `+`
+  // (`__host_add`, the same bridge emitAnyAdd/#2058 uses for identifier
+  // targets). Host-lane only — standalone keeps the numeric path (its extern
+  // property surface is a different, native lowering).
+  if (op === ts.SyntaxKind.PlusEqualsToken && ctx.standalone !== true && ctx.wasi !== true) {
+    const rhsAny = compileExpression(ctx, fctx, rhs, { kind: "externref" });
+    if (!rhsAny) return null;
+    if (rhsAny.kind !== "externref") {
+      coerceType(ctx, fctx, rhsAny, { kind: "externref" });
+    }
+    const hostAddIdx = ensureLateImport(
+      ctx,
+      "__host_add",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalAddIdx = ctx.funcMap.get("__host_add") ?? hostAddIdx;
+    if (finalAddIdx === undefined) {
+      reportError(ctx, target, "Missing __host_add for compound externref property assignment");
+      return null;
+    }
+    fctx.body.push({ op: "call", funcIdx: finalAddIdx });
+    const anyResultLocal = allocLocal(fctx, `__cmpd_pany_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: anyResultLocal });
+
+    // Write back — same pinned-dispatch/bare-host split as the numeric arm.
+    const setAnyIdx = ensureLateImport(
+      ctx,
+      "__extern_set",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const anyDispatched =
+      pinnedCompound && emitAlternateStructSetDispatch(ctx, fctx, objLocal, anyResultLocal, propName, /*strict*/ false);
+    if (!anyDispatched) {
+      fctx.body.push({ op: "local.get", index: objLocal });
+      fctx.body.push({ op: "local.get", index: keyLocal });
+      fctx.body.push({ op: "local.get", index: anyResultLocal });
+      if (setAnyIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setAnyIdx });
+    }
+    fctx.body.push({ op: "local.get", index: anyResultLocal });
+    return { kind: "externref" };
   }
 
   // Ensure union imports (including __unbox_number, __box_number) are registered

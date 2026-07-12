@@ -210,20 +210,45 @@ export type JsErrorKind = "TypeError" | "RangeError" | "ReferenceError" | "Synta
  * Leaves nothing on the value stack (the `throw` is terminal / stack-polymorphic).
  */
 export function emitThrowJsError(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): void {
+  fctx.body.push(...buildThrowJsErrorInstrs(ctx, fctx, kind, message));
+}
+
+/**
+ * (#3175) Same real-instance `<Kind>`-throw lowering as {@link emitThrowJsError},
+ * but RETURNS the terminal instruction sequence instead of pushing it, so it can
+ * be spliced into a nested `if.then` array (a CONDITIONAL throw — e.g. the
+ * `Number.prototype.toString(radix)` out-of-2..36 / `toFixed(digits)` out-of-
+ * 0..100 RangeError gates). Those gates previously threw a BARE STRING via the
+ * shared `$exc` tag, so `e instanceof RangeError` was false and the raw-`try`/
+ * `catch` + `assert(e instanceof RangeError)` corpus (S15.7.4.5 A1.3/A1.4) failed.
+ *
+ * As a side effect it registers the constructor / string constant and flushes
+ * any late-import index shift against the CURRENT `fctx.body` (so the returned
+ * `call` funcIdx is stable). Callers must therefore have already pushed the
+ * condition instructions before calling this — the shift correctly relocates any
+ * funcIdx baked into them.
+ */
+export function buildThrowJsErrorInstrs(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  kind: JsErrorKind,
+  message: string,
+): Instr[] {
   if (noJsHost(ctx)) {
     emitWasiErrorConstructor(ctx, kind, 1);
   }
   addStringConstantGlobal(ctx, message);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
   const ctorIdx = ensureLateImport(ctx, `__new_${kind}`, [{ kind: "externref" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  if (ctorIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: ctorIdx });
-  }
+  const tagIdx = ensureExnTag(ctx);
+  const instrs: Instr[] = [...stringConstantExternrefInstrs(ctx, message)];
   // If the constructor isn't available, the message externref is still on the
   // stack — degrade to throwing a string. Both paths produce the same tag.
-  const tagIdx = ensureExnTag(ctx);
-  fctx.body.push({ op: "throw", tagIdx });
+  if (ctorIdx !== undefined) {
+    instrs.push({ op: "call", funcIdx: ctorIdx });
+  }
+  instrs.push({ op: "throw", tagIdx });
+  return instrs;
 }
 
 /**

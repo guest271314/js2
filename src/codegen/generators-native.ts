@@ -1636,7 +1636,90 @@ function methodBodyUsesSuper(body: ts.Node): boolean {
  * the state model treat them uniformly; the only method-specific handling is the
  * synthetic `this` leading param (threaded in `registerNativeGenerator`).
  */
-export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration;
+export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration | ts.FunctionExpression;
+
+/**
+ * (#3164) Generator FUNCTION EXPRESSIONS (`var g = function*(){…}`, the dstr
+ * harness IIFE `var iter = function*(){…}()`) are candidates too: the closure
+ * lowering (closures.ts) registers them under their lifted `__closure_<n>` name
+ * with the closure `__self` param threaded as a leading synthetic capture, and
+ * the lifted body emits the native state-struct factory instead of the
+ * eager-buffer host path. This is the fn-expr-specific shape gate consumed by
+ * `isNativeGeneratorCandidate` — slice 1 (#3164):
+ *   - identifier-only params, no default/optional/rest (the closure trampoline's
+ *     argc/default machinery is NOT threaded through the state struct; a param
+ *     default's evaluation is a CALL-time observable per §27.5/EvaluateGeneratorBody,
+ *     which the resume-time model cannot honor);
+ *   - no `arguments` (the eager path builds the arguments vec; the state struct
+ *     has no slot for it);
+ *   - no `this` (a bare function expression's `this` is call-site dependent; the
+ *     state-struct model has no receiver slot for the non-method case);
+ *   - a NAMED fn-expr must not reference its own name (the self-binding scope
+ *     rides `__self` in the closure model, which the resume function lacks);
+ *   - no outer-scope capture (checked by the caller via
+ *     `generatorCapturesOuterScope`, same as methods).
+ */
+function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.FunctionExpression): boolean {
+  if (!decl.body) return false;
+  for (const param of decl.parameters) {
+    if (!ts.isIdentifier(param.name)) return false;
+    if (param.initializer || param.questionToken || param.dotDotDotToken) return false;
+  }
+  if (bodyUsesArguments(decl.body)) return false;
+  if (fnExprBodyReferencesThis(decl.body)) return false;
+  if (decl.name && bodyReferencesOwnName(decl.body, decl.name.text)) return false;
+  if (generatorCapturesOuterScope(ctx, decl)) return false;
+  return true;
+}
+
+/**
+ * (#3164) `this` (or `super`) anywhere in the fn-expr body, EXCLUDING nested
+ * non-arrow function scopes (their `this` is their own). An arrow's `this` IS
+ * the generator's, so arrows are descended into.
+ */
+function fnExprBodyReferencesThis(body: ts.Node): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    // Nested non-arrow function-likes rebind `this` — do not descend.
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(body, visit);
+  return found;
+}
+
+/**
+ * (#3164) Conservative: any identifier in the body textually equal to the named
+ * fn-expr's own name counts as a self-reference (shadowing not modeled — an
+ * over-bail keeps the host path, never a wrong compile).
+ */
+function bodyReferencesOwnName(body: ts.Node, name: string): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (ts.isIdentifier(node) && node.text === name) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(body, visit);
+  return found;
+}
 
 /**
  * (#3050) True when the generator body contains a try statement that crosses a
@@ -1877,7 +1960,17 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     // anything else keeps the eager path.
     if (!hostLaneGeneratorUsesAreSafe(ctx, decl)) return false;
   }
-  if (!decl.name || !decl.body || !decl.asteriskToken) return false;
+  if (!decl.body || !decl.asteriskToken) return false;
+  // (#3164) A FunctionExpression may be anonymous — its native registration
+  // rides a synthetic lifted-closure name supplied by the emit site
+  // (closures.ts). Everything else still requires a name (funcMap key).
+  if (!decl.name && !ts.isFunctionExpression(decl)) return false;
+  // (#3164) Fn-expr-specific shape gate (identifier-only params, no
+  // `this`/`arguments`, no self-name reference, no outer capture). Applied
+  // here — the SINGLE candidate gate — so `sourceNeedsGeneratorHostImports`,
+  // `registerNativeGenerator`, and the closures.ts emit site all agree
+  // (disagreement bakes an undefined `__gen_*` funcIdx → invalid module).
+  if (ts.isFunctionExpression(decl) && !isNativeGeneratorExpressionShape(ctx, decl)) return false;
   // (#2571) An object-literal method with a computed/string name
   // (`{ [k]*(){} }`, `{ "m"*(){} }`) is out of scope — only an identifier-named
   // method threads cleanly through the funcMap key. A FunctionDeclaration name
@@ -2081,7 +2174,14 @@ export function sourceNeedsGeneratorHostImports(ctx: CodegenContext, sourceFile:
     }
     if (ts.isFunctionExpression(node) && node.asteriskToken) {
       found = true;
-      needsHost = true;
+      // (#3164) A generator FUNCTION EXPRESSION no longer forces the host
+      // imports when the extended candidate gate admits it (zero/identifier
+      // params, no `this`/`arguments`/self-name/capture — the fn-expr arm of
+      // `isNativeGeneratorCandidate`); the closures.ts emit site routes it
+      // through the native state-struct factory. Any bail (including async —
+      // the modifiers check inside the candidate) keeps the imports
+      // registered, exactly like the declaration/method branches.
+      if (!node.body || !isNativeGeneratorCandidate(ctx, node)) needsHost = true;
       return;
     }
     if (ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
@@ -3854,6 +3954,37 @@ function compileDirectNativeGeneratorMethod(
   return undefined;
 }
 
+/**
+ * (#3164) Host-generator mix fallback deps for the open dispatch. Present when
+ * the host `__gen_*` machinery is registered in this module (some generator
+ * bailed to the eager-buffer path) — the dispatch then gains a host arm for
+ * receivers that are HOST generator objects. All funcIdx values are funcMap
+ * lookups made at emit time by the caller; no new imports are added.
+ */
+interface HostGenMixDeps {
+  /** `__gen_next` / `__gen_return` / `__gen_throw` (per method). */
+  callIdx: number;
+  /** `__gen_result_value(res) -> externref`. */
+  resultValueIdx: number;
+  /** `__gen_result_done(res) -> i32`. */
+  resultDoneIdx: number;
+  /** Caller-allocated externref scratch for the host result. */
+  hostResLocal: number;
+  /** `__NativeGeneratorResult_externref` struct typeIdx (the wrap target). */
+  extResultTypeIdx: number;
+}
+
+/**
+ * (#3164) Abstract heap-type codes for the host-external `ref.test`
+ * classification (same trick as iterator-native.ts's HOSTGEN arm): an
+ * internalized host external is neither struct nor array nor i31. Negative
+ * values are abstract heap-type codes (one signed-LEB byte at emit) and are
+ * never present in any DCE type-remap map.
+ */
+const HEAP_TYPE_STRUCT = -21; // 0x6B
+const HEAP_TYPE_ARRAY = -22; // 0x6A
+const HEAP_TYPE_I31 = -20; // 0x6C
+
 function buildNativeGeneratorDispatch(
   ctx: CodegenContext,
   anyLocal: number,
@@ -3868,6 +3999,8 @@ function buildNativeGeneratorDispatch(
   valueAnyLocal?: number,
   // (#2864 F2) externref error local for `.throw(e)`.
   errorLocal?: number,
+  // (#3164) Host-generator mix fallback deps — see tryCompileNativeGeneratorMethodCall.
+  hostMix?: HostGenMixDeps,
 ): { instrs: Instr[]; resultType: ValType } {
   const infos = Array.from(ctx.nativeGenerators.values());
   // (#2864 F1 / #2892) The enclosing dispatch block must accept every branch's
@@ -3896,6 +4029,12 @@ function buildNativeGeneratorDispatch(
     // No generators registered (defensive) — fall back to the f64 singleton.
     resultType = { kind: "ref", typeIdx: ensureNativeGeneratorResultType(ctx) };
   }
+  // (#3164) The host-mix arm produces `ref __NativeGeneratorResult_externref`
+  // — force the eqref supertype unless every branch already produces exactly
+  // that struct.
+  if (hostMix && !(distinctResultIdxs.size === 1 && infos[0]!.resultTypeIdx === hostMix.extResultTypeIdx)) {
+    resultType = { kind: "eqref" };
+  }
   // The per-branch `.next(v)`/`.return(v)` value local: an any-carrier branch
   // consumes the externref `valueAnyLocal`; numeric / string branches consume the
   // f64 `valueLocal` (unchanged). `valueLocal` is always present when valueAnyLocal
@@ -3908,8 +4047,66 @@ function buildNativeGeneratorDispatch(
   // TypeError (a real `__new_TypeError` instance + `throw $exc`), never the old
   // silent `{value: 0, done: true}` sentinel. `throw` is stack-polymorphic, so
   // it satisfies the enclosing block's `resultType` without leaving a value.
-  const fallback: Instr[] = [];
-  emitBrandCheckTypeError(ctx, fallback, `Generator.prototype.${methodName} requires that 'this' be a Generator`);
+  const typeErrArm: Instr[] = [];
+  emitBrandCheckTypeError(ctx, typeErrArm, `Generator.prototype.${methodName} requires that 'this' be a Generator`);
+  // (#3164) With the host machinery registered, a HOST generator object — an
+  // internalized external, so neither struct nor array nor i31 — routes to the
+  // host `__gen_*` arm; internal non-generators keep the #1344 TypeError.
+  let fallback: Instr[] = typeErrArm;
+  if (hostMix) {
+    const hostCall: Instr[] = [{ op: "local.get", index: anyLocal }, { op: "extern.convert_any" } as Instr];
+    if (methodName === "return") {
+      // `gen.return(v)` — the host import takes (gen, value externref). Prefer
+      // the already-externref `valueAnyLocal`; otherwise box the f64 value
+      // (best-effort: `__box_number` is registered whenever union imports are —
+      // which any generator module has; a missing boxer degrades to undefined).
+      if (valueAnyLocal !== undefined) {
+        hostCall.push({ op: "local.get", index: valueAnyLocal });
+      } else {
+        const boxIdx = ctx.funcMap.get("__box_number");
+        if (boxIdx !== undefined && valueLocal !== undefined) {
+          hostCall.push({ op: "local.get", index: valueLocal }, { op: "call", funcIdx: boxIdx } as Instr);
+        } else {
+          hostCall.push({ op: "ref.null.extern" } as Instr);
+        }
+      }
+    } else if (methodName === "throw") {
+      hostCall.push(
+        errorLocal !== undefined
+          ? ({ op: "local.get", index: errorLocal } as Instr)
+          : ({ op: "ref.null.extern" } as Instr),
+      );
+    }
+    hostCall.push(
+      { op: "call", funcIdx: hostMix.callIdx } as Instr,
+      { op: "local.set", index: hostMix.hostResLocal } as Instr,
+      // Wrap {value, done} into the externref-elem native result struct so the
+      // arm satisfies the dispatch block type and downstream `.value`/`.done`
+      // reads dispatch on it like any native result.
+      { op: "local.get", index: hostMix.hostResLocal } as Instr,
+      { op: "call", funcIdx: hostMix.resultValueIdx } as Instr,
+      { op: "local.get", index: hostMix.hostResLocal } as Instr,
+      { op: "call", funcIdx: hostMix.resultDoneIdx } as Instr,
+      { op: "struct.new", typeIdx: hostMix.extResultTypeIdx } as Instr,
+    );
+    fallback = [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: HEAP_TYPE_STRUCT } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: HEAP_TYPE_ARRAY } as Instr,
+      { op: "i32.or" } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: HEAP_TYPE_I31 } as Instr,
+      { op: "i32.or" } as Instr,
+      { op: "i32.eqz" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: resultType },
+        then: hostCall,
+        else: typeErrArm,
+      } as Instr,
+    ];
+  }
 
   function branch(index: number): Instr[] {
     if (index >= infos.length) return fallback;
@@ -4117,6 +4314,35 @@ export function tryCompileNativeGeneratorMethodCall(
     }
   }
 
+  // (#3164) HOST-generator mix fallback. A module can carry BOTH native
+  // generators (fn-expr closures, native methods) AND host eager-buffer
+  // generators (bailed shapes) — the open dispatch's receiver can then be a
+  // HOST generator object, which matches none of the native state types. The
+  // old miss arm threw the #1344 GeneratorValidate TypeError unconditionally,
+  // which broke every mixed module (`Generator.prototype.next requires that
+  // 'this' be a Generator` on a REAL host generator). When the host `__gen_*`
+  // machinery is registered (i.e. some generator in this module DID bail —
+  // presence in funcMap; this never adds imports), give the dispatch a host
+  // arm keyed on the HOSTGEN classification (an internalized host external is
+  // neither struct nor array nor i31): call the host `__gen_next/return/throw`
+  // and wrap its result into the externref-elem native result struct. Internal
+  // non-generators (a plain `$Object`, an i31) keep the #1344 TypeError.
+  let hostMix: HostGenMixDeps | undefined;
+  const hostCallIdx = ctx.funcMap.get(
+    methodName === "next" ? "__gen_next" : methodName === "return" ? "__gen_return" : "__gen_throw",
+  );
+  const hostResValueIdx = ctx.funcMap.get("__gen_result_value");
+  const hostResDoneIdx = ctx.funcMap.get("__gen_result_done");
+  if (hostCallIdx !== undefined && hostResValueIdx !== undefined && hostResDoneIdx !== undefined) {
+    hostMix = {
+      callIdx: hostCallIdx,
+      resultValueIdx: hostResValueIdx,
+      resultDoneIdx: hostResDoneIdx,
+      hostResLocal: allocLocal(fctx, `__gen_host_res_${fctx.locals.length}`, { kind: "externref" }),
+      extResultTypeIdx: ensureNativeGeneratorResultType(ctx, { kind: "externref" }),
+    };
+  }
+
   const { instrs, resultType } = buildNativeGeneratorDispatch(
     ctx,
     anyLocal,
@@ -4124,6 +4350,7 @@ export function tryCompileNativeGeneratorMethodCall(
     valueLocal,
     valueAnyLocal,
     errorLocal,
+    hostMix,
   );
   fctx.body.push(...instrs);
   return resultType;
@@ -4192,6 +4419,12 @@ export function tryCompileNativeGeneratorResultProperty(
   };
   if (ctx.nativeGeneratorResultTypeIdx >= 0) pushEntry(ctx.nativeGeneratorResultTypeIdx, { kind: "f64" });
   for (const info of ctx.nativeGenerators.values()) pushEntry(info.resultTypeIdx, info.elemValType);
+  // (#3164) The host-mix dispatch arm wraps a HOST generator's result into the
+  // externref-elem result struct, which may not belong to any REGISTERED
+  // native generator — include it whenever it exists so `.done`/`.value` reads
+  // on a host-wrapped result dispatch like any native result.
+  const extResIdx = ctx.structMap.get("__NativeGeneratorResult_externref");
+  if (extResIdx !== undefined) pushEntry(extResIdx, { kind: "externref" });
 
   if (propName === "done") {
     // `done` is i32 for every carrier — test each result type, read field 1.

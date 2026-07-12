@@ -233,9 +233,11 @@ export interface NativeGeneratorInfo {
    * class / object-literal generator method is a `ts.MethodDeclaration`; it
    * shares `.body` / `.parameters` / `.asteriskToken` with FunctionDeclaration,
    * and the native lowering treats an instance method's `this` as a synthetic
-   * leading param (see `registerNativeGenerator`).
+   * leading param (see `registerNativeGenerator`). (#3164) A generator
+   * FUNCTION EXPRESSION registers under its lifted `__closure_<n>` name with
+   * the closure `__self` param threaded as a leading synthetic capture.
    */
-  decl: ts.FunctionDeclaration | ts.MethodDeclaration;
+  decl: ts.FunctionDeclaration | ts.MethodDeclaration | ts.FunctionExpression;
   /**
    * (#2571) When `decl` is a non-static instance generator METHOD, the receiver
    * is threaded as a synthetic leading param named `"this"` (state field
@@ -472,15 +474,6 @@ export interface FunctionContext {
    * behaviour) when this flag is set — no regression.
    */
   emittedClosureArrayMethod?: boolean;
-  /**
-   * (#1042) True while {@link emitAsyncStateMachine} is driving an async
-   * function body through the CPS transform. Read by the `AwaitExpression`
-   * dispatcher in expressions.ts to decide between the legacy pass-through and
-   * a continuation split. Inert in #1042 PR1 (the activation hook is unwired
-   * and `ASYNC_CPS_ENABLED` is false), so it stays undefined/false and the
-   * emitted Wasm is byte-identical.
-   */
-  asyncCpsActive?: boolean;
   /**
    * (#2895 PATH B) Set while emitting a host-free async **resume** function body
    * (`__async_resume_f<name>`). When present, `return v` settles the frame's
@@ -1809,6 +1802,20 @@ export interface CodegenContext {
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
   anyValueTypeIdx: number;
+  /**
+   * (#3169) The `any === any` binary expression whose operands are CURRENTLY
+   * being compiled through the `$AnyValue` equality dispatch
+   * (`compileAnyBinaryDispatch` → emitStrictEq/emitLooseEq), set/restored
+   * around that call in binary-ops.ts. The #3037 read-carrier
+   * (`maybeWrapAnyReadEqualityCarrier`) fires ONLY when its operand's parent
+   * is this expression — guaranteeing the `ref $AnyValue` it produces is
+   * consumed by `__any_strict_eq` and never by an equality path chosen while
+   * `$AnyValue` was still unregistered (a mid-operand lazy registration flips
+   * `anyValueTypeIdx` ≥ 0 AFTER binary-ops' entry decision — the
+   * `obj[idx] !== val` spurious-neq hazard). `undefined` when no any-equality
+   * dispatch is active.
+   */
+  activeAnyEqDispatchExpr?: ts.BinaryExpression;
   /**
    * (#2106 S1) Global index of the standalone `$undefined` singleton — an
    * immutable tag-1 `$AnyValue`, reserved up-front at `ensureAnyValueType` time

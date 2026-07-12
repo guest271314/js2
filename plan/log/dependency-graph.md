@@ -716,3 +716,55 @@ Edition-gap issues with their sub-dependencies (umbrella → concrete slices):
 
 Edges: #2668 → #2671(JSON); #2580 ↔ #2670(length); #1642+#2566+#1556 ⊂ #2669.
 Deprioritized (eval/dynamic-code): #1066 #1102 #1240 #1263-#1266 — not scheduled.
+
+## 2026-07-12 — #2860 standalone-gap method-family slices (PO grooming)
+
+Nine fresh, independently-claimable slices of umbrella #2860 (lane-baseline
+remeasure 2026-07-12: honest gap 12,801). All `sprint: current`,
+`priority: high`, `feasibility: hard`, `umbrella: 2860`:
+
+- **#3169** Array.prototype callback HOFs over array-like receivers (519, L) —
+  mechanism-twin of host-lane #2670 (in-progress, test sets disjoint).
+- **#3170** Array indexOf/lastIndexOf/includes as-value + array-likes (125, M)
+  — value-read side; sequences with #3169's receiver ladder.
+- **#3171** Map/Set/WeakMap/WeakSet receiver brand-check protocol (~142, M).
+- **#3172** Set-algebra set-like protocol + getOrInsert(Computed) (120, M) —
+  shares #3171's brand gate.
+- ~~**#3173** DataView get*/set* spec semantics (230, L)~~ — DONE (217/230
+  flipped; 7 residual rows blocked on the #3179 any-array index-read family).
+- **#3174** Date brand + ToPrimitive coercion order (107, M) — slices #2671.
+- **#3175** Number.prototype toString(radix)/toFixed/valueOf (74, M).
+- **#3176** JSON parse/stringify residual (67, M) — slices #2671; array-holder
+  reviver arm extends #3046.
+- **#3177** TypedArrayConstructors internals + ctor protocols (356, L) — the
+  #3027-recommended "~350" slice; MUST NOT touch #2872's TypedArray/prototype
+  arms without owner sync.
+
+Edges: #3169 → #3170 (receiver ladder before/alongside value-read);
+#3171 → #3172, #3174 (shared brand-preamble helper); #2992 (in-progress)
+owns the defineProperty/create descriptor cluster — deliberately not sliced.
+
+## 2026-07-12 — #3178 host async-machinery retirement family (architect)
+
+Umbrella **#3178** (sprint: current, XL): the 4,467-leaky-pass generator/
+async/Promise host-import family — the largest standalone lever (~10.3 pts).
+Native substrate exists (microtask ring / $Promise / #2906 N-state machine);
+the family is admission-coverage slices:
+
+- **S1 = #3164** sync gen fn-expressions (~1,741 leaky, plan ready, fable-now)
+- **S2 = #3132** async-gen methods/yield*/return (~2,408, in-progress)
+- **S3** capturing generators → ref-cell capture slots (NEW child at staffing;
+  opus-design; coordinate #3032)
+- **S4** for-await-of dstr legacy async lowering (90; NEW child; overlaps #2602)
+- **S5/S6 = #2903** R1–R4 (non-inline executor, extends-Promise, lazy Iterator
+  helpers, TypedArray callbacks — all fable-now, re-grounded 2026-07-12)
+- **S7** `__get_caught_exception` zero-assert (mechanical, last)
+
+**#2040** re-grounded + restaffable (`ready`, sprint: current): slices 1–4
+(lazy defaults 198 / obj-rest ToPrimitive 190 / abrupt step-err 115 / gen
+brand-check 48) fable-now; A1 rest-identity (382) stays BLOCKED on
+#2580 M2/#3032/#3053 — do not re-attempt the tag-5 classifier. **#2723**
+(RegExp linear) plan confirmed adequate; stays Backlog below the async family.
+
+Edges: #3164 → #3178-S3 (same admission seam); #3132 ∥ #3164 ∥ #2903-R;
+#2040 slices ⊥ all of the above; #3178-S7 after S1+S2.

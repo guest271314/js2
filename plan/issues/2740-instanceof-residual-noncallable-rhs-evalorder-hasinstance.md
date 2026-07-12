@@ -1,10 +1,12 @@
 ---
 id: 2740
 title: "[UMBRELLA] instanceof residual after #2702 — 5 deep gaps, split into #2763/#2764/#2765"
-status: ready
+status: done
 sprint: current
 created: 2026-06-27
-updated: 2026-06-28
+updated: 2026-07-12
+completed: 2026-07-12
+assignee: ttraenkler/agent-a30d0acc00d3c78c5
 priority: medium
 horizon: s
 feasibility: hard
@@ -17,6 +19,11 @@ goal: test262-conformance
 parent: 2702
 depends_on: []
 children: [2763, 2764, 2765]
+# (#2740 close-out) the decidable non-callable dynamic RHS TypeError lives in
+# _instanceofResult — runtime.ts is the host-boundary subsystem this fix
+# belongs to; the +20 lines are the guarded step-1/step-4 branches + rationale.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 # #2740 — `instanceof` residual after #2702 (UMBRELLA — do not implement directly)
 
@@ -69,3 +76,37 @@ deferred list).
 - Spec: ES2023 §13.10.2 `InstanceofOperator`, §7.3.20 `OrdinaryHasInstance`.
 - No-regression bar for every sub-issue: the 28 instanceof tests currently green
   must stay green.
+
+## Test Results (2026-07-12 close-out verification)
+
+Local sweep of `test262/test/language/expressions/instanceof/` (43 tests):
+**29 pass / 14 fail** (28/15 at split time — `symbol-hasinstance-invocation`
+flipped to pass when #2764 landed; all four `symbol-hasinstance-*` tests green).
+
+Targeted probes confirm the operator semantics named in the original title are
+correct on main:
+- @@hasInstance dispatch on a non-callable RHS (step 2 before step 4) ✓
+- handler invoked at arity 1, ToBoolean coercion, throwing handler propagates ✓
+- eval order LHS→RHS with the non-object-RHS TypeError after both operands ✓
+
+**Residual fixed under this umbrella** (`_instanceofResult`, `src/runtime.ts`):
+a *decidably* non-callable dynamic RHS — a host (non-WasmGC-struct) object such
+as `Math` or an array reaching `__instanceof_check` through an any-typed
+variable — now throws TypeError per §13.10.2 step 4 instead of answering
+`false`. Guards:
+- `_wrapForHost` proxies (present as host objects but wrap structs of
+  undecidable callability) fall through to the conservative struct path;
+- `null`/`undefined` dynamic RHS stays conservatively `false`: the params+body
+  `Function("name", "body")` form STILL lowers to `null` (verified 2026-07-12;
+  only the body-only / `new Function()` forms yield real closures), and
+  throwing regresses S15.3.5.3_A1_T1..T8 (`primitive instanceof FACTORY` must
+  be `false`). Lift only when that form returns a real callable (#2763).
+- WasmGC data structs stay conservatively `false` unless they carry an own
+  `@@hasInstance`: class constructors / instances / object literals share one
+  representation (`__is_closure`=0, `__is_data_struct`=1) until the class-value
+  rep unification (#2763/#3134).
+
+Tests: `tests/issue-2740.test.ts` (12 cases incl. the two guard cases). The 14
+remaining sweep failures are exactly the #2763 (cross-realm identity, dynamic-
+Function `.prototype`) and #2765 (prototype getter/proto chain, undeclared-
+global ReferenceError) clusters — tracked there, not here.

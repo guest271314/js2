@@ -84,6 +84,8 @@ import { UNDEF_F64_BITS } from "./value-tags.js";
 import { buildIsUndefinedExternBody, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
+import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
+import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
@@ -133,6 +135,13 @@ const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
 const OBJ_FLAG_NONEXTENSIBLE = 0x01;
 const OBJ_FLAG_SEALED = 0x02;
 const OBJ_FLAG_FROZEN = 0x04;
+// (#3176) `[[IsRawJSON]]` internal-slot marker for the ES2025 `JSON.rawJSON`
+// carrier. Set on the `$Object.flags` field (a genuine internal slot, NOT an
+// own property — so a plain `{ rawJSON: '…' }` is distinguishable from a real
+// raw-JSON object). `JSON.isRawJSON` reads this bit. 0x10+ remain free; the
+// isFrozen/isSealed/isExtensible helpers mask only their own bits, so this is
+// inert to them.
+export const OBJ_FLAG_RAWJSON = 0x08;
 
 /**
  * Type indices for the open-object runtime structs/arrays, allocated once per
@@ -5103,6 +5112,127 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // #2042 S4 — ValidateAndApplyPropertyDescriptor preflight (throws on an
       // invalid (re)definition before any table mutation).
       ...s4Preflight,
+      // (#2992 S3) EXISTING live entry → §10.1.6.3 steps 5-10 in-place MERGE.
+      // A partial descriptor must PRESERVE every unspecified attribute and the
+      // current [[Value]]; the old blanket `__obj_insert` reset unspecified
+      // attrs to false, clobbered the value with the (null) value param on a
+      // flags-only define, and wiped FLAG_ACCESSOR off accessor properties
+      // (15.2.3.6-4-82-*, -107, -75; the "obj.prop stays 2010" family).
+      // e (local 11) and efl (local 12) were resolved by the preflight.
+      { op: "local.get", index: 11 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // spec = (hf >> 3) & 7 — the host "specified" bits 3/4/5 shift onto
+          // the native W/E/C bit positions 0/1/2 (locals 6/7 are scratch here;
+          // the merge path returns before the grow section reuses them).
+          { op: "local.get", index: 9 },
+          { op: "i32.const", value: 3 },
+          { op: "i32.shr_u" },
+          { op: "i32.const", value: 7 },
+          { op: "i32.and" },
+          { op: "local.set", index: 6 },
+          // mergedWEC = ((efl & 7) & ~spec) | (hf & spec)
+          { op: "local.get", index: 12 },
+          { op: "i32.const", value: 7 },
+          { op: "i32.and" },
+          { op: "local.get", index: 6 },
+          { op: "i32.const", value: -1 },
+          { op: "i32.xor" },
+          { op: "i32.and" },
+          { op: "local.get", index: 9 },
+          { op: "local.get", index: 6 },
+          { op: "i32.and" },
+          { op: "i32.or" },
+          { op: "local.set", index: 7 },
+          // nf = (efl & ~0x0F) | mergedWEC  (clears W/E/C + FLAG_ACCESSOR;
+          // any other entry bits are preserved)
+          { op: "local.get", index: 12 },
+          { op: "i32.const", value: -16 },
+          { op: "i32.and" },
+          { op: "local.get", index: 7 },
+          { op: "i32.or" },
+          { op: "local.set", index: 8 },
+          // keepAccessor = existing accessor AND a GENERIC desc (no [[Value]],
+          // no [[Writable]]) — §10.1.6.3 step 6: generic descs only touch
+          // attributes, the accessor halves stay live.
+          ...eflBit(FLAG_ACCESSOR),
+          { op: "local.get", index: 9 },
+          { op: "i32.const", value: HOST_HAS_VALUE | HOST_WRITABLE_SPECIFIED },
+          { op: "i32.and" },
+          { op: "i32.eqz" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // flags-only update of an accessor: e.flags = nf | FLAG_ACCESSOR
+              { op: "local.get", index: 11 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 8 },
+              { op: "i32.const", value: FLAG_ACCESSOR },
+              { op: "i32.or" },
+              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+            ],
+            else: [
+              // data result: e.flags = nf (FLAG_ACCESSOR cleared)
+              { op: "local.get", index: 11 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 8 },
+              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+              // [[Value]]: specified → overwrite; converting accessor→data →
+              // undefined (null slot); otherwise PRESERVE the current value.
+              ...hfBit(HOST_HAS_VALUE),
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 11 },
+                  { op: "ref.as_non_null" },
+                  { op: "local.get", index: 2 },
+                  { op: "any.convert_extern" },
+                  { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+                ],
+                else: [
+                  ...eflBit(FLAG_ACCESSOR),
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: 11 },
+                      { op: "ref.as_non_null" },
+                      { op: "ref.null", typeIdx: NONE_HEAP },
+                      { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+                    ],
+                  } as Instr,
+                ],
+              } as Instr,
+              // converting accessor→data: clear the stale get/set slots.
+              ...eflBit(FLAG_ACCESSOR),
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 11 },
+                  { op: "ref.as_non_null" },
+                  { op: "ref.null", typeIdx: NONE_HEAP },
+                  { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+                  { op: "local.get", index: 11 },
+                  { op: "ref.as_non_null" },
+                  { op: "ref.null", typeIdx: NONE_HEAP },
+                  { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+                ],
+              } as Instr,
+            ],
+          } as Instr,
+          // merged in place — return O.
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      } as Instr,
       // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
       { op: "local.get", index: 4 },
       { op: "ref.as_non_null" },
@@ -5210,8 +5340,51 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=obj 1=key 2=getter(externref) 3=setter(externref) 4=flagsF64
   // locals: 5=o(ref null $Object) 6=any(anyref) 7=cap 8=load 9=nflags(i32) 10=hf(i32) 11=seq 12=e(ref null $PropEntry)
+  //         13=efl(i32) 14=getSpec(i32) 15=setSpec(i32)  — #2992 S3 merge
   {
     const NATIVE_ATTR_MASK = FLAG_ENUMERABLE | FLAG_CONFIGURABLE; // 0x06 — accessors carry no WRITABLE
+    // (#2992 S3) §10.1.6.3 ValidateAndApplyPropertyDescriptor for the accessor
+    // define: partial descriptors MERGE into an existing entry (an absent
+    // get/set half PRESERVES the live half; absent enumerable/configurable
+    // preserve the current attribute), and a non-configurable current property
+    // rejects the forbidden transitions with a catchable TypeError. The host
+    // f64 flag word grows two "specified" bits for the halves:
+    //   bit 8: [[Get]] specified      bit 9: [[Set]] specified
+    // LEGACY compatibility: callers that set NEITHER bit (object-literal
+    // accessor pairs, pre-slice emit sites) mean "both halves specified" —
+    // the historical replace-both behavior.
+    addUnionImportsViaRegistry(ctx);
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+    const accTypeErrorCtorIdx = ctx.funcMap.get("__new_TypeError")!;
+    const accExnTagIdx = ensureExnTag(ctx);
+    const accObjectIsIdx = ctx.funcMap.get("__object_is")!;
+    const ACC_HOST_ENUMERABLE_SPECIFIED = 1 << 4;
+    const ACC_HOST_CONFIGURABLE_SPECIFIED = 1 << 5;
+    const ACC_HOST_GET_SPECIFIED = 1 << 8;
+    const ACC_HOST_SET_SPECIFIED = 1 << 9;
+    const accThrow = (message: string): Instr[] => {
+      addStringConstantGlobal(ctx, message);
+      return [
+        ...stringConstantExternrefInstrs(ctx, message),
+        { op: "call", funcIdx: accTypeErrorCtorIdx },
+        { op: "throw", tagIdx: accExnTagIdx } as Instr,
+      ];
+    };
+    // `(hf & bit) != 0` / `(efl & bit) != 0` as i32 0/1.
+    const accHfBit = (bit: number): Instr[] => [
+      { op: "local.get", index: 10 },
+      { op: "i32.const", value: bit },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+    ];
+    const accEflBit = (bit: number): Instr[] => [
+      { op: "local.get", index: 13 },
+      { op: "i32.const", value: bit },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+    ];
     const body: Instr[] = [
       // any = any.convert_extern(obj) ; if !$Object → return obj (lenient no-op)
       { op: "local.get", index: 0 },
@@ -5232,6 +5405,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 4 },
       { op: "i32.trunc_f64_s" },
       { op: "local.set", index: 10 },
+      // getSpec/setSpec — legacy fallback: no bit 8/9 set ⇒ both specified.
+      { op: "local.get", index: 10 },
+      { op: "i32.const", value: ACC_HOST_GET_SPECIFIED | ACC_HOST_SET_SPECIFIED },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          ...accHfBit(ACC_HOST_GET_SPECIFIED),
+          { op: "local.set", index: 14 },
+          ...accHfBit(ACC_HOST_SET_SPECIFIED),
+          { op: "local.set", index: 15 },
+        ],
+        else: [
+          { op: "i32.const", value: 1 },
+          { op: "local.set", index: 14 },
+          { op: "i32.const", value: 1 },
+          { op: "local.set", index: 15 },
+        ],
+      },
       // nflags = (hf & (ENUMERABLE|CONFIGURABLE)) | FLAG_ACCESSOR
       { op: "local.get", index: 10 },
       { op: "i32.const", value: NATIVE_ATTR_MASK },
@@ -5239,6 +5432,197 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "i32.const", value: FLAG_ACCESSOR },
       { op: "i32.or" },
       { op: "local.set", index: 9 },
+      // (#2992 S3) e = __obj_find(o, key) — existing live entry → validate + merge in place.
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 12 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // efl = e.flags
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+          { op: "local.set", index: 13 },
+          // non-configurable current → §10.1.6.3 step 7 rejections
+          ...accEflBit(FLAG_CONFIGURABLE),
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // 7.a configurable:true requested
+              ...accHfBit(ACC_HOST_CONFIGURABLE_SPECIFIED),
+              ...accHfBit(1 << 2),
+              { op: "i32.and" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: accThrow(
+                  "TypeError: Cannot redefine property: configurable attribute of a non-configurable property",
+                ),
+              } as Instr,
+              // 7.b enumerable flip requested
+              ...accHfBit(ACC_HOST_ENUMERABLE_SPECIFIED),
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...accHfBit(1 << 1),
+                  ...accEflBit(FLAG_ENUMERABLE),
+                  { op: "i32.ne" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: accThrow(
+                      "TypeError: Cannot redefine property: enumerable attribute of a non-configurable property",
+                    ),
+                  } as Instr,
+                ],
+              } as Instr,
+              // 7.c current is a data property → data→accessor conversion forbidden
+              ...accEflBit(FLAG_ACCESSOR),
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: accThrow(
+                  "TypeError: Cannot redefine property: cannot convert a non-configurable data property to an accessor",
+                ),
+              } as Instr,
+              // 7.d/e [[Get]]/[[Set]] change (SameValue) forbidden
+              { op: "local.get", index: 14 },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 2 },
+                  { op: "local.get", index: 12 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+                  { op: "extern.convert_any" } as Instr,
+                  { op: "call", funcIdx: accObjectIsIdx },
+                  { op: "i32.eqz" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: accThrow("TypeError: Cannot redefine property: get attribute of a non-configurable property"),
+                  } as Instr,
+                ],
+              } as Instr,
+              { op: "local.get", index: 15 },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 3 },
+                  { op: "local.get", index: 12 },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+                  { op: "extern.convert_any" } as Instr,
+                  { op: "call", funcIdx: accObjectIsIdx },
+                  { op: "i32.eqz" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: accThrow("TypeError: Cannot redefine property: set attribute of a non-configurable property"),
+                  } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr,
+          // merge flags: spec = (hf >> 3) & 6 (E/C only — accessors carry no W)
+          // nf = (efl & ~0x0F) | ((efl & 6 & ~spec) | (hf & spec)) | FLAG_ACCESSOR
+          // (locals 7/8 are scratch here; this path returns before grow uses them)
+          { op: "local.get", index: 10 },
+          { op: "i32.const", value: 3 },
+          { op: "i32.shr_u" },
+          { op: "i32.const", value: 6 },
+          { op: "i32.and" },
+          { op: "local.set", index: 7 },
+          { op: "local.get", index: 13 },
+          { op: "i32.const", value: 6 },
+          { op: "i32.and" },
+          { op: "local.get", index: 7 },
+          { op: "i32.const", value: -1 },
+          { op: "i32.xor" },
+          { op: "i32.and" },
+          { op: "local.get", index: 10 },
+          { op: "local.get", index: 7 },
+          { op: "i32.and" },
+          { op: "i32.or" },
+          { op: "local.set", index: 8 },
+          { op: "local.get", index: 12 },
+          { op: "ref.as_non_null" },
+          { op: "local.get", index: 13 },
+          { op: "i32.const", value: -16 },
+          { op: "i32.and" },
+          { op: "local.get", index: 8 },
+          { op: "i32.or" },
+          { op: "i32.const", value: FLAG_ACCESSOR },
+          { op: "i32.or" },
+          { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+          // halves: specified → overwrite; absent → preserve (a data entry's
+          // slots are already null, so conversion data→accessor is covered)
+          { op: "local.get", index: 14 },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 12 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 2 },
+              { op: "any.convert_extern" },
+              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+            ],
+          } as Instr,
+          { op: "local.get", index: 15 },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 12 },
+              { op: "ref.as_non_null" },
+              { op: "local.get", index: 3 },
+              { op: "any.convert_extern" },
+              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+            ],
+          } as Instr,
+          // converting data→accessor: the data value slot dies.
+          ...accEflBit(FLAG_ACCESSOR),
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 12 },
+              { op: "ref.as_non_null" },
+              { op: "ref.null", typeIdx: NONE_HEAP },
+              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
+            ],
+          } as Instr,
+          // merged in place — return O.
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      } as Instr,
+      // NEW key on a non-extensible object → TypeError (§10.1.6.3 step 2,
+      // matches the data-path preflight; previously a silent no-op).
+      { op: "local.get", index: 5 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: accThrow("TypeError: Cannot define property, object is not extensible"),
+      },
       // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
       { op: "local.get", index: 5 },
       { op: "ref.as_non_null" },
@@ -5342,6 +5726,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "hf", type: { kind: "i32" } },
         { name: "seq", type: { kind: "i32" } },
         { name: "e", type: entryRefNull },
+        { name: "efl", type: { kind: "i32" } },
+        { name: "getSpec", type: { kind: "i32" } },
+        { name: "setSpec", type: { kind: "i32" } },
       ],
       body,
     );
@@ -5465,7 +5852,23 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       } as Instr,
     ];
 
-    const readAccessor = (key: "get" | "set", localIdx: number): Instr[] => [
+    // (#2992 S3) get/set: mark hasAccessor + the half's "specified" bit
+    // (8 = [[Get]], 9 = [[Set]]) so the `__defineProperty_accessor` applier
+    // can MERGE a partial accessor descriptor. Distinguish present-undefined
+    // (specified empty half) from explicit null (TypeError) under the
+    // singleton regime — see the `__defineProperty_desc` twin.
+    const HOST_FLAG_GET_SPECIFIED = 1 << 8;
+    const HOST_FLAG_SET_SPECIFIED = 1 << 9;
+    let dpUndefTagTypeIdx = -1;
+    if (undefinedSingletonActive(ctx) && undefinedExternInstrs(ctx) !== undefined) {
+      dpUndefTagTypeIdx = ctx.anyValueTypeIdx;
+    }
+    const rawField = (key: string): Instr[] => [
+      { op: "local.get", index: L_RAW_DESC },
+      ...keyRef(key),
+      { op: "call", funcIdx: externGetIdx },
+    ];
+    const readAccessor = (key: "get" | "set", localIdx: number, specifiedBit: number): Instr[] => [
       ...hasField(key),
       {
         op: "if",
@@ -5473,24 +5876,70 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           { op: "i32.const", value: 1 },
           { op: "local.set", index: L_HAS_ACCESSOR },
-          ...getField(key),
-          { op: "local.tee", index: localIdx },
-          { op: "ref.is_null" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: localIdx },
-              { op: "call", funcIdx: typeofFunctionIdx },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: throwAccessor(),
-              } as Instr,
-            ],
-          } as Instr,
+          ...setFlag(specifiedBit),
+          ...(dpUndefTagTypeIdx >= 0
+            ? ([
+                ...rawField(key),
+                { op: "local.set", index: localIdx },
+                { op: "local.get", index: localIdx },
+                { op: "any.convert_extern" },
+                { op: "local.tee", index: L_RAW_ANY },
+                { op: "ref.test", typeIdx: dpUndefTagTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [
+                    { op: "local.get", index: L_RAW_ANY },
+                    { op: "ref.cast", typeIdx: dpUndefTagTypeIdx },
+                    { op: "struct.get", typeIdx: dpUndefTagTypeIdx, fieldIdx: 0 },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.eq" },
+                  ],
+                  else: [{ op: "i32.const", value: 0 }],
+                } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "ref.null.extern" }, { op: "local.set", index: localIdx }],
+                  else: [
+                    { op: "local.get", index: localIdx },
+                    { op: "ref.is_null" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwAccessor(),
+                    } as Instr,
+                    { op: "local.get", index: localIdx },
+                    { op: "call", funcIdx: typeofFunctionIdx },
+                    { op: "i32.eqz" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwAccessor(),
+                    } as Instr,
+                  ],
+                } as Instr,
+              ] as Instr[])
+            : ([
+                ...getField(key),
+                { op: "local.tee", index: localIdx },
+                { op: "ref.is_null" },
+                { op: "i32.eqz" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: localIdx },
+                    { op: "call", funcIdx: typeofFunctionIdx },
+                    { op: "i32.eqz" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwAccessor(),
+                    } as Instr,
+                  ],
+                } as Instr,
+              ] as Instr[])),
         ],
       } as Instr,
     ];
@@ -5614,8 +6063,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE_SPECIFIED, FLAG_CONFIGURABLE, false),
 
               // Accessor descriptor fields.
-              ...readAccessor("get", L_GETTER),
-              ...readAccessor("set", L_SETTER),
+              ...readAccessor("get", L_GETTER, HOST_FLAG_GET_SPECIFIED),
+              ...readAccessor("set", L_SETTER, HOST_FLAG_SET_SPECIFIED),
 
               // Data/accessor conflict is a ToPropertyDescriptor TypeError.
               { op: "local.get", index: L_HAS_DATA },
@@ -5886,8 +6335,27 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         ],
       } as Instr,
     ];
-    // get/set: mark hasAccessor, capture the closure, and if non-null require callable.
-    const readAccessor = (key: "get" | "set", localIdx: number): Instr[] => [
+    // (#2992 S3) get/set: mark hasAccessor + the half's "specified" bit
+    // (8 = [[Get]], 9 = [[Set]]) so `__defineProperty_accessor` can MERGE a
+    // partial accessor descriptor (absent half preserves the live half), then
+    // classify the RAW field value:
+    //   present-undefined → specified with an EMPTY half (null slot)
+    //   explicit null     → TypeError (§6.2.5.6: not callable, not undefined)
+    //   otherwise         → must be callable.
+    // Under the legacy (pre-#2106-singleton) regime undefined reads back as
+    // null already, so null keeps its historical lenient absent-half meaning.
+    const HOST_GET_SPECIFIED = 1 << 8;
+    const HOST_SET_SPECIFIED = 1 << 9;
+    let undefTagTypeIdx = -1;
+    if (undefinedSingletonActive(ctx) && undefinedExternInstrs(ctx) !== undefined) {
+      undefTagTypeIdx = ctx.anyValueTypeIdx;
+    }
+    const rawField = (key: string): Instr[] => [
+      { op: "local.get", index: L_DESC },
+      ...keyRef(key),
+      { op: "call", funcIdx: externGetIdx },
+    ];
+    const readAccessor = (key: "get" | "set", localIdx: number, specifiedBit: number): Instr[] => [
       ...hasField(key),
       {
         op: "if",
@@ -5895,24 +6363,71 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           { op: "i32.const", value: 1 },
           { op: "local.set", index: L_HAS_ACCESSOR },
-          ...getField(key),
-          { op: "local.tee", index: localIdx },
-          { op: "ref.is_null" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: localIdx },
-              { op: "call", funcIdx: typeofFunctionIdx },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: throwTypeError("TypeError: Getter/setter must be a function"),
-              } as Instr,
-            ],
-          } as Instr,
+          ...setFlag(specifiedBit),
+          ...(undefTagTypeIdx >= 0
+            ? ([
+                ...rawField(key),
+                { op: "local.set", index: localIdx },
+                // tag-1 $AnyValue box (the undefined singleton)?
+                { op: "local.get", index: localIdx },
+                { op: "any.convert_extern" },
+                { op: "local.tee", index: L_DESC_ANY },
+                { op: "ref.test", typeIdx: undefTagTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [
+                    { op: "local.get", index: L_DESC_ANY },
+                    { op: "ref.cast", typeIdx: undefTagTypeIdx },
+                    { op: "struct.get", typeIdx: undefTagTypeIdx, fieldIdx: 0 },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.eq" },
+                  ],
+                  else: [{ op: "i32.const", value: 0 }],
+                } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "ref.null.extern" }, { op: "local.set", index: localIdx }],
+                  else: [
+                    { op: "local.get", index: localIdx },
+                    { op: "ref.is_null" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwTypeError("TypeError: Getter/setter must be a function"),
+                    } as Instr,
+                    { op: "local.get", index: localIdx },
+                    { op: "call", funcIdx: typeofFunctionIdx },
+                    { op: "i32.eqz" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwTypeError("TypeError: Getter/setter must be a function"),
+                    } as Instr,
+                  ],
+                } as Instr,
+              ] as Instr[])
+            : ([
+                ...getField(key),
+                { op: "local.tee", index: localIdx },
+                { op: "ref.is_null" },
+                { op: "i32.eqz" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: localIdx },
+                    { op: "call", funcIdx: typeofFunctionIdx },
+                    { op: "i32.eqz" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: throwTypeError("TypeError: Getter/setter must be a function"),
+                    } as Instr,
+                  ],
+                } as Instr,
+              ] as Instr[])),
         ],
       } as Instr,
     ];
@@ -5966,8 +6481,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ...readBooleanFlag("writable", HOST_FLAG_WRITABLE, true, HOST_WRITABLE_SPECIFIED),
       ...readBooleanFlag("enumerable", HOST_FLAG_ENUMERABLE, false, HOST_ENUMERABLE_SPECIFIED),
       ...readBooleanFlag("configurable", HOST_FLAG_CONFIGURABLE, false, HOST_CONFIGURABLE_SPECIFIED),
-      ...readAccessor("get", L_GETTER),
-      ...readAccessor("set", L_SETTER),
+      ...readAccessor("get", L_GETTER, HOST_GET_SPECIFIED),
+      ...readAccessor("set", L_SETTER, HOST_SET_SPECIFIED),
 
       // data + accessor conflict → TypeError (§6.2.5.6 step 4).
       { op: "local.get", index: L_HAS_DATA },
@@ -6672,180 +7187,33 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     registerNative("__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }], [], body);
   }
 
-  // ── __getOwnPropertyDescriptors(externref obj) -> externref (#2042 S3) ────
+  // ── __object_getOwnPropertyDescriptors / __object_fromEntries ─────────────
   //
-  // `Object.getOwnPropertyDescriptors(obj)` — a fresh `$Object` mapping each own
-  // string key to its descriptor object. For each own key (from
-  // `__getOwnPropertyNames`) set `out[key] = __getOwnPropertyDescriptor(o, key)`.
-  // A non-`$Object` receiver yields an empty result object (the per-key loop runs
-  // zero times). Reuses the same enumeration + per-key descriptor builders, so
-  // accessor vs data shape and attribute flags are exactly consistent with the
-  // singular `getOwnPropertyDescriptor`.
+  // (#3160 — self-hosted stdlib) These two helpers are the PUREST members of
+  // the object runtime: thin COMPOSITIONS over the funcMap helpers registered
+  // above (`__new_plain_object`, `__extern_length`, `__extern_get_idx`,
+  // `__extern_set`, `__getOwnPropertyNames`, `__getOwnPropertyDescriptor`),
+  // with NO direct `$Object`/`$PropEntry` struct access or identity/proto/MOP
+  // entanglement. So they are compiled from ORDINARY TS SOURCE
+  // (`src/stdlib/object-runtime.ts`) through the compiler's own IR pipeline
+  // via the generalized self-hosting driver (#3161), exactly where the
+  // hand-emitted `Instr[]` bodies used to be pushed — the porffor model.
   //
-  // params: 0=obj(externref)
-  // locals: 1=names(externref $ObjVec) 2=cap(f64) 3=i(i32) 4=key(externref)
-  //         5=out(externref)
-  {
-    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
-    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
-    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
-    const getOwnNamesIdx = ctx.funcMap.get("__getOwnPropertyNames")!;
-    const getOwnDescIdx = ctx.funcMap.get("__getOwnPropertyDescriptor")!;
-    const externSetLocalIdx = ctx.funcMap.get("__extern_set")!;
-    const body: Instr[] = [
-      // out = __new_plain_object()
-      { op: "call", funcIdx: newPlainObjectIdx },
-      { op: "local.set", index: 5 },
-      // names = __getOwnPropertyNames(obj)
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: getOwnNamesIdx },
-      { op: "local.tee", index: 1 },
-      // cap = __extern_length(names)
-      { op: "call", funcIdx: externLengthIdx },
-      { op: "local.set", index: 2 },
-      // i = 0
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: 3 },
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              // if i >= cap break  (cap is f64; compare as f64)
-              { op: "local.get", index: 3 },
-              { op: "f64.convert_i32_s" },
-              { op: "local.get", index: 2 },
-              { op: "f64.ge" },
-              { op: "br_if", depth: 1 },
-              // key = __extern_get_idx(names, i)
-              { op: "local.get", index: 1 },
-              { op: "local.get", index: 3 },
-              { op: "f64.convert_i32_s" },
-              { op: "call", funcIdx: externGetIdxIdx },
-              { op: "local.set", index: 4 },
-              // __extern_set(out, key, __getOwnPropertyDescriptor(obj, key))
-              { op: "local.get", index: 5 },
-              { op: "local.get", index: 4 },
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: 4 },
-              { op: "call", funcIdx: getOwnDescIdx },
-              { op: "call", funcIdx: externSetLocalIdx },
-              // i++
-              { op: "local.get", index: 3 },
-              { op: "i32.const", value: 1 },
-              { op: "i32.add" },
-              { op: "local.set", index: 3 },
-              { op: "br", depth: 0 },
-            ],
-          },
-        ],
-      },
-      { op: "local.get", index: 5 },
-    ];
-    registerNative(
-      // Call site (calls.ts) requests this with the `__object_` prefix.
-      "__object_getOwnPropertyDescriptors",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-      [
-        { name: "names", type: { kind: "externref" } },
-        { name: "cap", type: { kind: "f64" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "key", type: { kind: "externref" } },
-        { name: "out", type: { kind: "externref" } },
-      ],
-      body,
-    );
-  }
-
-  // ── __object_fromEntries(externref entries) -> externref (#2042 S3 residual) ─
+  //   - getOwnPropertyDescriptors(obj): fresh object mapping each own key
+  //     (from `__getOwnPropertyNames`) to `__getOwnPropertyDescriptor(obj,key)`.
+  //   - fromEntries(entries): fresh object, `out[pair[0]] = pair[1]` per pair
+  //     (the call site normalises the arg to the indexable `$ObjVec`-of-pairs
+  //     shape before calling — see `compileObjectAssignArg`).
   //
-  // `Object.fromEntries(entries)` where `entries` is a `$ObjVec` of `[key,value]`
-  // pair `$ObjVec`s. Builds a fresh `$Object` and, for each pair, sets
-  // `out[pair[0]] = pair[1]` via `__extern_set` (which ToPropertyKeys the key —
-  // #2042 R2/S1). Iterates via `__extern_length` / `__extern_get_idx` (which
-  // index a `$ObjVec` reliably). The CALL SITE (calls.ts) normalises a literal
-  // array-of-pairs arg into this `$ObjVec`-of-`$ObjVec` shape before calling, so
-  // the helper only ever sees the indexable representation (a raw native vec /
-  // Map is not reliably indexable through `__extern_get_idx` — that's why the
-  // call site converts first, mirroring `compileObjectAssignArg`).
-  //
-  // params: 0=entries(externref) ; locals: 1=len(f64) 2=i(i32) 3=pair 4=key 5=val 6=out
-  {
-    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
-    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
-    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
-    const externSetIdx2 = ctx.funcMap.get("__extern_set")!;
-    const pairElem = (pairLocal: number, idx: number): Instr[] => [
-      { op: "local.get", index: pairLocal },
-      { op: "f64.const", value: idx },
-      { op: "call", funcIdx: externGetIdxIdx },
-    ];
-    const body: Instr[] = [
-      { op: "call", funcIdx: newPlainObjectIdx },
-      { op: "local.set", index: 6 },
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: externLengthIdx },
-      { op: "local.set", index: 1 },
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: 2 },
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              { op: "local.get", index: 2 },
-              { op: "f64.convert_i32_s" },
-              { op: "local.get", index: 1 },
-              { op: "f64.ge" },
-              { op: "br_if", depth: 1 },
-              // pair = __extern_get_idx(entries, i)
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: 2 },
-              { op: "f64.convert_i32_s" },
-              { op: "call", funcIdx: externGetIdxIdx },
-              { op: "local.set", index: 3 },
-              // key = pair[0]; val = pair[1]
-              ...pairElem(3, 0),
-              { op: "local.set", index: 4 },
-              ...pairElem(3, 1),
-              { op: "local.set", index: 5 },
-              // __extern_set(out, key, val)
-              { op: "local.get", index: 6 },
-              { op: "local.get", index: 4 },
-              { op: "local.get", index: 5 },
-              { op: "call", funcIdx: externSetIdx2 },
-              { op: "local.get", index: 2 },
-              { op: "i32.const", value: 1 },
-              { op: "i32.add" },
-              { op: "local.set", index: 2 },
-              { op: "br", depth: 0 },
-            ],
-          },
-        ],
-      },
-      { op: "local.get", index: 6 },
-    ];
-    registerNative(
-      "__object_fromEntries",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-      [
-        { name: "len", type: { kind: "f64" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "pair", type: { kind: "externref" } },
-        { name: "key", type: { kind: "externref" } },
-        { name: "val", type: { kind: "externref" } },
-        { name: "out", type: { kind: "externref" } },
-      ],
-      body,
-    );
+  // Behaviour mirrors the deleted hand bodies step-for-step (same enumeration
+  // order, same per-key `__extern_set`); the only representational difference
+  // is the f64 loop counter (the hand bodies used i32-with-convert — value-
+  // equivalent). Every callee is registered EARLIER in this pass (leaf-first).
+  // A non-`$Object` receiver still yields `{}` (the loop runs zero times).
+  // Verified by tests/issue-3160.test.ts (host + standalone) + byte-inert SHA
+  // containment for non-users.
+  for (const def of SELF_HOSTED_OBJECT_RUNTIME.values()) {
+    emitSelfHostedFunc(ctx, def);
   }
 
   // NOTE (#2042 S3): `__defineProperty_desc` (generic
@@ -9699,6 +10067,297 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
     // Defensive: preamble shape changed — prepend the arms after a fresh setup
     // is not safe, so skip rather than risk an unbalanced body.
     return;
+  }
+}
+
+/**
+ * (#3169) Box a CLOSED-struct field value (already on the stack) up to the
+ * uniform externref the dynamic-reader trio returns. Mirrors the result-boxing
+ * arm of `buildEntryArm` (closed-method-dispatch.ts) / the coercion engine's
+ * to-externref rules, but stays local to avoid an object-runtime ⇄
+ * type-coercion import cycle. funcMap-read-only (the union natives are
+ * registered by `ensureObjectRuntime` under standalone). Returns null when the
+ * field kind has no host-free boxing (f32/i64/v128/i8/i16) — the caller skips
+ * that field (its index reads as a miss, same as before the fill).
+ */
+function boxClosedStructFieldToExternref(ctx: CodegenContext, fieldType: ValType): Instr[] | null {
+  if (fieldType.kind === "externref") return [];
+  if (fieldType.kind === "f64") {
+    const boxNumIdx = ctx.funcMap.get("__box_number");
+    return boxNumIdx === undefined ? null : [{ op: "call", funcIdx: boxNumIdx } as Instr];
+  }
+  if (fieldType.kind === "i32") {
+    if ((fieldType as { boolean?: boolean }).boolean === true) {
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (boxBoolIdx !== undefined) return [{ op: "call", funcIdx: boxBoolIdx } as Instr];
+    }
+    const boxNumIdx = ctx.funcMap.get("__box_number");
+    return boxNumIdx === undefined
+      ? null
+      : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+  }
+  if (fieldType.kind === "ref" || fieldType.kind === "ref_null") return [{ op: "extern.convert_any" } as Instr];
+  return null;
+}
+
+/**
+ * (#3169) Finalize-time CLOSED-STRUCT array-like arms for the standalone
+ * dynamic-reader trio `__extern_length` / `__extern_get_idx` /
+ * `__extern_has_idx`.
+ *
+ * A plain-JS array-like literal with NO contextual type —
+ * `var obj = { 0: 11, 1: 12, length: 2 }`, the dominant receiver shape of the
+ * test262 `Array.prototype.<HOF>.call(obj, cb)` corpus (§23.1.3 generics over
+ * array-likes) — compiles to a CLOSED nominal WasmGC struct (`$__anon_N` with
+ * fields `$0/$1/$length`), NOT an open `$Object` (#1897 forbids diverting
+ * uncontexted literals to `$Object`: consumers compile against the inferred
+ * struct). The reader trio had arms for `$Object` / `$ObjVec` / typed vecs
+ * only, so a closed-struct receiver answered `length 0` / miss — the generic
+ * `compileArrayLikePrototypeCall` loop then ran ZERO iterations and returned
+ * the seed (the "returned 2 — assert #1" signature, ~500 standalone-lane gap
+ * tests under reduce/reduceRight/filter/some/every/map/forEach).
+ *
+ * Fill (this function): for every closed struct with a numeric-able `length`
+ * field, SPLICE (never rebuild — `reference_no_rebuild_helper_body_at_finalize`)
+ * one `ref.test`-guarded arm into each of the three helpers, right after their
+ * shared 3-instr preamble (the same insertion discipline as
+ * `fillExternGetIdxVecArms` above):
+ *   - `__extern_length`: `struct.get $length` → ToLength clamp (trunc, [0,
+ *     2^53−1], NaN→0) — spec Get(O,"length") + §7.1.20 over the real field.
+ *   - `__extern_get_idx`: compare the f64 index against each canonical
+ *     integer-named field ("0","1",…) — `f64.eq` per field, `struct.get` + box
+ *     on match, undefined-miss otherwise (a struct HAS no other indices — its
+ *     proto is Object.prototype, which has none either).
+ *   - `__extern_has_idx`: OR of the same `f64.eq` tests — HasProperty per
+ *     §23.1.3 hole semantics ({0:x, 2:y, length:3} skips index 1; a
+ *     present-but-undefined field still answers 1 since struct fields exist).
+ *
+ * Runs at FINALIZE (index.ts, right after `fillExternGetIdxVecArms`) so the
+ * struct-type table is COMPLETE — literals compiled after `ensureObjectRuntime`
+ * still get arms. Standalone-only via `ctx.externGetIdxReserved` (set exactly
+ * when the trio was registered with the standalone array-like arms); gc/host
+ * output is untouched (the host imports own this path there). All `call`
+ * funcIdxs are read from funcMap at fill time and the spliced instrs are
+ * walked by any later shift like all others.
+ */
+export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
+  if (!ctx.externGetIdxReserved) return; // standalone trio absent → nothing to widen
+  const findFn = (name: string) => {
+    const idx = ctx.funcMap.get(name);
+    return idx === undefined ? undefined : definedFuncAt(ctx, idx);
+  };
+  const lenFn = findFn("__extern_length");
+  const getIdxFn = findFn("__extern_get_idx");
+  const hasIdxFn = findFn("__extern_has_idx");
+  if (!lenFn && !getIdxFn && !hasIdxFn) return;
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  // (#3169) `length: "2"` (the test262 `-3-*` "length is a string containing a
+  // number" family) stores a STRING-ref length field; ToLength applies ToNumber
+  // first (§7.1.20 → §7.1.4), which is exactly the native `__str_to_number`
+  // scanner. Presence-gated (it is emitted with the union natives under
+  // nativeStrings — index.ts finalize — so it exists whenever such a literal
+  // can); absent → the string-length arm is skipped (under-fix, length 0 as
+  // before).
+  const strToNumIdx = ctx.funcMap.get("__str_to_number");
+  const isStringRefType = (t: ValType): boolean =>
+    (t.kind === "ref" || t.kind === "ref_null") &&
+    ((t as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
+      (t as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx) &&
+    (t as { typeIdx: number }).typeIdx >= 0;
+
+  // ── Collect closed-struct array-like candidates ──
+  // Same skip filter as `collectMethodEntries`/`collectFieldEntries`
+  // (closed-method-dispatch.ts) plus the internal `__subview_*` typed-array
+  // carriers (they carry a `length` field but are NOT generic array-likes —
+  // their element reads go through the dedicated typed-array paths, and
+  // widening their `.length` here would change established fall-through
+  // behaviour).
+  type ArrayLikeCand = {
+    typeIdx: number;
+    lengthFieldIdx: number;
+    lengthFieldType: ValType;
+    numericFields: { n: number; fieldIdx: number; fieldType: ValType }[];
+  };
+  const seen = new Set<number>();
+  const cands: ArrayLikeCand[] = [];
+  for (const [structName, fields] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined || seen.has(typeIdx)) continue;
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_") ||
+      structName.startsWith("__subview_") ||
+      structName.startsWith("$")
+    )
+      continue;
+    const lengthFieldIdx = fields.findIndex(
+      (f) =>
+        f.name === "length" &&
+        (f.type.kind === "f64" ||
+          f.type.kind === "i32" ||
+          f.type.kind === "externref" ||
+          (strToNumIdx !== undefined && isStringRefType(f.type))),
+    );
+    if (lengthFieldIdx < 0) continue;
+    const numericFields: ArrayLikeCand["numericFields"] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      if (!f?.name) continue;
+      const n = Number(f.name);
+      // Canonical non-negative integer index names only ("0", "1", …) — the
+      // ToString(ToPropertyKey) form §23.1.3 loops probe.
+      if (!Number.isInteger(n) || n < 0 || String(n) !== f.name) continue;
+      numericFields.push({ n, fieldIdx: i, fieldType: f.type });
+    }
+    seen.add(typeIdx);
+    cands.push({ typeIdx, lengthFieldIdx, lengthFieldType: fields[lengthFieldIdx]!.type, numericFields });
+  }
+  if (cands.length === 0) return;
+  cands.sort((a, b) => a.typeIdx - b.typeIdx);
+
+  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  const MAX_SAFE = 9007199254740991; // 2^53 - 1
+
+  /** Shared preamble test (identical for all three helpers). */
+  const hasPreamble = (fn: { body: Instr[] }): boolean =>
+    fn.body.length >= 3 &&
+    fn.body[0]?.op === "local.get" &&
+    fn.body[1]?.op === "any.convert_extern" &&
+    fn.body[2]?.op === "local.set";
+
+  // ── __extern_length arms (locals: 1=any, 2=lenF64, 3=lenTrunc) ──
+  if (lenFn && hasPreamble(lenFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      // Read the length field as f64: i32 converts (a boolean-branded field
+      // reads 1/0 — ToLength(ToNumber(true)) = 1); externref (an `any`-typed
+      // `length` slot) unboxes via __unbox_number (NaN for non-numbers → the
+      // clamp answers 0, matching ToLength(ToNumber) for the common cases);
+      // a string ref (`length: "2"`) runs the §7.1.4 StringToNumber scanner.
+      const readAsF64: Instr[] =
+        cand.lengthFieldType.kind === "i32"
+          ? [{ op: "f64.convert_i32_s" } as Instr]
+          : cand.lengthFieldType.kind === "externref"
+            ? unboxNumIdx !== undefined
+              ? [{ op: "call", funcIdx: unboxNumIdx } as Instr]
+              : [{ op: "drop" } as Instr, { op: "f64.const", value: 0 } as Instr]
+            : isStringRefType(cand.lengthFieldType) && strToNumIdx !== undefined
+              ? [{ op: "extern.convert_any" } as Instr, { op: "call", funcIdx: strToNumIdx } as Instr]
+              : [];
+      arms.push(
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 } as Instr,
+            { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
+            { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: cand.lengthFieldIdx } as Instr,
+            ...readAsF64,
+            // ToLength clamp — mirrors the `$Object` arm's NaN/trunc/[0,2^53−1]
+            // sequence, reusing the same scratch locals 2/3.
+            { op: "local.tee", index: 2 } as Instr,
+            { op: "local.get", index: 2 } as Instr,
+            { op: "f64.ne" } as Instr, // NaN?
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [{ op: "f64.const", value: 0 } as Instr],
+              else: [
+                { op: "local.get", index: 2 } as Instr,
+                { op: "f64.trunc" } as Instr,
+                { op: "local.tee", index: 3 } as Instr,
+                { op: "f64.const", value: 0 } as Instr,
+                { op: "f64.le" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "f64" } },
+                  then: [{ op: "f64.const", value: 0 } as Instr],
+                  else: [
+                    { op: "local.get", index: 3 } as Instr,
+                    { op: "f64.const", value: MAX_SAFE } as Instr,
+                    { op: "f64.min" } as Instr,
+                  ],
+                } as Instr,
+              ],
+            } as Instr,
+            { op: "return" } as Instr,
+          ],
+        } as Instr,
+      );
+    }
+    lenFn.body.splice(3, 0, ...arms);
+  }
+
+  // ── __extern_get_idx arms (params: 1=idx f64; locals: 2=any) ──
+  if (getIdxFn && hasPreamble(getIdxFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      const fieldChecks: Instr[] = [];
+      for (const nf of cand.numericFields) {
+        const box = boxClosedStructFieldToExternref(ctx, nf.fieldType);
+        if (box === null) continue; // unboxable field kind — reads as a miss
+        fieldChecks.push(
+          { op: "local.get", index: 1 } as Instr,
+          { op: "f64.const", value: nf.n } as Instr,
+          {
+            op: "f64.eq",
+          } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 2 } as Instr,
+              { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
+              { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: nf.fieldIdx } as Instr,
+              ...box,
+              { op: "return" } as Instr,
+            ],
+          } as Instr,
+        );
+      }
+      if (fieldChecks.length === 0) continue; // no indexable fields — fall-through miss is identical
+      arms.push(
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...fieldChecks, ...idxMiss(), { op: "return" } as Instr],
+        } as Instr,
+      );
+    }
+    if (arms.length > 0) getIdxFn.body.splice(3, 0, ...arms);
+  }
+
+  // ── __extern_has_idx arms (params: 1=idx f64; locals: 2=any) ──
+  if (hasIdxFn && hasPreamble(hasIdxFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      if (cand.numericFields.length === 0) continue; // fall-through 0 is identical
+      const orChain: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+      for (const nf of cand.numericFields) {
+        orChain.push(
+          { op: "local.get", index: 1 } as Instr,
+          { op: "f64.const", value: nf.n } as Instr,
+          { op: "f64.eq" } as Instr,
+          { op: "i32.or" } as Instr,
+        );
+      }
+      arms.push(
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...orChain, { op: "return" } as Instr],
+        } as Instr,
+      );
+    }
+    if (arms.length > 0) hasIdxFn.body.splice(3, 0, ...arms);
   }
 }
 

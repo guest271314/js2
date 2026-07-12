@@ -395,6 +395,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+        // (#3175) An `undefined` radix (§21.1.3.6 step 2) routes back to the
+        // 1-arg base-10 `number_toString` at the call site, so register it too
+        // — otherwise `(5).toString(undefined)` finds no emitted helper and the
+        // call site returns a null string ref.
+        state.primitiveNeeded.add("number_toString");
       } else {
         state.primitiveNeeded.add("number_toString");
       }
@@ -2549,6 +2554,24 @@ export function collectEmptyObjectWidening(
             markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
+          // (#2992 S4, standalone) `delete varName.prop` / `delete varName[k]`
+          // is an `$Object`-hash consumer too: a widened closed-struct FIELD
+          // cannot represent a deleted property — the struct-delete arm
+          // (typeof-delete.ts) writes a type-shaped SENTINEL (f64 → NaN,
+          // ref → null) into the fixed slot, and a statically-f64 read makes
+          // `o.k === undefined` CONST-FOLD to false, so the read can never
+          // observe the deletion (the issue's headline nominal-struct repro;
+          // also the pre-existing `delete-sentinel` string-field equivalence
+          // failure). Poison the widening so the var stays a `$Object`, where
+          // `__delete_property` tombstones give correct delete → read / `in` /
+          // hasOwnProperty semantics. Standalone-gated: the host lane's
+          // sidecar + live-mirror handles struct deletes (byte-inert).
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneDeleteTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
           // this receiver used a *dynamic* (non-inline-literal) descriptor, the
           // struct-widening fast path is unsound — the dynamic define is applied
@@ -2931,6 +2954,34 @@ function isAccessorDescriptor(descArg: ts.Expression): boolean {
  * matching the existing widening pre-pass (aliasing is a shared, documented
  * limitation — see the issue's `## Deferred`).
  */
+/**
+ * (#2992 S4, standalone-only caller) Poison `varName` when it is the receiver
+ * of any `delete varName.prop` / `delete varName[<expr>]` in the scanned
+ * statements. A widened closed struct cannot drop a field, so the delete arm's
+ * sentinel write (NaN / null) lies to every later read (`o.k === undefined`
+ * const-folds false on an f64 field). Keeping the var a `$Object` routes the
+ * delete through the `__delete_property` tombstone machinery, which slice 1
+ * (#2872) already proved correct in every lane. Parenthesized targets
+ * (`delete (o.k)`) are unwrapped like the module-init collector does.
+ */
+function markStandaloneDeleteTargets(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isDeleteExpression(n)) {
+      let target: ts.Expression = n.expression;
+      while (ts.isParenthesizedExpression(target)) target = target.expression;
+      if (
+        (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) &&
+        ts.isIdentifier(target.expression) &&
+        target.expression.text === varName
+      ) {
+        poisonSet.add(varName);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
 function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
   const isVarRef = (n: ts.Node): boolean => ts.isIdentifier(n) && n.text === varName;
 
@@ -4679,6 +4730,39 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             receiver = receiver.expression;
           }
           if (ts.isIdentifier(receiver) && ctx.topLevelFunctionNames.has(receiver.text)) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
+          // (#2623 P-7b) `Promise.<prop> = …` — a top-level static patch on the
+          // BUILTIN Promise (the test262 observable-resolve shape
+          // `Promise.resolve = function(){…}`, `all/race invoke-resolve.js`).
+          // `Promise` is neither a module global nor a top-level function, so
+          // the generic check below dropped the statement — the patch silently
+          // never existed at runtime (the exact #2671 `Test262Error.thrower`
+          // elision mechanism). Keep it in `__module_init` so the ordinary
+          // property-write arm runs: the write routes through `__extern_set`
+          // onto the `declared_global`-resolved Promise. In the single-realm
+          // CI lane (no vm sandbox) that IS `globalThis.Promise` — the same
+          // object the combinator capability `C` (`_resolveCtor`, runtime.ts)
+          // passes to V8, so `Get(C,"resolve")` observes the patch; the CI
+          // worker's #1220 static snapshot/restore un-patches it after each
+          // test. In the LOCAL sandboxed runner the write lands on the
+          // sandbox Promise (inert for the host-realm capability lane; the
+          // `["Promise","resolve"]` SENTINEL_KEYS entry discards the dirty
+          // sandbox) — the local lane deliberately does NOT chase realm
+          // unification (P-7b design decision, see the issue file). Host/GC
+          // lane + `Promise` receiver only — a blanket builtin-receiver keep
+          // flips patches on every builtin at once and is separate, measured
+          // work. Shadowed user bindings named `Promise` are module globals /
+          // functions and are caught by the arms above/below, never reaching
+          // this keep.
+          if (
+            ts.isIdentifier(receiver) &&
+            receiver.text === "Promise" &&
+            !ctx.moduleGlobals.has("Promise") &&
+            !ctx.topLevelFunctionNames.has("Promise") &&
+            !ctx.classSet.has("Promise")
+          ) {
             ctx.moduleInitStatements.push(stmt);
             continue;
           }

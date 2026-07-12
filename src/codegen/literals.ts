@@ -18,6 +18,8 @@ import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-map
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
   collectMutatedCaptureNames,
+  collectReferencedIdentifiers,
+  collectWrittenIdentifiers,
   compileArrowAsCallback,
   compileArrowAsClosure,
   type SharedRefCellMap,
@@ -25,6 +27,7 @@ import {
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
+import { addFunctionOwnLocals } from "./binding-info.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
@@ -523,6 +526,64 @@ function compileObjectLiteralWithAccessors(
       if (!accFn) continue;
       for (const n of collectMutatedCaptureNames(fctx, accFn as unknown as ts.FunctionExpression)) {
         accessorForceMutable.add(n);
+      }
+    }
+  }
+  // (#3051 Slice 3) Also capture-by-reference any local an accessor READS that
+  // the ENCLOSING function writes anywhere: `var v; const o = { get x() {
+  // return v; } }; v = 1;` must observe the later outer write. Without the
+  // shared ref cell, the getter snapshots the creation-time value (undefined) —
+  // the exact shape of test262 @@split str-coerce-lastindex-err's
+  // `badLastIndex` reassignments between protocol calls. #2128 only forced
+  // cells for locals the accessors themselves WRITE; this adds the
+  // outer-write/inner-read direction. Ref cells are semantically transparent,
+  // so the conservative superset is safe.
+  {
+    const accessorCaptured = new Set<string>();
+    for (const pair of accessorPairs.values()) {
+      for (const accFn of [pair.getter, pair.setter]) {
+        if (!accFn) continue;
+        const fnNode = accFn as unknown as ts.FunctionExpression;
+        const own = new Set<string>();
+        addFunctionOwnLocals(fnNode, own);
+        const refd = new Set<string>();
+        const b = fnNode.body;
+        if (b !== undefined) {
+          if (ts.isBlock(b)) {
+            for (const s of b.statements) collectReferencedIdentifiers(s, refd, own);
+          } else {
+            collectReferencedIdentifiers(b, refd, own);
+          }
+        }
+        for (const n of refd) {
+          if (fctx.localMap.has(n)) accessorCaptured.add(n);
+        }
+      }
+    }
+    if (accessorCaptured.size > 0) {
+      let encl: ts.Node | undefined = expr.parent;
+      while (
+        encl !== undefined &&
+        !ts.isFunctionDeclaration(encl) &&
+        !ts.isFunctionExpression(encl) &&
+        !ts.isArrowFunction(encl) &&
+        !ts.isMethodDeclaration(encl) &&
+        !ts.isSourceFile(encl)
+      ) {
+        encl = encl.parent;
+      }
+      const enclBody =
+        encl !== undefined && !ts.isSourceFile(encl) ? (encl as ts.FunctionLikeDeclaration).body : undefined;
+      if (enclBody !== undefined) {
+        const writtenOuter = new Set<string>();
+        if (ts.isBlock(enclBody)) {
+          for (const s of enclBody.statements) collectWrittenIdentifiers(s, writtenOuter);
+        } else {
+          collectWrittenIdentifiers(enclBody, writtenOuter);
+        }
+        for (const n of accessorCaptured) {
+          if (writtenOuter.has(n)) accessorForceMutable.add(n);
+        }
       }
     }
   }
@@ -3635,6 +3696,37 @@ export function compileArrayLiteral(
       if (ctxArrSym?.name === "Array" || ctxArrSym?.name === "ReadonlyArray") {
         const ctxElemType = ctx.checker.getTypeArguments(ctxArrType as ts.TypeReference)[0];
         if (ctxElemType && (ctxElemType.flags & ts.TypeFlags.Any) !== 0) {
+          elemWasm = { kind: "externref" };
+        }
+      } else if ((ctxArrType.flags & ts.TypeFlags.Any) !== 0) {
+        // (#3154) BARE-`any` context — an array literal passed directly to an
+        // `any`-typed parameter (`f([1, void 0, 3])` with `f(a: any)`), or an
+        // inner tuple of an `any[]` outer literal. The S0 widening above only
+        // fires for `Array<any>` contextual types, so these literals kept the
+        // first-element f64/i32 fast path: a `void 0` element became the sNaN
+        // sentinel (reads back as a NaN *number*, `a[1] !== a[1]` self-compare
+        // fails, `typeof` lies), and string/symbol/boolean elements were
+        // dropped or number-coerced at CONSTRUCTION — unrecoverable at any
+        // read site. This regressed 15 baseline-pass compareArray-cluster
+        // tests when the test262 harness shims briefly moved to `any` params
+        // (#3151 merge-group park, run 29175942933).
+        //
+        // Widen to externref-boxed elements — the SAME construction the
+        // `Array<any>` context already uses, so each element is boxed by its
+        // own static type (`__box_number` / `__box_boolean` / `__box_symbol` /
+        // native string / `ref.null extern` for undefined) — but ONLY when the
+        // literal is not purely numeric. A homogeneous number literal (the
+        // overwhelmingly common `compareArray(x, [1, 2, 3])` shape) keeps the
+        // f64 fast path byte-identical: its elements read back correctly
+        // through the dynamic `any` path already, and NaN self-inequality on a
+        // *genuine* NaN element is spec-correct (§7.2.16), not corruption.
+        const allPlainNumbers = expr.elements.every((el) => {
+          if (ts.isOmittedExpression(el) || _isUndefinedLike(el) || ts.isSpreadElement(el)) return false;
+          // (#1930) Classify via the oracle's static JS-type helper rather than
+          // a direct checker call, to satisfy the oracle-ratchet gate.
+          return ctx.oracle.staticJsTypeOf(el) === "number";
+        });
+        if (!allPlainNumbers) {
           elemWasm = { kind: "externref" };
         }
       }
