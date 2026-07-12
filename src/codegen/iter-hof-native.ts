@@ -401,7 +401,7 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
  * it at factory-compile time) — so the fill only READS `ctx.nativeGenerators`
  * + funcMap (#1719 discipline; append-only reserve, read-only fill).
  */
-function reserveIterHofSteppers(
+export function reserveIterHofSteppers(
   ctx: CodegenContext,
 ): { openIdx: number; nextIdx: number; closeIdx: number } | undefined {
   const existing = ctx.funcMap.get("__iter_hof_open");
@@ -536,6 +536,22 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   const iteratorReturnIdx = ctx.funcMap.get("__iterator_return");
   if (iteratorIdx === undefined || iteratorNextIdx === undefined || iteratorReturnIdx === undefined) return;
 
+  // (#2903 R3) Lazy Iterator-helper wrapper (`$LazyIterHelper`, iter-lazy-native.ts)
+  // arms. When the module built any `g().map/filter/take/drop(...)` wrapper, its
+  // struct type + the shared `__lazy_iter_step`/`__lazy_iter_close` steppers are
+  // registered (append-only). A wrapper handle reaching `__iter_hof_open` (a
+  // downstream eager helper / `.toArray()` / chained lazy helper) is its OWN
+  // iterator: open passes it through, next delegates to `__lazy_iter_step`, close
+  // to `__lazy_iter_close`. Read by funcMap/structMap (no import of the lazy
+  // module — one-directional dep).
+  const lazyHelperTypeIdx = ctx.structMap.get("$LazyIterHelper");
+  const lazyStepIdx = ctx.funcMap.get("__lazy_iter_step");
+  const lazyCloseIdx = ctx.funcMap.get("__lazy_iter_close");
+  const lazyArm =
+    lazyHelperTypeIdx !== undefined && lazyStepIdx !== undefined && lazyCloseIdx !== undefined
+      ? { typeIdx: lazyHelperTypeIdx, stepIdx: lazyStepIdx, closeIdx: lazyCloseIdx }
+      : undefined;
+
   // The `__iterator` GetIterator ladder is only SAFE for receivers one of its
   // arms admits — everything else hits the legacy vec hard-cast. Admissible
   // here: the canonical externref `$Vec` (the always-present vec arm) and,
@@ -587,6 +603,18 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   const openFn = definedFuncAt(ctx, openIdx);
   if (openFn) {
     const arms: Instr[] = [];
+    // Lazy Iterator-helper wrapper → the wrapper IS the handle (pass-through).
+    if (lazyArm) {
+      arms.push(
+        { op: "local.get", index: ANY } as Instr,
+        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
+        } as Instr,
+      );
+    }
     // Driven generator frame → the frame IS the handle (pass-through).
     for (const p of producers) {
       arms.push(
@@ -628,6 +656,23 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   const nextFn = definedFuncAt(ctx, nextIdx);
   if (nextFn) {
     const arms: Instr[] = [];
+    // Lazy Iterator-helper wrapper → delegate the step to `__lazy_iter_step`
+    // (which itself drives the wrapper's source via `__iter_hof_next`).
+    if (lazyArm) {
+      arms.push(
+        { op: "local.get", index: ANY } as Instr,
+        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 } as Instr,
+            { op: "call", funcIdx: lazyArm.stepIdx } as Instr,
+            { op: "return" } as Instr,
+          ],
+        } as Instr,
+      );
+    }
     for (const p of producers) {
       arms.push(
         { op: "local.get", index: ANY } as Instr,
@@ -662,6 +707,22 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   const closeFn = definedFuncAt(ctx, closeIdx);
   if (closeFn) {
     const arms: Instr[] = [];
+    // Lazy Iterator-helper wrapper → close its source via `__lazy_iter_close`.
+    if (lazyArm) {
+      arms.push(
+        { op: "local.get", index: ANY } as Instr,
+        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 } as Instr,
+            { op: "call", funcIdx: lazyArm.closeIdx } as Instr,
+            { op: "return" } as Instr,
+          ],
+        } as Instr,
+      );
+    }
     for (const p of producers) {
       arms.push(
         { op: "local.get", index: ANY } as Instr,

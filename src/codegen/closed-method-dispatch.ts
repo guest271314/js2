@@ -42,6 +42,7 @@ import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3125) Is
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
 import { ensureNativeIterHof, isIterHofForm, NATIVE_ITER_HOF_METHODS } from "./iter-hof-native.js"; // (#2903)
+import { ensureNativeLazyIter, isLazyIterForm, LAZY_ITER_METHODS } from "./iter-lazy-native.js"; // (#2903 R3)
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -194,6 +195,16 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   // answered `undefined`. Standalone only.
   if (ctx.standalone && NATIVE_ITER_HOF_METHODS.has(methodName) && isIterHofForm(methodName, arity)) {
     ensureNativeIterHof(ctx, methodName);
+  }
+
+  // (#2903 R3) For the LAZY Iterator-helper methods (map/filter/take/drop on an
+  // iterator receiver, arity ≥1), emit the native wrapper constructor
+  // `__iter_lazy_<name>` + shared steppers NOW (append-only; the fill only READS
+  // funcMap — #1719). The fill adds a lazy arm under the same non-vec/non-$Object
+  // iterator split as the eager arm; for map/filter it sits UNDER the #3098 vec
+  // HOF arm so a vec receiver still eager-maps. Standalone only.
+  if (ctx.standalone && LAZY_ITER_METHODS.has(methodName) && isLazyIterForm(methodName, arity)) {
+    ensureNativeLazyIter(ctx, methodName);
   }
 
   // Signature: (recv, arg0..arg{arity-1}) all externref → externref.
@@ -536,6 +547,67 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             blockType: { kind: "val", type: { kind: "externref" } },
             then: current,
             else: iterCall,
+          } as Instr,
+        ];
+      }
+    }
+
+    // (#2903 R3) LAZY Iterator-helper arm (map/filter/take/drop, arity ≥1).
+    // Same non-vec/non-$Object iterator split as the eager arm above: a
+    // generator / driven frame / Map-Set-array iterator / lazy-wrapper receiver
+    // routes to the native wrapper constructor `__iter_lazy_<name>(recv, arg0)`
+    // (returns a `$LazyIterHelper` iterator, iter-lazy-native.ts). For map/filter
+    // this sits UNDER the #3098 vec HOF arm (wrapped outside), so a vec receiver
+    // still eager-maps; take/drop have no vec arm (arrays lack them → the legacy
+    // undefined on a vec receiver, unchanged). Previously these receivers fell to
+    // `__extern_method_call`'s non-`$Object` arm and silently answered undefined.
+    {
+      const lazyCtorIdx = ctx.funcMap.get(`__iter_lazy_${methodName}`);
+      const objTypeIdxForLazy = ctx.objectRuntimeTypes?.objectTypeIdx;
+      const objVecTypeIdxForLazy = ctx.objectRuntimeTypes?.objVecTypeIdx;
+      if (
+        ctx.standalone &&
+        lazyCtorIdx !== undefined &&
+        LAZY_ITER_METHODS.has(methodName) &&
+        isLazyIterForm(methodName, arity) &&
+        objTypeIdxForLazy !== undefined
+      ) {
+        const lazyCall: Instr[] = [
+          { op: "local.get", index: 0 } as Instr, // recv
+          { op: "local.get", index: 1 } as Instr, // arg0 (mapper/predicate | count)
+          { op: "call", funcIdx: lazyCtorIdx } as Instr,
+        ];
+        // isNotIterTarget = null ∨ $Object ∨ $__vec_base ∨ $ObjVec — a NULL/
+        // $Object/vec receiver keeps the legacy route; everything else (iterator
+        // carriers) constructs the lazy wrapper.
+        const notIterTest: Instr[] = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: objTypeIdxForLazy } as Instr,
+          { op: "i32.or" } as Instr,
+        ];
+        if (ctx.vecBaseTypeIdx >= 0) {
+          notIterTest.push(
+            { op: "local.get", index: anyLocalIdx } as Instr,
+            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
+            { op: "i32.or" } as Instr,
+          );
+        }
+        if (objVecTypeIdxForLazy !== undefined) {
+          notIterTest.push(
+            { op: "local.get", index: anyLocalIdx } as Instr,
+            { op: "ref.test", typeIdx: objVecTypeIdxForLazy } as Instr,
+            { op: "i32.or" } as Instr,
+          );
+        }
+        current = [
+          ...notIterTest,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: current,
+            else: lazyCall,
           } as Instr,
         ];
       }

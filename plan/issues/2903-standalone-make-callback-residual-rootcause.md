@@ -29,8 +29,10 @@ loc-budget-allow:
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions.ts
   - src/codegen/index.ts
+  - src/codegen/iterator-native.ts
 coercion-sites-allow:
   - src/codegen/iter-hof-native.ts
+  - src/codegen/iter-lazy-native.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
@@ -445,3 +447,71 @@ vec HOF arm; ground in `closed-method-dispatch.ts` + the #2651 family.
 Leak probe (zero family env imports + bare `{}` instantiate OK), construct-
 sampled corpus flip, `prove-emit-identity` gc/wasi byte-identical, merge_group
 standalone floor as the decider.
+
+---
+
+## Landed: sub-front R3 — lazy Iterator helpers map/filter/take/drop (opus-r3, 2026-07-13)
+
+**PR:** `issue-2903-r3-lazy-iter-helpers`. **New module
+`src/codegen/iter-lazy-native.ts`.**
+
+### The lowering
+
+A single closed struct `$LazyIterHelper { kind i32, src externref, fn externref,
+state (mut f64), inner (mut externref) }` (the `inner` field is reserved for a
+future flatMap slice — unused here). `.map/filter/take/drop(arg)` on a **non-vec,
+non-`$Object` iterator receiver** (generator frame, Map/Set/array iterator, or a
+chained lazy wrapper) constructs one via `__iter_lazy_<name>(recv, arg)`, whose
+`src` is the OPENED source handle (`__iter_hof_open(recv)` — GetIteratorDirect at
+call time). A shared `__lazy_iter_step(wrapper) -> (i32 done, externref value)`
+drives `src` through `__iter_hof_next` and applies the kind-dispatched transform:
+map applies `fn(value, counter)`; filter loops until truthy; take counts down
+`state` (0 ⇒ IteratorClose(src) + done); drop drains `state` skips then passes
+through. `fn` invoked via `__apply_closure` — **no `env.__make_callback`, no host
+import**.
+
+The wrapper is itself an iterator, wired into BOTH drive paths:
+- `closed-method-dispatch.ts` — a lazy arm mirrors the #2903 eager arm's
+  non-vec/non-`$Object` split; for map/filter it sits UNDER the #3098 vec HOF arm
+  so a vec receiver still eager-maps (arrays keep `[...].map` returning an array).
+- `iter-hof-native.ts` `fillIterHofSteppers` — `$LazyIterHelper` arms in
+  `__iter_hof_open/_next/_close` (pass-through / `__lazy_iter_step` /
+  `__lazy_iter_close`) so `.toArray()`, the eager helpers, and lazy→lazy chaining
+  drive it.
+- `iter-lazy-native.ts` `fillLazyIterLadderArms` — prepends a `$LazyIterHelper`
+  recognition arm to the GetIterator ladder (`__iterator` returns the wrapper,
+  `__iterator_next` → `__lazy_iter_step`, `__iterator_return` → `__lazy_iter_close`,
+  `__iterator_rest` → `__array_from_iter_n(rec,-1)`) so `Array.from(...)`,
+  `[...spread]`, and `for…of` drain it natively.
+- `iterator-native.ts` `fillNativeIteratorLateArms` — admits `$LazyIterHelper` to
+  the `__array_from_iter_n` drain allowlist (the element-wise drainer the
+  `__iterator_rest` arm delegates to).
+
+### Proofs
+
+- `tests/issue-2903-r3.test.ts` (14 tests): map/filter/take/drop via `.toArray()`,
+  `Array.from`, `[...spread]`, `for-of`, mapper-counter, lazy→lazy + filter→take
+  chaining, empty/`take(0)`/`drop`-beyond edge cases — all **host-free** (`env`
+  imports = `[]`, bare `{}` instantiate) + value-correct. Plus eager-array-HOF /
+  gc-lane guards.
+- `tests/issue-2903.test.ts` + `tests/issue-1326.test.ts`: 25/25 still green
+  (then/catch/finally/allSettled de-leak + gc + wasi lanes untouched).
+- **gc/wasi byte-identity by construction**: every new path is gated on
+  `ctx.standalone`; `$LazyIterHelper` is only registered under standalone, so
+  `fillLazyIterLadderArms` and the `__array_from_iter_n` drain-admission no-op in
+  gc/host/wasi (structMap miss).
+
+### Boundaries (documented, not gate regressions)
+
+- Helper on a non-iterator receiver → the source handle is null ⇒ the wrapper
+  yields nothing, NOT the spec TypeError (same no-throw discipline as the eager
+  helpers, #3098).
+- `take(n)`/`drop(n)` floor + clamp-negative-to-0, NOT the spec RangeError on
+  negative/NaN.
+- `result-is-iterator` / `x instanceof Iterator` brand identity is NOT modeled
+  (the wrapper is a bespoke struct, not `%IteratorHelperPrototype%`).
+- **flatMap is NOT in this slice** — it needs the `inner`-iterator drain-then-
+  advance state machine (the struct field is reserved for it). Follow-up R3b.
+- Array-iterator reification is still a separate gap: `[1,2,3].values()` returns
+  NULL standalone, so `.values().map(...)` shapes stay failing (not a helper
+  problem).

@@ -1333,7 +1333,14 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // (#3119) With `objDeps`, a source carrying a truthy `@@iterator` PROPERTY
   // (post-hoc `o[Symbol.iterator] = fn`) is likewise admitted to the drain;
   // `@@iterator`-less array-like `$Object`s keep the indexed pass-through.
-  if (deps || objDeps || sgDeps) {
+  // (#2903 R3) Admit the lazy Iterator-helper wrapper `$LazyIterHelper` to the
+  // `__array_from_iter_n` drain: `Array.from(g().map(f))` / spread must DRIVE it
+  // (via the `__iterator`/`__iterator_next` prepends `fillLazyIterLadderArms`
+  // adds later in finalize) rather than pass the wrapper through to the indexed
+  // reader. The prepends run AFTER this fill, but the drain loop calls them at
+  // runtime, so ordering is irrelevant.
+  const lazyHelperTypeIdx = ctx.structMap.get("$LazyIterHelper");
+  if (deps || objDeps || sgDeps || lazyHelperTypeIdx !== undefined) {
     const afinIdx = ctx.funcMap.get("__array_from_iter_n");
     const afinFn = afinIdx !== undefined ? definedFuncAt(ctx, afinIdx) : undefined;
     if (afinFn && afinFn.body.length > 0) {
@@ -1347,7 +1354,8 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
       // through to the indexed reader (which answers length 0 → every binding
       // silently `undefined`).
       const genStateTypeIdxs = sgDeps ? sgDeps.producers.map((p) => p.stateTypeIdx) : [];
-      if (userTypeIdxs.length > 0 || objDeps || genStateTypeIdxs.length > 0) {
+      const lazyTypeIdxs = lazyHelperTypeIdx !== undefined ? [lazyHelperTypeIdx] : [];
+      if (userTypeIdxs.length > 0 || objDeps || genStateTypeIdxs.length > 0 || lazyTypeIdxs.length > 0) {
         afinFn.body = buildArrayFromIterNBody(
           { vecTypeIdx: types.vecTypeIdx, arrTypeIdx: types.arrTypeIdx },
           {
@@ -1355,7 +1363,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
             iteratorNextIdx,
             iteratorReturnIdx: ctx.funcMap.get("__iterator_return"),
           },
-          [...userTypeIdxs, ...genStateTypeIdxs],
+          [...userTypeIdxs, ...genStateTypeIdxs, ...lazyTypeIdxs],
           objDeps,
         );
       }
