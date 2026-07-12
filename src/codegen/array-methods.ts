@@ -7391,7 +7391,14 @@ function compileArrayMap(
  * `externref` local instead of being forced through a numeric unbox that
  * traps with "illegal cast" (#1994).
  */
-function resolveReduceAccType(setup: ArrayCallbackSetup, numKind: "i32" | "f64"): ValType {
+function resolveReduceAccType(
+  setup: ArrayCallbackSetup,
+  numKind: "i32" | "f64",
+  // (#3199) True when an explicit initial-value argument is a reference-typed
+  // value (string / object / …). Seeds the accumulator when no callback type
+  // pins it.
+  initIsReference = false,
+): ValType {
   const ci = setup.closureInfo;
   if (ci) {
     // A void-returning callback (returnType === null) yields `undefined`; keep
@@ -7405,7 +7412,31 @@ function resolveReduceAccType(setup: ArrayCallbackSetup, numKind: "i32" | "f64")
       return accParam;
     }
   }
+  // (#3199) Callback type doesn't pin the accumulator (void / untyped callback,
+  // e.g. `function () {}`). A reference-typed explicit initial value then seeds
+  // it as `externref` instead of the numeric default — otherwise
+  // `[].reduce(function () {}, "seed")` coerces the string seed to f64 (→ NaN).
+  if (initIsReference) return { kind: "externref" };
   return { kind: numKind };
+}
+
+/**
+ * (#3199) Whether a reduce/reduceRight initial value is reference-typed (the
+ * externref-boxed tags) and so should seed the accumulator as externref.
+ * Via the type oracle (#1930) — no direct TS-checker use. Numeric / boolean /
+ * undefined / mixed tags keep the numeric default.
+ */
+function initArgIsReference(ctx: CodegenContext, initArg: ts.Expression): boolean {
+  switch (ctx.oracle.staticJsTypeOf(initArg)) {
+    case "string":
+    case "object":
+    case "function":
+    case "symbol":
+    case "bigint":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -7433,8 +7464,11 @@ function compileArrayReduce(
   if (!setup) return null;
 
   // The accumulator local must match the actual accumulator type, not always
-  // the numeric kind — string/object accumulators are externref (#1994).
-  const accType = resolveReduceAccType(setup, numKind);
+  // the numeric kind — string/object accumulators are externref (#1994). When a
+  // void/untyped callback leaves the accumulator type unpinned, an explicit
+  // reference-typed initial value seeds it as externref (#3199).
+  const redInitIsRef = callExpr.arguments.length >= 2 && initArgIsReference(ctx, callExpr.arguments[1]!);
+  const accType = resolveReduceAccType(setup, numKind, redInitIsRef);
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "red");
   const accTmp = allocLocal(fctx, `__arr_red_acc_${fctx.locals.length}`, accType);
@@ -7600,8 +7634,11 @@ function compileArrayReduceRight(
   if (!setup) return null;
 
   // The accumulator local must match the actual accumulator type, not always
-  // the numeric kind — string/object accumulators are externref (#1994).
-  const accType = resolveReduceAccType(setup, numKind);
+  // the numeric kind — string/object accumulators are externref (#1994). A
+  // reference-typed explicit initial value seeds an otherwise-unpinned
+  // accumulator as externref (#3199).
+  const rrInitIsRef = callExpr.arguments.length >= 2 && initArgIsReference(ctx, callExpr.arguments[1]!);
+  const accType = resolveReduceAccType(setup, numKind, rrInitIsRef);
 
   // Set up receiver: vec/data/len
   const vecTmp = allocLocal(fctx, `__arr_rr_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
