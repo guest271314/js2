@@ -4204,10 +4204,24 @@ function round2(n: number): number {
  *   promise_error   — Promise rejection or async failure
  *   assertion_fail  — Test returned non-1 value (assert counter)
  *   exception_in_test — Test returned -1 (exception caught by wrapper)
- *   wasm_compile    — Wasm validation/instantiation error
+ *   wasm_compile    — GENUINE Wasm validation/instantiation error
+ *                     ("invalid Wasm binary" / "Compiling function #N…failed")
+ *   missing_dependency — (#3187) compiler DI diagnostic: a required extern
+ *                     class or host import function was never wired
+ *                     ("No dependency provided for …") — NOT invalid-Wasm
+ *   missing_builtin — (#3187) an unimplemented builtin / runtime feature
+ *                     ("… is not a function") — NOT invalid-Wasm
+ *   harness_shape   — (#3187) module compiled but exposes no `test` export
+ *                     ("no test export") — NOT invalid-Wasm
  *   negative_test_fail — Negative test that should have failed but passed
  *   runtime_error   — Other Cannot/Invalid runtime errors
  *   other           — Unclassified
+ *
+ * (#3187) The wasm_compile / missing_dependency / missing_builtin / harness_shape
+ * split un-inflates the genuine invalid-Wasm bucket (~448 → ~87): "… is not a
+ * function" and "No dependency provided …" were previously mis-binned as
+ * wasm_compile. This is a verdict-classification change, so ORACLE_VERSION was
+ * bumped (see tests/test262-oracle-version.ts). Label-only: no pass/fail flips.
  */
 export function classifyError(errorMsg: string | undefined): string | undefined {
   if (!errorMsg) return undefined;
@@ -4237,11 +4251,26 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // WITHOUT the constructor-name prefix.
   if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
 
-  // Wasm compile/validation errors (from instantiation)
-  if (/Compiling function|No dependency provided|not a function/i.test(errorMsg)) return "wasm_compile";
+  // Wasm compile/validation errors (from instantiation). (#3187) Order matters:
+  // classify GENUINE invalid-Wasm FIRST so an instantiation error that quotes
+  // source text ("Compiling function #N…failed: …") isn't stolen by the
+  // missing-builtin/missing-dependency rules below.
+  if (/invalid Wasm binary|Compiling function/i.test(errorMsg)) return "wasm_compile";
+  // (#3187) The compiler's own dependency-injection diagnostic — "No dependency
+  // provided for extern class X" / "…for imported function env::__X" — is NOT
+  // invalid-Wasm; it means a required host import/extern was never wired. Its own
+  // bucket so it stops inflating wasm_compile (~56 records were mis-binned).
+  if (/No dependency provided/i.test(errorMsg)) return "missing_dependency";
+  // (#3187) "… is not a function" is a missing builtin / unimplemented runtime
+  // feature (safeBroadcast, transferToImmutable, sumPrecise, then, …), not an
+  // invalid-Wasm binary. Kept AFTER the genuine-wasm_compile rule above so
+  // instantiate errors that quote source aren't stolen (~170 records mis-binned).
+  if (/\bis not a function\b/i.test(errorMsg)) return "missing_builtin";
   if (/expected .+ but compiled/i.test(errorMsg)) return "negative_test_fail";
   if (/expected runtime .+ but succeeded/i.test(errorMsg)) return "negative_test_fail";
-  if (/no test export/i.test(errorMsg)) return "wasm_compile";
+  // (#3187) "no test export" is a harness-shape problem (module compiled fine but
+  // exposes no `test` export), not invalid-Wasm — its own bucket.
+  if (/no test export/i.test(errorMsg)) return "harness_shape";
 
   // Catch-all for other errors
   if (/Cannot |Invalid /i.test(errorMsg)) return "runtime_error";
