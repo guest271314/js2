@@ -50,11 +50,15 @@ async function drain(binary: Uint8Array, imports: unknown, stringPool: unknown, 
 const VALUE_RETURN_GEN = `export function* g(){ yield 1; yield 2; return 3; }`;
 
 describe("#2951 gate-2 — IR-first generator skip-set narrowing", () => {
-  it("JS-host: a value-returning generator is now in irFirstSkipped and runs correctly", async () => {
+  it("JS-host: a value-returning generator compiles+runs correctly under IR-first", async () => {
     const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, /* irFirst */ true);
     expect(res.success).toBe(true);
-    // the generator's legacy body was skipped — IR owns the slot
-    expect(res.irFirstSkipped ?? []).toContain("g");
+    // (#3143) The IR-first skip set is now an ALLOWLIST restricted to f64-numeric
+    // bodies, so a generator is NOT skipped — it stays COMPILE-TWICE (correct;
+    // the IR overlay still owns its body). The compile-once optimization for
+    // JS-host generators is DEFERRED to the allowlist-widening track
+    // (#2855/#2856); this test locks the CORRECTNESS that #2951 established.
+    expect(res.irFirstSkipped ?? []).not.toContain("g");
     // no hard compile error and no post-claim demotion (self-sufficiency proof)
     expect((res.errors ?? []).filter((e) => e.severity === "error")).toHaveLength(0);
     expect(res.irPostClaimErrors ?? []).toHaveLength(0);
@@ -66,7 +70,8 @@ describe("#2951 gate-2 — IR-first generator skip-set narrowing", () => {
 
   it("JS-host: the terminal return value surfaces once with done:true", async () => {
     const res = await compileWith(VALUE_RETURN_GEN, { fileName: "test.ts" }, true);
-    expect(res.irFirstSkipped ?? []).toContain("g");
+    // (#3143) compile-twice under the f64-only allowlist — correctness preserved.
+    expect(res.irFirstSkipped ?? []).not.toContain("g");
     const got = await drain(res.binary!, res.imports, res.stringPool, (gen) => {
       gen.next();
       gen.next();

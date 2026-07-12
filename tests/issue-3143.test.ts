@@ -1,28 +1,19 @@
-// #3143 — IR-first default flip: gate 8 (TypedArray-view element store).
+// #3143 — IR-first default flip: the ALLOWLIST skip predicate + end-to-end.
 //
-// The IR front-end's `from-ast.ts` `lowerElementStore` throws a clean
-// post-claim fallback ("element store on a TypedArray view not in IR scope")
-// for TypedArray-view receivers — the per-view value conversions (ToUint8 /
-// clamp / packing) and the typed backing store are legacy-only. The selector's
-// #2856-C2 element-store arm accepts the shape STRUCTURALLY (checker-free), so
-// under the IR-first default a claimed function with such a store would promote
-// the demote to a HARD compile error as a skipped slot. Gate 8
-// (`irFirstBodyStoresTypedArrayView`) keeps those functions compile-twice.
-//
-// This test locks two properties:
-//   1. The syntactic predicate fires on the real class-4 shapes (typed param
-//      receiver, `new Uint8Array(n)` local, compound / prefix stores) and does
-//      NOT fire on plain-array / string / non-view element stores.
-//   2. End-to-end: a program with a TypedArray-view element store compiles with
-//      ZERO hard errors under the IR-first default and runs correctly (parity
-//      with the escape-hatch legacy order).
+// The IR-first skip set is an ALLOWLIST (`irFirstBodyIsProvenLowerable`): a
+// claimed function's legacy body is skipped ONLY when its body is the
+// proven-lowerable numeric/boolean subset. This test locks:
+//   1. The allowlist predicate accepts pure-numeric bodies and rejects anything
+//      outside the subset (strings, method calls, param mutation, TypedArray
+//      stores/construction, `??`, etc. — all stay COMPILE-TWICE, safe).
+//   2. `collectLocalCallEdges` maps callers→callees for the signature-parity
+//      fixpoint.
+//   3. End-to-end: programs with out-of-subset shapes (TypedArray stores, Map +
+//      boxing) compile with ZERO hard errors under the IR-first default and run
+//      correctly (parity with the escape-hatch legacy order).
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import {
-  irFirstBodyCallsUnloweredArrayMethod,
-  irFirstBodyMutatesParam,
-  irFirstBodyStoresTypedArrayView,
-} from "../src/codegen/ir-first-gate.js";
+import { collectLocalCallEdges, irFirstBodyIsProvenLowerable } from "../src/codegen/ir-first-gate.js";
 import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
@@ -42,92 +33,78 @@ async function instantiate(r: CompileResult): Promise<Record<string, Function>> 
   return instance.exports as Record<string, Function>;
 }
 
-describe("#3143 gate 8 — irFirstBodyStoresTypedArrayView predicate (store OR construct)", () => {
+// Arity map covering common callee names used in the fixtures below, so the
+// allowlist's exact-arity call check can accept them.
+const ARITY = new Map<string, number>([
+  ["f", 1],
+  ["g", 1],
+  ["add", 2],
+  ["fib", 1],
+  ["helper0", 0],
+]);
+
+describe("#3143 — irFirstBodyIsProvenLowerable (ALLOWLIST) predicate", () => {
   it.each([
-    ["typed param receiver, plain store", `function f(out: Uint8Array, i: number){ out[i] = 65; }`],
-    ["typed param receiver, computed index", `function f(out: Uint8Array, p: number, i: number){ out[p + i] = 10; }`],
+    ["pure add", `function add(a: number, b: number): number { return a + b; }`],
     [
-      "new-Uint8Array local receiver + store",
-      `function f(n: number){ const b = new Uint8Array(n); b[0] = 1; return b; }`,
+      "recursive fib (self-call, exact arity)",
+      `function fib(n: number): number { if (n < 2) return n; return fib(n-1) + fib(n-2); }`,
     ],
-    ["Int32Array param compound store", `function f(a: Int32Array, i: number){ a[i] += 3; }`],
-    ["Float64Array param prefix incr", `function f(a: Float64Array, i: number){ ++a[i]; }`],
-    ["Uint8ClampedArray param postfix", `function f(a: Uint8ClampedArray, i: number){ a[i]--; }`],
-    ["new-Float32Array local, shl store", `function f(){ const v = new Float32Array(4); v[1] <<= 1; return v; }`],
-    // (b) construction alone — even with only a READ afterward — is unlowered.
-    ["new-Uint8Array + read only (no store)", `function f(n: number){ const b = new Uint8Array(n); return b.length; }`],
-    ["new-Uint8Array returned only", `function f(n: number): Uint8Array { return new Uint8Array(n); }`],
-    ["new-Int16Array as argument", `function f(){ return new Int16Array(8)[0]; }`],
-  ])("fires (keep compile-twice): %s", (_label, src) => {
-    expect(irFirstBodyStoresTypedArrayView(fnDecl(src))).toBe(true);
-  });
-
-  it.each([
-    // plain arrays are lowerable (vec-elem-set) — must NOT fire.
-    ["number[] param store", `function f(a: number[], i: number){ a[i] = 1; }`],
-    ["untyped array local store", `function f(){ const a = [0,0,0]; a[0] = 1; return a; }`],
-    // TypedArray READ on a param (no construction, no store) lowers — must NOT fire.
-    ["typed param element READ only", `function f(a: Uint8Array, i: number){ return a[i]; }`],
-    ["typed param length READ only", `function f(a: Uint8Array){ return a.length; }`],
-    // string element store is a different gate / receiver.
-    ["object string-literal key store", `function f(o){ o["k"] = 1; }`],
-    // non-view construction is not this gate's concern.
-    ["new Array construction", `function f(){ const a = new Array(4); a[0] = 1; return a; }`],
-  ])("does not fire: %s", (_label, src) => {
-    expect(irFirstBodyStoresTypedArrayView(fnDecl(src))).toBe(false);
-  });
-});
-
-describe("#3143 gate 9 — irFirstBodyMutatesParam predicate", () => {
-  it.each([
-    ["param decrement in do-while", `function f(n: number){ let c=0; do { c++; n--; } while (n>0); return c; }`],
-    ["param increment in for", `function f(n: number){ for (let i=0;i<3;i++){ n++; } return n; }`],
-    ["param plain assignment", `function f(n: number){ n = 5; return n; }`],
-    ["param compound assignment", `function f(n: number){ n += 2; return n; }`],
-    ["param prefix decrement", `function f(n: number){ while (n>0){ --n; } return n; }`],
-  ])("fires (keep compile-twice): %s", (_label, src) => {
-    expect(irFirstBodyMutatesParam(fnDecl(src))).toBe(true);
-  });
-
-  it.each([
-    ["local mutation only (param read)", `function f(n: number){ let m=n; while(m>0){ m--; } return m; }`],
-    ["param read, no write", `function f(n: number){ return n + 1; }`],
-    ["no params", `function f(){ let x=0; x++; return x; }`],
     [
-      "nested-fn shadows param name",
-      `function f(n: number){ const g = (n: number) => { let k=n; k--; return k; }; return g(n); }`,
+      "loop with local mutation",
+      `function f(n: number): number { let t = 0; for (let i=1;i<=n;i++){ t += i; } return t; }`,
     ],
-  ])("does not fire: %s", (_label, src) => {
-    expect(irFirstBodyMutatesParam(fnDecl(src))).toBe(false);
-  });
-});
-
-describe("#3143 gate 10 — irFirstBodyCallsUnloweredArrayMethod predicate", () => {
-  it.each([
-    ["array-literal local .indexOf", `function f(){ const a=[10,20,30]; return a.indexOf(20); }`],
-    ["array-literal local .includes", `function f(){ const a=[1,2,3]; return a.includes(2)?1:0; }`],
-    ["array-literal local .flat", `function f(){ const a=[[1],[2]]; return a.flat()[0]; }`],
-    ["T[] param .lastIndexOf", `function f(a: number[]){ return a.lastIndexOf(5); }`],
-    ["Array<T> param .join", `function f(a: Array<number>){ return a.join(","); }`],
-    ["new Array local .slice", `function f(){ const a=new Array(3); return a.slice(1); }`],
-  ])("fires (keep compile-twice): %s", (_label, src) => {
-    expect(irFirstBodyCallsUnloweredArrayMethod(fnDecl(src))).toBe(true);
+    [
+      "compare in condition, logical &&",
+      `function f(a: number, b: number): number { if (a > 0 && b > 0) return 1; return 0; }`,
+    ],
+    ["ternary with numeric branches", `function f(n: number): number { return n < 0 ? -n : n; }`],
+    [
+      "while + do-while, local decrement",
+      `function f(n: number): number { let c=0; let m=n; while(m>0){ c++; m--; } return c; }`,
+    ],
+    ["bitwise + shift arithmetic", `function f(n: number): number { return (n & 0xff) ^ (n >> 2); }`],
+    ["void body, no return value", `function f(n: number): void { let x = n + 1; }`],
+  ])("accepts (skip-eligible): %s", (_label, src) => {
+    expect(irFirstBodyIsProvenLowerable(fnDecl(src), ARITY)).toBe(true);
   });
 
   it.each([
-    // `.push` IS lowered by from-ast — must NOT fire.
-    ["array .push", `function f(a: number[], v: number){ a.push(v); }`],
-    // element read / .length (not a call) — not gated.
-    ["array element read", `function f(a: number[], i: number){ return a[i]; }`],
-    ["array .length", `function f(a: number[]){ return a.length; }`],
-    // method call on a non-array receiver (class instance) — different gate/receiver.
-    ["method call on non-array local", `function f(o: { m(): number }){ return o.m(); }`],
-  ])("does not fire: %s", (_label, src) => {
-    expect(irFirstBodyCallsUnloweredArrayMethod(fnDecl(src))).toBe(false);
+    // out-of-subset value domains / ops — must stay compile-twice.
+    ["param mutation", `function f(n: number): number { n--; return n; }`],
+    ["string literal", `function f(): number { const s = "x"; return s.length; }`],
+    ["method call on receiver", `function f(a: number[]): number { return a.indexOf(2); }`],
+    ["element access", `function f(a: number[], i: number): number { return a[i]; }`],
+    ["property access", `function f(o: { v: number }): number { return o.v; }`],
+    ["new expression", `function f(): number { const b = new Uint8Array(4); b[0]=1; return b[0]; }`],
+    ["boolean literal operand", `function f(): number { return 0 === (false as unknown as number) ? 1 : 0; }`],
+    ["logical && of numbers (not bool operands)", `function f(a: number, b: number): number { return (a && b); }`],
+    ["nullish coalescing", `function f(a: number): number { return a ?? 0; }`],
+    ["call to non-claimed / unknown-arity callee", `function f(n: number): number { return unknownFn(n); }`],
+    ["wrong-arity call", `function f(n: number): number { return add(n); }`],
+    ["nested function declaration", `function f(n: number): number { function g(){ return 1; } return g(); }`],
+    ["try/throw statement", `function f(n: number): number { try { return n; } catch { return 0; } }`],
+  ])("rejects (compile-twice): %s", (_label, src) => {
+    expect(irFirstBodyIsProvenLowerable(fnDecl(src), ARITY)).toBe(false);
   });
 });
 
-describe("#3143 gate 8 — end-to-end IR-first default (no hard error, correct bytes)", () => {
+describe("#3143 — collectLocalCallEdges", () => {
+  it("maps each top-level function's callees, and module-init calls to the pseudo-node", () => {
+    const sf = ts.createSourceFile(
+      "t.ts",
+      `function a(){ return b() + c(); } function b(){ return 1; } function c(){ return b(); } a();`,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const edges = collectLocalCallEdges(sf);
+    expect([...(edges.get("a") ?? [])].sort()).toEqual(["b", "c"]);
+    expect([...(edges.get("c") ?? [])]).toEqual(["b"]);
+    expect([...(edges.get("<module-init>") ?? [])]).toEqual(["a"]);
+  });
+});
+
+describe("#3143 — end-to-end IR-first default (no hard error, correct bytes)", () => {
   // The native-messaging class-4 shape, reduced: a typed-param writer whose
   // element store stays legacy (gate 8a) plus a caller that constructs a view
   // (gate 8b). Both must compile cleanly under the IR-first default.
