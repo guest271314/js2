@@ -131,12 +131,16 @@ byte-identical). `__str_to_number` is emitted eagerly in the standalone block of
 `ensureObjectRuntime` for a stable finalize funcIdx (measured to add 0 bytes —
 it was already always emitted in standalone).
 
-Deviation from the plan: `__extern_has`'s numeric arm does NOT delegate to
-`__extern_has_idx` — that helper is `$ObjVec`/`$Object`-only, NOT
-`$__vec_base`-aware, so it would return 0 for a real array and the #2066
-liveness guard would skip every iteration. Instead the arm reads the bound
-directly through `$__vec_base` (`0 <= trunc_sat(n) < len`), using the same
-`trunc_sat` as `__extern_get_idx`'s vec arm so HAS and GET stay in agreement.
+Deviation from the plan: the plan said `__extern_has_idx` was already
+`$__vec_base`-aware — it was NOT (only `$ObjVec`/`$Object`). Rather than inline
+the bounds in `__extern_has`'s arm (duplicating logic — anti-bloat), this PR
+GENERALISES `__extern_has_idx` with a single guarded `$__vec_base` branch
+(length read uniformly through the supertype, same `trunc_sat` bounds as
+`__extern_get_idx`'s vec arm; the `$ObjVec` fast path is untouched since a vec
+is not a `$ObjVec`). `__extern_has`'s numeric arm then delegates to it, so HAS
+and GET stay in agreement and the #2066 liveness guard never skips a readable
+index. The generalisation also fixes `__extern_has_idx` for any other caller
+that passes a real array carrier.
 
 Verified standalone (zero host imports, `tests/issue-3183.test.ts`, 11 cases):
 - face A: `for (k in [5,6])` → 2; aliased `number[]` sum → 60; empty → 0.
