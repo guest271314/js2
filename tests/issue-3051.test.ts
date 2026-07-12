@@ -231,3 +231,128 @@ describe("#3051 Slice 2 — arg / flag coercion", { timeout: 30000 }, () => {
     expect(out).toBe("b");
   });
 });
+
+describe("#3051 Slice 3 — abrupt-throw propagation + @@split species protocol", { timeout: 30000 }, () => {
+  it("propagates a throwing result getter through @@replace (result-get-index-err)", async () => {
+    // A poisoned exec result: `get index() { throw marker }`. Accessor-bearing
+    // literals are HOST objects; before the fix the closure returning it
+    // null-dropped (externref→struct ref.test fallback), the getter never
+    // fired, and the abrupt completion was lost.
+    const out = await runLoose(`
+      export function test(): number {
+        var r = /./;
+        var marker: any = { tag: "m" };
+        var poisonedIndex = {
+          get index(): number { throw marker; }
+        };
+        (r as any).exec = function() { return poisonedIndex; };
+        try {
+          (r as any)[Symbol.replace]('a', 'b');
+          return 0;
+        } catch (e: any) {
+          return e === marker ? 1 : 2;
+        }
+      }
+    `);
+    expect(out).toBe(1);
+  });
+
+  it("exposes a null-valued result field as null, not undefined (result-coerce-groups-err)", async () => {
+    // `{ groups: null }` — §22.2.6.11 step 14.j/l: ToObject(null) must throw
+    // TypeError. The struct-field null previously read back as a shape-miss.
+    const out = await runLoose(`
+      export function test(): number {
+        var r = /./;
+        var coercibleValue: any = { length: 1, 0: '', index: 0, groups: null };
+        r.exec = function(): any { return coercibleValue; };
+        try {
+          (r as any)[Symbol.replace]('bar', '');
+          return 0;
+        } catch (e: any) {
+          return (e instanceof TypeError) ? 1 : 2;
+        }
+      }
+    `);
+    expect(out).toBe(1);
+  });
+
+  it("resolves @@split SpeciesConstructor through a compiled ctor's sidecar (species-ctor-y)", async () => {
+    // `rx.constructor = fn; rx.constructor[Symbol.species] = fn2` — the species
+    // lives on the closure's sidecar; the property-less closureBridge hid it, so
+    // the protocol defaulted to %RegExp% and new RegExp(<opaque proxy>) trapped.
+    const out = await runLoose(`
+      export function test(): string {
+        var flagsArg: any = "unset";
+        var re: any = {};
+        re.constructor = function() {};
+        re.constructor[Symbol.species] = function(_: any, flags: any) {
+          flagsArg = flags;
+          return /./y;
+        };
+        re.flags = '';
+        (RegExp.prototype as any)[Symbol.split].call(re, '');
+        return flagsArg as string;
+      }
+    `);
+    expect(out).toBe("y");
+  });
+
+  it("drives a fake-regexp splitter's lastIndex get/set protocol (str-coerce-lastindex)", async () => {
+    // The species-constructed splitter is a host object whose lastIndex getter
+    // returns `{ valueOf(){ return 2.9 } }` — the accessor bridge must marshal
+    // the data-struct return so native ToLength reaches valueOf.
+    const out = await runLoose(`
+      export function test(): string {
+        var obj: any = { constructor: function() {} };
+        var fakeRe: any = {
+          set lastIndex(_: any) {},
+          get lastIndex(): any {
+            return { valueOf: function(): number { return 2.9; } };
+          },
+          exec: function(): any { return []; }
+        };
+        obj.constructor[Symbol.species] = function() { return fakeRe; };
+        var result: any = (RegExp.prototype as any)[Symbol.split].call(obj, 'abcd');
+        return (result.length as number) + "|" + (result[0] as string) + "|" + (result[1] as string);
+      }
+    `);
+    expect(out).toBe("2||cd");
+  });
+
+  it("stored accessor getter observes OUTER writes after literal creation", async () => {
+    // `var v; ({ get x() { return v } }); v = ...` — the getter must read the
+    // updated value, not the creation-time snapshot (str-coerce-lastindex-err's
+    // badLastIndex reassignment). Fixed by rebinding the outer local to the
+    // shared ref cell (boxedCaptures write-through).
+    const out = await runLoose(`
+      export function test(): string {
+        var v: any;
+        var o = {
+          get x(): any { return v; }
+        };
+        const before = (o as any).x;
+        v = 42;
+        const after = (o as any).x;
+        return (before === undefined ? "u" : "x") + "|" + (after as number);
+      }
+    `);
+    expect(out).toBe("u|42");
+  });
+
+  it("plain-object mirror converts via inherited Object.prototype.toString", async () => {
+    // §7.1.1.1: an ordinary object without own toString/valueOf converts via
+    // the INHERITED Object.prototype.toString — the @@split default-ctor path
+    // (`new RegExp(<rx mirror>, flags)`) must not throw (species-ctor-ctor-non-obj
+    // guard call).
+    const out = await runLoose(`
+      export function test(): string {
+        var obj = { flags: '' };
+        var r: any = (RegExp.prototype as any)[Symbol.split].call(obj);
+        return "len=" + (r.length as number) + "|" + (r[0] as string) + "|" + (r[1] as string) + "|" + (r[2] as string);
+      }
+    `);
+    // Matches native V8: ToString(rx mirror) = "[object Object]" →
+    // new RegExp("[object Object]", "y") splits "undefined" → ["und","fin","d"].
+    expect(out).toBe("len=3|und|fin|d");
+  });
+});
