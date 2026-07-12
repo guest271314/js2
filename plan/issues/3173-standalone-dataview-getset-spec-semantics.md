@@ -18,6 +18,20 @@ sprint: current
 horizon: l
 related: [2860, 3062, 3054, 3058, 2872]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+# (#3102/#3131) Intentional growth for this slice: the spec-semantics core
+# (throw templates, f16/i64 codecs, __dv_m_* helper, reflective bodies) lives
+# in the SUBSYSTEM module dataview-native.ts per the anti-bloat directive; the
+# other files carry only the dispatch/wiring arms (dispatcher brand arm,
+# reflective-call route, ctor wrap gate, detach-write hook, getter fixes).
+loc-budget-allow:
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/any-helpers.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/property-access.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/array-object-proto.ts
+  - src/emit/binary.ts
 ---
 
 # #3173 — standalone: DataView.prototype get\*/set\* spec semantics
