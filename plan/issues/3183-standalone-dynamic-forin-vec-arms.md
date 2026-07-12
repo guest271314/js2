@@ -17,6 +17,14 @@ sprint: current
 horizon: m
 related: [3179, 3176, 3173, 3169, 2860]
 origin: "Split out of #3179 during root-cause diagnosis (2026-07-12). #3179's PR fixed the illegal-cast trap face (emitArrayForIn); this issue is the remaining any-typed-receiver face."
+# The dynamic for-in / string-key vec arms are new native-runtime codegen that
+# belongs in object-runtime.ts (the dynamic-reader helpers it splices into all
+# live there — fillExternGetIdxVecArms / fillExternArrayLikeStructArms /
+# fillExternGetErrorProps are its siblings); the index.ts delta is just the
+# import + one finalize call. Both are intended feature growth, not barrel bloat.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
 ---
 
 # #3183 — standalone: dynamic-path helpers lack vec arms → any-typed arrays enumerate empty / read undefined
