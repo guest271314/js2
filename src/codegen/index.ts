@@ -14604,12 +14604,33 @@ export function varBindingNeedsExternrefForUndefined(
   if (ctx !== undefined && (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init))) {
     const declType = ctx.checker.getTypeAtLocation(decl!);
     const isPurelyUndefinedOrVoid = (declType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0;
-    if (isPurelyUndefinedOrVoid) {
-      const recvType = ctx.checker.getTypeAtLocation(init.expression);
-      if (resolveWasmType(ctx, recvType).kind === "externref") return true;
-    }
+    if (isPurelyUndefinedOrVoid && undefinedTypedMemberReadProducesExternref(ctx, init)) return true;
   }
   return false;
+}
+
+/**
+ * (#3033 Bug 2a/2b) Shared predicate: a property/element access whose STATIC
+ * type is purely `undefined`/`void` — the checker could not resolve the member
+ * (untyped `this` receiver in a prototype-function, heterogeneous shapes, …) —
+ * but whose RECEIVER produces an externref at runtime is a DYNAMIC member
+ * read: its runtime value is externref, NOT the numeric undefined-sentinel
+ * `resolveWasmType(undefined)` would give it. Recursive, so a CHAINED read
+ * (`this.type.keyword` — Bug 2b) is recognized: the receiver `this.type` is
+ * itself such a read. Used by BOTH the var/let slot typing
+ * (`varBindingNeedsExternrefForUndefined`, Bug 2a) and the property-access
+ * dynamic-receiver admission (`compilePropertyAccess` isExternObj, Bug 2b) so
+ * the two stay in lockstep — no parallel branch.
+ */
+export function undefinedTypedMemberReadProducesExternref(ctx: CodegenContext, expr: ts.Expression): boolean {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (!ts.isPropertyAccessExpression(e) && !ts.isElementAccessExpression(e)) return false;
+  const t = ctx.checker.getTypeAtLocation(e);
+  if ((t.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return false;
+  const recvType = ctx.checker.getTypeAtLocation(e.expression);
+  if (resolveWasmType(ctx, recvType).kind === "externref") return true;
+  return undefinedTypedMemberReadProducesExternref(ctx, e.expression);
 }
 
 export function hoistVarDeclarations(
