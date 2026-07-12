@@ -2121,6 +2121,36 @@ export function coerceType(
     const toIdx = (to as { typeIdx: number }).typeIdx;
     // Guarded: ref.test before ref.cast to avoid illegal cast traps
     const tmpEqAny = allocTempLocal(fctx, from);
+    // (#3149) When the target is a VEC struct and the direct cast misses, the
+    // source is an indexable-but-differently-typed native collection (e.g. the
+    // `$ObjVec` group value handed back by `Map.groupBy(...).get(k)` — `map.get`
+    // returns anyref, not the externref `Object.groupBy`'s `__extern_get`
+    // yields). The legacy else-branch emitted `ref.null` + `ref.as_non_null`,
+    // which NULL-DEREF-TRAPPED the moment the harness's `any[]`-typed
+    // `compareArray` read `.length`. Mirror the `externref → ref` arm below:
+    // materialize a real vec by reading the source via
+    // `__extern_length`/`__extern_get_idx` (`buildVecFromExternref`), which an
+    // `$ObjVec` responds to. `buildVecFromExternref` needs an externref, so
+    // convert the anyref first. Non-vec struct targets keep the null fallback.
+    const eqVecInfo = to.kind === "ref" ? getVecInfo(ctx, toIdx) : undefined;
+    if (eqVecInfo) {
+      const tmpEqExtern = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpEqAny });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpEqExtern });
+      fctx.body.push({ op: "local.get", index: tmpEqAny });
+      fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
+        then: [{ op: "local.get", index: tmpEqAny } as Instr, { op: "ref.cast_null", typeIdx: toIdx } as Instr],
+        else: buildVecFromExternref(ctx, fctx, tmpEqExtern, toIdx, eqVecInfo),
+      } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      releaseTempLocal(fctx, tmpEqExtern);
+      releaseTempLocal(fctx, tmpEqAny);
+      return;
+    }
     fctx.body.push({ op: "local.tee", index: tmpEqAny });
     fctx.body.push({ op: "ref.test", typeIdx: toIdx });
     fctx.body.push({
@@ -2140,6 +2170,31 @@ export function coerceType(
   if ((from.kind === "eqref" || from.kind === "anyref") && to.kind === "ref_null") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
     const tmpLocal = allocTempLocal(fctx, from);
+    // (#3149) Vec target + cast-miss → materialize instead of dropping to null.
+    // This is the `any[]`-typed-parameter path (a `ref_null $vec`) that the
+    // harness `compareArray(a: any[], …)` forces on a `Map.groupBy(...).get(k)`
+    // `$ObjVec` group (`map.get` returns anyref). The legacy null fallback then
+    // NULL-DEREF-TRAPPED on `a.length`. Mirror the `externref → ref_null` arm:
+    // read the indexable source via `buildVecFromExternref`. Non-vec targets
+    // keep the null fallback.
+    const anyVecInfo = getVecInfo(ctx, toIdx);
+    if (anyVecInfo) {
+      const tmpExtern = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpLocal });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpExtern });
+      fctx.body.push({ op: "local.get", index: tmpLocal });
+      fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: to },
+        then: [{ op: "local.get", index: tmpLocal } as Instr, { op: "ref.cast", typeIdx: toIdx } as Instr],
+        else: buildVecFromExternref(ctx, fctx, tmpExtern, toIdx, anyVecInfo),
+      } as Instr);
+      releaseTempLocal(fctx, tmpExtern);
+      releaseTempLocal(fctx, tmpLocal);
+      return;
+    }
     fctx.body.push({ op: "local.tee", index: tmpLocal });
     // Use ref.test to check both null and type compatibility (ref.test returns 0 for null)
     fctx.body.push({ op: "ref.test", typeIdx: toIdx });
