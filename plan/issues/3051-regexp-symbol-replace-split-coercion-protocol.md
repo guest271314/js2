@@ -1,7 +1,9 @@
 ---
 id: 3051
 title: "RegExp.prototype[@@replace] / [@@split] coercion protocol: ToString/ToInteger/ToLength on result-array + lastIndex/limit/flags args (~48 fails)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-3051c
 sprint: current
 priority: medium
 horizon: m
@@ -18,6 +20,11 @@ goal: spec-completeness
 test262_category: built-ins/RegExp/prototype/Symbol.replace, built-ins/RegExp/prototype/Symbol.split
 test262_fail: 48
 related: []
+loc-budget-allow:
+  - src/runtime.ts
+  - src/codegen/literals.ts
+  - src/codegen/index.ts
+  - src/codegen/closures.ts
 ---
 
 # #3051 — RegExp `[@@replace]` / `[@@split]` coercion protocol
@@ -339,6 +346,70 @@ Each cluster: verify **no regression** in the delegating corpus
 `RegExp.prototype.{Symbol.match,Symbol.matchAll,Symbol.search}` — 459 files
 dev-3051b already swept) and in `tests/issue-3051.test.ts`. Full `merge_group`
 per cluster; standalone floor green (host-lane-gated).
+
+## Landed Slice 3 (dev-3051c, 2026-07-12) — Clusters 1+2+3
+
+**Category sweep (isolated per-file, `built-ins/RegExp/prototype/Symbol.{replace,split}`):
+88 → 101 pass vs origin/main, ZERO in-category regressions.** `tests/issue-3051.test.ts`
+extended to 16 tests. Three commits on `issue-3051-regexp-symbol-coercion`:
+
+- **Cluster 1 (result-\*-err abrupt throw) — root cause was NOT a missing
+  wasm-exn bridge.** The `WebAssembly.Exception` already traverses V8's native
+  protocol and re-enters the module's own `catch` tag. The real bug:
+  `resolveWasmType` mapped anonymous object types WITH accessor properties
+  (`{ get index() {…} }`) to a WasmGC struct while `compileObjectLiteralWithAccessors`
+  (#1239) represents them as HOST objects — the closure-return coercion
+  externref→struct then null-dropped on the failed `ref.test` (type-coercion.ts),
+  so exec's poisoned result arrived at V8 as `null` and the getter never fired.
+  Fix: accessor-bearing anonymous types resolve to externref (+`ensureStructForType`
+  skip). Plus `_resolveHostField` null-vs-shape-miss disambiguation for
+  `{ groups: null }` (result-coerce-groups-err). Flips: all 5 Cluster-1 files
+  + result-coerce-groups-prop.
+- **Clusters 2+3 (@@split object-arg coercion + SpeciesConstructor):**
+  (a) `_wrapForHost` get trap presents a closure struct CARRYING own sidecar
+  props (the `constructor` fn with `[Symbol.species]` assigned) as the cached
+  `_wrapCallableForHost` mirror — the bare closureBridge hid the sidecar and the
+  species silently defaulted to %RegExp% → `new RegExp(<opaque proxy>)` trap.
+  (b) host-side `[[Construct]]` of compiled closures marshals raw-struct returns
+  (new-path ONLY — call-exit marshalling is the known #2835 ~85-file dstr
+  regression). (c) exec-return wrap widened beyond `instanceof RegExp` + applied
+  to exec closure fields served by the get trap. (d) `getter_callback_maker`
+  marshals DATA-struct/vec getter returns (fakeRe `get lastIndex()` →
+  `{valueOf}`). (e) stored accessor callbacks rebind the outer local to the
+  shared capture cell (`boxedCaptures` write-through) so a getter observes OUTER
+  writes after creation. (f) `_wrapForHost` inherited
+  `Object.prototype.toString/valueOf` fallthrough on own-miss (§7.1.1.1 —
+  matches native V8 for the @@split default-ctor guard call). Flips:
+  coerce-flags, limit-0-bail, species-ctor-y, str-coerce-lastindex,
+  str-coerce-lastindex-err, str-get-lastindex-err, str-set-lastindex-match,
+  str-set-lastindex-no-match.
+
+**Remaining (13 in-category fails, follow-up material):**
+
+1. `species-ctor.js` — real-RegExp receiver: the typed `re.constructor = fn`
+   write (`Object_set_constructor` → `_safeSet`) stores the RAW closure struct
+   as an own prop of the host RegExp; V8's `Get(C, @@species)` on the opaque
+   struct is undefined. Needs wrap-on-store + unwrap-on-wasm-read (identity:
+   `===` is wasm-level `ref.eq`, so the wasm read path must return the raw
+   closure). Even then, `args.length === 2` needs the exact-argc channel (see 3).
+2. `species-ctor-ctor-non-obj.js` — typed `obj.constructor = false` on a
+   struct-typed receiver is **silently dropped by codegen** (no import emitted
+   at all; the dynamic `(obj as any).constructor = false` path works). Dropped-
+   write bug worth its own issue.
+3. `exec-invocation.js` / `fn-invoke-args*.js` / `named-groups-fn.js` /
+   `species-ctor.js#args` — `arguments.length` fidelity through the
+   `__call_fn_method_N` dispatchers (each closure receives its DECLARED arity,
+   spec wants the ACTUAL argument count). Needs an argc side channel.
+4. `species-ctor-err.js` / `species-ctor-species-non-ctor.js` — @@species as a
+   throwing/defined ACCESSOR on the ctor function object (defineProperty-on-
+   function path).
+5. `str-result-coerce-length.js` — fakeRe as a data STRUCT (`{exec}` only, no
+   accessors) with self-referential `fakeRe.lastIndex = 1` inside exec; the
+   construct-marshalled mirror reaches `RegExp.prototype.exec called on
+   incompatible receiver`.
+6. `name.js` ×2 — Cluster 4 (WKS method as first-class value), scoped last per
+   the arch plan; `splitter-proto-from-ctor-realm.js` (cross-realm) and
+   `poisoned-stdlib.js` (compile-hang, separate concern) out of scope.
 
 ## arch-3049 re-verification (2026-07-06) — CONFIRMED, with a line-drift caveat
 
