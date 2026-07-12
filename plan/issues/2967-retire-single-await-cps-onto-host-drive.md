@@ -12,8 +12,8 @@ reasoning_effort: max
 goal: async-model
 sprint: current
 parent: 1042
-depends_on: [1042]
-related: [2906, 2957, 1373b]
+depends_on: [1042, 3134]
+related: [2906, 2957, 1373b, 3134]
 origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane was left byte-stable; convergence is its own measured step"
 loc-budget-allow:
   - src/codegen/async-frame.ts
@@ -21,6 +21,7 @@ loc-budget-allow:
   - src/codegen/declarations.ts
   - src/codegen/expressions/calls.ts
   - src/codegen/closures.ts
+  - src/codegen/statements/nested-declarations.ts
 ---
 
 # #2967 — One async lowering engine: fold the single-tail-await CPS lane into the host drive, then widen the shared gaps
@@ -366,3 +367,144 @@ the frame engine** (fix the capture-struct/`__self` interplay in the
 lifted-closure context), **2b — pattern/rest params** (spill the
 prologue-derived locals into the frame), **2c — delete CPS**. Widening
 (try/catch-across-await) remains slice 3.
+
+## Phase 3 spec — cell-aware frame layout (the true 2c gate; 2026-07-11)
+
+After 2b the CPS population is only the **hazard re-lanes**: (class 1)
+spill/derived locals cell-boxed by a nested mutable capture; (class 2)
+non-resume-binding ref-typed spill guesses. Deleting CPS now would strand
+those on the legacy sync fakery (wrong under suspension — the await-using
+microtask cluster rides the class-1 decline TODAY). So 2c decomposes:
+
+**3a — retire class 1 by FORCE-BOXING (design verified against source):**
+
+- Key verified mechanics: (i) the resume prologue's `allocLocal(name)` makes
+  a segment lead's `let`/`const` REUSE that binding
+  (variables.ts `isHoistedLetConst`: `existingIdx >= params.length`), so the
+  #2692 let/const eager-boxing race does NOT apply inside the resume fn;
+  (ii) the declaration-init path is already box-aware
+  (variables.ts `boxedForInitStore`, #1177/#2692 — writes the init through
+  the cell when `fctx.boxedCaptures` has the name); (iii) closure creation
+  ALIASES a pre-existing `boxedCaptures` cell instead of re-boxing
+  (closures.ts `alreadyBoxed` branch).
+- Therefore: for each spill (or 2b-2 derived-param) name matching the class-1
+  predicate, type its frame field `(ref null $__ref_cell_<declaredT>)`;
+  create the cell at the ENTRY fn's frame `struct.new`
+  (body-local: `struct.new $cell(<default>)`; derived param: box the live
+  entry local — reuse the `derivedSpillInit` hook); in the resume prologue,
+  restore the cell local, bind the NAME to it, and register
+  `resumeFctx.boxedCaptures.set(name, {refCellTypeIdx, valType})`. Reads /
+  writes / declaration-inits / nested-capture aliasing then all flow through
+  existing machinery; `storeSpills` stores the cell ref (field type matches);
+  cell IDENTITY survives suspends (same heap object restored), so nested
+  closures observe post-await writes and vice versa.
+- The predicate does NOT need to exactly mirror closures.ts's boxing
+  decision: force-boxing is SELF-FULFILLING (over-approximation just adds an
+  indirection, still correct). This also fixes the latent declaration-lane
+  class-1 hazard (no corpus instance, slice-1 note).
+- Retires: `asyncClosureCellSpillHazard` class-1 arm, `patternParamCellHazard`
+  re-lane, and the 2b-2 non-CPS cell caveat. Own PR + merge_group A/B (the
+  await-using cluster flips lanes).
+
+**3b — class 2 (rep-divergence)**: smaller corpus (the fromAsync
+`const expected = [prom]` shape). Candidate: pre-bind the hazardous name to
+an EXTERNREF local (uniform boundary rep, field externref) and let the
+dynamic-read ladders handle it; the blocker to verify is the mid-body retype
+paths (#3037-style slot retyping re-allocs the local, orphaning the prologue
+binding). If that verification fails, 3b may fold into #3134 (the Promise<T>
+slot-rep fix) which removes the known divergence source.
+
+**2c — delete** `emitAsyncStateMachine`/`splitBodyAtAwait`/`compileNestedAwait`
+CPS arm/`asyncCpsActive` plumbing/CPS-only import detection once 3a+3b land
+(or 3a lands and 3b's population is measured ≈0 on the corpus).
+
+## Phase 3a — IMPLEMENTED (2026-07-11, this PR)
+
+Exactly per the spec above; notes on what the implementation surfaced:
+
+- `buildAsyncFrameInfo` computes `spillCellInfo` (spill idx → cell type +
+  inner valType) with the shared `collectNestedRefsAndAssigns` predicate;
+  flagged fields are typed `(ref null $__ref_cell_<T>)`. Body locals require
+  `isSpillSafeType(valType)` (the entry cell needs an inert default) — the
+  non-defaultable residue is ref-typed and thus already class-2-declined on
+  the closure path. Derived params force-box for ANY valType (live init).
+  Async-generator frames untouched (`asteriskToken` guard).
+- The resume prologue registers flagged names in `resumeFctx.boxedCaptures`
+  (CLONING the outer-shared map first — mutating `info.boxedCaptures` in
+  place would pollute the activating fctx) and `emitDeliver` writes a
+  force-boxed resume binding THROUGH the cell (`struct.set` field 0), since
+  its slot now holds the cell ref, not the value.
+- The 2b-2 `patternParamCellHazard` decline and the #2873 class-1 arm of
+  `asyncClosureCellSpillHazard` are removed. Class 2 (ref-typed spill-guess
+  rep divergence) is now the ONLY CPS re-lane (→ 3b / #3134).
+- **Latent #2623 consumer bug exposed and fixed** (the one real corpus
+  regression pre-fix): `nestedFuncCaptures` registered `valType: c.type` —
+  for a mutable capture whose outer slot was ALREADY the canonical cell,
+  that is the CELL type, and every call-site consumer derives the capture
+  param via `getOrRegisterRefCellType(valType)` → a CELL-OF-CELL, then casts
+  the real cell to it — "illegal cast" trap (test262 fromAsync
+  sync-iterable-with-rejecting-thenable-closes: a nested GENERATOR with a
+  `finally` mutating a captured counter; pre-3a the async body never had a
+  pre-boxed slot at nested-decl compile time, so the bug was latent).
+  Registration now stores the INNER value type for mutable alreadyBoxed
+  captures; the lifted param (`valueCaptureParamTypes` threads the cell
+  unchanged) and the call site's derived type then agree, and the
+  already-boxed branch passes the existing cell.
+
+Validation: engine-convergence suite (incl. 3 new 3a cases: cell identity
+across suspend, boxed resume-binding delivery, post-resume write visible to
+the nested closure; the two former routing pins INVERTED to drive+correct —
+the derived-param cell shape now returns the value CPS got WRONG); corpus
+sweep of await-using + AsyncDisposableStack + fromAsync (134 files): 80
+pass, 0 regressions vs the js-host baseline (remaining fails
+baseline-identical, incl. an identical illegal-cast failure mode on
+mapfn-result-awaited-once-per-iteration); issue-1712's single fail
+control-verified identical on pristine main (2ff0db4f0a). merge_group A/B
+is the hard gate (the await-using cluster flips CPS→drive).
+
+## Slice 2c (CPS deletion) — BLOCKED on class-2 rep-unification (2026-07-11)
+
+Attempted the CPS-engine deletion (`emitAsyncStateMachine`,
+`splitBodyAtAwait`, `compileSyntheticAsyncContinuation`, `asyncCpsActive`).
+The deletion mechanics are straightforward (the decl lane never uses CPS
+post-slice-1; only the class-2 closure re-lane does). **But it regresses 8
+baseline-PASSING test262 files** and cannot ship until class-2 is solved:
+
+**Hard evidence (measured, this session).** With CPS deleted, class-2 closures
+(a non-resume-binding body local whose spill GUESS is a typed vec/struct — the
+`fromAsync` iterable-input family) fall to the legacy sync-void path and
+return NaN. Corpus sweep delta vs phase-3a: **pass 80 → 72**, all 8
+regressions are baseline-`pass` files, every one a class-2 closure:
+`fromAsync/{async-iterable-input, async-iterable-input-does-not-await-input,
+non-iterable-input, non-iterable-input-with-thenable,
+non-iterable-with-non-promise-thenable, sync-iterable-input,
+sync-iterable-input-with-non-promise-thenable, sync-iterable-input-with-thenable}`.
+Only the CPS engine currently lowers these correctly, so CPS is **not
+deletable** while they pass.
+
+**Why class-2 can't be fixed at the frame-layout level** (four approaches
+tried, all fail):
+
+1. cell of the guess type → `struct.set[0] expected (ref null 18), found (ref
+null 4)` — the spill GUESS's vec typeIdx (18) diverges from the body's
+   context-specific array-literal vec typeIdx (4). Invalid Wasm.
+2. cell of the nullable-widened guess → same typeIdx divergence. Invalid.
+3. externref-valued cell → validates, but `arr[0]` derefs the cell to
+   externref and the vec loses its indexable rep → NaN.
+4. plain externref spill field (no cell) → validates, same NaN.
+
+The root cause is structural: the resume fn allocates the spill LOCAL (and the
+frame field) from a type GUESS **before** the body compiles, but the body's
+true local rep is only known AFTER it compiles (array literals mint
+context-specific vec typeIdxs; `#3134`'s Promise-unwrap re-types elements).
+Correct handling needs either **compile-body-then-build-frame** (a two-phase
+frame builder — the resume body learns real local types, then the layout is
+fixed) or **#3134's rep unification** (a single canonical vec rep so guess ==
+actual). Both are their own hard tasks.
+
+**Recommendation:** keep the CPS engine until #3134 (or a two-phase frame
+builder) lands; then 2c is a mechanical deletion. The convergence is otherwise
+COMPLETE — after slices 1/2a/2b + phase 3a, CPS's ONLY remaining live route is
+the class-2 closure re-lane (~8 corpus files). Reframed acceptance: 2c depends
+on #3134. (The class-1 force-boxing + #2623 fix from phase 3a are already on
+`main`; this class-2 residue is the sole blocker.)

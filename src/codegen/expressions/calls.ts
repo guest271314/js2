@@ -15274,7 +15274,24 @@ function compileCallExpression(
             const hasBoxedName = localSlot?.name?.startsWith(`__boxed_`) ?? false;
             candidateIsBoxed = isRefCellTyped && hasBoxedName;
           }
-          if (fctx.boxedCaptures?.has(cap.name) || candidateIsBoxed) {
+          // (#3024) Method/accessor capture promotion (#2029/#3039/#3121,
+          // closures.ts) moves a boxed capture's cell into a module global and
+          // DELETES the localMap binding so post-promotion code in the
+          // enclosing function routes through the global. `boxedCaptures`
+          // still has the name, so without this arm the branch below resolved
+          // `localMap.get(name) ?? cap.outerLocalIdx` → the STALE pre-boxing
+          // raw slot (an f64/i32 local) and baked `local.get <raw>` where the
+          // callee expects the ref cell → invalid Wasm (`call[0] expected
+          // (ref null N), found local.get of type f64`; the test262
+          // object/dstr meth-ary-ptrn-elision family). Source the SAME shared
+          // cell from the promotion global instead (live write-through — the
+          // method body and the enclosing function read/write this cell too).
+          const promotedBoxGlobal =
+            fctx.localMap.get(cap.name) === undefined ? ctx.capturedBoxGlobals?.get(cap.name) : undefined;
+          if (promotedBoxGlobal !== undefined && fctx.boxedCaptures?.has(cap.name)) {
+            fctx.body.push({ op: "global.get", index: promotedBoxGlobal.globalIdx });
+            fctx.body.push({ op: "ref.as_non_null" });
+          } else if (fctx.boxedCaptures?.has(cap.name) || candidateIsBoxed) {
             // Already a ref cell — pass the ref cell reference directly
             const currentLocalIdx = fctx.localMap.get(cap.name) ?? cap.outerLocalIdx;
             fctx.body.push({ op: "local.get", index: currentLocalIdx });

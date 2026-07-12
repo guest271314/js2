@@ -2344,6 +2344,22 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
     // (no method-as-value); only call expressions resolve them.
     const field = recvType.shape.fields.find((f) => f.name === propName);
     if (!field) {
+      // (#3144) Accessor fallback: `recv.prop` backed by a `get prop()`
+      // accessor (own or inherited) lowers to a call of the legacy accessor
+      // function `${recvClass}_get_${prop}` — the same key legacy's
+      // property-access getter dispatch calls (inherited accessors are
+      // key-propagated to the subclass, so the receiver's className is the
+      // right prefix).
+      const getter = findClassMember(recvType.shape, propName, "getter");
+      if (getter && getter.returnType !== null) {
+        const r = cx.builder.emitClassCall(recv, `get_${propName}`, [], getter.returnType);
+        if (r === null) {
+          throw new Error(
+            `ir/from-ast: getter ${recvType.shape.className}.${propName} produced no value (${cx.funcName})`,
+          );
+        }
+        return r;
+      }
       throw new Error(`ir/from-ast: class ${recvType.shape.className} has no field "${propName}" in ${cx.funcName}`);
     }
     return cx.builder.emitClassGet(recv, propName, field.type);
@@ -3003,6 +3019,17 @@ function irTypeArgAssignable(actual: IrType, expected: IrType): boolean {
   ) {
     return true;
   }
+  // (#3144) class<Sub> flows into a class<Parent> param when Parent is on
+  // Sub's projected parent chain: legacy registers the subclass struct as a
+  // declared WasmGC subtype of the parent struct (#3000-E — `(ref $Sub)`
+  // already flows into `(ref $Parent)` for `super(...)`), so the raw call
+  // typechecks with no coercion. `shape.parent` is present exactly for the
+  // single-level local subclasses whose parent projected — the sound set.
+  if (actual.kind === "class" && expected.kind === "class") {
+    for (let s = actual.shape.parent; s; s = s.parent) {
+      if (s.className === expected.shape.className) return true;
+    }
+  }
   return false;
 }
 
@@ -3359,7 +3386,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   if (expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword) {
     const parentShape = requireSuperParentShape(cx);
     const self = requireThisValue(cx);
-    const method = parentShape.methods.find((m) => m.name === methodName);
+    const method = findClassMember(parentShape, methodName, "method");
     if (!method) {
       throw new Error(
         `ir/from-ast: super.${methodName}() — parent class ${parentShape.className} has no method "${methodName}" in ${cx.funcName}`,
@@ -3454,6 +3481,51 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       return cx.builder.emitUnary(irOp, arg, irVal({ kind: "f64" }));
     }
     throw new Error(`ir/from-ast: Math.${methodName} not in IR whitelist (${cx.funcName})`);
+  }
+
+  // (#3144) `C.m(args)` — static method call on a locally-declared class.
+  // Recognised BEFORE receiver lowering (like the Math/console arms above):
+  // a bare class identifier has no IR value binding (lowerExpr would throw
+  // "unknown identifier"). Mirrors the selector's static-call arm exactly:
+  // identifier receiver, unshadowed, naming a local class. The descriptor
+  // lookup walks the parent chain — an inherited static resolves through the
+  // call-site class's `${className}_${method}` key, which legacy's
+  // inherited-member propagation registers. Legacy statics take NO `self`
+  // param, so `class.static_call` emits args only.
+  if (
+    ts.isIdentifier(expr.expression.expression) &&
+    cx.scope.get(expr.expression.expression.text) === undefined &&
+    cx.classShapes?.has(expr.expression.expression.text)
+  ) {
+    const className = expr.expression.expression.text;
+    const shape = cx.classShapes.get(className)!;
+    const method = findClassMember(shape, methodName, "static");
+    if (!method) {
+      throw new Error(`ir/from-ast: class ${className} has no static method "${methodName}" in ${cx.funcName}`);
+    }
+    if (expr.arguments.length !== method.params.length) {
+      throw new Error(
+        `ir/from-ast: static ${className}.${methodName} has ${expr.arguments.length} args, expected ${method.params.length} in ${cx.funcName}`,
+      );
+    }
+    const args: IrValueId[] = [];
+    for (let i = 0; i < expr.arguments.length; i++) {
+      const expected = method.params[i]!;
+      const argVal = lowerExpr(expr.arguments[i]!, cx, expected);
+      const argType = cx.builder.typeOf(argVal);
+      if (!irTypeEquals(argType, expected)) {
+        throw new Error(
+          `ir/from-ast: arg ${i} of static ${className}.${methodName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+      args.push(argVal);
+    }
+    if (method.returnType === null && !statementPosition) {
+      throw new Error(
+        `ir/from-ast: void static method ${className}.${methodName} used in expression position (${cx.funcName})`,
+      );
+    }
+    return cx.builder.emitClassStaticCall(shape, methodName, args, method.returnType);
   }
 
   const recv = lowerExpr(expr.expression.expression, cx, irVal({ kind: "f64" }));
@@ -3618,7 +3690,12 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       `ir/from-ast: method call .${methodName}(...) on ${describeIrType(recvType)} not in slice 4 (${cx.funcName})`,
     );
   }
-  const method = recvType.shape.methods.find((m) => m.name === methodName);
+  // (#3144) memberKind-filtered + parent-chain-walking lookup: getter/
+  // setter/static descriptors never resolve as instance methods, and an
+  // inherited (non-overridden) method found on an ancestor shape resolves —
+  // the emitted `${recvClass}_${method}` key exists via legacy's
+  // inherited-member key propagation.
+  const method = findClassMember(recvType.shape, methodName, "method");
   if (!method) {
     throw new Error(`ir/from-ast: class ${recvType.shape.className} has no method "${methodName}" in ${cx.funcName}`);
   }
@@ -3890,6 +3967,22 @@ function lowerPropertyAssignment(expr: ts.BinaryExpression, cx: LowerCtx): void 
   if (recvType.kind === "class") {
     const field = recvType.shape.fields.find((f) => f.name === fieldName);
     if (!field) {
+      // (#3144) Accessor fallback: `recv.prop = v` backed by a `set prop(v)`
+      // accessor lowers to `call ${recvClass}_set_${prop}(recv, v)` — the
+      // legacy setter function is `(self, value) -> []` (void), so a
+      // null-result class.call in statement position emits balanced.
+      const setter = findClassMember(recvType.shape, fieldName, "setter");
+      if (setter && setter.params.length === 1) {
+        const newValue = lowerExpr(expr.right, cx, setter.params[0]!);
+        const newValueType = cx.builder.typeOf(newValue);
+        if (!irTypeEquals(newValueType, setter.params[0]!)) {
+          throw new Error(
+            `ir/from-ast: assignment to setter ${recvType.shape.className}.${fieldName} (${describeIrType(setter.params[0]!)}) got ${describeIrType(newValueType)} (${cx.funcName})`,
+          );
+        }
+        cx.builder.emitClassCall(recv, `set_${fieldName}`, [newValue], null);
+        return;
+      }
       throw new Error(`ir/from-ast: class ${recvType.shape.className} has no field "${fieldName}" in ${cx.funcName}`);
     }
     const newValue = lowerExpr(expr.right, cx, field.type);
@@ -5223,9 +5316,16 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
   const tVal = asVal(ttype);
   const fVal = asVal(ftype);
   if (!tVal || !fVal || tVal.kind !== fVal.kind) {
-    throw new Error(
-      `ir/from-ast: ternary branches have different types (${describeIrType(ttype)} vs ${describeIrType(ftype)}) in ${cx.funcName}`,
-    );
+    // (#3144) Non-scalar arms with the SAME IrType (string/class/extern/
+    // object/…) are lowerable: the `if` lowering derives the result carrier
+    // from the instr's IrType via `lowerIrTypeToValType`, so e.g.
+    // `cond ? "true" : "false"` types as string on either string backend.
+    // Only genuinely mismatched arm types still demote.
+    if (!irTypeEquals(ttype, ftype)) {
+      throw new Error(
+        `ir/from-ast: ternary branches have different types (${describeIrType(ttype)} vs ${describeIrType(ftype)}) in ${cx.funcName}`,
+      );
+    }
   }
 
   return cx.builder.emitIfElse({
@@ -5438,6 +5538,74 @@ function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: Low
   return isProvablyBoolean(tsType);
 }
 
+/**
+ * (#3144) Walk a class shape's own + parent-chain method descriptors for a
+ * member of the requested kind. `memberKind` defaults to "method" on
+ * pre-#3144 descriptors, so plain instance-method lookups keep their exact
+ * prior semantics while getter/setter/static descriptors never leak into
+ * them. Inherited members resolve by walking `shape.parent` (present for
+ * single-level local subclasses); the CALL still targets the RECEIVER's
+ * `${className}_<member>` key, which legacy's inherited-member key
+ * propagation registers (collectClassDeclaration).
+ */
+function findClassMember(
+  shape: IrClassShape,
+  name: string,
+  kind: "method" | "getter" | "setter" | "static",
+): import("./nodes.js").IrClassMethodDescriptor | undefined {
+  for (let s: IrClassShape | undefined = shape; s; s = s.parent) {
+    const m = s.methods.find((m) => m.name === name && (m.memberKind ?? "method") === kind);
+    if (m) return m;
+  }
+  return undefined;
+}
+
+/**
+ * (#3144) `value instanceof C` where `C` names a locally-declared class.
+ * Class-typed LHS → `class.instanceof` (runtime `__tag` compare against C's
+ * tag + descendant tags — exactly legacy `compileInstanceOf`'s non-null-ref
+ * path). LHS representations that can never hold a user-class instance
+ * (unboxed scalars, strings, plain-object structs, closures) fold to
+ * constant false with the operand still evaluated for effects (legacy
+ * parity: `drop; i32.const 0`). Everything else (externref, dynamic, union,
+ * boxed, vec refs) demotes cleanly to legacy, which has the full dynamic
+ * `__instanceof_dyn` path.
+ */
+function lowerInstanceOf(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
+  if (!ts.isIdentifier(expr.right)) {
+    throw new Error(`ir/from-ast: instanceof RHS must be a class identifier (${cx.funcName})`);
+  }
+  const className = expr.right.text;
+  if (cx.scope.get(className) !== undefined) {
+    // A local binding shadows the class name — the selector rejects this
+    // shape, so reaching here is only possible via drift; demote cleanly.
+    throw new Error(`ir/from-ast: instanceof RHS "${className}" is shadowed by a local (${cx.funcName})`);
+  }
+  const targetShape = cx.classShapes?.get(className);
+  if (!targetShape) {
+    throw new Error(`ir/from-ast: instanceof RHS class "${className}" has no projected shape (${cx.funcName})`);
+  }
+  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
+  const lt = cx.builder.typeOf(lhs);
+  if (lt.kind === "class") {
+    return cx.builder.emitClassInstanceOf(lhs, targetShape);
+  }
+  if (
+    lt.kind === "string" ||
+    lt.kind === "object" ||
+    lt.kind === "closure" ||
+    (lt.kind === "val" && (lt.val.kind === "f64" || lt.val.kind === "i32"))
+  ) {
+    // Provably-never-a-class-instance representations → constant false. The
+    // LHS is already lowered; if it carries side effects the zero-use
+    // side-effecting emission arm keeps it (never silently dropped).
+    return cx.builder.emitConst({ kind: "i32", value: 0 }, irVal({ kind: "i32" }));
+  }
+  throw new Error(
+    `ir/from-ast: instanceof on ${describeIrType(lt)} LHS is not lowered — legacy handles the dynamic path (${cx.funcName})`,
+  );
+}
+
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
 
@@ -5459,6 +5627,16 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // the eager operand lowering below, like `??`.
   if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
     return lowerLogicalAndOr(expr, op, cx);
+  }
+
+  // (#3144) `x instanceof C` with a LOCAL-class RHS — intercepted before the
+  // capability gate (like `??` / `&&` above): `instanceof` stays table-deferred
+  // for the general case, but the local-class form has an IR lowering
+  // (`class.instanceof`, a static tag check mirroring legacy
+  // `compileInstanceOf`). The selector accepts exactly this shape
+  // (identifier RHS ∈ localClasses, unshadowed), keeping select↔build parity.
+  if (op === ts.SyntaxKind.InstanceOfKeyword) {
+    return lowerInstanceOf(expr, cx);
   }
 
   // #2135 — capability-table invariant (shared with the selector via

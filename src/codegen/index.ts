@@ -5,7 +5,7 @@ import { emitWasiErrorConstructor, fillExternGetErrorProps } from "./registry/er
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
@@ -1138,7 +1138,12 @@ function buildIrClassShapes(
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Methods — instance methods only, re-derived from the AST.
-    const methods: { name: string; params: IrType[]; returnType: IrType | null }[] = [];
+    const methods: {
+      name: string;
+      params: IrType[];
+      returnType: IrType | null;
+      memberKind?: "method" | "getter" | "setter" | "static";
+    }[] = [];
     let methodsOk = true;
     for (const member of stmt.members) {
       if (!ts.isMethodDeclaration(member) || !member.name) continue;
@@ -1179,6 +1184,75 @@ function buildIrClassShapes(
       methods.push({ name: methodName, params, returnType });
     }
     if (!methodsOk) continue;
+
+    // (#3144) Accessor + static-method descriptor projections — BEST-EFFORT:
+    // an unprojectable accessor/static is simply skipped (a claimed use then
+    // misses the descriptor at from-ast and demotes that one function),
+    // never rejecting the WHOLE class like the instance-method loop above
+    // would (which would regress classes that project today). Getters carry
+    // the property name with `memberKind: "getter"` ([] -> T); setters
+    // `"setter"` ([T] -> null); statics `"static"` (no `this` param at the
+    // Wasm level — invoked via `class.static_call`). Instance-member lookups
+    // filter on `memberKind`, so these never leak into `class.call`
+    // resolution.
+    for (const member of stmt.members) {
+      if (!member.name || !ts.isIdentifier(member.name)) continue;
+      const memberName = member.name.text;
+      if (ts.isGetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (!sig) continue;
+        const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+        if (isVoidType(retTs)) continue; // void getter — degenerate, skip
+        const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [], returnType: ir, memberKind: "getter" });
+      } else if (ts.isSetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        if (member.parameters.length !== 1) continue;
+        const p = member.parameters[0]!;
+        if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) continue;
+        const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [ir], returnType: null, memberKind: "setter" });
+      } else if (
+        ts.isMethodDeclaration(member) &&
+        hasStaticModifier(member) &&
+        !hasAbstractModifier(member) &&
+        !member.asteriskToken
+      ) {
+        const params: IrType[] = [];
+        let ok = true;
+        for (const p of member.parameters) {
+          if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) {
+            ok = false;
+            break;
+          }
+          const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+          if (!ir) {
+            ok = false;
+            break;
+          }
+          params.push(ir);
+        }
+        if (!ok) continue;
+        let returnType: IrType | null = null;
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (sig) {
+          const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+          if (!isVoidType(retTs)) {
+            const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+            if (!ir) continue;
+            returnType = ir;
+          }
+        }
+        // A same-name instance method + static method share ONE legacy
+        // funcMap key (`${className}_${name}` — class-bodies.ts skips the
+        // second registration), so resolving either would call the wrong
+        // body. Project the static only when no instance member takes the
+        // name (from-ast then demotes the ambiguous call cleanly).
+        if (methods.some((m) => m.name === memberName && (m.memberKind ?? "method") === "method")) continue;
+        methods.push({ name: memberName, params, returnType, memberKind: "static" });
+      }
+    }
 
     out.set(className, {
       className,
@@ -12591,7 +12665,18 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
         : [];
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
-    const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    // (#3024) STABLE handle (#1916 S3), not the legacy live-regime
+    // `numImportFuncs + functions.length`. This pre-mint runs during the
+    // DECLARATION SCAN (via the collectEmptyObjectWidening /
+    // collectGrowableObjectLiterals pre-passes' resolveWasmType), BEFORE the
+    // import collectors — a live index minted here goes stale the moment any
+    // collector prepends an import without a fixup, and `definedFuncAt` then
+    // fails to resolve it at literal-compile time, forking a duplicate method
+    // body while trampolines keep forwarding into the stale (import-range)
+    // index ("call[0] expected externref/f64, found …" — the Array.prototype
+    // S15.4.4.x A2 valueOf cluster). A stable handle is layout-independent:
+    // shift walkers skip it and resolution happens at emit.
+    const methodFuncIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
@@ -12601,7 +12686,7 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
       body: [],
       exported: false,
     };
-    ctx.mod.functions.push(methodFunc);
+    pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
   }
 }
 

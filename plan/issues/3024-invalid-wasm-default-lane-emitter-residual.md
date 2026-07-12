@@ -17,8 +17,8 @@ test262_category: language/expressions/object/dstr, built-ins/AsyncFromSyncItera
 test262_ce: 131
 related: []
 loc-budget-allow:
-  - src/codegen/expressions/unary-updates.ts
-  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/index.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
@@ -434,3 +434,133 @@ The remaining 78 are the scattered per-root-cause singletons listed above
 broad-impact, needs a full-CI window; then the 6-file `object/dstr`
 `meth-ary-ptrn-(rest-)elision` `call[#] expected (ref null #), found f#`
 cluster).
+
+---
+
+## Landed: capturing-fn call after method capture promotion (fable-wasm, 2026-07-11, slice 2)
+
+**PR:** `issue-3024-promoted-capture-call` — clears the 6-file `object/dstr`
+`{meth,gen-meth,async-gen-meth}-ary-ptrn-(rest-ary-)elision` cluster
+(`call[#] expected (ref null #), found local.get of type f#` in `test`).
+Post-slice-1 harvest: 78 → **72**, zero new signatures.
+
+### Root cause (stale `boxedCaptures` branch after #3121 promotion)
+
+The trigger is NOT destructuring: it is a local that is (a) closure-MUTATED by
+a nested function (boxed to a ref cell, `fctx.boxedCaptures`) and (b) also
+referenced by an object-literal METHOD. Compiling the object literal runs the
+accessor/method capture promotion (#2029/#3039/#3121, `closures.ts`): the
+shared cell is aliased into a module global (`ctx.capturedBoxGlobals`) and the
+`localMap` binding is DELETED (closures.ts ~L609) so post-promotion enclosing-
+function code routes through the global. But the direct-call capture-prepend
+(`compileCallExpression`, calls.ts ~L15260) checked `boxedCaptures` FIRST and
+resolved `fctx.localMap.get(name) ?? cap.outerLocalIdx` — the stale pre-boxing
+RAW f64 slot — baking `local.get <f64>` where the callee signature expects the
+ref cell. The correct `capturedBoxGlobals` arm existed (#2029 family A) but was
+unreachable behind the `boxedCaptures` branch.
+
+Verified by instrument: at the `g2()` call, `localMap=undefined boxed=true
+boxGlobal=true` → fallback to `cap.outerLocalIdx` (the raw f64).
+
+### Fix (calls.ts, narrow)
+
+Before the `boxedCaptures` branch: when `localMap.get(cap.name)` is undefined
+AND `ctx.capturedBoxGlobals` has the name, source the SAME shared cell from
+the promotion global (`global.get` + `ref.as_non_null`). Live write-through is
+preserved — the callee mutation, the method body, and the enclosing function
+all share one cell (proven at runtime: g2 `+=1` → method reads 1 → method
+`+=10` → enclosing reads 11). The old fallback in this configuration was
+ALWAYS invalid Wasm, so no valid module changes shape.
+
+### Proofs
+
+- 13 discriminator probes VALID (generator/non-generator mutator, normal and
+  destructuring method params, elision/binding patterns); all previously-valid
+  controls unchanged.
+- test262: 3 of the 6 files now **pass** end-to-end
+  (`*-rest-ary-elision.js`); the 3 `*-ptrn-elision.js` flip CE→plain fail on a
+  DISTINCT bug (the param-elision destructure advances the iterator twice —
+  `assert.sameValue(second, 0)` fails; see roll-forward below).
+- Full 214-candidate re-harvest: 78 → **72**, exactly this cluster, no new
+  signatures.
+- 12-program corpus **byte-identical** (sha256) to main.
+- New `tests/issue-3024-promoted-capture-call.test.ts` (5 tests, runtime
+  write-through assertions) passes; adjacent promotion suites (issue-3121,
+  issue-3039, issue-2029-tagged-template-capture-local-index,
+  issue-3024-incdec-element — 30 tests) pass.
+
+### Still open (roll forward)
+
+- **NEW (distinct root cause):** array-binding-pattern ELISION in a method
+  param over-steps the iterator (one extra IteratorStep) — turns the 3
+  `*-ptrn-elision.js` files into semantic fails now that they validate.
+- The remaining 72 invalid-Wasm files: 7-file `fN.ne` cross-statement
+  eval-promotion family (banked, broad-impact), then ≤4-file singletons
+  (`__obj_meth_tramp_*_valueOf`, `struct.set (ref null #)`, `call expected
+externref found ref.func`, Atomics `__cb_#` fallthru, `i#.lt_s` …).
+
+---
+
+## Landed: anon object-literal method stable-handle pre-mint (fable-wasm, 2026-07-11, slice 3)
+
+**PR:** `issue-3024-anon-method-stable-handle` — clears the 4-file
+`__obj_meth_tramp_*_valueOf` cluster (`built-ins/Array/prototype/{pop,push,
+shift,unshift}/S15.4.4.x_A2_*`; `call[0] expected externref/f64, found if of
+type (ref null N)` in the trampoline). Harvest: 4 files flip CE → valid Wasm
+(they now fail only on a distinct ToPrimitive/array-like-receiver semantic, not
+a compile error).
+
+### Root cause (live-regime pre-mint during the declaration scan)
+
+`ensureStructForType` (index.ts) pre-mints an anonymous object-literal method's
+defined function with the LIVE-REGIME index `numImportFuncs + functions.length`.
+That pre-mint runs during the DECLARATION SCAN — reached via the
+`collectEmptyObjectWidening` / `collectGrowableObjectLiterals` pre-passes'
+`resolveWasmType` — which is BEFORE the import collectors run. When a later
+collector (`collectUsedExternImports`, or the native-string/union import passes)
+prepends an `env` import via raw `addImport`, the import boundary moves but
+`addImport` does NOT shift existing defined-function indices, and no later shift
+walker repairs a 0-based index (`inLiveShiftRange(0, importsBefore>0)` is false).
+The pre-minted funcMap entry (e.g. `__anon_0_valueOf` = 0) is now stranded in
+the import range: `definedFuncAt` fails to resolve it at literal-compile time
+(forking a duplicate method body), while the method trampoline keeps forwarding
+`call 0` into an unrelated import (`__extern_get` / `__register_prototype`).
+Verified by instrument (`set __anon_0_valueOf=0` at `ensureStructForType`, then
+`addImport __extern_get -> idx 0`).
+
+The `arguments`/`obj[0] = …` element write and (independently) a user `class`
+declaration are the ingredients that force the extra imports which move the
+boundary — hence the cluster only appearing on those shapes.
+
+### Fix (index.ts, stable handle)
+
+Mint the method with `mintDefinedFunc` / `pushDefinedFunc` (#1916 S3) instead of
+the live-regime arithmetic. A stable handle is layout-independent: every
+late-import shift walker skips the stable range, and resolution to a concrete
+index happens at emit (`resolve-layout.ts`). This is the established idiom for
+any funcIdx minted before the import space is final.
+
+### Proofs
+
+- 3 repro shapes (element-write, borrowed-`pop`, `class`-preamble) VALIDATE;
+  all previously-valid controls unchanged.
+- All 4 target test262 files flip CE → valid Wasm.
+- Full 214-candidate re-harvest confirms the 4 valueOf files cleared, no new
+  invalid signatures.
+- 12-program corpus **byte-identical** (sha256) to main.
+- New `tests/issue-3024-anon-method-stable-handle.test.ts` (5 tests); adjacent
+  object-method / toPrimitive suites (issue-1602, 1602-regress, 1989, 1394,
+  2194-objlit-method-host-leak, 2358-array-toprimitive, 1917-any-param-
+  toprimitive — 51 tests) pass, plus 3121/3039/2160/2194 + the equivalence
+  suite.
+- `loc-budget-allow` granted for `index.ts` (#3131; +11 net on a god-file).
+
+### Still open (roll forward)
+
+The 4 valueOf files now fail on a DISTINCT semantic (Array.prototype method on a
+non-array `arguments`-like receiver whose `length` is an object with `valueOf` —
+ToPrimitive on the length). The remaining invalid-Wasm files: the 7-file `fN.ne`
+cross-statement eval-promotion family (banked, broad-impact) and ≤4-file
+per-root-cause singletons (`struct.set (ref null #)`, `call expected externref
+found ref.func`, Atomics `__cb_#` fallthru, `i#.lt_s`, `__vec_from_extern`
+element-rep).
