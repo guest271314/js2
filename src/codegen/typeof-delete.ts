@@ -25,7 +25,7 @@ import { compileStandaloneRegExpLiteral } from "./regexp-standalone.js";
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
-import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
+import { coerceType, compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
 import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
 
@@ -1205,6 +1205,46 @@ function emitAnnexBTypeofFlagBranch(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * (#2623 P-7) True when `sym` has at least one assignment expression targeting
+ * it anywhere in its source file (beyond the declaration initializer). Used to
+ * detect null/undefined flow-narrowing the checker could not invalidate
+ * (assignments inside nested closures are not applied to the outer flow), so
+ * `typeof x` must take the runtime path instead of const-folding. Cached per
+ * symbol — the source is immutable during a compile.
+ */
+const _typeofSymbolAssignedCache = new WeakMap<ts.Symbol, boolean>();
+function symbolHasAssignmentOutsideDeclaration(ctx: CodegenContext, sym: ts.Symbol): boolean {
+  const cached = _typeofSymbolAssignedCache.get(sym);
+  if (cached !== undefined) return cached;
+  let found = false;
+  const sf = sym.valueDeclaration?.getSourceFile();
+  if (sf) {
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        ts.isIdentifier(node.left)
+      ) {
+        try {
+          if (ctx.checker.getSymbolAtLocation(node.left) === sym) {
+            found = true;
+            return;
+          }
+        } catch {
+          /* ignore unresolvable LHS */
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  _typeofSymbolAssignedCache.set(sym, found);
+  return found;
+}
+
+/**
  * Compile `typeof x` as a standalone expression that returns a type string (externref).
  * For statically known types, emits the string constant directly.
  * For externref/union types, calls the __typeof host helper.
@@ -1339,6 +1379,29 @@ export function compileTypeofExpression(
     }
     if (ts.isIdentifier(bareTdz) && fctx.boxedTdzFlags?.has(bareTdz.text)) {
       forceRuntimeTypeof = true;
+    }
+    // (#2623 P-7) `typeof x` where x's FLOW-narrowed type is null/undefined but
+    // the binding is ASSIGNED elsewhere in the source must NOT const-fold: TS
+    // does not apply assignments made inside nested closures to the outer flow,
+    // so
+    //   var resolve = null;
+    //   target.then = function(a, b) { resolve = a; };
+    //   …; typeof resolve   // narrowed `null` → folded "object"
+    // while the runtime value is a host function (test262
+    // `finally/invokes-then-with-function.js` assert #4). Host lane only — the
+    // standalone `__typeof` native is a null stub (#2107), so the fold remains
+    // preferable there. Assignments the SAME function's flow already tracked
+    // re-narrow the type away from null, so this only fires where the fold is
+    // genuinely unsound (closure-crossing or branch-dependent writes) — those
+    // sites trade the fold for a correct runtime `__typeof` call.
+    if (!forceRuntimeTypeof && ctx.standalone !== true && ctx.wasi !== true && ts.isIdentifier(bareTdz)) {
+      const narrowed = ctx.checker.getTypeAtLocation(bareTdz);
+      if ((narrowed.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0) {
+        const sym = ctx.checker.getSymbolAtLocation(bareTdz);
+        if (sym?.valueDeclaration && symbolHasAssignmentOutsideDeclaration(ctx, sym)) {
+          forceRuntimeTypeof = true;
+        }
+      }
     }
   }
 
@@ -1481,6 +1544,22 @@ export function compileTypeofComparison(
   } else {
     staticTypeof = staticTypeofForType(ctx, tsType);
   }
+  // (#2623 P-7) Same unsound-fold guard as compileTypeofExpression: a
+  // null/undefined FLOW narrowing over a binding assigned elsewhere (closure-
+  // crossing writes the checker can't apply) must not const-fold the
+  // comparison — take the runtime `__typeof_*` helper path below instead.
+  if (
+    staticTypeof !== null &&
+    ctx.standalone !== true &&
+    ctx.wasi !== true &&
+    ts.isIdentifier(operand) &&
+    (tsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
+  ) {
+    const sym = ctx.checker.getSymbolAtLocation(operand);
+    if (sym?.valueDeclaration && symbolHasAssignmentOutsideDeclaration(ctx, sym)) {
+      staticTypeof = null;
+    }
+  }
   if (staticTypeof !== null) {
     const matches = staticTypeof === stringLiteral;
     const result = isEq ? (matches ? 1 : 0) : matches ? 0 : 1;
@@ -1563,18 +1642,30 @@ export function compileTypeofComparison(
 
   // Compile the operand of typeof — need to get the raw externref value
   // The operand should be loaded without narrowing (use the declared type)
+  // (#2623 P-7) A BOXED-CAPTURE binding must NOT take the raw `local.get` fast
+  // path: the local holds the mutable ref CELL, not the value, so the
+  // `typeof_check` host shim received the cell struct (`[object Object]`) and
+  // `typeof resolve === "function"` was false for a stored host function.
+  // Route through compileExpression, whose identifier path derefs the cell.
   if (ts.isIdentifier(operand)) {
-    const localIdx = fctx.localMap.get(operand.text);
+    const localIdx = fctx.boxedCaptures?.has(operand.text) ? undefined : fctx.localMap.get(operand.text);
     if (localIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: localIdx });
     } else {
-      // Try other resolution paths
-      const valType = compileExpression(ctx, fctx, operand);
+      // Try other resolution paths. (#2623 P-7) Request externref explicitly:
+      // an `$AnyValue`-rep module global read without an expected type crossed
+      // to the `typeof_check` host shim as the RAW box via a bare
+      // `extern.convert_any` (host saw `[object Object]` → `typeof resolve ===
+      // "function"` was false for a stored host function); the expected-type
+      // path routes through coerceType's AnyValue→externref unboxing arms.
+      const valType = compileExpression(ctx, fctx, operand, { kind: "externref" });
       if (!valType) return null;
+      if (valType.kind !== "externref") coerceType(ctx, fctx, valType, { kind: "externref" });
     }
   } else {
-    const valType = compileExpression(ctx, fctx, operand);
+    const valType = compileExpression(ctx, fctx, operand, { kind: "externref" });
     if (!valType) return null;
+    if (valType.kind !== "externref") coerceType(ctx, fctx, valType, { kind: "externref" });
   }
 
   // Call the typeof helper
