@@ -5415,6 +5415,36 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
   });
 }
 
+/**
+ * (#3168) ToNumber(operand) → f64 for a unary `+`/`-` operand that is not
+ * statically a number. Handles the scope the #3153 census flagged (§7.1.4):
+ *
+ *   - **boolean (i32)** → `f64.convert_i32_s` (0/1 → 0.0/1.0; boolean is 0/1
+ *     so signed/unsigned agree — matches legacy `expressions/unary.ts`).
+ *   - **string** → box the string into the boxed-any carrier and reuse the
+ *     existing `dyn.to_number` (§7.1.4.1 StringToNumber via the carrier's
+ *     tag-5 arm — native `__str_to_number` / host `__unbox_number`), so no new
+ *     helper and no string-representation juggling. `""` → 0, `" 42 "` → 42,
+ *     `"abc"` → NaN, hex per StringToNumber — exactly the carrier's ToNumber.
+ *
+ * Returns `null` for any other operand type (object ToPrimitive chain, bigint,
+ * etc.) so the caller keeps its existing clean throw (demote pre-#3143, and a
+ * selector-mirrored pre-claim reject is out of scope here — see the #3167
+ * resolution note on select.ts being checker-free).
+ */
+function emitUnaryToNumber(rand: IrValueId, randType: IrType, cx: LowerCtx): IrValueId | null {
+  if (asVal(randType)?.kind === "i32") {
+    // boolean (the only i32-typed IR operand reaching a `+`/`-` — a native
+    // `type i32 = number` operand is already numeric and takes the f64 path).
+    return cx.builder.emitUnary("f64.convert_i32_s", rand, irVal({ kind: "f64" }));
+  }
+  if (randType.kind === "string") {
+    const boxed = cx.builder.emitBox(rand, irDynamic(JsTag.String));
+    return cx.builder.emitDynToNumber(boxed);
+  }
+  return null;
+}
+
 function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValueId {
   // #2135 — capability-table invariant, mirroring `lowerBinary`. A deferred
   // prefix op post-claim is a selector↔table disagreement (compiler bug).
@@ -5435,6 +5465,13 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         const n = cx.builder.emitDynToNumber(rand);
         return cx.builder.emitUnary("f64.neg", n, irVal({ kind: "f64" }));
       }
+      // (#3168) `-x` on a non-number operand is `-ToNumber(x)` (§13.5.5 →
+      // §7.1.4). ToNumber the operand to f64, then `f64.neg` — sign-correct for
+      // `-0` (`-"" === -0`), unlike `0 - x`. Mirrors legacy `expressions/unary.ts`.
+      const negToNumber = emitUnaryToNumber(rand, randType, cx);
+      if (negToNumber !== null) {
+        return cx.builder.emitUnary("f64.neg", negToNumber, irVal({ kind: "f64" }));
+      }
       if (asVal(randType)?.kind !== "f64") {
         throw new Error(`ir/from-ast: unary '-' expects number in ${cx.funcName}`);
       }
@@ -5446,6 +5483,12 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
       // Unary Plus is exactly `? ToNumber(value)`): a bare `dyn.to_number`.
       if (randType.kind === "dynamic") {
         return cx.builder.emitDynToNumber(rand);
+      }
+      // (#3168) `+x` IS `ToNumber(x)` (§13.5.4). A boolean / string operand
+      // ToNumbers to f64 (boolean → 0/1; string → §7.1.4.1 StringToNumber).
+      const plusToNumber = emitUnaryToNumber(rand, randType, cx);
+      if (plusToNumber !== null) {
+        return plusToNumber;
       }
       if (asVal(randType)?.kind !== "f64") {
         throw new Error(`ir/from-ast: unary '+' expects number in ${cx.funcName}`);

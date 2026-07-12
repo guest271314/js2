@@ -1,7 +1,9 @@
 ---
 id: 3168
 title: "IR: lower unary +/- ToNumber on non-number operands — #3143 flip-track post-claim divergence class 3"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/fable-eqfix
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
@@ -15,7 +17,40 @@ language_feature: operators, coercion
 goal: ir-full-coverage
 related: [3143, 3153, 3167, 2949, 2138]
 origin: "2026-07-12 architect IR audit: #3153 census class 3; blocks the #3143 IR-first flip."
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/nodes.ts
 ---
+
+## Resolution (2026-07-12, fable-eqfix)
+
+Clears #3153 post-claim census class 3. `from-ast.ts`'s `lowerPrefixUnary`
+threw `unary '+' expects number` / `unary '-' expects number` for a non-number
+operand — a legacy demote under the overlay, a HARD error under the #3143
+IR-first flip. The `dynamic` (boxed-any) arm was already handled (#2949 S5.5);
+this adds the **string** and **boolean** arms.
+
+New `emitUnaryToNumber(rand, randType, cx)` (§7.1.4 ToNumber → f64):
+
+- **boolean (i32)** → `f64.convert_i32_s` (0/1 → 0.0/1.0; matches legacy
+  `expressions/unary.ts`).
+- **string** → `emitBox(rand, irDynamic(JsTag.String))` then the existing
+  `emitDynToNumber` — reuses the boxed-any carrier's §7.1.4.1 StringToNumber
+  (tag-5 → native `__str_to_number` / host `__unbox_number`). No new helper,
+  no string-representation juggling: `""`→0, `" 42 "`→42, `"abc"`→NaN,
+  `"0x10"`→16.
+
+`+x` returns the f64 directly (§13.5.4 Unary Plus IS ToNumber); `-x` wraps it
+in `f64.neg` (§13.5.5) — sign-correct for `-0` (`-"" === -0`), NOT `0 - x`.
+Object/bigint operands return `null` → the existing clean throw is kept (the
+mixed/other-operand pre-claim selector mirror is out of scope — `select.ts` is
+checker-free; same note as #3167).
+
+Verified: `tests/issue-3168.test.ts` (both lanes) + 18 edge probes (empty/ws/
+hex/NaN/-0/boolean/param/mixed-add); `irPostClaimErrors:[]` + `fallbackCounts:{}`
+under `JS2WASM_IR_FIRST=1`; ir-fallbacks / oracle-ratchet / coercion-sites
+clean; overlay parity holds. Stacked on #3167 (shared from-ast unary/relational
+region); loc-budget-allow granted here for the standalone #3168 delta.
 
 # #3168 — IR unary `+` / `-` ToNumber coercion
 

@@ -671,6 +671,12 @@ export type IrUnop =
   | "f64.neg"
   | "i32.eqz"
   | "i32.trunc_sat_f64_s"
+  // (#3168) boolean → f64 ToNumber for unary `+`/`-` (§7.1.4: false/true →
+  // 0/1). Same pass-through footprint as the #1371 Math family below: the
+  // WasmGC/linear emitters push the op tag verbatim (a valid `Instr` op); the
+  // bytecode backend's `unopToOpcode` throws loudly for it (not in the #1584
+  // production subset), exactly like `f64.abs` et al.
+  | "f64.convert_i32_s"
   // (#1371) Math.* unary ops that map 1:1 to a Wasm f64 instruction.
   // The IR's `case "unary"` lowerer already passes the `op` tag through
   // verbatim (lower.ts line 770), so we only need to extend the type
