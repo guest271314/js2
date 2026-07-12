@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-12",
   "threshold": 1500,
-  "totalCeiling": 405743,
+  "totalCeiling": 406545,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -12,7 +12,7 @@
     "src/codegen/async-frame.ts": 2313,
     "src/codegen/async-scheduler.ts": 4338,
     "src/codegen/binary-ops.ts": 4580,
-    "src/codegen/class-bodies.ts": 3076,
+    "src/codegen/class-bodies.ts": 3101,
     "src/codegen/closures.ts": 5045,
     "src/codegen/context/types.ts": 2578,
     "src/codegen/dataview-native.ts": 5287,
@@ -26,8 +26,8 @@
     "src/codegen/expressions/new-super.ts": 5690,
     "src/codegen/expressions/unary-updates.ts": 1896,
     "src/codegen/generators-native.ts": 4929,
-    "src/codegen/index.ts": 15737,
-    "src/codegen/iterator-native.ts": 2875,
+    "src/codegen/index.ts": 15771,
+    "src/codegen/iterator-native.ts": 2883,
     "src/codegen/json-codec-native.ts": 3225,
     "src/codegen/literals.ts": 4364,
     "src/codegen/map-runtime.ts": 2322,
