@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11867,
-    "fail": 3383,
+    "pass": 11868,
+    "fail": 3382,
     "ce": 135,
     "skip": 1,
     "total": 15386,
@@ -84,8 +84,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 826,
-        "fail": 276,
+        "pass": 827,
+        "fail": 275,
         "ce": 1,
         "skip": 0,
         "total": 1103,
@@ -111,8 +111,8 @@
       },
       {
         "name": "Symbol",
-        "pass": 440,
-        "fail": 182,
+        "pass": 441,
+        "fail": 181,
         "ce": 1,
         "skip": 0,
         "total": 623,
@@ -781,21 +781,21 @@
   },
   {
     "edition": "ES2017",
-    "pass": 369,
-    "fail": 291,
+    "pass": 375,
+    "fail": 285,
     "ce": 7,
     "skip": 0,
     "total": 667,
-    "pct": 55,
+    "pct": 56,
     "features": [
       {
         "name": "async-functions",
-        "pass": 207,
-        "fail": 114,
+        "pass": 213,
+        "fail": 108,
         "ce": 3,
         "skip": 0,
         "total": 324,
-        "pct": 64
+        "pct": 66
       },
       {
         "name": "SharedArrayBuffer",
@@ -844,12 +844,12 @@
       },
       {
         "name": "arrow-function",
-        "pass": 37,
-        "fail": 18,
+        "pass": 43,
+        "fail": 12,
         "ce": 0,
         "skip": 0,
         "total": 55,
-        "pct": 67
+        "pct": 78
       },
       {
         "name": "default-parameters",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3393,
-    "fail": 835,
+    "pass": 3399,
+    "fail": 829,
     "ce": 23,
     "skip": 0,
     "total": 4251,
@@ -1035,12 +1035,12 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2512,
-        "fail": 750,
+        "pass": 2518,
+        "fail": 744,
         "ce": 22,
         "skip": 0,
         "total": 3284,
-        "pct": 76
+        "pct": 77
       },
       {
         "name": "destructuring-binding",
@@ -1080,12 +1080,12 @@
       },
       {
         "name": "generators",
-        "pass": 180,
-        "fail": 149,
+        "pass": 183,
+        "fail": 146,
         "ce": 0,
         "skip": 0,
         "total": 329,
-        "pct": 55
+        "pct": 56
       },
       {
         "name": "object-rest",
@@ -1125,21 +1125,21 @@
       },
       {
         "name": "arrow-function",
-        "pass": 21,
-        "fail": 25,
+        "pass": 27,
+        "fail": 19,
         "ce": 0,
         "skip": 0,
         "total": 46,
-        "pct": 46
+        "pct": 59
       },
       {
         "name": "async-functions",
-        "pass": 22,
-        "fail": 22,
+        "pass": 25,
+        "fail": 19,
         "ce": 0,
         "skip": 0,
         "total": 44,
-        "pct": 50
+        "pct": 57
       },
       {
         "name": "class",
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 949,
-    "fail": 911,
+    "pass": 950,
+    "fail": 910,
     "ce": 18,
     "skip": 18,
     "total": 1896,
@@ -1471,8 +1471,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 549,
-        "fail": 473,
+        "pass": 550,
+        "fail": 472,
         "ce": 4,
         "skip": 0,
         "total": 1026,
@@ -1480,8 +1480,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 350,
-        "fail": 337,
+        "pass": 351,
+        "fail": 336,
         "ce": 1,
         "skip": 0,
         "total": 688,

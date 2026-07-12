@@ -44,6 +44,8 @@ import {
   flatStringType,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { COLLECTION_KIND, MAP_LAYOUT, ensureMapHelpers } from "./map-runtime.js"; // (#3171) size getter
+import { emitReceiverBrandCheck } from "./receiver-brand.js"; // (#3171) shared brand preamble
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -258,8 +260,8 @@ const SYMBOL_PROTO_METHODS = ["toString", "valueOf"] as const;
 /** `BigInt.prototype`'s own method names (ES2024 §21.2.3). */
 const BIGINT_PROTO_METHODS = ["toLocaleString", "toString", "valueOf"] as const;
 
-/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3). */
-const WEAKMAP_PROTO_METHODS = ["delete", "get", "has", "set"] as const;
+/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3 + ES2025 emplace). */
+const WEAKMAP_PROTO_METHODS = ["delete", "get", "getOrInsert", "getOrInsertComputed", "has", "set"] as const;
 
 /** `WeakSet.prototype`'s own method names (ES2024 §24.4.3). */
 const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
@@ -269,7 +271,19 @@ const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
  * *getter* on the proto (resolved by the computed-access path), not a data
  * method, so it stays out of the value-read CSV.
  */
-const MAP_PROTO_METHODS = ["clear", "delete", "entries", "forEach", "get", "has", "keys", "set", "values"] as const;
+const MAP_PROTO_METHODS = [
+  "clear",
+  "delete",
+  "entries",
+  "forEach",
+  "get",
+  "getOrInsert",
+  "getOrInsertComputed",
+  "has",
+  "keys",
+  "set",
+  "values",
+] as const;
 
 /** `Set.prototype`'s own method names (ES2024 §24.2.3 + the new set-method
  * proposal). `size` is an accessor getter, kept out of the CSV. */
@@ -400,6 +414,9 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
   // default to 1.
   set: 2,
+  // (#3172) ES2025 Map/WeakMap emplace additions — both arity 2.
+  getOrInsert: 2,
+  getOrInsertComputed: 2,
   // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
   // bind/call default to 1.
   apply: 2,
@@ -1343,6 +1360,77 @@ function emitTypedArrayProtoMemberBody(
   return resultType;
 }
 
+/**
+ * (#3171) Native reflective body for the `Map.prototype.size` / `Set.prototype.size`
+ * accessor GETTER — `gOPD(Map.prototype, "size").get.call(recv)`. Spec
+ * §24.1.3.10 / §24.2.4.14: "If M does not have a [[MapData]]/[[SetData]]
+ * internal slot, throw a TypeError". Routes the receiver through the shared
+ * brand preamble (receiver-brand.ts: non-trapping `ref.test $Map` + the
+ * COLLECTION_KIND tag → catchable TypeError on a miss — a Set receiver must
+ * throw for Map's getter and vice versa), then `__map_size` → boxed number.
+ *
+ * Late-funcidx discipline (mirrors `emitTypedArrayProtoMemberBody`): the
+ * `__box_number` import is resolved + flushed BEFORE the cascade; everything
+ * the brand preamble appends in standalone mode (error ctor funcs, string
+ * globals, exn tag) is append-only — no baked-index shifts.
+ */
+function emitCollectionSizeGetterBody(ctx: CodegenContext, fctx: FunctionContext, name: "Map" | "Set"): ValType | null {
+  const resultType: ValType = { kind: "externref" };
+  const refuseMsg = `TypeError: Method get ${name}.prototype.size called on incompatible receiver`;
+
+  // Register the native Map runtime (append-only defined funcs; idempotent).
+  ensureMapHelpers(ctx);
+  const sizeIdx = ctx.mapHelpers.get("__map_size");
+  if (sizeIdx === undefined || ctx.mapTypeIdx < 0) {
+    // No native collection runtime in this module → no receiver can carry the
+    // internal slot → the RequireInternalSlot throw applies unconditionally.
+    emitBrandCheckTypeError(ctx, fctx.body, refuseMsg);
+    return resultType;
+  }
+
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  // Closure ABI: local 0 = self wrapper, local 1 = externref `this`.
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  emitReceiverBrandCheck(
+    ctx,
+    fctx,
+    { kind: "externref" },
+    {
+      message: refuseMsg,
+      structTypeIdx: ctx.mapTypeIdx,
+      kindField: {
+        fieldIdx: MAP_LAYOUT.M_KIND,
+        accept: [name === "Map" ? COLLECTION_KIND.MAP : COLLECTION_KIND.SET],
+      },
+    },
+  );
+  // (ref $Map) on the stack → size (i32) → boxed number externref.
+  fctx.body.push({ op: "call", funcIdx: sizeIdx } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  return resultType;
+}
+
+/**
+ * (#3171) Glue factory for Map/Set — `makeGlue` plus the `size` accessor
+ * getter (real reflective body via {@link emitCollectionSizeGetterBody}).
+ */
+function makeCollectionGlue(brand: number, name: "Map" | "Set", members: readonly string[]): NativeProtoBuiltinGlue {
+  return {
+    brand,
+    name,
+    memberCsv: [...members, "size"].join(","),
+    memberKind: (member) => (member === "size" ? "getter" : "method"),
+    memberLength: (member) => (member === "size" ? 0 : (PROTO_METHOD_LENGTH[member] ?? 1)),
+    emitMemberBody: (c, fctx, member) =>
+      member === "size"
+        ? emitCollectionSizeGetterBody(c, fctx, name)
+        : emitProtoMemberBodyRefusal(c, fctx, name, member),
+  };
+}
+
 function makeGlue(
   ctx: CodegenContext,
   brand: number,
@@ -1564,7 +1652,9 @@ export function ensureMapNativeProtoGlue(ctx: CodegenContext): number | undefine
   const brand = getBuiltinBrand(ctx, "Map");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Map", MAP_PROTO_METHODS));
+    // (#3171) Collection glue = makeGlue + the `size` accessor getter with a
+    // real brand-checked reflective body.
+    registerNativeProtoBuiltin(ctx, makeCollectionGlue(brand, "Map", MAP_PROTO_METHODS));
   }
   return brand;
 }
@@ -1574,7 +1664,9 @@ export function ensureSetNativeProtoGlue(ctx: CodegenContext): number | undefine
   const brand = getBuiltinBrand(ctx, "Set");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Set", SET_PROTO_METHODS));
+    // (#3171) Collection glue = makeGlue + the `size` accessor getter with a
+    // real brand-checked reflective body.
+    registerNativeProtoBuiltin(ctx, makeCollectionGlue(brand, "Set", SET_PROTO_METHODS));
   }
   return brand;
 }
