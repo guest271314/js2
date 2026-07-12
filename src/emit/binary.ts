@@ -1124,6 +1124,9 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
     case "f64.convert_i64_s":
       enc.byte(OP.f64_convert_i64_s);
       break;
+    case "f64.convert_i64_u":
+      enc.byte(OP.f64_convert_i64_u);
+      break;
     case "i64.reinterpret_f64":
       enc.byte(OP.i64_reinterpret_f64);
       break;

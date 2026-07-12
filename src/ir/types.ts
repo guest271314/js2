@@ -256,6 +256,7 @@ type InstrBase =
   | { op: "i32.reinterpret_f32" }
   | { op: "f32.reinterpret_i32" }
   | { op: "f64.convert_i64_s" }
+  | { op: "f64.convert_i64_u" } // (#3173) DataView getBigUint64 — unsigned i64 → f64
   | { op: "f64.reinterpret_i64" }
   | { op: "f64.const"; value: number }
   | { op: "f32.const"; value: number }

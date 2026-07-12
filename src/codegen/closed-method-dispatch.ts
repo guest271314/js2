@@ -800,6 +800,38 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       }
     }
 
+    // (#3173) `$__dv_window` brand arm for the DataView.prototype get*/set*
+    // accessors on a genuinely-`any` receiver (`var sample; sample = new
+    // DataView(b); … () => sample.getUint8(Infinity)` — the assert.throws
+    // callback shape where the receiver widens to `any`). Routes to the shared
+    // `__dv_m_<name>` native helper (brand → ToIndex → [ToNumber] → detached →
+    // bounds → op, minted at the CALL SITE in calls.ts — the fill only READS
+    // funcMap, #1719). Sits UNDER the closed-struct arms (a user `{ getUint8(){…} }`
+    // still wins); a `$__dv_window` can never match a closed-struct arm, so the
+    // relative order is behavior-neutral there. Standalone/wasi only.
+    {
+      const dvHelperIdx = ctx.funcMap.get(`__dv_m_${methodName}`);
+      if ((ctx.standalone || ctx.wasi) && dvHelperIdx !== undefined && ctx.dvWindowTypeIdx >= 0) {
+        // Helper signature: recv + (get → offset, le | set → offset, value, le).
+        const helperArgs = methodName.startsWith("get") ? 2 : 3;
+        const dvCall: Instr[] = [{ op: "local.get", index: 0 } as Instr];
+        for (let i = 0; i < helperArgs; i++) {
+          dvCall.push(i < arity ? ({ op: "local.get", index: 1 + i } as Instr) : ({ op: "ref.null.extern" } as Instr));
+        }
+        dvCall.push({ op: "call", funcIdx: dvHelperIdx } as Instr);
+        current = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: ctx.dvWindowTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: dvCall,
+            else: current,
+          } as Instr,
+        ];
+      }
+    }
+
     // (#3117) FIELD-stored-closure arms — a pre-shaped closed struct whose
     // externref field `<name>` holds a boxed closure (`o.f = function(){}` on
     // a `{}` literal). Read the field and invoke via `__apply_closure` (args

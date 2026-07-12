@@ -5518,37 +5518,53 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         }
       }
 
-      // (#2159/#38) Standalone windowed DataView: when the view has a non-trivial
-      // window (an explicit byteOffset > 0, or an explicit byteLength), wrap the
-      // shared backing buffer in a `$__dv_window {buf, byteOffset, byteLength}`
-      // so the native accessors add the base offset and `dv.byteOffset` /
-      // `dv.byteLength` reflect the ctor args. Offset-0 default-length views keep
-      // the bare vec representation (the dominant, fully-native case) — the
-      // accessor's `recoverDvBacking` accepts both shapes. We only wrap struct
-      // buffers (the externref-buffer path has no compile-time struct to share).
-      const windowed = noJsHost(ctx) && args.length >= 2;
+      // (#2159/#38, #3173) Standalone DataView: wrap the shared backing buffer
+      // in a `$__dv_window {buf, byteOffset, byteLength}` so the native
+      // accessors add the base offset and `dv.byteOffset` / `dv.byteLength`
+      // reflect the ctor args. (#3173) The wrap is now UNCONDITIONAL (was:
+      // windowed views only) — `$__dv_window` IS the standalone [[DataView]]
+      // internal-slot brand, so an offset-0 default-length view must also be
+      // distinguishable from its bare ArrayBuffer vec (a bare vec receiver on
+      // an accessor now throws the §24.3.1.1/2 brand TypeError). The wrap is
+      // RUNTIME-GATED on the buffer actually being an `i32_byte` vec (a
+      // `$__resizable_ab` passes too — it subtypes the vec): a non-vec buffer
+      // (host object, exotic value) passes through unwrapped, exactly the
+      // pre-#3173 behaviour, so no new trap is introduced.
+      const windowed = noJsHost(ctx);
       if (windowed) {
         const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
-        // buf (ref null vec). The buffer local may be a struct ref already or an
-        // externref (ArrayBuffer locals are typed externref) — recover the vec
-        // struct so the wrapper's `buf` field is a concrete `(ref null vec)`.
+        const wrapWindow: Instr[] = [
+          // buf (ref null vec) — the cast is safe under the ref.test gate below.
+          { op: "local.get", index: bufLocal } as Instr,
+          ...(!isStructBuf ? [{ op: "any.convert_extern" } as Instr] : []),
+          { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+          // byteOffset (i32) — offsetF64 is already ToIndex-normalized & validated.
+          { op: "local.get", index: offsetF64 } as Instr,
+          { op: "i32.trunc_sat_f64_s" } as Instr,
+          // byteLength (i32) — lenF64 holds the windowed length (explicit arg or
+          // bufferByteLength - offset default computed above).
+          { op: "local.get", index: lenF64 } as Instr,
+          { op: "i32.trunc_sat_f64_s" } as Instr,
+          { op: "struct.new", typeIdx: dvWinTypeIdx } as Instr,
+          // DataView locals are externref (EXTERNREF_GLOBAL_NAMES) — hand back an
+          // externref so the wrapper survives the variable store and is recovered
+          // (any.convert_extern + ref.test $__dv_window) on accessor dispatch.
+          { op: "extern.convert_any" } as Instr,
+        ];
+        const passThrough: Instr[] = [
+          { op: "local.get", index: bufLocal } as Instr,
+          ...(isStructBuf ? [{ op: "extern.convert_any" } as Instr] : []),
+        ];
+        // Gate: is the buffer (a subtype of) the i32_byte vec?
         fctx.body.push({ op: "local.get", index: bufLocal });
-        if (!isStructBuf) {
-          fctx.body.push({ op: "any.convert_extern" });
-          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
-        }
-        // byteOffset (i32) — offsetF64 is already ToIndex-normalized & validated.
-        fctx.body.push({ op: "local.get", index: offsetF64 });
-        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-        // byteLength (i32) — lenF64 holds the windowed length (explicit arg or
-        // bufferByteLength - offset default computed above).
-        fctx.body.push({ op: "local.get", index: lenF64 });
-        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-        fctx.body.push({ op: "struct.new", typeIdx: dvWinTypeIdx });
-        // DataView locals are externref (EXTERNREF_GLOBAL_NAMES) — hand back an
-        // externref so the wrapper survives the variable store and is recovered
-        // (any.convert_extern + ref.test $__dv_window) on accessor dispatch.
-        fctx.body.push({ op: "extern.convert_any" });
+        if (!isStructBuf) fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: wrapWindow,
+          else: passThrough,
+        } as Instr);
         return { kind: "externref" };
       }
 

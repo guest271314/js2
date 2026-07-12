@@ -31,6 +31,7 @@ import {
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { emitDataViewProtoMemberBody } from "./dataview-native.js"; // (#3173) reflective DataView member bodies
 import { allocLocal } from "./context/locals.js";
 import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
@@ -1759,16 +1760,25 @@ export function ensureDataViewNativeProtoGlue(ctx: CodegenContext): number | und
   const brand = getBuiltinBrand(ctx, "DataView");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(
-      ctx,
-      makeGlueWithGetters(
-        brand,
-        "DataView",
-        DATAVIEW_PROTO_METHODS,
-        DATAVIEW_PROTO_GETTERS,
-        DATAVIEW_PROTO_METHOD_LENGTH,
-      ),
+    const glue = makeGlueWithGetters(
+      brand,
+      "DataView",
+      DATAVIEW_PROTO_METHODS,
+      DATAVIEW_PROTO_GETTERS,
+      DATAVIEW_PROTO_METHOD_LENGTH,
     );
+    // (#3173) Real reflective member bodies: get*/set* delegate to the shared
+    // `__dv_m_<member>` native core (brand → ToIndex → [ToNumber] → detached →
+    // bounds → op); `buffer`/`byteLength`/`byteOffset` getters brand-check and
+    // read the `$__dv_window` inline. This is what makes
+    // `DataView.prototype.getUint8.call({})` throw the §24.3.1.1 TypeError
+    // (this-has-no-dataview-internal.js) instead of refusing.
+    glue.emitMemberBody = (c, fctx, member) => emitDataViewProtoMemberBody(c, fctx, member);
+    // The uncounted littleEndian arg needs a real param slot: get*(offset[, le])
+    // → 2 slots (spec length 1), set*(offset, value[, le]) → 3 slots (length 2).
+    // Getter members return 0 (no slots).
+    glue.memberParamSlots = (member) => (member.startsWith("get") ? 2 : member.startsWith("set") ? 3 : 0);
+    registerNativeProtoBuiltin(ctx, glue);
   }
   return brand;
 }
