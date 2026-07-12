@@ -15,6 +15,12 @@ language_feature: typed-arrays, array-methods
 test262_category: built-ins/TypedArray/prototype/find
 related: [2872, 3058]
 parent: 2872
+# (#3162) The soundness fix extends `emitDynViewMethodTwoArm` in place (the
+# Implementation Plan mandates "extend in place; do not fork a per-method
+# two-arm"), so the two-arm's home file grows by the find/findIndex THEN-arm
+# routing. Intended, sanctioned growth of the god-file for this change-set.
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 ---
 
 # #3162 — dyn-view `find`/`findIndex` two-arm emits INVALID wasm

@@ -3045,27 +3045,20 @@ const DYN_VIEW_READ_METHODS = new Set<string>([
   // up via the {@link BOOLEAN_RESULT_METHODS} boxing fix below.
   "reduce",
   "reduceRight",
-  // (#3162) `find`/`findIndex` — the two-arm materializes the dyn view to an
-  // `$__vec_f64` and (standalone only) runs the #3098 native `__hof_<name>`
-  // loop over it (see {@link FIND_METHODS} and the THEN-arm Fix-B route in
-  // {@link emitDynViewMethodTwoArm}). Routing through `__hof_find` — not the
-  // legacy `compileArrayFind` re-entry — gives the correct `undefined`
-  // (`ref.null.extern`) not-found sentinel and thisArg threading; the legacy
-  // re-entry boxed a NaN sentinel (`__box_number`) that failed
-  // `assert.sameValue(result, undefined)`. Gated to standalone in the two-arm
-  // predicate (`__hof_*` is standalone-only); gc/host keeps the existing path.
+  // (#3162) find/findIndex — see {@link FIND_METHODS}. Standalone-gated in the
+  // two-arm predicate; gc/host keeps the pre-existing path.
   "find",
   "findIndex",
 ]);
 
 /**
  * (#3162) Two-arm methods whose THEN arm (materialized `$__vec_f64`) is routed
- * through the #3098 native `__hof_<name>` substrate instead of the legacy
- * `compileArrayMethodCall` re-entry — the substrate returns an externref result
- * with the spec `undefined` not-found sentinel and threads `thisArg`. Only
- * `find`/`findIndex` (the legacy `compileArrayFind` NaN sentinel + missing
- * thisArg was the soundness/semantics gap). `reduce`/`reduceRight` keep their
- * existing re-entry (byte-identical, no not-found sentinel to mis-box).
+ * through the standalone #3098 native `__hof_<name>` substrate instead of the
+ * legacy `compileArrayFind` re-entry — the substrate returns an externref with
+ * the spec `undefined` (`ref.null.extern`) not-found sentinel and threads
+ * `thisArg`, where the legacy re-entry boxed a NaN sentinel (`__box_number`,
+ * failing `assert.sameValue(result, undefined)`) and dropped `thisArg`.
+ * `reduce`/`reduceRight` keep their existing re-entry (no miss sentinel).
  */
 const FIND_METHODS = new Set<string>(["find", "findIndex"]);
 
@@ -3233,37 +3226,27 @@ function emitDynViewMethodTwoArm(
   if (hofMethodIdx !== undefined) {
     // (#3162 Fix B) find/findIndex over the materialized `$__vec_f64`: route
     // through the #3098 native `__hof_<name>(recv, cb, thisArg) -> externref`
-    // loop instead of re-entering `compileArrayFind` (whose f64-vec impl boxes
-    // a NaN "not found" sentinel and drops thisArg). `__extern_get_idx` accepts
-    // a real `$__vec_*` receiver, so we pass the materialized vec as externref;
-    // the helper returns the matched element / index / undefined as externref
-    // directly, so the arm is already the unified `externref` branch rep (no
-    // `coerceArmToExternref` fixup). The callback is compiled once per arm as an
-    // externref closure (the ELSE arm re-dispatch compiles it again — double
-    // mint is tolerated bloat, same as reduce/reduceRight; not a soundness bug).
+    // loop instead of re-entering `compileArrayFind` (whose f64-vec impl boxes a
+    // NaN "not found" sentinel and drops thisArg). `__extern_get_idx` accepts a
+    // real `$__vec_*` receiver, so the materialized vec crosses as externref;
+    // the helper returns element/index/undefined as externref — already the
+    // unified branch rep (no `coerceArmToExternref` fixup). The callback is
+    // compiled once per arm (the ELSE arm re-dispatch mints it again — tolerated
+    // double-mint, same as reduce/reduceRight; not a soundness bug).
+    const pushExt = (arg: ts.Expression, asClosure: boolean): void => {
+      const at =
+        asClosure && (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))
+          ? compileArrowAsClosure(ctx, fctx, arg)
+          : compileExpression(ctx, fctx, arg, { kind: "externref" });
+      if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+      else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+    };
     fctx.body.push({ op: "local.get", index: matLocal } as Instr);
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    // arg0 = callback → externref
-    const cbArg = callExpr.arguments[0]!;
-    if (ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)) {
-      const at = compileArrowAsClosure(ctx, fctx, cbArg);
-      if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
-      else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
-    } else {
-      const at = compileExpression(ctx, fctx, cbArg, { kind: "externref" });
-      if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
-      else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
-    }
-    // arg1 = thisArg → externref (undefined when omitted). Spec evaluates the
-    // args once; the ELSE arm re-evaluates for its own path (both arms are
-    // guarded by the runtime ref.test, so exactly one executes).
-    if (callExpr.arguments.length >= 2) {
-      const tt = compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "externref" });
-      if (tt && tt.kind !== "externref") coerceType(ctx, fctx, tt, { kind: "externref" });
-      else if (tt === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
-    } else {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
-    }
+    fctx.body.push({ op: "extern.convert_any" } as Instr); // recv
+    pushExt(callExpr.arguments[0]!, true); // cb
+    if (callExpr.arguments.length >= 2)
+      pushExt(callExpr.arguments[1]!, false); // thisArg
+    else fctx.body.push({ op: "ref.null.extern" } as Instr); // thisArg = undefined
     fctx.body.push({ op: "call", funcIdx: hofMethodIdx } as Instr);
     rThen = { kind: "externref" };
   } else {
