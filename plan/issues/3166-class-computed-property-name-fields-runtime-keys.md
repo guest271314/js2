@@ -131,3 +131,45 @@ to a follow-up and land fields first (120 of the 150).
 **fable-executable-now** for fields (steps 1–3; the dynamic-write helper
 exists). Accessors (step 4) may need the #2042 descriptor path — if it
 resists, slice it to a follow-up rather than stalling the field win.
+
+## Re-grounding (2026-07-12, sendev-3164 — READ BEFORE IMPLEMENTING)
+
+Probed against post-#3164 main before implementing. **Two of the plan's
+premises are wrong; the scope is heterogeneous:**
+
+1. **The "dynamic property write helper on class instances" does NOT work in
+   standalone** — the plan's step 3 depends on it. Probes:
+   `class C {}; c[f()] = 7; c[f()]` → 0, and `class C { x = 5 }; c["y"] = 7;
+   c.x + c["y"]` → NaN. Closed class-instance structs have no property table;
+   out-of-shape writes are silently dropped. The only side-table precedent is
+   the Error-subclass `$Error_struct.$props` field (#2101a,
+   assignment.ts `emitExternrefBackedOwnFieldWrite`). Generalizing that (a
+   `$props` overflow field on classes with dynamic members + read/write path
+   threading) is substrate work, not a `continue` removal.
+2. **Constant-foldable cpn tests already pass** (`[1+1]`, string/numeric
+   literals — `cpn-class-expr-fields-computed-property-name-from-additive-*`
+   PASS on main). The 150-fail population concentrates in:
+   - `fields-methods-*` variants (~26 of 31 fields-methods files fail): a
+     class with BOTH a computed field and a computed METHOD; even the
+     STATIC-key ones fail at assert #3 (returned 4) — the failing assert is
+     the later dynamic access (`c[String(1+1)]` string-key read of a
+     numeric-named member, or the method invocation through a computed key),
+     NOT the field collection.
+   - genuinely-runtime keys (function-expression / arrow / assignment /
+     coalesce / yield / await keys) — these DO hit the :748 `continue`, but
+     fixing them requires the missing dynamic-write substrate above.
+3. Suggested slicing (verify counts per slice before starting):
+   - **S1 (no new substrate):** dynamic READ canonicalization on closed class
+     structs — `c[String(1+1)]` / `c[2]` must both find struct field "2"
+     (numeric-key ToPropertyKey canonicalization in the any-receiver read),
+     plus computed-key METHOD invocation dispatch. Likely flips the
+     static-key `fields-methods` bucket (assert #3 class).
+   - **S2 (substrate):** generalized `$props` overflow table for classes with
+     runtime-computed members (fields first, accessors after), keyed at
+     class-eval time per §15.7.14 (evaluate-once ordering).
+   - Static members (`C[1+1]`) need the class-object carrier to answer
+     computed reads — verify which bucket asserts them (assert #2/#4 in the
+     same files).
+
+Claim released pending re-slice; the probes live in this branch's history
+(`.tmp/probe-3166*.mts` shapes are reproduced inline above).
