@@ -1,7 +1,9 @@
 ---
 id: 3169
 title: "standalone: Array.prototype callback methods (reduce/reduceRight/filter/some/every/map/forEach) over array-like receivers via .call/.apply (519 gap tests)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-array-hof
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -16,6 +18,19 @@ sprint: current
 horizon: l
 related: [2860, 2670, 3015, 3126, 3098, 2872]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+# (#3102) Growth is the receiver-ladder fill + its arms, placed next to their
+# established siblings: fillExternArrayLikeStructArms beside
+# fillExternGetIdxVecArms (object-runtime owns the reader trio), the
+# dynamic-any-index arm in the element-access owner (property-access), the
+# #3037 carrier marker in binary-ops/context, the un-refusal in array-methods,
+# one finalize call in index.ts.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/property-access.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/codegen/array-methods.ts
 ---
 
 # #3169 — standalone: Array.prototype callback methods over array-like receivers
@@ -96,3 +111,53 @@ machinery:
   (`check-standalone-highwater.mjs`); all changes exercised on both lanes in CI.
 - One PR; if the receiver ladder lands but a residual sub-bucket (>50 tests)
   remains, file a follow-on instead of scope-creeping.
+
+## Test Results (2026-07-12, local macOS, target: standalone)
+
+Fix landed as four coupled pieces (all standalone-gated; gc/host byte-identical):
+
+1. **`fillExternArrayLikeStructArms`** (object-runtime.ts, called from index.ts
+   finalize after `fillExternGetIdxVecArms`): CLOSED-STRUCT array-like arms
+   spliced into `__extern_length` / `__extern_get_idx` / `__extern_has_idx` —
+   the dominant receiver `var obj = {0:11, 1:12, length:2}` is a closed
+   nominal struct (`$__anon_N`), NOT `$Object` (#1897), and the reader trio
+   answered length 0 / miss, so the generic `compileArrayLikePrototypeCall`
+   loop ran 0 iterations. Length arm supports f64/i32/bool/externref-unbox AND
+   string lengths (`length: "2"` → `__str_to_number`, the `-3-*` family);
+   index arms are per-canonical-integer-field `f64.eq` reads with boxing;
+   has-arm is the HasProperty OR-chain (hole semantics).
+2. **No-init `reduce`/`reduceRight` un-refused** (array-methods.ts): the
+   M2.2c funcidx-shift bug the refusal guarded is gone (#16 by-name
+   re-resolves); the §23.1.3.24 step-6 hole-scan seed compiles natively.
+3. **Standalone dynamic-`any`-index read** (property-access.ts): twin of the
+   host-only #2773 arm — `obj[idx]` in a named-function callback reads legacy
+   `__extern_get` first, then retries positionally via `__extern_get_idx` on
+   miss (numeric, non-string key). `arguments`-rooted receivers excluded
+   (order-fragile materialized state — see #3180 bucket 4).
+4. **#3037 carrier gating** (binary-ops.ts + context/types.ts +
+   property-access.ts): `maybeWrapAnyReadEqualityCarrier` now requires the
+   LIVE `ctx.activeAnyEqDispatchExpr` marker, fixing the mid-operand
+   `$AnyValue`-registration hazard (spurious `!==` for value-equal operands —
+   also fixed the pre-existing `3 === 3.0 → false` standalone gap pinned in
+   `tests/issue-1917-emit-eq.test.ts`, now spec-correct 18 on both lanes).
+
+Measured (7-family batch, 1605 files, `runTest262File(..., "standalone")`):
+
+- in-family standalone passes: **672 (baseline) → 876 (+204 net)**
+- authoritative gap flips (host-pass ∧ standalone-not-pass): **202 / 513**
+- all 3 acceptance sample tests pass host-free ✓
+- in-family regressions: **2** — `reduce/15.4.4.21-8-b-ii-2.js`,
+  `reduceRight/15.4.4.22-8-b-ii-2.js`: vacuous-pass → honest-fail (previously
+  the REFUSED no-init call answered undefined, which happened to satisfy
+  `assert.notSameValue`; now the empty hole-scan throws the spec TypeError —
+  the receiver needs the #3180 bucket-1 defineProperty MOP to truly pass).
+- equivalence: `tests/issue-3169.test.ts` (16 host-free asserts) + all
+  related suites green (#3037 carrier ×115, #3098, #3126, #2903, #1461,
+  #1917, array-methods, array-prototype-methods).
+
+**Acceptance shortfall (deliberate, per the anti-scope-creep clause):** the
+≥350 flip target is NOT reachable with the receiver ladder alone — the
+residual ~306 gap tests split into six NON-ladder mechanisms (defineProperty
+MOP ~101, fnctor-array-inheritance ~52, builtin expandos ~46, arguments
+fidelity ~37, thisArg ~29, ToPrimitive lengths ~26), filed with measured
+counts as **#3180**.

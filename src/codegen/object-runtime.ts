@@ -10064,6 +10064,297 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
 }
 
 /**
+ * (#3169) Box a CLOSED-struct field value (already on the stack) up to the
+ * uniform externref the dynamic-reader trio returns. Mirrors the result-boxing
+ * arm of `buildEntryArm` (closed-method-dispatch.ts) / the coercion engine's
+ * to-externref rules, but stays local to avoid an object-runtime ⇄
+ * type-coercion import cycle. funcMap-read-only (the union natives are
+ * registered by `ensureObjectRuntime` under standalone). Returns null when the
+ * field kind has no host-free boxing (f32/i64/v128/i8/i16) — the caller skips
+ * that field (its index reads as a miss, same as before the fill).
+ */
+function boxClosedStructFieldToExternref(ctx: CodegenContext, fieldType: ValType): Instr[] | null {
+  if (fieldType.kind === "externref") return [];
+  if (fieldType.kind === "f64") {
+    const boxNumIdx = ctx.funcMap.get("__box_number");
+    return boxNumIdx === undefined ? null : [{ op: "call", funcIdx: boxNumIdx } as Instr];
+  }
+  if (fieldType.kind === "i32") {
+    if ((fieldType as { boolean?: boolean }).boolean === true) {
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (boxBoolIdx !== undefined) return [{ op: "call", funcIdx: boxBoolIdx } as Instr];
+    }
+    const boxNumIdx = ctx.funcMap.get("__box_number");
+    return boxNumIdx === undefined
+      ? null
+      : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+  }
+  if (fieldType.kind === "ref" || fieldType.kind === "ref_null") return [{ op: "extern.convert_any" } as Instr];
+  return null;
+}
+
+/**
+ * (#3169) Finalize-time CLOSED-STRUCT array-like arms for the standalone
+ * dynamic-reader trio `__extern_length` / `__extern_get_idx` /
+ * `__extern_has_idx`.
+ *
+ * A plain-JS array-like literal with NO contextual type —
+ * `var obj = { 0: 11, 1: 12, length: 2 }`, the dominant receiver shape of the
+ * test262 `Array.prototype.<HOF>.call(obj, cb)` corpus (§23.1.3 generics over
+ * array-likes) — compiles to a CLOSED nominal WasmGC struct (`$__anon_N` with
+ * fields `$0/$1/$length`), NOT an open `$Object` (#1897 forbids diverting
+ * uncontexted literals to `$Object`: consumers compile against the inferred
+ * struct). The reader trio had arms for `$Object` / `$ObjVec` / typed vecs
+ * only, so a closed-struct receiver answered `length 0` / miss — the generic
+ * `compileArrayLikePrototypeCall` loop then ran ZERO iterations and returned
+ * the seed (the "returned 2 — assert #1" signature, ~500 standalone-lane gap
+ * tests under reduce/reduceRight/filter/some/every/map/forEach).
+ *
+ * Fill (this function): for every closed struct with a numeric-able `length`
+ * field, SPLICE (never rebuild — `reference_no_rebuild_helper_body_at_finalize`)
+ * one `ref.test`-guarded arm into each of the three helpers, right after their
+ * shared 3-instr preamble (the same insertion discipline as
+ * `fillExternGetIdxVecArms` above):
+ *   - `__extern_length`: `struct.get $length` → ToLength clamp (trunc, [0,
+ *     2^53−1], NaN→0) — spec Get(O,"length") + §7.1.20 over the real field.
+ *   - `__extern_get_idx`: compare the f64 index against each canonical
+ *     integer-named field ("0","1",…) — `f64.eq` per field, `struct.get` + box
+ *     on match, undefined-miss otherwise (a struct HAS no other indices — its
+ *     proto is Object.prototype, which has none either).
+ *   - `__extern_has_idx`: OR of the same `f64.eq` tests — HasProperty per
+ *     §23.1.3 hole semantics ({0:x, 2:y, length:3} skips index 1; a
+ *     present-but-undefined field still answers 1 since struct fields exist).
+ *
+ * Runs at FINALIZE (index.ts, right after `fillExternGetIdxVecArms`) so the
+ * struct-type table is COMPLETE — literals compiled after `ensureObjectRuntime`
+ * still get arms. Standalone-only via `ctx.externGetIdxReserved` (set exactly
+ * when the trio was registered with the standalone array-like arms); gc/host
+ * output is untouched (the host imports own this path there). All `call`
+ * funcIdxs are read from funcMap at fill time and the spliced instrs are
+ * walked by any later shift like all others.
+ */
+export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
+  if (!ctx.externGetIdxReserved) return; // standalone trio absent → nothing to widen
+  const findFn = (name: string) => {
+    const idx = ctx.funcMap.get(name);
+    return idx === undefined ? undefined : definedFuncAt(ctx, idx);
+  };
+  const lenFn = findFn("__extern_length");
+  const getIdxFn = findFn("__extern_get_idx");
+  const hasIdxFn = findFn("__extern_has_idx");
+  if (!lenFn && !getIdxFn && !hasIdxFn) return;
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  // (#3169) `length: "2"` (the test262 `-3-*` "length is a string containing a
+  // number" family) stores a STRING-ref length field; ToLength applies ToNumber
+  // first (§7.1.20 → §7.1.4), which is exactly the native `__str_to_number`
+  // scanner. Presence-gated (it is emitted with the union natives under
+  // nativeStrings — index.ts finalize — so it exists whenever such a literal
+  // can); absent → the string-length arm is skipped (under-fix, length 0 as
+  // before).
+  const strToNumIdx = ctx.funcMap.get("__str_to_number");
+  const isStringRefType = (t: ValType): boolean =>
+    (t.kind === "ref" || t.kind === "ref_null") &&
+    ((t as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
+      (t as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx) &&
+    (t as { typeIdx: number }).typeIdx >= 0;
+
+  // ── Collect closed-struct array-like candidates ──
+  // Same skip filter as `collectMethodEntries`/`collectFieldEntries`
+  // (closed-method-dispatch.ts) plus the internal `__subview_*` typed-array
+  // carriers (they carry a `length` field but are NOT generic array-likes —
+  // their element reads go through the dedicated typed-array paths, and
+  // widening their `.length` here would change established fall-through
+  // behaviour).
+  type ArrayLikeCand = {
+    typeIdx: number;
+    lengthFieldIdx: number;
+    lengthFieldType: ValType;
+    numericFields: { n: number; fieldIdx: number; fieldType: ValType }[];
+  };
+  const seen = new Set<number>();
+  const cands: ArrayLikeCand[] = [];
+  for (const [structName, fields] of ctx.structFields) {
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined || seen.has(typeIdx)) continue;
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_") ||
+      structName.startsWith("__subview_") ||
+      structName.startsWith("$")
+    )
+      continue;
+    const lengthFieldIdx = fields.findIndex(
+      (f) =>
+        f.name === "length" &&
+        (f.type.kind === "f64" ||
+          f.type.kind === "i32" ||
+          f.type.kind === "externref" ||
+          (strToNumIdx !== undefined && isStringRefType(f.type))),
+    );
+    if (lengthFieldIdx < 0) continue;
+    const numericFields: ArrayLikeCand["numericFields"] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      if (!f?.name) continue;
+      const n = Number(f.name);
+      // Canonical non-negative integer index names only ("0", "1", …) — the
+      // ToString(ToPropertyKey) form §23.1.3 loops probe.
+      if (!Number.isInteger(n) || n < 0 || String(n) !== f.name) continue;
+      numericFields.push({ n, fieldIdx: i, fieldType: f.type });
+    }
+    seen.add(typeIdx);
+    cands.push({ typeIdx, lengthFieldIdx, lengthFieldType: fields[lengthFieldIdx]!.type, numericFields });
+  }
+  if (cands.length === 0) return;
+  cands.sort((a, b) => a.typeIdx - b.typeIdx);
+
+  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  const MAX_SAFE = 9007199254740991; // 2^53 - 1
+
+  /** Shared preamble test (identical for all three helpers). */
+  const hasPreamble = (fn: { body: Instr[] }): boolean =>
+    fn.body.length >= 3 &&
+    fn.body[0]?.op === "local.get" &&
+    fn.body[1]?.op === "any.convert_extern" &&
+    fn.body[2]?.op === "local.set";
+
+  // ── __extern_length arms (locals: 1=any, 2=lenF64, 3=lenTrunc) ──
+  if (lenFn && hasPreamble(lenFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      // Read the length field as f64: i32 converts (a boolean-branded field
+      // reads 1/0 — ToLength(ToNumber(true)) = 1); externref (an `any`-typed
+      // `length` slot) unboxes via __unbox_number (NaN for non-numbers → the
+      // clamp answers 0, matching ToLength(ToNumber) for the common cases);
+      // a string ref (`length: "2"`) runs the §7.1.4 StringToNumber scanner.
+      const readAsF64: Instr[] =
+        cand.lengthFieldType.kind === "i32"
+          ? [{ op: "f64.convert_i32_s" } as Instr]
+          : cand.lengthFieldType.kind === "externref"
+            ? unboxNumIdx !== undefined
+              ? [{ op: "call", funcIdx: unboxNumIdx } as Instr]
+              : [{ op: "drop" } as Instr, { op: "f64.const", value: 0 } as Instr]
+            : isStringRefType(cand.lengthFieldType) && strToNumIdx !== undefined
+              ? [{ op: "extern.convert_any" } as Instr, { op: "call", funcIdx: strToNumIdx } as Instr]
+              : [];
+      arms.push(
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 } as Instr,
+            { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
+            { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: cand.lengthFieldIdx } as Instr,
+            ...readAsF64,
+            // ToLength clamp — mirrors the `$Object` arm's NaN/trunc/[0,2^53−1]
+            // sequence, reusing the same scratch locals 2/3.
+            { op: "local.tee", index: 2 } as Instr,
+            { op: "local.get", index: 2 } as Instr,
+            { op: "f64.ne" } as Instr, // NaN?
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [{ op: "f64.const", value: 0 } as Instr],
+              else: [
+                { op: "local.get", index: 2 } as Instr,
+                { op: "f64.trunc" } as Instr,
+                { op: "local.tee", index: 3 } as Instr,
+                { op: "f64.const", value: 0 } as Instr,
+                { op: "f64.le" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "f64" } },
+                  then: [{ op: "f64.const", value: 0 } as Instr],
+                  else: [
+                    { op: "local.get", index: 3 } as Instr,
+                    { op: "f64.const", value: MAX_SAFE } as Instr,
+                    { op: "f64.min" } as Instr,
+                  ],
+                } as Instr,
+              ],
+            } as Instr,
+            { op: "return" } as Instr,
+          ],
+        } as Instr,
+      );
+    }
+    lenFn.body.splice(3, 0, ...arms);
+  }
+
+  // ── __extern_get_idx arms (params: 1=idx f64; locals: 2=any) ──
+  if (getIdxFn && hasPreamble(getIdxFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      const fieldChecks: Instr[] = [];
+      for (const nf of cand.numericFields) {
+        const box = boxClosedStructFieldToExternref(ctx, nf.fieldType);
+        if (box === null) continue; // unboxable field kind — reads as a miss
+        fieldChecks.push(
+          { op: "local.get", index: 1 } as Instr,
+          { op: "f64.const", value: nf.n } as Instr,
+          {
+            op: "f64.eq",
+          } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 2 } as Instr,
+              { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
+              { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: nf.fieldIdx } as Instr,
+              ...box,
+              { op: "return" } as Instr,
+            ],
+          } as Instr,
+        );
+      }
+      if (fieldChecks.length === 0) continue; // no indexable fields — fall-through miss is identical
+      arms.push(
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...fieldChecks, ...idxMiss(), { op: "return" } as Instr],
+        } as Instr,
+      );
+    }
+    if (arms.length > 0) getIdxFn.body.splice(3, 0, ...arms);
+  }
+
+  // ── __extern_has_idx arms (params: 1=idx f64; locals: 2=any) ──
+  if (hasIdxFn && hasPreamble(hasIdxFn)) {
+    const arms: Instr[] = [];
+    for (const cand of cands) {
+      if (cand.numericFields.length === 0) continue; // fall-through 0 is identical
+      const orChain: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+      for (const nf of cand.numericFields) {
+        orChain.push(
+          { op: "local.get", index: 1 } as Instr,
+          { op: "f64.const", value: nf.n } as Instr,
+          { op: "f64.eq" } as Instr,
+          { op: "i32.or" } as Instr,
+        );
+      }
+      arms.push(
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [...orChain, { op: "return" } as Instr],
+        } as Instr,
+      );
+    }
+    if (arms.length > 0) hasIdxFn.body.splice(3, 0, ...arms);
+  }
+}
+
+/**
  * (#2896) Finalize-time fill for the reserved builtin-fn metadata natives
  * (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
  * `__builtinfn_push_ownnames` — registered by `ensureObjectRuntime` under

@@ -1801,6 +1801,20 @@ export interface CodegenContext {
   /** Type index of the $AnyValue boxed-any struct */
   anyValueTypeIdx: number;
   /**
+   * (#3169) The `any === any` binary expression whose operands are CURRENTLY
+   * being compiled through the `$AnyValue` equality dispatch
+   * (`compileAnyBinaryDispatch` → emitStrictEq/emitLooseEq), set/restored
+   * around that call in binary-ops.ts. The #3037 read-carrier
+   * (`maybeWrapAnyReadEqualityCarrier`) fires ONLY when its operand's parent
+   * is this expression — guaranteeing the `ref $AnyValue` it produces is
+   * consumed by `__any_strict_eq` and never by an equality path chosen while
+   * `$AnyValue` was still unregistered (a mid-operand lazy registration flips
+   * `anyValueTypeIdx` ≥ 0 AFTER binary-ops' entry decision — the
+   * `obj[idx] !== val` spurious-neq hazard). `undefined` when no any-equality
+   * dispatch is active.
+   */
+  activeAnyEqDispatchExpr?: ts.BinaryExpression;
+  /**
    * (#2106 S1) Global index of the standalone `$undefined` singleton — an
    * immutable tag-1 `$AnyValue`, reserved up-front at `ensureAnyValueType` time
    * so `undefined` is distinguishable from `null` (`ref.null extern`) in

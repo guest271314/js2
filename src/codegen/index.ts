@@ -68,6 +68,7 @@ import {
   fillApplyClosure,
   fillBindDynHelper,
   fillBuiltinFnMeta,
+  fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
   fillExternIsArray,
   fillProxyDispatch,
@@ -2609,6 +2610,14 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+
+    // (#3169) Splice CLOSED-STRUCT array-like arms into the standalone
+    // dynamic-reader trio (`__extern_length`/`__extern_get_idx`/
+    // `__extern_has_idx`) now that the struct-type table is complete — a plain
+    // `{0:x, 1:y, length:n}` literal (a closed nominal struct, NOT `$Object`)
+    // becomes readable by the generic `Array.prototype.<HOF>.call(obj, cb)`
+    // loop. Standalone only (no-op otherwise).
+    fillExternArrayLikeStructArms(ctx);
 
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
