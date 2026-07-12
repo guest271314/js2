@@ -35,7 +35,7 @@ import {
 } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper; (#3054 B1/B2) shared-backing TA views + windowing; (#3054 D) dynamic ctor construct
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { emitObjectCoercion } from "./calls-guards.js"; // (#3118) shared Object(...) / new Object(...) ToObject coercion
-import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
+import { COLLECTION_KIND, ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
@@ -2823,6 +2823,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const mapNewIdx = ctx.mapHelpers.get("__map_new");
       const mapSetIdx = ctx.mapHelpers.get("__map_set");
       if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "i32.const", value: COLLECTION_KIND.MAP }); // (#3171) brand tag
         fctx.body.push({ op: "call", funcIdx: mapNewIdx });
         if (seedablePairs && arrArg !== undefined && arrArg.elements.length > 0 && mapSetIdx !== undefined) {
           const mTmp = allocLocal(fctx, `__mapctor_m_${fctx.locals.length}`, {
@@ -2869,6 +2870,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const mapNewIdx = ctx.mapHelpers.get("__map_new");
       const setAddIdx = ctx.mapHelpers.get("__set_add");
       if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "i32.const", value: COLLECTION_KIND.SET }); // (#3171) brand tag
         fctx.body.push({ op: "call", funcIdx: mapNewIdx });
         if (arrArg && setAddIdx !== undefined && !arrArg.elements.some((e) => ts.isSpreadElement(e))) {
           const mTmp = allocLocal(fctx, `__setctor_m_${fctx.locals.length}`, {
@@ -2914,6 +2916,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     ensureWeakCollectionHelpers(ctx);
     const mapNewIdx = ctx.mapHelpers.get("__map_new");
     if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({
+        op: "i32.const",
+        value: expr.expression.text === "WeakMap" ? COLLECTION_KIND.WEAKMAP : COLLECTION_KIND.WEAKSET,
+      }); // (#3171) brand tag
       fctx.body.push({ op: "call", funcIdx: mapNewIdx });
       return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
