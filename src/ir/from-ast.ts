@@ -199,9 +199,13 @@ export interface IrFromAstResolver {
    *     index-style (f64) user args (`"i32"` ⇒ from-ast inserts
    *     `i32.trunc_sat_f64_s`, the native helper signature); `padOmitted`
    *     picks the omitted-optional strategy (`"host"` = the host-shim
-   *     sentinel conventions incl. #1248 slice-end + #2002 NaN-position;
-   *     `"native-slice-len"` = `slice(start)`'s implicit end = recv.length,
-   *     i32-truncated).
+   *     sentinel conventions incl. #1248 slice/substring-end + #2002
+   *     NaN-position; `"native-slice-len"` = `slice(start)`'s implicit end =
+   *     recv.length, i32-truncated; `"native-substring"` (#3156) = substring's
+   *     omitted start/end pad `i32 0` / `i32 0x7fffffff` — `__str_substring`
+   *     clamps end to len, matching the legacy native arm's sentinel;
+   *     `"charcode-zero"` (#3156) = charCodeAt's omitted position pads
+   *     `i32 0` in BOTH modes, since the guarded helpers take an i32 index).
    *
    * Capability note: demote/claim decisions must be settled at BUILD time
    * (post-claim demotion is the documented residual channel; there is no
@@ -213,7 +217,11 @@ export interface IrFromAstResolver {
   stringMethodPlan?(
     method: string,
     argCount: number,
-  ): { funcName: string; indexArgRep: "f64" | "i32"; padOmitted: "host" | "native-slice-len" } | null;
+  ): {
+    funcName: string;
+    indexArgRep: "f64" | "i32";
+    padOmitted: "host" | "native-slice-len" | "native-substring" | "charcode-zero";
+  } | null;
   /**
    * (#2856) Resolve an extern-class member through the legacy inheritance
    * chain (`ctx.externClasses` + `ctx.externClassParent` — e.g. `appendChild`
@@ -3800,6 +3808,29 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
     result: { kind: "string" },
     requiredArgs: 1, // slice(start) is valid; end is optional
   },
+  // (#3156) §22.1.3.24 — substring() and substring(start) are both valid:
+  // omitted start defaults to 0, omitted end to the string length. Host mode
+  // targets the `string_substring` env import `(externref, f64, f64)` with
+  // the #1248 length-default pad; native mode targets `__str_substring`
+  // `(ref $AnyString, i32, i32)` whose clamp makes `0x7fffffff` an exact
+  // "to end" sentinel (mirrors the legacy native arm).
+  substring: {
+    hostArgs: [{ kind: "f64" }, { kind: "f64" }],
+    result: { kind: "string" },
+    requiredArgs: 0,
+  },
+  // (#3156) §22.1.3.3 — charCodeAt(pos ?? 0); out-of-range → NaN. Lowers to
+  // ONE call of a mode-specific guarded helper `(recv, i32) -> f64`
+  // (src/codegen/char-code-at-helpers.ts) so the bounds guard lives in the
+  // helper, not in from-ast-built control flow. The host helper wraps the
+  // `wasm:js-string` builtins via `ctx.jsStringImports` (the #1072
+  // bare-name-shadowing-safe registry); the native helper mirrors the legacy
+  // flatten + `array.get_u` arm.
+  charCodeAt: {
+    hostArgs: [{ kind: "f64" }],
+    result: irVal({ kind: "f64" }),
+    requiredArgs: 0,
+  },
   indexOf: {
     hostArgs: [{ kind: "externref" }, { kind: "externref" }],
     result: irVal({ kind: "f64" }),
@@ -3896,6 +3927,20 @@ function lowerStringMethodCall(
   // implicit `end` arg.
   for (let i = args.length; i < sig.hostArgs.length; i++) {
     const expectedHost = sig.hostArgs[i]!;
+    // (#3156) charCodeAt() — omitted position is position 0 (§22.1.3.3
+    // ToIntegerOrInfinity(undefined) = 0). The guarded helpers take an i32
+    // index in both modes, so the pad is an i32 zero.
+    if (plan.padOmitted === "charcode-zero") {
+      loweredArgs.push(cx.builder.emitConst({ kind: "i32", value: 0 }, irVal({ kind: "i32" })));
+      continue;
+    }
+    // (#3156) native substring — omitted start pads 0; omitted end pads the
+    // 0x7fffffff "to end" sentinel (`__str_substring` clamps to len; exactly
+    // the legacy native arm's convention, string-ops.ts `substring`).
+    if (plan.padOmitted === "native-substring") {
+      loweredArgs.push(cx.builder.emitConst({ kind: "i32", value: i === 1 ? 0x7fffffff : 0 }, irVal({ kind: "i32" })));
+      continue;
+    }
     if (plan.padOmitted === "native-slice-len") {
       // #1248 native-mode: slice's missing `end` defaults to `recv.len`.
       // The plan only selects this strategy for `slice(start)` — any other
@@ -3911,10 +3956,12 @@ function lowerStringMethodCall(
         `ir/from-ast: String.${methodName} optional arg ${i} omitted in nativeStrings mode not in slice 13c (${cx.funcName})`,
       );
     } else {
-      // #1248 host-mode: for `String.slice(start)`, the missing `end`
-      // arg defaults to `recv.length` (as f64). All other missing
-      // optional args fall back to the generic sentinel.
-      if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
+      // #1248 host-mode: for `String.slice(start)` / `String.substring(start)`
+      // (#3156), the missing `end` arg defaults to `recv.length` (as f64) —
+      // padding 0 would make the host run `substring(start, 0)`, which the
+      // spec SWAPS to `substring(0, start)` (§22.1.3.24 step 6-8). All other
+      // missing optional args fall back to the generic sentinel.
+      if ((methodName === "slice" || methodName === "substring") && i === 1 && expectedHost.kind === "f64") {
         const lenVal = cx.builder.emitStringLen(recv);
         loweredArgs.push(lenVal);
         continue;
