@@ -69,6 +69,7 @@ import {
   fillApplyClosure,
   fillBindDynHelper,
   fillBuiltinFnMeta,
+  fillDynamicForinVecArms,
   fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
   fillExternSetVecArms,
@@ -2632,6 +2633,15 @@ export function generateModule(
     // becomes readable by the generic `Array.prototype.<HOF>.call(obj, cb)`
     // loop. Standalone only (no-op otherwise).
     fillExternArrayLikeStructArms(ctx);
+
+    // (#3183) Splice `$__vec_base` arms into the standalone dynamic-path for-in /
+    // string-key helpers (`__object_keys_forin` / `__extern_has` / `__extern_get`)
+    // now that `number_toString` / `__str_to_number` / `__extern_get_idx` exist —
+    // an ANY-typed runtime array (which lowers to a `__vec_<k>` struct, not a
+    // `$Object`) now enumerates its index keys for-in and answers string-key
+    // reads (`arr[k]`, `arr["length"]`) instead of empty / undefined. Standalone
+    // only (no-op otherwise).
+    fillDynamicForinVecArms(ctx);
 
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /

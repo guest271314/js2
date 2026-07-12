@@ -18,6 +18,16 @@ origin: "2026-07-12 Fable codebase audit (plan/log/2026-07-12-fable-codebase-aud
 
 # #3184 — default lane: for-await-of / async-dstr vacuous cluster
 
+## Child slices (filed 2026-07-12)
+
+Decomposed into two M-sized claimable slices; this issue is the tracking
+umbrella for the async-vacuous cluster:
+
+- **#3197** — for-await-of / async-dstr drive (383 vacuous), P1.
+- **#3198** — Promise-combinator vacuous callbacks (218), medium (overlaps
+  blocked #2614 + active Promise work; likely shares the #3197 async-drive
+  root cause).
+
 ## Problem
 
 On the **default (JS-host) lane**, `language/statements/for-await-of` has
