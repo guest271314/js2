@@ -58,6 +58,7 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -2438,6 +2439,11 @@ export function generateModule(
       addUnionImports(ctx);
     }
     fillNativeIteratorLateArms(ctx);
+
+    // (#2903) Rebuild the Iterator-helper steppers (iter-hof-native.ts) with
+    // per-producer driven-generator arms + the positive-admission classifier.
+    // Read-only per #1719; no-op unless a helper call site reserved them.
+    fillIterHofSteppers(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the

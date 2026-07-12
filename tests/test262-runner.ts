@@ -1555,6 +1555,7 @@ function buildPreamble(
   needsTypedArrayCtorArrays: boolean,
   needsByteConversionValues: boolean,
   needsResizableAbUtils: boolean,
+  dynViewCompare: boolean,
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
@@ -1690,10 +1691,36 @@ function assert_notSameValue_bool(actual: any, expected: boolean): void {
 }`;
   }
 
+  // (#3151) LANE-SPLIT param type for the compareArray shims.
+  //
+  // STANDALONE/WASI lanes (`dynViewCompare`): params are `any`, NOT `any[]`.
+  // The real harness `compareArray` (harness/assert.js) is untyped, so
+  // `a`/`b` are effectively `any` and `a.length`/`a[i]` go through the
+  // DYNAMIC reader — which recognizes a runtime `$__ta_dyn_view` TypedArray
+  // (the `new TA(makeCtorArg(…))` harness shape). An `any[]` annotation
+  // instead emits WasmGC ARRAY ops, which a dyn-view is not, so every
+  // `compareArray(<TA>, <arr>)` returned 0 and gated the whole standalone
+  // TypedArray.prototype harness cluster (#2872). Measured on the PR #2899
+  // merge_group: +22 standalone TypedArray harness tests.
+  //
+  // JS-HOST lane: params MUST stay `any[]`. The `any` version regressed 15
+  // baseline-pass host tests (merge_group run 29175942933): with an `any`
+  // param context, callers' ARRAY-LITERAL arguments are constructed with a
+  // lossy representation — `[1, void 0, 3]` becomes an f64 array whose
+  // `void 0` element is NaN (`typeof a[1] === "number"`, and NaN !== NaN
+  // fails even a self-compare), and mixed literals like `[1, 'z']` /
+  // `[symA, symB]` misread their non-numeric elements. The corruption
+  // happens at literal CONSTRUCTION in the `any` argument context, so no
+  // branch inside compareArray's body can recover it — the lane split is
+  // the only harness-level fix. Host TypedArray compareArray tests passed
+  // at baseline with `any[]` (host TAs are not dyn-views), so the host lane
+  // loses nothing by keeping it.
+  const caT = dynViewCompare ? "any" : "any[]";
+
   if (needsCompareArray) {
     p += `
 
-function compareArray(a: any[], b: any[]): number {
+function compareArray(a: ${caT}, b: ${caT}): number {
   if (a.length !== b.length) return 0;
   for (let i: number = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return 0;
@@ -1703,9 +1730,10 @@ function compareArray(a: any[], b: any[]): number {
   }
 
   if (needsAssertCompareArray) {
+    // (#3151) lane-split param type — see the compareArray note above.
     p += `
 
-function assert_compareArray(actual: any[], expected: any[]): void {
+function assert_compareArray(actual: ${caT}, expected: ${caT}): void {
   __assert_count = __assert_count + 1;
   if (actual.length !== expected.length) { if (!__fail) __fail = __assert_count; return; }
   for (let i: number = 0; i < actual.length; i++) {
@@ -2243,7 +2271,17 @@ function allowProxyTraps(overrides: any): any {
   return p;
 }
 
-export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
+export function wrapTest(
+  source: string,
+  meta?: Test262Meta,
+  // (#3151) Compile target of the lane this wrap will be compiled for.
+  // Host-free targets (`standalone`/`wasi`) get `any`-typed compareArray
+  // shims (dyn-view TypedArray support); the default JS-host lane keeps
+  // `any[]` (an `any` param context corrupts callers' array-literal args —
+  // see the lane-split note in buildPreamble).
+  target?: string,
+): WrapResult {
+  const dynViewCompare = target === "standalone" || target === "wasi";
   // Strip metadata block
   let body = source.replace(/\/\*---[\s\S]*?---\*\//, "");
 
@@ -2608,6 +2646,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsTypedArrayCtorArrays,
     needsByteConversionValues,
     needsResizableAbUtils,
+    dynViewCompare,
   ]
     .map((b) => (b ? "1" : "0"))
     .join("");
@@ -2643,6 +2682,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsTypedArrayCtorArrays,
       needsByteConversionValues,
       needsResizableAbUtils,
+      dynViewCompare,
     );
     preambleCache.set(cacheKey, preamble);
   }
@@ -3694,7 +3734,7 @@ export async function runTest262File(
   }
 
   // Wrap the test
-  const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta);
+  const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta, target);
 
   /** Adjust error line numbers to refer to the original source file.
    *  The wrapped source has a variable preamble and stripped comments,
