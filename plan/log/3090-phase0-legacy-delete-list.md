@@ -83,6 +83,26 @@ on four structural facts:
   `object-runtime`). Retiring the front-end requires the IR to grow its own
   call-paths into this emission (per-kind adoption), not deletion.
 
+### Post-flip status (2026-07-13, re-verified on `origin/main` @ 3a0dabfeac)
+
+The #3143 IR-first flip is **not** "flip ⇒ delete now". It cleared **G1 for the
+numeric population only**: `computeIrFirstSkipSet`'s allowlist skips legacy body
+emission for provably-lowerable pure-`f64` (now also `boolean`, #3203)
+functions. Re-running the audit post-flip, the FRONTEND `legacy-only` count went
+**UP** 59,976 → 61,889 — nothing in the frontend became newly dead, because
+**G2 keeps every per-kind handler reachable**: the measured skip rate is ~12% of
+functions (ir-fallbacks corpus), so the other ~88% still route through
+`compileStatement`/`compileExpression` and use the legacy handler for every kind
+they contain, including `ir-owned` ones. **No frontend handler is deletable from
+the flip alone.** The −60K unlocks per-file only as each file's LAST gate closes
+(revised phase plan below); the levers are **widening the skip allowlist**
+(#3203 f64→bool landed this; native-i32 next) and **driving the selector's
+rejection buckets to zero** (#2856, `body-shape-rejected` now 14) to raise G2
+claim coverage, plus **top-level IR adoption** (G3). Gate distance is dominated
+by G2 (near-total claim coverage), not by a kind's `ir-owned`-ness, so the first
+file to close will be an all-`ir-owned`-kind file (`literals.ts` /
+`expressions/identifiers.ts`) once claim coverage approaches 100% — not before.
+
 **Consequence:** "deletable today with zero capability change" =
 the **unreferenced set (~2.1K fn-lines)** — everything else is conditional.
 The ~60K FRONTEND number is the size of the eventual win, banked per-kind as

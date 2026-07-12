@@ -29,7 +29,7 @@ import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
-import { collectLocalCallEdges, irFirstBodyIsProvenLowerable } from "./ir-first-gate.js";
+import { collectLocalCallEdges, irFirstBodyIsProvenLowerable, type ValueDomain } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { truthyEnv } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -1545,43 +1545,68 @@ function computeIrFirstSkipSet(
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
 
-  // (#3143) ALLOWLIST skip — see `irFirstBodyIsProvenLowerable`. A claimed
+  // (#3143/#3203) ALLOWLIST skip — see `irFirstBodyIsProvenLowerable`. A claimed
   // function's legacy body is skipped ONLY when its whole body is the
   // proven-lowerable numeric/boolean subset AND its signature is lowerable.
   // Everything else stays COMPILE-TWICE (safe: no skipped-slot hard error).
-  //
-  // `claimedArity`: name → parameter count for every CLAIMED function, so the
-  // body walk can enforce from-ast's exact call-arity requirement (a call to a
-  // non-claimed or wrong-arity callee is not allowlisted). Only claimed funcs
-  // are eligible callees (a claimed caller's IR `call` must target a
-  // claimed-or-compiled slot; a legacy-only callee is excluded).
+  const isF64 = (t: IrType): boolean => asVal(t)?.kind === "f64";
+  const isI32 = (t: IrType): boolean => asVal(t)?.kind === "i32";
+
+  // `claimedArity`: name → parameter count for every claimed function with a
+  // PURE-`f64` signature (all params + return `f64`). In v1 the allowlist lowers
+  // inter-function calls in NUMBER context only, so a call target must be a
+  // number-signature callee — this keeps the call-result domain sound and also
+  // closes a latent hole in the f64-only allowlist (a call to a claimed
+  // non-f64-return callee was accepted as `number`). Bool-signature functions
+  // are never allowlist call targets.
   const claimedArity = new Map<string, number>();
   for (const n of funcs) {
     const f = plan.declByName.get(n);
-    if (f) claimedArity.set(n, f.parameters.length);
-  }
-  // A resolved IR type is skip-eligible only when it is exactly `f64` (JS
-  // `number`) — the single value domain the number-only allowlist body handles.
-  // i32 (native-int OR boolean — ambiguous checker-free), strings, objects,
-  // closures, extern, dynamic, and any ref carrier are NOT; those functions
-  // stay compile-twice. (Widen to i32 once the allowlist tracks int-vs-bool.)
-  const isF64 = (t: IrType): boolean => asVal(t)?.kind === "f64";
-  const signatureLowerable = (fn: ts.FunctionDeclaration, name: string): boolean => {
-    // No default / optional / rest / destructuring params — from-ast's param
-    // binding throws on all of these ("rest/default/optional param not in
-    // Phase 1", or "unsupported param shape").
-    for (const p of fn.parameters) {
-      if (p.questionToken || p.dotDotDotToken || p.initializer) return false;
-      if (!ts.isIdentifier(p.name)) return false;
+    if (!f) continue;
+    const o = plan.overrideMap.get(n);
+    if (o && o.params.every(isF64) && o.returnType !== null && isF64(o.returnType)) {
+      claimedArity.set(n, f.parameters.length);
     }
-    // Params must all be `number` (f64); return must be `number` or void. Use
-    // the resolved overrideMap types — the selector's own resolution, so no
-    // checker call here.
+  }
+
+  // (#3203) Resolve a position's value DOMAIN for the allowlist. `number` = f64.
+  // `bool` = an `i32` carrier WITH an explicit `boolean` AST annotation — the
+  // ONLY checker-free way to disambiguate a boolean from a native-int (`type
+  // i32 = number`), which also resolves to `i32`. Unannotated `i32` (inferred)
+  // and native-int stay compile-twice (native-int is a follow-up widen). Any
+  // other carrier (string/object/closure/extern/dynamic/ref) → null.
+  const positionDomain = (annot: ts.TypeNode | undefined, resolved: IrType): ValueDomain | null => {
+    if (isF64(resolved)) return "number";
+    if (isI32(resolved) && annot?.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
+    return null;
+  };
+  // Resolve the full signature domain, or null when the function is not
+  // skip-eligible. Rejects default/optional/rest/destructuring params (from-ast
+  // throws on those) up front.
+  const resolveSignatureDomains = (
+    fn: ts.FunctionDeclaration,
+    name: string,
+  ): { paramDomains: ValueDomain[]; returnDomain: ValueDomain | "void" } | null => {
+    for (const p of fn.parameters) {
+      if (p.questionToken || p.dotDotDotToken || p.initializer) return null;
+      if (!ts.isIdentifier(p.name)) return null;
+    }
     const o = plan.overrideMap.get(name);
-    if (!o) return false; // no resolved signature — stay conservative
-    if (!o.params.every(isF64)) return false;
-    if (o.returnType !== null && !isF64(o.returnType)) return false;
-    return true;
+    if (!o) return null; // no resolved signature — stay conservative
+    const paramDomains: ValueDomain[] = [];
+    for (let i = 0; i < o.params.length; i++) {
+      const d = positionDomain(fn.parameters[i]?.type, o.params[i]!);
+      if (d === null) return null;
+      paramDomains.push(d);
+    }
+    let returnDomain: ValueDomain | "void";
+    if (o.returnType === null) returnDomain = "void";
+    else {
+      const rd = positionDomain(fn.type, o.returnType);
+      if (rd === null) return null;
+      returnDomain = rd;
+    }
+    return { paramDomains, returnDomain };
   };
 
   for (const name of funcs) {
@@ -1591,8 +1616,9 @@ function computeIrFirstSkipSet(
     // JS host; a `function*` body is never in the numeric allowlist anyway, so
     // this is subsumed, but kept explicit for standalone/WASI clarity.
     if (fn.asteriskToken && !generatorsSkippable) continue;
-    if (!signatureLowerable(fn, name)) continue; // numeric/boolean signature only
-    if (!irFirstBodyIsProvenLowerable(fn, claimedArity)) continue; // ALLOWLIST body walk (#3143)
+    const sig = resolveSignatureDomains(fn, name); // numeric/boolean signature only
+    if (!sig) continue;
+    if (!irFirstBodyIsProvenLowerable(fn, claimedArity, sig.paramDomains, sig.returnDomain)) continue; // #3143/#3203
     skip.add(name);
   }
 
