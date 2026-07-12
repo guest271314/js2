@@ -17,7 +17,7 @@
 // more robust than a runtime value, and it is exactly the failure mode (a
 // `call` to the wrong-signature helper) the fix addresses.
 //
-// Reproducing condition: `standalone: true, nativeStrings: true` — this routes
+// Reproducing condition: `target: "standalone" as const, nativeStrings: true` — this routes
 // the WasmGC-native Map/Set/Weak runtime AND defers `__box_number` to a late
 // import, so the numeric key/value coercion opens the stale-`mapHelpers` window
 // mid-method-call. (Under `--target wasi` the box helpers import eagerly, so the
@@ -32,7 +32,7 @@ import { compile } from "../src/index.js";
 
 /** Compile `source` standalone + nativeStrings; assert the binary is VALID Wasm. */
 async function expectValidStandalone(source: string): Promise<void> {
-  const r = await compile(source, { fileName: "test.ts", standalone: true, nativeStrings: true });
+  const r = await compile(source, { fileName: "test.ts", target: "standalone" as const, nativeStrings: true });
   expect(r.success).toBe(true);
   // A stale mapHelpers index emits a `call` to the wrong-signature helper, which
   // fails validation. This assertion is `false` without the three-site fix.
