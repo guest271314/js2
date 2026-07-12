@@ -112,7 +112,13 @@ import {
   tryEmitJsonStringifyStatic,
 } from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
-import { emitJsonParseText, emitJsonParseTextReviver, emitJsonStringifyValue } from "../json-codec-native.js";
+import {
+  emitJsonParseText,
+  emitJsonParseTextReviver,
+  emitJsonStringifyValue,
+  emitJsonRawJson,
+  emitJsonIsRawJson,
+} from "../json-codec-native.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -10295,6 +10301,66 @@ function compileCallExpression(
     // Handle JSON.stringify / JSON.parse as host import calls
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "JSON") {
       const method = propAccess.name.text;
+      // (#3176) ES2025 `JSON.rawJSON` / `JSON.isRawJSON` — standalone / WASI
+      // pure-Wasm. `rawJSON` builds a branded carrier object; `isRawJSON` reads
+      // the `[[IsRawJSON]]` brand bit. Both reuse the native JSON codec +
+      // object runtime (no host import, no second parser).
+      if ((method === "rawJSON" || method === "isRawJSON") && (ctx.standalone || ctx.wasi)) {
+        if (method === "rawJSON" && expr.arguments.length >= 1) {
+          // Build the carrier: `__json_rawjson` ToStrings the raw value inside
+          // then validates + brands it.
+          emitJsonRawJson(ctx);
+          const rawArg = expr.arguments[0]!;
+          // `undefined` / `void …` ToString to "undefined", which the parser
+          // rejects. But both compile to a bare `ref.null extern` —
+          // indistinguishable at runtime from `null` (whose ToString "null" IS a
+          // valid rawJSON primitive). So pass the literal string "undefined" for
+          // the syntactic undefined/void case; the codec then parses+rejects it.
+          // Peel `as`/`satisfies`/parens/`!` wrappers so `undefined as any` is
+          // still recognised.
+          let peeled: ts.Expression = rawArg;
+          while (
+            ts.isAsExpression(peeled) ||
+            ts.isSatisfiesExpression(peeled) ||
+            ts.isParenthesizedExpression(peeled) ||
+            ts.isNonNullExpression(peeled) ||
+            ts.isTypeAssertionExpression(peeled)
+          ) {
+            peeled = peeled.expression;
+          }
+          const isUndefinedLit =
+            (ts.isIdentifier(peeled) && peeled.text === "undefined") || ts.isVoidExpression(peeled);
+          if (isUndefinedLit) {
+            for (const ins of stringConstantExternrefInstrs(ctx, "undefined")) fctx.body.push(ins);
+          } else {
+            // Compile the arg to externref (the primitive-boxing target — a bare
+            // `anyref` hint drops a number literal and pushes null).
+            const argResult = compileExpression(ctx, fctx, rawArg, { kind: "externref" });
+            if (argResult === null) return null;
+            if (argResult.kind !== "externref") {
+              coerceType(ctx, fctx, argResult, { kind: "externref" });
+            }
+          }
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_rawjson")! } as Instr);
+          return { kind: "externref" };
+        }
+        if (method === "isRawJSON") {
+          if (expr.arguments.length >= 1) {
+            const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+            if (argResult === null) return null;
+            if (argResult.kind !== "externref") {
+              coerceType(ctx, fctx, argResult, { kind: "externref" });
+            }
+          } else {
+            fctx.body.push({ op: "ref.null.extern" } as Instr);
+          }
+          emitJsonIsRawJson(ctx);
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_is_rawjson")! } as Instr);
+          return { kind: "i32" };
+        }
+      }
       if ((method === "stringify" || method === "parse") && expr.arguments.length >= 1) {
         // (#1324 primitives slice) For JSON.stringify of statically-typed
         // primitive values (null / undefined / boolean, plus number when the
