@@ -44,49 +44,72 @@ import ts from "typescript";
 // ===========================================================================
 
 /**
- * (#3143) Return true iff `fn`'s body is entirely within the proven-lowerable
- * subset, given `claimedArity` (name → parameter count for every currently
- * claimed function — used to enforce from-ast's exact call-arity requirement;
- * a call to a non-claimed / wrong-arity callee is NOT allowlisted).
+ * (#3203) The value-domain an allowlist expression evaluates to. `number` = JS
+ * `number` (Wasm `f64`); `bool` = JS `boolean` (Wasm `i32`, disambiguated from
+ * native-int by the caller via an explicit `boolean` annotation — see
+ * `computeIrFirstSkipSet`). from-ast's Phase-1 arithmetic requires MATCHED
+ * operand types and its logical/`!` ops require BOOLEAN operands; tracking a
+ * per-expression domain (checker-free) is how the walk enforces that split.
+ */
+export type ValueDomain = "number" | "bool";
+
+/**
+ * (#3143/#3203) Return true iff `fn`'s body is entirely within the
+ * proven-lowerable subset, given:
+ *   - `claimedArity` — name → parameter count for every claimed function with a
+ *     PURE-`f64` signature (all params `f64`, `f64` return). A call to a
+ *     non-claimed / wrong-arity / non-f64-signature callee is NOT allowlisted;
+ *     in v1 calls are number-domain only (the callee's number signature is the
+ *     invariant that keeps the call result domain sound — see
+ *     `computeIrFirstSkipSet`).
+ *   - `paramDomains` — per-parameter value domain (parallel to `fn.parameters`).
+ *     Omitted ⇒ every param is `number` (preserves the pre-#3203 f64-only
+ *     behaviour and the 2-arg call sites).
+ *   - `returnDomain` — the function's return domain (`"void"` for a
+ *     value-less body). Defaults to `number`.
  *
- * **Strict number-only, with a separate boolean CONTEXT.** The caller restricts
- * params + return to `f64` (JS `number`) — so every identifier/local is a
- * number. from-ast's Phase-1 arithmetic requires MATCHED operand types and its
- * logical/`!` ops require BOOLEAN operands; a checker-free walk cannot inspect
- * types, so it enforces the split structurally:
- *   - a NUMBER context (`numOk`) allows number literals, number locals,
- *     arithmetic/bit ops between numbers, local number mutation, ternaries whose
- *     branches are numbers, and exact-arity calls to claimed functions;
- *   - a BOOLEAN context (`boolOk`) — the condition of if/while/do/for and the
- *     `?:` test, plus operands of `&&`/`||`/`!` — allows ONLY relational/equality
- *     comparisons of two NUMBERS, and `&&`/`||`/`!` over nested booleans.
- * No boolean literals, no boolean-valued locals, no string/array/object/closure/
- * class/extern/dynamic/member/element/`new`/coercion constructs — all
- * compile-twice until the IR lowers them. Local (`let`) mutation is allowed
- * (from-ast slot-promotes mutated lets); PARAMETER mutation is NOT.
+ * **Domain-tracked, safe-by-construction (#3203 widen).** Every identifier is
+ * resolved to a `number`/`bool` domain via a per-name map (params seeded from
+ * `paramDomains`, locals inferred from their initializer). `exprDomain` returns
+ * the domain of an expression or `null` when it is outside the subset:
+ *   - arithmetic / bit / shift over two NUMBERS → number;
+ *   - relational (`< > <= >=`) over two NUMBERS → bool;
+ *   - equality (`== === != !==`) over two operands of the SAME domain → bool;
+ *   - `&&` / `||` / `!` over BOOLS → bool;
+ *   - `?:` — bool condition, same-domain branches → that domain;
+ *   - `=` preserves the target local's domain; `+=`…`^=` and `++`/`--` are
+ *     number-only local mutation (PARAMETER mutation is rejected);
+ *   - a call to a claimed pure-`f64` callee with exact arity and number args →
+ *     number.
+ * if/while/do/for conditions must be `bool`; `return <e>` must match
+ * `returnDomain`. No string/array/object/closure/class/extern/dynamic/member/
+ * element/`new`/coercion constructs — all stay COMPILE-TWICE (a shape the walk
+ * does not recognise returns `null`/`false`, never a hard error).
  */
 export function irFirstBodyIsProvenLowerable(
   fn: ts.FunctionDeclaration,
   claimedArity: ReadonlyMap<string, number>,
+  paramDomains?: readonly ValueDomain[],
+  returnDomain: ValueDomain | "void" = "number",
 ): boolean {
   if (!fn.body) return false;
   const params = new Set<string>();
-  for (const p of fn.parameters) {
+  // Per-name value domain. Params seeded from the caller-provided domains
+  // (default `number`); locals populated as their declarations are walked
+  // (declare-before-use holds for the tail shapes; a not-yet-seen name resolves
+  // to `null` ⇒ reject, which is safe — it can only keep a function
+  // compile-twice, never wrongly skip it).
+  const domain = new Map<string, ValueDomain>();
+  for (let i = 0; i < fn.parameters.length; i++) {
+    const p = fn.parameters[i]!;
     if (!ts.isIdentifier(p.name)) return false; // destructuring param — reject
     params.add(p.name.text);
+    domain.set(p.name.text, paramDomains?.[i] ?? "number");
   }
-  // Every name bound anywhere in the function body. A bare identifier in number
-  // context must resolve to one of these (all numbers, per the caller's f64
-  // signature restriction); a module/host global is a from-ast throw.
-  const locals = new Set<string>(params);
-  const collectDecls = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) locals.add(node.name.text);
-    ts.forEachChild(node, collectDecls);
-  };
-  collectDecls(fn.body);
 
-  const isAssignToken = (k: ts.SyntaxKind): boolean =>
-    k === ts.SyntaxKind.EqualsToken || (k >= ts.SyntaxKind.PlusEqualsToken && k <= ts.SyntaxKind.CaretEqualsToken);
+  // `+=`…`^=` compound arithmetic assignment (number-only). `=` handled apart.
+  const isCompoundAssignToken = (k: ts.SyntaxKind): boolean =>
+    k >= ts.SyntaxKind.PlusEqualsToken && k <= ts.SyntaxKind.CaretEqualsToken;
   // Numeric binary ops (arith / bit / shift) — NOT comparisons, NOT logical.
   const isNumericBinaryToken = (k: ts.SyntaxKind): boolean =>
     k === ts.SyntaxKind.PlusToken ||
@@ -101,12 +124,14 @@ export function irFirstBodyIsProvenLowerable(
     k === ts.SyntaxKind.LessThanLessThanToken ||
     k === ts.SyntaxKind.GreaterThanGreaterThanToken ||
     k === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken;
-  // Relational / equality — produce a boolean from two numbers.
-  const isCompareToken = (k: ts.SyntaxKind): boolean =>
+  // Relational — produce a bool from two NUMBERS.
+  const isRelationalToken = (k: ts.SyntaxKind): boolean =>
     k === ts.SyntaxKind.LessThanToken ||
     k === ts.SyntaxKind.GreaterThanToken ||
     k === ts.SyntaxKind.LessThanEqualsToken ||
-    k === ts.SyntaxKind.GreaterThanEqualsToken ||
+    k === ts.SyntaxKind.GreaterThanEqualsToken;
+  // Equality — produce a bool from two operands of the SAME domain.
+  const isEqualityToken = (k: ts.SyntaxKind): boolean =>
     k === ts.SyntaxKind.EqualsEqualsToken ||
     k === ts.SyntaxKind.EqualsEqualsEqualsToken ||
     k === ts.SyntaxKind.ExclamationEqualsToken ||
@@ -115,76 +140,98 @@ export function irFirstBodyIsProvenLowerable(
   // An assignable target: a local that is NOT a parameter (param mutation is a
   // from-ast non-slot throw; a mutated `let` slot-promotes).
   const isAssignableLocal = (e: ts.Expression): boolean =>
-    ts.isIdentifier(e) && locals.has(e.text) && !params.has(e.text);
+    ts.isIdentifier(e) && domain.has(e.text) && !params.has(e.text);
 
-  const unwrapParen = (e: ts.Expression): ts.Expression =>
-    ts.isParenthesizedExpression(e) ? unwrapParen(e.expression) : e;
-
-  // Expression in NUMBER context — must evaluate to a number.
-  const numOk = (e: ts.Expression): boolean => {
+  // The value domain of `e`, or `null` when outside the proven-lowerable subset.
+  const exprDomain = (e: ts.Expression): ValueDomain | null => {
     switch (e.kind) {
       case ts.SyntaxKind.NumericLiteral:
-        return true;
+        return "number";
+      case ts.SyntaxKind.TrueKeyword:
+      case ts.SyntaxKind.FalseKeyword:
+        return "bool";
       case ts.SyntaxKind.Identifier:
-        return locals.has((e as ts.Identifier).text);
+        return domain.get((e as ts.Identifier).text) ?? null;
       case ts.SyntaxKind.ParenthesizedExpression:
-        return numOk((e as ts.ParenthesizedExpression).expression);
+        return exprDomain((e as ts.ParenthesizedExpression).expression);
       case ts.SyntaxKind.PrefixUnaryExpression: {
         const u = e as ts.PrefixUnaryExpression;
         if (u.operator === ts.SyntaxKind.PlusPlusToken || u.operator === ts.SyntaxKind.MinusMinusToken) {
-          return isAssignableLocal(u.operand);
+          // ++x / --x — number-local mutation only.
+          return isAssignableLocal(u.operand) && domain.get((u.operand as ts.Identifier).text) === "number"
+            ? "number"
+            : null;
         }
-        // `+x` / `-x` / `~x` are numeric; `!x` is boolean (rejected here).
-        return (
-          (u.operator === ts.SyntaxKind.PlusToken ||
-            u.operator === ts.SyntaxKind.MinusToken ||
-            u.operator === ts.SyntaxKind.TildeToken) &&
-          numOk(u.operand)
-        );
+        if (u.operator === ts.SyntaxKind.ExclamationToken) {
+          return exprDomain(u.operand) === "bool" ? "bool" : null; // `!` over a bool
+        }
+        // `+x` / `-x` / `~x` are numeric.
+        if (
+          u.operator === ts.SyntaxKind.PlusToken ||
+          u.operator === ts.SyntaxKind.MinusToken ||
+          u.operator === ts.SyntaxKind.TildeToken
+        ) {
+          return exprDomain(u.operand) === "number" ? "number" : null;
+        }
+        return null;
       }
-      case ts.SyntaxKind.PostfixUnaryExpression:
-        return isAssignableLocal((e as ts.PostfixUnaryExpression).operand); // ++ / -- only
+      case ts.SyntaxKind.PostfixUnaryExpression: {
+        const u = e as ts.PostfixUnaryExpression;
+        return isAssignableLocal(u.operand) && domain.get((u.operand as ts.Identifier).text) === "number"
+          ? "number"
+          : null; // x++ / x-- — number-local mutation only
+      }
       case ts.SyntaxKind.BinaryExpression: {
         const b = e as ts.BinaryExpression;
         const op = b.operatorToken.kind;
-        if (isAssignToken(op)) return isAssignableLocal(b.left) && numOk(b.right);
-        return isNumericBinaryToken(op) && numOk(b.left) && numOk(b.right);
+        if (op === ts.SyntaxKind.EqualsToken) {
+          // `x = <rhs>` — preserves the target local's domain.
+          if (!isAssignableLocal(b.left)) return null;
+          const d = domain.get((b.left as ts.Identifier).text)!;
+          return exprDomain(b.right) === d ? d : null;
+        }
+        if (isCompoundAssignToken(op)) {
+          // `x += <rhs>` … — number-only.
+          if (!isAssignableLocal(b.left) || domain.get((b.left as ts.Identifier).text) !== "number") return null;
+          return exprDomain(b.right) === "number" ? "number" : null;
+        }
+        if (isNumericBinaryToken(op)) {
+          return exprDomain(b.left) === "number" && exprDomain(b.right) === "number" ? "number" : null;
+        }
+        if (isRelationalToken(op)) {
+          return exprDomain(b.left) === "number" && exprDomain(b.right) === "number" ? "bool" : null;
+        }
+        if (isEqualityToken(op)) {
+          const l = exprDomain(b.left);
+          const r = exprDomain(b.right);
+          return l !== null && l === r ? "bool" : null; // matched domains only
+        }
+        if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+          return exprDomain(b.left) === "bool" && exprDomain(b.right) === "bool" ? "bool" : null;
+        }
+        return null;
       }
       case ts.SyntaxKind.ConditionalExpression: {
         const c = e as ts.ConditionalExpression;
-        return boolOk(c.condition) && numOk(c.whenTrue) && numOk(c.whenFalse);
+        if (exprDomain(c.condition) !== "bool") return null;
+        const t = exprDomain(c.whenTrue);
+        const f = exprDomain(c.whenFalse);
+        return t !== null && t === f ? t : null;
       }
       case ts.SyntaxKind.CallExpression: {
         const c = e as ts.CallExpression;
-        if (!ts.isIdentifier(c.expression)) return false; // no method calls
+        if (!ts.isIdentifier(c.expression)) return null; // no method calls
         const arity = claimedArity.get(c.expression.text);
-        if (arity === undefined || arity !== c.arguments.length) return false; // exact arity to a claimed fn
+        if (arity === undefined || arity !== c.arguments.length) return null; // exact arity to a claimed f64 fn
         for (const a of c.arguments) {
-          if (ts.isSpreadElement(a) || !numOk(a)) return false;
+          if (ts.isSpreadElement(a) || exprDomain(a) !== "number") return null;
         }
-        return true;
+        return "number"; // claimedArity holds pure-f64-signature callees only
       }
       default:
-        return false; // strings/booleans/member/element/new/array/object/arrow/this/… → reject
+        return null; // strings/member/element/new/array/object/arrow/this/… → reject
     }
   };
-
-  // Expression in BOOLEAN context — must evaluate to a boolean (comparisons of
-  // numbers, or logical combinations thereof). No boolean literals / vars: a
-  // number-vs-boolean mix is exactly the from-ast "matching operand types"
-  // throw this split exists to avoid.
-  function boolOk(e: ts.Expression): boolean {
-    const x = unwrapParen(e);
-    if (ts.isPrefixUnaryExpression(x) && x.operator === ts.SyntaxKind.ExclamationToken) return boolOk(x.operand);
-    if (ts.isBinaryExpression(x)) {
-      const op = x.operatorToken.kind;
-      if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-        return boolOk(x.left) && boolOk(x.right);
-      }
-      if (isCompareToken(op)) return numOk(x.left) && numOk(x.right);
-    }
-    return false;
-  }
 
   const stmtOk = (s: ts.Statement): boolean => {
     switch (s.kind) {
@@ -196,33 +243,36 @@ export function irFirstBodyIsProvenLowerable(
         return true;
       case ts.SyntaxKind.ReturnStatement: {
         const r = s as ts.ReturnStatement;
-        return r.expression === undefined || numOk(r.expression);
+        if (r.expression === undefined) return true; // bare `return;`
+        return returnDomain !== "void" && exprDomain(r.expression) === returnDomain;
       }
       case ts.SyntaxKind.ExpressionStatement:
-        return numOk((s as ts.ExpressionStatement).expression);
+        return exprDomain((s as ts.ExpressionStatement).expression) !== null;
       case ts.SyntaxKind.IfStatement: {
         const i = s as ts.IfStatement;
         return (
-          boolOk(i.expression) && stmtOk(i.thenStatement) && (i.elseStatement === undefined || stmtOk(i.elseStatement))
+          exprDomain(i.expression) === "bool" &&
+          stmtOk(i.thenStatement) &&
+          (i.elseStatement === undefined || stmtOk(i.elseStatement))
         );
       }
       case ts.SyntaxKind.WhileStatement: {
         const w = s as ts.WhileStatement;
-        return boolOk(w.expression) && stmtOk(w.statement);
+        return exprDomain(w.expression) === "bool" && stmtOk(w.statement);
       }
       case ts.SyntaxKind.DoStatement: {
         const d = s as ts.DoStatement;
-        return boolOk(d.expression) && stmtOk(d.statement);
+        return exprDomain(d.expression) === "bool" && stmtOk(d.statement);
       }
       case ts.SyntaxKind.ForStatement: {
         const f = s as ts.ForStatement;
         if (f.initializer) {
           if (ts.isVariableDeclarationList(f.initializer)) {
             if (!f.initializer.declarations.every(varDeclOk)) return false;
-          } else if (!numOk(f.initializer)) return false;
+          } else if (exprDomain(f.initializer) === null) return false;
         }
-        if (f.condition && !boolOk(f.condition)) return false;
-        if (f.incrementor && !numOk(f.incrementor)) return false;
+        if (f.condition && exprDomain(f.condition) !== "bool") return false;
+        if (f.incrementor && exprDomain(f.incrementor) === null) return false;
         return stmtOk(f.statement);
       }
       case ts.SyntaxKind.VariableStatement:
@@ -235,7 +285,10 @@ export function irFirstBodyIsProvenLowerable(
   function varDeclOk(d: ts.VariableDeclaration): boolean {
     if (!ts.isIdentifier(d.name)) return false; // destructuring
     if (d.initializer === undefined) return false; // uninitialized — reject (conservative)
-    return numOk(d.initializer);
+    const dom = exprDomain(d.initializer);
+    if (dom === null) return false;
+    domain.set(d.name.text, dom); // record so later statements resolve this local
+    return true;
   }
 
   return fn.body.statements.every(stmtOk);
