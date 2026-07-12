@@ -46,7 +46,12 @@ import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
 import { coercionInstrs } from "../type-coercion.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterRefCellType,
+  getOrRegisterVecBaseType,
+} from "../registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -5797,12 +5802,14 @@ function emitArrayForIn(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.ForInStatement,
-  arrayInfo: { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType },
+  _arrayInfo: { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType },
   keyLocal: number,
   memberTarget: ts.PropertyAccessExpression | ts.ElementAccessExpression | null,
   bindingPattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern | null,
 ): void {
-  const { vecTypeIdx } = arrayInfo;
+  // (#3179) `arrayInfo.vecTypeIdx` (the STATIC-type-derived vec type) is
+  // deliberately unused: the loop reads only the length, via the `$__vec_base`
+  // supertype, so the runtime element-kind rep no longer matters (see below).
 
   // Decimal-key formatter (f64 -> externref) for the integer index. Reuses the
   // sealed engine helper — NOT a hand-rolled ToString — via the SAME registration
@@ -5825,15 +5832,48 @@ function emitArrayForIn(
   // Compile the array expression into a vec ref local. A null/undefined receiver
   // would throw in JS; for-in over null/undefined is spec'd as a no-op (§13.7.5.1
   // step 2 returns when the value is undefined/null), so guard with ref.is_null.
-  const vecLocal = allocLocal(fctx, `__forin_arr_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  //
+  // (#3179) The receiver's RUNTIME vec rep can disagree with the vec type derived
+  // from the STATIC TS type: `var a = new Array(); a[0] = 5` is statically `any[]`
+  // (→ `__vec_externref`) but the allocation site's usage inference
+  // (compileNewExpression's Array arm) mints a `__vec_f64` — so the old
+  // unconditional `ref.cast <static vecTypeIdx>` on the externref branch trapped
+  // `illegal cast` at runtime. The loop below only reads the LENGTH (field 0),
+  // which every `__vec_<elemKind>` exposes uniformly through the shared
+  // `$__vec_base` supertype (#2186) — so downcast to `$__vec_base` instead,
+  // guarded by `ref.test` (a non-vec runtime value yields a null local → 0
+  // iterations, matching the nullish-receiver no-op; previously it trapped).
+  // The concrete-ref branch (receiver statically compiles to a vec ref) keeps
+  // its exact type via subtyping into the `$__vec_base` local.
+  const vecBaseTypeIdx = getOrRegisterVecBaseType(ctx);
+  const vecLocal = allocLocal(fctx, `__forin_arr_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: vecBaseTypeIdx,
+  });
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && (exprType.kind === "ref" || exprType.kind === "ref_null")) {
-    // already a vec ref
+    // already a concrete vec ref — a `__vec_<k>` subtypes `$__vec_base`
+    fctx.body.push({ op: "local.set", index: vecLocal });
   } else if (exprType && exprType.kind === "externref") {
+    const anyTmp = allocLocal(fctx, `__forin_any_${fctx.locals.length}`, { kind: "anyref" });
     fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "local.tee", index: anyTmp } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: vecBaseTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyTmp } as Instr,
+        { op: "ref.cast", typeIdx: vecBaseTypeIdx } as Instr,
+        { op: "local.set", index: vecLocal } as Instr,
+      ],
+      // non-vec runtime value → vecLocal stays null → 0 iterations
+    } as Instr);
+  } else {
+    // Defensive: unexpected receiver type on the stack — preserve the historical
+    // bare local.set (validation surfaces a genuine type mismatch, as before).
+    fctx.body.push({ op: "local.set", index: vecLocal });
   }
-  fctx.body.push({ op: "local.set", index: vecLocal });
 
   // length = vec.field0  (0 when the ref is null → loop body never runs)
   const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, { kind: "i32" });
@@ -5846,7 +5886,7 @@ function emitArrayForIn(
     else: [
       { op: "local.get", index: vecLocal } as Instr,
       { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "struct.get", typeIdx: vecBaseTypeIdx, fieldIdx: 0 } as Instr,
     ],
   } as Instr);
   fctx.body.push({ op: "local.set", index: lenLocal });
