@@ -4464,8 +4464,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // ── __extern_has_idx(externref v, f64 idx) -> i32 ─────────────────────────
   //
   // Standalone HasProperty(O, ToString(idx)) for array-like indexed access.
-  // Recognises a wrapped $ObjVec: present iff 0 <= i32(idx) < len. Any
-  // non-$ObjVec value returns 0 (matches the host import's null fallback).
+  // Recognises a wrapped $ObjVec, a real array carrier (`$__vec_base`, #3183)
+  // and an array-like `$Object`: present iff 0 <= i32(idx) < len. Any other
+  // value returns 0 (matches the host import's null fallback).
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=i
   {
@@ -4492,11 +4493,47 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           },
         ]
       : [];
+    // (#3183) `$__vec_base` arm: a real array literal / array result boxed to
+    // externref is a `__vec_<elemKind>` struct subtyping `$__vec_base`, which is
+    // NOT a `$ObjVec` — so without this arm a numeric HasProperty on an
+    // any-typed vec (`n in arr`, or the for-in liveness guard's index probe via
+    // `__extern_has`'s #3183 arm) answered 0. Length (field 0) is readable
+    // uniformly through the supertype regardless of element kind (mirrors the
+    // #2186 `__extern_length` arm); present iff 0 <= trunc_sat(idx) < len.
+    // Checked before the `$ObjVec` arm (a vec is not an $ObjVec, so the $ObjVec
+    // fast path is untouched). Standalone-gated; host import owns the path in
+    // gc/host mode.
+    const vecBaseHasIdx = objArrayLikeArms ? getOrRegisterVecBaseType(ctx) : -1;
+    const vecHasArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: vecBaseHasIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "i32.trunc_sat_f64_s" },
+              { op: "local.tee", index: 3 },
+              { op: "i32.const", value: 0 },
+              { op: "i32.ge_s" },
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: vecBaseHasIdx },
+              { op: "struct.get", typeIdx: vecBaseHasIdx, fieldIdx: 0 },
+              { op: "i32.lt_s" },
+              { op: "i32.and" },
+              { op: "return" },
+            ],
+          } as Instr,
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       ...objHasArm,
+      ...vecHasArm,
       { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
@@ -10097,12 +10134,12 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
  *     expando properties, so the index keys are exact) by pushing
  *     `number_toString(f64(i))` into a fresh `$ObjVec`. Mirrors the inline key
  *     loop `emitArrayForIn` emits for a statically-typed array.
- *   - `__extern_has`: `"length"` → 1; else a numeric string key present iff
- *     `0 <= trunc(n) < len` (bounds read through `$__vec_base` directly — the
- *     `__extern_has_idx` helper is `$ObjVec`-only, not `$__vec_base`-aware, and
- *     using the same trunc_sat bounds as `__extern_get_idx`'s vec arm keeps HAS
- *     and GET in agreement so the #2066 per-visit liveness guard never skips a
- *     readable index).
+ *   - `__extern_has`: `"length"` → 1; else delegate a numeric string key to
+ *     `__extern_has_idx(v, n)` — which this same PR generalised to be
+ *     `$__vec_base`-aware (it was `$ObjVec`/`$Object`-only). It uses the same
+ *     trunc_sat bounds as `__extern_get_idx`'s vec arm, so HAS and GET stay in
+ *     agreement and the #2066 per-visit liveness guard never skips a readable
+ *     index.
  *   - `__extern_get`: `"length"` → `__box_number(f64(len))`; else delegate a
  *     numeric string key to `__extern_get_idx(v, n)` (already vec-aware, handles
  *     OOB → undefined). A non-string / non-numeric / non-"length" key answers
@@ -10130,6 +10167,7 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
   const strToNumIdx = ctx.funcMap.get("__str_to_number");
   const boxNumberIdx = ctx.funcMap.get("__box_number");
   const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx");
+  const externHasIdxIdx = ctx.funcMap.get("__extern_has_idx");
   const objVecNewIdx = ctx.funcMap.get("__objvec_new");
   const objVecPushIdx = ctx.funcMap.get("__objvec_push");
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
@@ -10217,19 +10255,18 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
     keysFn.body.splice(0, 0, ...arm);
   }
 
-  // ── __extern_has: "length" → 1; numeric index present iff in-bounds ──
+  // ── __extern_has: "length" → 1; numeric index → __extern_has_idx ──
   const hasFn = findFn("__extern_has");
-  if (hasFn) {
-    // params: 0=obj 1=key ; append locals: hAny(anyref) hN(f64) hI(i32)
+  if (hasFn && externHasIdxIdx !== undefined) {
+    // params: 0=obj 1=key ; append locals: hAny(anyref) hN(f64)
     const hAny = 2 + hasFn.locals.length;
     const hN = hAny + 1;
-    const hI = hAny + 2;
-    hasFn.locals.push(
-      { name: "__vec_any", type: { kind: "anyref" } },
-      { name: "__vec_n", type: { kind: "f64" } },
-      { name: "__vec_i", type: { kind: "i32" } },
-    );
+    hasFn.locals.push({ name: "__vec_any", type: { kind: "anyref" } }, { name: "__vec_n", type: { kind: "f64" } });
     const lenArm = keyIsLength();
+    // Delegate the numeric-index presence check to `__extern_has_idx`, which is
+    // now `$__vec_base`-aware (#3183) and uses the SAME trunc_sat bounds as
+    // `__extern_get_idx`'s vec arm — so HAS and GET stay in agreement and the
+    // #2066 per-visit liveness guard never skips a readable index.
     const numericArm: Instr[] =
       strToNumIdx !== undefined
         ? [
@@ -10242,18 +10279,9 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                // present iff 0 <= trunc_sat(n) < len
+                { op: "local.get", index: 0 } as Instr,
                 { op: "local.get", index: hN } as Instr,
-                { op: "i32.trunc_sat_f64_s" } as Instr,
-                { op: "local.tee", index: hI } as Instr,
-                { op: "i32.const", value: 0 } as Instr,
-                { op: "i32.ge_s" } as Instr,
-                { op: "local.get", index: hI } as Instr,
-                { op: "local.get", index: hAny } as Instr,
-                { op: "ref.cast", typeIdx: vecBaseIdx } as Instr,
-                { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 } as Instr,
-                { op: "i32.lt_s" } as Instr,
-                { op: "i32.and" } as Instr,
+                { op: "call", funcIdx: externHasIdxIdx } as Instr,
                 { op: "return" } as Instr,
               ],
             } as Instr,
