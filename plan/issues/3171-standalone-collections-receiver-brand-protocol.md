@@ -18,6 +18,17 @@ sprint: current
 horizon: m
 related: [2860, 3172, 2893, 2916]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+# (#3102) God-file growth allowance for THIS change-set: the bulk of #3171
+# lives in NEW subsystem modules (receiver-brand.ts, collections-brand.ts);
+# the residual growth below is unavoidable wiring — the size-getter glue in
+# the glue factory's home module (+77), the COLLECTION_KIND field + reflective
+# receiver params in the collection runtime itself (+48), the kind operand at
+# the 3 ctor sites (+6), and the reflective-gate swap comment (+2).
+loc-budget-allow:
+  - src/codegen/array-object-proto.ts
+  - src/codegen/map-runtime.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3171 — standalone: collections receiver brand-check protocol
