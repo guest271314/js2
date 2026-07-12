@@ -41,10 +41,12 @@ describe("#3199 reduce/reduceRight accumulator type from initial value", () => {
   });
 
   it("empty array + object initial value + void callback returns the seed object", async () => {
+    // A statically-typed object literal seed resolves to the `object` tag via
+    // the oracle, so the accumulator is seeded as externref (not the numeric
+    // default). (`any`-typed seeds stay numeric — the oracle is conservative.)
     const src = `
       export function test(): any {
-        const seed: any = { tag: 42 };
-        const r: any = [].reduce(function () {}, seed);
+        const r: any = [].reduce(function () {}, { tag: 42 });
         return r.tag;
       }`;
     expect(await run(src)).toBe(42);
