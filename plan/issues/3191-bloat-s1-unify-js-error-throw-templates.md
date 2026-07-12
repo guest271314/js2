@@ -1,7 +1,9 @@
 ---
 id: 3191
 title: "bloat S1: unify the 4 hand-rolled JS-error-throw templates on buildThrowJsErrorInstrs"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-number-resid
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
