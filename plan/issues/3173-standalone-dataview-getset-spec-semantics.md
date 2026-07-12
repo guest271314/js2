@@ -32,6 +32,12 @@ loc-budget-allow:
   - src/codegen/expressions/assignment.ts
   - src/codegen/array-object-proto.ts
   - src/emit/binary.ts
+# (#2108) The 5 new __is_truthy references are the §7.1.2 ToBoolean(littleEndian)
+# spec step routed through the SHARED native truthiness helper (the engine's own
+# vocabulary — no fresh coercion matrix): the direct-path le flag, the minted
+# __dv_m_* helper, and their pre-registrations.
+coercion-sites-allow:
+  - src/codegen/dataview-native.ts
 ---
 
 # #3173 — standalone: DataView.prototype get\*/set\* spec semantics
