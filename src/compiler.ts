@@ -39,6 +39,7 @@ import { rewriteCjsRequire, rewriteCjsRequireWithMap } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
+import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -1139,12 +1140,25 @@ export function compileSourceSync(
       : { source: definedSource, positionMap: PositionMap.identity(), injected: false };
   const stdinInjectedSource = stdinResult.source;
 
+  // Step 0a.45: #3146 — inject the standalone `Iterator.zip / zipKeyed /
+  // concat / from` source prelude and rewrite `Iterator.<helper>` references
+  // to the prelude functions (which ride on the native iterator runtime via
+  // the `__j2w_iter_*` intrinsics, see codegen/expressions/calls.ts).
+  // Host-free targets only — JS-host mode keeps the runtime.ts polyfills
+  // (#1464). Byte-identical (identity map, unchanged source) when the program
+  // never references an Iterator static helper.
+  const iterStaticsResult =
+    options.target === "standalone" || options.target === "wasi"
+      ? injectIteratorStaticsPrelude(stdinInjectedSource)
+      : { source: stdinInjectedSource, positionMap: PositionMap.identity(), injected: false };
+  const iterStaticsSource = iterStaticsResult.source;
+
   // Step 0a.5: Rewrite CommonJS `const X = require('Y')` patterns to ESM `import`
   // declarations (#1279). This must run before preprocessImports so the resulting
   // import statements get the same declare-stub treatment as user-written imports,
   // and before `detectNodeFsImports` so `const fs = require('node:fs')` is picked
   // up as a node:fs import for WASI mode.
-  const cjsResult = rewriteCjsRequireWithMap(stdinInjectedSource);
+  const cjsResult = rewriteCjsRequireWithMap(iterStaticsSource);
   const cjsRewritten = cjsResult.source;
 
   // Step 0b: Pre-process imports (replace import * as X with declare namespace)
@@ -1173,6 +1187,7 @@ export function compileSourceSync(
   // outermost-first.
   const positionMap = preprocessed.positionMap
     .compose(cjsResult.positionMap)
+    .compose(iterStaticsResult.positionMap)
     .compose(stdinResult.positionMap)
     .compose(defineResult.positionMap);
 
@@ -1193,7 +1208,7 @@ export function compileSourceSync(
   // `private`, signature declarations) isn't hard-rejected with TS8009/8010/8017.
   // ScriptKind-only override; the `.js`-derived semantics (lenient checking)
   // stay intact. Byte-neutral when no prelude was injected.
-  const forceTsGrammar = stdinResult.injected;
+  const forceTsGrammar = stdinResult.injected || iterStaticsResult.injected;
   let ast: TypedAST;
   if (languageService) {
     // Incremental path: reuse cached lib files via the language service
