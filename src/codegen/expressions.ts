@@ -1358,22 +1358,12 @@ function compileExpressionInner(
   }
 
   if (ts.isAwaitExpression(expr)) {
-    // (#1042) When the async-CPS state machine is driving this function
-    // (`asyncCpsActive`), the single tail-position await is consumed by
-    // `splitBodyAtAwait` and never reaches this expression path. Any await
-    // that DOES reach here under an active state machine is a nested /
-    // non-tail await the PR1 lowering doesn't handle yet — fail loudly rather
-    // than silently emit the legacy synchronous pass-through (which would
-    // desync the continuation). Outside CPS mode (gate off / not async-CPS),
-    // keep the legacy pass-through: async fns are compiled synchronously.
-    if (fctx.asyncCpsActive) {
-      reportError(
-        ctx,
-        expr,
-        "internal: nested/non-tail await under async-CPS not yet supported (#1042 PR1 handles a single tail await)",
-      );
-      return { kind: "externref" };
-    }
+    // (#2967 2c) The legacy async-CPS lane (`asyncCpsActive` /
+    // `emitAsyncStateMachine`) is DELETED — an await in an ACTIVATED async fn
+    // is consumed by the $AsyncFrame planners (`planLinearAwaits` / the CFG
+    // plans) inside the resume-fn emitter and never reaches this expression
+    // path. What remains here is the legacy passthrough for bodies no engine
+    // claims (non-linear shapes pending the slice-3 widening).
     // (#2865 AG0) Host-free standalone/WASI await. Async fns are compiled
     // synchronously here (no CPS — function-body.ts gates it off for these
     // targets) and the awaited operand, when it is a Promise, is the Wasm-native
