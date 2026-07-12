@@ -248,3 +248,98 @@ crash (`getMembersOfSymbol`), reproduces with `JS2WASM_IR_FIRST=0`. Out of scope
   floor + cross-backend-parity shards) is the ultimate gate — the same gates
   that caught the banked regression. Merged-report delta MUST be
   net-non-negative, zero conformance regression.
+
+## CI result (2026-07-12, sendev-3143flip) — DENYLIST GATING IS NOT VIABLE
+
+First full CI run of the gated flip:
+
+- **cross-backend-parity GREEN, all 8 equivalence-SHARDS GREEN, quality GREEN,
+  cheap-gate GREEN** — the banked "50+ equivalence regressions" HEADLINE
+  divergence is genuinely resolved (by #3156/#3167 + selector rejects + the
+  class-4/box_number fixes here). Gates 9/10 (param mutation, unlowered array
+  method) cleared cross-backend-parity's 3 adversarial cases.
+- **equivalence-GATE FAILS: 138 NEW regressions.** The shards are non-failing
+  (record partials like test262); the _gate_ compares partials to baseline. The
+  138 are skipped-slot hard errors in the `tests/equivalence/*.test.ts` INLINE
+  programs — the authoritative #3153 dense corpus, which the dir-walking
+  `.tmp/skipslot-fast.mts` scanner NEVER scanned (it walks
+  examples/playground/test262 dirs; the equivalence sources are template
+  literals inside the test files). Extracted + scanned them
+  (`.tmp/equiv-scan.mts`): **~67 raw / ~22 real distinct from-ast throw classes,
+  125+ skipped-slot hard errors**, covering CORE operations:
+  - "Phase 1 requires matching operand types" (type-mismatched arith/compare)
+  - most String methods unlowered: split/replace/replaceAll/padStart/padEnd/
+    repeat/trimStart/trimEnd/lastIndexOf; number .toString/.valueOf
+  - class member resolution ("class C has no method/field/static X")
+  - call & constructor ARITY (default/optional params)
+  - property assignment on ref (obj.prop=, arr.length=), .call/.apply on
+    closures, `new Date` (unknown class), template/unary/bool coercion,
+    array-literal widening, + a hard CRASH (tostring-valueof: "Cannot read
+    properties of undefined").
+
+**Conclusion:** the divergence surface is broad and systemic (the banked
+diagnosis was right). Per-shape DENYLIST gating cannot close 22+ core-operation
+classes (impractical, and self-defeating — gated kinds block their own handler
+deletion; any missed shape = a regression). The gate/fix work banked here
+(class-4, union-import pre-registration, gates 9/10) is correct and valuable but
+is NOT sufficient for the flip.
+
+**Recommended pivot — ALLOWLIST skip.** Change `computeIrFirstSkipSet` from a
+denylist (skip claimed − gated) to an ALLOWLIST (skip ONLY functions whose
+entire body is a proven-lowerable subset: matching-type numeric arith, control
+flow, correct-arity local calls, returns; NO method calls / class / closures /
+coercion / mismatched types). Safe-by-construction (a missed allowlist entry
+keeps a function compile-twice = safe; vs a missed denylist entry = hard error).
+Clears G1 (IR-first IS the default mode) with a conservative compile-once
+subset; the −60k deletion then unlocks INCREMENTALLY as the allowlist widens via
+real lowering (#2855/#2856) — matching CLAUDE.md's gated G1–G4 deletion model.
+The banked "same-day middle path", now validatable locally against
+equivalence-gate.
+
+## ALLOWLIST implemented + validated (2026-07-12, sendev-3143flip) — approved (A)
+
+`computeIrFirstSkipSet` now skips legacy ONLY for functions that pass
+`irFirstBodyIsProvenLowerable` (a positive AST walk) AND whose signature is
+f64-params + (f64|void)-return (via `overrideMap`, no default/optional/rest/
+destructuring params). The proven-lowerable subset is number-only with a
+strict NUMBER vs BOOLEAN context split (comparisons only in if/while/do/for/`?:`
+conditions and `&&`/`||`/`!` operands; no boolean literals/values; local `let`
+mutation OK, param mutation not; exact-arity calls to other claimed funcs). The
+denylist gate predicates (`irFirstBody*`) remain exported + unit-tested but are
+no longer wired into the skip decision (the allowlist subsumes them).
+
+Two allowlist-precision iterations: v1 conflated numeric/boolean and leaked
+`0 === false` ("matching operand types") + `&&`-of-numbers ("requires bool
+operands") at the math tests; v2's context split + f64-only signature fixed both.
+
+Validation:
+
+- `.tmp/equiv-scan.mts` over the FULL equivalence inline corpus (209 files, 1267
+  sources): compiled 1267, threw 0, **skipped-slot-hard 0**.
+- Full `tests/equivalence` vitest suite: **ZERO `[IR-FIRST skipped-slot]`
+  failures**. Remaining equiv failures are PRE-EXISTING and flip-independent:
+  TS type-error negative tests, and one legacy nested-function-in-loop
+  closure-capture value bug (`arguments-nested-and-loops` "for-loop with
+  function declaration in body", 30 vs 33) — reproduces with
+  `experimentalIR:false` (pure legacy, `irCompiledFuncs=[]`), i.e. fails on main
+  too; the diff touches none of the legacy closure path. Baseline drift, not a
+  #3143 regression.
+- tsc clean; `check:ir-fallbacks` OK; loc-budget OK (index.ts net-shrank —
+  denylist gates removed); biome clean.
+
+Tradeoff (as approved): the initial compile-once subset is pure-numeric
+functions only, so the immediate legacy deletion is small; it WIDENS as the IR
+lowers more kinds (#2855/#2856). The flip clears G1 (IR-first is the default
+MODE) safely, which is the load-bearing outcome.
+
+**Meter caveat (durable):** the #3153 meter reads `irPostClaimErrors`, but
+skipped-slot HARD errors land in `CompileResult.errors` — the meter is a FALSE
+GREEN for flip-readiness. The authoritative gate is a `result.errors` scan for
+`[IR-FIRST skipped-slot` over the EQUIVALENCE inline corpus (not a dir walk).
+Fold both into the #3153 meter as a follow-up.
+
+**Meter caveat (durable):** the #3153 meter reads `irPostClaimErrors`, but
+skipped-slot HARD errors land in `CompileResult.errors` — the meter is a FALSE
+GREEN for flip-readiness. The authoritative gate is a `result.errors` scan for
+`[IR-FIRST skipped-slot` over the EQUIVALENCE inline corpus (not a dir walk).
+Fold both into the #3153 meter as a follow-up.

@@ -24,20 +24,12 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
-import { irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
+import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
-import {
-  collectModuleTopLevelNames,
-  irFirstBodyCallsUnloweredArrayMethod,
-  irFirstBodyHasNullish,
-  irFirstBodyMutatesParam,
-  irFirstBodyReadsHostNode,
-  irFirstBodyReadsStringElement,
-  irFirstBodyStoresTypedArrayView,
-} from "./ir-first-gate.js";
+import { irFirstBodyIsProvenLowerable } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -1507,139 +1499,102 @@ interface IrOverlayPlan {
 }
 
 /**
- * (#2138) Decide which claimed functions may have their LEGACY body emission
- * skipped under `JS2WASM_IR_FIRST=1`. Deliberately conservative — a function
- * qualifies only when:
+ * (#2138/#3143) Decide which claimed functions may have their LEGACY body
+ * emission skipped under IR-first (the default since #3143).
  *
- *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
- *      strictly AFTER the #2023 `new.target` clear and after resolve-time
- *      drops), so the IR path WILL attempt it.
- *   2. If it is a generator (`function*`), the compile targets a JS host
- *      (`generatorsSkippable` — `!standalone && !wasi`). #2951 gate-2: the
- *      IR generator lowering is now self-sufficient for the JS-host path —
- *      it pre-registers its own generator host imports
- *      (`addGeneratorImports` in `ir/integration.ts`, driven by any
- *      `funcKind === "generator"` claim) and its own `__exn` tag, and the
- *      source-level scan (`state.generatorFound` in `declarations.ts`)
- *      registers the generator imports independently of ANY individual
- *      generator's legacy body emission — so skipping a claimed generator's
- *      legacy body drops no import/type/tag the IR body relies on. The
- *      predecessor slice (`gen.setReturn`, #2640) closed the last
- *      value-returning-`return` deferral, so value-carrying generators now
- *      IR-claim with zero post-claim demotions (proven on a representative
- *      host-drain corpus, `irPostClaimErrors` empty). Any generator SHAPE the
- *      IR path still can't own is filtered UPSTREAM by the selector (async
- *      generators, generator methods → `deferred-feature`; unresolved yield
- *      shapes) so it never enters `safeSelection.funcs` and never reaches
- *      this gate. STANDALONE/WASI generators stay compile-twice: legacy
- *      restricts them to sequential-numeric-yield native lowering
- *      (`function-body.ts` "#680" guard) and the IR path unconditionally
- *      registers JS-host generator imports, so standalone self-sufficiency
- *      is genuinely unproven (#2138 deviation 3) — lift in a follow-up after
- *      a standalone measurement.
- *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
- *      selector's Step-2 closure already guarantees this against
- *      `selection.funcs`, but overrideMap resolution can re-open the closure
- *      (a callee dropped at resolve time). Such a caller's IR build then
- *      throws "call to unknown function" — a KNOWN-benign legacy fallback
- *      that must not become a skipped-slot hard error. Non-transitive is
- *      sufficient: only the function's own IR success is load-bearing for
- *      its slot, and a callee that is claimed-but-not-skipped still occupies
- *      its pre-allocated slot with a working body either way.
- *   4. Its body does not read a HOST node (property/element access or bare
- *      call rooted at an identifier that is neither function-local nor a
- *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
- *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
- *      host-global receivers), load-bearing the moment #2856's extern-in-IR
- *      selector arm lands: host-node functions stay compile-twice until that
- *      lowering is proven, keeping the flag-on measurement clean.
- *   5. (#2972) Its body has no non-lowerable string element read (gate 5,
- *      inline below).
- *   6. (#2949) It is not dynamic-signature — the move-only dynamic surface
- *      stays compile-twice (gate 6, inline below).
- *   7. (#3143) Its body contains no `??`/`??=` — `lowerNullish` only covers
- *      reference-shaped operand pairs; the residual demote must stay a
- *      metered legacy fallback (see `irFirstBodyHasNullish`), never a
- *      skipped-slot hard error.
- *   8. (#3143) Its body neither stores to nor constructs a TypedArray view —
- *      `view[i] = v` (`lowerElementStore`, per-view ToUint8/clamp/pack) and
- *      `new <TypedArrayCtor>(n)` (`lowerNewExpression` "unknown class") are
- *      both legacy-only in the IR (element READS on a view do lower); the
- *      residual demote must stay a metered legacy fallback (see
- *      `irFirstBodyStoresTypedArrayView`), never a skipped-slot hard error.
- *   9. (#3143) It does not mutate one of its own parameters (`n = …` / `n += …`
- *      / `n++` / `--n`) — from-ast binds params as non-slot `local`s, so a
- *      param write throws "… to non-slot binding". See `irFirstBodyMutatesParam`.
- *  10. (#3143) It calls no non-`push` method on a syntactically-detectable
- *      array receiver — from-ast lowers only `.push` on a vec; `.indexOf` /
- *      `.flat` / `.map` / … throw "not in slice 4". See
- *      `irFirstBodyCallsUnloweredArrayMethod`.
+ * **ALLOWLIST, not denylist (#3143).** An early attempt gated OUT the shapes
+ * from-ast cannot lower (a per-shape denylist). A `result.errors` scan of the
+ * equivalence inline corpus proved that surface is BROAD — ~22 distinct
+ * from-ast throw classes across core operations (string methods, class-member
+ * resolution, call/ctor arity, type-mismatched arith, property assignment,
+ * coercion, `new Date`, …). A denylist cannot enumerate them safely: a single
+ * miss ships a skipped-slot HARD error (an equivalence regression), because a
+ * skipped function whose IR build throws has no legacy body to demote to.
  *
- * Class members are NEVER skipped in this slice (their slot pre-allocation
- * lives in `class-bodies.ts` and carries a typeIdx parity contract with
- * legacy callers — see the parity guard in `integration.ts`); they stay on
- * the legacy-then-overwrite path.
+ * So the decision is inverted: skip ONLY functions that are PROVABLY lowerable.
+ * A function qualifies when ALL of:
+ *   - it is not a `function*` on a standalone/WASI target (gate 2, #2951 —
+ *     subsumed by the numeric allowlist anyway, kept explicit);
+ *   - its SIGNATURE is lowerable: no default/optional/rest/destructuring
+ *     params, and every param + the return type resolve (via `overrideMap`) to
+ *     a numeric/boolean Wasm type (f64 / i32) or void — `signatureLowerable`;
+ *   - its BODY is entirely the proven-lowerable numeric/boolean subset —
+ *     `irFirstBodyIsProvenLowerable` (matched-type arithmetic/compare/logic,
+ *     control flow, correctly-typed local mutation, exact-arity calls to other
+ *     CLAIMED functions, returns; NO method calls / member access / `new` /
+ *     literals-of-ref-type / closures / coercion).
  *
- * Every skipped function gets an `unreachable` placeholder body, so the
- * skip is a *body-emission* change, never an *index-layout* change: the
- * funcIdx/typeIdx slot assignment from `collectDeclarations` is untouched.
- * If the IR path then fails to compile a skipped function, the overlay in
- * `generateModule` promotes that failure to a hard compile error (the
- * placeholder must never ship) — surfacing exactly the selector↔builder
- * divergences this investigation exists to find (#2135).
+ * Safe by construction: a construct the allowlist does not recognise keeps the
+ * function COMPILE-TWICE (correct — the legacy body ships, the IR overlay may
+ * still overwrite it or demote to a warning), never a hard error. The subset
+ * starts narrow and WIDENS as the IR gains real lowering for more kinds
+ * (#2855/#2856); each widening unlocks more of the gated-G1 legacy deletion.
+ * Class members are never skipped here (typeIdx parity contract with legacy
+ * callers — see `integration.ts`).
+ *
+ * Every skipped function gets an `unreachable` placeholder body, so the skip is
+ * a *body-emission* change, never an *index-layout* change; if the IR path
+ * still fails on a skipped (allowlisted) function, `generateModule` promotes it
+ * to a hard error — which the allowlist is designed to make impossible.
  */
 function computeIrFirstSkipSet(
   plan: IrOverlayPlan,
-  sourceFile: ts.SourceFile,
+  _sourceFile: ts.SourceFile,
   generatorsSkippable: boolean,
 ): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
-  const edges = plan.selection.localCallees;
-  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
-  // module-level user bindings, computed once — receivers/callees rooted at
-  // these are user code, never host globals.
-  const moduleNames = collectModuleTopLevelNames(sourceFile);
+
+  // (#3143) ALLOWLIST skip — see `irFirstBodyIsProvenLowerable`. A claimed
+  // function's legacy body is skipped ONLY when its whole body is the
+  // proven-lowerable numeric/boolean subset AND its signature is lowerable.
+  // Everything else stays COMPILE-TWICE (safe: no skipped-slot hard error).
+  //
+  // `claimedArity`: name → parameter count for every CLAIMED function, so the
+  // body walk can enforce from-ast's exact call-arity requirement (a call to a
+  // non-claimed or wrong-arity callee is not allowlisted). Only claimed funcs
+  // are eligible callees (a claimed caller's IR `call` must target a
+  // claimed-or-compiled slot; a legacy-only callee is excluded).
+  const claimedArity = new Map<string, number>();
+  for (const n of funcs) {
+    const f = plan.declByName.get(n);
+    if (f) claimedArity.set(n, f.parameters.length);
+  }
+  // A resolved IR type is skip-eligible only when it is exactly `f64` (JS
+  // `number`) — the single value domain the number-only allowlist body handles.
+  // i32 (native-int OR boolean — ambiguous checker-free), strings, objects,
+  // closures, extern, dynamic, and any ref carrier are NOT; those functions
+  // stay compile-twice. (Widen to i32 once the allowlist tracks int-vs-bool.)
+  const isF64 = (t: IrType): boolean => asVal(t)?.kind === "f64";
+  const signatureLowerable = (fn: ts.FunctionDeclaration, name: string): boolean => {
+    // No default / optional / rest / destructuring params — from-ast's param
+    // binding throws on all of these ("rest/default/optional param not in
+    // Phase 1", or "unsupported param shape").
+    for (const p of fn.parameters) {
+      if (p.questionToken || p.dotDotDotToken || p.initializer) return false;
+      if (!ts.isIdentifier(p.name)) return false;
+    }
+    // Params must all be `number` (f64); return must be `number` or void. Use
+    // the resolved overrideMap types — the selector's own resolution, so no
+    // checker call here.
+    const o = plan.overrideMap.get(name);
+    if (!o) return false; // no resolved signature — stay conservative
+    if (!o.params.every(isF64)) return false;
+    if (o.returnType !== null && !isF64(o.returnType)) return false;
+    return true;
+  };
+
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
     if (!fn) continue;
     // gate 2 (#2951) — a claimed generator is skippable only when targeting a
-    // JS host. Standalone/WASI generators stay compile-twice (legacy's
-    // native-generator restriction + unproven IR standalone self-sufficiency,
-    // #2138 deviation 3). Non-generators are unaffected.
+    // JS host; a `function*` body is never in the numeric allowlist anyway, so
+    // this is subsumed, but kept explicit for standalone/WASI clarity.
     if (fn.asteriskToken && !generatorsSkippable) continue;
-    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
-    if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
-    if (irFirstBodyHasNullish(fn)) continue; // gate 7 — `??` residual demote (#3143)
-    if (irFirstBodyStoresTypedArrayView(fn)) continue; // gate 8 — TypedArray-view store/construct (#3143)
-    if (irFirstBodyMutatesParam(fn)) continue; // gate 9 — parameter mutation (#3143)
-    if (irFirstBodyCallsUnloweredArrayMethod(fn)) continue; // gate 10 — unlowered array method (#3143)
-    // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
-    // under IR-first while the dynamic surface is move-only (no box/unbox
-    // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
-    // to make claims build-proof, but a scan↔builder divergence on this brand-
-    // new surface would otherwise become a skipped-slot HARD error; keep the
-    // legacy body as the demotion target until slice 3 lowering + an ir_first
-    // lane measurement prove the claims robust, then lift this gate.
-    {
-      const o = plan.overrideMap.get(name);
-      if (o && (o.params.some((p) => isDynamic(p)) || (o.returnType !== null && isDynamic(o.returnType)))) {
-        continue;
-      }
-    }
-    if (!edges) continue; // no edge info (defensive) — stay conservative
-    const callees = edges.get(name);
-    let closed = true;
-    if (callees) {
-      for (const c of callees) {
-        if (!funcs.has(c)) {
-          closed = false;
-          break;
-        }
-      }
-    }
-    if (closed) skip.add(name); // gates 1 + 3
+    if (!signatureLowerable(fn, name)) continue; // numeric/boolean signature only
+    if (!irFirstBodyIsProvenLowerable(fn, claimedArity)) continue; // ALLOWLIST body walk (#3143)
+    skip.add(name);
   }
   return skip;
 }
