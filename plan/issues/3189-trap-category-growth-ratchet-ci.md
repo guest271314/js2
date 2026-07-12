@@ -1,7 +1,9 @@
 ---
 id: 3189
 title: "CI ratchet: hard-fail on uncatchable-trap category GROWTH (null_deref/illegal_cast/oob/unreachable) in the test262 regression gate"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-forin-sound
 created: 2026-07-12
 priority: medium
 feasibility: medium
@@ -64,6 +66,47 @@ the four trap categories**:
 2. Trap-category decreases bank automatically without per-PR baseline-bump
    merge conflicts.
 3. Doc: one paragraph in `docs/ci-policy.md` describing the ratchet.
+
+## Resolution (2026-07-12, dev-forin-sound)
+
+Implemented as a pure, unit-tested extension of the existing `diff-test262.ts`
+gate machinery (the same script the required `check for test262 regressions` /
+`merge shard reports` guards run) — no new required-check name, no new CI job.
+
+- **`evaluateTrapCategoryGrowth(baseline, newer, tolerance=0)`** (`scripts/diff-test262.ts`):
+  per-category population diff for `null_deref` / `illegal_cast` / `oob` /
+  `unreachable` (exported `TRAP_ERROR_CATEGORIES`). **Any growth in any trap
+  category → gate fail**, independent of `net_per_test`, naming the newly-trapping
+  files. Pure (no I/O), mirroring `evaluateRegressionThresholds` (#1943).
+- **Wired into `run()`** — applied in BOTH the normal and the oracle-rebase
+  branches (a new trap is a real regression regardless of an oracle bump; the
+  trap categories aren't touched by any oracle reclassification, so they stay
+  comparable across a forward bump). Prints a `Trap categories (baseline →
+  candidate)` line every run.
+- **Decreases auto-bank, conflict-free**: the ratchet reads the committed
+  baseline jsonl that `promote-baseline` re-seeds on every push to main
+  (#1528) — no separate ratchet baseline file, so no per-PR baseline-bump merge
+  conflict (#3131 pattern, achieved structurally).
+- **Noise discipline**: a byte-identical (`wasm_sha`-unchanged) pass→trap flip is
+  excluded as CI runner noise (a static miscompile can't appear on an identical
+  binary), exactly like the `net_per_test` gate's wasm-hash filter (#1222).
+- **Operational safety valve**: `TRAP_RATCHET_TOLERANCE` env (default 0 — strict)
+  mirrors `STANDALONE_REGRESSION_TOLERANCE`, so a false-positive against baseline
+  drift can be loosened without a code change rather than wedging the queue.
+- **Coordination**: lands after / alongside #3187 (classifier split) so the
+  ratchet baseline is taken on honest categories. The four trap categories are
+  unaffected by #3187's `wasm_compile` split, so the ordering is safe either way.
+
+### Acceptance criteria disposition
+1. A PR that increases any trap-category count vs baseline gets a failing gate
+   signal (`exit 1`) naming the newly-trapping files. ✓ (unit-tested +
+   CLI-smoke-tested: growth → exit 1, flat/shrink → exit 0.)
+2. Decreases bank automatically without per-PR baseline-bump merge conflicts —
+   the baseline is the promote-refreshed jsonl, no separate file. ✓
+3. Doc paragraph in `docs/ci-policy.md` (§3, "Uncatchable-trap growth ratchet"). ✓
+
+Tests: `tests/issue-3189.test.ts` (9 cases — hold/shrink/grow, net-positive-with-
+new-traps block, wasm-identical noise exclusion, lateral move, tolerance valve).
 
 ## Audit cross-link
 

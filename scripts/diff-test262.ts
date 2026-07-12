@@ -33,6 +33,15 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
+// #3189 — the four UNCATCHABLE Wasm-trap error categories. A trap aborts the
+// whole test file and escapes `try`/`catch` (documented in #3179 — a trap
+// inside `assert.throws` poisons every test whose body shares the pattern), so
+// the "crash-free (traps → 0)" goal (plan/goals/goal-graph.md) treats them as
+// strictly worse than an ordinary assertion fail. These strings are assigned by
+// `classifyError` (tests/test262-runner.ts) and are stable in the jsonl.
+export const TRAP_ERROR_CATEGORIES = ["null_deref", "illegal_cast", "oob", "unreachable"] as const;
+export type TrapCategory = (typeof TRAP_ERROR_CATEGORIES)[number];
+
 // #3086 — drift tolerance for a DELIBERATE oracle re-baseline (forward-bump
 // auto-rebase or ORACLE_REBASE=1). A pure re-baseline has ~0 improvements, so
 // the strict net<0 / ratio<10% gate is structurally inapplicable: ANY residual
@@ -95,6 +104,97 @@ export function evaluateRegressionThresholds(opts: {
     }
   }
   return failures;
+}
+
+/** Minimal row shape the trap ratchet needs (a subset of `TestResult`). */
+type TrapRatchetRow = { status: string; error_category?: string; wasm_sha?: string | null };
+
+export interface TrapCategoryGrowth {
+  /** Human-readable GATE-FAIL reasons (empty ⇒ within ratchet). */
+  failures: string[];
+  /** baseline population per trap category. */
+  baseCounts: Record<TrapCategory, number>;
+  /** candidate population per trap category (noise-filtered). */
+  newCounts: Record<TrapCategory, number>;
+  /** files that newly entered each trap category (weren't trapping there in baseline). */
+  newlyTrapping: Record<TrapCategory, string[]>;
+}
+
+/**
+ * #3189 — trap-category GROWTH ratchet. For each of the four uncatchable-trap
+ * categories, compare the candidate's population against the baseline's. **Any
+ * growth in any trap category is a gate failure**, independent of `net_per_test`
+ * — so a PR that fixes 60 assertion-fails while introducing 12 new illegal-casts
+ * (net-positive, so it clears the existing net/ratio gate) is still blocked. The
+ * "crash-free (traps → 0)" goal is a strict ratchet: the trap population may
+ * only shrink or hold. Decreases auto-bank because the committed baseline jsonl
+ * is re-seeded by `promote-baseline` on every push to main (#1528) — no separate
+ * baseline file, so there is no per-PR baseline-bump merge conflict (#3131).
+ *
+ * Pure (no I/O) so the unit test drives it with fixture maps, mirroring
+ * `evaluateRegressionThresholds` (#1943).
+ *
+ * Noise discipline: a trap category is a STATIC miscompile signal — a
+ * byte-identical binary (same `wasm_sha`) cannot newly trap — so a candidate row
+ * whose wasm hash is unchanged from a baseline row of the same file is excluded
+ * as CI runner noise, exactly like the `net_per_test` gate's `wasmUnchanged`
+ * filter (#1222). This prevents a flaky pass→trap flip on an identical binary
+ * from tripping the ratchet.
+ */
+export function evaluateTrapCategoryGrowth(
+  baseline: Map<string, TrapRatchetRow>,
+  newer: Map<string, TrapRatchetRow>,
+  /**
+   * Per-category growth tolerance (default 0 — strict ratchet). An operational
+   * safety valve wired to `TRAP_RATCHET_TOLERANCE` in the CLI, mirroring
+   * `STANDALONE_REGRESSION_TOLERANCE`: if the ratchet ever proves brittle
+   * against baseline drift it can be loosened without a code change, rather than
+   * wedging the merge queue. Growth fails only when it EXCEEDS the tolerance.
+   */
+  tolerancePerCategory = 0,
+): TrapCategoryGrowth {
+  const zero = () => Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, 0])) as Record<TrapCategory, number>;
+  const baseCounts = zero();
+  const newCounts = zero();
+  const newlyTrapping = Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, [] as string[]])) as Record<
+    TrapCategory,
+    string[]
+  >;
+
+  const isTrap = (cat: string | undefined): cat is TrapCategory =>
+    !!cat && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(cat);
+
+  for (const row of baseline.values()) {
+    if (isTrap(row.error_category)) baseCounts[row.error_category]++;
+  }
+
+  for (const [file, row] of newer) {
+    if (!isTrap(row.error_category)) continue;
+    const base = baseline.get(file);
+    // Wasm-identical noise: a trap can't appear on a byte-identical binary, so a
+    // same-`wasm_sha` flip is runner noise — don't let it inflate the count.
+    if (base && base.wasm_sha && row.wasm_sha && base.wasm_sha === row.wasm_sha) continue;
+    newCounts[row.error_category]++;
+    // "newly trapping HERE" = this file was not already in THIS trap category.
+    if (!base || base.error_category !== row.error_category) {
+      newlyTrapping[row.error_category].push(file);
+    }
+  }
+
+  const failures: string[] = [];
+  for (const cat of TRAP_ERROR_CATEGORIES) {
+    if (newCounts[cat] - baseCounts[cat] > tolerancePerCategory) {
+      const grew = newCounts[cat] - baseCounts[cat];
+      const sample = newlyTrapping[cat].slice().sort().slice(0, 10);
+      const more =
+        newlyTrapping[cat].length > sample.length ? ` (+${newlyTrapping[cat].length - sample.length} more)` : "";
+      failures.push(
+        `trap category "${cat}" grew ${baseCounts[cat]} → ${newCounts[cat]} (+${grew}) — uncatchable-trap ratchet (#3189). ` +
+          `Newly trapping: ${sample.join(", ")}${more}`,
+      );
+    }
+  }
+  return { failures, baseCounts, newCounts, newlyTrapping };
 }
 
 interface TestResult {
@@ -905,6 +1005,24 @@ async function run(
   // regressionsWasmChange. Gate: improvements.length - regressionsWasmChange < 0.
   const netPerTest = improvements.length - regressionsWasmChange;
   let gateFailed = false;
+
+  // #3189 — uncatchable-trap GROWTH ratchet. Applies in BOTH the normal and the
+  // oracle-rebase branches: a genuinely new trap is a real regression regardless
+  // of net_per_test or an oracle re-baseline (the four trap categories are not
+  // touched by any oracle reclassification, so they stay comparable across a
+  // forward bump). A trap escapes try/catch and poisons the whole file, so the
+  // crash-free goal forbids ANY growth. Decreases auto-bank via promote-baseline.
+  const trapTolerance = Number.parseInt(process.env.TRAP_RATCHET_TOLERANCE ?? "0", 10) || 0;
+  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, trapTolerance);
+  console.log(
+    `=== Trap categories (baseline → candidate): ` +
+      TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +
+      ` (#3189 ratchet) ===`,
+  );
+  for (const reason of trapGrowth.failures) {
+    console.log(`=== GATE FAIL: ${reason} ===`);
+    gateFailed = true;
+  }
 
   // #3086 — is this a deliberate oracle RE-BASELINE? (forward-monotonic bump
   // auto-rebase, or ORACLE_REBASE=1). Same condition the oracle guard above used
