@@ -70,7 +70,8 @@ export function createFallbackCounts(): FallbackCounts {
  */
 export const STRICT_FALLBACK_CLASSES: ReadonlySet<SilentFallbackClass> = new Set<SilentFallbackClass>();
 
-function truthyEnv(v: string | undefined): boolean {
+/** (#3195) Shared leaf util — an env var is "truthy" when `"1"` or `"true"`. */
+export function truthyEnv(v: string | undefined): boolean {
   return v === "1" || v === "true";
 }
 

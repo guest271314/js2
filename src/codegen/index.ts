@@ -35,6 +35,7 @@ import {
   irFirstBodyReadsStringElement,
 } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
+import { truthyEnv } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
@@ -1434,10 +1435,6 @@ function isStrictIrBuildError(message: string): boolean {
     if (message.includes(pat)) return true;
   }
   return false;
-}
-
-function truthyEnv(v: string | undefined): boolean {
-  return v === "1" || v === "true";
 }
 
 export function irVerifierHardFailureEnabled(env: Record<string, string | undefined> = process.env): boolean {
