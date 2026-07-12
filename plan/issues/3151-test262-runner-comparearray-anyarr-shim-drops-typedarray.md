@@ -28,6 +28,45 @@ by the ENTIRE TA prototype cluster, so full CI is expected to show a materially
 larger net gain (validated on `merge_group`, not a scoped sweep — this is a
 scoring-harness change).
 
+## MERGE-GROUP PARK → LANE-SPLIT FIX (2026-07-12, CI-fix dev)
+
+The global `any[]`→`any` flip above was auto-parked in the merge queue
+(`auto-park-bot:merge-group-failure`, run 29175942933): the **JS-host lane**
+regressed **15 baseline-pass tests** (all `assertion_fail`, all
+compareArray-involving: `concat_*sloppy/strict-arguments`, `with/this-value-boolean`,
+`Reflect.ownKeys`/`gOPDs order-after-define-property`, `computed-property-names/basics/symbol`,
+4× `spread-obj-spread-order`, `slice/coerced-start-end-shrink`, 2× BigInt-TA)
+vs **+1 improvement** — gate fail `net_per_test -14`. The standalone lane was
+net **+22 / −3** (the intended win).
+
+**Root cause of the host regressions (probe-pinned):** the "real-array callers
+read identically" claim was wrong for one construction context. With `any`
+params, callers' **array-literal arguments** are built in an `any`-typed
+context, which picks a **lossy representation**: `[1, void 0, 3]` becomes an
+f64 array whose `void 0` element is **NaN** (`typeof a[1] === "number"`; even
+`a[1] !== a[1]` self-compare fails), and mixed literals (`[1,'z']`,
+`[symA, symB]`) misread their non-numeric elements. The corruption happens at
+literal **construction**, so no branch inside compareArray's body can recover
+it (an `Array.isArray` dispatch was probed and does NOT fix it).
+
+**Fix: lane-split the shim param type** (`dynViewCompare` in `buildPreamble`,
+threaded from `wrapTest(source, meta, target)`):
+
+- **standalone/wasi lanes** → `any` params (dyn-view TypedArray reads; keeps
+  the +22 TA-harness cluster win).
+- **JS-host lane** → `any[]` params, byte-identical preamble to pre-PR main
+  (proven: wrapped host output for all regressed-cluster tests is
+  byte-identical to `origin/main`'s `wrapTest`) — the 15 host regressions are
+  gone by construction. Host TAs are not dyn-views; host TA compareArray tests
+  passed at baseline with `any[]`.
+
+Local re-run of the 15 regressed host tests: 12/15 pass, 3 fail only from
+local-env gaps (macOS node: resizable-AB RangeError, BigInt-TA harness ctor) —
+all 3 proven byte-identical-wrap to main, so CI scores them as baseline.
+Follow-up (compiler, out of scope here): array-literal lowering in an `any`
+context should not adopt the NaN-lossy f64 representation for literals
+containing `undefined`/mixed elements.
+
 # #3151 — runner `compareArray` shim `any[]` typing drops dyn-view TypedArrays
 
 ## Problem (root-caused, probe-pinned 2026-07-11)
