@@ -32,6 +32,31 @@
  * or vecs — the resolver below throws on all of those, which turns any
  * accidental dialect growth in `src/stdlib/math.ts` into a loud compile
  * error instead of a miscompile.
+ *
+ * #3161 — generalized typed path (`SelfHostedFuncDef` / `emitSelfHostedFunc`):
+ * the scale-up families (array-methods #3159, object-runtime #3160) need
+ * builtins whose params/returns/callees are NOT unary f64: externref
+ * params, void kernels, i32 results, and ctx-bound `ref_null { typeIdx }`
+ * raw-array params. The generalized path carries explicit positional
+ * param types + a typed callee map, flowing through from-ast's existing
+ * `paramTypeOverrides` / `returnTypeOverride`. It is deliberately NOT
+ * process-memoized: a `typeIdx` inside a def's types is only meaningful
+ * in the CodegenContext that registered it, so the IR must be rebuilt
+ * per emission. That costs little — `emitSelfHostedFunc` early-returns
+ * via `ctx.funcMap` (once per compilation, the same lifecycle the hand
+ * `Instr[]` bodies had). The global/named-type scope guard stays: raw
+ * ValType refs (`ref_null`) are `val`-kind and never hit `resolveType`,
+ * while any accidental use of module globals or symbolic named types in
+ * stdlib source remains a loud compile error.
+ *
+ * Caller-side dialect rule: from-ast validates direct-call args by EXACT
+ * IrType equality (`irTypeArgAssignable`) — declare numeric index params
+ * as `f64` in callee sigs (kernels trunc internally); there is no
+ * implicit f64→i32 argument coercion. Params whose type isn't spellable
+ * as a TS primitive should be annotated `unknown` in the source (a
+ * non-primitive annotation defers to the positional override). Void
+ * builtins must end with an explicit `return;` — a loop is not a valid
+ * tail statement in the IR subset (`lowerTail`).
  */
 
 import { ts } from "../ts-api.js";
@@ -49,49 +74,84 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 
 const F64: IrType = irVal({ kind: "f64" });
 
+/**
+ * #3161 — a self-hosted builtin with an explicit typed signature. The
+ * generalized shape behind the `StdlibMathBuiltin` pilot descriptor:
+ * positional param types + a typed callee map instead of the pilot's
+ * implicit "everything is unary f64".
+ *
+ * `paramTypes` is positional and override-authoritative: a param whose
+ * type has no TS-primitive spelling (externref, `ref_null { typeIdx }`)
+ * should be annotated `unknown` in `source` — from-ast's `resolveIrType`
+ * defers non-primitive annotations to the override, and REJECTS a
+ * primitive annotation that disagrees with it (typo guard).
+ * `returnType: null` means void (zero Wasm results; bare `return;` /
+ * fall-through tails, statement-position calls only — #1228 / #2856 C4).
+ */
+export interface SelfHostedFuncDef {
+  /** funcMap registration name — also the function's name in `source`. */
+  readonly name: string;
+  /** Ordinary TS source, IR-claimable subset. */
+  readonly source: string;
+  /** Positional param IrTypes (may carry ctx-bound typeIdx refs). */
+  readonly paramTypes: readonly IrType[];
+  /** Return IrType; null == void. */
+  readonly returnType: IrType | null;
+  /** Typed signatures for every direct callee in `source`. */
+  readonly calleeTypes: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
+}
+
 /** Process-lifetime cache: builtin name → immutable, context-free IR. */
 const irCache = new Map<string, IrFunction>();
 
 /**
- * Parse the builtin's TS source and lower it to a verified, optimized
- * `IrFunction`. Pure function of the builtin definition — memoized.
+ * #3161 — parse a typed self-hosted builtin's TS source and lower it to
+ * a verified, optimized `IrFunction`.
+ *
+ * NOT memoized (unlike the math pilot's `buildBuiltinIr` wrapper below):
+ * `def.paramTypes` / callee sigs may carry ctx-bound `{ typeIdx }` refs
+ * that are only meaningful in the CodegenContext that registered those
+ * types, so the IR must be rebuilt per emission. `emitSelfHostedFunc`'s
+ * funcMap early-return bounds this to once per compilation.
+ *
+ * Exported separately from the emit glue so the widened dialect shapes
+ * are unit-testable without constructing a CodegenContext (the build
+ * stage is a pure function of the def).
  */
-function buildBuiltinIr(builtin: StdlibMathBuiltin): IrFunction {
-  const cached = irCache.get(builtin.name);
-  if (cached) return cached;
-
+export function buildSelfHostedIr(def: SelfHostedFuncDef): IrFunction {
   const sourceFile = ts.createSourceFile(
-    `stdlib/${builtin.name}.ts`,
-    builtin.source,
+    `stdlib/${def.name}.ts`,
+    def.source,
     ts.ScriptTarget.Latest,
     /* setParentNodes */ true,
     ts.ScriptKind.TS,
   );
   const fnDecl = sourceFile.statements.find(
-    (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === builtin.name,
+    (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === def.name,
   );
   if (!fnDecl) {
-    throw new Error(`stdlib-selfhost: source for ${builtin.name} has no matching function declaration`);
+    throw new Error(`stdlib-selfhost: source for ${def.name} has no matching function declaration`);
   }
-
-  // Sibling math helpers are all unary (f64) -> f64.
-  const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
-  for (const callee of builtin.callees) {
-    calleeTypes.set(callee, { params: [F64], returnType: F64 });
+  if (fnDecl.parameters.length !== def.paramTypes.length) {
+    throw new Error(
+      `stdlib-selfhost: ${def.name} declares ${fnDecl.parameters.length} params but paramTypes has ${def.paramTypes.length}`,
+    );
   }
 
   const { main, lifted } = lowerFunctionAstToIr(fnDecl, {
-    funcName: builtin.name,
+    funcName: def.name,
     exported: false,
-    calleeTypes,
+    calleeTypes: def.calleeTypes,
+    paramTypeOverrides: def.paramTypes,
+    returnTypeOverride: def.returnType,
   });
   if (lifted.length > 0) {
-    throw new Error(`stdlib-selfhost: ${builtin.name} unexpectedly produced ${lifted.length} lifted functions`);
+    throw new Error(`stdlib-selfhost: ${def.name} unexpectedly produced ${lifted.length} lifted functions`);
   }
 
   const buildErrors = verifyIrFunction(main);
   if (buildErrors.length > 0) {
-    throw new Error(`stdlib-selfhost: IR verify failed for ${builtin.name}: ${buildErrors[0]!.message}`);
+    throw new Error(`stdlib-selfhost: IR verify failed for ${def.name}: ${buildErrors[0]!.message}`);
   }
 
   // Same hygiene pipeline integration.ts runs (constantFold → deadCode →
@@ -106,11 +166,102 @@ function buildBuiltinIr(builtin: StdlibMathBuiltin): IrFunction {
 
   const postErrors = verifyIrFunction(ir);
   if (postErrors.length > 0) {
-    throw new Error(`stdlib-selfhost: post-pass IR verify failed for ${builtin.name}: ${postErrors[0]!.message}`);
+    throw new Error(`stdlib-selfhost: post-pass IR verify failed for ${def.name}: ${postErrors[0]!.message}`);
   }
+
+  return ir;
+}
+
+/**
+ * Parse the builtin's TS source and lower it to a verified, optimized
+ * `IrFunction`. Pure function of the builtin definition — memoized
+ * (sound here, unlike the generalized path: math sigs are all context-
+ * free `(f64) -> f64`, no typeIdx can appear).
+ */
+function buildBuiltinIr(builtin: StdlibMathBuiltin): IrFunction {
+  const cached = irCache.get(builtin.name);
+  if (cached) return cached;
+
+  // Sibling math helpers are all unary (f64) -> f64. The f64 param/return
+  // overrides agree with the sources' `: number` annotations (enforced by
+  // from-ast's resolveIrType), so lowering through the generalized builder
+  // yields IR identical to the pilot's un-overridden path.
+  const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
+  for (const callee of builtin.callees) {
+    calleeTypes.set(callee, { params: [F64], returnType: F64 });
+  }
+  const ir = buildSelfHostedIr({
+    name: builtin.name,
+    source: builtin.source,
+    paramTypes: [F64],
+    returnType: F64,
+    calleeTypes,
+  });
 
   irCache.set(builtin.name, ir);
   return ir;
+}
+
+/**
+ * #3161 — lower a typed self-hosted builtin against the live context and
+ * register it as a defined function under `def.name`. Same registration
+ * discipline as the math path (stable-regime mint + push, funcMap entry,
+ * `exported: false`) so call sites cannot tell the difference from the
+ * hand-emitted `Instr[]` body it replaces.
+ *
+ * Idempotent: early-returns the existing funcIdx when `def.name` is
+ * already registered (mirrors the `ensure*` convention of the hand
+ * emitters this replaces).
+ *
+ * Precondition: every callee in `def.calleeTypes` that the source
+ * actually calls is already registered in `ctx.funcMap` (families
+ * convert leaf-first; retained hand kernels are emitted before the
+ * self-hosted bodies that call them).
+ */
+export function emitSelfHostedFunc(ctx: CodegenContext, def: SelfHostedFuncDef): number {
+  const existing = ctx.funcMap.get(def.name);
+  if (existing !== undefined) return existing;
+
+  const ir = buildSelfHostedIr(def);
+  const funcIdx = lowerAndRegister(ctx, def.name, ir);
+  return funcIdx;
+}
+
+/** Shared lowering + registration glue for both driver paths. */
+function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): number {
+  const resolver: IrLowerResolver = {
+    resolveFunc(ref) {
+      const idx = ctx.funcMap.get(ref.name);
+      if (idx === undefined) {
+        throw new Error(
+          `stdlib-selfhost: ${name} calls "${ref.name}" but it is not registered yet — ` +
+            `emit callees leaf-first (check the family's phase ordering)`,
+        );
+      }
+      return idx;
+    },
+    resolveGlobal(ref) {
+      throw new Error(`stdlib-selfhost: ${name} must not reference globals (got "${ref.name}")`);
+    },
+    resolveType(ref) {
+      throw new Error(`stdlib-selfhost: ${name} must not reference named types (got "${ref.name}")`);
+    },
+    internFuncType(type) {
+      return addFuncType(ctx, type.params, type.results, type.name);
+    },
+  };
+
+  const { func } = lowerIrFunctionToWasm(ir, resolver);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name,
+    typeIdx: func.typeIdx,
+    locals: func.locals,
+    body: func.body,
+    exported: false,
+  });
+  ctx.funcMap.set(name, funcIdx);
+  return funcIdx;
 }
 
 /**
@@ -124,38 +275,5 @@ function buildBuiltinIr(builtin: StdlibMathBuiltin): IrFunction {
  */
 export function emitSelfHostedMathFunc(ctx: CodegenContext, builtin: StdlibMathBuiltin): number {
   const ir = buildBuiltinIr(builtin);
-
-  const resolver: IrLowerResolver = {
-    resolveFunc(ref) {
-      const idx = ctx.funcMap.get(ref.name);
-      if (idx === undefined) {
-        throw new Error(
-          `stdlib-selfhost: ${builtin.name} calls "${ref.name}" but it is not registered yet — ` +
-            `check emitInlineMathFunctions phase ordering`,
-        );
-      }
-      return idx;
-    },
-    resolveGlobal(ref) {
-      throw new Error(`stdlib-selfhost: ${builtin.name} must not reference globals (got "${ref.name}")`);
-    },
-    resolveType(ref) {
-      throw new Error(`stdlib-selfhost: ${builtin.name} must not reference named types (got "${ref.name}")`);
-    },
-    internFuncType(type) {
-      return addFuncType(ctx, type.params, type.results, type.name);
-    },
-  };
-
-  const { func } = lowerIrFunctionToWasm(ir, resolver);
-  const funcIdx = mintDefinedFunc(ctx);
-  pushDefinedFunc(ctx, funcIdx, {
-    name: builtin.name,
-    typeIdx: func.typeIdx,
-    locals: func.locals,
-    body: func.body,
-    exported: false,
-  });
-  ctx.funcMap.set(builtin.name, funcIdx);
-  return funcIdx;
+  return lowerAndRegister(ctx, builtin.name, ir);
 }
