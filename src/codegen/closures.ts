@@ -35,6 +35,7 @@ import {
   addFuncType,
   destructureParamArray,
   destructureParamObject,
+  addGeneratorImports,
   destructureParamObjectExternref,
   ensureExnTag,
   ensureStructForType,
@@ -84,6 +85,15 @@ import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
 import { planAsyncClosureActivation, emitAsyncClosureBody } from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
+// (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
+// closure body emits the state-struct factory instead of the eager-buffer host
+// path. `generators-native` does not import `closures`, so no cycle.
+import {
+  compileNativeGeneratorFunction,
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+} from "./generators-native.js";
+import type { NativeGeneratorInfo } from "./context/types.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
 
@@ -2839,6 +2849,39 @@ export function compileArrowAsClosure(
     hoistLetConstWithTdz(ctx, liftedFctx, body.statements);
   }
 
+  // (#3164) Native generator FUNCTION EXPRESSION (standalone/wasi). When the
+  // extended candidate gate admits the fn-expr (zero/identifier params, no
+  // `this`/`arguments`/self-name/capture — the same gate
+  // `sourceNeedsGeneratorHostImports` consulted, so the `__gen_*` host imports
+  // were NOT registered for it), register it under the lifted closure name with
+  // the `__self` param threaded as a leading synthetic capture: the state
+  // struct's param fields then align 1:1 with the lifted wasm params
+  // (`local.get 0..n` in the factory), and the resume prelude rehydrates the
+  // user params by name. The closure ABI is UNCHANGED (externref return) — the
+  // factory's `(ref $GenState)` is widened via `extern.convert_any`, and every
+  // consumer dispatches dynamically: `.next()/.return()/.throw()` through the
+  // open anyref dispatch (`tryCompileNativeGeneratorMethodCall`), for-of /
+  // destructuring / spread through the `__iterator` runtime's GENSTATE arm
+  // (iterator-native.ts, filled at finalize).
+  let nativeGenExprInfo: NativeGeneratorInfo | null = null;
+  if (
+    isGenerator &&
+    !isAsync &&
+    (ctx.standalone || ctx.wasi) &&
+    ts.isFunctionExpression(arrow) &&
+    ts.isBlock(body) &&
+    isNativeGeneratorCandidate(ctx, arrow)
+  ) {
+    nativeGenExprInfo = registerNativeGenerator(
+      ctx,
+      arrow,
+      closureName,
+      [{ kind: selfParamKind, typeIdx: selfTypeIdx }, ...arrowParams],
+      /* synthesizedThis */ false,
+      [{ name: "__self" }],
+    );
+  }
+
   if (
     isGenerator &&
     isAsync &&
@@ -2856,6 +2899,17 @@ export function compileArrowAsClosure(
     // the resume fn. TDZ-flagged captures store PARAM indices in
     // `boxedTdzFlags` (wrong in the resume fn's local layout) → legacy path.
     emitAsyncGenerator(ctx, liftedFctx, arrow);
+  } else if (isGenerator && ts.isBlock(body) && nativeGenExprInfo) {
+    // (#3164) Emit the native state-struct factory (mirrors the class-method /
+    // object-literal wiring, #2571/#2581): construct `$GenState_<closure>` from
+    // the lifted wasm params (param 0 = `__self`, threaded as a leading
+    // synthetic capture; user params follow), then widen to the closure's
+    // externref return. The body itself compiles once, inside the resume
+    // function (`ensureNativeGeneratorResumeFunction`). ZERO host imports —
+    // no `__gen_create_buffer` / `__create_generator` / `__get_caught_exception`.
+    compileNativeGeneratorFunction(ctx, liftedFctx, arrow, nativeGenExprInfo);
+    liftedFctx.body.push({ op: "extern.convert_any" } as Instr);
+    conciseBodyHasValue = true;
   } else if (isGenerator && ts.isBlock(body)) {
     // Generator function expression: eagerly evaluate body, collect yields
     // into a buffer, then wrap with __create_generator.
@@ -2888,6 +2942,16 @@ export function compileArrowAsClosure(
       arrow.parameters.length === 0 &&
       !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
       !genBodyReferencesThis(body);
+    // (#3164) Defensive: in a no-JS-host target the eager-buffer path needs the
+    // `__gen_*` host imports, which the pre-scan (`sourceNeedsGeneratorHostImports`)
+    // skips when it classifies every generator as native. If this fn-expr was
+    // admitted by the pre-scan but the emit-time registration bailed (a
+    // candidate/plan desync), baking an undefined funcIdx would produce an
+    // INVALID module — late-register the import bundle instead (idempotent,
+    // shift-safe; the IR path does the same mid-emission).
+    if ((ctx.standalone || ctx.wasi) && !ctx.funcMap.has("__gen_create_buffer")) {
+      addGeneratorImports(ctx, { allowNoJsHost: true });
+    }
     const genOuterBody = liftedFctx.body;
     const eagerSeq: Instr[] = [];
     if (genLazyEligible) liftedFctx.body = eagerSeq;
