@@ -39,6 +39,10 @@ here as a follow-on instead of being absorbed.
    the literal to the open `$Object` rep at compile time (the host lane's
    `compileObjectLiteralWithAccessors` analog), so the runtime MOP (accessor
    entries, delete tombstones) actually applies. Largest single bucket.
+   **ROUTING: this bucket belongs to the #2992 / fable-2984c lane
+   (peer-owned) — the standalone defineProperty/accessor-MOP substrate. Do
+   NOT double-work it here; the HOF flip is a downstream consumer of that
+   substrate. Coordinate before touching.**
 2. **fnctor-array-inheritance (~52, sec-8)** — `foo.prototype = new Array(...);
    f = new foo(); f.length = null; f.every(cb)` — constructor instances
    inheriting Array.prototype elements/length through the proto chain.
