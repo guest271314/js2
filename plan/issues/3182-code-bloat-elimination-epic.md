@@ -116,6 +116,11 @@ the same ES2025 semantics.
 
 ## Slices (independently claimable; each is its own PR)
 
+**Filed as claimable child issues (2026-07-12):** S1 → **#3191**,
+S2 → **#3192** (stacked on #3191), S3 → **#3193** (medium — array-methods.ts
+hot), S4 → **#3194**, S5 → **#3195**, S6 → **#3196** (medium — array-methods.ts
+hot, L). This epic stays the tracking umbrella.
+
 ### S1 — Unify the JS-error-throw templates on `buildThrowJsErrorInstrs` [M]
 
 - **Remove**: `dvTypeErrorThrow` (dataview-native.ts:653),

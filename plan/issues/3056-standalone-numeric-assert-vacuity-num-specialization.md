@@ -1,11 +1,11 @@
 ---
 id: 3056
 title: "Standalone numeric assertions are vacuous — add `assert_sameValue_num` harness routing (measurement re-baseline)"
-status: ready
+status: blocked
 sprint: current
 model: opus
 created: 2026-07-05
-updated: 2026-07-08
+updated: 2026-07-12
 priority: high
 horizon: m
 feasibility: medium
@@ -13,7 +13,13 @@ task_type: measurement-integrity
 area: test-harness
 language_feature: test262-runner, standalone-floor
 goal: standalone-mode
+blocked_by: [3055]
 related: [3054, 3055]
+# NOT auto-pickable: human-gated. Do NOT land under the autonomous loop — this
+# re-baselines the headline standalone floor and needs HUMAN sign-off + a
+# coordinated standalone-floor re-baseline (refresh test262-current.jsonl in
+# loopdive/js2wasm-baselines). Land after/with #3055 (the real codegen fix).
+# status: blocked removes it from `budget-status --pick` (two prior mis-claims).
 ---
 
 # #3056 — Standalone numeric assertions are not enforced (vacuous host_free_pass)
