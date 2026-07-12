@@ -137,6 +137,45 @@ parallel with T2/T3.
 - **Drift between doc and code**: T5's schema snapshot + T4's shared rule
   tables are the anti-drift mechanisms; the doc alone would rot.
 
+## Residual format/versioning decision memo (opus-owned — options only, 2026-07-12 fable-arch)
+
+**D1 (canonical JSON) and D2 (versioning policy) are FROZEN on main** (T1
+landed 2026-07-04; `IR_FORMAT_VERSION = "1.0"`). They are not re-litigated
+by any dev or architect — reopening either is a **major-version** decision.
+What remains genuinely open, for opus to ratify when the trigger arrives
+(none blocks T2–T6):
+
+1. **Binary encoding (the v2 non-goal's trigger).** Options: (a) stay
+   JSON-only until a consumer measures size/parse cost as a real problem
+   (status quo — zero work, gzip covers most of it); (b) pre-commit to a
+   trigger criterion now (e.g. "serialized module > N MB or parse > N ms in
+   a named consumer") so v2 isn't relitigated ad hoc; (c) CBOR/msgpack
+   sidecar as a cheap middle path (same schema, mechanical transcode).
+   Tradeoff axis: spec surface + second codepath vs. consumer performance
+   that is currently hypothetical.
+2. **Effects serialization.** v1.0 ships effects as a DERIVED per-kind
+   published table (ratified at T1), not per-instruction fields. Options:
+   (a) keep derived (smaller documents, no drift risk between field and
+   table); (b) additive minor serializing per-instruction effect lists once
+   a consumer needs instruction-granular effect overrides (e.g. a pure-call
+   annotation the kind table can't express). Decide only when such a
+   consumer exists.
+3. **Schema depth (T5's open latitude).** T1's schema pins the 59-kind
+   table + discriminating payloads for the key kinds. Options: (a) deepen
+   to full per-kind payload conditionals (strongest gate, most maintenance;
+   hand-maintained drift risk unless generated); (b) generate the schema
+   from the node-kind tables (one source of truth — preferred direction if
+   T5 finds the generator cheap); (c) keep the current depth and lean on
+   the verifier as the semantic gate (contract §Conformance already says
+   this). This is a T5 implementation choice, not a contract change.
+4. **Version negotiation / min-reader policy.** The contract states writer
+   versioning but not reader obligations. Options: (a) readers MUST reject
+   a higher major and MAY accept any equal-major/higher-minor (additive
+   guarantee makes this safe) — the conventional choice; (b) readers pin
+   exact versions (safest, most brittle). Needs ratifying text in
+   `docs/ir/ir-contract.md` §Versioning before the FIRST external consumer
+   ships (T6 is the natural deadline).
+
 ## Progress log
 
 ### T1 landed — v1.0 frozen (fable-arch-slices, 2026-07-04)
