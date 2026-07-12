@@ -3222,17 +3222,24 @@ function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFil
  * fall back to the existing `ref.null.extern` behavior.
  */
 /**
- * (#3166) True when the receiver of an element-access expression statically
- * resolves to a user-defined class instance (present in `ctx.classSet`, incl.
- * class expressions aliased via `classExprNameMap`). Gates the field-closure
- * dynamic-call route so primitive / array / host receivers keep their existing
- * lowering.
+ * (#3166) Resolve the receiver of an element-access expression to a
+ * user-defined class name (present in `ctx.classSet`, incl. class expressions
+ * aliased via `classExprNameMap`), or `undefined`. Uses the type oracle
+ * (#1930) rather than a raw checker query.
+ */
+function elemAccessReceiverClassName(ctx: CodegenContext, elemAccess: ts.ElementAccessExpression): string | undefined {
+  let name = ctx.oracle.declaredNameOf(elemAccess.expression);
+  if (name && !ctx.classSet.has(name)) name = ctx.classExprNameMap.get(name) ?? name;
+  return name && ctx.classSet.has(name) ? name : undefined;
+}
+
+/**
+ * (#3166) True when the element-access receiver resolves to a user-class
+ * instance. Gates the field-closure dynamic-call route so primitive / array /
+ * host receivers keep their existing lowering.
  */
 function elemAccessReceiverIsUserClass(ctx: CodegenContext, elemAccess: ts.ElementAccessExpression): boolean {
-  const recvType = ctx.checker.getTypeAtLocation(elemAccess.expression);
-  let name = recvType.getSymbol()?.name;
-  if (name && !ctx.classSet.has(name)) name = ctx.classExprNameMap.get(name) ?? name;
-  return !!name && ctx.classSet.has(name);
+  return elemAccessReceiverClassName(ctx, elemAccess) !== undefined;
 }
 
 /**
@@ -3246,9 +3253,7 @@ function classInstanceHasField(
   elemAccess: ts.ElementAccessExpression,
   fieldName: string,
 ): boolean {
-  const recvType = ctx.checker.getTypeAtLocation(elemAccess.expression);
-  let name = recvType.getSymbol()?.name;
-  if (name && !ctx.classSet.has(name)) name = ctx.classExprNameMap.get(name) ?? name;
+  const name = elemAccessReceiverClassName(ctx, elemAccess);
   if (!name) return false;
   const fields = ctx.structFields.get(name);
   return !!fields && fields.some((f) => f.name === fieldName);
