@@ -1,7 +1,9 @@
 ---
 id: 3195
 title: "bloat S5: runtime.ts — one parameterized closure-iterable drainer (fold the 3 copies + truthyEnv dup)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-find-wasm
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -58,3 +60,40 @@ file). Fold into one export.
 `NewPromiseCapability` / combinator dispatch is `:12445`, `:13341-13465`; the
 drainers are `:2938-3031` and `:10605`). Low collision risk but re-merge
 `origin/main` before enqueue.
+
+## Resolution (2026-07-12, dev-find-wasm)
+
+**Drainers → one loop.** Extracted `_stepClosureIterator(iteratorObj, exports,
+opts)` + the shared `_resolveIterProp` field-resolver in `runtime.ts`. All three
+drainers now delegate their step loop to it:
+- `_drainClosureIterableToArray` → `{ cap: 1_000_000, nullOnMalformedNext: true }`
+- `_drainWasmClosureIterable` → `{ nullOnMissingCallFn0: true }`
+- `_walkWasmIterator` → `{ limit, closeOnStop: true }`
+
+Each keeps its own distinct ENTRY (iterator acquisition: raw-closure vs
+wrapper-vs-raw vs native-vs-wasm dispatch); only the triplicated step loop
+folded. The historical divergences became the `opts` (cap, limit, `closeOnStop`
+IteratorClose, `nullOnMalformedNext`, `nullOnMissingCallFn0`) — verified 1:1
+against each original. `_resolveIterProp` is functionally equivalent to the old
+`_readIterResultField` for the inputs `_drainClosureIterableToArray` actually
+sees (always wasm-struct iterators/results, per its precondition), so switching
+it in is behavior-preserving.
+
+**truthyEnv → one export.** The verbatim dup (`index.ts` vs
+`fallback-telemetry.ts`) folded: `truthyEnv` is now exported from the leaf
+`fallback-telemetry.ts` (index.ts already imports that module — no cycle) and
+imported into `index.ts`.
+
+Net −17 LOC.
+
+## Test Results
+
+- `tests/issue-3195.test.ts` — 4/4 (spread, Array.from, bounded destructuring,
+  for-of over a compiled closure `[Symbol.iterator]` — the three drainer paths
+  end-to-end). Passes identically on base (drainers reverted).
+- Zero test-diff: 15 drainer-exercising suites (#1320, #928/#929 generator-forof,
+  #3023, #1219, #1592, spread/destructuring, flatmap, …) report identical
+  pass/fail on base vs change (99/8 — the 8 pre-existing `string_constants`
+  local-harness failures are unrelated). runtime.ts is host-side glue, not
+  compiled into the wasm, so emitted binaries are unchanged by construction.
+- `tsc --noEmit` clean; `check:loc-budget` OK (−17 LOC).
