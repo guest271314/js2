@@ -1205,43 +1205,36 @@ function emitAnnexBTypeofFlagBranch(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
- * (#2623 P-7) True when `sym` has at least one assignment expression targeting
- * it anywhere in its source file (beyond the declaration initializer). Used to
- * detect null/undefined flow-narrowing the checker could not invalidate
- * (assignments inside nested closures are not applied to the outer flow), so
- * `typeof x` must take the runtime path instead of const-folding. Cached per
- * symbol — the source is immutable during a compile.
+ * (#2623 P-7) True when SOME assignment expression in `sf` targets a bare
+ * identifier named `name`. Used to detect null/undefined flow-narrowing the
+ * checker could not invalidate (assignments inside nested closures are not
+ * applied to the outer flow), so `typeof x` must take the runtime path instead
+ * of const-folding. NAME-based (checker-free, per the #1930 oracle ratchet) —
+ * a same-named different binding over-approximates, which only ever trades a
+ * fold for a correct runtime `__typeof` call. One walk per source file,
+ * cached (source is immutable during a compile).
  */
-const _typeofSymbolAssignedCache = new WeakMap<ts.Symbol, boolean>();
-function symbolHasAssignmentOutsideDeclaration(ctx: CodegenContext, sym: ts.Symbol): boolean {
-  const cached = _typeofSymbolAssignedCache.get(sym);
-  if (cached !== undefined) return cached;
-  let found = false;
-  const sf = sym.valueDeclaration?.getSourceFile();
-  if (sf) {
+const _typeofAssignedNamesCache = new WeakMap<ts.SourceFile, ReadonlySet<string>>();
+function sourceHasIdentifierAssignment(sf: ts.SourceFile, name: string): boolean {
+  let names = _typeofAssignedNamesCache.get(sf);
+  if (names === undefined) {
+    const collected = new Set<string>();
     const visit = (node: ts.Node): void => {
-      if (found) return;
       if (
         ts.isBinaryExpression(node) &&
         node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
         node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
         ts.isIdentifier(node.left)
       ) {
-        try {
-          if (ctx.checker.getSymbolAtLocation(node.left) === sym) {
-            found = true;
-            return;
-          }
-        } catch {
-          /* ignore unresolvable LHS */
-        }
+        collected.add(node.left.text);
       }
       ts.forEachChild(node, visit);
     };
     visit(sf);
+    names = collected;
+    _typeofAssignedNamesCache.set(sf, names);
   }
-  _typeofSymbolAssignedCache.set(sym, found);
-  return found;
+  return names.has(name);
 }
 
 /**
@@ -1394,14 +1387,15 @@ export function compileTypeofExpression(
     // re-narrow the type away from null, so this only fires where the fold is
     // genuinely unsound (closure-crossing or branch-dependent writes) — those
     // sites trade the fold for a correct runtime `__typeof` call.
-    if (!forceRuntimeTypeof && ctx.standalone !== true && ctx.wasi !== true && ts.isIdentifier(bareTdz)) {
-      const narrowed = ctx.checker.getTypeAtLocation(bareTdz);
-      if ((narrowed.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0) {
-        const sym = ctx.checker.getSymbolAtLocation(bareTdz);
-        if (sym?.valueDeclaration && symbolHasAssignmentOutsideDeclaration(ctx, sym)) {
-          forceRuntimeTypeof = true;
-        }
-      }
+    if (
+      !forceRuntimeTypeof &&
+      ctx.standalone !== true &&
+      ctx.wasi !== true &&
+      ts.isIdentifier(bareTdz) &&
+      (tsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 &&
+      sourceHasIdentifierAssignment(bareTdz.getSourceFile(), bareTdz.text)
+    ) {
+      forceRuntimeTypeof = true;
     }
   }
 
@@ -1553,12 +1547,10 @@ export function compileTypeofComparison(
     ctx.standalone !== true &&
     ctx.wasi !== true &&
     ts.isIdentifier(operand) &&
-    (tsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
+    (tsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 &&
+    sourceHasIdentifierAssignment(operand.getSourceFile(), operand.text)
   ) {
-    const sym = ctx.checker.getSymbolAtLocation(operand);
-    if (sym?.valueDeclaration && symbolHasAssignmentOutsideDeclaration(ctx, sym)) {
-      staticTypeof = null;
-    }
+    staticTypeof = null;
   }
   if (staticTypeof !== null) {
     const matches = staticTypeof === stringLiteral;
