@@ -20,6 +20,11 @@ goal: spec-completeness
 test262_category: built-ins/RegExp/prototype/Symbol.replace, built-ins/RegExp/prototype/Symbol.split
 test262_fail: 48
 related: []
+loc-budget-allow:
+  - src/runtime.ts
+  - src/codegen/literals.ts
+  - src/codegen/index.ts
+  - src/codegen/closures.ts
 ---
 
 # #3051 — RegExp `[@@replace]` / `[@@split]` coercion protocol
