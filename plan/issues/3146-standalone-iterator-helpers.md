@@ -11,6 +11,14 @@ feasibility: hard
 area: codegen, runtime
 goal: standalone-mode
 related: [2984]
+# LOC-budget gate (#3102): intentional growth from the shared-substrate ladder
+# extensions (GC-ref carriers, string arm, OBJ next-fallback, optional deps),
+# the __j2w_iter_* recognizer, and the source-prelude injection wiring. The bulk
+# of the feature lives in the NEW src/iterator-statics-prelude.ts (not ratcheted).
+loc-budget-allow:
+  - src/codegen/iterator-native.ts
+  - src/codegen/expressions/calls.ts
+  - src/compiler.ts
 origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
 ---
 
