@@ -10,9 +10,9 @@
   },
   {
     "edition": "ES5",
-    "pass": 10292,
+    "pass": 10294,
     "fail": 2689,
-    "ce": 94,
+    "ce": 92,
     "skip": 0,
     "total": 13075,
     "pct": 79,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11884,
-    "fail": 3366,
+    "pass": 11886,
+    "fail": 3364,
     "ce": 135,
     "skip": 1,
     "total": 15386,
@@ -2141,12 +2141,12 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3366,
-    "fail": 827,
-    "ce": 41,
+    "pass": 3400,
+    "fail": 796,
+    "ce": 38,
     "skip": 0,
     "total": 4234,
-    "pct": 79,
+    "pct": 80,
     "features": [
       {
         "name": "class",
@@ -2159,12 +2159,12 @@
       },
       {
         "name": "class-fields-public",
-        "pass": 1653,
-        "fail": 401,
+        "pass": 1683,
+        "fail": 371,
         "ce": 0,
         "skip": 0,
         "total": 2054,
-        "pct": 80
+        "pct": 82
       },
       {
         "name": "class-fields-private",
@@ -2240,12 +2240,12 @@
       },
       {
         "name": "computed-property-names",
-        "pass": 65,
-        "fail": 166,
+        "pass": 95,
+        "fail": 136,
         "ce": 0,
         "skip": 0,
         "total": 231,
-        "pct": 28
+        "pct": 41
       },
       {
         "name": "Symbol.iterator",
@@ -2258,21 +2258,21 @@
       },
       {
         "name": "top-level-await",
-        "pass": 163,
-        "fail": 25,
-        "ce": 5,
+        "pass": 167,
+        "fail": 24,
+        "ce": 2,
         "skip": 0,
         "total": 193,
-        "pct": 84
+        "pct": 87
       },
       {
         "name": "class-static-fields-public",
-        "pass": 68,
-        "fail": 115,
+        "pass": 98,
+        "fail": 85,
         "ce": 0,
         "skip": 0,
         "total": 183,
-        "pct": 37
+        "pct": 54
       },
       {
         "name": "Symbol.asyncIterator",
@@ -2429,12 +2429,12 @@
       },
       {
         "name": "exponentiation",
-        "pass": 8,
-        "fail": 4,
+        "pass": 12,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 12,
-        "pct": 67
+        "pct": 100
       },
       {
         "name": "Symbol.species",
