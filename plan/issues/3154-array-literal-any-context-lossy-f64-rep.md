@@ -1,16 +1,60 @@
 ---
 id: 3154
 title: "Array-literal lowering in an `any` context adopts a lossy NaN-f64 representation for literals containing `undefined`/mixed elements"
-status: ready
-sprint: Backlog
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/fable-eqfix
+sprint: current
 priority: medium
 horizon: m
 feasibility: hard
 area: codegen
 goal: standalone-mode
-related: [3151]
+related: [3151, 90]
 origin: "#3151 / PR #2899 auto-park diagnosis (CI-fix dev, 2026-07-12)"
+loc-budget-allow:
+  - src/codegen/binary-ops.ts
+  - src/codegen/literals.ts
 ---
+
+## Resolution (2026-07-12, fable-eqfix — jointly with task #90)
+
+Fixed as the array-literal half of the `any !== any` value-equality gap
+(TaskList task #90). Two coupled root causes, one PR:
+
+- **(A) `#3154` array-literal rep (`src/codegen/literals.ts`)** — the
+  `compileArrayLiteral` contextual-type widening only fired for an
+  `Array<any>` contextual type. A **bare-`any`** context (an array literal
+  passed directly to an `any`-typed parameter, or an inner tuple of an `any[]`
+  outer literal) kept the first-element f64/i32 fast path, so a `void 0`
+  element became the sNaN sentinel (reads back a NaN _number_; `a[1] !== a[1]`
+  self-compare true; `typeof` lies `"number"`) and string/boolean/symbol
+  elements were dropped/number-coerced at CONSTRUCTION. Fix: widen a
+  **non-all-numeric** bare-`any` literal to externref-boxed elements (each
+  boxed by its own static type — the SAME construction `Array<any>` already
+  uses). A homogeneous-numeric literal keeps the f64 fast path byte-identical.
+
+- **(B) `#90` strict-eq value compare (`src/codegen/binary-ops.ts`)** — a
+  dynamic element/member read in standalone lowers to a `(ref $AnyValue)`
+  reader carrier (#3037 CS1b); compared `===`/`!==` against an `any` PARAM
+  (raw externref) or a primitive, the codegen `ref.eq`'d the CARRIER BOX
+  against the raw value → always false, so equal strings / the same interned
+  symbol / boxed-undefined wrongly tested unequal. Fix: route the mixed
+  `$AnyValue`-vs-externref/primitive pair through the tag-aware
+  `__any_strict_eq` (§7.2.16 IsStrictlyEqual — numbers by `f64.eq` with
+  NaN≠NaN / +0===-0, strings by content, objects/symbols by identity),
+  classifying the non-carrier side with the SAME honest classifier the reader
+  used. A statically-symbol i32 operand is boxed by its brand
+  (`__box_symbol` — the id-interned `$Symbol` carrier), never `__box_number`,
+  in the standalone tag-dispatch AND the host `__host_eq` path.
+
+Regression guard: `tests/issue-90-any-value-eq.test.ts` (15 shapes × both
+lanes). **Still out of scope (independent pre-existing root causes, identical
+on clean main — verified):** `Map/groupBy/string.js` (groupBy does not iterate
+a **string** iterable — empty map) and `Map/groupBy/toPropertyKey.js` (object
+**key** identity lost through the struct→externref boxing substrate). Neither is
+the string/symbol value-equality class; both reproduce byte-identically on
+`origin/main` and are unaffected by this change.
 
 ## Problem (probe-pinned 2026-07-12)
 
@@ -22,7 +66,7 @@ compiler picks a **lossy representation** for the array's elements:
   as **NaN**. A subsequent read gives `typeof a[1] === "number"` (should be
   `"undefined"`), and because `NaN !== NaN`, even a **self-compare**
   `a[1] !== a[1]` returns true — a plain array literal fails to compare equal
-  to *itself*.
+  to _itself_.
 - Mixed-element literals like `[1, 'z']` or `[symA, symB]` **misread their
   non-numeric elements** through the same `any`-context path — the string /
   symbol elements are lost or coerced when the literal is built as f64.
@@ -65,21 +109,31 @@ function f(a: any): number {
   // self-compare of a plain array literal's undefined element
   return a[1] !== a[1] ? 0 : 1; // returns 0 (BROKEN — should be 1)
 }
-export function test(): number { return f([1, void 0, 3]); }
+export function test(): number {
+  return f([1, void 0, 3]);
+}
 ```
 
 ```ts
 // typeof through any: literal's undefined element reads as "number"
-function g(a: any): string { return typeof a[1]; }
-export function test(): string { return g([1, void 0, 3]); } // "number" (BROKEN — "undefined")
+function g(a: any): string {
+  return typeof a[1];
+}
+export function test(): string {
+  return g([1, void 0, 3]);
+} // "number" (BROKEN — "undefined")
 ```
 
 Compare with the **`any[]`** annotation, which lowers the literal correctly
 (WasmGC array of boxed/externref elements) and reads `undefined` back:
 
 ```ts
-function f(a: any[]): number { return a[1] === undefined ? 1 : 0; }
-export function test(): number { return f([1, void 0, 3]); } // 1 (CORRECT)
+function f(a: any[]): number {
+  return a[1] === undefined ? 1 : 0;
+}
+export function test(): number {
+  return f([1, void 0, 3]);
+} // 1 (CORRECT)
 ```
 
 Note the asymmetry surfaced by the probes: an array built as a typed `any[]`
@@ -108,7 +162,7 @@ type drives element-representation selection at construction, not in the
 - The representation decision lives in array-literal codegen — inspect where
   the contextual/expected type of an array literal selects between an f64
   packed array and a boxed/externref WasmGC array. The bug is that an `any`
-  expected type currently routes to the f64-packed path when the *first*
+  expected type currently routes to the f64-packed path when the _first_
   element is numeric, instead of the boxed path that preserves `undefined`
   and heterogeneous elements.
 - Cross-check against the `any[]` path, which already lowers these literals

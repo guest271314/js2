@@ -3698,6 +3698,36 @@ export function compileArrayLiteral(
         if (ctxElemType && (ctxElemType.flags & ts.TypeFlags.Any) !== 0) {
           elemWasm = { kind: "externref" };
         }
+      } else if ((ctxArrType.flags & ts.TypeFlags.Any) !== 0) {
+        // (#3154) BARE-`any` context — an array literal passed directly to an
+        // `any`-typed parameter (`f([1, void 0, 3])` with `f(a: any)`), or an
+        // inner tuple of an `any[]` outer literal. The S0 widening above only
+        // fires for `Array<any>` contextual types, so these literals kept the
+        // first-element f64/i32 fast path: a `void 0` element became the sNaN
+        // sentinel (reads back as a NaN *number*, `a[1] !== a[1]` self-compare
+        // fails, `typeof` lies), and string/symbol/boolean elements were
+        // dropped or number-coerced at CONSTRUCTION — unrecoverable at any
+        // read site. This regressed 15 baseline-pass compareArray-cluster
+        // tests when the test262 harness shims briefly moved to `any` params
+        // (#3151 merge-group park, run 29175942933).
+        //
+        // Widen to externref-boxed elements — the SAME construction the
+        // `Array<any>` context already uses, so each element is boxed by its
+        // own static type (`__box_number` / `__box_boolean` / `__box_symbol` /
+        // native string / `ref.null extern` for undefined) — but ONLY when the
+        // literal is not purely numeric. A homogeneous number literal (the
+        // overwhelmingly common `compareArray(x, [1, 2, 3])` shape) keeps the
+        // f64 fast path byte-identical: its elements read back correctly
+        // through the dynamic `any` path already, and NaN self-inequality on a
+        // *genuine* NaN element is spec-correct (§7.2.16), not corruption.
+        const allPlainNumbers = expr.elements.every((el) => {
+          if (ts.isOmittedExpression(el) || _isUndefinedLike(el)) return false;
+          const t = ctx.checker.getTypeAtLocation(el);
+          return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+        });
+        if (!allPlainNumbers) {
+          elemWasm = { kind: "externref" };
+        }
       }
     }
   }
