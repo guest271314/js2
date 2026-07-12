@@ -47044,7 +47044,7 @@
         "built-ins/GeneratorFunction",
         "built-ins/GeneratorPrototype"
       ],
-      "passCount": 1034,
+      "passCount": 1035,
       "totalCount": 1391,
       "tests": [
         {
