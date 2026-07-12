@@ -4,12 +4,13 @@
 // `$AsyncFrame` resume machine with the host settle backend (#1042), so ONE
 // engine drives every linear shape (single-await is the N=1 case).
 //
-// The slice-1 carve-outs are since retired: lifted closures were admitted in
-// slice 2a (with the #2873 park-fix hazard gate), concise arrow bodies in
-// slice 2b-1, and binding-pattern params in slice 2b-2 (derived prologue
-// locals ride the frame as live-initialized spill fields). The only CPS
-// re-lanes left are hazard DECLINES (cell-boxed spills / cell-boxed derived
-// params), not population carve-outs.
+// The slice-1 carve-outs are all retired: lifted closures (slice 2a, #2873
+// park-fix), concise arrow bodies (2b-1), binding-pattern params (2b-2,
+// live-initialized spills), cell-boxed spills (phase 3a, force-boxed cell
+// fields), and the class-2 ref-typed spill guess (#3134's Promise<T>
+// value-slot rep fix). Slice 2c then DELETED the CPS engine
+// (`emitAsyncStateMachine`/`compileSyntheticAsyncContinuation`/the `cps`
+// lane): the frame engine is the sole JS-host suspension engine.
 //
 // Structural assertions read the binaryen-emitted WAT for the
 // `__async_resume_f<name>` resume function — the frame engine's signature
@@ -582,5 +583,66 @@ describe("#2967 phase 3a — cell-aware frame layout (force-boxed class-1 spills
       export function main(): any { return f(); }
     `);
     await expect(settled(exports.main())).resolves.toBe(42);
+  });
+});
+
+describe("#2967 slice 2c — the CPS engine is DELETED; one frame engine", () => {
+  it("a single-tail-await DECLARATION mints a resume fn + a pending result promise (no CPS fallback)", async () => {
+    const wat = await watOf(`
+      async function f(): Promise<number> {
+        const a = await Promise.resolve(20).then((x: number) => x + 1);
+        return a * 2;
+      }
+      export async function main(): Promise<number> { return await f(); }
+    `);
+    expect(wat).toContain("__async_resume_ff");
+    // The deleted CPS driver chained via Promise_then2 from an exported
+    // continuation; the frame engine settles a pre-allocated pending promise.
+    expect(wat).toContain("Promise_new_pending");
+  });
+
+  it("the former class-2 shape (a Promise<T> vec element live across the await) now DRIVES a closure and resolves (#3134 unblock)", async () => {
+    const wat = await watOf(`
+      export function main(): any {
+        const g = async function (): Promise<number> {
+          const p = Promise.resolve(40).then((x: number) => x + 0);
+          const expected = [p];
+          const first = await expected[0];
+          const a = await Promise.resolve(2).then((x: number) => x + 0);
+          return first + a;
+        };
+        return g();
+      }
+    `);
+    expect(wat).toContain("__async_resume_fanon");
+    const exports = await compileToWasm(`
+      export function main(): any {
+        const g = async function (): Promise<number> {
+          const p = Promise.resolve(40).then((x: number) => x + 0);
+          const expected = [p];
+          const first = await expected[0];
+          const a = await Promise.resolve(2).then((x: number) => x + 0);
+          return first + a;
+        };
+        return g();
+      }
+    `);
+    await expect(settled(exports.main())).resolves.toBe(42);
+  });
+
+  it("a discarded-tail bare await in a CLOSURE (the former 2957 CPS-emit re-park) settles correctly on the frame engine", async () => {
+    const exports = await compileToWasm(`
+      let acc: number = 0;
+      export function main(): any {
+        const cb = async function (): Promise<void> {
+          await Promise.resolve(0).then((x: number) => { acc = 42; return x; });
+        };
+        return cb();
+      }
+      export function readAcc(): number { return acc; }
+    `);
+    await settled(exports.main());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(exports.readAcc()).toBe(42);
   });
 });

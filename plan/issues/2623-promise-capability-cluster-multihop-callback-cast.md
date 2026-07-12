@@ -5,8 +5,14 @@ status: ready
 # stale in-progress claim (ttraenkler/sendev-promise-subclass) cleared 2026-07-04 by the
 # architect: that agent's landable slices merged (#1977 identity, #1981 box-depth) and the
 # deep tail was formalized as #2637 (done). No record existed on the issue-assignments ref.
+# 2026-07-12: dev-promise-p7 force-claimed over the stale sd-2623a lock (2026-06-24, its
+# slices merged), SHIPPED slice P-7a (B-1 arguments.length reflection + B-5 §27.2.5.3
+# sync-throw + two typeof unsound-fold residuals — 4 test262 flips, zero scoped
+# regressions; see "§P7 P-7a SHIPPED" below), released the lock, and left the anchor
+# `ready` for the remaining slices (P-3 Fable standalone-capability; P-7b B-4
+# observable-resolve + Promise.try — concrete findings banked below).
 created: 2026-06-22
-updated: 2026-07-04
+updated: 2026-07-12
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -17,6 +23,17 @@ goal: async-model
 sprint: current
 parent: 1528
 architect_spec: authored
+# (#3102 LOC ratchet) P-7a/P-7b grow four over-threshold files intentionally:
+# a new dispatcher-mirroring export (index.ts), the bridge dispatch-arity +
+# realm-unification arms (runtime.ts), the finally wrap-exclusion
+# (expressions.ts) and the typeof unsound-fold guards (typeof-delete.ts) —
+# each sits beside the machinery it corrects; extraction is #3102's job.
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/typeof-delete.ts
+  - src/runtime.ts
+  - src/codegen/expressions.ts
+  - src/codegen/declarations.ts
 related: [2614, 2618, 1373b, 1042, 86, 56, 2613, 2958, 2867, 2906, 2959, 2980]
 note: "Spun off from #86 (class-ctor arm, merged) + #55 async-bucket scope (PR #1947). The #56/#1940 closure-construct bridge + #86 executor-call host-routing landed the SURFACE of the capability lane; this issue is the DEEPER shared substrate behind three clusters that the surface fixes did NOT close."
 ---
@@ -1099,3 +1116,91 @@ serially or coordinate; P-7 is `runtime.ts`, P-8 is `tests/`.
 - P-8: the #2613 row list (~15) + `allSettled/call-resolve-element.js`,
   `race/resolve-from-same-thenable.js` — with the honest-flip bucket
   breakdown attached to the PR.
+
+---
+
+## §P7 P-7a SHIPPED — B-1 reflection + B-5 sync-throw + typeof unsound-fold (dev-promise-p7, 2026-07-12)
+
+**Banked: 4 test262 flips, zero scoped regressions** (per-process runner, host lane):
+- `built-ins/Promise/prototype/finally/invokes-then-with-function.js` fail→pass
+- `built-ins/Promise/prototype/finally/invokes-then-with-non-function.js` fail→pass
+- `built-ins/Promise/prototype/finally/this-value-then-poisoned.js` fail→pass
+- `built-ins/Promise/prototype/finally/this-value-then-throws.js` fail→pass
+
+Four distinct root causes, each probe-verified (probes in `.tmp/`, tests in
+`tests/issue-2623-p7-finally-bridge.test.ts`):
+
+1. **B-1 `arguments.length` reflection** — `_wrapWasmClosureUnknownArity`'s
+   method arm dispatched every host→wasm callback at the HIGHEST emitted
+   `__call_fn_method_N`; the #820l argc/extras plumbing derives
+   `arguments.length` from the dispatcher arity, so the pad-to-max was
+   indistinguishable from real undefined args (V8-native `.finally` invokes a
+   patched `then` with exactly 2 args; wasm observed 5). Fix: new codegen
+   export `__closure_arity(externref)→i32` (src/codegen/index.ts, mirrors
+   `__is_closure` + `buildFuncrefExtraction`, per-funcType `ref.test` →
+   declared formal count) + the dynamic bridge (src/runtime.ts) now dispatches
+   at exactly `max(args.length, realArity)` when that dispatcher exists —
+   never below the closure's declared arity (the #2664 acorn omission hazard
+   is preserved; falls back to max-arity when the export is absent).
+2. **B-5 synchronous abrupt completion** — `isAsyncCallExpression`
+   (src/codegen/expressions.ts) wrapped every promise-returning call in the
+   fulfilled-wrap try/catch→`Promise_reject`, converting the §27.2.5.3
+   SYNCHRONOUS throw from a poisoned/throwing `then` into a rejection, and its
+   `Promise_resolve(result)` re-wrap destroyed the `result === returnValue`
+   identity (`invokes-then-*` last assert). Fix: `.finally(…)` calls (and
+   `…finally.call/apply(…)`) are excluded from the wrap on the gc/host lane
+   ONLY — the standalone producer-module lane keeps the wrap per the #2903
+   measurement (subclass-finally passes only WITH it there).
+3. **typeof unsound null-narrow fold** — `var resolve = null;
+   patched.then = function(a,b){ resolve = a; }; typeof resolve` const-folded
+   to "object": TS never applies closure-crossing assignments to the outer
+   flow, so the narrowed type stays `null`. Fix (src/codegen/typeof-delete.ts):
+   both `compileTypeofExpression` and `compileTypeofComparison` now force the
+   runtime path when the operand's narrowed type is Null/Undefined AND the
+   symbol has an assignment beyond its declaration
+   (`symbolHasAssignmentOutsideDeclaration`, cached per symbol; host lane only
+   — the standalone `__typeof` native is a null stub, #2107).
+4. **boxed-capture typeof operand** — `compileTypeofComparison`'s raw
+   `local.get` fast path pushed the mutable ref CELL (boxed capture) instead
+   of the value, so `typeof_check` host-side saw `[object Object]` for a
+   stored host function. Fix: boxed-capture bindings route through
+   `compileExpression` (derefs the cell); non-local operands now also coerce
+   AnyValue→externref explicitly.
+
+Scoped validation: full finally+try+invoke-resolve family re-measured (4 flips,
+0 regressions — `.tmp/baseline-p7.txt` vs `.tmp/after-p7.txt`); 77 targeted
+dispatch/typeof tests + async/promise suites + acorn-dispatch suites green
+(3 failures verified PRE-EXISTING on clean main via stash:
+`promise-combinators` ×2, `optional-direct-closure-call` ×2,
+`issue-1712-capture-closure-dispatch` ×1). Broad-impact (closure-call hot
+path) → merge_group floor authoritative.
+
+## §P7 P-7b remaining — B-4 observable-resolve + Promise.try (findings, NOT yet landed)
+
+Probe-verified loci for the follow-up slice (all probes reproduced 2026-07-12):
+
+- **`Promise.resolve = fn` assignment is a complete NO-OP in codegen** (host
+  lane): no import call is emitted, the patch is invisible to reads
+  (`Promise.resolve === orig` stays true) and to V8's `Get(C,"resolve")`.
+  `all/race invoke-resolve` cannot flip until the assignment LANDS on the same
+  object `_resolveCtor(directCall=1)` passes as C.
+- **Realm identity split**: `__get_builtin("Promise")` (runtime.ts:11797)
+  returns HOST-realm `globalThis.Promise`, while the `global_Promise` import
+  (`declared_global` intent) returns the runner's vm-SANDBOX Promise. So
+  `Promise.try(fn)` (generic `__extern_method_call(__get_builtin("Promise"),
+  "try", …)`) mints a host-realm instance whose `.constructor` ≠ the wasm
+  `Promise` value-read → `try/promise.js` assert #1. Unify on the
+  sandbox-first object (`globalSandbox?.Promise ?? Promise`) for
+  `__get_builtin("Promise")` + `_resolveCtor` + the static-read path — Promise-
+  scoped, NOT a blanket `__get_builtin` change (cross-realm `instanceof`/error
+  identity hazards).
+- **`new Promise.try()` does not throw** (`try/not-a-constructor.js`): the
+  dynamic-new path on a host-fn externref value does not route through a real
+  `Construct` — V8 would throw the required TypeError natively via
+  `Reflect.construct`.
+- These COMPOSE with the landed B-1 fix: the patched `resolve` is a wasm
+  closure invoked by V8 with `this=C` and 1 arg — `invoke-resolve` asserts
+  `arguments.length === 1`, which only holds with the exact-arity dispatch.
+- Sandbox-pollution note for the runner: a landed static-patch would persist on
+  the vm-sandbox `Promise` — add `["Promise", "resolve"]` to `SENTINEL_KEYS`
+  in `tests/test262-runner.ts` when landing P-7b.

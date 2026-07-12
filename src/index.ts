@@ -270,6 +270,20 @@ export interface CompileOptions {
    *  `nativeStrings: true` and refuses to emit any `wasm:js-string` or
    *  `env` JS-host string imports. */
   target?: "gc" | "linear" | "wasi" | "standalone";
+  /**
+   * (#86) NOT a real option — declared `never` so `compile(src, { standalone:
+   * true })` is a TypeScript excess-property error. The standalone codegen
+   * regime is selected via `target: "standalone"`; a `standalone` boolean was
+   * silently ignored (it never reached codegen), producing vacuous standalone
+   * coverage. `buildCodegenOptions` also throws at runtime for widened
+   * (`Record`-typed) callers. Use `target: "standalone"`.
+   */
+  standalone?: never;
+  /**
+   * (#86) NOT a real option — see `standalone`. The WASI regime is
+   * `target: "wasi"`; a `wasi` boolean was silently ignored.
+   */
+  wasi?: never;
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
   /**

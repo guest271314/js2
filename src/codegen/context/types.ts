@@ -473,15 +473,6 @@ export interface FunctionContext {
    */
   emittedClosureArrayMethod?: boolean;
   /**
-   * (#1042) True while {@link emitAsyncStateMachine} is driving an async
-   * function body through the CPS transform. Read by the `AwaitExpression`
-   * dispatcher in expressions.ts to decide between the legacy pass-through and
-   * a continuation split. Inert in #1042 PR1 (the activation hook is unwired
-   * and `ASYNC_CPS_ENABLED` is false), so it stays undefined/false and the
-   * emitted Wasm is byte-identical.
-   */
-  asyncCpsActive?: boolean;
-  /**
    * (#2895 PATH B) Set while emitting a host-free async **resume** function body
    * (`__async_resume_f<name>`). When present, `return v` settles the frame's
    * result `$Promise` (`__promise_fulfill(resultPromise, v)`) and emits a void
