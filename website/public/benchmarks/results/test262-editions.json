@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11868,
-    "fail": 3382,
+    "pass": 11878,
+    "fail": 3372,
     "ce": 135,
     "skip": 1,
     "total": 15386,
@@ -111,8 +111,8 @@
       },
       {
         "name": "Symbol",
-        "pass": 441,
-        "fail": 181,
+        "pass": 442,
+        "fail": 180,
         "ce": 1,
         "skip": 0,
         "total": 623,
@@ -300,12 +300,12 @@
       },
       {
         "name": "DataView.prototype.setUint8",
-        "pass": 31,
-        "fail": 5,
+        "pass": 36,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 36,
-        "pct": 86
+        "pct": 100
       },
       {
         "name": "new.target",
@@ -1462,30 +1462,30 @@
   },
   {
     "edition": "ES2020",
-    "pass": 950,
-    "fail": 910,
+    "pass": 975,
+    "fail": 885,
     "ce": 18,
     "skip": 18,
     "total": 1896,
-    "pct": 50,
+    "pct": 51,
     "features": [
       {
         "name": "BigInt",
-        "pass": 550,
-        "fail": 472,
+        "pass": 575,
+        "fail": 447,
         "ce": 4,
         "skip": 0,
         "total": 1026,
-        "pct": 54
+        "pct": 56
       },
       {
         "name": "TypedArray",
-        "pass": 351,
-        "fail": 336,
+        "pass": 358,
+        "fail": 329,
         "ce": 1,
         "skip": 0,
         "total": 688,
-        "pct": 51
+        "pct": 52
       },
       {
         "name": "dynamic-import",
@@ -1498,12 +1498,12 @@
       },
       {
         "name": "Symbol",
-        "pass": 77,
-        "fail": 57,
+        "pass": 86,
+        "fail": 48,
         "ce": 0,
         "skip": 0,
         "total": 134,
-        "pct": 57
+        "pct": 64
       },
       {
         "name": "globalThis",
@@ -1525,48 +1525,48 @@
       },
       {
         "name": "ArrayBuffer",
-        "pass": 57,
-        "fail": 40,
+        "pass": 68,
+        "fail": 29,
         "ce": 0,
         "skip": 0,
         "total": 97,
-        "pct": 59
+        "pct": 70
       },
       {
         "name": "DataView",
-        "pass": 52,
-        "fail": 30,
+        "pass": 63,
+        "fail": 19,
         "ce": 0,
         "skip": 0,
         "total": 82,
-        "pct": 63
+        "pct": 77
       },
       {
         "name": "SharedArrayBuffer",
-        "pass": 26,
-        "fail": 47,
+        "pass": 33,
+        "fail": 40,
         "ce": 0,
         "skip": 0,
         "total": 73,
-        "pct": 36
+        "pct": 45
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 19,
-        "fail": 44,
+        "pass": 20,
+        "fail": 43,
         "ce": 0,
         "skip": 0,
         "total": 63,
-        "pct": 30
+        "pct": 32
       },
       {
         "name": "Atomics",
-        "pass": 13,
-        "fail": 48,
+        "pass": 20,
+        "fail": 41,
         "ce": 0,
         "skip": 0,
         "total": 61,
-        "pct": 21
+        "pct": 33
       },
       {
         "name": "Symbol.matchAll",
@@ -1579,12 +1579,12 @@
       },
       {
         "name": "computed-property-names",
-        "pass": 19,
-        "fail": 37,
+        "pass": 20,
+        "fail": 36,
         "ce": 0,
         "skip": 0,
         "total": 56,
-        "pct": 34
+        "pct": 36
       },
       {
         "name": "Symbol.species",
@@ -1696,12 +1696,12 @@
       },
       {
         "name": "DataView.prototype.setUint8",
-        "pass": 4,
-        "fail": 10,
+        "pass": 7,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 14,
-        "pct": 29
+        "pct": 50
       },
       {
         "name": "export-star-as-namespace-from-module",
@@ -3191,8 +3191,8 @@
   },
   {
     "edition": "ES2025",
-    "pass": 1065,
-    "fail": 209,
+    "pass": 1067,
+    "fail": 207,
     "ce": 0,
     "skip": 0,
     "total": 1274,
@@ -3254,12 +3254,12 @@
       },
       {
         "name": "Float16Array",
-        "pass": 43,
-        "fail": 6,
+        "pass": 45,
+        "fail": 4,
         "ce": 0,
         "skip": 0,
         "total": 49,
-        "pct": 88
+        "pct": 92
       },
       {
         "name": "Reflect.construct",
@@ -3326,12 +3326,12 @@
       },
       {
         "name": "DataView.prototype.setUint8",
-        "pass": 4,
-        "fail": 2,
+        "pass": 6,
+        "fail": 0,
         "ce": 0,
         "skip": 0,
         "total": 6,
-        "pct": 67
+        "pct": 100
       },
       {
         "name": "Reflect",
