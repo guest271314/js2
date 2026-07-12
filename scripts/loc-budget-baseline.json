@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-12",
   "threshold": 1500,
-  "totalCeiling": 404858,
+  "totalCeiling": 404951,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -42,7 +42,7 @@
     "src/codegen/regexp-standalone.ts": 2893,
     "src/codegen/stack-balance.ts": 2772,
     "src/codegen/statements/control-flow.ts": 1529,
-    "src/codegen/statements/loops.ts": 6482,
+    "src/codegen/statements/loops.ts": 6522,
     "src/codegen/statements/nested-declarations.ts": 2719,
     "src/codegen/statements/variables.ts": 1535,
     "src/codegen/string-ops.ts": 3495,
@@ -52,10 +52,10 @@
     "src/compiler/early-errors/node-checks.ts": 1865,
     "src/emit/binary.ts": 1992,
     "src/ir/builder.ts": 1633,
-    "src/ir/from-ast.ts": 7082,
+    "src/ir/from-ast.ts": 7125,
     "src/ir/integration.ts": 2795,
     "src/ir/lower.ts": 3617,
-    "src/ir/nodes.ts": 2987,
+    "src/ir/nodes.ts": 2993,
     "src/ir/select.ts": 3296,
     "src/runtime.ts": 16257
   }

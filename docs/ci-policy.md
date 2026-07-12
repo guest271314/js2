@@ -216,6 +216,32 @@ real run-to-run standalone drift was 0 regressions / +3 improvements, so 15
 sits well above the noise floor. The threshold is tunable via the
 `STANDALONE_REGRESSION_TOLERANCE` env on the guard step.
 
+### Uncatchable-trap growth ratchet (#3189)
+
+On top of the net/ratio/bucket gate, `scripts/diff-test262.ts` runs a
+**per-category trap ratchet**: for each of the four uncatchable-Wasm-trap
+`error_category` values — `null_deref`, `illegal_cast`, `oob`, `unreachable` —
+it compares the candidate's population against the baseline's, and **fails the
+gate (`exit 1`) on ANY growth in ANY trap category, independent of
+`net_per_test`**. A net-positive PR that fixes 60 assertion-fails while
+introducing 12 new `illegal_cast`s clears the net/ratio gate but is blocked
+here. The rationale: a Wasm trap **escapes `try`/`catch`** and aborts the whole
+test file (#3179 — a trap inside `assert.throws` poisons every test whose body
+shares the pattern), so the "crash-free (traps → 0)" goal
+(`plan/goals/goal-graph.md`) treats a trap as strictly worse than an ordinary
+fail — the trap population may only shrink or hold. The failure names the
+newly-trapping files. This applies in **both** the normal and the oracle
+re-baseline branches (a genuinely new trap is a real regression regardless of an
+oracle bump; the trap categories are not touched by any oracle reclassification,
+so they stay comparable across a forward bump). **Decreases auto-bank** with no
+per-PR baseline-bump merge conflict: the ratchet reads the committed baseline
+jsonl that `promote-baseline` re-seeds on every push to main (#1528/#3131), so a
+trap fix lowers the floor automatically on the next promote — there is no
+separate ratchet baseline file. Byte-identical (`wasm_sha`-unchanged) pass→trap
+flips are excluded as CI runner noise, exactly like the `net_per_test` gate's
+wasm-hash filter (#1222). The pure `evaluateTrapCategoryGrowth` logic is
+unit-tested in `tests/issue-3189.test.ts`.
+
 ---
 
 ## 4. Linear history and merge mode
