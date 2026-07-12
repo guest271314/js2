@@ -6810,18 +6810,38 @@ function emitArrayCallbackArgsPlumbing(
  * externref. Mirrors the array-elem coercion paths used by emitArgumentsVecBody.
  */
 function emitElemBoxToExternref(ctx: CodegenContext, arrTypeIdx: number, getOp: string): Instr[] {
-  void ctx;
-  void arrTypeIdx;
-  void getOp;
-  // The element is on top of stack from the array.get. We don't reliably know
-  // its concrete ValType at this layer, but in practice this dispatcher only
-  // fires when numParams=0 (callback declares no formals). For that case the
-  // value is unused inside the body and just needs ANY externref placeholder
-  // so the extras vec has the right length. Use a null externref — the
-  // arguments[0] slot will be undefined / null which matches what tests with
-  // 0-formal callbacks observe.
-  // Drop the loaded element and push ref.null.extern.
-  return [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+  // (#3165) Box the loaded element (top of stack) to externref for the extras
+  // vec. The previous stub DROPPED the element and pushed a null externref on
+  // the claim that a 0-formal callback never reads its `arguments[0]` — false:
+  // the test262 `predicate-call-parameters` family (~186 standalone fails,
+  // TypedArray/Array callbackfn-arguments tests) does exactly
+  // `sample.findIndex(function() { results.push(arguments); })` and asserts
+  // `arguments[0]` is the element. The element's concrete ValType is the
+  // backing ARRAY type's element def; packed i8/i16 arrays surface as i32 on
+  // the stack via `array.get_s`/`array.get_u`.
+  //
+  // Boundary: a `$Hole` sentinel in a holey externref array rides through
+  // as-is (the inline param path's holeToUndefined mapping is not applied
+  // here) — same visibility as before for that edge; the numeric fast paths
+  // are exact.
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  const elem = arrDef && arrDef.kind === "array" ? (arrDef.element as ValType) : undefined;
+  const undefFallback: Instr[] = [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+  if (!elem) return undefFallback;
+  if (elem.kind === "externref") return [];
+  if (elem.kind === "ref" || elem.kind === "ref_null") return [{ op: "extern.convert_any" } as Instr];
+  const boxIdx = ctx.funcMap.get("__box_number");
+  const loadsAsI32 = elem.kind === "i32" || getOp === "array.get_s" || getOp === "array.get_u";
+  if (elem.kind === "f64") {
+    return boxIdx !== undefined ? [{ op: "call", funcIdx: boxIdx } as Instr] : undefFallback;
+  }
+  if (loadsAsI32) {
+    return boxIdx !== undefined
+      ? [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr]
+      : undefFallback;
+  }
+  // Unboxable element kind (i64/v128/…) — keep the undefined placeholder.
+  return undefFallback;
 }
 
 /**
