@@ -76,8 +76,25 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
  * (no closure materialization, so it also covers methods whose value-read is
  * not yet wired host-free); the meta subtypes answer reflective/runtime reads
  * for the wired closures.
+ *
+ * (#3181) The whole table AND every inner record are NULL-PROTOTYPED via
+ * `nullProtoDeep`. A plain object literal inherits `Object.prototype`, so an
+ * inner lookup of an `Object.prototype` method name (`toString`/`valueOf`/
+ * `hasOwnProperty`/`constructor`…) returned the INHERITED FUNCTION rather than
+ * `undefined` — making the fold at property-access.ts:1126 treat e.g.
+ * `Number.toString.length` as "found" and emit the `Function` as an f64 → NaN.
+ * With null prototypes, only the explicitly-listed static methods match; every
+ * other name resolves `undefined` and routes through the normal path.
  */
-export const BUILTIN_STATIC_METHOD_ARITY: Record<string, Record<string, number>> = {
+const nullProtoDeep = (rec: Record<string, Record<string, number>>): Record<string, Record<string, number>> => {
+  const out: Record<string, Record<string, number>> = Object.create(null);
+  for (const key of Object.keys(rec)) {
+    out[key] = Object.assign(Object.create(null) as Record<string, number>, rec[key]);
+  }
+  return out;
+};
+
+export const BUILTIN_STATIC_METHOD_ARITY: Record<string, Record<string, number>> = nullProtoDeep({
   Array: { isArray: 1, from: 1, fromAsync: 1, of: 0 },
   ArrayBuffer: { isView: 1 },
   BigInt: { asUintN: 2, asIntN: 2 },
@@ -187,7 +204,7 @@ export const BUILTIN_STATIC_METHOD_ARITY: Record<string, Record<string, number>>
   },
   Iterator: { from: 1 },
   Uint8Array: { fromBase64: 1, fromHex: 1 },
-};
+});
 
 /**
  * Register (idempotently, keyed by `cacheKey`) the unique metadata-carrying

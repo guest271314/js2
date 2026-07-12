@@ -1,7 +1,8 @@
 ---
 id: 3181
 title: "standalone: Number.prototype brand-check / property-surface / method .length / toExp+toPrec no-arg (residual #3175 gap)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-number-resid
 created: 2026-07-12
 updated: 2026-07-12
 priority: medium
@@ -252,3 +253,47 @@ TypeError; `call`/`apply` transfer shapes.
   the post-#2933 130/168 baseline toward ≥139.
 - Coordinate with PR #2933 (in-flight): branch AFTER it lands; its issue
   file (#3175) stays untouched by this work.
+
+## Progress log
+
+### Cluster C — DONE (2026-07-12, dev-number-resid)
+
+`Number.prototype.<m>.length` folded to **NaN**. Fable review corrected the
+root cause: NOT a dispatch-order bug — the shared `PROTO_METHOD_LENGTH` arity
+table (`src/codegen/array-object-proto.ts`) was a plain object literal, so a
+lookup of an `Object.prototype`-inherited method name
+(`toString`/`valueOf`/`toLocaleString`) returned the INHERITED FUNCTION, not
+`undefined`, slipping past the `?? 1` guard and emitting the `Function` as an
+f64 → NaN.
+
+Fix:
+- Null-prototyped `PROTO_METHOD_LENGTH` (`Object.assign(Object.create(null),
+  {...})`) + explicit `toString: 0, valueOf: 0, toLocaleString: 0` (correct
+  cross-family default).
+- `makeGlue` `memberLength` overrides Number's `toString` → 1
+  (`Number.prototype.toString(radix)` §21.1.3.7 is the only family where
+  `toString` ≠ 0).
+- Same inherited-function hazard flagged & fixed in
+  `BUILTIN_STATIC_METHOD_ARITY` (`src/codegen/builtin-fn-meta.ts`) via a
+  `nullProtoDeep` wrapper (outer table + every inner record null-proto'd).
+
+Bonus: also fixes `Array/String/Object.prototype.toString.length` (all were NaN
+on main). Both changed paths are `ctx.standalone`-gated ⇒ zero host-mode impact.
+Tests: `tests/issue-3181.test.ts` (10 cases, all pass). Adjacent #3175/#2933/
+#2374/#2160/#3081 suites (50 cases) still green.
+
+### Clusters B, D, A — REMAINING (honest scope)
+
+Not started in this slice. Per the plan's C→B→D→A ship order these are separate
+mergeable PR-lets and stay open under this issue:
+- **B** (property surface ~12 files, M): `Number.prototype` reflective
+  own-property queries (`hasOwnProperty`/enumeration/`constructor`) via the
+  `$NativeProto`/`registerNativeProtoBuiltin` machinery.
+- **D** (toExp/toPrec no-arg + coercion ~8 files, M): topologically order the
+  `number_toString` helper registration (the #3175 emit-graph CE), delegate
+  `toPrecision(undefined)` → `number_toString`, trailing-zero-trim
+  `toExponential()`; Symbol/BigInt args → real TypeError.
+- **A** (brand-check on transferred method values ~12 files, L): HARDEST.
+  Note (Fable): `emitReceiverBrandCheck`'s primitive arm throws unconditionally
+  for a raw-f64 receiver — must be handled around the gate so a raw-number
+  receiver is ACCEPTED, not thrown.
