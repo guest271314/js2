@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 2;
+export const ORACLE_VERSION = 3;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -57,5 +57,19 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "regression). Landed with ORACLE_REBASE (forward-monotonic bump auto-" +
       "rebases in diff-test262.ts) so the guards treat the cross-policy diff as " +
       "a re-baseline; promote-baseline re-seeds host+standalone baselines at v2.",
+  },
+  {
+    version: 3,
+    note:
+      "#3187 error_category classifier split. classifyError previously binned " +
+      "'… is not a function' (missing builtin/runtime feature) and 'No dependency " +
+      "provided for …' (the compiler's DI diagnostic) as wasm_compile, inflating " +
+      "the genuine invalid-Wasm bucket ~3.4× (~448 → ~87 default-lane). Splits out " +
+      "three honest buckets: missing_builtin ('\\bis not a function\\b'), " +
+      "missing_dependency ('No dependency provided'), and harness_shape ('no test " +
+      "export'), while wasm_compile is narrowed to 'invalid Wasm binary|Compiling " +
+      "function'. LABEL-ONLY: zero pass/fail flips (net_per_test 0). The " +
+      "regression-gate bucket diff is label-noise; landed with ORACLE_REBASE so " +
+      "the guards treat the cross-policy relabel as a re-baseline.",
   },
 ];
