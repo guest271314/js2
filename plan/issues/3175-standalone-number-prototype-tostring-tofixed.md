@@ -17,6 +17,11 @@ sprint: current
 horizon: m
 related: [2860, 3078, 3081, 2861]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+  - src/codegen/declarations.ts
+coercion-sites-allow:
+  - src/codegen/declarations.ts
 ---
 
 # #3175 — standalone: Number.prototype method spec semantics
@@ -108,8 +113,8 @@ Tests: `tests/issue-3175.test.ts`.
   receiver on transfer (`s.toString = Number.prototype.toString; s.toString()`
   must throw TypeError). Large — needs the shared brand-preamble (#3171/#3174)
   wired to extractable prototype-method values.
-- **Property surface** (~12: `Number.prototype.hasOwnProperty(...)`, S15.7.4_A3.*,
-  S15.7.3.1_*). Needs `Number.prototype` as a real object with own-property
+- **Property surface** (~12: `Number.prototype.hasOwnProperty(...)`, S15.7.4*A3.\*,
+  S15.7.3.1*\*). Needs `Number.prototype` as a real object with own-property
   descriptors.
 - **Method `.length`** (3: toString/valueOf/toLocaleString `length.js`). The
   `.name` fold already fires (`tryCompileStandaloneBuiltinProtoMemberMeta` in
