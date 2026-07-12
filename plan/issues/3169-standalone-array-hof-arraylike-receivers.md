@@ -31,6 +31,14 @@ loc-budget-allow:
   - src/codegen/context/types.ts
   - src/codegen/index.ts
   - src/codegen/array-methods.ts
+# (#2108) The added coercion sites INVOKE the sealed engine helpers, not
+# hand-rolled vocabulary: `__str_to_number` applies §7.1.20 ToLength →
+# §7.1.4 ToNumber to a STRING-ref `length` field (`length: "2"`, the -3-*
+# array-like family) via the existing native scanner, and `__unbox_number`
+# reads the numeric length. No new ToString/ToNumber matrix.
+coercion-sites-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/property-access.ts
 ---
 
 # #3169 — standalone: Array.prototype callback methods over array-like receivers
@@ -52,7 +60,7 @@ methods to **array-like receivers**:
 ```js
 // built-ins/Array/prototype/reduce/15.4.4.21-9-c-ii-29.js and ~500 siblings
 var obj = { 0: 11, 1: 12, length: 2 };
-Array.prototype.reduce.call(obj, callbackfn, 1);   // returned 2 — assert #1
+Array.prototype.reduce.call(obj, callbackfn, 1); // returned 2 — assert #1
 ```
 
 plus hole semantics (`HasProperty` before `Get`), `this`-binding of the
