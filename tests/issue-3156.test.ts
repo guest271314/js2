@@ -1,4 +1,4 @@
-// #3154 — IR lowering for string `.substring(...)` / `.charCodeAt(...)`
+// #3156 — IR lowering for string `.substring(...)` / `.charCodeAt(...)`
 // (the top post-claim divergence class from the #3153 census, on the #3143
 // IR-first-flip selector-precision track).
 //
@@ -196,7 +196,7 @@ const CASES: { name: string; source: string; expected: number }[] = [
   },
 ];
 
-describe("#3154 IR string substring/charCodeAt — host mode", () => {
+describe("#3156 IR string substring/charCodeAt — host mode", () => {
   for (const c of CASES) {
     it(c.name, async () => {
       const r = await dualRun(c.source, false);
@@ -209,7 +209,7 @@ describe("#3154 IR string substring/charCodeAt — host mode", () => {
   }
 });
 
-describe("#3154 IR string substring/charCodeAt — standalone (native strings)", () => {
+describe("#3156 IR string substring/charCodeAt — standalone (native strings)", () => {
   for (const c of CASES) {
     it(c.name, async () => {
       const r = await dualRun(c.source, true);

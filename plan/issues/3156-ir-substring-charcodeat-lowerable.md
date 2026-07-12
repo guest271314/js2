@@ -1,5 +1,5 @@
 ---
-id: 3154
+id: 3156
 title: "IR selector precision: make string .substring / .charCodeAt lowerable (wasm:js-string family) — #3143 flip track"
 status: done
 assignee: ttraenkler/fable-substr
@@ -22,7 +22,7 @@ loc-budget-allow:
   - src/ir/integration.ts
 ---
 
-# #3154 — IR: make `s.substring(...)` / `s.charCodeAt(...)` lowerable
+# #3156 — IR: make `s.substring(...)` / `s.charCodeAt(...)` lowerable
 
 Top class from the #3153 post-claim divergence map. The STATIC selector
 (`planIrCompilation`) claims functions containing string-receiver
@@ -75,7 +75,7 @@ Route (a) — genuinely lowerable, BOTH modes, whole method family arity range:
   (`__str_charCodeAt (ref $AnyString, i32) -> f64`, flatten + guard +
   `array.get_u`, mirroring the legacy native inline arm). Both follow the
   `ensureFmod` append-only defined-function discipline.
-- `tests/issue-3154.test.ts` — 17 cases × {host, standalone}: dual-run
+- `tests/issue-3156.test.ts` — 17 cases × {host, standalone}: dual-run
   equivalence vs `experimentalIR: false` + JS oracle, AND
   `irPostClaimErrors === []` (the load-bearing #3143 assertion).
 

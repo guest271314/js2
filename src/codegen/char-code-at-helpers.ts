@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * (#3154) Guarded `String.prototype.charCodeAt` helpers for the IR path.
+ * (#3156) Guarded `String.prototype.charCodeAt` helpers for the IR path.
  *
  * ECMA-262 §22.1.3.3: `charCodeAt(pos)` returns the UTF-16 code unit at
  * ToIntegerOrInfinity(pos), or `NaN` when the resolved position is outside

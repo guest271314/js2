@@ -61,7 +61,7 @@ import {
 import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
-// (#3154) — on-demand guarded charCodeAt helper materialization
+// (#3156) — on-demand guarded charCodeAt helper materialization
 import {
   ensureHostCharCodeAtGuarded,
   ensureNativeCharCodeAtHelper,
@@ -1024,7 +1024,7 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     // `str.method` instr is #2955's follow-up slice.
     stringMethodPlan(method: string, argCount: number) {
       const native = ctx.nativeStrings;
-      // (#3154) charCodeAt — BOTH modes lower to a guarded defined helper
+      // (#3156) charCodeAt — BOTH modes lower to a guarded defined helper
       // `(recv, i32 idx) -> f64` (src/codegen/char-code-at-helpers.ts;
       // materialized on demand by resolveFunc below). NOT the bare
       // `wasm:js-string charCodeAt` builtin: that one traps out-of-range
@@ -1049,7 +1049,7 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
       const sig = STRING_METHOD_TABLE[method];
       if (!sig) return null;
       const omitted = argCount < sig.hostArgs.length;
-      // (#3154) substring — native `__str_substring` clamps both indices to
+      // (#3156) substring — native `__str_substring` clamps both indices to
       // [0, len], so omissions pad exact sentinels (start 0 / end 0x7fffffff,
       // the legacy native arm's convention) and every arity lowers; host mode
       // rides the #1248 length-default pad in from-ast.
@@ -1311,7 +1311,7 @@ function makeResolver(
         }
         return helperIdx;
       }
-      // (#3154) Guarded charCodeAt helpers — materialized on demand, same
+      // (#3156) Guarded charCodeAt helpers — materialized on demand, same
       // append-only defined-function discipline as ensureFmod (never an
       // import, no existing funcIdx shifts). Idempotent via funcMap. The
       // host variant bakes the `wasm:js-string` builtin import indices from
@@ -1602,7 +1602,7 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
   const walk = (instr: IrInstr): void => {
     if (instrUsesStrings(instr)) usesStringOp = true;
     if (instr.kind === "string.const") literals.add(instr.value);
-    // (#3154) The host guarded-charCodeAt helper wraps the `wasm:js-string`
+    // (#3156) The host guarded-charCodeAt helper wraps the `wasm:js-string`
     // charCodeAt/length builtins — its materialization (resolveFunc) reads
     // `ctx.jsStringImports`, so `addStringImports` must have run BEFORE
     // Phase-3 emission. A claimed function can carry this call with NO other
@@ -1620,7 +1620,7 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
     if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
       for (const sub of instr.body) walk(sub);
     }
-    // (#3154) Value-producing if/else arms and try bodies are nested instr
+    // (#3156) Value-producing if/else arms and try bodies are nested instr
     // buffers too — a `s.charCodeAt(i)` (or any string op) inside a ternary
     // arm or try block would otherwise escape pre-registration.
     if (instr.kind === "if") {
