@@ -23,6 +23,49 @@ loc-budget-allow:
   - src/codegen/expressions/calls-closures.ts
 ---
 
+## Progress (2026-07-12, fable) — Slice 4: dyn-view reduce/reduceRight + boolean-result boxing (REUSE-first)
+
+The #3140 `Function.prototype.bind`-on-closure blocker the earlier slices
+flagged as THE cluster unblock is now **DONE** (PR #2884), so the
+`testWithTypedArrayConstructors` harness reaches the method bodies.
+
+Per the standing no-bloat directive, this slice adds **zero new per-method TA
+handlers** — it extends the existing #3058 dyn-view two-arm
+(`emitDynViewMethodTwoArm`, which materializes a `$__ta_dyn_view` → `$__vec_f64`
+and re-enters the ORDINARY native array-HOF impl):
+
+1. `reduce` / `reduceRight` added to `DYN_VIEW_READ_METHODS` (array-methods.ts) —
+   they return a scalar accumulator with Array-identical semantics, so the
+   materialize-and-reuse path is correct verbatim.
+2. **Boolean-result boxing fix** (shared): the two-arm's `coerceArmToExternref`
+   boxed a boolean method's raw i32 as a NUMBER, so `includes(x) === true`/
+   `=== false` failed (truthiness worked, which masked it) — a LATENT #3058 bug
+   for `includes` (already in the read set). New `BOOLEAN_RESULT_METHODS` set +
+   a `boolResult` param route boolean methods through `__box_boolean`. One fix
+   lights up `includes` (+6) and pre-wires a future `every`/`some`.
+
+**Measured (real runner, standalone, `built-ins/TypedArray{,Constructors}/prototype`
+reduce+reduceRight+includes+callback family, 441 files, vs main):
++8 fail→pass, ZERO regressions, ZERO CEs.** (reduce +1, reduceRight +1,
+includes +6.)
+
+- `prove-emit-identity`: IDENTICAL 39/39 (gc/wasi/standalone corpus byte-inert).
+- 402-file broad standalone stride: zero flips (no collateral — the shared
+  two-arm coercion change is inert outside dyn-view receivers).
+- `tests/issue-2872-ta-dynview-reduce-includes.test.ts` 9/9; all prior
+  #2872/TypedArray/array-method suites green (114 tests).
+
+**Deferred (measured but NOT shipped — would regress/CE):**
+`find`/`findIndex` (+13 pass but the materialized `find` impl emits invalid wasm
+on `predicate-call-changes-value` — arm type mismatch), `findLast`/
+`findLastIndex` (array impl misses a `__call_1_f64` registration on this path →
+CE), `every`/`some`/`forEach` (detached-buffer tests regress — materialization
+snapshots before a mid-callback detach). Each needs targeted work: the `find`
+arm-result type fix, the `findLast` `__call_1_f64` wiring, and detached-aware
+materialization. `map`/`filter` (new same-kind TA result), `sort`/`toSorted`
+(numeric default comparator), `with`/`toReversed` (new TAs) still need a
+TA-result builder.
+
 > **UNBLOCKED 2026-07-11 (fable-harvest3):** the #2893 brand dependency landed
 > on main 2026-07-01 (PR #2395 merged — the "CONFIRMED BLOCKED" note below is
 > stale). Slice 1 (general dynamic construction + dyn-view `.fill`) is
