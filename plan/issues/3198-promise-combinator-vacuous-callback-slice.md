@@ -1,7 +1,7 @@
 ---
 id: 3198
 title: "default lane: Promise combinator callbacks never execute — vacuous slice (218 fails)"
-status: ready
+status: blocked
 created: 2026-07-12
 updated: 2026-07-12
 priority: medium
@@ -14,7 +14,8 @@ goal: core-semantics
 sprint: current
 horizon: m
 umbrella: 3184
-related: [3184, 2614, 2613, 2623, 2940]
+related: [3184, 3197, 2614, 2613, 2623, 2940]
+blocked_on: "host-lane async-continuation drive primitive (shared with #3197)"
 origin: "2026-07-12 Fable codebase audit §F1; slice of #3184"
 ---
 
@@ -71,6 +72,77 @@ Priority is **medium**: this slice's file (`src/runtime.ts` Promise region)
 overlaps blocked #2614 (senior-developer) and active Promise-capability work
 (dev-promise-cap). Confirm no in-flight lock on the combinator dispatch region
 before claiming; prefer to land after or alongside #3197 (shared root cause).
+
+## Root-cause note (2026-07-12, dev-promise-vac) — BLOCKED, not a combinator bug
+
+**Verdict: this is NOT a `src/runtime.ts` combinator bug.** The combinators are
+correct — they delegate to the host `Promise.all/race/allSettled/any`
+(`src/runtime.ts` `Promise_all`/`Promise_race`/`Promise_allSettled`/`Promise_any`),
+which correctly schedule their per-element and `.then` reactions. The 218
+vacuous records are a manifestation of the **general host-lane
+`.then`/async-continuation drive gap** — the SAME architectural gap as #3197
+(for-await-of). Both are `vacuous: harness-wrapper callback never executed
+(#2940)`; they are one problem, not two slices.
+
+### Which link drops the callback (combinator entry → per-element → settle → $DONE)
+
+None of the combinator-internal links drop it. The callback is dropped at the
+**verdict-read boundary**, one level above the combinator:
+
+1. On the DEFAULT (JS-host) lane, `Promise.X(...)` returns a **host** promise;
+   `.then(cb)` (the callback that holds the assertions + `$DONE`) is lowered to
+   host `p.then(cb)` (`Promise_then`), which schedules `cb` as a **host
+   microtask**.
+2. `__drain_microtasks()` — which the runner appends to async-test bodies to
+   pump pending reactions before the vacuity gate — is a **compile-time no-op on
+   the host lane**: `getDrainFuncIdxForWasiStart(ctx)` returns `null` off the
+   native-`$Promise` carrier, so it emits nothing
+   (`src/codegen/expressions/calls.ts:4928-4938`). The host owns its own
+   microtask queue; wasm can't synchronously flush it.
+3. The runner reads the verdict **synchronously**: `const ret = testFn();`
+   (`tests/test262-runner.ts:3981`), with no `await`/tick. The vacuity gate that
+   returns `-262` lives INSIDE `test()` (`tests/test262-runner.ts:3039-3047`).
+4. So for any top-level `Promise.X(...).then(cb-with-$DONE)`, `cb` is still
+   queued (never run) when the gate executes → `__assert_count === 1` /
+   `__harness_cb_dead === __harness_cb_expected` → returns `-262` → scored
+   `vacuous`.
+
+### Empirical confirmation (probe, host lane, this branch)
+
+Compiled `Promise.X(...).then(() => ran++)` + `__drain_microtasks()`, read `ran`
+synchronously (mirrors the runner):
+
+| body | host-lane `ran` |
+| --- | --- |
+| `Promise.resolve(7).then(cb)` | **0** |
+| `Promise.all([1,2,3]).then(cb)` | **0** |
+| `Promise.race([1,2,3]).then(cb)` | **0** |
+| `async () => { ran++ }()` (sync body, no await) | 1 |
+
+`Promise.resolve().then()` is undriven too, so the gap is **not
+combinator-specific** — it is every host-lane `.then` continuation. (Probe was a
+gitignored `.tmp`/`probe-*` scratch, not committed.)
+
+### Blocked on (shared primitive with #3197)
+
+The fix is host-lane async-continuation drive, NOT a combinator edit: either
+activate the native `$Promise` carrier on the host lane (so `.then`
+continuations land on the wasm microtask ring drained by
+`__drain_microtasks()`), or a synchronous settled-`.then` bridge that enqueues
+onto that ring at `.then`-call time. That is #2980 carrier-widen territory and
+overlaps active `dev-promise-cap` + blocked #2614. Building it ad-hoc here would
+collide, so #3198 is marked `blocked` behind that primitive.
+
+**#2614 overlap did NOT surface into code.** #2614 (read the constructor's own
+`resolve` + callable resolve/reject element functions) is a distinct spec-detail
+fix for combinator tests that DO run; this slice is the never-runs drive class.
+Those paths were read-only during diagnosis; nothing was touched.
+
+### Recommendation
+
+Resolve #3197 and #3198 together as ONE host-lane async-drive decision (now with
+the stakeholder). When the host-lane drive primitive lands, remeasure #3198 —
+much of the 218 likely flips for free alongside #3197's for-await bucket.
 
 ## Audit cross-link
 
