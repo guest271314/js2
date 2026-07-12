@@ -132,7 +132,7 @@ function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.V
   // only — a bare `undefined`-typed binding (e.g. an optional-property read) must
   // stay numeric for the delete/undefined f64-sentinel machinery (#1112). See
   // `varBindingNeedsExternrefForUndefined`.
-  if (varBindingNeedsExternrefForUndefined(decl)) return { kind: "externref" };
+  if (varBindingNeedsExternrefForUndefined(decl, ctx)) return { kind: "externref" };
   return resolveWasmType(ctx, type);
 }
 

@@ -14506,22 +14506,53 @@ export function collectEnumDeclarations(ctx: CodegenContext, sourceFile: ts.Sour
  * Used by BOTH the `var` hoister and the let/const declaration path so the slot
  * type is uniform (a `var` reuses its hoisted slot, so both sites MUST agree).
  *
- * IMPORTANT — trigger on the `void`-EXPRESSION INITIALIZER ONLY, not on a bare
- * "purely `undefined`/`void` declared type". A binding can be `undefined`-typed
- * for unrelated reasons (e.g. `const afterA = obj.a` reading an optional
- * `a?: number` after `delete obj.a`), and those MUST stay a numeric slot — the
- * delete / optional-property machinery encodes `undefined` as an f64 sNaN
+ * IMPORTANT — the `void`-EXPRESSION arm triggers on the INITIALIZER ONLY, not on
+ * a bare "purely `undefined`/`void` declared type". A binding can be
+ * `undefined`-typed for unrelated reasons (e.g. `const afterA = obj.a` reading an
+ * optional `a?: number` after `delete obj.a`), and those MUST stay a numeric slot
+ * — the delete / optional-property machinery encodes `undefined` as an f64 sNaN
  * sentinel and relies on the local being f64/i32 so `afterA === undefined`
  * detects the sentinel. Forcing those to externref boxes the sentinel via
  * `__box_number` and breaks the `=== undefined` check (regressed
  * delete-sentinel #1112). The `void 0` expression is the precise, narrow signal
  * for the acorn evolving-local idiom.
+ *
+ * (#3033) SECOND arm — a member read off a DYNAMIC (externref) receiver whose
+ * static type collapses to `undefined`. compiled-acorn's `pp$5.parseIdentNode`
+ * does `var ty = this.type` where `this` is the Parser fnctor instance
+ * (externref) but the checker — unable to resolve the untyped `this`'s shape —
+ * types `this.type` as pure `undefined`. `resolveWasmType(undefined)` is a
+ * numeric (i32) slot, so the RUNTIME value (a TokenType read dynamically through
+ * `__extern_get`, returned as externref) was truncated to the i32
+ * undefined-sentinel on store → `ty` read back `undefined`, and `x.var` (any
+ * `<expr>.<keyword>` property name) threw. The read goes through the dynamic
+ * host path (receiver externref) and returns externref, so the slot must be
+ * externref to hold it. Distinguished from the #1112 sentinel case by the
+ * receiver's wasm type: an optional field off a KNOWN struct receiver resolves
+ * to `ref $struct` (NOT externref), so this arm does not fire for it and the
+ * numeric sentinel is preserved. An externref slot holding a genuine runtime
+ * `undefined` still compares `=== undefined` (the `emitUndefined` singleton), so
+ * a dynamic read that really is undefined is unaffected.
  */
-export function varBindingNeedsExternrefForUndefined(decl: ts.VariableDeclaration | undefined): boolean {
+export function varBindingNeedsExternrefForUndefined(
+  decl: ts.VariableDeclaration | undefined,
+  ctx?: CodegenContext,
+): boolean {
   // `var x = (void 0)` / `var x = void <expr>` — strip parens to find the void.
   let init = decl?.initializer;
   while (init && ts.isParenthesizedExpression(init)) init = init.expression;
-  return init !== undefined && ts.isVoidExpression(init);
+  if (init === undefined) return false;
+  if (ts.isVoidExpression(init)) return true;
+  // (#3033) Dynamic-receiver member read whose static type is purely undefined.
+  if (ctx !== undefined && (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init))) {
+    const declType = ctx.checker.getTypeAtLocation(decl!);
+    const isPurelyUndefinedOrVoid = (declType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0;
+    if (isPurelyUndefinedOrVoid) {
+      const recvType = ctx.checker.getTypeAtLocation(init.expression);
+      if (resolveWasmType(ctx, recvType).kind === "externref") return true;
+    }
+  }
+  return false;
 }
 
 export function hoistVarDeclarations(
@@ -14676,7 +14707,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl)
+      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, ctx)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
