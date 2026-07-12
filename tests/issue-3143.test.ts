@@ -18,7 +18,11 @@
 //      with the escape-hatch legacy order).
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { irFirstBodyStoresTypedArrayView } from "../src/codegen/ir-first-gate.js";
+import {
+  irFirstBodyCallsUnloweredArrayMethod,
+  irFirstBodyMutatesParam,
+  irFirstBodyStoresTypedArrayView,
+} from "../src/codegen/ir-first-gate.js";
 import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
@@ -74,6 +78,55 @@ describe("#3143 gate 8 — irFirstBodyStoresTypedArrayView predicate (store OR c
   });
 });
 
+describe("#3143 gate 9 — irFirstBodyMutatesParam predicate", () => {
+  it.each([
+    ["param decrement in do-while", `function f(n: number){ let c=0; do { c++; n--; } while (n>0); return c; }`],
+    ["param increment in for", `function f(n: number){ for (let i=0;i<3;i++){ n++; } return n; }`],
+    ["param plain assignment", `function f(n: number){ n = 5; return n; }`],
+    ["param compound assignment", `function f(n: number){ n += 2; return n; }`],
+    ["param prefix decrement", `function f(n: number){ while (n>0){ --n; } return n; }`],
+  ])("fires (keep compile-twice): %s", (_label, src) => {
+    expect(irFirstBodyMutatesParam(fnDecl(src))).toBe(true);
+  });
+
+  it.each([
+    ["local mutation only (param read)", `function f(n: number){ let m=n; while(m>0){ m--; } return m; }`],
+    ["param read, no write", `function f(n: number){ return n + 1; }`],
+    ["no params", `function f(){ let x=0; x++; return x; }`],
+    [
+      "nested-fn shadows param name",
+      `function f(n: number){ const g = (n: number) => { let k=n; k--; return k; }; return g(n); }`,
+    ],
+  ])("does not fire: %s", (_label, src) => {
+    expect(irFirstBodyMutatesParam(fnDecl(src))).toBe(false);
+  });
+});
+
+describe("#3143 gate 10 — irFirstBodyCallsUnloweredArrayMethod predicate", () => {
+  it.each([
+    ["array-literal local .indexOf", `function f(){ const a=[10,20,30]; return a.indexOf(20); }`],
+    ["array-literal local .includes", `function f(){ const a=[1,2,3]; return a.includes(2)?1:0; }`],
+    ["array-literal local .flat", `function f(){ const a=[[1],[2]]; return a.flat()[0]; }`],
+    ["T[] param .lastIndexOf", `function f(a: number[]){ return a.lastIndexOf(5); }`],
+    ["Array<T> param .join", `function f(a: Array<number>){ return a.join(","); }`],
+    ["new Array local .slice", `function f(){ const a=new Array(3); return a.slice(1); }`],
+  ])("fires (keep compile-twice): %s", (_label, src) => {
+    expect(irFirstBodyCallsUnloweredArrayMethod(fnDecl(src))).toBe(true);
+  });
+
+  it.each([
+    // `.push` IS lowered by from-ast — must NOT fire.
+    ["array .push", `function f(a: number[], v: number){ a.push(v); }`],
+    // element read / .length (not a call) — not gated.
+    ["array element read", `function f(a: number[], i: number){ return a[i]; }`],
+    ["array .length", `function f(a: number[]){ return a.length; }`],
+    // method call on a non-array receiver (class instance) — different gate/receiver.
+    ["method call on non-array local", `function f(o: { m(): number }){ return o.m(); }`],
+  ])("does not fire: %s", (_label, src) => {
+    expect(irFirstBodyCallsUnloweredArrayMethod(fnDecl(src))).toBe(false);
+  });
+});
+
 describe("#3143 gate 8 — end-to-end IR-first default (no hard error, correct bytes)", () => {
   // The native-messaging class-4 shape, reduced: a typed-param writer whose
   // element store stays legacy (gate 8a) plus a caller that constructs a view
@@ -113,7 +166,7 @@ describe("#3143 gate 8 — end-to-end IR-first default (no hard error, correct b
       const exports = await instantiate(r);
       expect((exports.run as () => number)()).toBe(46);
     } finally {
-      if (prev === undefined) delete process.env.JS2WASM_IR_FIRST;
+      if (prev === undefined) Reflect.deleteProperty(process.env, "JS2WASM_IR_FIRST");
       else process.env.JS2WASM_IR_FIRST = prev;
     }
   });

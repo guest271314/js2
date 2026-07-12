@@ -410,3 +410,145 @@ export function irFirstBodyStoresTypedArrayView(fn: ts.FunctionDeclaration): boo
   scan(fn.body);
   return found;
 }
+
+/**
+ * (#3143 gate 9) Parameter mutation. from-ast binds every parameter as a
+ * `local` SSA binding (from-ast.ts:536), never a mutable `slot` — the mutation
+ * pre-pass (`collectMutatedLetNames`) drives slot promotion for `let`s but the
+ * param binding loop does not consult it. So ANY write to a parameter —
+ * assignment (`n = …`), compound assignment (`n += …`), or increment/decrement
+ * (`n++`/`--n`) — throws a clean post-claim fallback ("assignment/… to non-slot
+ * binding … — mutation pre-pass should have detected it"). The selector claims
+ * such functions (the write shapes are all Phase-1), so under IR-first the
+ * demote becomes a skipped-slot hard error. Keep any function that mutates one
+ * of its own parameters on the compile-twice path until from-ast promotes
+ * mutated params to slots (the natural follow-up: mirror the `let`-slot arm for
+ * params). Local (`let`) mutation is unaffected — it already slot-promotes.
+ *
+ * Conservative: a false positive only keeps a function compile-twice. Nested
+ * function/arrow bodies are skipped (their writes bind to their own scope).
+ */
+export function irFirstBodyMutatesParam(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.body) return false;
+  const params = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name)) params.add(p.name.text);
+  }
+  if (params.size === 0) return false;
+  const isAssignToken = (k: ts.SyntaxKind): boolean =>
+    k === ts.SyntaxKind.EqualsToken || (k >= ts.SyntaxKind.PlusEqualsToken && k <= ts.SyntaxKind.CaretEqualsToken);
+  let found = false;
+  const scan = (node: ts.Node): void => {
+    if (found) return;
+    // Don't descend into nested function scopes — a shadowed param there is a
+    // different binding; an outer-param write from a closure is handled by the
+    // closure gates, never reaching this gate as a clean claim.
+    if (
+      node !== fn.body &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node))
+    ) {
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      isAssignToken(node.operatorToken.kind) &&
+      ts.isIdentifier(node.left) &&
+      params.has(node.left.text)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand) &&
+      params.has(node.operand.text)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, scan);
+  };
+  scan(fn.body);
+  return found;
+}
+
+/** Array.prototype methods that from-ast's `lowerMethodCall` can lower on a vec
+ *  receiver. Today ONLY `push` (single plain arg, f64/externref elem — see
+ *  from-ast.ts:3642). Every other array method (`indexOf`, `includes`,
+ *  `lastIndexOf`, `flat`, `flatMap`, `map`, `filter`, `reduce`, `slice`,
+ *  `join`, `sort`, …) hits the "not in slice 4" throw. */
+const IR_LOWERABLE_VEC_METHODS: ReadonlySet<string> = new Set(["push"]);
+
+/**
+ * (#3143 gate 10) Array (vec) method call not lowered by from-ast. The selector
+ * accepts any `<recv>.<method>(...)` whose receiver is a Phase-1 expression
+ * (select.ts:2773) WITHOUT checking that the method is lowerable — the overlay
+ * assumption "the lowerer falls back to legacy if not a class method". from-ast
+ * lowers only `.push` on a vec receiver; every other array method throws
+ * "method call .<m>(...) on ref not in slice 4". Under IR-first that demote
+ * becomes a skipped-slot hard error. Keep any function that calls a non-`push`
+ * method on a (syntactically-detectable) array receiver on the compile-twice
+ * path until the IR gains those array-method lowerings.
+ *
+ * Checker-free array detection (same conservative style as gates 5/8): a
+ * receiver identifier is an array when it is a parameter/local annotated
+ * `T[]` / `Array<T>` / `ReadonlyArray<T>`, or a local initialized with an array
+ * literal `[…]` or `new Array(…)`. `.length` / element reads (not calls) are
+ * unaffected; class-instance method calls (different receiver) are not gated.
+ */
+export function irFirstBodyCallsUnloweredArrayMethod(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.body) return false;
+  const isArrayTypeNode = (t: ts.TypeNode | undefined): boolean => {
+    if (t === undefined) return false;
+    if (ts.isArrayTypeNode(t)) return true;
+    return (
+      ts.isTypeReferenceNode(t) &&
+      ts.isIdentifier(t.typeName) &&
+      (t.typeName.text === "Array" || t.typeName.text === "ReadonlyArray")
+    );
+  };
+  const isArrayInit = (e: ts.Expression | undefined): boolean => {
+    if (e === undefined) return false;
+    if (ts.isArrayLiteralExpression(e)) return true;
+    return ts.isNewExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "Array";
+  };
+  const arrayNames = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name) && isArrayTypeNode(p.type)) arrayNames.add(p.name.text);
+  }
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      if (isArrayTypeNode(node.type) || isArrayInit(node.initializer)) arrayNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(fn.body);
+  if (arrayNames.size === 0) return false;
+  const isArrayReceiver = (e: ts.Expression): boolean => {
+    let cur = e;
+    while (ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur) || ts.isAsExpression(cur))
+      cur = cur.expression;
+    return ts.isIdentifier(cur) && arrayNames.has(cur.text);
+  };
+  let found = false;
+  const scan = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.name) &&
+      !IR_LOWERABLE_VEC_METHODS.has(node.expression.name.text) &&
+      isArrayReceiver(node.expression.expression)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, scan);
+  };
+  scan(fn.body);
+  return found;
+}

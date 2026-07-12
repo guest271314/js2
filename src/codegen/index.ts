@@ -31,7 +31,9 @@ import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
 import {
   collectModuleTopLevelNames,
+  irFirstBodyCallsUnloweredArrayMethod,
   irFirstBodyHasNullish,
+  irFirstBodyMutatesParam,
   irFirstBodyReadsHostNode,
   irFirstBodyReadsStringElement,
   irFirstBodyStoresTypedArrayView,
@@ -1564,6 +1566,13 @@ interface IrOverlayPlan {
  *      both legacy-only in the IR (element READS on a view do lower); the
  *      residual demote must stay a metered legacy fallback (see
  *      `irFirstBodyStoresTypedArrayView`), never a skipped-slot hard error.
+ *   9. (#3143) It does not mutate one of its own parameters (`n = …` / `n += …`
+ *      / `n++` / `--n`) — from-ast binds params as non-slot `local`s, so a
+ *      param write throws "… to non-slot binding". See `irFirstBodyMutatesParam`.
+ *  10. (#3143) It calls no non-`push` method on a syntactically-detectable
+ *      array receiver — from-ast lowers only `.push` on a vec; `.indexOf` /
+ *      `.flat` / `.map` / … throw "not in slice 4". See
+ *      `irFirstBodyCallsUnloweredArrayMethod`.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1602,7 +1611,9 @@ function computeIrFirstSkipSet(
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
     if (irFirstBodyHasNullish(fn)) continue; // gate 7 — `??` residual demote (#3143)
-    if (irFirstBodyStoresTypedArrayView(fn)) continue; // gate 8 — TypedArray-view element store (#3143)
+    if (irFirstBodyStoresTypedArrayView(fn)) continue; // gate 8 — TypedArray-view store/construct (#3143)
+    if (irFirstBodyMutatesParam(fn)) continue; // gate 9 — parameter mutation (#3143)
+    if (irFirstBodyCallsUnloweredArrayMethod(fn)) continue; // gate 10 — unlowered array method (#3143)
     // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
     // under IR-first while the dynamic surface is move-only (no box/unbox
     // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
