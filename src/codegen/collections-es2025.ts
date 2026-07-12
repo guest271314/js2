@@ -55,6 +55,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { COLLECTION_KIND, compileCollectionElementArg, ensureMapHelpers } from "./map-runtime.js";
+import { buildClosureRefTestArms } from "./closure-classifier.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
 import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { ensureNativeIteratorRuntime } from "./iterator-native.js";
@@ -583,9 +584,25 @@ function reserveSetRecFieldGetters(ctx: CodegenContext): boolean {
       [{ op: "ref.null.extern" } as Instr],
     );
   }
+  // `__setrec_check_callable(v) -> v` — GetSetRecord steps 8/10 "If
+  // IsCallable(has/keys) is false, throw a TypeError". Reserved (pass-through
+  // placeholder) because the closure base-wrapper type set is only complete at
+  // FINALIZE. The TypeError ctor + message string are registered NOW so the
+  // fill introduces no new imports/globals behind baked indices.
+  emitBrandCheckTypeError(ctx, [], SETREC_CALLABLE_MSG); // registers ctor + string (scratch body discarded)
+  addKernel(
+    ctx,
+    "__setrec_check_callable",
+    [externref],
+    [externref],
+    [{ name: "__any", type: { kind: "anyref" } }],
+    [{ op: "local.get", index: 0 } as Instr],
+  );
   (ctx as CodegenContext & { setRecFieldGettersReserved?: boolean }).setRecFieldGettersReserved = true;
   return true;
 }
+
+const SETREC_CALLABLE_MSG = "TypeError: Set-like argument's has/keys is not callable";
 
 /**
  * FINALIZE fill for the `__setrec_field_<name>` readers: one `ref.test` arm
@@ -661,6 +678,27 @@ export function fillSetRecFieldGetters(ctx: CodegenContext): void {
       { op: "local.set", index: 1 } as Instr,
       ...current,
     ];
+  }
+
+  // ── `__setrec_check_callable(v) -> v` — the IsCallable gate (steps 8/10) ──
+  // Pass through when v tests as any registered closure base wrapper; throw a
+  // catchable TypeError otherwise (null/undefined, plain objects, primitives).
+  // The closure base-wrapper set (closure-classifier.ts) is complete HERE.
+  {
+    const fnIdx = ctx.mapHelpers.get("__setrec_check_callable");
+    const fn = fnIdx !== undefined ? definedFuncAt(ctx, fnIdx) : undefined;
+    if (fn) {
+      const throwArm: Instr[] = [];
+      emitBrandCheckTypeError(ctx, throwArm, SETREC_CALLABLE_MSG); // idempotent (registered at reserve)
+      const body: Instr[] = [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "any.convert_extern" } as Instr,
+        { op: "local.set", index: 1 } as Instr,
+        ...buildClosureRefTestArms(ctx, 1, [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr]),
+        ...throwArm,
+      ];
+      fn.body = body;
+    }
   }
 }
 
@@ -758,12 +796,14 @@ export function ensureSetAlgebraAnyDispatch(ctx: CodegenContext, methodName: str
   const fieldSizeIdx = ctx.mapHelpers.get("__setrec_field_size");
   const fieldHasIdx = ctx.mapHelpers.get("__setrec_field_has");
   const fieldKeysIdx = ctx.mapHelpers.get("__setrec_field_keys");
+  const checkCallableIdx = ctx.mapHelpers.get("__setrec_check_callable");
   if (
     sizeIdx === undefined ||
     setlikeIdx === undefined ||
     fieldSizeIdx === undefined ||
     fieldHasIdx === undefined ||
-    fieldKeysIdx === undefined
+    fieldKeysIdx === undefined ||
+    checkCallableIdx === undefined
   ) {
     return undefined;
   }
@@ -798,9 +838,11 @@ export function ensureSetAlgebraAnyDispatch(ctx: CodegenContext, methodName: str
     { op: "local.set", index: 3 },
     { op: "local.get", index: 1 },
     { op: "call", funcIdx: fieldHasIdx } as Instr,
+    { op: "call", funcIdx: checkCallableIdx } as Instr, // step 8 IsCallable(has)
     { op: "local.set", index: 4 },
     { op: "local.get", index: 1 },
     { op: "call", funcIdx: fieldKeysIdx } as Instr,
+    { op: "call", funcIdx: checkCallableIdx } as Instr, // step 10 IsCallable(keys)
     { op: "local.set", index: 5 },
     { op: "local.get", index: 0 },
     { op: "local.get", index: 1 },

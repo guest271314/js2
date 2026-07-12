@@ -37,7 +37,9 @@ import { emitSetBrandCheck, ensureSetHelpers } from "./set-runtime.js";
 const TOMBSTONE_BIT = 0x40000000; // mirrors map-runtime.ts
 const M_ENTRIES = 1;
 const M_ENTRYCOUNT = 2;
+const F_KEY = 0;
 const F_VALUE = 1;
+void F_VALUE; // layout doc — the walks project F_KEY (see entryValue)
 const F_HASH = 3;
 
 const SET_ALGEBRA_SET_OPS = new Set(["union", "intersection", "difference", "symmetricDifference"]);
@@ -89,11 +91,14 @@ function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp
   } as Instr;
 }
 
-/** entry.value (anyref) onto the stack. */
+/** entry element (anyref) onto the stack — the entry's KEY. For a Set entry
+ *  key === value, so this is the element either way; for a MAP argument
+ *  (#3172 `combines-Map`) the spec's GetSetRecord `keys()` yields the map's
+ *  KEYS, so the walk must project F_KEY, not F_VALUE. */
 function entryValue(ctx: CodegenContext, entryTmp: number): Instr[] {
   return [
     { op: "local.get", index: entryTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
   ];
 }
 

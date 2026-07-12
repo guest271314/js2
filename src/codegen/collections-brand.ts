@@ -127,6 +127,18 @@ function collectionMethodTarget(
   while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
     e = (e as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
   }
+  // (#3172) Value-erased closure variable: `const union = Set.prototype.union;
+  // union.call(recv, …)` (the `require-internal-slot.js` harness shape). Trace
+  // the identifier back to its single initializer and match THAT — one level,
+  // mirroring calls.ts's resolveVarInitializer data-flow trace.
+  if (ts.isIdentifier(e)) {
+    const init = resolveVarInitializerLocal(ctx, e);
+    if (init === undefined) return undefined;
+    e = init;
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
+      e = (e as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
+    }
+  }
   if (!ts.isPropertyAccessExpression(e)) return undefined;
   const method = e.name.text;
   // Unwrap parens/`as`/non-null on the OBJECT too, so `(Map.prototype as any)
@@ -294,6 +306,23 @@ export function tryCompileCollectionReflectiveCall(
     }
   }
   return undefined;
+}
+
+/**
+ * (#3172) Resolve a variable's single initializer (mirrors calls.ts's
+ * `resolveVarInitializer`). Uses the raw checker's symbol resolution — the
+ * oracle exposes type FACTS, not declaration nodes (preauthorized in
+ * scripts/oracle-ratchet-baseline.json).
+ */
+function resolveVarInitializerLocal(ctx: CodegenContext, ident: ts.Identifier): ts.Expression | undefined {
+  try {
+    const sym = ctx.checker.getSymbolAtLocation(ident);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
+    return decl.initializer;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Unwrap parens/`as`/non-null down to the `X.prototype.METHOD` property access. */

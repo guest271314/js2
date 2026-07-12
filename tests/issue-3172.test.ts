@@ -309,6 +309,67 @@ describe("#3172 GetSetRecord size coercion", () => {
   });
 });
 
+describe("#3172 GetSetRecord IsCallable gate (steps 8/10)", () => {
+  it("has: undefined → TypeError (even when the algorithm would not call has)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const s1 = new Set([1, 2]);
+           const s2 = { size: 2, has: undefined, keys: function () { return [2].values(); } };
+           try { s1.union(s2 as any); return 0; }
+           catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+         }`,
+      ),
+    ).toBe(1);
+  });
+  it("keys: non-callable object → TypeError", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const s1 = new Set([1, 2]);
+           const s2 = { size: 2, has: () => true, keys: {} };
+           try { s1.isSubsetOf(s2 as any); return 0; }
+           catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+         }`,
+      ),
+    ).toBe(1);
+  });
+});
+
+describe("#3172 Map argument is set-like per spec (keys projection)", () => {
+  it("union with a real Map combines the Map's KEYS", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const s = new Set([1]);
+           const m = new Map();
+           m.set(7, "v" as any);
+           const c = s.union(m as any);
+           return (c.has(7) ? 1 : 0) + (c.has("v" as any) ? 100 : 0) + c.size * 10;
+         }`,
+      ),
+    ).toBe(21);
+  });
+});
+
+describe("#3172 value-erased reflective form (require-internal-slot harness shape)", () => {
+  it("const union = Set.prototype.union; union.call(nonSet) → TypeError", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const union = (Set.prototype as any).union;
+           let n = 0;
+           const realSet = new Set([]);
+           try { union.call(undefined, realSet); } catch (e: any) { if (e instanceof TypeError) n++; }
+           try { union.call({}, realSet); } catch (e: any) { if (e instanceof TypeError) n++; }
+           try { union.call(new Map(), realSet); } catch (e: any) { if (e instanceof TypeError) n++; }
+           return n;
+         }`,
+      ),
+    ).toBe(3);
+  });
+});
+
 describe("#3172 fast lane + brand rows unregressed", () => {
   it("real-Set operands keep the native kernels", async () => {
     expect(

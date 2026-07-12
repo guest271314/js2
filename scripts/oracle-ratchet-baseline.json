@@ -215,6 +215,12 @@
   },
   "preauthorized": [
     {
+      "file": "src/codegen/collections-brand.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3172: resolveVarInitializerLocal traces a value-erased collection method closure (`const union = Set.prototype.union; union.call(...)`, the require-internal-slot.js harness shape) back to its variable initializer via checker.getSymbolAtLocation(ident).valueDeclaration. ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires. Mirrors calls.ts's resolveVarInitializer (#2901)."
+    },
+    {
       "file": "src/codegen/property-access.ts",
       "field": "ctxChecker",
       "extra": 1,
