@@ -58,6 +58,7 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -2438,6 +2439,15 @@ export function generateModule(
       addUnionImports(ctx);
     }
     fillNativeIteratorLateArms(ctx);
+
+    // (#2903) Rebuild the Iterator-helper stepper bodies (`__iter_hof_open`/
+    // `_next`/`_close`, iter-hof-native.ts) with a driven-generator arm per
+    // registered native sync generator — an `any`-held generator frame reaching
+    // the generic `__iterator` ladder has no arm and traps on the legacy vec
+    // hard-cast. Runs after all bodies compiled (every constructible
+    // generator's resume funcIdx is set); read-only per #1719. No-op unless an
+    // Iterator-helper call site reserved the steppers.
+    fillIterHofSteppers(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the

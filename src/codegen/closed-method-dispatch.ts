@@ -41,6 +41,7 @@ import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./a
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3125) IsCallable arms
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
+import { ensureNativeIterHof, isIterHofForm, NATIVE_ITER_HOF_METHODS } from "./iter-hof-native.js"; // (#2903)
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjVecBuilders, reserveApplyClosure } from "./object-runtime.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -181,6 +182,18 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   if (ctx.standalone && NATIVE_HOF_METHODS.has(methodName) && arity >= 1) {
     getOrRegisterVecBaseType(ctx);
     ensureNativeArrayHof(ctx, methodName);
+  }
+
+  // (#2903) For the EAGER Iterator-helper methods (find/every/some/forEach/
+  // reduce/toArray), emit the native stepped loop `__iter_hof_<name>` NOW
+  // (append-only defined funcs; the fill only READS funcMap — #1719). The fill
+  // adds an ITERATOR fallback arm under the open-`$Object` split: a receiver
+  // that is neither a closed struct with the method, nor a vec/$ObjVec, nor a
+  // `$Object`, is exactly the generator/driven-frame/iterator-carrier set that
+  // previously fell to `__extern_method_call`'s non-`$Object` arm and silently
+  // answered `undefined`. Standalone only.
+  if (ctx.standalone && NATIVE_ITER_HOF_METHODS.has(methodName) && isIterHofForm(methodName, arity)) {
+    ensureNativeIterHof(ctx, methodName);
   }
 
   // Signature: (recv, arg0..arg{arity-1}) all externref → externref.
@@ -446,6 +459,86 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       ];
     } else {
       current = [{ op: "ref.null.extern" } as Instr];
+    }
+
+    // (#2903) ITERATOR fallback arm for the eager Iterator-helper methods
+    // (find/every/some/forEach/reduce arity ≥1, toArray arity 0). Splits the
+    // bottom arm: `$Object` receivers keep the open-hash-map
+    // `__extern_method_call` route; every OTHER receiver — generators, driven
+    // frames, Map/Set/array iterators, custom closed-struct iterables — routes
+    // to the native stepped loop `__iter_hof_<name>` (emitted at reserve time,
+    // iter-hof-native.ts), which drives `__iterator`/`__iterator_next` and
+    // invokes the predicate via `__apply_closure`. Previously these receivers
+    // fell to `__extern_method_call`'s non-`$Object` arm and silently answered
+    // `undefined` (the #2903 re-grounded residual). Vec/$ObjVec receivers are
+    // EXCLUDED here: the callback methods are caught by the #3098 HOF arm
+    // wrapped outside, and `toArray` (not an Array.prototype method) keeps the
+    // legacy undefined rather than draining an array. Sits at the BOTTOM so
+    // closed-struct arms (a user `{ find(){…} }`) and field-closure arms win.
+    {
+      const iterHofIdx = ctx.funcMap.get(`__iter_hof_${methodName}`);
+      const objTypeIdxForIter = ctx.objectRuntimeTypes?.objectTypeIdx;
+      const objVecTypeIdxForIter = ctx.objectRuntimeTypes?.objVecTypeIdx;
+      if (
+        ctx.standalone &&
+        iterHofIdx !== undefined &&
+        NATIVE_ITER_HOF_METHODS.has(methodName) &&
+        isIterHofForm(methodName, arity) &&
+        objTypeIdxForIter !== undefined
+      ) {
+        const iterCall: Instr[] =
+          methodName === "toArray"
+            ? [
+                // `__iter_hof_toArray(recv)` — stepped drain → $ObjVec.
+                { op: "local.get", index: 0 } as Instr,
+                { op: "call", funcIdx: iterHofIdx } as Instr,
+              ]
+            : [
+                { op: "local.get", index: 0 } as Instr, // recv
+                { op: "local.get", index: 1 } as Instr, // cb
+                ...(methodName === "reduce"
+                  ? [
+                      ...(arity >= 2 ? [{ op: "local.get", index: 2 } as Instr] : [{ op: "ref.null.extern" } as Instr]), // init
+                      { op: "i32.const", value: arity >= 2 ? 1 : 0 } as Instr, // hasInit
+                    ]
+                  : []),
+                { op: "call", funcIdx: iterHofIdx } as Instr,
+              ];
+        // isNotIterTarget = null ∨ ref.test $Object ∨ ref.test $__vec_base ∨
+        // ref.test $ObjVec — a NULL receiver keeps the legacy open-arm route
+        // (`__extern_method_call` answers undefined for null) instead of
+        // trapping inside `__iterator`.
+        const notIterTest: Instr[] = [
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: anyLocalIdx } as Instr,
+          { op: "ref.test", typeIdx: objTypeIdxForIter } as Instr,
+          { op: "i32.or" } as Instr,
+        ];
+        if (ctx.vecBaseTypeIdx >= 0) {
+          notIterTest.push(
+            { op: "local.get", index: anyLocalIdx } as Instr,
+            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
+            { op: "i32.or" } as Instr,
+          );
+        }
+        if (objVecTypeIdxForIter !== undefined) {
+          notIterTest.push(
+            { op: "local.get", index: anyLocalIdx } as Instr,
+            { op: "ref.test", typeIdx: objVecTypeIdxForIter } as Instr,
+            { op: "i32.or" } as Instr,
+          );
+        }
+        current = [
+          ...notIterTest,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: current,
+            else: iterCall,
+          } as Instr,
+        ];
+      }
     }
 
     // (#2583) `$__vec_base` brand arm for callback-free array search/predicate
