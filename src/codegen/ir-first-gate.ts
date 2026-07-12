@@ -274,3 +274,139 @@ export function irFirstBodyHasNullish(fn: ts.FunctionDeclaration): boolean {
   scan(fn.body);
   return found;
 }
+
+/** The TypedArray view constructor / type names whose element STORE the IR
+ *  front-end does not yet lower (`from-ast.ts` `lowerElementStore` throws
+ *  "element store on a TypedArray view not in IR scope" — the per-view value
+ *  conversions ToUint8/clamp/pack are legacy-only). Kept in lockstep with the
+ *  resolver's `isTypedArrayViewExpr` semantics: any indexed write to one of
+ *  these is legacy-only today. */
+const TYPED_ARRAY_VIEW_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+]);
+
+/**
+ * (#3143 gate 8) Unlowered TypedArray-view op — element STORE or CONSTRUCTION.
+ * Two from-ast throws share this "TypedArray views are legacy-only in the IR"
+ * boundary, and the selector accepts both shapes structurally (checker-free):
+ *
+ *   (a) element store `view[i] = v` → `lowerElementStore` throws "element store
+ *       on a TypedArray view not in IR scope" (per-view ToUint8/clamp/pack
+ *       conversions + typed backing store are legacy-only). Real population:
+ *       the native-messaging `putAscii` / `putUint` writers.
+ *   (b) construction `new <TypedArrayCtor>(n)` → `lowerNewExpression` throws
+ *       "unknown class" (the extern-class registry has no TypedArray view arm
+ *       in the IR path; only element READS on a claimed view lower today).
+ *
+ * Under the overlay both demote silently to legacy; as a skipped IR-first slot
+ * either would promote to a HARD compile error (the `unreachable` placeholder
+ * must never ship). Keep any function that stores to OR constructs a TypedArray
+ * view on the compile-twice path until the IR gains those lowerings — exactly
+ * the compile-twice deferral gates 4/5/7 use. (A view PARAMETER that is only
+ * READ lowers fine and is NOT gated — element reads on a claimed view work.)
+ *
+ * Checker-free view detection (conservative — a false positive only keeps a
+ * function compile-twice, never a correctness risk; a false negative leaves a
+ * rarer view-typed receiver to hard-error as before, i.e. no NEW regression):
+ * a receiver identifier is treated as a TypedArray view when it is a parameter
+ * or local annotated with a TypedArray type, or a local initialized with
+ * `new <TypedArrayCtor>(…)`.
+ */
+export function irFirstBodyStoresTypedArrayView(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.body) return false;
+  const isViewTypeNode = (t: ts.TypeNode | undefined): boolean =>
+    t !== undefined &&
+    ts.isTypeReferenceNode(t) &&
+    ts.isIdentifier(t.typeName) &&
+    TYPED_ARRAY_VIEW_TYPE_NAMES.has(t.typeName.text);
+  const isViewNewExpr = (e: ts.Expression | undefined): boolean => {
+    if (e === undefined || !ts.isNewExpression(e)) return false;
+    return ts.isIdentifier(e.expression) && TYPED_ARRAY_VIEW_TYPE_NAMES.has(e.expression.text);
+  };
+  // --- (b) ANY TypedArray-view construction `new <TypedArrayCtor>(…)` in the
+  //     body keeps the function compile-twice (from-ast "unknown class"). ---
+  {
+    let constructsView = false;
+    const scanNew = (node: ts.Node): void => {
+      if (constructsView) return;
+      if (ts.isNewExpression(node) && isViewNewExpr(node)) {
+        constructsView = true;
+        return;
+      }
+      ts.forEachChild(node, scanNew);
+    };
+    scanNew(fn.body);
+    if (constructsView) return true;
+  }
+  // --- names known to hold a TypedArray view inside the function ---
+  const viewNames = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name) && isViewTypeNode(p.type)) viewNames.add(p.name.text);
+  }
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      if (isViewTypeNode(node.type) || isViewNewExpr(node.initializer)) viewNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(fn.body);
+  if (viewNames.size === 0) return false;
+  // --- receiver root of an element access chain (unwrap parens/nonnull/as) ---
+  const isViewReceiver = (e: ts.Expression): boolean => {
+    let cur = e;
+    while (ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur) || ts.isAsExpression(cur))
+      cur = cur.expression;
+    return ts.isIdentifier(cur) && viewNames.has(cur.text);
+  };
+  // --- flag any assignment (=, compound) whose LHS is `view[idx]` ---
+  const isAssignToken = (k: ts.SyntaxKind): boolean =>
+    k === ts.SyntaxKind.EqualsToken ||
+    k === ts.SyntaxKind.PlusEqualsToken ||
+    k === ts.SyntaxKind.MinusEqualsToken ||
+    k === ts.SyntaxKind.AsteriskEqualsToken ||
+    k === ts.SyntaxKind.SlashEqualsToken ||
+    k === ts.SyntaxKind.PercentEqualsToken ||
+    k === ts.SyntaxKind.AmpersandEqualsToken ||
+    k === ts.SyntaxKind.BarEqualsToken ||
+    k === ts.SyntaxKind.CaretEqualsToken ||
+    k === ts.SyntaxKind.LessThanLessThanEqualsToken ||
+    k === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken ||
+    k === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken;
+  let found = false;
+  const scan = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      isAssignToken(node.operatorToken.kind) &&
+      ts.isElementAccessExpression(node.left) &&
+      !node.left.questionDotToken &&
+      isViewReceiver(node.left.expression)
+    ) {
+      found = true;
+      return;
+    }
+    // prefix/postfix `view[i]++` / `--view[i]` also route through the store.
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      ts.isElementAccessExpression(node.operand) &&
+      !node.operand.questionDotToken &&
+      isViewReceiver(node.operand.expression)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, scan);
+  };
+  scan(fn.body);
+  return found;
+}

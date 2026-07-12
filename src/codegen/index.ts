@@ -34,6 +34,7 @@ import {
   irFirstBodyHasNullish,
   irFirstBodyReadsHostNode,
   irFirstBodyReadsStringElement,
+  irFirstBodyStoresTypedArrayView,
 } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -1557,6 +1558,12 @@ interface IrOverlayPlan {
  *      reference-shaped operand pairs; the residual demote must stay a
  *      metered legacy fallback (see `irFirstBodyHasNullish`), never a
  *      skipped-slot hard error.
+ *   8. (#3143) Its body neither stores to nor constructs a TypedArray view —
+ *      `view[i] = v` (`lowerElementStore`, per-view ToUint8/clamp/pack) and
+ *      `new <TypedArrayCtor>(n)` (`lowerNewExpression` "unknown class") are
+ *      both legacy-only in the IR (element READS on a view do lower); the
+ *      residual demote must stay a metered legacy fallback (see
+ *      `irFirstBodyStoresTypedArrayView`), never a skipped-slot hard error.
  *
  * Class members are NEVER skipped in this slice (their slot pre-allocation
  * lives in `class-bodies.ts` and carries a typeIdx parity contract with
@@ -1595,6 +1602,7 @@ function computeIrFirstSkipSet(
     if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
     if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
     if (irFirstBodyHasNullish(fn)) continue; // gate 7 — `??` residual demote (#3143)
+    if (irFirstBodyStoresTypedArrayView(fn)) continue; // gate 8 — TypedArray-view element store (#3143)
     // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
     // under IR-first while the dynamic surface is move-only (no box/unbox
     // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed

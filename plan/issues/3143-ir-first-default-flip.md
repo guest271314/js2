@@ -1,12 +1,11 @@
 ---
 id: 3143
 title: "Flip IR-first (JS2WASM_IR_FIRST) to default — clears gate G1 of the legacy-frontend retirement"
-status: blocked
+status: in-progress
 sprint: current
-assignee: ttraenkler/fable-shrink
+assignee: ttraenkler/sendev-3143flip
 created: 2026-07-11
-updated: 2026-07-11
-blocked_on: "selector↔builder capability alignment (#2855/#2949 track) — see ## CI A/B divergence (banked 2026-07-11) below"
+updated: 2026-07-12
 priority: high
 horizon: m
 feasibility: medium
@@ -20,13 +19,20 @@ related: [2138, 3090, 2855, 2856, 3153, 3156]
 origin: "plan/bloat-reduction-battle-plan.md slice 4; gate G1 in plan/log/3090-phase0-legacy-delete-list.md"
 loc-budget-allow:
   - src/codegen/index.ts
+  - src/ir/integration.ts
 ---
 
 <!-- loc-budget-allow rationale (#3131): the flip's +21 in the barrel/driver
 `src/codegen/index.ts` is the `explicitlyDisabledEnv` escape-hatch helper +
-the gate-7 docblock and gate line, which structurally belong to the IR-first
-pipeline block in `generateModule`. Gate-7's own scan helper went into the
-subsystem module `src/codegen/ir-first-gate.ts`, not the barrel. -->
+the gate-7/8 docblock and gate lines, which structurally belong to the IR-first
+pipeline block in `generateModule`. Gate-7/8's own scan helpers went into the
+subsystem module `src/codegen/ir-first-gate.ts`, not the barrel. The +69 in
+`src/ir/integration.ts` is the #3143 union-import pre-registration fix
+(`preregisterDynamicSupport` + `UNION_IMPORT_FUNC_NAMES` + the
+`__extern_is_undefined` batch flush) — it MUST live in `integration.ts`
+because that is where the Phase-3 pre-registration seam is (the sibling
+`preregisterStringSupport`/`preregisterIteratorSupport` passes), and it fixes
+the IR-first-exposed dual-compile import-registration gap in place. -->
 
 # #3143 — Make IR-first compilation the default (gate G1)
 
@@ -36,8 +42,8 @@ Today the IR is an **overlay**: legacy compiles every function first, then IR-co
 bodies replace legacy bodies (`src/codegen/index.ts` overlay block ~:2096). #2138
 (done) built the inversion behind `JS2WASM_IR_FIRST=1` — legacy emission is skipped
 for claimed functions — but it is **not the default**. Gate **G1** in
-`plan/log/3090-phase0-legacy-delete-list.md`: *no live legacy handler can be deleted
-until IR-first is the default*, because the overlay keeps every handler reachable.
+`plan/log/3090-phase0-legacy-delete-list.md`: _no live legacy handler can be deleted
+until IR-first is the default_, because the overlay keeps every handler reachable.
 
 ## Implementation Plan (architect — re-sequenced 2026-07-12 audit)
 
@@ -50,8 +56,8 @@ until IR-first is the default*, because the overlay keeps every handler reachabl
 > "never a silent legacy demote", codegen/index.ts:2147–2172). So the true
 > flip gate is **zero post-claim demotions on the corpora**, measured by the
 > #3153 meter. #2856 (blocked epic, 14 residual body-shape rejects — all
-> playground capability programs) is decoupled: it gates legacy *deletion
-> breadth*, not the flip itself.
+> playground capability programs) is decoupled: it gates legacy _deletion
+> breadth_, not the flip itself.
 
 1. **Preconditions (the #3153 census classes, in place of #2856):**
    - #3156 substring/charCodeAt family — **done** (2026-07-12).
@@ -68,7 +74,7 @@ until IR-first is the default*, because the overlay keeps every handler reachabl
      both report **zero** post-claim demotions.
 2. **Flip**: default the IR-first path on in `src/codegen/index.ts` (keep
    `JS2WASM_IR_FIRST=0` as an escape hatch for one release); keep the demote-to-legacy
-   fallback for *rejected* functions unchanged.
+   fallback for _rejected_ functions unchanged.
 3. **Measure**: full-corpus A/B on CI sharded test262 (host + standalone lanes) —
    net ≥ 0, no async/generator bucket regression. This changes which emitter produced
    every claimed function's bytes; it is NOT byte-inert — the merge_group standalone
@@ -164,7 +170,7 @@ case ships a **divergent** flip.
 Replace the skip **denylist** with a conservative **allowlist** gate — skip
 only functions whose body is provably in a small lowerable set (numeric
 arithmetic/compare, control flow, local calls, returns; **no** method calls /
-string ops / coercion). Safe-by-construction *iff* the allowlist is a strict
+string ops / coercion). Safe-by-construction _iff_ the allowlist is a strict
 subset of buildable; lands a reduced (pure-function-only) flip that still
 clears G1 for that population. Risk: a single mis-classified construct
 re-introduces divergence, and it can't be fully validated without a CI A/B
@@ -181,3 +187,64 @@ round-trip. Not taken under the closing-window constraint.
 3. On landing: flip `status: done`, mark G1 cleared in
    `plan/log/3090-phase0-legacy-delete-list.md` (already staged there — revert
    that edit if the flip is materially reworked).
+
+## Resume + resolution (2026-07-12, sendev-3143flip) — UNBLOCKED
+
+The banked "broad divergence surface" (string methods, relational, unary `+`,
+`Symbol.toPrimitive`, template coercion, ternary-string, toString/valueOf,
+try-catch, sort) is **no longer the blocker**: intervening main advances
+applied fix (A) incrementally — #3156 (substring/charCodeAt family lowering),
+#3167 (string relational lowering), plus selector-precision that now REJECTS
+the remaining shapes pre-claim (rejected ⇒ never in `safeSelection` ⇒ never
+skipped ⇒ graceful legacy, never a skipped-slot hard error).
+
+### The meter was a FALSE GREEN (root cause the prior attempts kept hitting)
+
+The #3153 meter reads `CompileResult.irPostClaimErrors`, but a skipped-slot
+**hard error** lands in `CompileResult.errors` (severity `error`, message
+`[IR-FIRST skipped-slot, #2138]`) — NOT in `irPostClaimErrors`. Proven: the
+class-4 file pre-fix returned `errors=2, irPostClaimErrors=0`. So "meter
+STRIDE=300 = zero" did NOT prove flip-readiness; it was blind to the exact
+failure population. **The authoritative flip-readiness gate is a `result.errors`
+scan for `[IR-FIRST skipped-slot`** across the corpus (see `.tmp/skipslot-fast.mts`;
+consider folding this into the #3153 meter as a follow-up).
+
+### Residual firing-class inventory (current main + this branch)
+
+`result.errors` skipped-slot scan over FULL examples/playground (103 files, the
+dense divergence source per #3153) + test262 STRIDE=120 (~360): after the fixes
+below, **zero** skipped-slot hard errors. The only classes that fired:
+
+1. **TypedArray-view element store** (`view[i] = v`) — native-messaging
+   `putAscii`/`putUint`. → **gate 8** (`irFirstBodyStoresTypedArrayView`).
+2. **TypedArray-view construction** (`new <TypedArrayCtor>(n)`, from-ast
+   "unknown class") — folded into **gate 8** (store OR construct; view element
+   READS still lower, not gated). Defense-in-depth: didn't fire in the sampled
+   corpus but is a real selector-claimable from-ast throw.
+3. **`__box_number` / `__extern_is_undefined` unknown funcref** — fibMemo
+   (Map + number boxing). from-ast emits these as named funcref calls relying
+   on legacy's `addUnionImports`/`ensureLateImport` **side effect** (documented
+   dual-compile assumption, from-ast.ts:3345); IR-first skips legacy → import
+   unregistered → `ir/integration` throws. → **general fix**: extend
+   `preregisterDynamicSupport` (`src/ir/integration.ts`) to register the
+   `addUnionImports` family + `__extern_is_undefined` when the built IR
+   references them by name, then `flushLateImportShifts` so the funcIdx shift +
+   defined-body fix-up applies BEFORE Phase-3 baking (a pending batch desynced a
+   sibling IR function's funcIdx — "out of local range"). Idempotent,
+   pre-emission, kills the class not the instance.
+
+NOT flip regressions: 4 test262 dstr class-method files THROW "Cannot read
+properties of undefined (reading 'flags')" — a pre-existing TypeScript-checker
+crash (`getMembersOfSymbol`), reproduces with `JS2WASM_IR_FIRST=0`. Out of scope.
+
+### Validation
+
+- `tests/issue-3143.test.ts` (21 tests): gate-8 predicate (store + construct
+  branches), e2e no-hard-error + correct-bytes + `JS2WASM_IR_FIRST=0` parity,
+  and the fibMemo `__box_number`/`__extern_is_undefined` regression + VALID
+  binary guard. tsc clean; `check:ir-fallbacks` OK (body-shape-rejected
+  unchanged at 14, no post-claim increase); 2138/2951/2972 (40 tests) green.
+- Broad-impact ⇒ the full-CI/merge_group (equivalence + test262 + standalone
+  floor + cross-backend-parity shards) is the ultimate gate — the same gates
+  that caught the banked regression. Merged-report delta MUST be
+  net-non-negative, zero conformance regression.
