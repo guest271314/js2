@@ -57,6 +57,7 @@ import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynam
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
 import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
 import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
+import { fillLazyIterLadderArms } from "./iter-lazy-native.js"; // (#2903 R3)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -2475,6 +2476,13 @@ export function generateModule(
     // per-producer driven-generator arms + the positive-admission classifier.
     // Read-only per #1719; no-op unless a helper call site reserved them.
     fillIterHofSteppers(ctx);
+
+    // (#2903 R3) Prepend the `$LazyIterHelper` recognition arm to the
+    // GetIterator ladder (`__iterator`/`_next`/`_return`) so `Array.from(...)`,
+    // spread, and `for…of` drive a lazy map/filter/take/drop wrapper natively.
+    // MUST run AFTER `fillNativeIteratorLateArms` (which rebuilds those bodies).
+    // No-op unless a lazy wrapper was constructed.
+    fillLazyIterLadderArms(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
