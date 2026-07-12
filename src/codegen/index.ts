@@ -12234,6 +12234,22 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (name && !ctx.structMap.has(name)) {
       name = ctx.classExprNameMap.get(name) ?? name;
     }
+    // (#3051 Slice 3) An ANONYMOUS object type carrying a get/set ACCESSOR
+    // property (`{ get index() {…} }`) is runtime-represented as a HOST plain
+    // object — `compileObjectLiteralWithAccessors` (#1239) lowers the literal
+    // via `__new_plain_object` + `__defineProperty_accessor`, never as a WasmGC
+    // struct. Resolving its TS type to a struct ref makes every typed slot
+    // (closure returns above all) coerce externref→struct, whose failed
+    // `ref.test` null-fallback (type-coercion.ts) silently DROPPED the object:
+    // a `regexp.exec` override returning a poisoned `{ get index() { throw … } }`
+    // arrived at V8's @@replace protocol as `null` (= no match), so the getter
+    // never fired and the test262 `result-get-*-err` abrupt completions never
+    // happened. Resolve such types to externref so the host object survives
+    // end-to-end. Scoped to anonymous (`__type`/`__object`) types — named
+    // class/interface accessors keep their struct lowering.
+    if ((name === "__type" || name === "__object") && typeHasAccessorProperty(tsType)) {
+      return { kind: "externref" };
+    }
     // Check named structs (interfaces, type aliases)
     if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
       // (#1366a) Externref-backed user classes (e.g. `class Sub extends Error`)
@@ -12288,6 +12304,24 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   }
 
   return mapTsTypeToWasm(tsType, ctx.checker, ctx.fast);
+}
+
+/**
+ * (#3051 Slice 3) True when the object type carries at least one property
+ * declared as a get/set accessor (`{ get x() {…} }` / `{ set x(v) {…} }`).
+ * Such values are runtime-represented as HOST plain objects (see
+ * `compileObjectLiteralWithAccessors`, #1239), so their TS type must resolve
+ * to externref, never a WasmGC struct ref.
+ */
+function typeHasAccessorProperty(tsType: ts.Type): boolean {
+  for (const p of tsType.getProperties()) {
+    const decls = p.getDeclarations?.() ?? p.declarations;
+    if (!decls) continue;
+    for (const d of decls) {
+      if (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -12392,6 +12426,13 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   }
   // Callable types (functions) are compiled as closures, not structs
   if (tsType.getCallSignatures().length > 0) return;
+  // (#3051 Slice 3) Accessor-bearing anonymous object types are host plain
+  // objects (compileObjectLiteralWithAccessors) — see resolveWasmType's
+  // matching externref guard. Never register a struct for them.
+  {
+    const n = tsType.symbol?.name;
+    if ((n === "__type" || n === "__object") && typeHasAccessorProperty(tsType)) return;
+  }
   // (#2542) A pure string-index-signature type — `{ [s: string]: T }` with no own
   // named properties — is an open dictionary that lowers to a `$Object` externref
   // (see resolveWasmType's #2542 guard), NOT an empty WasmGC struct. Registering an

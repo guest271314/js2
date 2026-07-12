@@ -1,7 +1,8 @@
 ---
 id: 3051
 title: "RegExp.prototype[@@replace] / [@@split] coercion protocol: ToString/ToInteger/ToLength on result-array + lastIndex/limit/flags args (~48 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-3051c
 sprint: current
 priority: medium
 horizon: m

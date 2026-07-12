@@ -5824,6 +5824,19 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
         // receiver's struct shape doesn't carry the field at all.
         const v = getter(obj);
         if (v !== undefined && v !== null) return v;
+        // (#3051 Slice 3) `null` disambiguation: a compiled `null` literal is
+        // stored as ref.null (reads back `null` — same as the dispatcher's
+        // shape-miss), while compiled `undefined` is the distinguished host
+        // undefined. When the receiver's OWN struct shape carries the field,
+        // a `null` read is the REAL stored value, not a miss — e.g. the exec
+        // result `{ groups: null }` must expose `groups === null` so V8's
+        // @@replace step 14.j/l `ToObject(namedCaptures)` throws the
+        // spec-mandated TypeError (result-coerce-groups-err). Shape check only
+        // on the rare null path — the common hit path above is unchanged.
+        if (v === null) {
+          const fieldNames = _getStructFieldNames(obj, exports);
+          if (fieldNames !== null && fieldNames.includes(String(key))) return null;
+        }
       } catch {
         /* not a field of this struct type */
       }
