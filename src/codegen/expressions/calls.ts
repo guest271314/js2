@@ -12466,7 +12466,7 @@ function compileCallExpression(
           // (#3175) Throw a real RangeError INSTANCE so the raw-`try`/`catch` +
           // `assert(e instanceof RangeError)` corpus passes (not a bare string).
           const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
-          const throwInstrs = buildThrowJsErrorInstrs(ctx, fctx, "RangeError", rangeErrMsg);
+          const throwInstrs = buildThrowJsErrorInstrs(ctx, "RangeError", rangeErrMsg, { flush: fctx });
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
@@ -12682,7 +12682,7 @@ function compileCallExpression(
         {
           // (#3175) Real RangeError INSTANCE (see the toString radix gate).
           const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
-          const throwInstrs = buildThrowJsErrorInstrs(ctx, fctx, "RangeError", rangeErrMsg);
+          const throwInstrs = buildThrowJsErrorInstrs(ctx, "RangeError", rangeErrMsg, { flush: fctx });
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },

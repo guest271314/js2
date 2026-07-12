@@ -21,7 +21,8 @@ import {
   resolveWasmType,
   typedArrayPackedSignedness,
 } from "./index.js";
-import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
+import { buildThrowStringInstrs, emitThrowString, noJsHost } from "./js-errors.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
@@ -34,7 +35,6 @@ import {
   isTaViewTypeIdx,
 } from "./registry/types.js";
 import { emitTaDynViewToVec, emitTaDynViewValidate, emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through; (#3058) dyn-view materialize+validate
-import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
@@ -134,19 +134,11 @@ function nativeStringElementEqInstrs(
   ];
 }
 
-/** Emit throw with a string message (local version to avoid circular dep on expressions.ts) */
-function emitThrowString(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
-  addStringConstantGlobal(ctx, message);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
-  const tagIdx = ensureExnTag(ctx);
-  fctx.body.push({ op: "throw", tagIdx });
-}
-
-function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
-  addStringConstantGlobal(ctx, message);
-  const tagIdx = ensureExnTag(ctx);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
-}
+// (#3191) The former private `emitThrowString` / `throwStringInstrs` copies (a
+// verbatim duplicate of the canonical bare-string throw, kept local to avoid a
+// circular dep on `expressions/`) now route through the layering-safe leaf
+// module `./js-errors.ts` — `emitThrowString` (push) + `buildThrowStringInstrs`
+// (returns the terminal `Instr[]` for an `if.then`/`else` arm).
 
 // unpackedElemType / elemGetOp are canonical in shared.ts (#2934 — needed by
 // loops.ts and type-coercion.ts too, and array-methods.ts is not importable
@@ -323,7 +315,7 @@ function emitReceiverNullGuard(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: throwStringInstrs(ctx, "TypeError: Array method called on null or undefined"),
+    then: buildThrowStringInstrs(ctx, "TypeError: Array method called on null or undefined"),
     else: [],
   });
 }
@@ -1597,7 +1589,7 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
         });
       }
 
@@ -1761,7 +1753,7 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
         });
       }
 
@@ -7485,7 +7477,7 @@ function compileArrayReduce(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
     } as Instr);
     fctx.body.push({ op: "local.get", index: loop.dataTmp });
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7687,7 +7679,7 @@ function compileArrayReduceRight(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
     } as Instr);
     fctx.body.push({ op: "local.get", index: dataTmp });
     fctx.body.push({ op: "local.get", index: lenTmp });

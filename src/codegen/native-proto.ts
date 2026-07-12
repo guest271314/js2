@@ -35,10 +35,9 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { ensureBuiltinFnMetaType } from "./builtin-fn-meta.js";
-import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
-import { emitThrowTypeError } from "./expressions/helpers.js"; // (#2984) refusal-body fallback
+import { buildThrowJsErrorInstrs, emitThrowTypeError } from "./js-errors.js"; // (#2984) refusal-body fallback
 import { allocLocal } from "./context/locals.js";
 
 // ── Brand space (shared with #2101 — MUST stay coherent) ──────────────────────
@@ -556,14 +555,13 @@ export function ensureStandaloneNativeMethodClosure(
  * never a `ref.cast` trap (#2100 M2 / §22.2.6.4.1 step 2).
  */
 export function emitBrandCheckTypeError(ctx: CodegenContext, body: Instr[], message: string): void {
-  emitWasiErrorConstructor(ctx, "TypeError", 1);
-  addStringConstantGlobal(ctx, message);
-  for (const instr of stringConstantExternrefInstrs(ctx, message)) body.push(instr);
-  const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
-  if (newTypeErrorIdx !== undefined) {
-    body.push({ op: "call", funcIdx: newTypeErrorIdx } as Instr);
+  // (#3191) Unified onto the shared builder. `forceInModuleCtor` reproduces the
+  // former behavior EXACTLY — always emit the in-module `__new_TypeError` (via
+  // `emitWasiErrorConstructor` + `funcMap`) regardless of `noJsHost`, so host-
+  // mode codegen for these brand checks is unchanged. Sinks into the raw `body`.
+  for (const instr of buildThrowJsErrorInstrs(ctx, "TypeError", message, { forceInModuleCtor: true })) {
+    body.push(instr);
   }
-  body.push({ op: "throw", tagIdx: ensureExnTag(ctx) } as Instr);
 }
 
 /** The `eq` abstract heap type, signed-LEB128 -19 (= 0x6d). `ref.test`/`ref.cast`

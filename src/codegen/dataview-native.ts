@@ -39,10 +39,9 @@
 import type { Instr, ValType } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitThrowTypeError, noJsHost } from "./expressions/helpers.js";
+import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import {
   addFuncType,
@@ -626,14 +625,10 @@ const DV_RANGE_MESSAGE = "RangeError: Offset is outside the bounds of the DataVi
  * accessor body and flushes shifts.
  */
 function emitDataViewRangeError(ctx: CodegenContext): Instr[] {
-  if (noJsHost(ctx)) emitWasiErrorConstructor(ctx, "RangeError", 1);
-  addStringConstantGlobal(ctx, DV_RANGE_MESSAGE);
-  const ctorIdx = ensureLateImport(ctx, "__new_RangeError", [{ kind: "externref" }], [{ kind: "externref" }]);
-  const tagIdx = ensureExnTag(ctx);
-  const instrs: Instr[] = [...stringConstantExternrefInstrs(ctx, DV_RANGE_MESSAGE)];
-  if (ctorIdx !== undefined) instrs.push({ op: "call", funcIdx: ctorIdx } as Instr);
-  instrs.push({ op: "throw", tagIdx } as Instr);
-  return instrs;
+  // (#3191) Unified onto the shared builder. No `flush` opt: the caller
+  // pre-builds this template BEFORE emitting the body and flushes shifts itself
+  // (funcIdx-capture ordering, see the doc above) — exactly the former behavior.
+  return buildThrowJsErrorInstrs(ctx, "RangeError", DV_RANGE_MESSAGE);
 }
 
 /** §24.3.1.1/§24.3.1.2 step 2 — receiver has no [[DataView]] internal slot. */
@@ -650,14 +645,8 @@ const DV_TOBIGINT_UNDEFINED_MESSAGE = "TypeError: Cannot convert undefined to a 
  * MUST be built (and shifts flushed) BEFORE any later funcIdx is captured.
  */
 function dvTypeErrorThrow(ctx: CodegenContext, message: string): Instr[] {
-  if (noJsHost(ctx)) emitWasiErrorConstructor(ctx, "TypeError", 1);
-  addStringConstantGlobal(ctx, message);
-  const ctorIdx = ensureLateImport(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
-  const tagIdx = ensureExnTag(ctx);
-  const instrs: Instr[] = [...stringConstantExternrefInstrs(ctx, message)];
-  if (ctorIdx !== undefined) instrs.push({ op: "call", funcIdx: ctorIdx } as Instr);
-  instrs.push({ op: "throw", tagIdx } as Instr);
-  return instrs;
+  // (#3191) Unified onto the shared builder — caller-flush ordering (see above).
+  return buildThrowJsErrorInstrs(ctx, "TypeError", message);
 }
 
 /**
