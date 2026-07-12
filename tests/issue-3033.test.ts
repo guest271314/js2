@@ -101,3 +101,66 @@ export function test() {
     expect(exp.test()).toBe(42);
   });
 });
+
+// Bug 2b (#3033) — a CHAINED member read (`this.type.keyword`) whose
+// intermediate is a purely-`undefined`-typed dynamic read fell through to the
+// terminal "unresolvable" fallback in compilePropertyAccess and folded to a
+// constant `ref.null.extern` (read null), while the SAME read via a local
+// (`var t = this.type; t.keyword`) worked (Bug 2a gave the local an externref
+// slot). Fixed by admitting such receivers into the dynamic `__extern_get` arm
+// via the shared `undefinedTypedMemberReadProducesExternref` predicate.
+//
+// NOTE: the exact checker collapse (`this.type` typed PURELY `undefined`)
+// needs acorn's scale (heterogeneous `type` fields across dozens of shapes) —
+// minimal repros compile through other paths (verified; same finding as the
+// two prior slices). These are behavioral no-regression guards; the acorn-
+// scale gate is the dogfood harness fixture
+// tests/dogfood/fixtures/inputs/member-keyword-props.js (pnpm run dogfood:acorn).
+describe("#3033 Bug 2b — chained member reads and keyword-named properties", () => {
+  // The acorn parseIdentNode shape: direct chained read must equal the
+  // via-local read (pre-fix at acorn scale: null vs "var").
+  it("direct chained this.type.keyword equals the via-local read", async () => {
+    const exp = await run(`
+var TokenType = function TokenType(label, conf) {
+  if (conf === void 0) conf = {};
+  this.label = label;
+  this.keyword = conf.keyword;
+};
+var keywords = { var: new TokenType("var", { keyword: "var" }) };
+var Parser = function Parser() { this.type = keywords.var; };
+var pp = Parser.prototype;
+pp.readDirect = function () { return this.type.keyword; };
+pp.readVia = function () { var t = this.type; return t.keyword; };
+export function test() {
+  var p = new Parser();
+  return String(p.readDirect()) + "|" + String(p.readVia());
+}
+`);
+    expect(exp.test()).toBe("var|var");
+  });
+
+  // Reserved words as property names on user objects (`this.var = []`) —
+  // the source-level twin of the acorn `x.var` snippet.
+  it("keyword-named properties (var/if/function) read and write correctly", async () => {
+    const exp = await run(`
+var S = function S(f) { this.var = [f]; this.if = "yes"; this.function = 2; };
+export function test() {
+  var s = new S(7);
+  return String(s.var.length) + "|" + String(s.var[0]) + "|" + s.if + "|" + String(s.function);
+}
+`);
+    expect(exp.test()).toBe("1|7|yes|2");
+  });
+
+  // Deep chained reads through dynamically-typed receivers stay intact.
+  it("deep chained reads through untyped receivers", async () => {
+    const exp = await run(`
+var make = function () { return { a: { b: { c: "deep" } } }; };
+export function test() {
+  var o = make();
+  return String(o.a.b.c);
+}
+`);
+    expect(exp.test()).toBe("deep");
+  });
+});

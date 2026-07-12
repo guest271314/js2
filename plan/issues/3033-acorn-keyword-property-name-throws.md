@@ -1,10 +1,12 @@
 ---
 id: 3033
 title: "compiled-acorn THROWS parsing a KEYWORD used as a property name (`x.var`, `x.function`, `x.if`) — the next-deeper acorn self-parse blocker after #2853"
-status: in-progress
-assignee: ttraenkler/dev-3051c
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-b2b-memberread
 loc-budget-allow:
   - src/codegen/index.ts
+  - src/codegen/property-access.ts
 sprint: current
 priority: low
 horizon: m
@@ -35,13 +37,17 @@ var Scope = function Scope(flags) {
 ## Minimal repros (compiled-acorn throws `WebAssembly.Exception`, node-acorn OK)
 
 ```js
-x.var;        // THROWS
-x.var = [];   // THROWS
-x.function;   // THROWS
-x.if;         // THROWS
-x.foo = [];   // OK  ← non-keyword property fine
-function S(f) { this.var = []; }                          // THROWS
-var Scope = function Scope(flags) { this.flags = flags; } // OK (no keyword prop)
+x.var; // THROWS
+x.var = []; // THROWS
+x.function; // THROWS
+x.if; // THROWS
+x.foo = []; // OK  ← non-keyword property fine
+function S(f) {
+  this.var = [];
+} // THROWS
+var Scope = function Scope(flags) {
+  this.flags = flags;
+}; // OK (no keyword prop)
 ```
 
 So the gap is precisely: **a reserved word used as a property name after `.`**.
@@ -225,3 +231,55 @@ identifies `this.type` as runtime-externref). The Bug-2a helper
 `.tmp/b2b-cond.mts` (shows `kwDirect=null` vs `kwVia_t=var`) is the tightest
 signal — fix is correct when `kwDirect` reads `"var"`. Related: the
 `new (Fn as any)()`-returns-null bug (#3163) blocks minimal-scale repros.
+
+## Bug 2b — FIXED (dev-b2b-memberread, 2026-07-12) — acorn now FULLY self-parses
+
+**Localization (corrects the "one of ~46 inline numeric paths" hypothesis).**
+Compile-time tracing (a temporary wrapper around `compilePropertyAccess`
+shadowing `fctx.body.push` to stack-trace every `ref.null.extern` emit — no
+injected wasm, so the prior slice's stack-balance blocker never arose) showed
+the failing `this.type.keyword` reads (acorn L3680/L3681, `parseIdentNode`)
+compile to a SINGLE constant `ref.null.extern` emitted by the TERMINAL
+"unresolvable property access" fallback (property-access.ts ~6810) — NOT an
+inline numeric path, and NOT an i32 truncation at the read site (`accessWasm`
+was already externref there). The receiver `this.type` has static type purely
+`undefined` → `resolveWasmType` NUMERIC → the dynamic-receiver arm's
+`isExternObj` gate (~6489) rejected it → every arm missed → constant-null fold.
+The via-local form worked because `isExternObj`'s second clause accepts an
+identifier whose LOCAL SLOT is externref (which Bug 2a's fix provides).
+
+**Fix (shared predicate, no parallel branch).** Extracted the Bug-2a receiver
+logic into `undefinedTypedMemberReadProducesExternref(ctx, expr)`
+(src/codegen/index.ts): a property/element access whose static type is purely
+`undefined`/`void` but whose receiver produces externref at runtime — RECURSIVE
+so the chained receiver (`this.type` under `this.type.keyword`) is recognized.
+`varBindingNeedsExternrefForUndefined` (Bug 2a, var/let slot typing) now
+delegates to it, and `compilePropertyAccess`'s `isExternObj` admission gains it
+as a third clause — the chained read then compiles through the EXISTING
+dynamic `__extern_get` arm (result externref, no truncation).
+
+**Verified:**
+
+- `.tmp/b2b-cond.mts` flips: `kwDirect="var"` (was null), `kwVia_t="var"`, no throw.
+- All issue snippets (`x.var`, `x.var = []`, `x.function`, `x.if`,
+  `function S(f){this.var=[]}`, `x.type.keyword`; `x.foo = []` regression-free)
+  parse AST-equal vs node-acorn oracle (`.tmp/b2b-accept.mts`; only the
+  pre-existing boundary artifacts — `sourceFile:null` sidecar, booleans as 0/1
+  — filtered, present on the baseline-OK snippet too).
+- **compiled acorn now FULLY SELF-PARSES acorn.mjs: 422/422 top-level
+  statements, Program body 422, ~55s** (`.tmp/b2b-selfparse.mts`). The
+  statement-238 wall (and every deeper one) is gone.
+- Risk suites (delete-sentinel, logical-conditional-identity,
+  tdz-reference-error, null-dereference-guards, compound-assignment-property/
+  -unresolvable-prop, struct-new-dynamic-field, typeof-member-expression,
+  issue-799-prototype-chain): failure sets IDENTICAL with and without the fix
+  (15 pre-existing local-env failures, name-for-name diff-verified).
+- `tests/issue-3033.test.ts` extended (Bug 2b block, 7/7 green); dogfood
+  fixture `tests/dogfood/fixtures/inputs/member-keyword-props.js` added as the
+  acorn-scale regression gate (minimal-scale repros still can't reach the
+  checker collapse — confirmed again this slice, matching both prior slices).
+
+**Residual (out of scope, pre-existing):** the `this.type = void 0`-seeded
+fnctor FIELD-slot flavor (a ctor assignment types the FIELD purely undefined →
+later writes truncate; `.tmp/b2b-min2.mts`) is a separate family member —
+field slots, not read admission — and existed before this slice.

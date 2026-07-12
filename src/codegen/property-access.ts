@@ -54,6 +54,7 @@ import {
   classifyTypedArrayType,
   reserveVecMethodHelper,
   resolveWasmType,
+  undefinedTypedMemberReadProducesExternref,
   TYPED_ARRAY_NAMES,
   typedArrayPackedSignedness,
   typedArrayVecStorage,
@@ -6437,6 +6438,16 @@ export function compilePropertyAccess(
     const objWasmType = resolveWasmType(ctx, objType);
     const isExternObj =
       objWasmType.kind === "externref" ||
+      // (#3033 Bug 2b) CHAINED dynamic read: the receiver is itself a purely-
+      // undefined-typed member read off an externref receiver (`this.type` in
+      // acorn's `this.type.keyword`). Its static type resolves NUMERIC
+      // (resolveWasmType(undefined)), so the externref clause above misses it
+      // and the read fell through to the terminal "unresolvable" fallback — a
+      // constant `ref.null.extern` — making `x.var` throw. The receiver's
+      // RUNTIME value is externref (the inner read compiles through this very
+      // arm), so admit it here. Shared predicate with Bug 2a's var-slot typing
+      // (`varBindingNeedsExternrefForUndefined`) — single source of truth.
+      undefinedTypedMemberReadProducesExternref(ctx, expr.expression) ||
       (ts.isIdentifier(expr.expression) &&
         (() => {
           const localIdx = fctx.localMap.get(expr.expression.text);
