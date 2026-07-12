@@ -19,6 +19,7 @@ related: [3143, 3153, 3167, 2949, 2138]
 origin: "2026-07-12 architect IR audit: #3153 census class 3; blocks the #3143 IR-first flip."
 loc-budget-allow:
   - src/ir/from-ast.ts
+  - src/ir/nodes.ts
 ---
 
 ## Resolution (2026-07-12, fable-eqfix)
