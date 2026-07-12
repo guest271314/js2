@@ -16,6 +16,16 @@ area: codegen, standalone
 language_feature: generators
 goal: standalone-mode
 related: [1665, 680, 2203, 2571, 2581, 2920, 2940, 3132, 1781]
+# (#3131) LOC allowance for this change-set: the three parts land as new arms
+# in the existing generator/iterator/closure subsystems — admission gate +
+# host-mix dispatch (generators-native), GENSTATE runtime arms
+# (iterator-native), fn-expr emit-site wiring (closures), NativeGeneratorInfo
+# decl widening (context/types). No barrel/driver growth.
+loc-budget-allow:
+  - src/codegen/iterator-native.ts
+  - src/codegen/generators-native.ts
+  - src/codegen/closures.ts
+  - src/codegen/context/types.ts
 origin: "2026-07-12 architect standalone audit (plan/log/standalone-gap-map.md): 1,741 official-scope tests pass ONLY via the eager-buffer __create_generator/__gen_* host shims; the dominant shape is the dstr-harness IIFE `var iter = function*() { iterCount += 1; }();`"
 ---
 
