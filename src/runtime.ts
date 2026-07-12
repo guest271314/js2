@@ -2382,6 +2382,11 @@ function _wrapWasmClosureUnknownArity(
       break;
     }
   }
+  // (#2623 P-7 / B-1) The closure's REAL declared arity, resolved lazily via the
+  // `__closure_arity` export (emitted alongside `__is_closure`). -2 = not yet
+  // probed, -1 = unknown (no export / not a closure). Cached per wrapper — the
+  // arity of a given closure struct never changes.
+  let realArityCache = -2;
   const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
     // (#3051 Slice 3) Host-side [[Construct]] (`new bridge(...)` — e.g. V8's
     // `Construct(C_species, «rx, flags»)` in the RegExp @@split protocol): a
@@ -2395,13 +2400,42 @@ function _wrapWasmClosureUnknownArity(
         ? _wrapForHost(ret, callbackState?.getExports())
         : ret;
     // METHOD call (receiver-bound `o.m(...)` → `fn.apply(wrappedObj, …)`): dispatch
-    // at the max method arity so a closure whose declared arity exceeds the caller's
-    // arg count is still matched. Each closure receives exactly its own arity.
+    // at an arity ≥ the closure's declared arity so the closure is still matched.
+    // Each closure receives exactly its own declared formals at the wasm arm.
     if (methodMaxArity >= 0 && this !== undefined && this !== globalThis) {
-      const methodCallFn = exports[`__call_fn_method_${methodMaxArity}`];
+      // (#2623 P-7 / B-1) Prefer dispatching at EXACTLY max(args.length,
+      // realArity): the #820l argc/extras plumbing derives `arguments.length`
+      // from the DISPATCHER arity, so padding to `methodMaxArity`
+      // (indistinguishable from real undefined args) inflated the callee's
+      // `arguments.length` (V8-native `.finally` invokes a patched `then` with
+      // exactly 2 args; the wasm `then` observed 5 — the test262
+      // `finally/invokes-then-with-*` assert-#3 failure). Falls back to the
+      // historical max-arity dispatch when the module has no `__closure_arity`
+      // export or the exact-arity dispatcher isn't emitted — never dispatches
+      // BELOW the closure's declared arity (the #2664 acorn omission hazard).
+      let dispatchArity = methodMaxArity;
+      if (realArityCache === -2) {
+        realArityCache = -1;
+        const arityFn = exports.__closure_arity as ((v: any) => number) | undefined;
+        if (typeof arityFn === "function") {
+          try {
+            const a = arityFn(closure);
+            if (typeof a === "number" && a >= 0) realArityCache = a;
+          } catch {
+            realArityCache = -1;
+          }
+        }
+      }
+      if (realArityCache >= 0) {
+        const exact = Math.max(args.length, realArityCache);
+        if (exact < methodMaxArity && typeof exports[`__call_fn_method_${exact}`] === "function") {
+          dispatchArity = exact;
+        }
+      }
+      const methodCallFn = exports[`__call_fn_method_${dispatchArity}`];
       if (typeof methodCallFn === "function") {
         const padded: any[] = [];
-        for (let i = 0; i < methodMaxArity; i++) padded.push(args[i]);
+        for (let i = 0; i < dispatchArity; i++) padded.push(args[i]);
         // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
         // struct before installing it as `__current_this`. `__extern_method_call`
         // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host

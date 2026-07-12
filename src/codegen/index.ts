@@ -58,6 +58,7 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -2439,6 +2440,11 @@ export function generateModule(
     }
     fillNativeIteratorLateArms(ctx);
 
+    // (#2903) Rebuild the Iterator-helper steppers (iter-hof-native.ts) with
+    // per-producer driven-generator arms + the positive-admission classifier.
+    // Read-only per #1719; no-op unless a helper call site reserved them.
+    fillIterHofSteppers(ctx);
+
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
     // combinator drain and the native iterator carrier can never disagree).
@@ -2635,6 +2641,12 @@ export function generateModule(
     // (necessary because __vec_len returns 0 for both empty arrays and
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
+
+    // #2623 P-7 (B-1): emit __closure_arity(externref) -> i32 so the JS-side
+    // dynamic bridge can dispatch host→wasm method callbacks at the closure's
+    // REAL declared arity (exact `arguments.length` reflection) instead of the
+    // highest emitted __call_fn_method_N.
+    emitClosureArityExport(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -5180,6 +5192,85 @@ function emitIsClosureExport(ctx: CodegenContext): void {
 
   mod.exports.push({
     name: "__is_closure",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
+ * Emit `__closure_arity(externref) -> i32` (#2623 P-7 / B-1). Returns the
+ * DECLARED formal-parameter count of a registered Wasm closure struct, or -1
+ * when the value is not a closure. Used by the JS-side dynamic bridge
+ * (`_wrapWasmClosureUnknownArity`) to dispatch a host→wasm method callback at
+ * `max(args.length, realArity)` instead of always the HIGHEST emitted
+ * `__call_fn_method_N`: dispatching at max-N padded the arg vector with
+ * undefineds that the #820l argc/extras plumbing cannot distinguish from real
+ * arguments, so the callee's `arguments.length` reported the dispatcher arity
+ * (V8's native `.finally` invokes a patched `then` with exactly 2 args; the
+ * wasm-side `then` observed `arguments.length === 5` — the test262
+ * `Promise/prototype/finally/invokes-then-with-*` assert-#3 failure and the
+ * #2614 assert-#2 finding).
+ *
+ * Dispatch shape mirrors `__call_fn_N` (per-shape funcref extraction via
+ * {@link buildFuncrefExtraction}, then a `ref.test` chain over the distinct
+ * closure FUNC types — the func type determines the formal count). No-op when
+ * the module has no closures, exactly like `__is_closure`.
+ */
+function emitClosureArityExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  const seenFuncTypeIdx = new Set<number>();
+  const entries: { funcTypeIdx: number; selfTypeIdx: number; closureArity: number }[] = [];
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    if (seenFuncTypeIdx.has(info.funcTypeIdx)) continue;
+    seenFuncTypeIdx.add(info.funcTypeIdx);
+    const funcTypeDef = mod.types[info.funcTypeIdx];
+    const selfParam = funcTypeDef?.kind === "func" ? funcTypeDef.params[0] : undefined;
+    const selfTypeIdx =
+      selfParam && (selfParam.kind === "ref" || selfParam.kind === "ref_null")
+        ? (selfParam as { typeIdx: number }).typeIdx
+        : typeIdx;
+    entries.push({ funcTypeIdx: info.funcTypeIdx, selfTypeIdx, closureArity: info.paramTypes.length });
+  }
+  if (entries.length === 0) return;
+
+  const arityTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_arity_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // Locals: 0 = value externref (param), 1 = anyref, 2 = funcref.
+  const anyLocal = 1;
+  const funcLocal = 2;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: anyLocal } as Instr,
+    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+  ];
+  for (const entry of entries) {
+    body.push({ op: "local.get", index: funcLocal } as Instr);
+    body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: entry.closureArity } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: -1 } as Instr);
+
+  mod.functions.push({
+    name: "__closure_arity",
+    typeIdx: arityTypeIdx,
+    locals: [
+      { name: "__any", type: { kind: "anyref" } },
+      { name: "__funcref", type: { kind: "funcref" } },
+    ],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__closure_arity",
     desc: { kind: "func", index: funcIdx },
   });
 }

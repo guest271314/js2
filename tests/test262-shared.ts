@@ -583,7 +583,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
               return;
             }
 
-            const { source: wrapped, bodyLineOffset: wrapOffset } = wrapTest(source, meta);
+            // (#3151) Pass the lane target: host-free lanes (standalone/wasi)
+            // get `any`-typed compareArray shims (dyn-view TypedArray support);
+            // the JS-host lane keeps `any[]` (an `any` param context corrupts
+            // callers' array-literal args — see buildPreamble in test262-runner.ts).
+            const { source: wrapped, bodyLineOffset: wrapOffset } = wrapTest(source, meta, TEST262_TARGET);
             // (#2119) `wrapTest` injects a synthetic top-level `export function
             // test()` entry point, which makes TypeScript flag EVERY wrapped
             // source as a module (`externalModuleIndicator`). The compiler would
