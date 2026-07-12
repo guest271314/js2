@@ -48,15 +48,21 @@ when `experimentalIR: true`". The pipeline disproves this; deletion is gated
 on four structural facts:
 
 - **G1 — legacy compiles EVERYTHING first.** ~~By default the IR is an
-  _overlay_~~ **CLEARED 2026-07-11 by #3143**: IR-first is now the default
-  (`JS2WASM_IR_FIRST=0` is a one-release escape hatch) — legacy emission is
-  skipped for claimed functions that pass `computeIrFirstSkipSet`'s gates
-  (2 generators-standalone, 4 host-nodes, 5 string-element, 6
-  dynamic-signature, 7 `??` residual). NOTE this clears G1 only for the
-  *skipped* population: functions excluded by gates 2/4/5/6/7, selector-
-  rejected functions (G2), top-level statements (G3), and class members
-  still compile via legacy — per-kind handler deletion still requires
-  G2/G3/G4 plus emptying the relevant skip-gate.
+  _overlay_~~ **CLEARED 2026-07-13 by #3143** (PR #2891, merge 1fc3b9d3a3):
+  IR-first is now the default (`JS2WASM_IR_FIRST=0` is a one-release escape
+  hatch). `computeIrFirstSkipSet` is an **ALLOWLIST** (not the earlier
+  denylist gates): legacy emission is skipped ONLY for a function whose
+  signature is f64-params + (f64|void)-return AND whose body is the
+  proven-lowerable numeric/boolean subset (`irFirstBodyIsProvenLowerable`) AND
+  whose internal callers are all also skipped (signature-parity fixpoint,
+  `collectLocalCallEdges`). Safe-by-construction: everything else compiles
+  twice. **The −60k deletion is INCREMENTAL, not unlocked by this flip alone:**
+  a per-kind handler is deletable only once NO compile-twice function uses it,
+  which requires the allowlist to OWN that node kind. The initial subset is
+  pure-numeric, so the immediately-deletable set is small; it grows as the
+  allowlist WIDENS (proven strings/vecs/JS-host generators → …) via the
+  #2855/#2856 capability track. Per-kind deletion still also requires
+  G2/G3/G4.
 - **G2 — whole-function claim unit keeps every handler live.** The selector
   claims `FunctionDeclaration`s; any rejection (every non-zero bucket in
   `plan/log/ir-adoption.md`, every `mixed`/`direct-only`/`deferred` kind in

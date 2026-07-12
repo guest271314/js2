@@ -1,11 +1,12 @@
 ---
 id: 3143
 title: "Flip IR-first (JS2WASM_IR_FIRST) to default — clears gate G1 of the legacy-frontend retirement"
-status: in-progress
+status: done
 sprint: current
 assignee: ttraenkler/sendev-3143flip
 created: 2026-07-11
-updated: 2026-07-12
+updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 horizon: m
 feasibility: medium
@@ -343,3 +344,30 @@ skipped-slot HARD errors land in `CompileResult.errors` — the meter is a FALSE
 GREEN for flip-readiness. The authoritative gate is a `result.errors` scan for
 `[IR-FIRST skipped-slot` over the EQUIVALENCE inline corpus (not a dir walk).
 Fold both into the #3153 meter as a follow-up.
+
+## CI GREEN (2026-07-12, sendev-3143flip) — PR #2891 @ 3b7d4a25f3
+
+All PR-level required checks PASS: **equivalence-gate** (138 regressions → 1 →
+0; the gradual-typing regression fixed by the signature-parity fixpoint),
+**quality** (dead-export green after deleting the 7 unwired predicates),
+**cross-backend-parity**, **equivalence-shards 1–8**, cheap-gate / smoke /
+linear-tests / check-for-test262-regressions / changes. test262 host+standalone
+shards + merge-shard-reports + standalone-floor `skipping` on the PR — they run
+on **merge_group** only (post-enqueue).
+
+Behavior-preserving proof: the 8-file ON-vs-OFF A/B was IDENTICAL (22==22
+failures, all pre-existing — fail with `experimentalIR:false` too). The
+allowlist skips only functions whose IR body ships identically to the overlay,
+so the flip changes compile-time work, not output → the test262 merged-report
+delta should be net-zero by construction.
+
+**Follow-ups (post-merge):**
+
+1. Widen the allowlist beyond f64-numeric (proven strings/vecs/JS-host
+   generators → restore #2951/#2972 compile-once) via the #2855/#2856
+   capability track; each widening unlocks more Phase-3a legacy deletion.
+2. The −60k deletion is INCREMENTAL, not one flip: a legacy handler is
+   deletable only once NO compile-twice function uses it (requires the allowlist
+   to own that node kind). Scope deletion slices as the allowlist widens.
+3. Fold the `result.errors` skipped-slot scan over the equivalence inline corpus
+   into the #3153 meter (retire the false-green `irPostClaimErrors` channel).
