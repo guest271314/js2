@@ -1258,6 +1258,16 @@ jobs:
           # #1954 — scoped PR runs: restrict the baseline to the scope or
           # every out-of-scope baseline pass reads as a pass→absent regression.
           TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
+          # #3202 — the #3189 uncatchable-trap ratchet's per-category tolerance
+          # (diff-test262.ts reads TRAP_RATCHET_TOLERANCE; default 0 = strict).
+          # Sourced from a repo variable so it can be tightened back to 0 without
+          # a PR once the CI-sharded-only +4 oob on the 4 unsupported-BigInt
+          # `TypedArray.prototype.set` tests is resolved. Set to 4 during the
+          # 2026-07-12 queue-wedge incident: main HEAD is verifiably 58 (baseline
+          # source c660e830 → main HEAD has only doc commits; fresh baseline=58),
+          # so the +4 is a speculative-merge/CI-flaky classification, NOT a main
+          # regression — this valve is the ratchet's own designed unwedge.
+          TRAP_RATCHET_TOLERANCE: ${{ vars.TRAP_RATCHET_TOLERANCE || '0' }}
         run: |
           BASELINE="benchmarks/results/test262-current.jsonl"
           if [ ! -f "$BASELINE" ]; then
