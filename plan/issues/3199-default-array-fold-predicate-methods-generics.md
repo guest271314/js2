@@ -1,7 +1,8 @@
 ---
 id: 3199
 title: "default lane: Array.prototype fold/predicate generics (reduce/reduceRight/every/some) over real + array-like receivers (~283 fails)"
-status: ready
+status: done
+completed: 2026-07-12
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -72,3 +73,38 @@ host-fail). Do not touch the standalone `fillExternArrayLikeStructArms` /
 slices), epic S3 #3193 / S6 #3196, and dev-array-hof. Land as **behavioral**
 fixes; coordinate refactors with #3182/#3105. Re-anchor by symbol; re-merge
 `origin/main` before enqueue.
+
+## Resolution (2026-07-12) — bounded in-file fix; bulk re-sliced to #3185
+
+Measured root-cause breakdown of the 281 default-lane fails (fresh-process
+probes over the baseline jsonl, reduce/reduceRight/some/every):
+
+- **~102 getter/`defineProperty`/`delete` observation on REAL (vec-backed)
+  arrays** — getters/delete never fire on the WasmGC vec, so
+  `testResult`/`accessed`/`callCnt`/mutation-during-iteration asserts fail.
+  This is the real-array dynamic-property gap **blocked on rep-unification
+  #3134**, NOT fixable in `array-methods.ts`. Re-sliced into #3185 as its own
+  XL child gated on #3134.
+- **~125 `.call(arrayLike)`** — the generic dispatch
+  (`compileArrayLikePrototypeCall`) exists but each failing cluster is a
+  DISTINCT deep, mostly **cross-file** gap: `instanceof`-on-host-externref
+  inside callbacks (`o instanceof Date` → false), Function-value receivers
+  (`object is not a function`), etc. Not `array-methods.ts` work — re-sliced
+  into #3185 as distinct issues.
+- **~46 "simple" direct** — dominated by mutation-during-iteration + mixed
+  number/string reduce coercion (e.g. `[1,2,,4,'5'].reduce → "NaN5"` vs
+  `"105"`, needs hole-skip + dynamic length re-read + string fold).
+- **8 traps** (illegal cast).
+
+**Shipped (this PR):** the one clean, zero-regression fix that lives entirely
+in `array-methods.ts` — `resolveReduceAccType` ignored the initial value's
+type and defaulted a void/untyped-callback accumulator to f64, so
+`[].reduce(function () {}, "seed")` coerced the reference seed to NaN. Now an
+explicit reference-typed initial value seeds the accumulator as `externref`
+(numeric inits unchanged). Flips test262
+`reduce/15.4.4.21-7-10` + `reduceRight/15.4.4.22-7-10`; covered by
+`tests/issue-3199.test.ts` (7 cases incl. numeric/string regression guards).
+
+**Not achievable in an M-sized in-file slice:** the ≥150-flip acceptance
+requires the XL #3134 real-array-observation feature. Acceptance #3 (zero
+traps) and the bulk are tracked under #3185's re-slice.
