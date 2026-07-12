@@ -77,3 +77,40 @@ axes. sort's callback comparator is in-scope here (default lane) but is not a
 `src/codegen/array-methods.ts` is shared with #3199/#3200, epic S3 #3193 /
 S6 #3196, and dev-array-hof. Behavioral fixes only; re-anchor by symbol;
 re-merge `origin/main` before enqueue.
+## Progress — sparse-array read trap-safety (indexOf/lastIndexOf) landed (opus-dstr, 2026-07-13)
+
+Partial fix for the trap-first sub-bucket (acceptance #1). `compileArrayIndexOf`
+and `compileArrayLastIndexOf` looped `0 .. vec.length` (logical length, field 0)
+reading `data[i]` with a raw `array.get`, which TRAPS ("array element access out
+of bounds") once `i` passes the physical backing length — the case where a
+sparse array's logical `.length` was set beyond its WasmGC backing (`a.length =
+N`, or a high-index write). Per §23.1.3.14 / §23.1.3.20 (HasProperty-driven)
+those absent indices are SKIPPED, so the fix clamps the iteration bound (indexOf:
+effective length = `min(logicalLen, array.len(data))`; lastIndexOf: clamp the
+reverse-scan start index down to `array.len(data)-1`). Pure-sparse searches now
+return the correct `-1` with no trap; dense arrays are byte-unchanged (backing
+capacity ≥ length ⇒ clamp is a no-op). Zero array-suite regressions
+(`tests/issue-3201.test.ts`, standalone lane; the two pre-existing
+`fast-arrays`/`array-oob-bounds-check` fails are unrelated and present on clean
+main).
+
+### Remaining trap-class root causes (NOT addressed here — separate follow-ups)
+
+Measured against the 2026-07-13 baseline, most of the family's trap-class fails
+are NOT the method-read OOB this slice fixes:
+
+1. **Huge sparse-index WRITE** (`arr[Math.pow(2,32)-2] = v`) — traps on the
+   element-WRITE path trying to densely grow the backing to ~4 billion slots
+   (`15.4.4.14-5-16/-5-12/-9-9`, `15.4.4.15-5-12/-8-9`, splice/concat variants).
+   Needs a sparse representation or a graceful cap/RangeError in the array
+   index-write lowering — out of `array-methods.ts` scope. **Dominant remaining
+   trap cause.**
+2. **`Array.prototype` mutation** (`Array.prototype.length = 0`,
+   `Array.prototype[1] = 1`) — `illegal cast` writing the prototype's `length`,
+   and prototype-inherited index reads the flat WasmGC vec cannot model
+   (`15.4.4.14-2-4`, `15.4.4.15-2-4`, pop/concat `S15.4.4.*_A*`). The read side
+   would need prototype-chain index fallback (shared with the #2001-deferred
+   hole/prototype-inheritance boundary).
+3. **Revoked-Proxy `illegal cast`** (concat/slice `create-revoked-proxy`,
+   `is-concat-spreadable-*-revoked`) — Proxy is a deferred feature; the revoked
+   handle should surface a TypeError rather than trapping on `ref.cast`.

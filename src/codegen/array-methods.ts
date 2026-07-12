@@ -4546,6 +4546,27 @@ function compileArrayIndexOf(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
+  // (#3201) A sparse array (logical `.length` set beyond the physical backing,
+  // or a high-index write) has `lenTmp` (field 0) > `array.len(dataTmp)`. The
+  // search loop below reads `data[i]` with a raw `array.get`, which TRAPS
+  // ("array element access out of bounds") once `i` passes the backing length.
+  // Per §23.1.3.14 (HasProperty-driven) those absent indices are SKIPPED, so
+  // clamp the iteration bound to the backing length — the beyond-backing holes
+  // can never strict-equal the search value anyway. Normal (non-sparse) vecs
+  // keep `lenTmp` unchanged (backing capacity ≥ length ⇒ min is the length).
+  const effLenTmp = allocLocal(fctx, `__arr_iof_efflen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: lenTmp } as Instr],
+    else: [{ op: "local.get", index: dataTmp } as Instr, { op: "array.len" } as Instr],
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: effLenTmp });
+
   compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
@@ -4654,7 +4675,7 @@ function compileArrayIndexOf(
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
+    { op: "local.get", index: effLenTmp },
     { op: "i32.ge_s" },
     { op: "br_if", depth: 1 },
 
@@ -9459,6 +9480,30 @@ function compileArrayLastIndexOf(
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // (#3201) A sparse array (logical `.length` > physical backing) starts the
+  // reverse scan at `len-1`, beyond the backing array — the first `data[i]`
+  // read TRAPS ("array element access out of bounds"). Per §23.1.3.20
+  // (HasProperty-driven) the absent top indices are SKIPPED, so clamp the
+  // start index down to `array.len(data)-1`. Non-sparse vecs are unaffected
+  // (backing capacity ≥ length ⇒ the clamp is a no-op).
+  fctx.body.push({ op: "local.get", index: iTmp });
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.gt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: dataTmp } as Instr,
+      { op: "array.len" } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.sub" } as Instr,
+      { op: "local.set", index: iTmp } as Instr,
+    ],
+  } as Instr);
 
   // Compile search value
   compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
