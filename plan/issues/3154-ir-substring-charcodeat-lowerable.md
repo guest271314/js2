@@ -1,11 +1,12 @@
 ---
 id: 3154
 title: "IR selector precision: make string .substring / .charCodeAt lowerable (wasm:js-string family) — #3143 flip track"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-substr
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
+completed: 2026-07-12
 priority: high
 horizon: m
 feasibility: medium
