@@ -25,6 +25,13 @@ origin: "Split out of #3179 during root-cause diagnosis (2026-07-12). #3179's PR
 loc-budget-allow:
   - src/codegen/object-runtime.ts
   - src/codegen/index.ts
+# The vec arms REUSE the engine's existing coercion helpers — `number_toString`
+# (canonical Number::toString for the enumerated index keys) and
+# `__str_to_number` (§7.1.4.1 StringToNumber for the string index key) — they do
+# NOT hand-roll a fresh ToString/ToNumber matrix. The gate counts the added call
+# sites; this is intended reuse of the single engine, so grant the allowance.
+coercion-sites-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 # #3183 — standalone: dynamic-path helpers lack vec arms → any-typed arrays enumerate empty / read undefined
