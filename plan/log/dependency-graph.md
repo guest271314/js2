@@ -768,3 +768,32 @@ brand-check 48) fable-now; A1 rest-identity (382) stays BLOCKED on
 
 Edges: #3164 → #3178-S3 (same admission seam); #3132 ∥ #3164 ∥ #2903-R;
 #2040 slices ⊥ all of the above; #3178-S7 after S1+S2.
+
+## Umbrella decompositions filed 2026-07-12 (claimable slices)
+
+Three filed umbrellas decomposed into individually-lockable slices so multiple
+devs can work them in parallel without colliding.
+
+**#3182 bloat-elimination epic** (tracking umbrella stays open):
+- #3191 S1 — unify 4 JS-error-throw templates on `buildThrowJsErrorInstrs` [M, high]
+- #3192 S2 — DataView+RegExp brand → `receiver-brand.ts` [M, high, `depends_on: 3191`]
+- #3193 S3 — delete 5 shape-path `Array.prototype.*.call` clones [M, medium — array-methods.ts hot]
+- #3194 S4 — extract shared super-dispatch core (new-super.ts) [S, high]
+- #3195 S5 — one parameterized closure-iterable drainer (runtime.ts) [S, high]
+- #3196 S6 — de-inline standalone dynamic-HOF onto #3098 steppers [L, medium — array-methods.ts hot]
+- Edges: #3191 → #3192 (stacked); #3193 ∥ #3196 claim serially (both array-methods.ts).
+
+**#3184 async-vacuous cluster** (tracking umbrella stays open):
+- #3197 — for-await-of / async-dstr drive (383 vacuous) [M, high]
+- #3198 — Promise-combinator vacuous callbacks (218) [M, medium — overlaps blocked #2614 + active Promise work; likely shares #3197 root cause]
+
+**#3185 default-lane Array.prototype generics** (tracking umbrella stays open;
+disjoint from standalone #3169/#3180 by lane):
+- #3199 — fold/predicate: reduce/reduceRight/every/some (~283) [M, high]
+- #3200 — iteration/producer: forEach/map/filter/flatMap (~204) [M, high]
+- #3201 — search+structural: indexOf/lastIndexOf/slice/splice/sort/concat/pop (~312) [M, high — owns 30 trap-class fails, land first]
+- All three share array-methods.ts (hot: dev-array-hof, #3193/#3196) — behavioral fixes, re-anchor by symbol.
+
+Frontmatter hygiene: **#3056** set `status: blocked` + `blocked_by: [3055]`
+(human-gated standalone-floor re-baseline — was mis-claimed twice from the
+auto-pick pool while tagged `sprint: current` + high).
