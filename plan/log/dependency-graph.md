@@ -716,3 +716,29 @@ Edition-gap issues with their sub-dependencies (umbrella → concrete slices):
 
 Edges: #2668 → #2671(JSON); #2580 ↔ #2670(length); #1642+#2566+#1556 ⊂ #2669.
 Deprioritized (eval/dynamic-code): #1066 #1102 #1240 #1263-#1266 — not scheduled.
+
+## 2026-07-12 — #2860 standalone-gap method-family slices (PO grooming)
+
+Nine fresh, independently-claimable slices of umbrella #2860 (lane-baseline
+remeasure 2026-07-12: honest gap 12,801). All `sprint: current`,
+`priority: high`, `feasibility: hard`, `umbrella: 2860`:
+
+- **#3169** Array.prototype callback HOFs over array-like receivers (519, L) —
+  mechanism-twin of host-lane #2670 (in-progress, test sets disjoint).
+- **#3170** Array indexOf/lastIndexOf/includes as-value + array-likes (125, M)
+  — value-read side; sequences with #3169's receiver ladder.
+- **#3171** Map/Set/WeakMap/WeakSet receiver brand-check protocol (~142, M).
+- **#3172** Set-algebra set-like protocol + getOrInsert(Computed) (120, M) —
+  shares #3171's brand gate.
+- **#3173** DataView get*/set* spec semantics (230, L).
+- **#3174** Date brand + ToPrimitive coercion order (107, M) — slices #2671.
+- **#3175** Number.prototype toString(radix)/toFixed/valueOf (74, M).
+- **#3176** JSON parse/stringify residual (67, M) — slices #2671; array-holder
+  reviver arm extends #3046.
+- **#3177** TypedArrayConstructors internals + ctor protocols (356, L) — the
+  #3027-recommended "~350" slice; MUST NOT touch #2872's TypedArray/prototype
+  arms without owner sync.
+
+Edges: #3169 → #3170 (receiver ladder before/alongside value-read);
+#3171 → #3172, #3174 (shared brand-preamble helper); #2992 (in-progress)
+owns the defineProperty/create descriptor cluster — deliberately not sliced.
