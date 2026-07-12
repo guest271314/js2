@@ -1,7 +1,9 @@
 ---
 id: 3171
 title: "standalone: Map/Set/WeakMap/WeakSet receiver brand-check protocol — spec TypeError on incompatible receivers (~142 direct gap tests)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-collections-brand
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -51,9 +53,15 @@ TypeError is thrown at all (the bulk). Same story for
   has the right internal-slot brand) and throw the spec `TypeError` otherwise.
 - Do it ONCE: add a shared brand-check preamble helper (pattern: the
   `$__ta_dyn_view` view-brand check from #2893, and `shape-brand.ts`) that all
-  four runtimes' dispatch arms in `closed-method-dispatch.ts` call — not four
-  hand-rolled copies. Wrong-brand-but-collection receivers
-  (`Map.prototype.get.call(new Set())`) must also throw.
+  four runtimes' dispatch arms call — not four hand-rolled copies.
+  Wrong-brand-but-collection receivers (`Map.prototype.get.call(new Set())`)
+  must also throw.
+  - **Pointer correction (impl finding):** the dispatch arms are NOT in
+    `closed-method-dispatch.ts` (that module handles closed object-literal
+    struct methods). The real brand machinery is `emitSetBrandCheck`
+    (set-runtime.ts, #2604), the three `tryCompileNative*MethodCall`
+    direct dispatchers wired via `expressions/extern.ts`, and the reflective
+    `.call` interception in `expressions/calls.ts`.
 - Accessor `size` (Set 5 / Map 7 rows) goes through the same gate on its
   getter.
 

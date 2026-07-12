@@ -173,6 +173,68 @@ describe("#3171 valid receivers still dispatch natively through .call", () => {
   });
 });
 
+describe("#3171 size accessor getter through gOPD brand-checks its receiver", () => {
+  it("gOPD(Map.prototype,'size').get.call(map) works; .call(new Set()) throws", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const descriptor = Object.getOwnPropertyDescriptor(Map.prototype, 'size');
+           const map = new Map();
+           map.set(1, 2);
+           if ((descriptor as any).get.call(map) !== 1) return 3;
+           try { (descriptor as any).get.call(new Set()); return 0; }
+           catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+         }`,
+      ),
+    ).toBe(1);
+  });
+  it("gOPD(Map.prototype,'size').get.call({}) throws", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const descriptor = Object.getOwnPropertyDescriptor(Map.prototype, 'size');
+           try { (descriptor as any).get.call({}); return 0; }
+           catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+         }`,
+      ),
+    ).toBe(1);
+  });
+  it("gOPD(Map.prototype,'size').get.call(false) throws (this-not-object)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const descriptor = Object.getOwnPropertyDescriptor(Map.prototype, 'size');
+           try { (descriptor as any).get.call(false); return 0; }
+           catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+         }`,
+      ),
+    ).toBe(1);
+  });
+  it("gOPD(Set.prototype,'size').get.call(set) returns the size", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const descriptor = Object.getOwnPropertyDescriptor(Set.prototype, 'size');
+           const s = new Set([1, 2, 3]);
+           return (descriptor as any).get.call(s);
+         }`,
+      ),
+    ).toBe(3);
+  });
+  it("direct m.size / s.size unregressed", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const m = new Map();
+           m.set(1, 2);
+           const s = new Set([1, 2]);
+           return m.size + s.size;
+         }`,
+      ),
+    ).toBe(3);
+  });
+});
+
 describe("#3171 construction sites stamp the right COLLECTION_KIND (no collateral)", () => {
   it("direct map/set/weak ops unregressed", async () => {
     expect(
