@@ -23,6 +23,17 @@ goal: async-model
 sprint: current
 parent: 1528
 architect_spec: authored
+# (#3102 LOC ratchet) P-7a/P-7b grow four over-threshold files intentionally:
+# a new dispatcher-mirroring export (index.ts), the bridge dispatch-arity +
+# realm-unification arms (runtime.ts), the finally wrap-exclusion
+# (expressions.ts) and the typeof unsound-fold guards (typeof-delete.ts) —
+# each sits beside the machinery it corrects; extraction is #3102's job.
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/typeof-delete.ts
+  - src/runtime.ts
+  - src/codegen/expressions.ts
+  - src/codegen/declarations.ts
 related: [2614, 2618, 1373b, 1042, 86, 56, 2613, 2958, 2867, 2906, 2959, 2980]
 note: "Spun off from #86 (class-ctor arm, merged) + #55 async-bucket scope (PR #1947). The #56/#1940 closure-construct bridge + #86 executor-call host-routing landed the SURFACE of the capability lane; this issue is the DEEPER shared substrate behind three clusters that the surface fixes did NOT close."
 ---
