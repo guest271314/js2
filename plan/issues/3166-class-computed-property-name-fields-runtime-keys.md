@@ -1,0 +1,133 @@
+---
+id: 3166
+title: "Class fields/accessors with RUNTIME computed property names are silently dropped ([f()] = 1 → read returns 0) — ~150 cpn tests"
+status: ready
+sprint: current
+created: 2026-07-12
+updated: 2026-07-12
+priority: medium
+horizon: m
+feasibility: medium
+reasoning_effort: high
+task_type: bugfix
+area: codegen
+language_feature: classes, computed-property-names
+goal: standalone-mode
+related: [2515, 1472, 2042]
+origin: "2026-07-12 architect standalone audit: 192 cpn-* failures (120 class-field, 30 class-accessor, 14 obj-lit variants); class-field root cause verified live."
+---
+
+# #3166 — runtime computed property names on class fields/accessors
+
+## Problem
+
+**Verified live** (2026-07-12, upstream/main @ adc65cfc65, standalone):
+
+```ts
+function f(): number { return 1; }
+class C { [f()] = 1; }
+const c: any = new C();
+c[f()]   // → 0   (expected 1)
+```
+
+Object-literal computed names work (`{ [1 * 1]: 1 }` reads back 1); the class
+form silently drops the field.
+
+Failing population: 150 `cpn-class-*` tests (fields + accessors) across
+`language/expressions/class` and `language/statements/class`, plus 14
+`cpn-obj-lit-*` residuals (the obj-lit tests fail on secondary asserts like
+`o[String(1 * 1)]` — verify per-test; do not assume the same root cause).
+
+## Root cause (confirmed in source)
+
+`resolveClassMemberName` (src/codegen/class-bodies.ts:523) resolves computed
+names via `resolveComputedKeyExpression` (src/codegen/literals.ts:1783), which
+only handles **compile-time constants** (literals, const-folding, well-known
+Symbols, enum members). A runtime expression (`[f()]`, `[x && 1]`) returns
+`undefined`, and the field-collection loop then does:
+
+```ts
+// class-bodies.ts:748
+const fieldName = resolveClassMemberName(ctx, member.name);
+if (fieldName === undefined) continue; // dynamic computed name — skip
+```
+
+— the member vanishes: no struct field, no init emission, no error. Reads
+return the missing-property default (0). Same pattern at :1007 (methods),
+:1129/:1136/:1176 (accessors/props).
+
+## Implementation Plan (architect)
+
+### Strategy
+
+Per ClassDefinitionEvaluation (§15.7.14) the key expression is evaluated
+ONCE, at class-evaluation time, with ToPropertyKey. Since the key is not
+known at compile time, the field cannot be a struct field — it must go
+through the **dynamic/open-object property table** on the instance (the
+#2515 open-object machinery / the dynamic-shape property path used for
+`obj[k] = v` writes on class instances).
+
+### Changes
+
+**1. Collection (class-bodies.ts, field loop at :745):** for a
+`PropertyDeclaration` whose `resolveClassMemberName` is `undefined` AND whose
+name is a `ComputedPropertyName`, do NOT `continue` silently. Record it in a
+new `dynamicComputedFields: { member: ts.PropertyDeclaration }[]` list on the
+class info (and equivalently for get/set accessors at :1129+). Leave methods
+out of scope (bail-with-diagnostic as today) — the failing corpus is fields +
+accessors.
+
+**2. Class-evaluation-time key capture:** emit evaluation of each computed
+key expression at the point where the class definition is evaluated (for a
+class statement: where static members are initialized), apply
+ToPropertyKey → string (reuse the ToString/ToPrimitive helper the object
+literal computed-key RUNTIME path uses — find it via the obj-lit lowering in
+literals.ts around the `resolveComputedKeyExpression` call-site fallback),
+and store it in a module-level global (`__cpn_key_<class>_<i>`, externref or
+native-string ref depending on lane).
+
+**3. Constructor field-init:** in the constructor prelude where instance
+fields are initialized, after the static-key fields, emit for each dynamic
+computed field: read the captured key global, evaluate the initializer, and
+install via the SAME dynamic property write helper `c[key] = value` lowers to
+on a class instance (grep the any-receiver member-write path in
+property-access.ts — the helper #2515 routes open-object writes through).
+Ordering: fields initialize in source order — interleave with static-key
+fields per member index, not appended at the end (tests assert ordering).
+
+**4. Accessors:** register the getter/setter functions as today (they compile
+fine — only the NAME is dynamic), but attach them to the instance/prototype
+under the runtime key via the dynamic accessor-installation path used by
+`Object.defineProperty` with get/set (see #2042's descriptor machinery in
+object-ops.ts). If that path only supports static keys, slice accessors out
+to a follow-up and land fields first (120 of the 150).
+
+### Edge cases
+
+- Key evaluates to a number (`[1 + 1]`) → ToPropertyKey canonicalization
+  ("2"); reuse the numeric-key canonicalization the dynamic write path
+  already performs (verify `c[2]` and `c["2"]` both read it).
+- Key expression with side effects — must evaluate exactly once, at class
+  eval, NOT per construction (test262 asserts call counts).
+- Duplicate key with a static field (`class C { x = 1; ["x"] = 2 }` — note
+  `"x"` is compile-time-resolvable, but `[f()]` colliding with `x` at runtime
+  is possible): dynamic write wins (later member overwrites); the dynamic
+  write helper must shadow the struct field read — if the dynamic-read path
+  checks the property table BEFORE struct fields this is free; verify.
+- Static members (`static [f()] = 1`): same mechanism against the class
+  object/constructor carrier; slice out if the class-object representation
+  lacks a property table.
+
+### Validation
+
+- Live repro above → 1.
+- Scoped: `runTest262File` on
+  `language/expressions/class/cpn-class-expr-fields-*.js` sample (both lanes).
+- Equivalence test for host-lane parity.
+- CI: expect ~120–150 flips in the cpn family; standalone floor green.
+
+### Classification
+
+**fable-executable-now** for fields (steps 1–3; the dynamic-write helper
+exists). Accessors (step 4) may need the #2042 descriptor path — if it
+resists, slice it to a follow-up rather than stalling the field win.
