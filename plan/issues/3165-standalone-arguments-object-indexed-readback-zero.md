@@ -1,10 +1,12 @@
 ---
 id: 3165
 title: "Standalone: arguments object stored into any[] loses indexed elements on readback (length survives, r0[0] → 0) — ~186 tests"
-status: ready
+status: done
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
+completed: 2026-07-12
+assignee: sendev-3164
 priority: high
 horizon: m
 feasibility: medium
@@ -124,3 +126,36 @@ Do NOT block on #3053.
 
 **fable-executable-now** — single dispatch-arm addition after a bounded WAT
 diagnosis; verified minimal repro included.
+
+## Implementation Notes (2026-07-12, sendev-3164)
+
+**The architect's root-cause hypothesis was WRONG — corrected by WAT diagnosis
+before implementing** (verify-first): the dynamic indexed READ dispatch is
+fine. The bug is at the WRITE side: `emitArrayCallbackArgsPlumbing`
+(array-methods.ts, #820l) builds the extras vec for the inlined array-HOF
+callback dispatch, and its element slot went through `emitElemBoxToExternref`
+— a documented STUB that emitted `array.get → drop → ref.null.extern` ("the
+value is unused inside the body" — false for the predicate-call-parameters
+family). So `arguments[0]` inside `sample.findIndex(function(){...})` was
+undefined→0 even read DIRECTLY inside the callback; no readback involved.
+Probe matrix: direct-call closures and declarations were always fine — only
+the inlined HOF-callback dispatch dropped the element (the index right after
+it was boxed correctly via `__box_number`).
+
+**Fix**: `emitElemBoxToExternref` now boxes by the backing array's element
+ValType — f64 → `__box_number`; i32 / packed i8/i16 (loaded as i32 via
+`array.get_s/u`) → `f64.convert_i32_s` + box; ref/ref_null →
+`extern.convert_any`; externref as-is; unboxable kinds keep the undefined
+placeholder. `$Hole` sentinels ride through unmapped (same visibility as
+before; noted boundary).
+
+**Validated**: all 4 `built-ins/Array/prototype/{find,findIndex,findLast,
+findLastIndex}/predicate-call-parameters.js` flip fail→pass standalone;
+tests/issue-3165.test.ts (6 cases, host-free + host parity).
+
+**Residual — TypedArray half (~most of the 186)**: TypedArray HOFs route
+through the host `__make_callback` bridge, which cannot set the wasm-side
+`__argc`/`__extras_argv` globals — `results` stays empty there
+(`env: __make_callback`, r0 == null). Needs the bridge retirement /
+native TypedArray HOF dispatch (#2903 family), NOT this plumbing. Filed as
+follow-up scope; do not re-open this issue for it.
