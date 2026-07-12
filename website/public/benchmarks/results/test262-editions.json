@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10291,
-    "fail": 2690,
+    "pass": 10292,
+    "fail": 2689,
     "ce": 94,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11883,
-    "fail": 3367,
+    "pass": 11884,
+    "fail": 3366,
     "ce": 135,
     "skip": 1,
     "total": 15386,
@@ -84,8 +84,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 827,
-        "fail": 275,
+        "pass": 828,
+        "fail": 274,
         "ce": 1,
         "skip": 0,
         "total": 1103,
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 975,
-    "fail": 885,
+    "pass": 976,
+    "fail": 884,
     "ce": 18,
     "skip": 18,
     "total": 1896,
@@ -1471,8 +1471,8 @@
     "features": [
       {
         "name": "BigInt",
-        "pass": 575,
-        "fail": 447,
+        "pass": 576,
+        "fail": 446,
         "ce": 4,
         "skip": 0,
         "total": 1026,
@@ -1480,8 +1480,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 358,
-        "fail": 329,
+        "pass": 359,
+        "fail": 328,
         "ce": 1,
         "skip": 0,
         "total": 688,
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3364,
-    "fail": 829,
+    "pass": 3366,
+    "fail": 827,
     "ce": 41,
     "skip": 0,
     "total": 4234,
@@ -2213,12 +2213,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 264,
-        "fail": 153,
+        "pass": 266,
+        "fail": 151,
         "ce": 15,
         "skip": 0,
         "total": 432,
-        "pct": 61
+        "pct": 62
       },
       {
         "name": "class-static-fields-private",
