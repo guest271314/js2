@@ -1,0 +1,69 @@
+---
+id: 3172
+title: "standalone: Set-algebra methods (union/intersection/difference/…) set-like protocol + Map/WeakMap getOrInsert(Computed) spec semantics (120 gap tests)"
+status: ready
+created: 2026-07-12
+updated: 2026-07-12
+priority: high
+feasibility: hard
+task_type: bug
+area: codegen
+es_edition: multi
+language_feature: collections
+goal: standalone
+umbrella: 2860
+sprint: current
+horizon: m
+related: [2860, 3171, 3149]
+origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+---
+
+# #3172 — standalone: Set-algebra set-like protocol + getOrInsert(Computed)
+
+## Problem
+
+**120 gap tests** (measured 2026-07-12 lane-baseline diff, method in #3169)
+in the two newest collection method families:
+
+- **Set-algebra, 69 tests**: `union` 11, `symmetricDifference` 11,
+  `intersection` 11, `difference` 10, `isSupersetOf` 9, `isDisjointFrom` 9,
+  `isSubsetOf` 8 under `built-ins/Set/prototype/`.
+- **getOrInsert/getOrInsertComputed, 51 tests** across `Map.prototype`
+  (15+9) and `WeakMap.prototype` (rest).
+
+The native kernels EXIST (`src/codegen/set-algebra.ts` landed the algorithms;
+#3149 landed `Map.groupBy`). What fails is the **spec protocol around them**,
+measured as `assert.throws(TypeError, …)` rows that don't throw plus
+wrong-value rows:
+
+- GetSetRecord coercion on the argument: `size` must be read and
+  `ToNumber`-coerced (`size-is-a-number.js`), `has`/`keys` must be callable,
+  non-object arguments must throw `TypeError` — i.e. accepting **set-LIKE**
+  arguments (a plain `{ size, has, keys }` object), not only real Sets.
+- Receiver brand check (`receiver-not-set.js`) — shares the #3171 gate.
+- getOrInsertComputed: callback-throw propagation, key normalization
+  (`append-new-values-normalizes-zero-key.js`), insertion-order and
+  re-entrancy rules; WeakMap key-validity `TypeError`s.
+
+## ANTI-BLOAT directive
+
+- Extend `src/codegen/set-algebra.ts` / `map-runtime.ts` /
+  `weak-collections-runtime.ts` in place. The missing piece is ONE shared
+  **GetSetRecord** helper (arg → {size, has, keys} with spec coercion order +
+  TypeErrors) used by all 7 algebra methods — do not duplicate the coercion
+  per method.
+- Receiver brand checks come from #3171's shared gate — sequence with it or
+  land the gate here if #3171 hasn't started (agree the boundary in the
+  TaskList before both go in-progress).
+- Callback invocation for `getOrInsertComputed` uses the #3098 native
+  callback-dispatch substrate — no `__make_callback` reintroduction.
+
+## Acceptance criteria
+
+- ≥90 of the 120 measured gap tests flip to host-free standalone passes.
+- Sample tests:
+  - `test/built-ins/Set/prototype/intersection/receiver-not-set.js`
+  - `test/built-ins/Set/prototype/isSupersetOf/size-is-a-number.js`
+  - `test/built-ins/Map/prototype/getOrInsert/append-new-values-normalizes-zero-key.js`
+- Zero host-mode regressions; zero standalone high-water regressions.
+- One PR, this family only.
