@@ -260,8 +260,8 @@ const SYMBOL_PROTO_METHODS = ["toString", "valueOf"] as const;
 /** `BigInt.prototype`'s own method names (ES2024 §21.2.3). */
 const BIGINT_PROTO_METHODS = ["toLocaleString", "toString", "valueOf"] as const;
 
-/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3). */
-const WEAKMAP_PROTO_METHODS = ["delete", "get", "has", "set"] as const;
+/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3 + ES2025 emplace). */
+const WEAKMAP_PROTO_METHODS = ["delete", "get", "getOrInsert", "getOrInsertComputed", "has", "set"] as const;
 
 /** `WeakSet.prototype`'s own method names (ES2024 §24.4.3). */
 const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
@@ -271,7 +271,19 @@ const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
  * *getter* on the proto (resolved by the computed-access path), not a data
  * method, so it stays out of the value-read CSV.
  */
-const MAP_PROTO_METHODS = ["clear", "delete", "entries", "forEach", "get", "has", "keys", "set", "values"] as const;
+const MAP_PROTO_METHODS = [
+  "clear",
+  "delete",
+  "entries",
+  "forEach",
+  "get",
+  "getOrInsert",
+  "getOrInsertComputed",
+  "has",
+  "keys",
+  "set",
+  "values",
+] as const;
 
 /** `Set.prototype`'s own method names (ES2024 §24.2.3 + the new set-method
  * proposal). `size` is an accessor getter, kept out of the CSV. */
@@ -402,6 +414,9 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
   // default to 1.
   set: 2,
+  // (#3172) ES2025 Map/WeakMap emplace additions — both arity 2.
+  getOrInsert: 2,
+  getOrInsertComputed: 2,
   // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
   // bind/call default to 1.
   apply: 2,

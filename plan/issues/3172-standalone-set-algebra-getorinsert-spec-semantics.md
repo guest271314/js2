@@ -1,9 +1,19 @@
 ---
 id: 3172
 title: "standalone: Set-algebra methods (union/intersection/difference/…) set-like protocol + Map/WeakMap getOrInsert(Computed) spec semantics (120 gap tests)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-collections-brand
 created: 2026-07-12
 updated: 2026-07-12
+# (#3102) God-file growth allowance for THIS change-set: the implementation
+# lives in the NEW subsystem module collections-es2025.ts; the residual
+# growth is unavoidable wiring — getOrInsert(Computed) in the Map/WeakMap
+# proto CSVs + length table (+15), and the finalize fill call for the
+# reserved __setrec_field_* readers (+7).
+loc-budget-allow:
+  - src/codegen/array-object-proto.ts
+  - src/codegen/index.ts
 priority: high
 feasibility: hard
 task_type: bug

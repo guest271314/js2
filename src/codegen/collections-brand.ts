@@ -34,6 +34,12 @@
  */
 import { ts } from "../ts-api.js";
 import type { ValType } from "../ir/types.js";
+import {
+  compileCollectionGetOrInsert,
+  emitSetAlgebraAnyArgDispatch,
+  ensureSetAlgebraAnyDispatch,
+  isSetAlgebraMethod,
+} from "./collections-es2025.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import {
   COLLECTION_KIND,
@@ -45,6 +51,7 @@ import {
 } from "./map-runtime.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { emitReceiverBrandCheck, type ReceiverBrandSpec } from "./receiver-brand.js";
+import { ensureSetAlgebraHelpers } from "./set-algebra.js";
 import { ensureSetHelpers } from "./set-runtime.js";
 import type { InnerResult } from "./shared.js";
 import { VOID_RESULT, compileExpression } from "./shared.js";
@@ -52,12 +59,40 @@ import { ensureWeakCollectionHelpers } from "./weak-collections-runtime.js";
 
 type CollectionClass = "Map" | "Set" | "WeakMap" | "WeakSet";
 
-/** Prototype methods each collection's reflective dispatch owns. ES2025
- *  set-algebra + getOrInsert* are #3172's lane and deliberately absent. */
+/** Prototype methods each collection's reflective dispatch owns. (#3172 added
+ *  the ES2025 layer: Map/WeakMap getOrInsert(Computed), Set set-algebra.) */
 const COLLECTION_METHODS: Record<CollectionClass, ReadonlySet<string>> = {
-  Map: new Set(["get", "set", "has", "delete", "clear", "forEach", "keys", "values", "entries"]),
-  Set: new Set(["add", "has", "delete", "clear", "forEach", "keys", "values", "entries"]),
-  WeakMap: new Set(["get", "set", "has", "delete"]),
+  Map: new Set([
+    "get",
+    "set",
+    "has",
+    "delete",
+    "clear",
+    "forEach",
+    "keys",
+    "values",
+    "entries",
+    "getOrInsert",
+    "getOrInsertComputed",
+  ]),
+  Set: new Set([
+    "add",
+    "has",
+    "delete",
+    "clear",
+    "forEach",
+    "keys",
+    "values",
+    "entries",
+    "union",
+    "intersection",
+    "difference",
+    "symmetricDifference",
+    "isSubsetOf",
+    "isSupersetOf",
+    "isDisjointFrom",
+  ]),
+  WeakMap: new Set(["get", "set", "has", "delete", "getOrInsert", "getOrInsertComputed"]),
   WeakSet: new Set(["add", "has", "delete"]),
 };
 
@@ -94,7 +129,12 @@ function collectionMethodTarget(
   }
   if (!ts.isPropertyAccessExpression(e)) return undefined;
   const method = e.name.text;
-  const obj = e.expression;
+  // Unwrap parens/`as`/non-null on the OBJECT too, so `(Map.prototype as any)
+  // .getOrInsert.call(…)` (the untyped-ES2025-method cast idiom) still matches.
+  let obj: ts.Expression = e.expression;
+  while (ts.isParenthesizedExpression(obj) || ts.isAsExpression(obj) || ts.isNonNullExpression(obj)) {
+    obj = (obj as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;
+  }
   // `X.prototype.METHOD`
   if (
     ts.isPropertyAccessExpression(obj) &&
@@ -168,6 +208,35 @@ export function tryCompileCollectionReflectiveCall(
     emitThrowTypeError(ctx, fctx, brand.message);
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" } as ValType;
+  }
+
+  // (#3172) getOrInsert / getOrInsertComputed (Map + WeakMap): the shared
+  // emplace compiler with the brand-checked receiver from arg0.
+  if (method === "getOrInsert" || method === "getOrInsertComputed") {
+    return compileCollectionGetOrInsert(
+      ctx,
+      fctx,
+      recvExpr,
+      callArgs[1],
+      callArgs[2],
+      method === "getOrInsertComputed",
+      /* weakKeys */ cls === "WeakMap",
+      brand,
+    );
+  }
+
+  // (#3172) Set-algebra (union/…/isDisjointFrom): brand-check the receiver,
+  // then the runtime any-dispatcher handles the argument (native fast lane /
+  // set-LIKE GetSetRecord lane / TypeError). Dispatcher is ensured BEFORE any
+  // instruction is baked (#1719 discipline).
+  if (isSetAlgebraMethod(method)) {
+    ensureSetAlgebraHelpers(ctx);
+    // Bail (clean, nothing emitted) when the dispatcher can't be built.
+    if (ensureSetAlgebraAnyDispatch(ctx, method) === undefined) return undefined;
+    const recvType2 = compileExpression(ctx, fctx, recvExpr);
+    emitReceiverBrandCheck(ctx, fctx, recvType2, brand); // leaves (ref $Map)
+    const argType = callArgs[1] !== undefined ? compileExpression(ctx, fctx, callArgs[1]) : null;
+    return emitSetAlgebraAnyArgDispatch(ctx, fctx, method, argType);
   }
 
   // forEach: shared native drive with the brand-checked receiver from arg0 and
