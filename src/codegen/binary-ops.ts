@@ -14,7 +14,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -2093,6 +2093,70 @@ export function compileBinaryExpression(
             return { kind: "i32" };
           }
         }
+        // (#3154 / task #90) Mixed `(ref $AnyValue)` vs externref/primitive
+        // strict equality — VALUE-compare via the tag-aware engine, not box
+        // identity. A dynamic element/member read in standalone lowers to
+        // `__any_from_extern_honest` → `(ref $AnyValue)` (the #3037 CS1b reader
+        // carrier); compared against an `any` PARAM (still a raw externref) or
+        // a static primitive, the identity bridge below `ref.eq`'d the CARRIER
+        // BOX against the raw value — unconditionally false, so
+        // `a[0] === s` failed for the SAME interned symbol, equal strings,
+        // etc. (probe-pinned: WAT shows `ref.eq($AnyValue, $Symbol)`). Route
+        // instead through the SAME pair the both-$AnyValue arm above uses:
+        // classify the non-carrier side honestly (`__any_from_extern_honest` —
+        // the classifier the reader itself used, so tags agree) and call the
+        // keystone `__any_strict_eq` (§7.2.16: numbers by f64.eq — NaN≠NaN,
+        // +0===-0 —, strings by content, objects/symbols by refval identity,
+        // cross-tag identity reconciliation for same-ref different-rep).
+        // A primitive non-ref side is first boxed to externref by its STATIC
+        // brand (symbol → `__box_symbol` interned carrier, boolean →
+        // `__box_boolean`, number → `__box_number`) so the classifier sees an
+        // honest box. Gated on standalone/wasi + a statically-`$AnyValue`
+        // non-null ref side; every other pairing keeps the legacy bridge
+        // byte-identical.
+        if (ctx.standalone === true || ctx.wasi === true) {
+          const refSideType = leftIsRef ? leftType : rightType;
+          const refSideIsAnyValue =
+            ctx.anyValueTypeIdx >= 0 && refSideType.kind === "ref" && refSideType.typeIdx === ctx.anyValueTypeIdx;
+          const otherTsTypeAV = leftIsRef ? rightTsType : leftTsType;
+          const otherBoxableAV = otherType.kind === "externref" || otherType.kind === "i32" || otherType.kind === "f64";
+          if (refSideIsAnyValue && otherBoxableAV) {
+            const honestFromExternIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+            ensureAnyHelpers(ctx);
+            const strictEqIdxAV = ctx.funcMap.get("__any_strict_eq");
+            if (honestFromExternIdx !== undefined && strictEqIdxAV !== undefined) {
+              // Brand a primitive other-side by its static TS type so the box
+              // preserves the JS tag (the #2785 type-aware-box rule).
+              const brandedOther: ValType =
+                otherType.kind === "i32" && (otherTsTypeAV.flags & ts.TypeFlags.ESSymbolLike) !== 0
+                  ? { kind: "i32", symbol: true }
+                  : otherType.kind === "i32" && isBooleanType(otherTsTypeAV)
+                    ? { kind: "i32", boolean: true }
+                    : otherType;
+              // Stack: [left, right] (right on top).
+              if (leftIsRef) {
+                // Right is the non-carrier side: box (if primitive) + classify in place.
+                if (otherType.kind !== "externref") {
+                  coerceType(ctx, fctx, brandedOther, { kind: "externref" });
+                }
+                fctx.body.push({ op: "call", funcIdx: honestFromExternIdx });
+              } else {
+                // Left is the non-carrier side: save right ($AnyValue), box+classify left, restore.
+                const tmpRightAV = allocTempLocal(fctx, rightType);
+                fctx.body.push({ op: "local.set", index: tmpRightAV });
+                if (otherType.kind !== "externref") {
+                  coerceType(ctx, fctx, brandedOther, { kind: "externref" });
+                }
+                fctx.body.push({ op: "call", funcIdx: honestFromExternIdx });
+                fctx.body.push({ op: "local.get", index: tmpRightAV });
+                releaseTempLocal(fctx, tmpRightAV);
+              }
+              fctx.body.push({ op: "call", funcIdx: strictEqIdxAV });
+              if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
+              return { kind: "i32" };
+            }
+          }
+        }
         if (otherType.kind === "externref") {
           const EQ_HEAP_TYPE_BR = -19;
           // Stack: [left, right]. Save right (as anyref), then handle left.
@@ -2463,7 +2527,7 @@ export function compileBinaryExpression(
       // passes a boolean into an `any` param and compares it with `===`/`!==`
       // against a `boolean` literal (#2605). Boxing booleans as booleans makes the
       // "both typeof boolean → unbox i32, compare" arm fire correctly.
-      const boxOperandToExternref = (operandType: ValType, isBoolOperand: boolean): void => {
+      const boxOperandToExternref = (operandType: ValType, isBoolOperand: boolean, isSymbolOperand: boolean): void => {
         if (operandType.kind === "externref") return;
         if (operandType.kind === "i32" && isBoolOperand) {
           // addUnionImports (already called above) installs __box_boolean.
@@ -2473,15 +2537,29 @@ export function compileBinaryExpression(
             return;
           }
         }
+        // (#3154 / task #90) A SYMBOL operand is an i32 HANDLE, not a number —
+        // the brand-blind fallthrough boxed it via `f64.convert_i32_s` +
+        // `__box_number`, so `boxedSymbolElem === symIdentifier` compared a
+        // `$Symbol` carrier against a boxed NUMBER (the id) and returned
+        // false. Route through the branded i32→externref arm, which resolves
+        // `__box_symbol` (the id-interned `$Symbol` carrier in standalone/
+        // WASI — #2866 slice 3 — so `ref.eq` in the identity arm holds for
+        // same-id boxings).
+        if (operandType.kind === "i32" && isSymbolOperand) {
+          coerceType(ctx, fctx, { kind: "i32", symbol: true }, { kind: "externref" });
+          return;
+        }
         coerceType(ctx, fctx, operandType, { kind: "externref" });
       };
 
       // Coerce both operands to externref temps (right is on top of stack).
+      const leftIsSymbolStatic = (leftTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0;
+      const rightIsSymbolStatic = (rightTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0;
       const rTmp = allocTempLocal(fctx, { kind: "externref" });
-      boxOperandToExternref(rightType, rightIsBool);
+      boxOperandToExternref(rightType, rightIsBool, rightIsSymbolStatic);
       fctx.body.push({ op: "local.set", index: rTmp });
       const lTmp = allocTempLocal(fctx, { kind: "externref" });
-      boxOperandToExternref(leftType, leftIsBool);
+      boxOperandToExternref(leftType, leftIsBool, leftIsSymbolStatic);
       fctx.body.push({ op: "local.set", index: lTmp });
 
       // (#1910 R1) §7.2.13 steps 11-12 — reduce an Object operand to a primitive
@@ -2939,13 +3017,23 @@ export function compileBinaryExpression(
     // false — boolean operands keep the existing (correct) lowering, and a
     // boolean `any` compared to a boolean falls through to it.
     if (isStrict && !noJsHost && !leftIsString && !rightIsString && !leftIsBool && !rightIsBool) {
+      // (#3154 / task #90) Brand a statically-SYMBOL i32 operand so the
+      // externref box preserves the JS tag: the brand-blind
+      // `coerceType(i32 → externref)` fallthrough boxed a symbol HANDLE via
+      // `__box_number`, so the host strict-eq compared a real symbol against a
+      // boxed number id and was always false (`anyElem === moduleScopedSymbol`
+      // failed). With the brand, `coerceType` routes through `__box_symbol`
+      // (host symbol cache → identity-stable JS symbol), and JS `===` answers
+      // symbol identity.
+      const brandSymbolIfStatic = (t: ValType, tsType: ts.Type): ValType =>
+        t.kind === "i32" && (tsType.flags & ts.TypeFlags.ESSymbolLike) !== 0 ? { kind: "i32", symbol: true } : t;
       if (rightType.kind !== "externref") {
-        coerceType(ctx, fctx, rightType, { kind: "externref" });
+        coerceType(ctx, fctx, brandSymbolIfStatic(rightType, rightTsType), { kind: "externref" });
       }
       if (leftType.kind !== "externref") {
         const tmpR = allocTempLocal(fctx, { kind: "externref" });
         fctx.body.push({ op: "local.set", index: tmpR });
-        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        coerceType(ctx, fctx, brandSymbolIfStatic(leftType, leftTsType), { kind: "externref" });
         fctx.body.push({ op: "local.get", index: tmpR });
         releaseTempLocal(fctx, tmpR);
       }
