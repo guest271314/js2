@@ -135,6 +135,13 @@ const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
 const OBJ_FLAG_NONEXTENSIBLE = 0x01;
 const OBJ_FLAG_SEALED = 0x02;
 const OBJ_FLAG_FROZEN = 0x04;
+// (#3176) `[[IsRawJSON]]` internal-slot marker for the ES2025 `JSON.rawJSON`
+// carrier. Set on the `$Object.flags` field (a genuine internal slot, NOT an
+// own property — so a plain `{ rawJSON: '…' }` is distinguishable from a real
+// raw-JSON object). `JSON.isRawJSON` reads this bit. 0x10+ remain free; the
+// isFrozen/isSealed/isExtensible helpers mask only their own bits, so this is
+// inert to them.
+export const OBJ_FLAG_RAWJSON = 0x08;
 
 /**
  * Type indices for the open-object runtime structs/arrays, allocated once per
