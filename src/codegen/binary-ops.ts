@@ -3020,10 +3020,11 @@ export function compileBinaryExpression(
       // (#3154 / task #90) Brand a statically-SYMBOL i32 operand so the
       // externref box preserves the JS tag: the brand-blind
       // `coerceType(i32 → externref)` fallthrough boxed a symbol HANDLE via
-      // `__box_number`, so `__host_eq(<real symbol>, <number id>)` was always
-      // false (`anyElem === moduleScopedSymbol` failed). With the brand,
-      // `coerceType` routes through `__box_symbol` (host symbol cache →
-      // identity-stable JS symbol), and JS `===` answers symbol identity.
+      // `__box_number`, so the host strict-eq compared a real symbol against a
+      // boxed number id and was always false (`anyElem === moduleScopedSymbol`
+      // failed). With the brand, `coerceType` routes through `__box_symbol`
+      // (host symbol cache → identity-stable JS symbol), and JS `===` answers
+      // symbol identity.
       const brandSymbolIfStatic = (t: ValType, tsType: ts.Type): ValType =>
         t.kind === "i32" && (tsType.flags & ts.TypeFlags.ESSymbolLike) !== 0 ? { kind: "i32", symbol: true } : t;
       if (rightType.kind !== "externref") {

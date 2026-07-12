@@ -15,6 +15,8 @@ origin: "#3151 / PR #2899 auto-park diagnosis (CI-fix dev, 2026-07-12)"
 loc-budget-allow:
   - src/codegen/binary-ops.ts
   - src/codegen/literals.ts
+coercion-sites-allow:
+  - src/codegen/binary-ops.ts
 ---
 
 ## Resolution (2026-07-12, fable-eqfix — jointly with task #90)
@@ -47,6 +49,14 @@ Fixed as the array-literal half of the `any !== any` value-equality gap
   used. A statically-symbol i32 operand is boxed by its brand
   (`__box_symbol` — the id-interned `$Symbol` carrier), never `__box_number`,
   in the standalone tag-dispatch AND the host `__host_eq` path.
+
+**Gate allowances (#3131):** `loc-budget-allow` (both files) + `coercion-sites-allow`
+(binary-ops.ts). The coercion-sites growth is one added `__any_strict_eq` dispatch
+(1→2) — an intentional, reviewed step that routes the mixed
+`$AnyValue`-vs-externref/primitive strict-eq through the engine keystone
+`__any_strict_eq` (§7.2.16), REPLACING a wrong hand-rolled `ref.eq` box-identity
+comparison. This is USING the coercion engine, not hand-rolling a fresh
+ToString/ToNumber/ToPrimitive matrix.
 
 Regression guard: `tests/issue-90-any-value-eq.test.ts` (15 shapes × both
 lanes). **Still out of scope (independent pre-existing root causes, identical
