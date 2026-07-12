@@ -270,6 +270,24 @@ after it, with zero fixup.
 | S9 (MLIR memo)           | **OPUS-owned decision memo** — options laid out below, NOT picked here; hard-blocked on #3030 T3 (serializer not yet landed)                          |
 | #3030 format/versioning  | **already frozen on main** (T1 D1/D2, 2026-07-04); residual open forks are an OPUS-owned memo in #3030                                                |
 
+### Dispatch lines (lift straight into TaskList; gate = what proves it safe)
+
+| Task                | One-line dispatch summary                                                                                                                                                       | Proving gate                                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **S3a** [S]         | `git mv src/codegen/js-tag.ts src/ir/js-tag.ts` + one-line shim at old path + flip the 5 ir-side imports (nodes:21, builder:40, verify:28, from-ast:57, handles:24)             | import-path-only ⇒ byte-identical: tsc + equivalence + `prove-emit-identity.mjs` spot-check              |
+| **S3b** [S]         | Re-home from-ast's 3 upward imports: FMOD_FN → `src/ir/names.ts`; `evaluateConstantCondition` + `isIncreasingStep`/`loopBodyMutatesIndexOrArray` → `src/compiler/ast-analysis.ts` (shims at old paths) | tsc + equivalence; no emitted-code change                                                                |
+| **S3c** [M–L]       | Split `compileIrPathFunctions` (integration.ts:138): neutral core keeps `IrBackendIntegration` param; WasmGC arm (makeResolver:1280 + Deferred\* + preregister\* + patch site) cut-pastes to new `src/codegen/ir-gc-adapter.ts`; caller index.ts:2205 constructs the adapter | **byte-identity**: `prove-emit-identity.mjs` + `byte-diff-corpus.mts` + equivalence + merge_group        |
+| **S5-gc** [M]       | New `src/codegen/module-assembler.ts`: `GcModuleAssembler` implementing contract part 5 over `mintDefinedFunc`/`pushDefinedFunc`/`ensureLateImport`/`resolveLayout`; bind in `tests/backend-contract.test.ts`; ZERO call-site migration | additive-only ⇒ byte-inert: `prove-emit-identity.mjs` + conformance tests + tsc                          |
+| **S5-linear** [S–M] | `LinearModuleAssembler` over `LinearContext` (context.ts:7), same conformance binding, no call-site change                                                                       | additive-only ⇒ byte-inert: same gates                                                                   |
+| **S6-w1** [S]       | `git mv src/ir/backend/bytecode-{emitter,vm}.ts → src/backend/bytecode/` + README + import-path rewrite                                                                          | tsc + equivalence; byte-identical (path-only)                                                            |
+| **S6-w2** [S–M]     | `git mv` contract files (`contract,emitter,legality,handles,contract-conformance,README`) → `src/backend/contract/`; `wasmgc-emitter.ts` → `src/backend/gc/emitter.ts`          | tsc + equivalence; byte-identical (path-only); lead-scheduled window                                     |
+| **S7 R-DEP** [S–M]  | New `scripts/check-layer-imports.mjs` (change-scoped, baseline = the exact violation inventory above) + `check:layer-imports` in package.json + `quality` (ci.yml ~152)          | script unit test; no compiler change ⇒ byte-inert by construction                                        |
+| **S2-resid** [S]    | New `scripts/check-pushraw.mjs`: fail on `pushRaw(` growth in lower.ts (base 103) unless `// pushraw-ok(#NNNN)` tagged; `--update-on-decrease` banks; wire into `quality`        | script unit test; no compiler change ⇒ byte-inert by construction                                        |
+
+Ordering constraint the lead should encode: **S7 R-DEP + S2-resid first**
+(lock the boundary before the moves), then S3a → S3b → S3c, then S5-gc /
+S5-linear / S6-w1 / S6-w2 in any order (S6 waves 3–5 stay blocked on S3c).
+
 ### S2 — pushRaw families (defers to #2953; residual spec: the R-ESCAPE ratchet)
 
 #2953 owns the family conversions (refcells done; unions/boxing, closures,
