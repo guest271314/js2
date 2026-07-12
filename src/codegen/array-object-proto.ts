@@ -396,120 +396,140 @@ const TYPED_ARRAY_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   // some, sort, toSorted) are arity 1 — the default.
 };
 
-/** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
-const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
-  concat: 1,
-  copyWithin: 2,
-  every: 1,
-  fill: 1,
-  forEach: 1,
-  push: 1,
-  reduce: 1,
-  slice: 2,
-  splice: 2,
-  unshift: 1,
-  with: 2,
-  hasOwnProperty: 1,
-  isPrototypeOf: 1,
-  propertyIsEnumerable: 1,
-  // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
-  // default to 1.
-  set: 2,
-  // (#3172) ES2025 Map/WeakMap emplace additions — both arity 2.
-  getOrInsert: 2,
-  getOrInsertComputed: 2,
-  // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
-  // bind/call default to 1.
-  apply: 2,
-  // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
-  at: 1,
-  charAt: 1,
-  charCodeAt: 1,
-  codePointAt: 1,
-  endsWith: 1,
-  includes: 1,
-  indexOf: 1,
-  lastIndexOf: 1,
-  localeCompare: 1,
-  match: 1,
-  matchAll: 1,
-  normalize: 0,
-  padEnd: 1,
-  padStart: 1,
-  repeat: 1,
-  replace: 2,
-  replaceAll: 2,
-  search: 1,
-  split: 2,
-  startsWith: 1,
-  substr: 2,
-  substring: 2,
-  // Number.prototype (ES2024 §21.1.3).
-  toExponential: 1,
-  toFixed: 1,
-  toPrecision: 1,
-  // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
-  // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
-  // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
-  // in the String batch above.)
-  toLowerCase: 0,
-  toUpperCase: 0,
-  toLocaleLowerCase: 0,
-  toLocaleUpperCase: 0,
-  trim: 0,
-  trimEnd: 0,
-  trimStart: 0,
-  isWellFormed: 0,
-  toWellFormed: 0,
-  // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
-  setFullYear: 3,
-  setUTCFullYear: 3,
-  setMonth: 2,
-  setUTCMonth: 2,
-  setHours: 4,
-  setUTCHours: 4,
-  setMinutes: 3,
-  setUTCMinutes: 3,
-  setSeconds: 2,
-  setUTCSeconds: 2,
-  // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
-  // `.length` to 0 so the meta-read path reports the spec arity.
-  getDate: 0,
-  getDay: 0,
-  getFullYear: 0,
-  getYear: 0, // (#2671) Annex B §B.2.4 legacy getter (0-arity)
-  getHours: 0,
-  getMilliseconds: 0,
-  getMinutes: 0,
-  getMonth: 0,
-  getSeconds: 0,
-  getTime: 0,
-  getTimezoneOffset: 0,
-  getUTCDate: 0,
-  getUTCDay: 0,
-  getUTCFullYear: 0,
-  getUTCHours: 0,
-  getUTCMilliseconds: 0,
-  getUTCMinutes: 0,
-  getUTCMonth: 0,
-  getUTCSeconds: 0,
-  setTime: 1,
-  toDateString: 0,
-  toISOString: 0,
-  toTimeString: 0,
-  toUTCString: 0,
-  // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
-  // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
-  // on exact arities, only the member set.
-  toJSON: 1,
-  // WeakRef.prototype.deref (ES2024 §26.1.3.2) is 0-arity; FinalizationRegistry.
-  // prototype.register (§26.2.3.1) is arity 2, unregister (§26.2.3.2) arity 1.
-  // These names don't collide with other builtins, so they live in the shared
-  // table safely.
-  deref: 0,
-  register: 2,
-  unregister: 1,
-};
+/**
+ * Spec arity (`fn.length`) of the proto methods that differ from the default 1.
+ *
+ * (#3181) NULL-PROTOTYPED. A plain object literal inherits `Object.prototype`,
+ * so a lookup of an inherited method name (`toString`/`valueOf`/`toLocaleString`/
+ * `constructor`/`hasOwnProperty`…) returned the INHERITED FUNCTION, not
+ * `undefined` — which slipped past the `?? 1` guard and folded `.length` to a
+ * `Function` value → NaN (e.g. `Number.prototype.toString.length`,
+ * `Array.prototype.toString.length`). With a null prototype, unlisted names
+ * resolve to `undefined` and the `?? 1` fallback fires as intended. The three
+ * `Object.prototype`-shadowed names below are given EXPLICIT arities (all 0 for
+ * every family; Number.prototype.toString(radix) is arity 1 — overridden in the
+ * Number glue's `memberLength`, since this table is shared cross-family).
+ */
+const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = Object.assign(
+  Object.create(null) as Record<string, number>,
+  {
+    // Object.prototype-shadowed method names (see the null-proto note above).
+    toString: 0,
+    valueOf: 0,
+    toLocaleString: 0,
+    concat: 1,
+    copyWithin: 2,
+    every: 1,
+    fill: 1,
+    forEach: 1,
+    push: 1,
+    reduce: 1,
+    slice: 2,
+    splice: 2,
+    unshift: 1,
+    with: 2,
+    hasOwnProperty: 1,
+    isPrototypeOf: 1,
+    propertyIsEnumerable: 1,
+    // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
+    // default to 1.
+    set: 2,
+    // (#3172) ES2025 Map/WeakMap emplace additions — both arity 2.
+    getOrInsert: 2,
+    getOrInsertComputed: 2,
+    // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
+    // bind/call default to 1.
+    apply: 2,
+    // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
+    at: 1,
+    charAt: 1,
+    charCodeAt: 1,
+    codePointAt: 1,
+    endsWith: 1,
+    includes: 1,
+    indexOf: 1,
+    lastIndexOf: 1,
+    localeCompare: 1,
+    match: 1,
+    matchAll: 1,
+    normalize: 0,
+    padEnd: 1,
+    padStart: 1,
+    repeat: 1,
+    replace: 2,
+    replaceAll: 2,
+    search: 1,
+    split: 2,
+    startsWith: 1,
+    substr: 2,
+    substring: 2,
+    // Number.prototype (ES2024 §21.1.3).
+    toExponential: 1,
+    toFixed: 1,
+    toPrecision: 1,
+    // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
+    // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
+    // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
+    // in the String batch above.)
+    toLowerCase: 0,
+    toUpperCase: 0,
+    toLocaleLowerCase: 0,
+    toLocaleUpperCase: 0,
+    trim: 0,
+    trimEnd: 0,
+    trimStart: 0,
+    isWellFormed: 0,
+    toWellFormed: 0,
+    // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
+    setFullYear: 3,
+    setUTCFullYear: 3,
+    setMonth: 2,
+    setUTCMonth: 2,
+    setHours: 4,
+    setUTCHours: 4,
+    setMinutes: 3,
+    setUTCMinutes: 3,
+    setSeconds: 2,
+    setUTCSeconds: 2,
+    // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
+    // `.length` to 0 so the meta-read path reports the spec arity.
+    getDate: 0,
+    getDay: 0,
+    getFullYear: 0,
+    getYear: 0, // (#2671) Annex B §B.2.4 legacy getter (0-arity)
+    getHours: 0,
+    getMilliseconds: 0,
+    getMinutes: 0,
+    getMonth: 0,
+    getSeconds: 0,
+    getTime: 0,
+    getTimezoneOffset: 0,
+    getUTCDate: 0,
+    getUTCDay: 0,
+    getUTCFullYear: 0,
+    getUTCHours: 0,
+    getUTCMilliseconds: 0,
+    getUTCMinutes: 0,
+    getUTCMonth: 0,
+    getUTCSeconds: 0,
+    setTime: 1,
+    toDateString: 0,
+    toISOString: 0,
+    toTimeString: 0,
+    toUTCString: 0,
+    // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
+    // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
+    // on exact arities, only the member set.
+    toJSON: 1,
+    // WeakRef.prototype.deref (ES2024 §26.1.3.2) is 0-arity; FinalizationRegistry.
+    // prototype.register (§26.2.3.1) is arity 2, unregister (§26.2.3.2) arity 1.
+    // These names don't collide with other builtins, so they live in the shared
+    // table safely.
+    deref: 0,
+    register: 2,
+    unregister: 1,
+  },
+);
 
 /**
  * (#2875 slice 3) ABI param-slot counts for `String.prototype` members whose
@@ -1446,7 +1466,10 @@ function makeGlue(
     // on the prototype itself; `length` is an own data property of an instance,
     // not the proto).
     memberKind: () => "method",
-    memberLength: (member) => PROTO_METHOD_LENGTH[member] ?? 1,
+    // (#3181) `Number.prototype.toString(radix)` is arity 1 (§21.1.3.7) — the
+    // only family where `toString` differs from the shared default of 0. Every
+    // other family (Array/String/Object/Boolean/Date/…) keeps 0 from the table.
+    memberLength: (member) => (name === "Number" && member === "toString" ? 1 : (PROTO_METHOD_LENGTH[member] ?? 1)),
     // (#2875 slice 3) String search-family members carry an uncounted optional
     // `position` arg — give their closures a real param slot for it. Non-String
     // families return 0 (= "no override": the slot count falls back to the spec
