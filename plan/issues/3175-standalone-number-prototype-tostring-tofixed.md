@@ -1,7 +1,8 @@
 ---
 id: 3175
 title: "standalone: Number.prototype.toString(radix)/toFixed/valueOf spec semantics + prototype surface (74 gap tests)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-number
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -16,6 +17,11 @@ sprint: current
 horizon: m
 related: [2860, 3078, 3081, 2861]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+  - src/codegen/declarations.ts
+coercion-sites-allow:
+  - src/codegen/declarations.ts
 ---
 
 # #3175 — standalone: Number.prototype method spec semantics
@@ -66,3 +72,61 @@ Measured signatures:
   - `test/built-ins/Number/prototype/valueOf/length.js`
 - Zero host-mode regressions; zero standalone high-water regressions.
 - One PR, Number family only.
+
+## Progress (PR-1, dev-number, 2026-07-12) — PARTIAL
+
+Local measurement via the real `wrapTest` + standalone compile over all 168
+`built-ins/Number/prototype/**` files: **84 → 130 standalone passes (+46)**,
+zero host-mode regressions (verified `Number.prototype.{toString,valueOf,
+toFixed}` still correct in gc mode), zero standalone high-water regressions
+(spot-checked; the two `issue-1320-standalone` iterator failures pre-date this
+branch on `origin/main`).
+
+**Landed (all `src/codegen/`, Number family only):**
+
+1. **`Number.prototype` receiver → +0** (dominant bucket, ~35 tests). New
+   `isNumberDotPrototype()` in `expressions/calls.ts` recovers the prototype
+   object's [[NumberData]] = +0 (§21.1.3) directly, before the boxed-wrapper
+   `__to_primitive`/`__unbox_number` recovery (which found no [[PrimitiveValue]]
+   slot → NaN). Wired into `emitNumberMethodReceiverF64` (covers toString/
+   toFixed/toPrecision/toExponential/toLocaleString) and the wrapper `valueOf`
+   path. Shadow-guarded via `isDeclarationFile` (the global `Number` is
+   ambient-only; a user `const Number` bails).
+2. **`toString(undefined)` → base 10** (§21.1.3.6 step 2), not RangeError/trap.
+   `declarations.ts` scan now also registers `number_toString` for `.toString(arg)`
+   so the undefined-radix fallback resolves.
+3. **`toFixed` ToIntegerOrInfinity(fractionDigits)**: `f64.trunc` toward zero +
+   `normalizeNaNToZero` before the [0,100] gate, so `toFixed(-0.1)`/`toFixed(NaN)`/
+   `toFixed("x")` no longer trap (matches the toPrecision arm).
+4. **Real RangeError INSTANCES** from the toString-radix and toFixed out-of-range
+   gates (new `buildThrowJsErrorInstrs` helper returns the terminal
+   instruction sequence for splicing into an `if.then`), so raw-`try`/`catch` +
+   `assert(e instanceof RangeError)` passes.
+
+Tests: `tests/issue-3175.test.ts`.
+
+**Remaining (NOT in this PR — each a separate slice; ~38 files still failing):**
+
+- **Brand checks / "not generic"** (~12: toString A4_T01–05, valueOf A2_T01–05,
+  toExp/toPrec `this-type-not-number`). Require materializing
+  `Number.prototype.<m>` as a first-class function VALUE that brand-checks its
+  receiver on transfer (`s.toString = Number.prototype.toString; s.toString()`
+  must throw TypeError). Large — needs the shared brand-preamble (#3171/#3174)
+  wired to extractable prototype-method values.
+- **Property surface** (~12: `Number.prototype.hasOwnProperty(...)`, S15.7.4*A3.\*,
+  S15.7.3.1*\*). Needs `Number.prototype` as a real object with own-property
+  descriptors.
+- **Method `.length`** (3: toString/valueOf/toLocaleString `length.js`). The
+  `.name` fold already fires (`tryCompileStandaloneBuiltinProtoMemberMeta` in
+  `property-access.ts`); `.length` is intercepted by an earlier generic
+  `.length` handler and returns NaN. Needs a dispatch-order fix (fold before the
+  generic handler) — deferred to avoid property-access reordering risk here.
+- **toExponential / toPrecision no-arg + coercion** (~8). The standalone no-arg
+  render is a documented 6-digit approximation (`number-format-native.ts`:
+  "shortest round-trip out of scope"); `toPrecision(undefined)` should be
+  `ToString(x)` but the delegation to `number_toString` collides with the
+  `number_toString`←`number_toString_radix` emit-dependency chain (CE) — needs
+  the emit-graph untangled first. Separate defect, out of the toString/toFixed/
+  valueOf scope.
+- **Symbol/BigInt arg ToNumber-throws** (~2). `toFixed`/`toExponential` Symbol/
+  BigInt args must throw TypeError as a real instance.

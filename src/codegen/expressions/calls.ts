@@ -228,6 +228,7 @@ import {
   tryCompileStandaloneRegExpToString,
 } from "../regexp-standalone.js";
 import {
+  buildThrowJsErrorInstrs,
   emitThrowRangeError,
   emitThrowTypeError,
   getFuncParamTypes,
@@ -908,6 +909,38 @@ function isNumberMethodReceiver(ctx: CodegenContext, receiverType: ts.Type): boo
 }
 
 /**
+ * (#3175) Detect a syntactic `Number.prototype` receiver.
+ *
+ * Per §21.1.3 the Number prototype object is an ordinary object whose internal
+ * [[NumberData]] slot is +0, so `Number.prototype.toString(radix)` /
+ * `.valueOf()` / `.toFixed(d)` / `.toPrecision(p)` / `.toExponential(d)` all
+ * behave as if invoked on the primitive +0 (e.g. `Number.prototype.toString(3)`
+ * is `"0"`). This is the dominant standalone gap in the S15.7.4.2 corpus
+ * (35 `A1`/`A2` tests open with exactly this assertion).
+ *
+ * Standalone types `Number.prototype` as the `Number` wrapper interface, so the
+ * boxed-wrapper `__to_primitive`/`__unbox_number` recovery runs — but the
+ * prototype object carries no [[PrimitiveValue]] slot, so the unbox yields NaN
+ * (rendered `"NaN"`). Recover the +0 directly at the receiver site instead.
+ *
+ * Guarded against a shadowing user binding: a LOCAL `const Number = {...}` /
+ * param is caught by `fctx.localMap`/`boxedCaptures` (mirrors the sibling
+ * `tryCompileStandaloneBuiltinProtoMemberMeta` shadow check). A module-level
+ * shadow does not reach here at all — every caller is gated on the receiver
+ * TYPE being the `Number` wrapper (`isNumberMethodReceiver` /
+ * `recvSymName === "Number"`), which a non-Number shadow would not satisfy.
+ * Uses no direct TS-checker read (oracle-ratchet, #1930).
+ */
+function isNumberDotPrototype(fctx: FunctionContext, expr: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(expr)) return false;
+  if (expr.name.text !== "prototype") return false;
+  const base = expr.expression;
+  if (!ts.isIdentifier(base) || base.text !== "Number") return false;
+  const shadowed = fctx.localMap.has("Number") || (fctx.boxedCaptures?.has("Number") ?? false);
+  return !shadowed;
+}
+
+/**
  * (#2767) Nominal types whose bare-`var` receiver recovery is VERIFIED safe —
  * the substituted `receiverType` routes into a dispatch path whose
  * externref→ref value-recovery is properly guarded and whose method/property
@@ -1004,6 +1037,13 @@ function emitNumberMethodReceiverF64(
   propAccess: ts.PropertyAccessExpression,
   receiverType: ts.Type,
 ): void {
+  // (#3175) `Number.prototype.<m>(...)` — the prototype object's [[NumberData]]
+  // is +0 (§21.1.3). Recover the +0 directly; the wrapper `__to_primitive`
+  // recovery below finds no [[PrimitiveValue]] slot and would yield NaN.
+  if (isNumberDotPrototype(fctx, propAccess.expression)) {
+    fctx.body.push({ op: "f64.const", value: 0 });
+    return;
+  }
   if (ctx.standalone && isNumberWrapperType(receiverType)) {
     ensureObjectRuntime(ctx);
     const toPrimIdx = ctx.funcMap.get("__to_primitive");
@@ -11477,6 +11517,19 @@ function compileCallExpression(
       // `ctx.standalone` specifically — WASI keeps the host-import object
       // machinery (the native object-runtime is standalone-only), so it stays on
       // the legacy paths below.
+      // (#3175) `Number.prototype.valueOf()` — [[NumberData]] is +0 (§21.1.3).
+      // The prototype object has no [[PrimitiveValue]] slot, so the wrapper
+      // `__to_primitive`/`__unbox_number` recovery below would yield NaN.
+      if (
+        recvSymName === "Number" &&
+        wrapperMethodName === "valueOf" &&
+        expr.arguments.length === 0 &&
+        isNumberDotPrototype(fctx, propAccess.expression)
+      ) {
+        fctx.body.push({ op: "f64.const", value: 0 });
+        return { kind: "f64" };
+      }
+
       if (ctx.standalone && isWrapperValueAccessor) {
         ensureObjectRuntime(ctx);
         const toPrimIdx = ctx.funcMap.get("__to_primitive");
@@ -12230,8 +12283,19 @@ function compileCallExpression(
       // Also captures the validated, floored radix in `radixLocalIdx` so it can
       // be passed to the 2-arg `number_toString_radix` host import below (#1321).
       let radixLocalIdx: number | undefined;
-      if (expr.arguments.length > 0) {
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+      // (#3175) §21.1.3.6 step 2: an `undefined` radix means base 10 — the
+      // ToIntegerOrInfinity/range-check (steps 3-4) is skipped entirely, so
+      // `(5).toString(undefined)` is `"5"`, NOT a RangeError. A literal
+      // `undefined` / `void 0` argument would otherwise floor to NaN and hit
+      // the NaN→RangeError guard (or trap on the externref→f64 coercion). Treat
+      // it as the 0-arg (default base-10) case.
+      const radixArg = expr.arguments.length > 0 ? expr.arguments[0]! : undefined;
+      const radixArgIsUndefined =
+        radixArg !== undefined &&
+        ((ts.isIdentifier(radixArg) && radixArg.text === "undefined") ||
+          (ts.isVoidExpression(radixArg) && ts.isNumericLiteral(radixArg.expression)));
+      if (radixArg !== undefined && !radixArgIsUndefined) {
+        compileExpression(ctx, fctx, radixArg, { kind: "f64" });
         // Floor the radix (ToInteger semantics: NaN→0, 2.5→2, etc.)
         fctx.body.push({ op: "f64.floor" });
         radixLocalIdx = allocLocal(fctx, `__radix_${fctx.locals.length}`, { kind: "f64" });
@@ -12250,13 +12314,14 @@ function compileCallExpression(
         fctx.body.push({ op: "f64.ne" });
         fctx.body.push({ op: "i32.or" });
         {
+          // (#3175) Throw a real RangeError INSTANCE so the raw-`try`/`catch` +
+          // `assert(e instanceof RangeError)` corpus passes (not a bare string).
           const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
-          addStringConstantGlobal(ctx, rangeErrMsg);
-          const tagIdx = ensureExnTag(ctx);
+          const throwInstrs = buildThrowJsErrorInstrs(ctx, fctx, "RangeError", rangeErrMsg);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            then: throwInstrs,
             else: [],
           });
         }
@@ -12442,8 +12507,22 @@ function compileCallExpression(
         coerceNumberMethodArgToF64(ctx, fctx, compileExpression(ctx, fctx, expr.arguments[0]!));
         // RangeError: fractionDigits must be 0-100
         const digitsLocal = allocLocal(fctx, `__toFixed_digits_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.tee", index: digitsLocal });
+        fctx.body.push({ op: "local.set", index: digitsLocal });
+        // (#3175) §21.1.3.3 step 1: f = ToIntegerOrInfinity(fractionDigits),
+        // which TRUNCATES toward zero (then maps NaN → 0). This must run BEFORE
+        // the [0,100] RangeError gate: `(5).toFixed(-0.1)` truncates to -0 (in
+        // range → "5"), NOT RangeError; `(5).toFixed(1.9)` truncates to 1. And a
+        // NaN/non-numeric-string count (`(5).toFixed(NaN)` / `.toFixed("x")`)
+        // maps to 0 — without normalisation NaN reaches the native
+        // `number_toFixed`, whose `i32.trunc_f64_s(NaN)` traps ("float
+        // unrepresentable in integer range"). Mirrors the toPrecision arm's
+        // ToIntegerOrInfinity handling.
+        fctx.body.push({ op: "local.get", index: digitsLocal });
+        fctx.body.push({ op: "f64.trunc" });
+        fctx.body.push({ op: "local.set", index: digitsLocal });
+        normalizeNaNToZero(fctx, digitsLocal);
         // Check digits < 0
+        fctx.body.push({ op: "local.get", index: digitsLocal });
         fctx.body.push({ op: "f64.const", value: 0 });
         fctx.body.push({ op: "f64.lt" });
         // Check digits > 100
@@ -12452,13 +12531,13 @@ function compileCallExpression(
         fctx.body.push({ op: "f64.gt" });
         fctx.body.push({ op: "i32.or" });
         {
+          // (#3175) Real RangeError INSTANCE (see the toString radix gate).
           const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
-          addStringConstantGlobal(ctx, rangeErrMsg);
-          const tagIdx = ensureExnTag(ctx);
+          const throwInstrs = buildThrowJsErrorInstrs(ctx, fctx, "RangeError", rangeErrMsg);
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            then: throwInstrs,
             else: [],
           });
         }

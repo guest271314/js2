@@ -395,6 +395,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+        // (#3175) An `undefined` radix (§21.1.3.6 step 2) routes back to the
+        // 1-arg base-10 `number_toString` at the call site, so register it too
+        // — otherwise `(5).toString(undefined)` finds no emitted helper and the
+        // call site returns a null string ref.
+        state.primitiveNeeded.add("number_toString");
       } else {
         state.primitiveNeeded.add("number_toString");
       }
