@@ -777,3 +777,55 @@ export function irFirstBodyIsProvenLowerable(
 
   return fn.body.statements.every(stmtOk);
 }
+
+/**
+ * (#3143) Build a syntactic caller→callees edge map over the WHOLE source file
+ * (top-level function declarations + a `MODULE_INIT_CALLER` pseudo-node for
+ * module-level statements). Used by `computeIrFirstSkipSet` to enforce a
+ * signature-parity invariant: a function whose LEGACY body is skipped is
+ * installed with its IR-resolved signature, so any LEGACY caller (a non-skipped
+ * function, whose call-site arg coercion was resolved against the callee's
+ * legacy signature) would mismatch it (the boxed-`any`→typed-param
+ * `f64.convert_i32_s` validation break, #3143). Therefore a function may be
+ * skipped only when EVERY caller is itself skipped — the caller graph lets
+ * `computeIrFirstSkipSet` compute that fixpoint. Name-based + over-approximating
+ * (any bare `f(...)` identifier call attributes an edge from the enclosing
+ * top-level function, or the module-init node): a false edge only keeps a
+ * function compile-twice, never unsafe.
+ */
+export const MODULE_INIT_CALLER = "<module-init>";
+
+export function collectLocalCallEdges(sourceFile: ts.SourceFile): ReadonlyMap<string, ReadonlySet<string>> {
+  const edges = new Map<string, Set<string>>();
+  const addEdge = (caller: string, callee: string): void => {
+    let s = edges.get(caller);
+    if (!s) {
+      s = new Set<string>();
+      edges.set(caller, s);
+    }
+    s.add(callee);
+  };
+  // Walk a function/module body, attributing every identifier-callee `f(...)`
+  // to `caller`. Does NOT descend into nested function declarations — their
+  // calls are attributed to their OWN name (a nested `function g(){}` is walked
+  // separately below with caller = the top-level owner is fine as an
+  // over-approximation; to stay simple + safe we attribute nested calls to the
+  // enclosing top-level `caller` too, so we do descend but keep the same
+  // caller). Simplicity beats precision here (over-approx = safe).
+  const walkCalls = (node: ts.Node, caller: string): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      addEdge(caller, node.expression.text);
+    }
+    ts.forEachChild(node, (c) => walkCalls(c, caller));
+  };
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+      walkCalls(stmt.body, stmt.name.text);
+    } else {
+      // module-level statement (incl. `export function` is handled above;
+      // top-level expression statements, var initializers, class static blocks…)
+      walkCalls(stmt, MODULE_INIT_CALLER);
+    }
+  }
+  return edges;
+}

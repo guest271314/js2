@@ -29,7 +29,7 @@ import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
-import { irFirstBodyIsProvenLowerable } from "./ir-first-gate.js";
+import { collectLocalCallEdges, irFirstBodyIsProvenLowerable } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -1595,6 +1595,41 @@ function computeIrFirstSkipSet(
     if (!signatureLowerable(fn, name)) continue; // numeric/boolean signature only
     if (!irFirstBodyIsProvenLowerable(fn, claimedArity)) continue; // ALLOWLIST body walk (#3143)
     skip.add(name);
+  }
+
+  // (#3143) Signature-parity fixpoint: a skipped function is installed with its
+  // IR-resolved signature, so a LEGACY (non-skipped) caller — whose call-site
+  // arg coercion was resolved against the callee's LEGACY signature — mismatches
+  // it (the boxed-`any`→typed-param `f64.convert_i32_s` validation break). So
+  // keep a function skippable ONLY when EVERY caller is itself skipped. Iterate
+  // to a fixpoint (removing a function can un-skip its callees' other callers).
+  // `<module-init>` (top-level statement calls) is never in `skip`, so any
+  // function called at module scope is correctly excluded.
+  const callEdges = collectLocalCallEdges(_sourceFile);
+  const callers = new Map<string, Set<string>>(); // callee → callers
+  for (const [caller, callees] of callEdges) {
+    for (const callee of callees) {
+      let s = callers.get(callee);
+      if (!s) {
+        s = new Set<string>();
+        callers.set(callee, s);
+      }
+      s.add(caller);
+    }
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const name of skip) {
+      const cs = callers.get(name);
+      if (!cs) continue; // no internal callers (leaf / host-only) — safe to skip
+      for (const c of cs) {
+        if (!skip.has(c)) {
+          skip.delete(name);
+          changed = true;
+          break;
+        }
+      }
+    }
   }
   return skip;
 }
