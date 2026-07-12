@@ -278,7 +278,8 @@ one ready first slice: module early errors + wrapTest export collision).
   monotonically falling the way `check:ir-fallbacks` ratchets fallbacks. If
   the trap counts regress-while-net-positive on a PR, nothing notices. Cheap
   candidate: extend the existing bucket analysis to hard-fail on
-  trap-category *growth*. (Related goal: crash-free; no concrete issue.)
+  trap-category *growth*. (Related goal: crash-free.) **Filed after all:
+  #3189** — the mechanism is cheap and reuses the #2855/#3102 ratchet pattern.
 - **Compile-time perf is healthy, but ungated**: baseline `compile_ms` p50
   102 ms / p90 316 ms / p99 1,385 ms / max 10 s (87 tests > 5 s; 2.3 CPU-hours
   per full run). No trend gate; god-file refactors (#3104/#3111) could
