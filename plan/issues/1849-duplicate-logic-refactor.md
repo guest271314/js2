@@ -1,9 +1,18 @@
 ---
 id: 1849
 title: "Refactor diverged copy-paste (super dispatch, closure drainers, resolveVec, extern_has, typed-default)"
-status: backlog
+status: wont-fix
+completed: 2026-07-12
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-07-12
+superseded_by: 3182
+# 2026-07-12: SUBSUMED into the #3182 bloat-elimination epic (slices S4/S5)
+# with refreshed evidence. Per-item disposition (see #3182 "D4" table):
+# super-dispatch pair → S4 (still duplicated, new-super.ts:545/666);
+# closure drainers → S5 (now ×3: runtime.ts:2938/3031/10605);
+# resolveVec → ALREADY FIXED (resolveVecForElementImpl, ir/integration.ts:960);
+# __extern_has ×2 → re-verify, likely legitimately distinct after #2741/#2617;
+# typed-default blocks → mostly fixed via pushDefaultValue (new-super.ts:122/642).
 priority: low
 feasibility: medium
 task_type: refactor

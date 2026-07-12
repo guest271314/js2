@@ -4,8 +4,12 @@ title: "Extract and refactor compileCallExpression (3,350 lines)"
 status: in-progress
 assignee: ttraenkler/cs-1931
 created: 2026-03-17
-updated: 2026-06-24
-priority: medium
+updated: 2026-07-12
+priority: high
+# 2026-07-12 (#3182 groom): elevated medium→high. The EXTRACTION half is done
+# (calls.ts exists, 18,753 LOC — see #803, closed as landed); the live scope is
+# the REFACTOR half: break up compileCallExpression inside
+# src/codegen/expressions/calls.ts and table-drive the dispatch chain.
 feasibility: medium
 goal: maintainability
 sprint: current

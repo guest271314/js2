@@ -68,7 +68,7 @@ import {
   JSSTR_CHARCODEAT_FN,
   NATIVE_CHARCODEAT_FN,
 } from "../codegen/char-code-at-helpers.js";
-import { lowerFunctionAstToIr, STRING_METHOD_TABLE, type IrFromAstResolver } from "./from-ast.js";
+import { IR_STRING_COMPARE_FN, lowerFunctionAstToIr, STRING_METHOD_TABLE, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
   lowerIrTypeToValType,
@@ -1333,6 +1333,34 @@ function makeResolver(
         }
         return helperIdx;
       }
+      // (#3167) String relational compare helper. Resolve mode-appropriately:
+      //   native/WASI → the `__str_compare` defined helper (idempotently
+      //     ensured via `ensureNativeStringHelpers`; append-only, so no funcIdx
+      //     shift — same discipline as `ensureFmod`/the charCodeAt helpers).
+      //   host → the `string_compare` env import (registered by the legacy
+      //     declaration-collection pass whenever source has a string relational,
+      //     so it is already in `ctx.funcMap`; its import index is stable).
+      // Both are `(str, str) -> i32` returning a -1/0/1 lexicographic sign.
+      if (ref.name === IR_STRING_COMPARE_FN) {
+        if (ctx.nativeStrings) {
+          ensureNativeStringHelpers(ctx);
+          const helperIdx = ctx.nativeStrHelpers.get("__str_compare");
+          if (helperIdx === undefined) {
+            throw new Error(`ir/integration: cannot materialize ${ref.name} (native __str_compare unavailable)`);
+          }
+          // Re-resolve by name against the post-shift function table (the
+          // helper map's captured index can predate later import inserts).
+          for (let i = 0; i < ctx.mod.functions.length; i++) {
+            if (ctx.mod.functions[i]!.name === "__str_compare") return ctx.numImportFuncs + i;
+          }
+          return helperIdx;
+        }
+        const hostIdx = ctx.funcMap.get("string_compare");
+        if (hostIdx === undefined) {
+          throw new Error(`ir/integration: cannot resolve ${ref.name} (host string_compare import not registered)`);
+        }
+        return hostIdx;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
       // Slice 6 part 4 (#1183): native-string helpers (`__str_charAt`,
@@ -1609,6 +1637,15 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
     // string op (e.g. `f(s: string) { return s.charCodeAt(0); }` — receiver
     // is a param, no literals), so detect the call target explicitly.
     if (instr.kind === "call" && instr.target.name === JSSTR_CHARCODEAT_FN) {
+      usesStringOp = true;
+    }
+    // (#3167) A body may carry a string relational (`a < b` on string params)
+    // with NO other string op — no literal, concat, or eq. Detect the compare
+    // call so host-mode pre-registration (`addStringImports` + any literal
+    // globals) and native-mode helper availability are guaranteed before
+    // Phase-3 emission. (`resolveFunc` also ensures the native `__str_compare`
+    // on demand, but flagging here keeps the host string-import path uniform.)
+    if (instr.kind === "call" && instr.target.name === IR_STRING_COMPARE_FN) {
       usesStringOp = true;
     }
     if (instr.kind === "extern.regex") {
