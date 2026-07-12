@@ -52,7 +52,14 @@ describe("#3032 — lazy generator-expression thunks", () => {
     expect(await run(src, "standalone")).toBe(0);
   });
 
-  it("first next() materializes; yields/drain/done exact (buffered semantics)", async () => {
+  it("first next() suspends at the first yield (native state machine, #3164)", async () => {
+    // (#3164) This shape now routes through the NATIVE generator state machine
+    // (the fn-expr closure emits the state-struct factory), which is truly
+    // lazy AND suspends at each yield: after the first next() the body has run
+    // only up to `yield 5`, so `log === 1` — the spec §27.5 semantics. The
+    // pre-#3164 host eager-buffer thunk ran the WHOLE body on the first
+    // resume (`mid === 2`, "buffered semantics"); that approximation is gone
+    // for admitted fn-exprs.
     const src = `
       let log: number = 0;
       let mid: number = -1;
@@ -60,7 +67,7 @@ describe("#3032 — lazy generator-expression thunks", () => {
         const g = function*() { log = 1; yield 5; yield 7; log = 2; }();
         const before = log;                    // 0 (lazy)
         const a = g.next();                    // 5
-        mid = log;                             // 2 (buffered: body ran on first resume)
+        mid = log;                             // 1 (suspended at the first yield)
         const b = g.next();                    // 7
         const c = g.next();                    // done
         const d = g.next();                    // done
@@ -68,7 +75,7 @@ describe("#3032 — lazy generator-expression thunks", () => {
           + mid * 100 + (c.done ? 10 : 0) + (d.done ? 1 : 0);
       }
     `;
-    expect(await run(src, "standalone")).toBe(57211);
+    expect(await run(src, "standalone")).toBe(57111);
   });
 
   it("return() before first next() never runs the body (§27.5.3.2)", async () => {

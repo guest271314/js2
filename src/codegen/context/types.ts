@@ -233,9 +233,11 @@ export interface NativeGeneratorInfo {
    * class / object-literal generator method is a `ts.MethodDeclaration`; it
    * shares `.body` / `.parameters` / `.asteriskToken` with FunctionDeclaration,
    * and the native lowering treats an instance method's `this` as a synthetic
-   * leading param (see `registerNativeGenerator`).
+   * leading param (see `registerNativeGenerator`). (#3164) A generator
+   * FUNCTION EXPRESSION registers under its lifted `__closure_<n>` name with
+   * the closure `__self` param threaded as a leading synthetic capture.
    */
-  decl: ts.FunctionDeclaration | ts.MethodDeclaration;
+  decl: ts.FunctionDeclaration | ts.MethodDeclaration | ts.FunctionExpression;
   /**
    * (#2571) When `decl` is a non-static instance generator METHOD, the receiver
    * is threaded as a synthetic leading param named `"this"` (state field

@@ -1,10 +1,12 @@
 ---
 id: 3164
 title: "Standalone: native lowering for generator FUNCTION EXPRESSIONS (anonymous/IIFE/var-assigned) — retires ~1,700 sync __create_generator leaky passes"
-status: ready
+status: done
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
+completed: 2026-07-12
+assignee: sendev-3164
 priority: high
 horizon: l
 feasibility: medium
@@ -14,6 +16,16 @@ area: codegen, standalone
 language_feature: generators
 goal: standalone-mode
 related: [1665, 680, 2203, 2571, 2581, 2920, 2940, 3132, 1781]
+# (#3131) LOC allowance for this change-set: the three parts land as new arms
+# in the existing generator/iterator/closure subsystems — admission gate +
+# host-mix dispatch (generators-native), GENSTATE runtime arms
+# (iterator-native), fn-expr emit-site wiring (closures), NativeGeneratorInfo
+# decl widening (context/types). No barrel/driver growth.
+loc-budget-allow:
+  - src/codegen/iterator-native.ts
+  - src/codegen/generators-native.ts
+  - src/codegen/closures.ts
+  - src/codegen/context/types.ts
 origin: "2026-07-12 architect standalone audit (plan/log/standalone-gap-map.md): 1,741 official-scope tests pass ONLY via the eager-buffer __create_generator/__gen_* host shims; the dominant shape is the dstr-harness IIFE `var iter = function*() { iterCount += 1; }();`"
 ---
 
@@ -169,3 +181,73 @@ needed (generators stay compile-twice under IR-first in standalone, see
 **fable-executable-now** — the native factory, plan builder, and both method
 wirings (#2571/#2581) are established patterns to follow; no new substrate
 design.
+
+## Implementation Notes (2026-07-12, sendev-3164)
+
+Implemented as slice 1 (zero/identifier params) in three parts — the plan's
+"consumers already dispatch" claim held only for `.next()`; the dynamic
+iteration consumers needed real work:
+
+1. **Admission** (`generators-native.ts`, `closures.ts`, `context/types.ts`):
+   `GeneratorDecl` widened with `ts.FunctionExpression`;
+   `isNativeGeneratorCandidate` gained a fn-expr shape gate
+   (`isNativeGeneratorExpressionShape`: identifier-only params without
+   default/optional/rest, no `arguments`, no `this`/`super` outside nested
+   non-arrow scopes, no self-name reference for NAMED fn-exprs, no outer
+   capture). `sourceNeedsGeneratorHostImports` consults the same gate, so the
+   `__gen_*` bundle is skipped exactly when every fn-expr is admitted. The
+   closures.ts emit site registers the fn-expr under its lifted
+   `__closure_<n>` name with `paramTypes = [selfType, ...arrowParams]` and
+   `leadingCaptures = [{name: "__self"}]` — the factory's `local.get 0..n`
+   then aligns 1:1 with the lifted wasm params, and the resume prelude
+   rehydrates user params by name. The closure ABI is UNCHANGED (externref
+   return, `extern.convert_any` on the state struct), so function VALUES
+   (`g.prop = 1`, passing `g` around) need no escape analysis; only the
+   returned generator object changed representation. A candidate/pre-scan
+   desync in the eager arm late-registers the import bundle
+   (`addGeneratorImports({allowNoJsHost:true})`, the IR-path idiom) instead of
+   baking an undefined funcIdx.
+   - WHY defaults/patterns bail (slice 1): per §27.5 EvaluateGeneratorBody,
+     FunctionDeclarationInstantiation (param destructure side effects/throws)
+     is a CALL-time observable; the #2920 resume prelude defers it to state 0.
+     The `-err`/`-throws` dstr families would flip leaky-pass→fail if admitted.
+2. **Dynamic consumers** (`iterator-native.ts`): new `ITER_KIND_GENSTATE`
+   (=7) arm across the whole generic runtime — GetIterator identity arm in
+   `__iterator`, per-producer resume drive + per-elem boxing (UNDEF_F64
+   sentinel-aware) in `__iterator_next` (an f64 scratch local is appended at
+   fill time), `__iterator_rest` stepKinds, `__array_from_iter_n` drainability
+   admission (without which externref destructure silently answered length 0 →
+   all bindings undefined), and an IteratorClose arm in `__iterator_return`
+   that writes `state := doneState` (a closed generator's later `.next()` is
+   `{undefined, true}`; finally-on-close stays out of scope — the #2903
+   iter-hof boundary). Producers = `ctx.nativeGenerators` values with
+   `resumeFuncIdx` emitted, deduped by state type, at finalize fill time.
+3. **Host-mix dispatch** (`generators-native.ts`): the open
+   `.next()/.return()/.throw()` dispatch's #1344 miss arm assumed every
+   generator in the module is native — false once fn-exprs go native while a
+   sibling shape bails (the `gen-meth-dflt-*-fn-name-gen` class regressed
+   pass→fail with `Generator.prototype.next requires that 'this' be a
+   Generator`). When the host `__gen_*` machinery is registered (funcMap
+   presence — never adds imports), the miss arm now classifies the receiver:
+   an internalized HOST external (neither struct/array/i31 — the #3075
+   HOSTGEN trick) routes to `__gen_next/return/throw` and wraps the result
+   into `__NativeGeneratorResult_externref` (dispatch block type forced to
+   eqref); internal non-generators keep the #1344 TypeError. The open result
+   reader includes the externref result struct whenever it exists.
+
+**Also fixed en passant**: `tests/issue-3032-lazy-generator-expressions.test.ts`
+"buffered semantics" expectation updated — the native path suspends at each
+yield (spec-correct), the old host thunk ran the whole body on first resume.
+
+**Validation** (local): 130-file test262 sample (100 leaky + 30 host-free
+controls): 0 regressions, +6 status fixes, host-free 15→25; 40-file zero-param
+sample: 0 regressions, +10 fixes, host-free 7→16. All direct consumers probed
+host-free: `.next()`, for-of (any), destructure, rest, spread, `Array.from`,
+throw-at-step propagation, close-marks-done. tests/issue-1344.test.ts green
+(receiver validation preserved). Full standalone delta validated by CI
+shards + merge_group floor.
+
+**Follow-ups (out of slice)**: pattern/default params for fn-exprs (needs a
+call-time destructure model, see WHY above); `arguments` (needs an args-vec
+slot in the state struct); async fn-exprs ride #3132; the `gen-meth-*dflt*`
+method families still bail (their own admission slice).

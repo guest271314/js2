@@ -68,6 +68,12 @@ import { ensureStrToCharVecHelper, nativeStringLiteralInstrs } from "./native-st
 // (#3119) The OBJ arm's miss/undefined value matches `__extern_get`'s miss
 // representation (the #2106 S1 `$undefined` singleton when active, else null).
 import { undefinedExternInstrs } from "./any-helpers.js";
+// (#3164) The GENSTATE step's f64 value read canonicalizes the UNDEF_F64
+// sentinel (a done/valueless yield) to the null externref — the standalone
+// canonical `undefined` — before boxing (same recipe as
+// `sentinelAwareF64BoxInstrs`, generators-native.ts; inlined here to avoid a
+// module-init-order-sensitive import back into that cycle-heavy module).
+import { UNDEF_F64_BITS } from "./value-tags.js";
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
 const ITER_KIND_VEC = 3;
@@ -148,6 +154,29 @@ const HEAP_TYPE_I31 = -20; // 0x6C
  */
 const ITER_KIND_ASYNCGEN = 6;
 
+/**
+ * (#3164) IterRec kind tag for a DRIVEN native SYNC-generator state struct
+ * (`$GenState_*`, generators-native.ts). Statically-typed consumers drive the
+ * per-generator resume function directly at the call site
+ * (`tryCompileNativeGeneratorForOf`, the #2169 destructure drain), but a
+ * generator held DYNAMICALLY — the (#3164) generator function-expression
+ * closure returns its state struct as externref, and any `g: any` — reaches
+ * the generic `__iterator` ladder, which previously either hard-cast trapped
+ * (for-of) or silently defaulted every binding (externref destructure). This
+ * arm dispatches a per-producer type-switch over `ctx.nativeGenerators` (dedup
+ * by state struct type, resume emitted): GetIterator is the identity
+ * (a generator object's `@@iterator` returns `this`); `__iterator_next` calls
+ * the matching `__gen_resume_<name>` and reads `{value, done}` off the
+ * per-generator result struct, boxing the value per elem carrier (f64 via the
+ * UNDEF-sentinel-aware box, i32 via convert+box, GC refs via
+ * `extern.convert_any`, externref as-is). IteratorClose marks the frame done
+ * (`state := doneState`) so a closed generator's later `.next()` answers
+ * `{undefined, true}`; finally-block `.return()` semantics on early exit are
+ * out of scope (same boundary as the #2903 iter-hof `close` no-op). The frame
+ * rides in `userIter` (field 3).
+ */
+const ITER_KIND_GENSTATE = 7;
+
 /** `$Promise` field layout (async-scheduler.ts): state(0) i32 — 1=FULFILLED —
  *  and value(1) externref. */
 const PROMISE_FIELD_STATE = 0;
@@ -174,6 +203,37 @@ interface AsyncGenCarrierDeps {
   /** `__NativeGeneratorResult_externref` struct typeIdx. */
   resultTypeIdx: number;
 }
+
+/**
+ * (#3164) Resolved fill-time deps of the GENSTATE arm — driven native SYNC
+ * generators (`ctx.nativeGenerators`), deduped by state struct type. Only
+ * generators whose resume function actually EMITTED participate (a
+ * registered-but-never-instantiated generator's state struct cannot exist at
+ * runtime). `resumeIdx` values are re-read from `info.resumeFuncIdx`, which
+ * `shiftLateImportIndices` walks (#2941 lockstep), so they are current at
+ * finalize. The per-producer result struct is PER-ELEM-KIND
+ * (`__NativeGeneratorResult_<kind>`), so each producer carries its own
+ * `resultTypeIdx` + `elemValType` for the value boxing.
+ */
+interface SyncGenCarrierDeps {
+  producers: {
+    stateTypeIdx: number;
+    resumeIdx: number;
+    resultTypeIdx: number;
+    elemValType: ValType;
+    /** Terminal state id — IteratorClose writes it into the frame's `state`. */
+    doneState: number;
+  }[];
+  /** `__box_number` funcIdx (f64/i32 elem carriers box through it). */
+  boxNumIdx?: number;
+  /** Index of the f64 scratch local appended to `__iterator_next` at fill
+   *  time (sentinel-aware f64 boxing needs one). */
+  f64TmpIdx: number;
+}
+
+/** (#3164) `$GenState_*` field layout (generators-native.ts frame ABI):
+ *  state(0) mut i32 — `doneState` marks the generator completed. */
+const GENSTATE_STATE_FIELD = 0;
 
 /**
  * (#3075) Resolved fill-time deps of the HOSTGEN arm — the legacy eager-buffer
@@ -1123,6 +1183,33 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
     }
   }
 
+  // (#3164) GENSTATE-arm deps — driven native SYNC generator frames. Present
+  // exactly when some native generator's resume function emitted
+  // (standalone/wasi drive lane; a factory compile ensures the resume — see
+  // `compileNativeGeneratorFunction`). Modules without native generators are
+  // byte-identical. `f64TmpIdx` names the scratch local appended to
+  // `__iterator_next` below (params(1) + reserve-time locals(6) = index 7).
+  let sgDeps: SyncGenCarrierDeps | undefined;
+  if ((ctx.standalone || ctx.wasi) && ctx.nativeGenerators.size > 0) {
+    const sgProducers: SyncGenCarrierDeps["producers"] = [];
+    const seenStates = new Set<number>();
+    for (const info of ctx.nativeGenerators.values()) {
+      if (info.resumeFuncIdx === undefined || seenStates.has(info.stateTypeIdx)) continue;
+      seenStates.add(info.stateTypeIdx);
+      sgProducers.push({
+        stateTypeIdx: info.stateTypeIdx,
+        resumeIdx: info.resumeFuncIdx,
+        resultTypeIdx: info.resultTypeIdx,
+        elemValType: info.elemValType,
+        doneState: info.doneState,
+      });
+    }
+    sgProducers.sort((a, b) => a.stateTypeIdx - b.stateTypeIdx);
+    if (sgProducers.length > 0) {
+      sgDeps = { producers: sgProducers, boxNumIdx: ctx.funcMap.get("__box_number"), f64TmpIdx: 7 };
+    }
+  }
+
   const types = iterRuntimeTypes(ctx);
 
   // (#3146) STRING subjects — `Iterator.from("ab")`, a string element reaching
@@ -1157,7 +1244,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   }
 
   const familyArms = [...stringArm, ...buildVecFamilyArms(ctx, types)];
-  if (!deps && !objDeps && !hostDeps && !agDeps && familyArms.length === 0) return; // nothing to fill — byte-identical
+  if (!deps && !objDeps && !hostDeps && !agDeps && !sgDeps && familyArms.length === 0) return; // nothing to fill — byte-identical
 
   const iteratorIdx = ctx.funcMap.get("__iterator");
   const iteratorNextIdx = ctx.funcMap.get("__iterator_next");
@@ -1166,9 +1253,17 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   const iteratorFn = definedFuncAt(ctx, iteratorIdx);
   const iteratorNextFn = definedFuncAt(ctx, iteratorNextIdx);
   if (iteratorFn)
-    iteratorFn.body = buildIteratorBody(types, deps, familyArms, objDeps, hostDeps, agDeps, callIteratorIdx);
-  if ((deps || objDeps || hostDeps || agDeps) && iteratorNextFn)
-    iteratorNextFn.body = buildIteratorNextBody(types, deps, objDeps, hostDeps, agDeps);
+    iteratorFn.body = buildIteratorBody(types, deps, familyArms, objDeps, hostDeps, agDeps, callIteratorIdx, sgDeps);
+  if ((deps || objDeps || hostDeps || agDeps || sgDeps) && iteratorNextFn) {
+    // (#3164) The GENSTATE step's sentinel-aware f64 boxing needs an f64
+    // scratch local; append it at fill time (locals are read at emit, after
+    // this fill — same discipline as the #3100 S5 `__iterator_rest` locals
+    // swap). Index = params(1) + reserve-time locals(6) = 7 (`sgDeps.f64TmpIdx`).
+    if (sgDeps && iteratorNextFn.locals.length === 6) {
+      iteratorNextFn.locals.push({ name: "__gen_f64tmp", type: { kind: "f64" } });
+    }
+    iteratorNextFn.body = buildIteratorNextBody(types, deps, objDeps, hostDeps, agDeps, sgDeps);
+  }
 
   // (#3100 S5) `__iterator_rest` was VEC-only — a USER record (custom iterable)
   // drained EMPTY under `[...iterable]` / `Array.from(iterable)`. Rebuild it
@@ -1179,12 +1274,13 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // (#3119) OBJ records drain through the SAME step-to-exhaustion arm (the
   // kind dispatch lives inside `__iterator_next`), so the guard admits every
   // step-driven kind the GetIterator ladder can produce in this module.
-  if (deps || objDeps || hostDeps || agDeps) {
+  if (deps || objDeps || hostDeps || agDeps || sgDeps) {
     const stepKinds: number[] = [];
     if (deps) stepKinds.push(ITER_KIND_USER);
     if (objDeps) stepKinds.push(ITER_KIND_OBJ);
     if (hostDeps) stepKinds.push(ITER_KIND_HOSTGEN); // (#3075) drain via __iterator_next
     if (agDeps) stepKinds.push(ITER_KIND_ASYNCGEN); // (#3132) drain via __iterator_next
+    if (sgDeps) stepKinds.push(ITER_KIND_GENSTATE); // (#3164) drain via __iterator_next
     const iteratorRestIdx = ctx.funcMap.get("__iterator_rest");
     const iteratorRestFn = iteratorRestIdx !== undefined ? definedFuncAt(ctx, iteratorRestIdx) : undefined;
     if (iteratorRestFn) {
@@ -1210,7 +1306,12 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // (#3119) The OBJ close arm (`__extern_get(iterObj, "return")` +
   // `__apply_closure`) fills independently — a plain-object iterator's
   // `return` is a PROPERTY, reachable without any closed-struct dispatcher.
-  if ((deps && deps.callReturnIdx !== undefined) || objDeps || hostDeps?.genReturnIdx !== undefined) {
+  if (
+    (deps && deps.callReturnIdx !== undefined) ||
+    objDeps ||
+    hostDeps?.genReturnIdx !== undefined ||
+    sgDeps !== undefined
+  ) {
     const iteratorReturnIdx = ctx.funcMap.get("__iterator_return");
     const iteratorReturnFn = iteratorReturnIdx !== undefined ? definedFuncAt(ctx, iteratorReturnIdx) : undefined;
     if (iteratorReturnFn) {
@@ -1220,7 +1321,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         // (#3119) `ret` scratch for the OBJ close arm — harmless when unused.
         ...(objDeps ? [{ name: "ret", type: { kind: "externref" as const } }] : []),
       ];
-      iteratorReturnFn.body = buildIteratorReturnBody(types, deps?.callReturnIdx, objDeps, hostDeps);
+      iteratorReturnFn.body = buildIteratorReturnBody(types, deps?.callReturnIdx, objDeps, hostDeps, sgDeps);
     }
   }
 
@@ -1232,14 +1333,21 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
   // (#3119) With `objDeps`, a source carrying a truthy `@@iterator` PROPERTY
   // (post-hoc `o[Symbol.iterator] = fn`) is likewise admitted to the drain;
   // `@@iterator`-less array-like `$Object`s keep the indexed pass-through.
-  if (deps || objDeps) {
+  if (deps || objDeps || sgDeps) {
     const afinIdx = ctx.funcMap.get("__array_from_iter_n");
     const afinFn = afinIdx !== undefined ? definedFuncAt(ctx, afinIdx) : undefined;
     if (afinFn && afinFn.body.length > 0) {
       // Closed-struct drain candidates need the USER arm; without `deps` they
       // would hit the ladder's hard-cast tail, so admit them only with `deps`.
       const userTypeIdxs = deps ? collectUserIterableStructTypeIdxs(ctx) : [];
-      if (userTypeIdxs.length > 0 || objDeps) {
+      // (#3164) Native sync-generator frames are drainable through the
+      // GENSTATE arm just filled above — admit their state struct types so an
+      // externref-held generator (the fn-expr closure return / `g: any`)
+      // destructures by actually DRIVING the generator instead of passing
+      // through to the indexed reader (which answers length 0 → every binding
+      // silently `undefined`).
+      const genStateTypeIdxs = sgDeps ? sgDeps.producers.map((p) => p.stateTypeIdx) : [];
+      if (userTypeIdxs.length > 0 || objDeps || genStateTypeIdxs.length > 0) {
         afinFn.body = buildArrayFromIterNBody(
           { vecTypeIdx: types.vecTypeIdx, arrTypeIdx: types.arrTypeIdx },
           {
@@ -1247,7 +1355,7 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
             iteratorNextIdx,
             iteratorReturnIdx: ctx.funcMap.get("__iterator_return"),
           },
-          userTypeIdxs,
+          [...userTypeIdxs, ...genStateTypeIdxs],
           objDeps,
         );
       }
@@ -1305,8 +1413,54 @@ function buildIteratorReturnBody(
   callReturnIdx: number | undefined,
   objDeps: ObjCarrierDeps | undefined,
   hostDeps?: HostGenDeps,
+  sgDeps?: SyncGenCarrierDeps,
 ): Instr[] {
   const { iterRecTypeIdx } = types;
+  // (#3164) kind == GENSTATE → IteratorClose marks the sync-generator frame
+  // COMPLETED (`state := doneState`): a subsequent `.next()` then answers
+  // `{value: undefined, done: true}` (§27.5.3.3 — the generator moves to
+  // "completed"). Running a finally block on early close is out of scope
+  // (same boundary as the #2903 iter-hof `close`). Per-producer type-switch;
+  // an unmatched frame falls through (defensive no-op).
+  const genStateClose: Instr[] = sgDeps
+    ? [
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: iterRecTypeIdx },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: ITER_KIND_GENSTATE },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            ...sgDeps.producers.flatMap((p): Instr[] => [
+              { op: "local.get", index: 1 } as Instr,
+              { op: "ref.cast", typeIdx: iterRecTypeIdx } as Instr,
+              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: 1 } as Instr,
+                  { op: "ref.cast", typeIdx: iterRecTypeIdx } as Instr,
+                  { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
+                  { op: "any.convert_extern" } as Instr,
+                  { op: "ref.cast", typeIdx: p.stateTypeIdx } as Instr,
+                  { op: "i32.const", value: p.doneState } as Instr,
+                  { op: "struct.set", typeIdx: p.stateTypeIdx, fieldIdx: GENSTATE_STATE_FIELD } as Instr,
+                  { op: "return" } as Instr,
+                ],
+                else: [],
+              } as Instr,
+            ]),
+            { op: "return" } as Instr,
+          ],
+          else: [],
+        } as Instr,
+      ]
+    : [];
   // (#3075) kind == HOSTGEN → IteratorClose via the host `__gen_return`
   // import (gen.return(undefined), result dropped — marks the buffered
   // generator exhausted). Absent import ⇒ arm not filled ⇒ NormalCompletion
@@ -1427,6 +1581,7 @@ function buildIteratorReturnBody(
     { op: "ref.test", typeIdx: iterRecTypeIdx } as Instr,
     { op: "i32.eqz" },
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+    ...genStateClose,
     ...hostClose,
     ...objClose,
     ...userClose,
@@ -1479,8 +1634,36 @@ function buildIteratorBody(
    * property-read OBJ arms; every other subject keeps the loud trap.
    */
   tailCallIteratorIdx?: number,
+  sgDeps?: SyncGenCarrierDeps,
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx } = types;
+
+  // (#3164) GENSTATE arm — a DRIVEN native SYNC-generator `$GenState_*` frame.
+  // One `ref.test` per registered producer state type; a match wraps the frame
+  // in $IterRec{GENSTATE, vec:null, idx:0, userIter: frame}. GetIterator on a
+  // generator object is the identity (`@@iterator` returns `this`). Fresh
+  // Instr objects per producer (#2169b). Placed with the ASYNCGEN arm — after
+  // the vec/family arms, before the OBJ/USER arms.
+  const genStateArm: Instr[] = sgDeps
+    ? sgDeps.producers.flatMap((p): Instr[] => [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: ITER_KIND_GENSTATE } as Instr,
+            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: 0 } as Instr,
+            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
+            { op: "extern.convert_any" } as Instr,
+            { op: "return" } as Instr,
+          ],
+          else: [],
+        } as Instr,
+      ])
+    : [];
 
   // (#3132 S1) ASYNCGEN arm — a DRIVEN async-generator `$AsyncFrame` carrier.
   // One `ref.test` per registered producer frame type; a match wraps the frame
@@ -1732,6 +1915,7 @@ function buildIteratorBody(
       else: [],
     },
     ...familyArms,
+    ...genStateArm,
     ...asyncGenArm,
     ...hostArm,
     ...objArm,
@@ -1932,6 +2116,7 @@ function buildIteratorNextBody(
   objDeps?: ObjCarrierDeps,
   hostDeps?: HostGenDeps,
   agDeps?: AsyncGenCarrierDeps,
+  sgDeps?: SyncGenCarrierDeps,
 ): Instr[] {
   const { iterRecTypeIdx, vecTypeIdx, arrTypeIdx } = types;
 
@@ -2223,11 +2408,119 @@ function buildIteratorNextBody(
       ]
     : [];
 
+  // (#3164) The GENSTATE step — drive the sync-generator frame through its
+  // per-producer resume function, then read `{value, done}` off the
+  // per-generator result struct. Locals: 1=rec, 4=done, 5=value, 6=res (holds
+  // frame → result across the phases), sgDeps.f64TmpIdx = f64 scratch for the
+  // sentinel-aware boxing. A frame matching no producer traps loudly
+  // (`unreachable`) — a GENSTATE record only wraps matched frames, so this is
+  // unreachable by construction (same discipline as the ASYNCGEN step). A
+  // resume-time JS throw propagates as the native `$exc` tag, catchable by the
+  // caller (the dstr `-err` harness shapes observe it via assert.throws).
+  const genStateStep: Instr[] = sgDeps
+    ? (() => {
+        const valueRead = (p: SyncGenCarrierDeps["producers"][number]): Instr[] => {
+          const read: Instr[] = [
+            { op: "local.get", index: 6 } as Instr,
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE } as Instr,
+          ];
+          if (p.elemValType.kind === "externref") return read;
+          if (p.elemValType.kind === "f64" && sgDeps.boxNumIdx !== undefined) {
+            // Sentinel-aware box: the UNDEF_F64 bit pattern (done/valueless
+            // yield) canonicalizes to the null externref (standalone canonical
+            // `undefined`), everything else boxes via `__box_number` — the
+            // `sentinelAwareF64BoxInstrs` recipe (generators-native.ts).
+            return [
+              ...read,
+              { op: "local.tee", index: sgDeps.f64TmpIdx } as Instr,
+              { op: "i64.reinterpret_f64" } as Instr,
+              { op: "i64.const", value: UNDEF_F64_BITS } as Instr,
+              { op: "i64.eq" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "externref" } },
+                then: [{ op: "ref.null.extern" } as Instr],
+                else: [
+                  { op: "local.get", index: sgDeps.f64TmpIdx } as Instr,
+                  { op: "call", funcIdx: sgDeps.boxNumIdx } as Instr,
+                ],
+              } as Instr,
+            ];
+          }
+          if (p.elemValType.kind === "i32" && sgDeps.boxNumIdx !== undefined) {
+            return [...read, { op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: sgDeps.boxNumIdx } as Instr];
+          }
+          if (p.elemValType.kind === "ref" || p.elemValType.kind === "ref_null") {
+            return [...read, { op: "extern.convert_any" } as Instr];
+          }
+          // Unboxable carrier (defensive): undefined.
+          return [...read, { op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+        };
+        return [
+          // res := rec.userIter (the frame externref)
+          { op: "local.get", index: 1 } as Instr,
+          { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
+          { op: "local.set", index: 6 } as Instr,
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              ...sgDeps.producers.flatMap((p): Instr[] => [
+                { op: "local.get", index: 6 } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // res := extern(resume(cast(frame)))  — the {value, done} result
+                    { op: "local.get", index: 6 } as Instr,
+                    { op: "any.convert_extern" } as Instr,
+                    { op: "ref.cast", typeIdx: p.stateTypeIdx } as Instr,
+                    { op: "call", funcIdx: p.resumeIdx } as Instr,
+                    { op: "extern.convert_any" } as Instr,
+                    { op: "local.set", index: 6 } as Instr,
+                    // done = res.done
+                    { op: "local.get", index: 6 } as Instr,
+                    { op: "any.convert_extern" } as Instr,
+                    { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
+                    { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE } as Instr,
+                    { op: "local.set", index: 4 } as Instr,
+                    // value = box_elem(res.value) — a done result's value field
+                    // already holds the canonical absent marker (UNDEF_F64
+                    // sentinel / null ref), which the boxing canonicalizes to
+                    // the null externref.
+                    ...valueRead(p),
+                    { op: "local.set", index: 5 } as Instr,
+                    { op: "br", depth: 1 } as Instr,
+                  ],
+                  else: [],
+                } as Instr,
+              ]),
+              // No producer matched — unreachable by construction.
+              { op: "unreachable" } as Instr,
+            ],
+          } as Instr,
+        ];
+      })()
+    : [];
+
   // (#3075/#3132) Wrap a step chain in the kind==HOSTGEN / kind==ASYNCGEN
   // dispatches when the arms are filled; pass-through otherwise
   // (byte-identical).
   const withHostDispatch = (inner: Instr[]): Instr[] => {
     let wrapped = inner;
+    if (sgDeps) {
+      wrapped = [
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: ITER_KIND_GENSTATE },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: genStateStep, else: wrapped } as Instr,
+      ];
+    }
     if (agDeps) {
       wrapped = [
         { op: "local.get", index: 1 },
