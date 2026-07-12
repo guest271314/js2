@@ -4736,13 +4736,21 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           // never existed at runtime (the exact #2671 `Test262Error.thrower`
           // elision mechanism). Keep it in `__module_init` so the ordinary
           // property-write arm runs: the write routes through `__extern_set`
-          // onto the sandbox-realm Promise object, which the combinator
-          // capability `C` (`_resolveCtor`, runtime.ts) and `__get_builtin`
-          // now consult (P-7b realm unification). Host/GC lane + `Promise`
-          // receiver only — a blanket builtin-receiver keep flips patches on
-          // every builtin at once and is separate, measured work. Shadowed
-          // user bindings named `Promise` are module globals / functions and
-          // are caught by the arms above/below, never reaching this keep.
+          // onto the `declared_global`-resolved Promise. In the single-realm
+          // CI lane (no vm sandbox) that IS `globalThis.Promise` — the same
+          // object the combinator capability `C` (`_resolveCtor`, runtime.ts)
+          // passes to V8, so `Get(C,"resolve")` observes the patch; the CI
+          // worker's #1220 static snapshot/restore un-patches it after each
+          // test. In the LOCAL sandboxed runner the write lands on the
+          // sandbox Promise (inert for the host-realm capability lane; the
+          // `["Promise","resolve"]` SENTINEL_KEYS entry discards the dirty
+          // sandbox) — the local lane deliberately does NOT chase realm
+          // unification (P-7b design decision, see the issue file). Host/GC
+          // lane + `Promise` receiver only — a blanket builtin-receiver keep
+          // flips patches on every builtin at once and is separate, measured
+          // work. Shadowed user bindings named `Promise` are module globals /
+          // functions and are caught by the arms above/below, never reaching
+          // this keep.
           if (
             ts.isIdentifier(receiver) &&
             receiver.text === "Promise" &&

@@ -11848,19 +11848,16 @@ assert._isSameValue = isSameValue;
           return ret === wrappedReceiver ? receiver : _unwrapForHost(ret);
         };
       // Get actual JS built-in object by name (#965) — fixes WI3 null receiver for built-in classes
-      // (#2623 P-7b) Sandbox-first for `Promise` ONLY: the `declared_global`
-      // intent (the bare-identifier `Promise` value read) already resolves to
-      // `globalSandbox.Promise` when a sandbox is supplied, while this handler
-      // returned the HOST-realm `globalThis.Promise` — so `Promise.try(fn)`
-      // (generic method dispatch on the `__get_builtin` receiver) minted an
-      // instance whose `.constructor` could never `===` the wasm-side `Promise`
-      // value (test262 `Promise/try/promise.js`). Unifying the two resolvers on
-      // the sandbox realm restores identity; both realms' promises interoperate
-      // (thenable assimilation is realm-agnostic). Deliberately NOT a blanket
-      // sandbox-first change: cross-realm `instanceof`/error-identity semantics
-      // for the other builtins are separate, measured work.
-      if (name === "__get_builtin")
-        return (n: string) => (n === "Promise" ? (globalSandbox?.Promise ?? Promise) : (globalThis as any)[n]);
+      // (#2623 P-7b design decision) This handler resolves the HOST realm on
+      // purpose. A sandbox-first arm for `Promise` was prototyped and REVERTED:
+      // partial (per-builtin) realm unification is inherently leaky — Promise
+      // sandbox-first while Object/Boolean stayed host-realm regressed
+      // `prototype/proto.js` + `catch/this-value-obj-coercible.js` (cross-
+      // builtin proto/ToObject realm mixing). The vm sandbox is a LOCAL-runner
+      // isolation mechanism, not a product surface; the CI lane is single-realm
+      // (no sandbox) and relies on the worker's #1220 static snapshot/restore.
+      // See "P-7b DESIGN DECISION" in plan/issues/2623-*.md.
+      if (name === "__get_builtin") return (n: string) => (globalThis as any)[n];
       // Object.hasOwn(obj, key) — ES2022 static method (#965)
       // (#3060) Object.hasOwn(O, P) ≡ HasOwnProperty(ToObject(O), ToPropertyKey(P)),
       // the same predicate as Object.prototype.hasOwnProperty.call. The previous
@@ -13208,13 +13205,18 @@ assert._isSameValue = isSameValue;
         // throw a TypeError exception`) — which is what test262
         // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
         // undefined/null/primitive/non-constructor values.
-        // (#2623 P-7b) Sandbox-first: `C` must be the SAME object the user's
-        // code observes as `Promise` (the `declared_global`/`__get_builtin`
-        // realm), so a wasm-side `Promise.resolve = fn` patch — which lands on
-        // the sandbox Promise via `__extern_set` — is seen by V8's
-        // `Get(C, "resolve")` in PerformPromiseAll/Race (§25.4.4.1.1 step 5,
-        // the `all/race invoke-resolve.js` observable-resolve contract).
-        if (directCall) return globalSandbox?.Promise ?? Promise;
+        // (#2623 P-7b) HOST realm on purpose (see the __get_builtin design
+        // note). In the single-realm CI lane this IS the object the user's
+        // `Promise.resolve = fn` patch lands on (the declarations.ts
+        // __module_init keep), so V8's `Get(C, "resolve")` in
+        // PerformPromiseAll/Race (§27.2.4.1.1 step 5) observes the patch —
+        // the `all/race/allSettled invoke-resolve.js` observable-resolve
+        // contract. A sandbox-first arm here was prototyped and REVERTED:
+        // capability-C sandbox + host-realm minting broke the §27.2.4.7
+        // `nextPromise.constructor === C` identity fast path (the historical
+        // `any/invoke-then` regression), and unifying minting too leaked
+        // cross-builtin (see the design-decision section in the issue file).
+        if (directCall) return Promise;
         // (#1694 A.i / #1632b-1) When the user passes a COMPILED FUNCTION as the
         // capability constructor — `Promise.all.call(NotPromise, …)` where
         // `NotPromise` is an ordinary `function` lowered to a Wasm closure
@@ -13347,15 +13349,13 @@ assert._isSameValue = isSameValue;
           const C = _resolveCtor(thisArg, directCall);
           return (Promise as any).any.call(C, _toIterable(arr));
         };
-      // (#2623 P-7b) Realm unification for the Promise-MINTING shims: instances
-      // must come from the SAME constructor the capability lane uses as `C`
-      // (`_resolveCtor` → sandbox-first). A split realm re-introduces the
-      // historical `any/invoke-then` regression: `Get(C,"resolve")(hostPromise)`
-      // fails the §27.2.4.7 `nextPromise.constructor === C` identity fast path,
-      // V8 wraps the value in a NEW C-realm promise, and the user's patched
-      // `promise.then` is never Invoke()d (plus one extra assimilation tick).
-      // No sandbox supplied ⇒ `Promise` ⇒ byte-for-byte the old behavior.
-      if (name === "Promise_resolve") return (val: any) => (globalSandbox?.Promise ?? Promise).resolve(val);
+      // (#2623 P-7b) HOST-realm minting on purpose: minting and the capability
+      // lane (`_resolveCtor`) MUST share one realm — a split breaks the
+      // §27.2.4.7 `nextPromise.constructor === C` identity fast path (the
+      // historical `any/invoke-then` regression). Both stay HOST; the
+      // prototyped sandbox-first unification leaked cross-builtin and was
+      // reverted (see the __get_builtin design note).
+      if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject")
         return (val: any) => {
           // (#2978) Pre-mark the rejection as handled. Compiled code holds the
@@ -13366,7 +13366,7 @@ assert._isSameValue = isSameValue;
           // capped loop emits a 100k-event storm that vitest/CI runners count
           // as errors. The no-op catch derives a separate promise; consumers of
           // the returned promise observe the rejection unchanged.
-          const p = (globalSandbox?.Promise ?? Promise).reject(val);
+          const p = Promise.reject(val);
           p.catch(() => {});
           return p;
         };
@@ -13379,9 +13379,7 @@ assert._isSameValue = isSameValue;
         return () => {
           let r: (v: any) => void = () => {};
           let j: (e: any) => void = () => {};
-          // (#2623 P-7b) sandbox-first — see the Promise_resolve realm note.
-          const PromiseCtor = globalSandbox?.Promise ?? Promise;
-          const p: any = new PromiseCtor((res: any, rej: any) => {
+          const p: any = new Promise((res: any, rej: any) => {
             r = res;
             j = rej;
           });
@@ -13398,10 +13396,7 @@ assert._isSameValue = isSameValue;
           if (p && typeof p.__j === "function") p.__j(reason);
         };
       // (#1382) `executor` is called as `executor(resolve, reject)` — arity 2.
-      // (#2623 P-7b) sandbox-first — see the Promise_resolve realm note.
-      if (name === "Promise_new")
-        return (executor: any) =>
-          new (globalSandbox?.Promise ?? Promise)(_maybeWrapCallable(executor, 2, callbackState));
+      if (name === "Promise_new") return (executor: any) => new Promise(_maybeWrapCallable(executor, 2, callbackState));
       // (#1382) `onFulfilled` / `onRejected` callbacks are arity-1 (the value or reason).
       if (name === "Promise_then") return (p: any, cb: any) => p.then(_maybeWrapCallable(cb, 1, callbackState));
       if (name === "Promise_then2")
@@ -14203,13 +14198,6 @@ assert._isSameValue = isSameValue;
               }
               // Fall through: maybe globalThis has the same name (unlikely).
             }
-            // (#2623 P-7b) Sandbox realm FIRST when supplied (test262 per-test
-            // isolation): the P-7b realm unification mints Promise instances
-            // from the SANDBOX ctor, so `p instanceof Promise` must consult it
-            // — the host-realm check below stays as the fallback, so a
-            // host-realm instance still answers true for the same name.
-            const sbCtor = globalSandbox?.[ctorName];
-            if (typeof sbCtor === "function" && v instanceof sbCtor) return 1;
             const ctor = (globalThis as any)[ctorName];
             if (typeof ctor === "function" && v instanceof ctor) return 1;
           } catch {
