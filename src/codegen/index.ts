@@ -12095,15 +12095,24 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
         // storing the externref into an f64/struct slot would otherwise coerce
         // `externref → f64` via __unbox_number = NaN (or an illegal struct cast).
         //
-        // GC/host stays byte-identical: the unwrap-to-T contract only held
-        // because async fns are compiled synchronously, which is exactly when the
-        // carrier is OFF. An async fn's OWN wasm return signature pre-unwraps via
-        // unwrapPromiseType (function-body.ts / declarations.ts), so this branch
-        // is only hit for *value* slots (bindings / params / fields / non-async
-        // returns), never an async fn's own result type. externref is a leaf
-        // valtype — registers no new type, so no DCE remap / funcIdx churn.
-        if (isStandalonePromiseActive(ctx)) return { kind: "externref" };
-        return resolveWasmType(ctx, inner, _depth + 1, _visited);
+        // (#3134) A `Promise<T>`-typed VALUE slot lowers to externref on EVERY
+        // lane — it holds a real promise object (a Promise builtin chain, or an
+        // activated async fn's result), never the unwrapped `T`. Unwrapping to
+        // `T` (f64) then `__unbox_number`'d the real promise externref at the
+        // declaration → NaN (#3134); it only "worked" for the legacy sync-fakery
+        // population, where an async call returns the unwrapped value — and there
+        // the boxed value round-trips harmlessly (`f() : Promise<number>` stores
+        // the f64 via `__box_number`, and a later numeric use `__unbox_number`s
+        // it back, while `await p` assimilates it through `Promise_resolve`). So
+        // externref serves BOTH reps: a real promise passes through, a
+        // sync-fakery value boxes/unboxes. This ALSO unifies the rep of a
+        // `Promise<T>`-typed vec ELEMENT (`const xs = [p]`) — the frame spill
+        // guess now matches the stored promise (unblocks #2967 2c class-2).
+        // An async fn's OWN wasm return signature pre-unwraps via
+        // `unwrapPromiseType` (declarations/closures/class-bodies) BEFORE this
+        // branch, so it is unaffected. externref is a leaf valtype — no new type,
+        // no DCE remap / funcIdx churn. Broad rep change → full-CI A/B (#3134).
+        return { kind: "externref" };
       }
       return { kind: "externref" }; // bare Promise without type arg
     }

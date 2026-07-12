@@ -95,3 +95,45 @@ as the honest end-state.
 - The three probe shapes above resolve to 42 on the host lane.
 - Full-corpus A/B net ≥ 0 (this touches declaration typing — broad impact,
   full CI validation, never scoped-sweep only).
+
+## Implementation (2026-07-11, fable-senior) — Direction 2 (rep convergence)
+
+Chose direction 2 (the issue's recommended end-state) over the narrow
+direction 1 because `resolveWasmType` is a PURE function of the TS type — it
+cannot see the initializer, so direction 1 would need per-call-site changes at
+every typing site (locals, params-with-defaults, fields, non-async returns,
+AND vec element types), and direction 1 cannot reach a `Promise<T>` VEC ELEMENT
+at all (no per-element initializer to inspect). Direction 2 is the single site
+that fixes all of them — and it is exactly the rep the #2967 2c class-2 blocker
+needs (a `Promise<T>[]` vec element now resolves to `vec<externref>`, matching
+the stored promise, so the async-frame spill guess stops diverging).
+
+**The change** (`src/codegen/index.ts`, the `sym?.name === "Promise"` branch of
+`resolveWasmType`): `Promise<T>` → `externref` on EVERY lane (dropped the
+`isStandalonePromiseActive` gate that made host/GC unwrap to `T`). One
+externref serves BOTH reps:
+
+- a REAL promise (Promise builtin, activated async fn result) passes through
+  as externref — fixing the `__unbox_number` → NaN;
+- a SYNC-FAKERY value (a legacy async call compiled synchronously returns the
+  unwrapped `T` = f64) boxes at the declaration coerce (`__box_number`), then
+  either `__unbox_number`s back for a later numeric use, or assimilates through
+  `Promise_resolve` at `await` — both correct.
+
+Why it's safe where it matters: an async fn's OWN wasm return signature is
+pre-unwrapped via `unwrapPromiseType` (declarations/closures/class-bodies)
+BEFORE this branch runs, so activated result types are unaffected. externref is
+a leaf valtype — no new type registration, no DCE remap / funcIdx churn.
+
+**Local validation:** the 5 acceptance cases (3 probe shapes + sync-fakery
+parity + the class-2 vec-element rep) all resolve to 42. Async battery
+(async-await / equivalence async-function / 1042-host-drive / 2957 /
+2967-engine-convergence / 2906-multiawait) green; the only 2 failures are
+`promise-combinators` `Promise.all/race with resolved values` — pre-existing
+("undefined is not iterable", the exact documented #2967-slice-1 failure mode,
+engine-independent). tsc clean.
+
+**Risk:** broad — every `Promise<T>` value slot's rep flips f64→externref. The
+merge_group full-corpus A/B is the hard gate (never scoped-sweep only).
+
+status: in-review pending the full-CI A/B.
