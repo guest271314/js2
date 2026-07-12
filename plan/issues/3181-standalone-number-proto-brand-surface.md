@@ -1,7 +1,10 @@
 ---
 id: 3181
 title: "standalone: Number.prototype brand-check / property-surface / method .length / toExp+toPrec no-arg (residual #3175 gap)"
-status: in-progress
+status: done
+completed: 2026-07-12
+loc-budget-allow:
+  - src/codegen/array-object-proto.ts
 assignee: ttraenkler/dev-number-resid
 created: 2026-07-12
 updated: 2026-07-12
