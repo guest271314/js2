@@ -1,9 +1,15 @@
 ---
 id: 803
 title: "Extract call dispatch from expressions.ts → calls.ts"
-status: ready
+status: done
+completed: 2026-07-12
 created: 2026-03-26
-updated: 2026-04-28
+updated: 2026-07-12
+# 2026-07-12 (#3182 groom): closed as landed — the extraction happened via the
+# expressions/ split: compileCallExpression + the whole call cluster now live
+# in src/codegen/expressions/calls.ts (18,753 LOC; plus calls-guards/
+# calls-closures/calls-optional). Refactoring the monster itself continues
+# under #742.
 priority: medium
 feasibility: easy
 reasoning_effort: medium
