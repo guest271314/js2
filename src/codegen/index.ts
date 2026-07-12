@@ -1138,7 +1138,12 @@ function buildIrClassShapes(
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Methods — instance methods only, re-derived from the AST.
-    const methods: { name: string; params: IrType[]; returnType: IrType | null }[] = [];
+    const methods: {
+      name: string;
+      params: IrType[];
+      returnType: IrType | null;
+      memberKind?: "method" | "getter" | "setter" | "static";
+    }[] = [];
     let methodsOk = true;
     for (const member of stmt.members) {
       if (!ts.isMethodDeclaration(member) || !member.name) continue;
@@ -1179,6 +1184,75 @@ function buildIrClassShapes(
       methods.push({ name: methodName, params, returnType });
     }
     if (!methodsOk) continue;
+
+    // (#3144) Accessor + static-method descriptor projections — BEST-EFFORT:
+    // an unprojectable accessor/static is simply skipped (a claimed use then
+    // misses the descriptor at from-ast and demotes that one function),
+    // never rejecting the WHOLE class like the instance-method loop above
+    // would (which would regress classes that project today). Getters carry
+    // the property name with `memberKind: "getter"` ([] -> T); setters
+    // `"setter"` ([T] -> null); statics `"static"` (no `this` param at the
+    // Wasm level — invoked via `class.static_call`). Instance-member lookups
+    // filter on `memberKind`, so these never leak into `class.call`
+    // resolution.
+    for (const member of stmt.members) {
+      if (!member.name || !ts.isIdentifier(member.name)) continue;
+      const memberName = member.name.text;
+      if (ts.isGetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (!sig) continue;
+        const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+        if (isVoidType(retTs)) continue; // void getter — degenerate, skip
+        const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [], returnType: ir, memberKind: "getter" });
+      } else if (ts.isSetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        if (member.parameters.length !== 1) continue;
+        const p = member.parameters[0]!;
+        if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) continue;
+        const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [ir], returnType: null, memberKind: "setter" });
+      } else if (
+        ts.isMethodDeclaration(member) &&
+        hasStaticModifier(member) &&
+        !hasAbstractModifier(member) &&
+        !member.asteriskToken
+      ) {
+        const params: IrType[] = [];
+        let ok = true;
+        for (const p of member.parameters) {
+          if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) {
+            ok = false;
+            break;
+          }
+          const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+          if (!ir) {
+            ok = false;
+            break;
+          }
+          params.push(ir);
+        }
+        if (!ok) continue;
+        let returnType: IrType | null = null;
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (sig) {
+          const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+          if (!isVoidType(retTs)) {
+            const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+            if (!ir) continue;
+            returnType = ir;
+          }
+        }
+        // A same-name instance method + static method share ONE legacy
+        // funcMap key (`${className}_${name}` — class-bodies.ts skips the
+        // second registration), so resolving either would call the wrong
+        // body. Project the static only when no instance member takes the
+        // name (from-ast then demotes the ambiguous call cleanly).
+        if (methods.some((m) => m.name === memberName && (m.memberKind ?? "method") === "method")) continue;
+        methods.push({ name: memberName, params, returnType, memberKind: "static" });
+      }
+    }
 
     out.set(className, {
       className,

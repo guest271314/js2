@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-11",
   "threshold": 1500,
-  "totalCeiling": 396915,
+  "totalCeiling": 397463,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -26,7 +26,7 @@
     "src/codegen/expressions/new-super.ts": 5750,
     "src/codegen/expressions/unary-updates.ts": 1896,
     "src/codegen/generators-native.ts": 4696,
-    "src/codegen/index.ts": 15398,
+    "src/codegen/index.ts": 15472,
     "src/codegen/iterator-native.ts": 2354,
     "src/codegen/json-codec-native.ts": 2859,
     "src/codegen/literals.ts": 4272,
@@ -51,12 +51,12 @@
     "src/compiler.ts": 1550,
     "src/compiler/early-errors/node-checks.ts": 1865,
     "src/emit/binary.ts": 1989,
-    "src/ir/builder.ts": 1587,
-    "src/ir/from-ast.ts": 6806,
-    "src/ir/integration.ts": 2659,
-    "src/ir/lower.ts": 3532,
-    "src/ir/nodes.ts": 2926,
-    "src/ir/select.ts": 3260,
+    "src/ir/builder.ts": 1633,
+    "src/ir/from-ast.ts": 6984,
+    "src/ir/integration.ts": 2678,
+    "src/ir/lower.ts": 3617,
+    "src/ir/nodes.ts": 2987,
+    "src/ir/select.ts": 3296,
     "src/runtime.ts": 16038
   }
 }

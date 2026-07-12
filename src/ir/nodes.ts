@@ -154,6 +154,20 @@ export interface IrClassMethodDescriptor {
   readonly name: string;
   readonly params: readonly IrType[];
   readonly returnType: IrType | null;
+  /**
+   * (#3144) Member kind discriminator. Absent/`"method"` = instance method
+   * (the pre-#3144 population — every existing consumer that reads
+   * `shape.methods` expects instance methods, so lookups MUST filter on this
+   * flag). `"getter"`/`"setter"` are accessor projections: `name` is the
+   * PROPERTY name (`name`, `age`), params/returnType follow the accessor
+   * signature (getter: `[] -> T`; setter: `[T] -> null`); the lowered call
+   * target is `<className>_get_<name>` / `<className>_set_<name>` (the legacy
+   * accessor key — inherited accessors are key-propagated to subclasses by
+   * `collectClassDeclaration`, so resolution by the RECEIVER's className is
+   * sound). `"static"` methods have no `this` param at the Wasm level and are
+   * invoked via `class.static_call` (never through an instance receiver).
+   */
+  readonly memberKind?: "method" | "getter" | "setter" | "static";
 }
 
 /**
@@ -1336,6 +1350,43 @@ export interface IrInstrClassSuperCall extends IrInstrBase {
   readonly args: readonly IrValueId[];
 }
 
+/**
+ * (#3144) `value instanceof C` where `C` is a locally-declared user class.
+ * `value` must be `IrType.class` (a non-null `(ref $Struct)` — the IR's class
+ * carrier is never null, so no null arm is needed). Lowering mirrors the
+ * legacy `compileInstanceOf` non-nullable-ref path byte-for-byte in shape:
+ *   <emit value>
+ *   struct.get $<RecvStruct> <__tag fieldIdx>       ;; hidden tag at slot 0
+ *   ;; compare against the TARGET class's tag + all descendant tags
+ *   i32.const t0, i32.eq [ (i32.or i32.const ti, i32.eq)* via scratch local ]
+ * The compatible-tag set comes from the resolver (`IrClassLowering.
+ * instanceOfTags` — own tag + transitive children, the same walk as legacy's
+ * `collectInstanceOfTags`). An empty tag set lowers to `drop; i32.const 0`
+ * (legacy parity for a tag-less class). Result type: i32 (JS boolean).
+ */
+export interface IrInstrClassInstanceOf extends IrInstrBase {
+  readonly kind: "class.instanceof";
+  readonly value: IrValueId;
+  readonly targetShape: IrClassShape;
+}
+
+/**
+ * (#3144) Static method call `C.m(args)` on a locally-declared user class.
+ * No receiver: legacy compiles a static method WITHOUT a `self` param
+ * (`class-bodies.ts` — `methodParams = isStatic ? [] : [self]`), so the
+ * lowering emits args then `call $<className>_<methodName>` (resolved via
+ * `IrClassLowering.methodFuncName`, i.e. the collision-relocated funcMap
+ * key). `shape` is the class named at the call site; an inherited static
+ * resolves through the same key thanks to legacy's inherited-member key
+ * propagation. Result type: the descriptor's `returnType` (null → void).
+ */
+export interface IrInstrClassStaticCall extends IrInstrBase {
+  readonly kind: "class.static_call";
+  readonly shape: IrClassShape;
+  readonly methodName: string;
+  readonly args: readonly IrValueId[];
+}
+
 // ---------------------------------------------------------------------------
 // Slot ops + for-of (#1169e — IR Phase 4 Slice 6)
 // ---------------------------------------------------------------------------
@@ -2272,6 +2323,8 @@ export type IrInstr =
   | IrInstrClassGet
   | IrInstrClassSet
   | IrInstrClassCall
+  | IrInstrClassInstanceOf
+  | IrInstrClassStaticCall
   | IrInstrSlotRead
   | IrInstrSlotWrite
   | IrInstrVecLen
@@ -2571,6 +2624,8 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "class.call":
     case "class.super_init":
     case "class.super_call":
+    case "class.instanceof":
+    case "class.static_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2719,6 +2774,8 @@ export function mapNestedBuffers(
     case "class.call":
     case "class.super_init":
     case "class.super_call":
+    case "class.instanceof":
+    case "class.static_call":
     case "slot.read":
     case "slot.write":
     case "vec.len":
@@ -2834,6 +2891,10 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [...instr.args, instr.self];
     case "class.super_call":
       return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     case "slot.write":
       return [instr.value];
     case "vec.len":

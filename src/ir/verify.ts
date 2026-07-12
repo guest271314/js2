@@ -806,6 +806,10 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];
