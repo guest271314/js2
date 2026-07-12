@@ -69,8 +69,8 @@
       "ctxChecker": 5
     },
     "src/codegen/expressions/calls.ts": {
-      "getTypeAtLocation": 60,
-      "ctxChecker": 134
+      "getTypeAtLocation": 61,
+      "ctxChecker": 135
     },
     "src/codegen/expressions/eval-inline.ts": {
       "getTypeAtLocation": 2,
