@@ -99,3 +99,26 @@ exact drop-in shape the Math pilot proved.
 - No conversion of comparator sorts / ToString default sort (different units).
 - No `array-methods.ts` inline-emitter conversions yet (slices 2+ — need elem-kind
   coverage per the analysis above).
+
+## Follow-up: slice 2 scoping (the copy-family)
+
+`array-methods.ts` is **985 inline `fctx.body.push` sites** — every `compile*`
+emitter splices into the CALLER's frame, so unlike timsort (a module-level
+fixed-ABI helper) they are **not byte-inert to convert**: self-hosting an inline
+emitter turns inlined code into an out-of-line call, changing byte output. That
+moves the proof bar from byte-inert containment to **measured-net-non-negative +
+behavioral sweep** (still bit-exact vs main-built control, but binaries differ).
+
+The highest-leverage next unit is the **copy-family** — `compileArrayToReversed`
+(99), `compileArrayWith` (60), `compileArrayToSpliced` (133), `compileArraySlice`
+(36), `compileArrayConcat` (119) — which all inline the same "alloc
+`array.new_default` + `array.copy` + per-element transform + `struct.new` vec"
+pattern. Plan: extract each to a self-hosted `__sh_<method>_<k>(vec, …) -> vec`
+called from a thin inline wrapper (the wrapper keeps the vec-struct
+extract/repack the dialect can't express, exactly the timsort thunk shape).
+Precursor: extend `__arri_*` to **all 6 element kinds** (add packed i8/i16
+get_s/get_u/set) so one templated source covers every instantiation and the
+generic inline emitter can actually be deleted (per the net-deletion rule above).
+Estimated net −150…−250 across the family. **Start fresh from main AFTER the
+driver (#3161/#2916) and this slice land** — avoids a held-PR stack and a triple
+`emitSelfHostedFunc` collision.
