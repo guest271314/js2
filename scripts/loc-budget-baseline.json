@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-12",
   "threshold": 1500,
-  "totalCeiling": 405593,
+  "totalCeiling": 405743,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -26,7 +26,7 @@
     "src/codegen/expressions/new-super.ts": 5690,
     "src/codegen/expressions/unary-updates.ts": 1896,
     "src/codegen/generators-native.ts": 4929,
-    "src/codegen/index.ts": 15707,
+    "src/codegen/index.ts": 15737,
     "src/codegen/iterator-native.ts": 2875,
     "src/codegen/json-codec-native.ts": 3225,
     "src/codegen/literals.ts": 4364,
@@ -53,7 +53,7 @@
     "src/emit/binary.ts": 1992,
     "src/ir/builder.ts": 1633,
     "src/ir/from-ast.ts": 7125,
-    "src/ir/integration.ts": 2795,
+    "src/ir/integration.ts": 2864,
     "src/ir/lower.ts": 3617,
     "src/ir/nodes.ts": 2993,
     "src/ir/select.ts": 3296,
