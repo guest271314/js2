@@ -6638,6 +6638,19 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       if (Array.isArray(val) && exports) {
         return _wrapHostArrayElems(val, exports);
       }
+      // (#3051 Slice 3) Inherited `Object.prototype.toString` / `valueOf`
+      // fallthrough. A Proxy's get trap intercepts INHERITED lookups too, so a
+      // native ToPrimitive on the mirror of a plain-object struct saw
+      // `toString === undefined` and threw "Cannot convert object to primitive
+      // value" — but an ordinary object converts via the inherited
+      // `Object.prototype.toString` ("[object Object]", §7.1.1.1). The @@split
+      // default-constructor path (`new RegExp(<rx mirror>, flags)` when the
+      // receiver has no species) must NOT throw (species-ctor-ctor-non-obj's
+      // guard call). Scoped to exactly these two keys, only when nothing own
+      // resolves.
+      if (val === undefined && (key === "toString" || key === "valueOf")) {
+        return (Object.prototype as Record<string, unknown>)[key as string];
+      }
       return val;
     },
     set(_t, key, val) {
