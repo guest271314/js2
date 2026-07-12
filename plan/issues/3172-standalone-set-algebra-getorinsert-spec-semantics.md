@@ -14,6 +14,15 @@ updated: 2026-07-12
 loc-budget-allow:
   - src/codegen/array-object-proto.ts
   - src/codegen/index.ts
+# (#2108) Coercion-vocabulary allowance: the GetSetRecord kernels are emitted
+# WASM FUNCTION BODIES (runtime helpers), not compile-time call-site lowering —
+# they must invoke the runtime coercion helpers (__to_primitive for the spec's
+# ToNumber(size) with valueOf-once, __unbox_number for the numeric read,
+# __is_truthy for ToBoolean(has(v))) by funcidx inside the kernel. The
+# compile-time coercion ENGINE cannot run inside an emitted body; these are
+# the same helper invocations the engine itself lowers to.
+coercion-sites-allow:
+  - src/codegen/collections-es2025.ts
 priority: high
 feasibility: hard
 task_type: bug
