@@ -29,7 +29,7 @@
   "codegen/map-runtime.ts": 2,
   "codegen/number-format-native.ts": 8,
   "codegen/object-ops.ts": 4,
-  "codegen/object-runtime.ts": 30,
+  "codegen/object-runtime.ts": 35,
   "codegen/parse-number-native.ts": 4,
   "codegen/promise-combinators.ts": 1,
   "codegen/property-access.ts": 18,
