@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10273,
-    "fail": 2708,
+    "pass": 10290,
+    "fail": 2691,
     "ce": 94,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11831,
-    "fail": 3419,
+    "pass": 11866,
+    "fail": 3384,
     "ce": 135,
     "skip": 1,
     "total": 15386,
@@ -66,8 +66,8 @@
     "features": [
       {
         "name": "destructuring-binding",
-        "pass": 2172,
-        "fail": 334,
+        "pass": 2176,
+        "fail": 330,
         "ce": 27,
         "skip": 0,
         "total": 2533,
@@ -84,8 +84,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 822,
-        "fail": 280,
+        "pass": 826,
+        "fail": 276,
         "ce": 1,
         "skip": 0,
         "total": 1103,
@@ -165,12 +165,12 @@
       },
       {
         "name": "Symbol.species",
-        "pass": 97,
-        "fail": 86,
+        "pass": 104,
+        "fail": 79,
         "ce": 0,
         "skip": 0,
         "total": 183,
-        "pct": 53
+        "pct": 57
       },
       {
         "name": "destructuring-assignment",
@@ -201,21 +201,21 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 44,
-        "fail": 37,
+        "pass": 45,
+        "fail": 36,
         "ce": 0,
         "skip": 0,
         "total": 81,
-        "pct": 54
+        "pct": 56
       },
       {
         "name": "Symbol.match",
-        "pass": 65,
-        "fail": 11,
+        "pass": 66,
+        "fail": 10,
         "ce": 0,
         "skip": 0,
         "total": 76,
-        "pct": 86
+        "pct": 87
       },
       {
         "name": "WeakMap",
@@ -228,12 +228,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 67,
-        "fail": 8,
+        "pass": 70,
+        "fail": 5,
         "ce": 0,
         "skip": 0,
         "total": 75,
-        "pct": 89
+        "pct": 93
       },
       {
         "name": "let",
@@ -255,12 +255,12 @@
       },
       {
         "name": "Symbol.split",
-        "pass": 39,
-        "fail": 17,
+        "pass": 46,
+        "fail": 10,
         "ce": 1,
         "skip": 0,
         "total": 57,
-        "pct": 68
+        "pct": 81
       },
       {
         "name": "upsert",
@@ -327,12 +327,12 @@
       },
       {
         "name": "Symbol.search",
-        "pass": 23,
-        "fail": 11,
+        "pass": 27,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 34,
-        "pct": 68
+        "pct": 79
       },
       {
         "name": "Symbol.isConcatSpreadable",
@@ -781,8 +781,8 @@
   },
   {
     "edition": "ES2017",
-    "pass": 368,
-    "fail": 292,
+    "pass": 369,
+    "fail": 291,
     "ce": 7,
     "skip": 0,
     "total": 667,
@@ -799,17 +799,17 @@
       },
       {
         "name": "SharedArrayBuffer",
-        "pass": 104,
-        "fail": 138,
+        "pass": 105,
+        "fail": 137,
         "ce": 3,
         "skip": 0,
         "total": 245,
-        "pct": 42
+        "pct": 43
       },
       {
         "name": "Atomics",
-        "pass": 94,
-        "fail": 113,
+        "pass": 95,
+        "fail": 112,
         "ce": 3,
         "skip": 0,
         "total": 210,
@@ -817,12 +817,12 @@
       },
       {
         "name": "TypedArray",
-        "pass": 70,
-        "fail": 121,
+        "pass": 71,
+        "fail": 120,
         "ce": 2,
         "skip": 0,
         "total": 193,
-        "pct": 36
+        "pct": 37
       },
       {
         "name": "ArrayBuffer",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3381,
-    "fail": 847,
+    "pass": 3393,
+    "fail": 835,
     "ce": 23,
     "skip": 0,
     "total": 4251,
@@ -1035,8 +1035,8 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2511,
-        "fail": 751,
+        "pass": 2512,
+        "fail": 750,
         "ce": 22,
         "skip": 0,
         "total": 3284,
@@ -1044,12 +1044,12 @@
       },
       {
         "name": "destructuring-binding",
-        "pass": 768,
-        "fail": 522,
+        "pass": 776,
+        "fail": 514,
         "ce": 5,
         "skip": 0,
         "total": 1295,
-        "pct": 59
+        "pct": 60
       },
       {
         "name": "Symbol.iterator",
@@ -1089,12 +1089,12 @@
       },
       {
         "name": "object-rest",
-        "pass": 154,
-        "fail": 82,
+        "pass": 162,
+        "fail": 74,
         "ce": 0,
         "skip": 0,
         "total": 236,
-        "pct": 65
+        "pct": 69
       },
       {
         "name": "object-spread",
@@ -1107,12 +1107,12 @@
       },
       {
         "name": "regexp-named-groups",
-        "pass": 83,
-        "fail": 9,
+        "pass": 86,
+        "fail": 6,
         "ce": 1,
         "skip": 0,
         "total": 93,
-        "pct": 89
+        "pct": 92
       },
       {
         "name": "default-parameters",
@@ -1197,12 +1197,12 @@
       },
       {
         "name": "Symbol.replace",
-        "pass": 4,
-        "fail": 4,
+        "pass": 7,
+        "fail": 1,
         "ce": 1,
         "skip": 0,
         "total": 9,
-        "pct": 44
+        "pct": 78
       },
       {
         "name": "Reflect.construct",
@@ -1462,30 +1462,30 @@
   },
   {
     "edition": "ES2020",
-    "pass": 943,
-    "fail": 920,
-    "ce": 15,
+    "pass": 949,
+    "fail": 911,
+    "ce": 18,
     "skip": 18,
     "total": 1896,
     "pct": 50,
     "features": [
       {
         "name": "BigInt",
-        "pass": 542,
-        "fail": 480,
+        "pass": 549,
+        "fail": 473,
         "ce": 4,
         "skip": 0,
         "total": 1026,
-        "pct": 53
+        "pct": 54
       },
       {
         "name": "TypedArray",
-        "pass": 346,
-        "fail": 341,
+        "pass": 350,
+        "fail": 337,
         "ce": 1,
         "skip": 0,
         "total": 688,
-        "pct": 50
+        "pct": 51
       },
       {
         "name": "dynamic-import",
@@ -1525,21 +1525,21 @@
       },
       {
         "name": "ArrayBuffer",
-        "pass": 55,
-        "fail": 42,
+        "pass": 57,
+        "fail": 40,
         "ce": 0,
         "skip": 0,
         "total": 97,
-        "pct": 57
+        "pct": 59
       },
       {
         "name": "DataView",
-        "pass": 50,
-        "fail": 32,
+        "pass": 52,
+        "fail": 30,
         "ce": 0,
         "skip": 0,
         "total": 82,
-        "pct": 61
+        "pct": 63
       },
       {
         "name": "SharedArrayBuffer",
@@ -1571,8 +1571,8 @@
       {
         "name": "Symbol.matchAll",
         "pass": 36,
-        "fail": 22,
-        "ce": 3,
+        "fail": 20,
+        "ce": 5,
         "skip": 0,
         "total": 61,
         "pct": 59
@@ -1615,12 +1615,12 @@
       },
       {
         "name": "optional-chaining",
-        "pass": 27,
+        "pass": 26,
         "fail": 12,
-        "ce": 5,
+        "ce": 6,
         "skip": 0,
         "total": 44,
-        "pct": 61
+        "pct": 59
       },
       {
         "name": "async-iteration",
@@ -1696,12 +1696,12 @@
       },
       {
         "name": "DataView.prototype.setUint8",
-        "pass": 2,
-        "fail": 12,
+        "pass": 4,
+        "fail": 10,
         "ce": 0,
         "skip": 0,
         "total": 14,
-        "pct": 14
+        "pct": 29
       },
       {
         "name": "export-star-as-namespace-from-module",
@@ -1878,12 +1878,12 @@
   },
   {
     "edition": "ES2021",
-    "pass": 284,
-    "fail": 178,
+    "pass": 286,
+    "fail": 176,
     "ce": 1,
     "skip": 0,
     "total": 463,
-    "pct": 61,
+    "pct": 62,
     "features": [
       {
         "name": "numeric-separator-literal",
@@ -1959,12 +1959,12 @@
       },
       {
         "name": "String.prototype.replaceAll",
-        "pass": 12,
-        "fail": 19,
+        "pass": 14,
+        "fail": 17,
         "ce": 0,
         "skip": 0,
         "total": 31,
-        "pct": 39
+        "pct": 45
       },
       {
         "name": "AggregateError",
@@ -2013,12 +2013,12 @@
       },
       {
         "name": "Symbol.match",
-        "pass": 2,
-        "fail": 5,
+        "pass": 4,
+        "fail": 3,
         "ce": 0,
         "skip": 0,
         "total": 7,
-        "pct": 29
+        "pct": 57
       },
       {
         "name": "class",
@@ -2784,8 +2784,8 @@
   },
   {
     "edition": "ES2024",
-    "pass": 461,
-    "fail": 177,
+    "pass": 457,
+    "fail": 181,
     "ce": 7,
     "skip": 0,
     "total": 645,
@@ -2793,12 +2793,12 @@
     "features": [
       {
         "name": "TypedArray",
-        "pass": 117,
-        "fail": 121,
+        "pass": 113,
+        "fail": 125,
         "ce": 4,
         "skip": 0,
         "total": 242,
-        "pct": 48
+        "pct": 47
       },
       {
         "name": "regexp-v-flag",
@@ -2829,21 +2829,21 @@
       },
       {
         "name": "Atomics",
-        "pass": 39,
-        "fail": 58,
+        "pass": 35,
+        "fail": 62,
         "ce": 4,
         "skip": 0,
         "total": 101,
-        "pct": 39
+        "pct": 35
       },
       {
         "name": "Atomics.waitAsync",
-        "pass": 39,
-        "fail": 58,
+        "pass": 35,
+        "fail": 62,
         "ce": 4,
         "skip": 0,
         "total": 101,
-        "pct": 39
+        "pct": 35
       },
       {
         "name": "regexp-unicode-property-escapes",
@@ -2865,12 +2865,12 @@
       },
       {
         "name": "SharedArrayBuffer",
-        "pass": 35,
-        "fail": 56,
+        "pass": 31,
+        "fail": 60,
         "ce": 4,
         "skip": 0,
         "total": 95,
-        "pct": 37
+        "pct": 33
       },
       {
         "name": "arrow-function",
@@ -2901,12 +2901,12 @@
       },
       {
         "name": "Symbol",
-        "pass": 31,
-        "fail": 16,
+        "pass": 27,
+        "fail": 20,
         "ce": 0,
         "skip": 0,
         "total": 47,
-        "pct": 66
+        "pct": 57
       },
       {
         "name": "Reflect",
@@ -2928,21 +2928,21 @@
       },
       {
         "name": "Symbol.toPrimitive",
-        "pass": 12,
-        "fail": 15,
+        "pass": 8,
+        "fail": 19,
         "ce": 0,
         "skip": 0,
         "total": 27,
-        "pct": 44
+        "pct": 30
       },
       {
         "name": "computed-property-names",
-        "pass": 12,
-        "fail": 9,
+        "pass": 8,
+        "fail": 13,
         "ce": 0,
         "skip": 0,
         "total": 21,
-        "pct": 57
+        "pct": 38
       },
       {
         "name": "resizable-arraybuffer",
@@ -3508,21 +3508,21 @@
   },
   {
     "edition": "ES2026",
-    "pass": 177,
-    "fail": 165,
+    "pass": 180,
+    "fail": 162,
     "ce": 7,
     "skip": 0,
     "total": 349,
-    "pct": 51,
+    "pct": 52,
     "features": [
       {
         "name": "joint-iteration",
-        "pass": 27,
-        "fail": 40,
+        "pass": 30,
+        "fail": 37,
         "ce": 4,
         "skip": 0,
         "total": 71,
-        "pct": 38
+        "pct": 42
       },
       {
         "name": "IsHTMLDDA",
