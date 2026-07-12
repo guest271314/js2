@@ -2,10 +2,12 @@
 id: 3109
 title: "Test-helper consolidation: 132 test files re-declare compileAndRun (10+ signature variants) across 292k test LOC"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-09
-updated: 2026-07-09
-priority: medium
+updated: 2026-07-12
+priority: high
+# 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
+# Re-measured: 133 test files declare their own compileAndRun today.
 horizon: m
 feasibility: easy
 model: opus

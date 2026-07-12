@@ -3,13 +3,22 @@ id: 869
 title: "Refactor default params: caller-side insertion instead of sNaN sentinel"
 status: ready
 created: 2026-03-29
-updated: 2026-04-28
-priority: medium
+updated: 2026-07-12
+priority: high
 feasibility: medium
 reasoning_effort: high
 goal: maintainability
-sprint: Backlog
+sprint: current
+related: [3182]
 ---
+
+> **2026-07-12 (#3182 groom, elevated to current/high).** Still actionable:
+> the sNaN sentinel (`0x7FF00000DEADC0DE`) is live in at least
+> `src/codegen/array-methods.ts`, `src/codegen/any-helpers.ts`,
+> `src/codegen/literals.ts`, `src/codegen/statements/destructuring.ts`,
+> `src/codegen/statements/loops.ts` (grep `DEADC0DE`). Note the shared
+> `pushDefaultValue`/`defaultValueInstrs` helpers in type-coercion.ts are the
+> established default-emission machinery — build on them.
 # #869 -- Refactor default params: compile-time insertion at call sites
 
 ## Problem
