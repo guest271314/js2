@@ -11966,6 +11966,15 @@ assert._isSameValue = isSameValue;
           return ret === wrappedReceiver ? receiver : _unwrapForHost(ret);
         };
       // Get actual JS built-in object by name (#965) — fixes WI3 null receiver for built-in classes
+      // (#2623 P-7b design decision) This handler resolves the HOST realm on
+      // purpose. A sandbox-first arm for `Promise` was prototyped and REVERTED:
+      // partial (per-builtin) realm unification is inherently leaky — Promise
+      // sandbox-first while Object/Boolean stayed host-realm regressed
+      // `prototype/proto.js` + `catch/this-value-obj-coercible.js` (cross-
+      // builtin proto/ToObject realm mixing). The vm sandbox is a LOCAL-runner
+      // isolation mechanism, not a product surface; the CI lane is single-realm
+      // (no sandbox) and relies on the worker's #1220 static snapshot/restore.
+      // See "P-7b DESIGN DECISION" in plan/issues/2623-*.md.
       if (name === "__get_builtin") return (n: string) => (globalThis as any)[n];
       // Object.hasOwn(obj, key) — ES2022 static method (#965)
       // (#3060) Object.hasOwn(O, P) ≡ HasOwnProperty(ToObject(O), ToPropertyKey(P)),
@@ -13314,6 +13323,17 @@ assert._isSameValue = isSameValue;
         // throw a TypeError exception`) — which is what test262
         // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
         // undefined/null/primitive/non-constructor values.
+        // (#2623 P-7b) HOST realm on purpose (see the __get_builtin design
+        // note). In the single-realm CI lane this IS the object the user's
+        // `Promise.resolve = fn` patch lands on (the declarations.ts
+        // __module_init keep), so V8's `Get(C, "resolve")` in
+        // PerformPromiseAll/Race (§27.2.4.1.1 step 5) observes the patch —
+        // the `all/race/allSettled invoke-resolve.js` observable-resolve
+        // contract. A sandbox-first arm here was prototyped and REVERTED:
+        // capability-C sandbox + host-realm minting broke the §27.2.4.7
+        // `nextPromise.constructor === C` identity fast path (the historical
+        // `any/invoke-then` regression), and unifying minting too leaked
+        // cross-builtin (see the design-decision section in the issue file).
         if (directCall) return Promise;
         // (#1694 A.i / #1632b-1) When the user passes a COMPILED FUNCTION as the
         // capability constructor — `Promise.all.call(NotPromise, …)` where
@@ -13447,6 +13467,12 @@ assert._isSameValue = isSameValue;
           const C = _resolveCtor(thisArg, directCall);
           return (Promise as any).any.call(C, _toIterable(arr));
         };
+      // (#2623 P-7b) HOST-realm minting on purpose: minting and the capability
+      // lane (`_resolveCtor`) MUST share one realm — a split breaks the
+      // §27.2.4.7 `nextPromise.constructor === C` identity fast path (the
+      // historical `any/invoke-then` regression). Both stay HOST; the
+      // prototyped sandbox-first unification leaked cross-builtin and was
+      // reverted (see the __get_builtin design note).
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject")
         return (val: any) => {
@@ -13471,7 +13497,7 @@ assert._isSameValue = isSameValue;
         return () => {
           let r: (v: any) => void = () => {};
           let j: (e: any) => void = () => {};
-          const p: any = new Promise((res, rej) => {
+          const p: any = new Promise((res: any, rej: any) => {
             r = res;
             j = rej;
           });

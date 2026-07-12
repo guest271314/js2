@@ -68,6 +68,10 @@ const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
   ["Function", "prototype", "call"],
   ["String", "prototype", "slice"],
   ["Promise", "prototype", "then"],
+  // (#2623 P-7b) Top-level `Promise.resolve = fn` patches now LAND on the
+  // sandbox Promise (the observable-resolve contract) — watch the static so a
+  // patched sandbox is discarded before the next test.
+  ["Promise", "resolve"],
   ["Set", "prototype", "add"],
   ["Map", "prototype", "set"],
   ["WeakMap", "prototype", "set"],
