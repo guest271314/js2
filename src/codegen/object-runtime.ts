@@ -84,6 +84,8 @@ import { UNDEF_F64_BITS } from "./value-tags.js";
 import { buildIsUndefinedExternBody, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
+import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
+import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
@@ -7178,180 +7180,33 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     registerNative("__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }], [], body);
   }
 
-  // ── __getOwnPropertyDescriptors(externref obj) -> externref (#2042 S3) ────
+  // ── __object_getOwnPropertyDescriptors / __object_fromEntries ─────────────
   //
-  // `Object.getOwnPropertyDescriptors(obj)` — a fresh `$Object` mapping each own
-  // string key to its descriptor object. For each own key (from
-  // `__getOwnPropertyNames`) set `out[key] = __getOwnPropertyDescriptor(o, key)`.
-  // A non-`$Object` receiver yields an empty result object (the per-key loop runs
-  // zero times). Reuses the same enumeration + per-key descriptor builders, so
-  // accessor vs data shape and attribute flags are exactly consistent with the
-  // singular `getOwnPropertyDescriptor`.
+  // (#3160 — self-hosted stdlib) These two helpers are the PUREST members of
+  // the object runtime: thin COMPOSITIONS over the funcMap helpers registered
+  // above (`__new_plain_object`, `__extern_length`, `__extern_get_idx`,
+  // `__extern_set`, `__getOwnPropertyNames`, `__getOwnPropertyDescriptor`),
+  // with NO direct `$Object`/`$PropEntry` struct access or identity/proto/MOP
+  // entanglement. So they are compiled from ORDINARY TS SOURCE
+  // (`src/stdlib/object-runtime.ts`) through the compiler's own IR pipeline
+  // via the generalized self-hosting driver (#3161), exactly where the
+  // hand-emitted `Instr[]` bodies used to be pushed — the porffor model.
   //
-  // params: 0=obj(externref)
-  // locals: 1=names(externref $ObjVec) 2=cap(f64) 3=i(i32) 4=key(externref)
-  //         5=out(externref)
-  {
-    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
-    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
-    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
-    const getOwnNamesIdx = ctx.funcMap.get("__getOwnPropertyNames")!;
-    const getOwnDescIdx = ctx.funcMap.get("__getOwnPropertyDescriptor")!;
-    const externSetLocalIdx = ctx.funcMap.get("__extern_set")!;
-    const body: Instr[] = [
-      // out = __new_plain_object()
-      { op: "call", funcIdx: newPlainObjectIdx },
-      { op: "local.set", index: 5 },
-      // names = __getOwnPropertyNames(obj)
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: getOwnNamesIdx },
-      { op: "local.tee", index: 1 },
-      // cap = __extern_length(names)
-      { op: "call", funcIdx: externLengthIdx },
-      { op: "local.set", index: 2 },
-      // i = 0
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: 3 },
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              // if i >= cap break  (cap is f64; compare as f64)
-              { op: "local.get", index: 3 },
-              { op: "f64.convert_i32_s" },
-              { op: "local.get", index: 2 },
-              { op: "f64.ge" },
-              { op: "br_if", depth: 1 },
-              // key = __extern_get_idx(names, i)
-              { op: "local.get", index: 1 },
-              { op: "local.get", index: 3 },
-              { op: "f64.convert_i32_s" },
-              { op: "call", funcIdx: externGetIdxIdx },
-              { op: "local.set", index: 4 },
-              // __extern_set(out, key, __getOwnPropertyDescriptor(obj, key))
-              { op: "local.get", index: 5 },
-              { op: "local.get", index: 4 },
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: 4 },
-              { op: "call", funcIdx: getOwnDescIdx },
-              { op: "call", funcIdx: externSetLocalIdx },
-              // i++
-              { op: "local.get", index: 3 },
-              { op: "i32.const", value: 1 },
-              { op: "i32.add" },
-              { op: "local.set", index: 3 },
-              { op: "br", depth: 0 },
-            ],
-          },
-        ],
-      },
-      { op: "local.get", index: 5 },
-    ];
-    registerNative(
-      // Call site (calls.ts) requests this with the `__object_` prefix.
-      "__object_getOwnPropertyDescriptors",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-      [
-        { name: "names", type: { kind: "externref" } },
-        { name: "cap", type: { kind: "f64" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "key", type: { kind: "externref" } },
-        { name: "out", type: { kind: "externref" } },
-      ],
-      body,
-    );
-  }
-
-  // ── __object_fromEntries(externref entries) -> externref (#2042 S3 residual) ─
+  //   - getOwnPropertyDescriptors(obj): fresh object mapping each own key
+  //     (from `__getOwnPropertyNames`) to `__getOwnPropertyDescriptor(obj,key)`.
+  //   - fromEntries(entries): fresh object, `out[pair[0]] = pair[1]` per pair
+  //     (the call site normalises the arg to the indexable `$ObjVec`-of-pairs
+  //     shape before calling — see `compileObjectAssignArg`).
   //
-  // `Object.fromEntries(entries)` where `entries` is a `$ObjVec` of `[key,value]`
-  // pair `$ObjVec`s. Builds a fresh `$Object` and, for each pair, sets
-  // `out[pair[0]] = pair[1]` via `__extern_set` (which ToPropertyKeys the key —
-  // #2042 R2/S1). Iterates via `__extern_length` / `__extern_get_idx` (which
-  // index a `$ObjVec` reliably). The CALL SITE (calls.ts) normalises a literal
-  // array-of-pairs arg into this `$ObjVec`-of-`$ObjVec` shape before calling, so
-  // the helper only ever sees the indexable representation (a raw native vec /
-  // Map is not reliably indexable through `__extern_get_idx` — that's why the
-  // call site converts first, mirroring `compileObjectAssignArg`).
-  //
-  // params: 0=entries(externref) ; locals: 1=len(f64) 2=i(i32) 3=pair 4=key 5=val 6=out
-  {
-    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
-    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
-    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
-    const externSetIdx2 = ctx.funcMap.get("__extern_set")!;
-    const pairElem = (pairLocal: number, idx: number): Instr[] => [
-      { op: "local.get", index: pairLocal },
-      { op: "f64.const", value: idx },
-      { op: "call", funcIdx: externGetIdxIdx },
-    ];
-    const body: Instr[] = [
-      { op: "call", funcIdx: newPlainObjectIdx },
-      { op: "local.set", index: 6 },
-      { op: "local.get", index: 0 },
-      { op: "call", funcIdx: externLengthIdx },
-      { op: "local.set", index: 1 },
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: 2 },
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              { op: "local.get", index: 2 },
-              { op: "f64.convert_i32_s" },
-              { op: "local.get", index: 1 },
-              { op: "f64.ge" },
-              { op: "br_if", depth: 1 },
-              // pair = __extern_get_idx(entries, i)
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: 2 },
-              { op: "f64.convert_i32_s" },
-              { op: "call", funcIdx: externGetIdxIdx },
-              { op: "local.set", index: 3 },
-              // key = pair[0]; val = pair[1]
-              ...pairElem(3, 0),
-              { op: "local.set", index: 4 },
-              ...pairElem(3, 1),
-              { op: "local.set", index: 5 },
-              // __extern_set(out, key, val)
-              { op: "local.get", index: 6 },
-              { op: "local.get", index: 4 },
-              { op: "local.get", index: 5 },
-              { op: "call", funcIdx: externSetIdx2 },
-              { op: "local.get", index: 2 },
-              { op: "i32.const", value: 1 },
-              { op: "i32.add" },
-              { op: "local.set", index: 2 },
-              { op: "br", depth: 0 },
-            ],
-          },
-        ],
-      },
-      { op: "local.get", index: 6 },
-    ];
-    registerNative(
-      "__object_fromEntries",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-      [
-        { name: "len", type: { kind: "f64" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "pair", type: { kind: "externref" } },
-        { name: "key", type: { kind: "externref" } },
-        { name: "val", type: { kind: "externref" } },
-        { name: "out", type: { kind: "externref" } },
-      ],
-      body,
-    );
+  // Behaviour mirrors the deleted hand bodies step-for-step (same enumeration
+  // order, same per-key `__extern_set`); the only representational difference
+  // is the f64 loop counter (the hand bodies used i32-with-convert — value-
+  // equivalent). Every callee is registered EARLIER in this pass (leaf-first).
+  // A non-`$Object` receiver still yields `{}` (the loop runs zero times).
+  // Verified by tests/issue-3160.test.ts (host + standalone) + byte-inert SHA
+  // containment for non-users.
+  for (const def of SELF_HOSTED_OBJECT_RUNTIME.values()) {
+    emitSelfHostedFunc(ctx, def);
   }
 
   // NOTE (#2042 S3): `__defineProperty_desc` (generic
