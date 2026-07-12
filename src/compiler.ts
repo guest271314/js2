@@ -39,6 +39,7 @@ import { rewriteCjsRequire, rewriteCjsRequireWithMap } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
+import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -709,6 +710,24 @@ function buildCodegenOptions(
     jsxRuntime?: import("./import-resolver.js").JsxRuntimeImport;
   },
 ): CodegenOptions {
+  // (#86) Measurement-integrity guard. The standalone / wasi codegen regime is
+  // derived ONLY from `options.target` (below). There is NO `standalone` /
+  // `wasi` boolean OPTION — a caller that passes `{ standalone: true }` (or
+  // `{ wasi: true }`) to `compile()` intends a standalone/wasi run but silently
+  // gets the default gc-host lane, i.e. VACUOUS standalone coverage (the entire
+  // point of #86). TypeScript's excess-property check catches the direct-literal
+  // form (the fields are typed `never` on CompileOptions), but callers that
+  // widen options to `Record<string, unknown>` erase that — so fail LOUDLY here
+  // too. Use `target: "standalone"` / `target: "wasi"`.
+  const strayRegime = (options as Record<string, unknown>).standalone ?? (options as Record<string, unknown>).wasi;
+  if (strayRegime !== undefined) {
+    const key = (options as Record<string, unknown>).standalone !== undefined ? "standalone" : "wasi";
+    throw new Error(
+      `Unknown compile option '${key}' — the ${key} codegen regime is selected via ` +
+        `target: "${key}", not a '${key}' boolean. Passing { ${key}: true } silently ran the ` +
+        `default gc-host lane (vacuous ${key} coverage). Use { target: "${key}" }. (#86)`,
+    );
+  }
   return {
     sourceMap: emitSourceMap,
     fast: options.fast,
@@ -876,7 +895,7 @@ function runPipeline(input: PipelineInput): CompileResult {
   let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
   // (#3000) genuine-emission signal — functions/class-members actually IR-emitted.
   let capturedIrCompiledFuncs: import("./index.js").CompileResult["irCompiledFuncs"];
-  // (#2138) IR-first skip telemetry — populated only under JS2WASM_IR_FIRST=1.
+  // (#2138) IR-first skip telemetry — populated when IR-first is active (default as of #3143).
   let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
   try {
     if (useLinear) {
@@ -895,6 +914,33 @@ function runPipeline(input: PipelineInput): CompileResult {
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
       capturedIrPostClaimErrors = result.irPostClaimErrors;
+      // (#3153) Post-claim demotion telemetry sink. When
+      // `JS2WASM_IR_POSTCLAIM_LOG=<path>` is set, append one JSONL record per
+      // post-claim demotion (selector claimed, from-ast/resolve/lower threw —
+      // exactly the #3143 IR-first divergence population) so a whole test-suite
+      // run doubles as an empirical throw-site meter. Same env-gated telemetry
+      // pattern as JS2WASM_LOG_IR_FALLBACKS; inert (no fs touch) when unset.
+      if (process.env.JS2WASM_IR_POSTCLAIM_LOG && capturedIrPostClaimErrors?.length) {
+        try {
+          // Dynamic import kept out of the module graph on purpose: this is
+          // node-only telemetry and `compiler.ts` is also bundled for the
+          // browser playground, where `node:fs` must not be a static dep.
+          // `createRequire` via process.getBuiltinModule (node >= 20.16) or a
+          // guarded globalThis require both work; simplest portable form:
+          const fs = (
+            globalThis as { process?: { getBuiltinModule?: (m: string) => unknown } }
+          ).process?.getBuiltinModule?.("node:fs") as typeof import("node:fs") | undefined;
+          if (!fs) throw new Error("node:fs unavailable");
+          const { appendFileSync } = fs;
+          const file = options.fileName ?? "<source>";
+          const lines = capturedIrPostClaimErrors
+            .map((e) => JSON.stringify({ file, func: e.func, kind: e.kind, message: e.message }))
+            .join("\n");
+          appendFileSync(process.env.JS2WASM_IR_POSTCLAIM_LOG, lines + "\n");
+        } catch {
+          // Telemetry must never fail a compile.
+        }
+      }
       capturedIrCompiledFuncs = result.irCompiledFuncs;
       capturedIrFirstSkipped = multiAst
         ? undefined // generateMultiModule has no IR overlay yet — the #2138 multi seam is a follow-on slice
@@ -1112,12 +1158,25 @@ export function compileSourceSync(
       : { source: definedSource, positionMap: PositionMap.identity(), injected: false };
   const stdinInjectedSource = stdinResult.source;
 
+  // Step 0a.45: #3146 — inject the standalone `Iterator.zip / zipKeyed /
+  // concat / from` source prelude and rewrite `Iterator.<helper>` references
+  // to the prelude functions (which ride on the native iterator runtime via
+  // the `__j2w_iter_*` intrinsics, see codegen/expressions/calls.ts).
+  // Host-free targets only — JS-host mode keeps the runtime.ts polyfills
+  // (#1464). Byte-identical (identity map, unchanged source) when the program
+  // never references an Iterator static helper.
+  const iterStaticsResult =
+    options.target === "standalone" || options.target === "wasi"
+      ? injectIteratorStaticsPrelude(stdinInjectedSource)
+      : { source: stdinInjectedSource, positionMap: PositionMap.identity(), injected: false };
+  const iterStaticsSource = iterStaticsResult.source;
+
   // Step 0a.5: Rewrite CommonJS `const X = require('Y')` patterns to ESM `import`
   // declarations (#1279). This must run before preprocessImports so the resulting
   // import statements get the same declare-stub treatment as user-written imports,
   // and before `detectNodeFsImports` so `const fs = require('node:fs')` is picked
   // up as a node:fs import for WASI mode.
-  const cjsResult = rewriteCjsRequireWithMap(stdinInjectedSource);
+  const cjsResult = rewriteCjsRequireWithMap(iterStaticsSource);
   const cjsRewritten = cjsResult.source;
 
   // Step 0b: Pre-process imports (replace import * as X with declare namespace)
@@ -1146,6 +1205,7 @@ export function compileSourceSync(
   // outermost-first.
   const positionMap = preprocessed.positionMap
     .compose(cjsResult.positionMap)
+    .compose(iterStaticsResult.positionMap)
     .compose(stdinResult.positionMap)
     .compose(defineResult.positionMap);
 
@@ -1166,7 +1226,7 @@ export function compileSourceSync(
   // `private`, signature declarations) isn't hard-rejected with TS8009/8010/8017.
   // ScriptKind-only override; the `.js`-derived semantics (lenient checking)
   // stay intact. Byte-neutral when no prelude was injected.
-  const forceTsGrammar = stdinResult.injected;
+  const forceTsGrammar = stdinResult.injected || iterStaticsResult.injected;
   let ast: TypedAST;
   if (languageService) {
     // Incremental path: reuse cached lib files via the language service

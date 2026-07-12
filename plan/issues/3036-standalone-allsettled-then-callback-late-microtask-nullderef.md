@@ -1,8 +1,10 @@
 ---
 id: 3036
 title: "Standalone: Promise.allSettled(...).then(cb) callback null-derefs on a late real-Promise microtask (pre-existing, discovered while landing #3035)"
-status: ready
+status: done
+assignee: ttraenkler/fable-rescue
 created: 2026-07-05
+completed: 2026-07-10
 priority: low
 horizon: s
 feasibility: medium
@@ -113,3 +115,56 @@ load-bearing spot).
       per-call-instance state that outlives the synchronous call") that
       prevents this class of crash.
 - [ ] Regression test using the minimal repro above (no widen needed).
+
+## Resolution (2026-07-10, fable-rescue)
+
+**Already resolved on current `origin/main` (32bae1f48f) — verified, not
+re-fixed.** The closure-bridge null-deref described above no longer
+reproduces via ANY of the routes in this issue:
+
+1. the minimal single-instance repro (`Promise.allSettled([]).then(() => { out = 1; })`,
+   `--target standalone`) — `run()` returns and the late microtask sets
+   `out === 1` cleanly, no crash;
+2. three back-to-back instances in one process, each calling `setExports`
+   (so the module-level `callbackState.getExports()` points at the LAST
+   instance) — the earlier instances' late `.then` microtasks still fire
+   cleanly and set their own `out === 1`, no stale-closure null-deref;
+3. the two named test262 files run back-to-back through
+   `runTest262File(..., "standalone")`
+   (`built-ins/Promise/allSettled/resolved-immed.js`,
+   `.../reject-ignored-deferred.js`) — both record a (failing) verdict, and
+   NO `uncaughtException`/`unhandledRejection` fires in the late-microtask
+   window.
+
+**Attribution:** the crash was live when #3035 landed (2026-07-05) — that
+PR's test (`tests/issue-3035.test.ts`) had to install
+`process.on("uncaughtException", () => {})` to swallow exactly this crash so
+it would not look like a regression. It was fixed incidentally by the
+post-#3035 async-carrier / closure-lifetime hardening line (#2978/#2980/#3035
+area) that landed afterward; there is no single attributable commit and a
+bisect was not warranted for a low-priority, already-degraded path.
+
+**What this PR does:** adds `tests/issue-3036-late-microtask-closure.test.ts`,
+a regression test that drives the exact original trigger (including the
+multi-instance `setExports`-swap that made the bridge resolve the WRONG
+instance's exports) and asserts the late callback fires with NO closure-bridge
+crash. It deliberately does NOT swallow `uncaughtException`, so a reintroduced
+null-deref surfaces as a captured error and fails the assertion.
+
+**Follow-up (not done here, out of lane):** the now-unnecessary
+`process.on("uncaughtException", () => {})` / `unhandledRejection` swallow in
+`tests/issue-3035.test.ts` can be removed now that this crash is gone — left
+in place to avoid touching another issue's test file.
+
+### Acceptance criteria
+
+- [x] Root-cause understood: the lazy closure bridge
+      (`wasmClosureBridge`, `src/runtime.ts`) resolves `__call_fn_*` against
+      the module-level `callbackState` exports at call time, so a late,
+      detached real-Promise microtask from an earlier instance dispatched
+      against a later instance's exports with a stale closure ref. No longer
+      reachable on current main.
+- [x] Fix / invariant in place: callbacks handed to the deferred combinators
+      now survive a late, detached microtask (verified across all three
+      original routes).
+- [x] Regression test added (`tests/issue-3036-late-microtask-closure.test.ts`).

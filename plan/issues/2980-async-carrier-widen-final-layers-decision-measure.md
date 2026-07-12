@@ -1,7 +1,8 @@
 ---
 id: 2980
 title: "Standalone async widen — FINAL layers (async-fn drive −16 residual, Gap 5 for-await/async-gen −32) + the slice-1d carrier-widen DECISION MEASURE"
-status: ready
+status: done
+completed: 2026-07-10
 # measure phase delivered by ttraenkler/fable-5 (2026-07-02) — the four residual classes are the remaining work.
 # NB the 07-02 claim release had NOT landed on the issue-assignments ref; force-released
 # 2026-07-03 by the architect (`claim-issue.mjs --release 2980 ... --force`). Claimable now.
@@ -379,3 +380,44 @@ record:
 Escalated to the tech lead with this measure; #2980 claim released — the
 flip PR is an S slice for whoever holds the pen when #2833 lands + sign-off
 arrives.
+
+## ✅ THE FLIP — 2026-07-10 (fable-2938, stakeholder sign-off granted)
+
+Both non-measurement gates cleared on 2026-07-10: **PR #2833** (the
+#2978/#2934-3b pairing) merged at 15:16, and **explicit stakeholder
+sign-off** was granted (relayed by the tech lead). Per rule 1, the flip PR
+carries exactly the two predicates + this record:
+
+- `isStandalonePromiseActive` / `isStandaloneThenChainNativeActive` →
+  `ctx.wasi === true || (ctx.standalone === true && !widenAsyncGenFallback(ctx))`
+  — verbatim the MEASURED on-arm semantics (the conservative async-gen
+  fallback `b66d7e2ceb` included). The `JS2WASM_ASYNC_CARRIER_WIDEN`
+  instrument is retired (on-arm == production now); the harness stays in
+  `scripts/measure/` for future re-measures.
+- The former #2865 receiver-directed arm of the then-chain predicate
+  (`getDrainFuncIdxForWasiStart(ctx) !== null`) is subsumed: the widened arm
+  is a superset for every non-async-gen standalone module, and async-gen
+  modules measured host-clean (bucket net 0, zero regressions) with the
+  whole lane host per the fallback.
+- One consequential test update: `tests/issue-2978-forawait-rejected.test.ts`
+  "standalone carrier-off" case — post-flip that lane is carrier-ON, so the
+  rejected-promise for-await now delivers the ORIGINAL rejection reason
+  (spec-correct, identical to its wasi case) instead of the bounded-cap
+  TypeError. Expectation updated with provenance comment.
+- Production-behavior probe (no env): plain async module compiles host-free
+  (no `Promise_resolve` import); async-gen module keeps the host lane
+  (`Promise_reject` import present) — exactly the measured arms.
+- Local validation: issue-2978/2979/2980-carrier-fallback suites green;
+  tsc/prettier clean. NB `tests/issue-2865-standalone-async-await-unwrap.test.ts`
+  has 2 WASI-lane failures locally that reproduce IDENTICALLY on unmodified
+  main (pre-existing local-env artifact; wasi arm untouched by this flip;
+  green in CI on main) — not a flip effect.
+- The authoritative gate is the `merge_group` standalone lane (48k) — this
+  PR is scoreboard-affecting (~+20 construct-sampled; population estimate
+  per the tradeoff doc §4). `auto-park` catches any residual.
+
+**#2980 is DONE with this flip.** The #2867/#2895/#2906 async program now
+scores on the standalone lane. Filed-forward known-negatives (inside
+net-positive buckets): thenable-assimilation edges (#3125 class, 6 sampled
+files), `evaluation-body.js`, the 3 class-async static-async illegal-cast
+shapes. Follow-ups belong to their own issues.

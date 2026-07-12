@@ -85,7 +85,7 @@ import {
 } from "./frame-core.js";
 import { ensureI32Condition, resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getOrRegisterRefCellType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement } from "./shared.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 
@@ -172,13 +172,21 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
  * `Promise_new_pending`/`Promise_settle_*`) instead of the native `$Promise`
  * callback list. One lowering engine, two settle primitives.
  *
- * **Deliberately disjoint from {@link asyncFnNeedsCps}**: every shape the
- * proven single-tail-await CPS lane accepts today keeps taking that lane
- * (byte-stable), so this predicate claims ONLY shapes that today fall through
- * to the legacy synchronous fakery and produce wrong values under genuine
- * suspension (measured 2026-07-02: multi-await → null, spill-across-await →
- * null, try/finally-across-await → null, rejected 2nd await → uncaught wasm
- * exception). Additive by construction: `false` ⇒ output unchanged.
+ * **(#2967 slice 1 — engine convergence)** This predicate now claims EVERY
+ * linear shape `planLinearAwaits` can drive, including the single-tail-await
+ * population the CPS lane (`asyncFnNeedsCps`) used to own exclusively — the
+ * #1042 `!asyncFnNeedsCps` disjointness exclusion is dropped. Single-await is
+ * the N=1 case of the N-state machine, so one engine drives both.
+ *
+ * (#2967 slice 2 status) The two slice-1 carve-outs are now migrated:
+ * closures were admitted in slice 2a (`planAsyncClosureActivation`, with the
+ * #2873 park-fix hazard gate), and binding-pattern params in slice 2b-2 —
+ * their prologue-derived locals ride the frame as live-initialized spill
+ * fields (see `emitAsyncFrameStateMachine`). The only remaining CPS re-lanes
+ * are hazard DECLINES (cell-boxed spills / cell-boxed derived params), not
+ * population carve-outs. Pre-#2967 host-drive shapes (multi-await,
+ * try/finally-across-await) are unaffected — for them `asyncFnNeedsCps` was
+ * already false.
  */
 export function asyncFnNeedsHostDrive(
   ctx: CodegenContext,
@@ -190,8 +198,20 @@ export function asyncFnNeedsHostDrive(
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
-  // The single-tail-await CPS lane owns its shapes — never re-route them.
-  if (asyncFnNeedsCps(fn, plan)) return false;
+  // (#2967 slice 2b-2) Binding-pattern params are DRIVEN: the entry fn's
+  // destructuring prologue has already derived the bound locals by the time
+  // the activation emits (maybeActivateAsync / the closure body emit both run
+  // AFTER the param prologue), so `emitAsyncFrameStateMachine` captures them
+  // into the frame as LIVE-INITIALIZED spill fields (initialized from the
+  // entry locals at struct.new, restored on every resume, stored back at
+  // every suspend — which also preserves the CPS lane's
+  // mutation-before-the-await semantics). Rest params never needed a
+  // carve-out at all: an identifier rest param IS a raw wasm param (the
+  // caller builds the vec — ctx.funcRestParams), captured by name like any
+  // other param. (#2967 phase 3a) A derived binding that a nested
+  // function-like captures mutably is FORCE-BOXED into a cell-typed frame
+  // field (buildAsyncFrameInfo `spillCellInfo`) — no pattern-shape decline
+  // remains.
   const linear = planLinearAwaits(fn, plan);
   if (linear === null) return false;
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
@@ -241,6 +261,22 @@ export interface AsyncFrameInfo {
   spillTypes: ValType[];
   /** First struct field index where spills start. FrameLayout. */
   spillFieldOffset: number;
+  /**
+   * (#2967 slice 2b-2) Spill index → ENTRY-fn local index for pattern-DERIVED
+   * param bindings. Only meaningful inside the activating fctx: at frame
+   * struct.new these spill fields are initialized from the listed live locals
+   * (post-destructuring-prologue values) instead of `defaultSpillInstr`.
+   */
+  derivedSpillInit?: Map<number, number>;
+  /**
+   * (#2967 phase 3a) Spill index → ref-cell metadata for FORCE-BOXED class-1
+   * hazardous spills (nested-mutable-captured locals / derived params). The
+   * field (and `spillTypes[i]`) is the CELL ref type; `valType` is the boxed
+   * value type. Entry creates the cell at struct.new; the resume prologue
+   * registers the name in `boxedCaptures` so all reads/writes/inits and the
+   * closures.ts capture aliasing flow through the cell.
+   */
+  spillCellInfo?: Map<number, { refCellTypeIdx: number; valType: ValType }>;
   /** Field index of the result `$Promise` the async fn returns / settles. */
   resultPromiseFieldIdx: number;
   /**
@@ -331,6 +367,7 @@ export function buildAsyncFrameInfo(
   paramTypes: ValType[],
   promiseTypeIdx: number,
   hostImports?: HostAsyncImports,
+  derivedParams?: DerivedParamCapture[],
 ): AsyncFrameInfo {
   const functionName = asyncFnName(decl);
 
@@ -353,7 +390,72 @@ export function buildAsyncFrameInfo(
   }
 
   const spillFieldOffset = PARAM_FIELD_OFFSET + paramTypes.length;
-  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
+  // (#2967 slice 2b-2) Pattern-DERIVED param bindings ride the frame as
+  // LIVE-INITIALIZED spill fields: excluded from the liveness-computed spill
+  // set (whose entries the resume fn expects a segment lead to initialize —
+  // a derived binding has no lead statement, and its declared-type GUESS
+  // would be an externref default anyway), then appended with their ACTUAL
+  // entry-local ValTypes. `derivedSpillInit` maps their spill indices to the
+  // entry locals so `emitAsyncFrameStateMachine` initializes the fields with
+  // the post-prologue values at struct.new instead of inert defaults. As
+  // ordinary (mutable) spill fields they are restored on every resume AND
+  // stored back at every suspend, so a mutation before an await survives it —
+  // the same observable semantics the CPS continuation snapshot gave them.
+  const derived = derivedParams ?? [];
+  const { spillNames, spillTypes } = computeAsyncSpills(
+    ctx,
+    decl,
+    plan,
+    derived.length === 0 ? paramNames : paramNames.concat(derived.map((d) => d.name)),
+  );
+  const derivedSpillInit = new Map<number, number>();
+  for (const d of derived) {
+    derivedSpillInit.set(spillNames.length, d.entryLocalIdx);
+    spillNames.push(d.name);
+    spillTypes.push(d.type);
+  }
+
+  // (#2967 phase 3a) Cell-aware fields — FORCE-BOX class-1 hazardous spills.
+  // A spill name that a NESTED function-like captures mutably gets cell-boxed
+  // by body compile (closures.ts), which used to invalidate the frame layout
+  // (the #2873 class-1 decline). Instead of predicting closures.ts's decision,
+  // we make it: the frame field is typed `(ref null $__ref_cell_<T>)`, the
+  // ENTRY fn creates the cell at struct.new (a live cell for a derived param,
+  // a default-valued one for a body local), and the resume prologue binds the
+  // NAME to the restored cell + registers it in `boxedCaptures` — so the
+  // declaration-init (#1177 boxedForInitStore), reads/writes (identifiers/
+  // assignment/unary-updates), and nested-closure creation (the closures.ts
+  // `alreadyBoxed` aliasing branch) ALL flow through existing machinery, and
+  // `storeSpills` stores the cell ref back into a matching field. Cell
+  // IDENTITY survives suspends (the same heap cell is restored), so a nested
+  // closure and post-await states observe each other's writes. Force-boxing
+  // is deliberately an over-approximation: boxing a local closures.ts would
+  // not have boxed just adds an indirection — still correct — so the
+  // predicate need not mirror closures.ts exactly. Body locals require a
+  // defaultable value type (the entry cell needs `defaultSpillInstr`);
+  // derived params are live-initialized, so any value type boxes. Async
+  // GENERATOR frames are untouched (every own local spills there; the yield
+  // machine has its own discipline).
+  const spillCellInfo = new Map<number, { refCellTypeIdx: number; valType: ValType }>();
+  if (decl.asteriskToken === undefined && decl.body !== undefined && spillNames.length > 0) {
+    const { referencedInNested, assigned } = collectNestedRefsAndAssigns(decl.body);
+    if (referencedInNested.size > 0 && assigned.size > 0) {
+      const declByName = collectVarDeclsByName(decl);
+      const derivedNames = new Set(derived.map((d) => d.name));
+      for (let i = 0; i < spillNames.length; i++) {
+        const name = spillNames[i]!;
+        if (!referencedInNested.has(name) || !assigned.has(name)) continue;
+        const isDerived = derivedNames.has(name);
+        if (!declByName.has(name) && !isDerived) continue;
+        const valType = spillTypes[i]!;
+        if (!isDerived && !isSpillSafeType(valType)) continue; // no inert cell default
+        const refCellTypeIdx = getOrRegisterRefCellType(ctx, valType);
+        spillCellInfo.set(i, { refCellTypeIdx, valType });
+        spillTypes[i] = { kind: "ref_null", typeIdx: refCellTypeIdx };
+      }
+    }
+  }
+
   for (let i = 0; i < spillNames.length; i++) {
     stateFields.push({
       name: `spill_${spillNames[i]}`,
@@ -395,6 +497,8 @@ export function buildAsyncFrameInfo(
     spillNames,
     spillTypes,
     spillFieldOffset,
+    derivedSpillInit: derivedSpillInit.size > 0 ? derivedSpillInit : undefined,
+    spillCellInfo: spillCellInfo.size > 0 ? spillCellInfo : undefined,
     resultPromiseFieldIdx,
     promiseTypeIdx,
     host: hostImports !== undefined,
@@ -679,6 +783,120 @@ function isNestedScope(node: ts.Node): boolean {
 }
 
 /**
+ * (#2967 slice 2b-2 / 2a park fix shared analysis) Conservative syntactic
+ * capture/assignment survey of an async body, mirroring the closures.ts
+ * cell-boxing trigger (`writtenInClosure ∪ writtenInOuter`):
+ *   - `referencedInNested`: names referenced anywhere inside a nested
+ *     function-like (capture candidates);
+ *   - `assigned`: names assigned anywhere in the body, incl. inside nested
+ *     closures.
+ * A name in BOTH sets is cell-boxed at the nested closure's creation site
+ * (localMap rebind to a `(ref null $cell)` local) — the class-1 frame-layout
+ * hazard for anything the frame spills or re-materializes by declared type.
+ */
+function collectNestedRefsAndAssigns(body: ts.Node): {
+  referencedInNested: Set<string>;
+  assigned: Set<string>;
+} {
+  const referencedInNested = new Set<string>();
+  const assigned = new Set<string>();
+
+  const noteAssignment = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(node.left)
+    ) {
+      assigned.add(node.left.text);
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand)
+    ) {
+      assigned.add(node.operand.text);
+    }
+  };
+
+  const collectNestedRefs = (node: ts.Node): void => {
+    noteAssignment(node);
+    if (ts.isIdentifier(node)) {
+      // Skip pure property-name positions (`a.b`'s `b`, `{ b: 1 }`'s `b`).
+      const p = node.parent;
+      const isPropName =
+        p !== undefined &&
+        ((ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isPropertyAssignment(p) && p.name === node));
+      if (!isPropName) referencedInNested.add(node.text);
+      return;
+    }
+    forEachChild(node, collectNestedRefs);
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (isNestedScope(node)) {
+      forEachChild(node, collectNestedRefs);
+      return;
+    }
+    noteAssignment(node);
+    forEachChild(node, walk);
+  };
+  forEachChild(body, walk);
+  return { referencedInNested, assigned };
+}
+
+/**
+ * (#2967 slice 2b-2) Every identifier bound by a binding-PATTERN parameter of
+ * `fn` (recursing through nested patterns; includes rest ELEMENTS inside a
+ * pattern like `[a, ...rest]`). These are the names the entry fn's
+ * destructuring prologue derives into locals — the frame must capture them for
+ * the resume fn to see them. Identifier params (incl. an identifier REST
+ * param, whose vec the CALLER builds) are raw wasm params and are NOT listed.
+ */
+function collectPatternParamBindingNames(fn: ts.FunctionLikeDeclaration): string[] {
+  const out: string[] = [];
+  const walkPattern = (pattern: ts.BindingPattern): void => {
+    for (const el of pattern.elements) {
+      if (!ts.isBindingElement(el)) continue; // OmittedExpression (array holes)
+      if (ts.isIdentifier(el.name)) out.push(el.name.text);
+      else walkPattern(el.name);
+    }
+  };
+  for (const p of fn.parameters) {
+    if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) walkPattern(p.name);
+  }
+  return out;
+}
+
+/**
+ * (#2967 slice 2b-2) Resolve the pattern-derived param bindings of `decl`
+ * against the ACTIVATING FunctionContext — must be called AFTER the param
+ * destructuring prologue has run (both activation entry points are), so each
+ * derived name maps to a live entry local whose ValType is the ACTUAL local
+ * rep (no TS-resolved guess → no rep-divergence hazard). Names the prologue
+ * did not materialize are skipped (they stay exactly as broken/absent as on
+ * the legacy path — never worse).
+ */
+export interface DerivedParamCapture {
+  name: string;
+  type: ValType;
+  /** Local index in the ACTIVATING (entry) fctx — used only at frame struct.new. */
+  entryLocalIdx: number;
+}
+
+function collectDerivedPatternParams(decl: ts.FunctionLikeDeclaration, fctx: FunctionContext): DerivedParamCapture[] {
+  const out: DerivedParamCapture[] = [];
+  for (const name of collectPatternParamBindingNames(decl)) {
+    const idx = fctx.localMap.get(name);
+    if (idx === undefined) continue;
+    const type = idx < fctx.params.length ? fctx.params[idx]!.type : fctx.locals[idx - fctx.params.length]?.type;
+    if (type === undefined) continue;
+    out.push({ name, type, entryLocalIdx: idx });
+  }
+  return out;
+}
+
+/**
  * Defensive check of the {@link AsyncCfgPlan} emitter contract (see the
  * contract block in async-cps.ts). Returns a human-readable violation, or
  * `null` when the plan is emittable. Cheap (O(states)); run once per machine so
@@ -910,6 +1128,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   }
   // Load spills from the frame into locals (overwritten by a segment's lead on
   // first entry into its owning state; restored from the frame on resume).
+  // (#2967 phase 3a) A force-boxed spill restores the CELL ref and registers
+  // the name in `boxedCaptures`, so declaration-inits (#1177
+  // boxedForInitStore), reads/writes, and nested-closure capture aliasing all
+  // route through the cell. Clone the (outer-shared) capture map before
+  // adding resume-local entries so the activating fctx is not polluted.
+  if (info.spillCellInfo !== undefined) {
+    resumeFctx.boxedCaptures = new Map(resumeFctx.boxedCaptures ?? []);
+  }
   for (let i = 0; i < info.spillNames.length; i++) {
     const idx = allocLocal(resumeFctx, info.spillNames[i]!, info.spillTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: frameLocal });
@@ -919,6 +1145,13 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       fieldIdx: info.spillFieldOffset + i,
     });
     resumeFctx.body.push({ op: "local.set", index: idx });
+    const cell = info.spillCellInfo?.get(i);
+    if (cell !== undefined) {
+      (resumeFctx.boxedCaptures ??= new Map()).set(info.spillNames[i]!, {
+        refCellTypeIdx: cell.refCellTypeIdx,
+        valType: cell.valType,
+      });
+    }
   }
   // (#2865) A lifted-CLOSURE body (arrow / fn-expr) keeps its captures in the
   // `__self` struct — closures.ts materializes each into a NAMED local in the
@@ -978,14 +1211,28 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // and the spilled/reloaded value share one local. A binding used only within
   // its own continuation gets a fresh delivery-only local. Typed via
   // `resumeBindingValType` (== the spill field type for the spilled ones).
-  const bindingLocal = new Map<string, { local: number; type: ValType }>();
+  // (#2967 phase 3a) A FORCE-BOXED spilled binding's slot holds the ref CELL;
+  // record the cell metadata so `emitDeliver` writes the settled value THROUGH
+  // it (struct.set field 0) instead of clobbering the cell local.
+  const cellBySpillName = new Map<string, { refCellTypeIdx: number; valType: ValType }>();
+  if (info.spillCellInfo !== undefined) {
+    for (const [i, cell] of info.spillCellInfo) cellBySpillName.set(info.spillNames[i]!, cell);
+  }
+  const bindingLocal = new Map<
+    string,
+    { local: number; type: ValType; cell?: { refCellTypeIdx: number; valType: ValType } }
+  >();
   for (const st of cfg.states) {
     const rb = st.resumeFrom?.binding;
     if (!rb) continue;
     const t = resumeBindingValType(ctx, rb);
     const existing = resumeFctx.localMap.get(rb.name);
     const local = existing !== undefined ? existing : allocLocal(resumeFctx, rb.name, t);
-    bindingLocal.set(rb.name, { local, type: t });
+    bindingLocal.set(rb.name, {
+      local,
+      type: t,
+      cell: existing !== undefined ? cellBySpillName.get(rb.name) : undefined,
+    });
   }
 
   // Transient locals reused across every state arm (only one await is processed
@@ -1056,14 +1303,29 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     } as Instr);
     if (rp.binding) {
       const bl = bindingLocal.get(rp.binding.name)!;
-      out.push({ op: "local.get", index: frameLocal });
-      out.push({
-        op: "struct.get",
-        typeIdx: info.stateTypeIdx,
-        fieldIdx: SENT_FIELD,
-      });
-      coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
-      out.push({ op: "local.set", index: bl.local });
+      if (bl.cell !== undefined) {
+        // (#2967 phase 3a) Force-boxed binding: `bl.local` holds the ref CELL
+        // (a nested closure aliases the same cell) — deliver the settled value
+        // THROUGH it so the closure observes it and the cell ref stays intact.
+        out.push({ op: "local.get", index: bl.local });
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({
+          op: "struct.get",
+          typeIdx: info.stateTypeIdx,
+          fieldIdx: SENT_FIELD,
+        });
+        coerceType(ctx, resumeFctx, { kind: "externref" }, bl.cell.valType);
+        out.push({ op: "struct.set", typeIdx: bl.cell.refCellTypeIdx, fieldIdx: 0 } as Instr);
+      } else {
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({
+          op: "struct.get",
+          typeIdx: info.stateTypeIdx,
+          fieldIdx: SENT_FIELD,
+        });
+        coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
+        out.push({ op: "local.set", index: bl.local });
+      }
     }
   };
 
@@ -1651,7 +1913,12 @@ export function emitAsyncFrameStateMachine(
   const promiseTypeIdx = host ? -1 : getOrRegisterPromiseType(ctx);
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
-  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports);
+  // (#2967 slice 2b-2) Both activation entry points run AFTER the param
+  // destructuring prologue, so every pattern-derived binding is a live entry
+  // local here — capture them into the frame as live-initialized spill fields
+  // (see buildAsyncFrameInfo). Empty for identifier-only params (byte-inert).
+  const derivedParams = collectDerivedPatternParams(decl, fctx);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports, derivedParams);
   // (#2865) A CLOSURE consumer (arrow / fn-expr, #2957 phase 2) may capture
   // outer locals as ref cells (leading params of the lifted fn). The cells ride
   // into frame param fields like ordinary params; the resume body must deref
@@ -1693,7 +1960,29 @@ export function emitAsyncFrameStateMachine(
     fctx.body.push({ op: "local.get", index: i });
   }
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    // (#2967 slice 2b-2) A pattern-derived param spill field starts LIVE (the
+    // entry prologue's post-destructure value from its entry local); all other
+    // spill fields start inert and are initialized by their owning segment's
+    // lead statements in the resume fn.
+    // (#2967 phase 3a) A force-boxed (class-1 hazardous) spill field holds a
+    // REF CELL, created HERE exactly once so its identity survives every
+    // suspend/resume round-trip (a live cell for a derived param; a
+    // default-valued one for a body local, whose declaration then writes the
+    // real init through the cell — variables.ts boxedForInitStore).
+    const derivedInitLocal = info.derivedSpillInit?.get(i);
+    const cell = info.spillCellInfo?.get(i);
+    if (cell !== undefined) {
+      if (derivedInitLocal !== undefined) {
+        fctx.body.push({ op: "local.get", index: derivedInitLocal });
+      } else {
+        fctx.body.push(defaultSpillInstr(cell.valType));
+      }
+      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx } as Instr);
+    } else if (derivedInitLocal !== undefined) {
+      fctx.body.push({ op: "local.get", index: derivedInitLocal });
+    } else {
+      fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    }
   }
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);

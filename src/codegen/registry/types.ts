@@ -57,20 +57,6 @@ export function addFuncType(ctx: CodegenContext, params: ValType[], results: Val
   return idx;
 }
 
-function valTypeEq(a: ValType, b: ValType): boolean {
-  if (a.kind !== b.kind) return false;
-  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
-    return a.typeIdx === (b as { typeIdx: number }).typeIdx;
-  }
-  // (#2846) Keep the two i64 brands non-equal so `funcTypeEq` (structural-match
-  // callers) does not re-merge a bigint-branded i64 with a plain i64 — mirrors
-  // the `funcTypeKey` `:big` bucket above and the #2795 i32 precedent.
-  if (a.kind === "i64") {
-    return Boolean((a as { bigint?: true }).bigint) === Boolean((b as { bigint?: true }).bigint);
-  }
-  return true;
-}
-
 /**
  * Get or register a Wasm array type for a given element kind.
  * Reuses existing registrations so each element type only gets one array type.
@@ -401,6 +387,36 @@ export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
   ];
   ctx.mod.types.push({ kind: "struct", name, superTypeIdx: vecBaseIdx, fields });
   ctx.taDynViewTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, fields);
+  return idx;
+}
+
+/**
+ * (#3140) Get or register `$__bound_fn` — the standalone/WASI native
+ * bound-function carrier minted by `Function.prototype.bind`:
+ * `{target: externref, thisArg: externref, boundArgs: externref}` where
+ * `boundArgs` holds a boxed `$ObjVec` of the partial-application arguments.
+ * Invocation unwraps through the `__apply_closure` front-guard (prepending
+ * `boundArgs` and recursing on `target`, so bound-of-bound chains compose);
+ * the closure classifier (`closure-classifier.ts`) counts it callable so
+ * `typeof bound === "function"`. A plain struct (NOT a vec/closure subtype) so
+ * it never collides with other `ref.test`s. Registered late+once, memoized on
+ * `ctx.boundFnTypeIdx`. Byte-inert: only emitted when a standalone `.bind(...)`
+ * site compiles.
+ */
+export function getOrRegisterBoundFnType(ctx: CodegenContext): number {
+  if (ctx.boundFnTypeIdx >= 0) return ctx.boundFnTypeIdx;
+  const idx = ctx.mod.types.length;
+  const name = "__bound_fn";
+  const fields = [
+    { name: "target", type: { kind: "externref" as const }, mutable: false },
+    { name: "thisArg", type: { kind: "externref" as const }, mutable: false },
+    { name: "boundArgs", type: { kind: "externref" as const }, mutable: false },
+  ];
+  ctx.mod.types.push({ kind: "struct", name, fields });
+  ctx.boundFnTypeIdx = idx;
   ctx.structMap.set(name, idx);
   ctx.typeIdxToStructName.set(idx, name);
   ctx.structFields.set(name, fields);

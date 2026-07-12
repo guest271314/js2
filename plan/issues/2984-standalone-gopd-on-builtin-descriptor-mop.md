@@ -10,10 +10,161 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2984c
+assignee: ttraenkler/fable-sub1
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+## Slice "@@species key" LANDED (2026-07-11, fable-sub1) — builtin receiver + non-literal key
+
+> PR: `issue-2984-gopd-builtin-key-dispatch`. Takes the "builtin receiver +
+> non-literal key (the `__get_builtin` CE family)" residual of bucket 1. The
+> suite-wide `__get_builtin` non-pass cluster is 565; the gOPD-at-flagged-line
+> subset is only **38**, decomposing (measured 2026-07-11 off the standalone
+> baseline JSONL + flagged-source-line classification): **26 × `gOPD(<Ctor>,
+> Symbol.species)`** (the dominant non-literal-key shape) + 12 × RegExp annex-B
+> legacy accessors (open universe — deliberately refused). The remaining ~527
+> are NOT gOPD — they are direct unimplemented static-method calls
+> (`Atomics.*` 213, `Iterator.zip/zipKeyed/concat/from` ~99, `String.raw` 22,
+> `BigInt.asIntN/asUintN` 20, `Map.groupBy` 12, …), i.e. separate
+> builtin-surface work, not descriptor MOP.
+
+### Root cause
+
+Both compile-time synthesis gates (Phase-3 builtin-static + the #2874 struct
+key dispatch) require a LITERAL key. `Symbol.species` is a
+PropertyAccessExpression, so `gOPD(Array, Symbol.species)` fell through to the
+dynamic fallback, which routes a builtin-identifier receiver through
+`__get_builtin` → hard CE standalone (#1472 Phase B).
+
+### Fix (PR: `issue-2984-gopd-builtin-key-dispatch`)
+
+- `isSymbolSpeciesKeyExpression` (builtin-static-gopd.ts): syntactic
+  recognizer for the unshadowed `Symbol.species` key (unwraps parens/`as`/`!`).
+- `tryEmitStandaloneBuiltinSpeciesGopd` (builtin-static-gopd.ts): for the
+  @@species-owner ctors (Array/ArrayBuffer/SharedArrayBuffer/Map/Set/Promise/
+  RegExp — the complete spec set; concrete TypedArray ctors INHERIT, don't
+  own) emits `__create_accessor_descriptor(get, undefined, {e:false,c:true})`.
+  Non-owners / other symbol keys keep the loud refusal (strictly additive:
+  every intercepted shape CE'd).
+- `ensureStandaloneSpeciesGetterClosure` (property-access.ts): per-ctor
+  `get [Symbol.species]` closure — body is spec step 1 ("Return the this
+  value", param 1), meta subtype `species:<Ctor>` (name
+  `"get [Symbol.species]"`, length 0 per §10.2.9) so the reflective
+  `__builtinfn_*` natives answer propertyHelper's runtime
+  `verifyProperty(desc.get, "name"|"length")` reads; identity-stable via the
+  #2175 V2-S2 singleton; registered in
+  `nativeProtoReceiverClosureStructTypes` (meta type ONLY — the shared
+  signature-wrapper base is untouched) so a statically-resolvable
+  `g.call(thisVal)` threads the receiver.
+- Thin gate in calls.ts after the Phase-3 arm (`ctx.standalone && propLiteral
+  === undefined && isSymbolSpeciesKeyExpression`), receiver via the bucket-1
+  alias resolver. Host/gc byte-inert.
+
+### Measured (real runner, standalone lane, base = origin/main @ 026f40f771 merged)
+
+| Sweep                                             | before          | after              | Δ                        |
+| ------------------------------------------------- | --------------- | ------------------ | ------------------------ |
+| `built-ins/*/Symbol.species/*` (29)               | 0 / 5 / 24 CE   | **18 / 11 / 0 CE** | **+18 pass, 0 regressions** |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` (328) | 281 / 47 / 0 | **281 / 47 / 0**   | unchanged (0 regressions) |
+
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits match the
+  main-state baseline (host/gc/wasi inert; corpus has no species gOPD).
+- `tests/issue-2984-species.test.ts` 9/9 (accessor shape, identity stability,
+  per-ctor distinctness, getter name/length meta, reflective gOPD-on-getter,
+  alias receiver, non-owner refusal GUARD, shadowed-Symbol GUARD, host-lane
+  compile).
+- Still failing in the species dirs (NOT this slice): `return-value.js` ×6 —
+  `gOPD(...).get.call(thisVal)` invokes a descriptor-extracted closure value
+  (the #2949 first-class-closure `.call` substrate gap; the getter itself
+  returns `this` correctly when the closure resolves statically);
+  `TypedArray/Symbol.species/*` ×4 — receiver is the harness's
+  `Object.getPrototypeOf(Int8Array)` var, which the conservative alias
+  resolver declines; `Promise/symbol-species.js` — propertyHelper
+  verify-chain trips an unrelated null-access.
+- loc-budget: +20 in calls.ts (the thin gate) covered by the
+  `loc-budget-allow` frontmatter above (#3131); the synthesis lives in the
+  subsystem module.
+
+## Slice "arg-2 name coercion" LANDED (2026-07-10, fable-16th) — struct-receiver runtime key dispatch
+
+> PR: `issue-2984-gopd-key-dispatch` (stacked on `issue-2984-gopd-runtime-dispatch`
+> / PR #2865). Takes the **15.2.3.3-2-\*** bucket ("arg-2 name coercion",
+> 17/47 failing) of "Still remaining after Phase 3".
+
+### Root cause (measured, probe-pinned)
+
+A plain object literal lowers to a TYPED STRUCT, not a runtime `$Object`. The
+gOPD call site (calls.ts) answers struct receivers only through the
+LITERAL-key fast path (`structName && propLiteral !== undefined`); ANY
+non-literal key — `gOPD(obj, NaN)`, `gOPD(obj, k)`, `gOPD(obj, {toString})`,
+even a plain STRING variable — fell through to the dynamic
+`__getOwnPropertyDescriptor` native, which only walks `$Object`s, so a struct
+receiver always answered `undefined`. The key coercion itself was NOT the gap:
+`__to_property_key` (#2042 S1 / #2985) already canonicalises every non-Symbol
+key (boxed number → `number_toString`, object → `__extern_toString`).
+
+### Fix
+
+New `tryEmitStandaloneStructGopdKeyDispatch` (builtin-static-gopd.ts), called
+from a thin gate in the calls.ts gOPD handler (`ctx.standalone && structName
+&& propLiteral === undefined`): compile receiver+key, run the key through
+`__to_property_key`, string-match it against the struct's compile-time field
+names (`__str_equals` chain) and synthesize per-field the SAME descriptor the
+literal fast path emits (struct.get + box + shapePropFlags/#1629b
+definedPropertyFlags → `__create_descriptor`). **Strictly additive**: class
+receivers and sidecar-defined keys bail to the dynamic path (gate), and both
+runtime misses (non-string post-ToPropertyKey key; runtime value not the
+checker-typed struct) fall through to the dynamic native with the ORIGINAL
+key — every previously-answered shape keeps its exact answer.
+
+### Measured (real runner, standalone lane, base = PR #2865 tree)
+
+| Sweep                                           | before      | after          | Δ                      |
+| ----------------------------------------------- | ----------- | -------------- | ---------------------- |
+| `getOwnPropertyDescriptor/15.2.3.3-2-*` (47)    | 30 / 17 / 0 | **41 / 6 / 0** | **+11, 0 regressions** |
+| `built-ins/Object/getOwnPropertyDescriptor{,s}` | —           | 281 / 47 / 0   | 0 CE                   |
+
+- `prove-emit-identity`: **IDENTICAL** — all 39 (file,target) emits across
+  gc/standalone/wasi match the predecessor baseline.
+- `tests/issue-2984-key-dispatch.test.ts` 9/9 (NaN/Infinity/var/object-toString
+  keys, full attribute triple, absent key, literal fast-path GUARD, sidecar
+  GUARD); prior suites (2984/phase3/alias-receivers) 34/34.
+- Still failing in the dir (NOT this slice): `-3`/`-4` (undefined/null keys —
+  blocked on the #2106 undefined-singleton regime; `String(undefined)` cannot
+  yield `"undefined"` under the legacy no-singleton lowering), `-38/-40/-41`
+  (ARRAY keys — the any-lane array ToString residual: `String([1])` ≠ `"1"`
+  when the array flows through the boxed-any rep), `-47` (proto-INHERITED
+  `toString` on the key object — `__to_primitive`'s method lookup misses
+  inherited methods).
+- loc-budget: dispatch lives in the subsystem module; the +17 thin gate in
+  calls.ts is covered by the `loc-budget-allow` frontmatter above (#3131).
+
+## Bucket-1 slice LANDED (2026-07-10, fable-6th) — alias (obj-VAR) gOPD receivers
+
+> PR: `issue-2984-gopd-runtime-dispatch`. Takes the "obj-VAR receivers"
+> entry of "Still remaining after Phase 3" bucket 1 — `var m = Math;
+> gOPD(m, "atan2")`, the dominant 15.2.3.3-4-* fixture shape, which fell to
+> the dynamic `__getOwnPropertyDescriptor` path and silently answered
+> `undefined` standalone (probe-verified on main @ 4ac4b6e01a).
+
+- `resolveBuiltinReceiverName` (builtin-static-gopd.ts): conservative,
+  AST-only reaching-def alias resolution — accepts an alias only when
+  exactly ONE declaration binds the name in the enclosing scope tree, its
+  initializer unwraps to an unshadowed builtin identifier, and nothing
+  writes/re-binds the name (params, catch, imports, `=`/compound/`++ --`
+  all decline). Declining keeps today's path bit-for-bit.
+- Wired at the calls.ts gOPD synthesis gate (replaces the bare-identifier
+  test; direct receivers resolve exactly as Phase 3 did).
+- `prove-emit-identity`: **IDENTICAL** (all 39 file,target emits vs main).
+  Tests: `tests/issue-2984-alias-receivers.test.ts` 7/7 (aliases, value
+  identity, absent-key, reassignment/shadow/non-builtin guards); phase-3
+  suite 11/11.
+- Still open in bucket 1 after this slice: arg-2 NAME COERCION (non-literal
+  keys — the `__get_builtin` CE family), global-object receivers
+  (`this`/`window`), gOPDs-plural residuals, `primitive-string(s)`.
 
 ## Phase 3 LANDED (2026-07-10, fable-2984c) — ctor/namespace-receiver static-property descriptor synthesis
 

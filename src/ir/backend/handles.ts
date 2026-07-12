@@ -155,6 +155,15 @@ export interface IrClassLowering {
    */
   readonly initFuncName: string;
   /**
+   * (#3144) The "instanceof-compatible" tag set for THIS class: its own
+   * `__tag` discrimination constant plus every transitive descendant's —
+   * the same walk as legacy `collectInstanceOfTags` (typeof-delete.ts), so
+   * the `class.instanceof` lowering compares against the identical set the
+   * legacy `compileInstanceOf` emits. Empty when the class has no tag
+   * registered (lowering then folds to constant false, legacy parity).
+   */
+  readonly instanceOfTags: readonly number[];
+  /**
    * #3000-C: the raw Wasm instruction sequence that allocates a fresh,
    * default-initialised instance of this class — the default field values
    * (with the `__tag` slot set to the class's discrimination constant)

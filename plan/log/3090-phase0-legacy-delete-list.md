@@ -47,13 +47,22 @@ The issue's Phase 1 assumed handlers for `ir-owned` kinds are "unreachable
 when `experimentalIR: true`". The pipeline disproves this; deletion is gated
 on four structural facts:
 
-- **G1 — legacy compiles EVERYTHING first.** By default the IR is an
-  _overlay_: "The legacy path has already produced a working `body` for every
-  function before `compileIrPathFunctions` runs" (`src/codegen/index.ts`,
-  overlay block at ~:2096). IR-compiled bodies _replace_ legacy bodies after
-  the fact. Only under `JS2WASM_IR_FIRST=1` (#2138, flag-gated, NOT default)
-  is legacy emission skipped for claimed functions. **Deleting any live
-  handler breaks compilation until IR-first is the default.**
+- **G1 — legacy compiles EVERYTHING first.** ~~By default the IR is an
+  _overlay_~~ **CLEARED 2026-07-13 by #3143** (PR #2891, merge 1fc3b9d3a3):
+  IR-first is now the default (`JS2WASM_IR_FIRST=0` is a one-release escape
+  hatch). `computeIrFirstSkipSet` is an **ALLOWLIST** (not the earlier
+  denylist gates): legacy emission is skipped ONLY for a function whose
+  signature is f64-params + (f64|void)-return AND whose body is the
+  proven-lowerable numeric/boolean subset (`irFirstBodyIsProvenLowerable`) AND
+  whose internal callers are all also skipped (signature-parity fixpoint,
+  `collectLocalCallEdges`). Safe-by-construction: everything else compiles
+  twice. **The −60k deletion is INCREMENTAL, not unlocked by this flip alone:**
+  a per-kind handler is deletable only once NO compile-twice function uses it,
+  which requires the allowlist to OWN that node kind. The initial subset is
+  pure-numeric, so the immediately-deletable set is small; it grows as the
+  allowlist WIDENS (proven strings/vecs/JS-host generators → …) via the
+  #2855/#2856 capability track. Per-kind deletion still also requires
+  G2/G3/G4.
 - **G2 — whole-function claim unit keeps every handler live.** The selector
   claims `FunctionDeclaration`s; any rejection (every non-zero bucket in
   `plan/log/ir-adoption.md`, every `mixed`/`direct-only`/`deferred` kind in

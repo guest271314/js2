@@ -18,7 +18,10 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index";
 
 async function run(src: string, standalone: boolean): Promise<unknown> {
-  const r = await compile(src, standalone ? { fileName: "test.ts", standalone: true } : { fileName: "test.ts" });
+  const r = await compile(
+    src,
+    standalone ? { fileName: "test.ts", target: "standalone" as const } : { fileName: "test.ts" },
+  );
   expect(r.success, r.success ? undefined : r.errors?.map((e) => e.message).join("; ")).toBe(true);
   if (!r.success) return undefined;
   const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);

@@ -146,3 +146,103 @@ default (#2141 S3/S4, #2626 acceptance) only after enough waves land that
 the **merge_group standalone floor** clears: every vacuous pass the
 classifier unmasks must first be made a GENUINE pass by laziness. Measure
 with `JS2WASM_TAG5_CLASSIFIER=1 pnpm run test:262` A/B per wave.
+
+## Implementation Plan (W3 then W2 — the next executable waves)
+
+(arch, 2026-07-12. Anchors re-verified on main: the landed Slice-1 lazy wrap
+lives in `src/codegen/closures.ts` — `genLazyEligible` gate at :2886, eager
+sequence capture at :2893, flag-branch emission at :2953,
+`ensureGenEagerFlag` at :1721. The gc-host eager-buffer arm for NAMED
+generator declarations is `src/codegen/function-body.ts` :1052-1080 (the
+`__gen_create_buffer` block; the standalone #680 gate is right above at
+:1045). The method-generator eager arm is `src/codegen/class-bodies.ts`
+:2309. There is no `nested-declarations.ts` — the W3 note's pointer is
+stale; the eager path for nested named generators is the function-body.ts
+arm.)
+
+**Recommended order: W3 (route a — cheap wrap) first, then W2 (measure
+before building), then W4.** W3 covers the dominant test262 shape (named
+generators inside the `export function test()` wrapper); W2's zero-param
+observation in the banked note ("the fixture corpus is ~all zero-param")
+means W2 may be a measurement no-op.
+
+### W3 route (a) — nested capturing NAMED generators via the same if-flag wrap
+
+**Where**: `src/codegen/function-body.ts` :1052-1080 — the eager-buffer arm
+for a gc-host generator FUNCTION DECLARATION (`function* g() {...}` nested
+inside the test wrapper falls here after failing native candidacy).
+
+**Change**:
+1. Extract the Slice-1 wrap into a shared helper
+   `wrapGeneratorEagerSeqLazy(ctx, fctx, bodyEmitter, selfClosureEmitter)`
+   in closures.ts (parameterize what :2886-2960 does inline today): capture
+   the eager sequence into a fresh `Instr[]`, then emit
+   `if (global.get $__gen_eager_mode) { <eager seq, clears flag at top> }
+   else { <return __create_generator(<self as externref>, null)> }`.
+2. Apply it in the function-body.ts arm. The one W3-specific problem is the
+   THUNK SELF value: a declaration-form generator is a plain defined func,
+   not a closure struct, so there is no `__self` param to pass to
+   `__create_generator`. Two options — (a-i) mint the nested named generator
+   AS a closure value at its declaration site (route it through
+   `compileArrowAsClosure`'s generator branch — it then inherits the landed
+   lazy wrap verbatim, captures included); (a-ii) synthesize a zero-capture
+   closure struct wrapping the defined funcIdx purely as the thunk handle.
+   Prefer (a-i): it reuses the PROVEN Slice-1 branch end-to-end and gives
+   capture cells for free; the call sites (`g()`) already compile
+   identifier-call-of-closure.
+3. Eligibility gates: same as Slice 1 (`!isAsync`, no `arguments`, no
+   `this`/`super` — reuse `closureBodyUsesArguments` +
+   `genBodyReferencesThis`, both already exported for the :2886 gate), PLUS
+   `parameters.length === 0` until W2 lands.
+
+**Hazards** (from the Slice-1 PR #2625 lessons, all still live):
+- `ctx.genEagerFlagGlobalIdx` staleness across string-constant imports —
+  `fixupModuleGlobalIndices` (src/codegen/registry/imports.ts) already
+  covers the cached idx; any NEW cached global here must be added there.
+- The eager arm must clear the flag at its top (nested creations stay lazy).
+- Host contract: `__create_generator` thunk detection + `__call_fn_0`
+  re-invocation (src/runtime.ts) is shape-agnostic — no host change needed
+  if (a-i) is taken (the thunk IS a closure).
+
+**Probe/tests**: probe v14 (the banked shape — named capturing generator in
+the wrapper, `iterations` must stay 0 before first `next()`); the
+class/dstr `dflt` canaries with `JS2WASM_TAG5_CLASSIFIER=1`;
+return/throw-before-start (v16/v17 twins for the named shape).
+
+### W2 — paramful generator expressions (measure first)
+
+**Step 0 (measurement gate)**: grep the test262 corpus for paramful
+`function*(...)` EXPRESSIONS that are also lazy-eligible; the banked note
+predicts ~none. If the measured population is <10 files, mark W2 wont-build
+and move to W4.
+
+**If built**: at creation time, spill call args into ref cells appended to
+the closure struct — but do NOT add a second struct instance. Simpler
+concrete shape than the banked sketch: extend `computeClosureWrapperSig`'s
+generator arm so a lazy-eligible paramful generator expression's lifted func
+reads its params from CAPTURE FIELDS instead of wasm params (compile-time
+rewrite: params become synthetic captures initialized at creation), making
+the thunk re-invocation `__call_fn_0`-compatible (zero wasm params) with no
+host/ABI change. Gate `genLazyEligible` on "all params spillable"
+(spill-safe types only, the #2906 rule).
+
+**Reuse**: the ref-cell capture machinery in closures.ts (the mutable
+closure-capture struct fields — `struct (field $value (mut T))`), the
+Slice-1 wrap, `__call_fn_0`.
+
+### W4 pointer (banked, unchanged)
+
+class-bodies.ts:2309 is the method-generator eager arm; param
+instantiation must stay OUTSIDE the flag branch (spec: param defaults run at
+call). Not a pure wrap — do after W3.
+
+### Acceptance per wave
+
+- Probe battery v10-v17 green; creation runs NOTHING (side-effect counter
+  0 before first `next()`).
+- `JS2WASM_TAG5_CLASSIFIER=1` A/B on the dstr/class cluster: unmasked
+  vacuous passes become genuine (net ≥ 0 per wave vs the classifier-off
+  baseline).
+- gc/host lane: no regression on the generator suites
+  (`gen-func-expr-args-trailing-comma-*`, `iter-val-array-prototype` — the
+  two PR-#2625 regression buckets must stay green).

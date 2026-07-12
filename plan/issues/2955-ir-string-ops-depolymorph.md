@@ -4,8 +4,8 @@ title: "De-polymorph the IR front-end on string mode: abstract IR string ops res
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-03
-assignee: ttraenkler/agent-a4461
+updated: 2026-07-10
+assignee: ttraenkler/fable-2856
 priority: medium
 horizon: m
 feasibility: medium
@@ -16,6 +16,9 @@ language_feature: strings
 goal: ir-full-coverage
 related: [2953, 679, 2949]
 origin: "2026-07-02 July Fable audit §5 (identical source builds different IR per string mode)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
 ---
 
 # #2955 — identical source builds different IR depending on nativeStrings
@@ -155,3 +158,81 @@ none is a sub-25-min byte-inert land like Slice 1 was (Slice 1 exploited an
 already-abstract `coerce.to_externref` op whose new elision arm was dead for
 all existing callers). Banking this corrected map instead of sinking final
 budget into a half-finished op introduction. `status` stays `ready`.
+
+## Slice 2 (2026-07-10, fable-2856) — site 3641 `lowerStringMethodCall`: the mode table moves to the resolver
+
+The WHOLE mode decision — target name (`string_<m>` vs `__str_<m>`),
+index-arg representation (f64 vs i32-truncated), omitted-optional strategy
+(#1248 slice-end / #2002 NaN-position / native defer), and the #2002
+native-mode 4-method defer — is relocated into a single resolver callback,
+`IrFromAstResolver.stringMethodPlan(method, argCount)`, implemented in
+`integration.ts` (the lower-time side, next to the mode discriminator).
+`lowerStringMethodCall` now reads NO `nativeStrings`: it applies the plan
+mechanically, and a `null` plan is this mode's demote decision (demote set
+unchanged).
+
+**Why a resolver callback, not (yet) the abstract `str.method` op the Slice-5
+sketch above wanted:** half of this site's polymorphism is CLAIM/DEMOTE
+(native indexOf/includes/startsWith/endsWith; native omitted optionals) —
+and demote decisions must be settled at build time (there is no lower-time
+demote channel; post-claim demotion buckets are gated). So any faithful move
+keeps a build-time mode-owned query; the callback IS that query, owned by
+the lower side. The rep half (the `i32.trunc_sat_f64_s` insertion, which
+still makes the IR differ per mode) can later move into a true abstract op
+lowered per mode — that promotion (op-union + verifier + lower.ts case +
+byte proof) remains the follow-up for this site and is what would satisfy
+the "identical IR across modes" criterion here.
+
+**Verification:** byte-inert in BOTH modes — sha256-identical compiled
+binaries vs pristine base over a 13-function corpus covering every table
+method incl. omitted-optional forms (host `01fa36e630951f86`, native
+`ce91bb7087c850b7`; postClaim counts unchanged 0/7); `check:ir-fallbacks`
+gate unchanged; `issue-1232`/`issue-1248`/`issue-2002`/`issue-2192b` suites
+41/41; IR equivalence suites 73/73; tsc clean. `nativeStrings` reads in
+from-ast: 4 remain (the 3263/3275/5846 coercion-demote class, 3432
+number-toString capability, 4155 for-of strategy — Slices 2–4 in the map
+above).
+
+## Number-box capability slice (2026-07-10, fable-10th) — sites 3245+4018 (map lines) → `hasHostNumberBox`
+
+The two **number-box** reads (the re-measured map's "NOT string polymorphism"
+pair) are relocated: `coerceToExpectedExtern`'s f64→externref `__box_number`
+arm and `coerceReturnValue`'s externref→f64 `__unbox_number` arm no longer
+read `nativeStrings?.() === false` — they consult a resolver-owned capability
+predicate, `IrFromAstResolver.hasHostNumberBox()`, implemented in
+`integration.ts` (`makeFromAstResolver`) as exactly `!ctx.nativeStrings`.
+Byte-inert relocation: the predicate's truth table is identical to the old
+in-place proxy reads in both modes (including the resolver-absent case:
+`undefined === false` and `undefined === true` are both false → demote).
+
+Two constraints recorded for whoever widens this later (per the Slice-2
+pattern discussion with fable-2856):
+
+- **The capability answer must stay a build-time answer** — the demote arm
+  (the `coerceToExpectedExtern` throw / the #1798-gate slip in
+  `coerceReturnValue`) is a claim/demote decision and there is no lower-time
+  demote channel. Same constraint as the Slice-2 `stringMethodPlan` callback;
+  this predicate is the boolean sibling of that lower-time-owned query shape
+  (a full plan-object wasn't needed — the arm bodies are mode-invariant, only
+  availability varies).
+- **Widening is a semantic follow-up, not this slice**: allowing the box pair
+  under a native-strings HOST compile, or lowering to `$AnyValue` boxing in
+  standalone instead of demoting, changes claim behavior and **must be
+  validated against the standalone floor** (`merge_group`), because the
+  standalone demote arm is load-bearing.
+
+**Verification**: sha256-identical compiled binaries vs pristine base in BOTH
+modes over a 17-source corpus (14 playground examples + targeted box/unbox +
+string-iter snippets): host `b246b07133d1be80`, native `097a7d8abc01e23a`,
+12 compiled / 2 pre-existing CEs per mode, unchanged. `tsc --noEmit` clean;
+prettier clean; `issue-2856-extern-in-ir` + `issue-2856-vec-push` +
+`ir-frontend-widening` 39/39; `ir-algorithms-cluster` (covers the
+`coerceReturnValue` unbox arm) 18/18.
+
+**Remaining after this slice** (from-ast functional `nativeStrings` reads):
+the string-rep coercion/demote class (`coerceToExpectedExtern` string arm +
+the string→externref arm + the undefined-test at the map's 5815), the
+number-`toString` capability site (string-rep-coupled: the host import's
+return IS host-mode's string carrier), `lowerStringMethodCall` (Slice 2, PR
+#2857, landed 2026-07-10), and the for-of strategy switch. `status` stays
+`ready`.

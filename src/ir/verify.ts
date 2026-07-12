@@ -806,6 +806,10 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];
@@ -1111,6 +1115,8 @@ function binopOperandKind(op: import("./nodes.js").IrBinop): ValType["kind"] | n
 function unopResultKind(op: import("./nodes.js").IrUnop): ValType["kind"] | null {
   switch (op) {
     case "f64.neg":
+    // (#3168) boolean → f64 ToNumber for unary `+`/`-`.
+    case "f64.convert_i32_s":
       return "f64";
     case "i32.eqz":
     case "ref.is_null":
@@ -1129,6 +1135,8 @@ function unopOperandKind(op: import("./nodes.js").IrUnop): ValType["kind"] | nul
     case "i32.trunc_sat_f64_s":
       return "f64";
     case "i32.eqz":
+    // (#3168) the boolean-ToNumber conversion consumes the i32 0/1.
+    case "f64.convert_i32_s":
       return "i32";
     // ref.is_null takes a ref/externref/funcref — not a fixed scalar; skip.
     default:

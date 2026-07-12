@@ -156,6 +156,39 @@ export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./
  * Used to determine whether the result needs Promise.resolve() wrapping (#919).
  */
 function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  // (#2903) `.finally(...)` nodes lowered to the NATIVE §27.2.5.3 machinery
+  // already return a `$Promise` — the fulfilled-wrap would double-wrap (and
+  // its try/catch_all would null a rejection reason). The per-node marker is
+  // set by the calls.ts finally arms at lowering time, so this check is in
+  // exact lockstep with the route actually emitted; the legacy host route
+  // (producer modules, gc/host lane) never marks and KEEPS the wrap.
+  if (ctx.standaloneNativeFinallyNodes?.has(expr) === true) return false;
+  // (#2623 P-7 / B-5) `.finally(...)` on the gc/host lane must NOT get the
+  // fulfilled-wrap either. §27.2.5.3 defines `finally` via
+  // `Invoke(promise, "then", «thenFinally, catchFinally»)`: an abrupt
+  // completion from reading a poisoned `then` accessor or invoking a throwing
+  // patched `then` propagates SYNCHRONOUSLY out of `.finally()`
+  // (test262 `finally/this-value-then-{poisoned,throws}.js` assert #2), and
+  // the result IS whatever the receiver's own `then` returned
+  // (`finally/invokes-then-with-*.js` — `result === returnValue` identity).
+  // The wrap broke both: its try/catch_all converted the sync throw into a
+  // `Promise_reject`, and its `Promise_resolve(result)` re-wrap destroyed the
+  // return-value identity for a patched `then`. The STANDALONE producer-module
+  // lane is deliberately excluded — the #2903 measurement found the
+  // subclass-`finally` tests pass through that host route only WITH the wrap.
+  if (
+    ctx.standalone !== true &&
+    ctx.wasi !== true &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    (expr.expression.name.text === "finally" ||
+      // `Promise.prototype.finally.call(target, …)` / `.apply(target, …)` —
+      // the same §27.2.5.3 entry reached reflectively.
+      ((expr.expression.name.text === "call" || expr.expression.name.text === "apply") &&
+        ts.isPropertyAccessExpression(expr.expression.expression) &&
+        expr.expression.expression.name.text === "finally"))
+  ) {
+    return false;
+  }
   // Built-in Promise static methods already return a Promise object. Wrapping
   // `Promise.resolve(v)` in another `Promise.resolve(...)` is harmless in the
   // JS host due to native assimilation, but standalone `$Promise` currently has
@@ -868,71 +901,6 @@ function compileExpressionBody(
   return wasmType;
 }
 
-/**
- * Emit a local.set with automatic type coercion.
- */
-export function emitCoercedLocalSet(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  localIdx: number,
-  stackType: ValType,
-): void {
-  const localType = getLocalType(fctx, localIdx);
-  if (localType && !valTypesMatch(stackType, localType)) {
-    const sameRefTypeIdx =
-      (stackType.kind === "ref" || stackType.kind === "ref_null") &&
-      (localType.kind === "ref" || localType.kind === "ref_null") &&
-      (stackType as { typeIdx: number }).typeIdx === (localType as { typeIdx: number }).typeIdx;
-    if (sameRefTypeIdx && stackType.kind === "ref_null" && localType.kind === "ref") {
-      widenLocalToNullable(fctx, localIdx);
-    } else if (sameRefTypeIdx) {
-      // ref -> ref_null: subtype, no coercion needed
-    } else if (
-      (stackType.kind === "ref" || stackType.kind === "ref_null") &&
-      (localType.kind === "ref" || localType.kind === "ref_null")
-    ) {
-      const bodyLenBefore = fctx.body.length;
-      coerceType(ctx, fctx, stackType, localType);
-      if (fctx.body.length === bodyLenBefore) {
-        updateLocalType(fctx, localIdx, stackType);
-      }
-    } else {
-      coerceType(ctx, fctx, stackType, localType);
-    }
-  }
-  fctx.body.push({ op: "local.set", index: localIdx });
-}
-
-function updateLocalType(fctx: FunctionContext, localIdx: number, newType: ValType): void {
-  if (localIdx < fctx.params.length) {
-    const param = fctx.params[localIdx];
-    if (param) param.type = newType;
-  } else {
-    const local = fctx.locals[localIdx - fctx.params.length];
-    if (local) local.type = newType;
-  }
-}
-
-function widenLocalToNullable(fctx: FunctionContext, localIdx: number): void {
-  if (localIdx < fctx.params.length) {
-    const param = fctx.params[localIdx];
-    if (param && param.type.kind === "ref") {
-      param.type = {
-        kind: "ref_null",
-        typeIdx: (param.type as { typeIdx: number }).typeIdx,
-      };
-    }
-  } else {
-    const local = fctx.locals[localIdx - fctx.params.length];
-    if (local && local.type.kind === "ref") {
-      local.type = {
-        kind: "ref_null",
-        typeIdx: (local.type as { typeIdx: number }).typeIdx,
-      };
-    }
-  }
-}
-
 /** Coerce a value on the stack from one type to another */
 export function coerceType(
   ctx: CodegenContext,
@@ -1416,22 +1384,12 @@ function compileExpressionInner(
   }
 
   if (ts.isAwaitExpression(expr)) {
-    // (#1042) When the async-CPS state machine is driving this function
-    // (`asyncCpsActive`), the single tail-position await is consumed by
-    // `splitBodyAtAwait` and never reaches this expression path. Any await
-    // that DOES reach here under an active state machine is a nested /
-    // non-tail await the PR1 lowering doesn't handle yet — fail loudly rather
-    // than silently emit the legacy synchronous pass-through (which would
-    // desync the continuation). Outside CPS mode (gate off / not async-CPS),
-    // keep the legacy pass-through: async fns are compiled synchronously.
-    if (fctx.asyncCpsActive) {
-      reportError(
-        ctx,
-        expr,
-        "internal: nested/non-tail await under async-CPS not yet supported (#1042 PR1 handles a single tail await)",
-      );
-      return { kind: "externref" };
-    }
+    // (#2967 2c) The legacy async-CPS lane (`asyncCpsActive` /
+    // `emitAsyncStateMachine`) is DELETED — an await in an ACTIVATED async fn
+    // is consumed by the $AsyncFrame planners (`planLinearAwaits` / the CFG
+    // plans) inside the resume-fn emitter and never reaches this expression
+    // path. What remains here is the legacy passthrough for bodies no engine
+    // claims (non-linear shapes pending the slice-3 widening).
     // (#2865 AG0) Host-free standalone/WASI await. Async fns are compiled
     // synchronously here (no CPS — function-body.ts gates it off for these
     // targets) and the awaited operand, when it is a Promise, is the Wasm-native

@@ -18,6 +18,8 @@ import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-map
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
   collectMutatedCaptureNames,
+  collectReferencedIdentifiers,
+  collectWrittenIdentifiers,
   compileArrowAsCallback,
   compileArrowAsClosure,
   type SharedRefCellMap,
@@ -25,6 +27,7 @@ import {
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
+import { addFunctionOwnLocals } from "./binding-info.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
@@ -79,6 +82,7 @@ import {
   S5C_STRUCT_ACCESSOR_CLOSURE,
   buildAccessorClosure,
   ensureStructAccessorGlobal,
+  isDefinePropertyReceiverLiteral,
 } from "./struct-accessor-closure.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
@@ -522,6 +526,64 @@ function compileObjectLiteralWithAccessors(
       if (!accFn) continue;
       for (const n of collectMutatedCaptureNames(fctx, accFn as unknown as ts.FunctionExpression)) {
         accessorForceMutable.add(n);
+      }
+    }
+  }
+  // (#3051 Slice 3) Also capture-by-reference any local an accessor READS that
+  // the ENCLOSING function writes anywhere: `var v; const o = { get x() {
+  // return v; } }; v = 1;` must observe the later outer write. Without the
+  // shared ref cell, the getter snapshots the creation-time value (undefined) —
+  // the exact shape of test262 @@split str-coerce-lastindex-err's
+  // `badLastIndex` reassignments between protocol calls. #2128 only forced
+  // cells for locals the accessors themselves WRITE; this adds the
+  // outer-write/inner-read direction. Ref cells are semantically transparent,
+  // so the conservative superset is safe.
+  {
+    const accessorCaptured = new Set<string>();
+    for (const pair of accessorPairs.values()) {
+      for (const accFn of [pair.getter, pair.setter]) {
+        if (!accFn) continue;
+        const fnNode = accFn as unknown as ts.FunctionExpression;
+        const own = new Set<string>();
+        addFunctionOwnLocals(fnNode, own);
+        const refd = new Set<string>();
+        const b = fnNode.body;
+        if (b !== undefined) {
+          if (ts.isBlock(b)) {
+            for (const s of b.statements) collectReferencedIdentifiers(s, refd, own);
+          } else {
+            collectReferencedIdentifiers(b, refd, own);
+          }
+        }
+        for (const n of refd) {
+          if (fctx.localMap.has(n)) accessorCaptured.add(n);
+        }
+      }
+    }
+    if (accessorCaptured.size > 0) {
+      let encl: ts.Node | undefined = expr.parent;
+      while (
+        encl !== undefined &&
+        !ts.isFunctionDeclaration(encl) &&
+        !ts.isFunctionExpression(encl) &&
+        !ts.isArrowFunction(encl) &&
+        !ts.isMethodDeclaration(encl) &&
+        !ts.isSourceFile(encl)
+      ) {
+        encl = encl.parent;
+      }
+      const enclBody =
+        encl !== undefined && !ts.isSourceFile(encl) ? (encl as ts.FunctionLikeDeclaration).body : undefined;
+      if (enclBody !== undefined) {
+        const writtenOuter = new Set<string>();
+        if (ts.isBlock(enclBody)) {
+          for (const s of enclBody.statements) collectWrittenIdentifiers(s, writtenOuter);
+        } else {
+          collectWrittenIdentifiers(enclBody, writtenOuter);
+        }
+        for (const n of accessorCaptured) {
+          if (writtenOuter.has(n)) accessorForceMutable.add(n);
+        }
       }
     }
   }
@@ -1052,6 +1114,97 @@ export function objectLiteralIsStandaloneAnyObjectCarrier(
   return ctxFact !== undefined && (ctxFact.kind === "any" || ctxFact.kind === "unknown");
 }
 
+/**
+ * (#1901/#2542, extracted for #3128) The standalone open-`$Object` divert
+ * decision for a NON-EMPTY object literal: `compileObjectLiteral` builds the
+ * literal as an open `$Object` handed back as **externref** (via
+ * `compileObjectLiteralAsExternref`) instead of a closed struct when this
+ * predicate answers true. Exported so CONSUMERS that pre-decide a slot type
+ * for the literal's value can make the IDENTICAL decision — the same
+ * lockstep discipline `objectLiteralSpreadTakesHostPath` (#2804) and
+ * `objectLiteralIsStandaloneAnyObjectCarrier` (#1930) established. The
+ * inlined-IIFE return-local typing (calls.ts, #3128) consults this: typing
+ * the ret-local from the TS struct type while the literal lowers dynamically
+ * made the ret-value coercion's `ref.test` arm silently null the result.
+ *
+ * Shape gate: standalone only; data props / spreads / plain-named method
+ * shorthand (#3099), no accessor / computed / symbol keys, not a parameter
+ * default. Context gate: requires an EXPLICIT any / unknown / `object`
+ * contextual type (#1897 — an ABSENT contextual type means consumers compile
+ * against the inferred struct), or a PURE string-index dictionary context
+ * (#2542).
+ */
+export function objectLiteralTakesStandaloneAnyObjectPath(
+  ctx: CodegenContext,
+  expr: ts.ObjectLiteralExpression,
+): boolean {
+  if (
+    !ctx.standalone ||
+    expr.properties.length === 0 ||
+    ts.isParameter(expr.parent) ||
+    // only data props / spreads / plain-named method shorthand we can build onto
+    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
+    // host accessor path). (#3099) Plain-named method shorthand is now buildable
+    // here — compileObjectLiteralAsExternref materializes it as a runtime own
+    // property closure — so a method-bearing any-context literal (`const h: any =
+    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
+    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
+    // whose method exists only in the compile-time member table.
+    !expr.properties.every(
+      (p) =>
+        ts.isPropertyAssignment(p) ||
+        ts.isShorthandPropertyAssignment(p) ||
+        ts.isSpreadAssignment(p) ||
+        isPlainNamedMethodDeclaration(p),
+    ) ||
+    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
+    // check return undefined/false for those).
+    !expr.properties.every(
+      (p) =>
+        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
+    )
+  ) {
+    return false;
+  }
+  const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
+  // Require an EXPLICIT any / unknown / `object` contextual type to divert to
+  // the open-`$Object` path. An ABSENT contextual type means TypeScript
+  // infers a concrete *struct* type for the literal — and every downstream
+  // consumer (member reads off the inferred-typed local, destructuring
+  // patterns, numeric coercion) compiles against that struct type. Routing
+  // such a literal to `$Object` makes the consumers null-deref (struct.get on
+  // a `$Object`) or mis-coerce (`(o as any) - 0` → 0 instead of NaN, the
+  // #1806/#1900 contract). This bit the -45 standalone gate (#1897): 116
+  // regressions across language/expressions/object (parenthesized literals,
+  // `var obj = ({var: 42})`) and for-of/for-await-of destructuring sources —
+  // all shapes with NO contextual type whose consumers use the struct path.
+  // The nested-property-value case (`g({x: {y: 5}})` inner `{y: 5}`, also no
+  // contextual type) is handled separately by construction-site recursion in
+  // compileObjectLiteralAsExternref, NOT by this gate.
+  const isAnyContextNonEmpty =
+    !!ctxTypeNonEmpty &&
+    ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
+      (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
+      (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
+  // (#2542) A STRING-INDEX-SIGNATURE contextual type — `{ [s: string]: T }` — is
+  // semantically an open dictionary: its sole purpose is runtime string-keyed
+  // access (`o[k]` with a runtime `k`). `resolveWasmType` already lowers such a
+  // type to externref for the binding (no named properties → falls through to
+  // `mapTsTypeToWasm` → externref), so the consuming local is externref and ALL
+  // reads/writes route through `__extern_get`/`__extern_set`. But the closed-
+  // struct literal path builds a nominal `struct.new` and `extern.convert_any`-
+  // wraps it; `__extern_get`'s `ref.test $Object` then can't match the struct, so
+  // `o[k]` returns 0 and `o[k] = v` is dropped. Building the literal as an open
+  // `$Object` (same as #1901's any-context route) makes every native reader find
+  // the property. Restricted to a PURE dictionary (no own named properties): a
+  // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
+  // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
+  // so diverting its literal to `$Object` would mismatch that struct local.
+  const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
+  const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
+  return isAnyContextNonEmpty || isPureStringIndexContext;
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1150,7 +1303,9 @@ export function compileObjectLiteral(
       !!ctxType &&
       ctxType.getProperties().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
-    if (isAnyContext || isPureStringIndexEmpty) {
+    // (#3076) defineProperty({}) receiver → open $Object (standalone/wasi;
+    // rationale in isDefinePropertyReceiverLiteral, struct-accessor-closure.ts).
+    if (isAnyContext || isPureStringIndexEmpty || isDefinePropertyReceiverLiteral(ctx, expr)) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
@@ -1190,73 +1345,10 @@ export function compileObjectLiteral(
   // failure mode the gc/host R2 fast path avoids. Gating to `ctx.standalone`
   // keeps wasi byte-identical to main (the wasi extension is a tracked
   // follow-on; see plan/issues/1901). gc/host mode is untouched (not standalone).
-  if (
-    ctx.standalone &&
-    expr.properties.length > 0 &&
-    !ts.isParameter(expr.parent) &&
-    // only data props / spreads / plain-named method shorthand we can build onto
-    // a $Object (no accessor / computed-key / mixed shapes that need the struct or
-    // host accessor path). (#3099) Plain-named method shorthand is now buildable
-    // here — compileObjectLiteralAsExternref materializes it as a runtime own
-    // property closure — so a method-bearing any-context literal (`const h: any =
-    // { m() {…} }`) builds as an open `$Object` whose runtime-keyed reads
-    // (`h[k]`, `Object.keys`, for-in) find the method, instead of an anon struct
-    // whose method exists only in the compile-time member table.
-    expr.properties.every(
-      (p) =>
-        ts.isPropertyAssignment(p) ||
-        ts.isShorthandPropertyAssignment(p) ||
-        ts.isSpreadAssignment(p) ||
-        isPlainNamedMethodDeclaration(p),
-    ) &&
-    // and no computed/symbol keys (resolvePropertyNameText / the plain-method
-    // check return undefined/false for those).
-    expr.properties.every(
-      (p) =>
-        ts.isSpreadAssignment(p) || isPlainNamedMethodDeclaration(p) || resolvePropertyNameText(ctx, p) !== undefined,
-    )
-  ) {
-    const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
-    // Require an EXPLICIT any / unknown / `object` contextual type to divert to
-    // the open-`$Object` path. An ABSENT contextual type means TypeScript
-    // infers a concrete *struct* type for the literal — and every downstream
-    // consumer (member reads off the inferred-typed local, destructuring
-    // patterns, numeric coercion) compiles against that struct type. Routing
-    // such a literal to `$Object` makes the consumers null-deref (struct.get on
-    // a `$Object`) or mis-coerce (`(o as any) - 0` → 0 instead of NaN, the
-    // #1806/#1900 contract). This bit the -45 standalone gate (#1897): 116
-    // regressions across language/expressions/object (parenthesized literals,
-    // `var obj = ({var: 42})`) and for-of/for-await-of destructuring sources —
-    // all shapes with NO contextual type whose consumers use the struct path.
-    // The nested-property-value case (`g({x: {y: 5}})` inner `{y: 5}`, also no
-    // contextual type) is handled separately by construction-site recursion in
-    // compileObjectLiteralAsExternref, NOT by this gate.
-    const isAnyContextNonEmpty =
-      !!ctxTypeNonEmpty &&
-      ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
-        (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
-        (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
-    // (#2542) A STRING-INDEX-SIGNATURE contextual type — `{ [s: string]: T }` — is
-    // semantically an open dictionary: its sole purpose is runtime string-keyed
-    // access (`o[k]` with a runtime `k`). `resolveWasmType` already lowers such a
-    // type to externref for the binding (no named properties → falls through to
-    // `mapTsTypeToWasm` → externref), so the consuming local is externref and ALL
-    // reads/writes route through `__extern_get`/`__extern_set`. But the closed-
-    // struct literal path builds a nominal `struct.new` and `extern.convert_any`-
-    // wraps it; `__extern_get`'s `ref.test $Object` then can't match the struct, so
-    // `o[k]` returns 0 and `o[k] = v` is dropped. Building the literal as an open
-    // `$Object` (same as #1901's any-context route) makes every native reader find
-    // the property. Restricted to a PURE dictionary (no own named properties): a
-    // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
-    // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
-    // so diverting its literal to `$Object` would mismatch that struct local.
-    const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
-    const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
-    if (isAnyContextNonEmpty || isPureStringIndexContext) {
-      const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
-      if (objResult) return objResult;
-      // fall through to the struct path if the $Object builder declined.
-    }
+  if (objectLiteralTakesStandaloneAnyObjectPath(ctx, expr)) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
+    if (objResult) return objResult;
+    // fall through to the struct path if the $Object builder declined.
   }
 
   // (#2837) A NON-EMPTY object literal initializing a variable that the detection
@@ -2716,8 +2808,16 @@ export function compileObjectLiteralForStruct(
         pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
       }
 
-      // Promote captured locals to globals so the method body can access them
-      promoteAccessorCapturesToGlobals(ctx, fctx, prop.body);
+      // Promote captured locals to globals so the method body can access them.
+      // (#3040) ALSO scan the parameter-default initializers — an object-literal
+      // method like `{ method([x] = iter) {} }` references the enclosing local
+      // `iter` ONLY from the default, which the body-only scan misses, so `iter`
+      // reads null and the array-destructure throws "Cannot destructure null".
+      // The class-method / getter-setter paths already pass these `extraNodes`
+      // (#1161, nested-declarations.ts:128-133); mirror it here for plain object
+      // methods (the object-method variants of the `ary-init-iter-close` cluster).
+      const objMethodParamInits = prop.parameters.map((p) => p.initializer).filter((e): e is ts.Expression => !!e);
+      promoteAccessorCapturesToGlobals(ctx, fctx, prop.body, objMethodParamInits);
 
       // Compile method body
       const methodFctxParams: { name: string; type: ValType }[] = [
@@ -3596,6 +3696,37 @@ export function compileArrayLiteral(
       if (ctxArrSym?.name === "Array" || ctxArrSym?.name === "ReadonlyArray") {
         const ctxElemType = ctx.checker.getTypeArguments(ctxArrType as ts.TypeReference)[0];
         if (ctxElemType && (ctxElemType.flags & ts.TypeFlags.Any) !== 0) {
+          elemWasm = { kind: "externref" };
+        }
+      } else if ((ctxArrType.flags & ts.TypeFlags.Any) !== 0) {
+        // (#3154) BARE-`any` context — an array literal passed directly to an
+        // `any`-typed parameter (`f([1, void 0, 3])` with `f(a: any)`), or an
+        // inner tuple of an `any[]` outer literal. The S0 widening above only
+        // fires for `Array<any>` contextual types, so these literals kept the
+        // first-element f64/i32 fast path: a `void 0` element became the sNaN
+        // sentinel (reads back as a NaN *number*, `a[1] !== a[1]` self-compare
+        // fails, `typeof` lies), and string/symbol/boolean elements were
+        // dropped or number-coerced at CONSTRUCTION — unrecoverable at any
+        // read site. This regressed 15 baseline-pass compareArray-cluster
+        // tests when the test262 harness shims briefly moved to `any` params
+        // (#3151 merge-group park, run 29175942933).
+        //
+        // Widen to externref-boxed elements — the SAME construction the
+        // `Array<any>` context already uses, so each element is boxed by its
+        // own static type (`__box_number` / `__box_boolean` / `__box_symbol` /
+        // native string / `ref.null extern` for undefined) — but ONLY when the
+        // literal is not purely numeric. A homogeneous number literal (the
+        // overwhelmingly common `compareArray(x, [1, 2, 3])` shape) keeps the
+        // f64 fast path byte-identical: its elements read back correctly
+        // through the dynamic `any` path already, and NaN self-inequality on a
+        // *genuine* NaN element is spec-correct (§7.2.16), not corruption.
+        const allPlainNumbers = expr.elements.every((el) => {
+          if (ts.isOmittedExpression(el) || _isUndefinedLike(el) || ts.isSpreadElement(el)) return false;
+          // (#1930) Classify via the oracle's static JS-type helper rather than
+          // a direct checker call, to satisfy the oracle-ratchet gate.
+          return ctx.oracle.staticJsTypeOf(el) === "number";
+        });
+        if (!allPlainNumbers) {
           elemWasm = { kind: "externref" };
         }
       }

@@ -202,12 +202,13 @@ export interface CompileResult {
    */
   irCompiledFuncs?: readonly string[];
   /**
-   * (#2138) IR-first compile-once inversion telemetry. Present ONLY when the
-   * `JS2WASM_IR_FIRST=1` flag was active for this compile: lists the
-   * top-level functions whose legacy body emission was skipped because the
-   * IR path owned the slot (compiled once instead of twice). `undefined`
-   * whenever the flag is off — the flag-off pipeline is byte-identical to
-   * the pre-#2138 behavior and pays zero cost for this field.
+   * (#2138) IR-first compile-once inversion telemetry. Present when IR-first
+   * was active for this compile (the DEFAULT as of #3143; disable with the
+   * `JS2WASM_IR_FIRST=0` escape hatch): lists the top-level functions whose
+   * legacy body emission was skipped because the IR path owned the slot
+   * (compiled once instead of twice). `undefined` when IR-first is off —
+   * that pipeline is byte-identical to the pre-#2138 behavior and pays zero
+   * cost for this field.
    */
   irFirstSkipped?: readonly string[];
 }
@@ -270,6 +271,20 @@ export interface CompileOptions {
    *  `nativeStrings: true` and refuses to emit any `wasm:js-string` or
    *  `env` JS-host string imports. */
   target?: "gc" | "linear" | "wasi" | "standalone";
+  /**
+   * (#86) NOT a real option — declared `never` so `compile(src, { standalone:
+   * true })` is a TypeScript excess-property error. The standalone codegen
+   * regime is selected via `target: "standalone"`; a `standalone` boolean was
+   * silently ignored (it never reached codegen), producing vacuous standalone
+   * coverage. `buildCodegenOptions` also throws at runtime for widened
+   * (`Record`-typed) callers. Use `target: "standalone"`.
+   */
+  standalone?: never;
+  /**
+   * (#86) NOT a real option — see `standalone`. The WASI regime is
+   * `target: "wasi"`; a `wasi` boolean was silently ignored.
+   */
+  wasi?: never;
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
   /**

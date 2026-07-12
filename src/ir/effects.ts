@@ -137,6 +137,7 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "global.get":
     case "object.get":
     case "class.get":
+    case "class.instanceof": // (#3144) reads the receiver's __tag struct field
     case "vec.get":
     case "vec.len":
     case "refcell.get":
@@ -156,6 +157,7 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "class.call":
     case "class.super_init": // #3000-E — runs parent `_init` (writes parent fields on self)
     case "class.super_call": // #3000-E — static-dispatched parent method (arbitrary heap effect)
+    case "class.static_call": // (#3144) — static method body, arbitrary heap effect
     case "closure.call":
     case "extern.call":
     case "class.new":
@@ -457,6 +459,8 @@ export function isSideEffecting(i: IrInstr): boolean {
     // does NOT seed its operand uses — that dropped `super(<const>)`'s arg, #3000-E).
     i.kind === "class.super_init" ||
     i.kind === "class.super_call" ||
+    // (#3144): a static method call runs an arbitrary user body; keep live.
+    i.kind === "class.static_call" ||
     // Slice 6 (#1169e): slot.write and forof.vec are statement-level
     // side effects — the loop's body executes for every element.
     // slot.read is pure (load a Wasm local) but always-keep to avoid

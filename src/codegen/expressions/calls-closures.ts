@@ -22,6 +22,68 @@ import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasm
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitClosureCallArgcExtras, emitResetArgcExtras, emitWrapperDynamicMethodCall } from "./calls.js";
 
+/**
+ * (#3033) Per-source-file set of member names the USER's own code defines as
+ * function-valued — prototype-method assignments (`P.prototype.check = fn`,
+ * including the alias form `var pp = P.prototype; pp.check = fn`), plain
+ * function-valued property assignments, function-valued object-literal
+ * properties / method shorthands, and class method names.
+ *
+ * `tryExternClassMethodOnAny` consults this to REFUSE binding an `any`-typed
+ * receiver's method call to an ambient extern class (lib.dom.d.ts et al.) by
+ * first-name-match when the program itself defines a member of that name. The
+ * concrete failure (#3033 acorn dogfood, minimal FF2 repro): `p.check()` on a
+ * fnctor instance first-matched **FontFaceSet.check** — a DOM API — so the
+ * user's `P.prototype.check` never ran and the call returned the import's
+ * boxed default. Refusal is semantically safe: the call falls through to the
+ * generic dynamic dispatch (`__extern_method_call` / fnctor-proto lookup),
+ * which resolves by the receiver's REAL runtime identity — the same reasoning
+ * as the existing hardcoded `slice`/`replace`/`forEach`/`some` refusals, made
+ * general for names the user demonstrably owns.
+ */
+const _userFunctionMemberNamesCache = new WeakMap<ts.SourceFile, Set<string>>();
+function getUserFunctionMemberNames(sf: ts.SourceFile): Set<string> {
+  const cached = _userFunctionMemberNamesCache.get(sf);
+  if (cached) return cached;
+  const names = new Set<string>();
+  const isFnValued = (e: ts.Expression): boolean =>
+    ts.isFunctionExpression(e) || ts.isArrowFunction(e) || ts.isIdentifier(e);
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      isFnValued(node.right)
+    ) {
+      // Identifier RHS is included conservatively (`pp.parseIdent = parseIdent`
+      // aliasing); it can only widen the refusal set, never mis-bind.
+      if (ts.isFunctionExpression(node.right) || ts.isArrowFunction(node.right)) {
+        names.add(node.left.name.text);
+      }
+    } else if (ts.isObjectLiteralExpression(node)) {
+      for (const prop of node.properties) {
+        if (ts.isMethodDeclaration(prop) && ts.isIdentifier(prop.name)) {
+          names.add(prop.name.text);
+        } else if (
+          ts.isPropertyAssignment(prop) &&
+          ts.isIdentifier(prop.name) &&
+          (ts.isFunctionExpression(prop.initializer) || ts.isArrowFunction(prop.initializer))
+        ) {
+          names.add(prop.name.text);
+        }
+      }
+    } else if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.members) {
+      for (const m of node.members) {
+        if (ts.isMethodDeclaration(m) && ts.isIdentifier(m.name)) names.add(m.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  _userFunctionMemberNamesCache.set(sf, names);
+  return names;
+}
+
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
   ctx: CodegenContext,
@@ -1019,7 +1081,66 @@ export function tryExternClassMethodOnAny(
   // the `.slice` and `.replace`/`.replaceAll` ambiguity refusals above.
   // (A genuinely-`Uint8ClampedArray`-typed receiver never reaches here — it is
   // handled by the native array-method path before the `any` fallback.)
-  if (methodName === "forEach" || methodName === "some") return null;
+  //
+  // (#3139) Extended to the REST of the Array.prototype iteration/search
+  // generics for the same reason and with the same fallback: the mis-bind is
+  // not merely a standalone leak — `Uint8ClampedArray_every` runs the host
+  // %TypedArray% bridge on a receiver with no [[TypedArrayName]] slot, so a
+  // fnctor-instance array-like (`foo.prototype = new Array(1,2,3); new
+  // foo().every(cb)`, the 15.4.4.x applied-to-object test262 family) silently
+  // iterates ZERO elements. The generic `__extern_method_call` /
+  // `__proto_method_call` paths dispatch on the runtime shape and (post-#3138
+  // + the #3139 prototype-inclusive `__extern_length`/`__extern_get_idx`/
+  // `__extern_has_idx` handlers) resolve inherited length/elements correctly.
+  // `indexOf`/`lastIndexOf` are String∩Array-ambiguous exactly like `.slice`.
+  if (
+    methodName === "forEach" ||
+    methodName === "some" ||
+    methodName === "every" ||
+    methodName === "filter" ||
+    methodName === "map" ||
+    methodName === "reduce" ||
+    methodName === "reduceRight" ||
+    methodName === "find" ||
+    methodName === "findIndex" ||
+    methodName === "indexOf" ||
+    methodName === "lastIndexOf"
+  ) {
+    return null;
+  }
+
+  // (#2872) `fill` is a core Array.prototype / %TypedArray%.prototype method,
+  // but `CanvasRenderingContext2D` (and Path2D-adjacent DOM classes) also
+  // declare a `fill`. First-match iteration bound an `any`-typed receiver's
+  // `ta.fill(v)` to `CanvasRenderingContext2D_fill` — a host import the
+  // standalone runtime cannot satisfy (the dominant leak of the
+  // built-ins/TypedArray/prototype/fill standalone cluster; the receiver there
+  // is a dynamically-constructed TA view). On an `any` receiver `fill` is
+  // overwhelmingly an Array/TypedArray operation; refuse extern-class dispatch
+  // and let the generic dynamic dispatch (which now carries the native
+  // `$__ta_dyn_view` fill arm) resolve by runtime shape. Mirrors the `.slice` /
+  // `.replace` / `.forEach`/`.some` ambiguity refusals above.
+  if (methodName === "fill") return null;
+
+  // (#2872 slice 2) `copyWithin` / `reverse` — core Array.prototype /
+  // %TypedArray%.prototype mutators with the same first-match hijack hazard as
+  // `fill` (an ambient extern class declaring the name binds an `any`-typed
+  // `ta.copyWithin(…)`/`ta.reverse()` to a host import the standalone runtime
+  // cannot satisfy). On an `any` receiver these are overwhelmingly Array/TA
+  // operations; refuse extern-class dispatch so the generic dynamic dispatch
+  // (which now carries the native `$__ta_dyn_view` copyWithin/reverse arms)
+  // resolves by runtime shape. Mirrors the `fill` refusal above.
+  if (methodName === "copyWithin" || methodName === "reverse") return null;
+
+  // (#3033) If the program's OWN code defines a function-valued member of this
+  // name (prototype-method assignment, function-valued property, object-literal
+  // method, class method), the receiver is far more plausibly a user object
+  // than an ambient DOM/extern instance — and the first-match binding below
+  // would hijack the call to the extern import (acorn's `p.check()` bound to
+  // FontFaceSet_check; parseIdent/finishToken shadow DOM names too). Refuse and
+  // let the generic dynamic dispatch resolve by runtime identity — which also
+  // handles genuine extern receivers correctly host-side.
+  if (getUserFunctionMemberNames(expr.getSourceFile()).has(methodName)) return null;
 
   // (#1283) The dispatch below emits `externref` hints for every arg and
   // assumes the call's params are all-externref. When iterating in

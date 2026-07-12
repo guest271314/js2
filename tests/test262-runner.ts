@@ -68,6 +68,10 @@ const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
   ["Function", "prototype", "call"],
   ["String", "prototype", "slice"],
   ["Promise", "prototype", "then"],
+  // (#2623 P-7b) Top-level `Promise.resolve = fn` patches now LAND on the
+  // sandbox Promise (the observable-resolve contract) — watch the static so a
+  // patched sandbox is discarded before the next test.
+  ["Promise", "resolve"],
   ["Set", "prototype", "add"],
   ["Map", "prototype", "set"],
   ["WeakMap", "prototype", "set"],
@@ -1551,6 +1555,7 @@ function buildPreamble(
   needsTypedArrayCtorArrays: boolean,
   needsByteConversionValues: boolean,
   needsResizableAbUtils: boolean,
+  dynViewCompare: boolean,
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
@@ -1686,10 +1691,36 @@ function assert_notSameValue_bool(actual: any, expected: boolean): void {
 }`;
   }
 
+  // (#3151) LANE-SPLIT param type for the compareArray shims.
+  //
+  // STANDALONE/WASI lanes (`dynViewCompare`): params are `any`, NOT `any[]`.
+  // The real harness `compareArray` (harness/assert.js) is untyped, so
+  // `a`/`b` are effectively `any` and `a.length`/`a[i]` go through the
+  // DYNAMIC reader — which recognizes a runtime `$__ta_dyn_view` TypedArray
+  // (the `new TA(makeCtorArg(…))` harness shape). An `any[]` annotation
+  // instead emits WasmGC ARRAY ops, which a dyn-view is not, so every
+  // `compareArray(<TA>, <arr>)` returned 0 and gated the whole standalone
+  // TypedArray.prototype harness cluster (#2872). Measured on the PR #2899
+  // merge_group: +22 standalone TypedArray harness tests.
+  //
+  // JS-HOST lane: params MUST stay `any[]`. The `any` version regressed 15
+  // baseline-pass host tests (merge_group run 29175942933): with an `any`
+  // param context, callers' ARRAY-LITERAL arguments are constructed with a
+  // lossy representation — `[1, void 0, 3]` becomes an f64 array whose
+  // `void 0` element is NaN (`typeof a[1] === "number"`, and NaN !== NaN
+  // fails even a self-compare), and mixed literals like `[1, 'z']` /
+  // `[symA, symB]` misread their non-numeric elements. The corruption
+  // happens at literal CONSTRUCTION in the `any` argument context, so no
+  // branch inside compareArray's body can recover it — the lane split is
+  // the only harness-level fix. Host TypedArray compareArray tests passed
+  // at baseline with `any[]` (host TAs are not dyn-views), so the host lane
+  // loses nothing by keeping it.
+  const caT = dynViewCompare ? "any" : "any[]";
+
   if (needsCompareArray) {
     p += `
 
-function compareArray(a: any[], b: any[]): number {
+function compareArray(a: ${caT}, b: ${caT}): number {
   if (a.length !== b.length) return 0;
   for (let i: number = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return 0;
@@ -1699,9 +1730,10 @@ function compareArray(a: any[], b: any[]): number {
   }
 
   if (needsAssertCompareArray) {
+    // (#3151) lane-split param type — see the compareArray note above.
     p += `
 
-function assert_compareArray(actual: any[], expected: any[]): void {
+function assert_compareArray(actual: ${caT}, expected: ${caT}): void {
   __assert_count = __assert_count + 1;
   if (actual.length !== expected.length) { if (!__fail) __fail = __assert_count; return; }
   for (let i: number = 0; i < actual.length; i++) {
@@ -2239,7 +2271,116 @@ function allowProxyTraps(overrides: any): any {
   return p;
 }
 
-export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
+/**
+ * (#3188 slice 1) Parenthesize the object-literal operand of an `await`:
+ * `await {…}` → `await ({…})`. In a genuine async/TLA context `await { … }`
+ * is an AwaitExpression whose operand is an ObjectLiteral, but the runner
+ * compiles the top-level-await body SYNCHRONOUSLY (the wrapTest TLA path emits
+ * it at module top level, not inside an `async` function), so TS treats `await`
+ * as an identifier and the following `{ … }` as a *block statement*. That block
+ * (`{ function() {} }` in these `await-expr-obj-literal` tests) then swallows the
+ * wrapper's trailing `export function test()` during error recovery, yielding a
+ * spurious `Duplicate identifier 'test'` / `Duplicate export name 'test'` — 6
+ * `language/module-code/top-level-await/syntax/*-obj-literal.js` records failed
+ * as a pure runner artifact. Parenthesizing forces the `{…}` to parse as the
+ * await operand in every position (top-level statement, `typeof`/`void`, a
+ * for-header, and `export var/let x = await {…}` initializers), a semantic
+ * no-op in a real async context. Balanced-brace scan skips string/template/
+ * comment spans so an `await {` inside a literal is never rewritten.
+ */
+export function parenthesizeAwaitBraceOperand(body: string): string {
+  if (!/\bawait\s*\{/.test(body)) return body;
+  let out = "";
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    const c = body[i]!;
+    // Skip string / template literals.
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < n) {
+        out += body[i];
+        if (body[i] === "\\") {
+          i++;
+          if (i < n) out += body[i];
+          i++;
+          continue;
+        }
+        if (body[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    // Skip line / block comments.
+    if (c === "/" && body[i + 1] === "/") {
+      const nl = body.indexOf("\n", i);
+      const end = nl === -1 ? n : nl;
+      out += body.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (c === "/" && body[i + 1] === "*") {
+      const end = body.indexOf("*/", i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += body.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    // Match `await` <ws> `{` at a word boundary.
+    if (
+      body.startsWith("await", i) &&
+      (i === 0 || !/[A-Za-z0-9_$]/.test(body[i - 1]!)) &&
+      !/[A-Za-z0-9_$]/.test(body[i + 5] ?? "")
+    ) {
+      let j = i + 5;
+      while (j < n && /\s/.test(body[j]!)) j++;
+      if (body[j] === "{") {
+        // Find the matching close brace (respecting nested braces + string spans).
+        let depth = 0;
+        let k = j;
+        let str: string | null = null;
+        for (; k < n; k++) {
+          const ch = body[k]!;
+          if (str) {
+            if (ch === "\\") {
+              k++;
+              continue;
+            }
+            if (ch === str) str = null;
+            continue;
+          }
+          if (ch === '"' || ch === "'" || ch === "`") str = ch;
+          else if (ch === "{") depth++;
+          else if (ch === "}" && --depth === 0) break;
+        }
+        // Emit `await ( {…} )`, preserving the original whitespace run.
+        out += body.slice(i, j) + "(" + body.slice(j, k + 1) + ")";
+        i = k + 1;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+export function wrapTest(
+  source: string,
+  meta?: Test262Meta,
+  // (#3151) Compile target of the lane this wrap will be compiled for.
+  // Host-free targets (`standalone`/`wasi`) get `any`-typed compareArray
+  // shims (dyn-view TypedArray support); the default JS-host lane keeps
+  // `any[]` (an `any` param context corrupts callers' array-literal args —
+  // see the lane-split note in buildPreamble).
+  target?: string,
+): WrapResult {
+  const dynViewCompare = target === "standalone" || target === "wasi";
   // Strip metadata block
   let body = source.replace(/\/\*---[\s\S]*?---\*\//, "");
 
@@ -2440,16 +2581,37 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // e.g. assert_sameValue(__executed[index], __expected[index])
   body = body.replace(/assert_sameValue\s*\(\s*(\w+\[\w+\])\s*,\s*(\w+\[\w+\])\s*\)/g, "assert_sameValue_str($1, $2)");
 
-  // Route boolean comparisons to boolean-aware assert
-  body = body.replace(/assert_sameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, "assert_sameValue_bool($1, $2)");
-  body = body.replace(/assert_sameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, "assert_sameValue_bool($1, $2)");
-  body = body.replace(
-    /assert_notSameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g,
-    "assert_notSameValue_bool($1, $2)",
+  // Route boolean comparisons to boolean-aware assert.
+  // (#3173) Guard: only rewrite when the captured operand has BALANCED parens.
+  // `[^,]+?` happily stops inside a nested call's own boolean argument —
+  // `assert_sameValue(sample.getFloat16(0, false), 3.078125)` matched with
+  // $1 = "sample.getFloat16(0" and $2 = "false", producing
+  // `assert_sameValue_bool(sample.getFloat16(0, false), 3.078125)` — a bool
+  // compare against 3.078125, which can never hold. Every DataView
+  // `get*(idx, littleEndian-literal)` assert hit this. An unbalanced capture
+  // keeps the generic `assert_sameValue`, which compares correctly.
+  const parensBalanced = (s: string): boolean => {
+    let depth = 0;
+    for (const ch of s) {
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth < 0) return false;
+      }
+    }
+    return depth === 0;
+  };
+  body = body.replace(/assert_sameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(a) ? `assert_sameValue_bool(${a}, ${b})` : m,
   );
-  body = body.replace(
-    /assert_notSameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g,
-    "assert_notSameValue_bool($1, $2)",
+  body = body.replace(/assert_sameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(b) ? `assert_sameValue_bool(${a}, ${b})` : m,
+  );
+  body = body.replace(/assert_notSameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(a) ? `assert_notSameValue_bool(${a}, ${b})` : m,
+  );
+  body = body.replace(/assert_notSameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(b) ? `assert_notSameValue_bool(${a}, ${b})` : m,
   );
 
   // Route compareArray assertions through assert_true
@@ -2604,6 +2766,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsTypedArrayCtorArrays,
     needsByteConversionValues,
     needsResizableAbUtils,
+    dynViewCompare,
   ]
     .map((b) => (b ? "1" : "0"))
     .join("");
@@ -2639,6 +2802,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsTypedArrayCtorArrays,
       needsByteConversionValues,
       needsResizableAbUtils,
+      dynViewCompare,
     );
     preambleCache.set(cacheKey, preamble);
   }
@@ -2832,7 +2996,13 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // where `await` parses correctly — and leave `test()` as a trivial probe of
   // `__fail`. The `export function test` already marks the file as a module,
   // so module-goal top-level await is valid.
+  //
+  // (#3188 slice 1) The obj-literal operand form `await { … }` still misparses
+  // even at module top level (synchronous compile ⇒ `await` is an identifier ⇒
+  // `{ … }` is a block that swallows the trailing `export function test`), so
+  // parenthesize the operand first — see parenthesizeAwaitBraceOperand.
   if (resolvedMeta.features?.includes("top-level-await")) {
+    const tlaBody = parenthesizeAwaitBraceOperand(bodyForFunc);
     const tlaPreBody = `${strictDirective}
 ${preamble}
 ${hoistedDecls}
@@ -2848,7 +3018,7 @@ export function test(): number {
     const metaBlockTla = source.match(/\/\*---[\s\S]*?---\*\//);
     const metaLinesTla = metaBlockTla ? metaBlockTla[0].split("\n").length - 1 : 0;
     return {
-      source: tlaPreBody + bodyForFunc.trim() + "\n" + tlaPostBody,
+      source: tlaPreBody + tlaBody.trim() + "\n" + tlaPostBody,
       bodyLineOffset: tlaBodyLineOffset - metaLinesTla,
     };
   }
@@ -3690,7 +3860,7 @@ export async function runTest262File(
   }
 
   // Wrap the test
-  const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta);
+  const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta, target);
 
   /** Adjust error line numbers to refer to the original source file.
    *  The wrapped source has a variable preamble and stripped comments,
@@ -3742,7 +3912,18 @@ export async function runTest262File(
       // wrapper. Matches `test262-shared.ts`.
       inferModuleStrictArguments: isModuleGoal(category, meta, source),
       // (#2095) standalone lane for the baseline validator (default host/gc).
-      ...(target ? { target } : {}),
+      // (#3049 C1 / #3123) Host lane defers top-level init (export
+      // `__module_init`, no wasm `(start)` section) so top-level code runs
+      // AFTER `setExports` has wired the runtime — aligned with
+      // `scripts/compiler-fork-worker.mjs` (#1251 both-paths rule). The
+      // standalone/wasi lane keeps its own `_start` model and is untouched.
+      // MODULE-GOAL tests are EXCLUDED: the multi-module (FIXTURE) link
+      // already synthesizes per-module init plumbing, and adding the
+      // deferred-export flag there emitted a SECOND `__module_init` export in
+      // one binary — V8 rejects it ("Duplicate export name '__module_init'"),
+      // which is exactly the 6-file `language/module-code/*` regression that
+      // parked the stack PR #2835/#2839 in the merge queue.
+      ...(target ? { target } : isModuleGoal(category, meta, source) ? {} : { deferTopLevelInit: true }),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,
@@ -3889,6 +4070,15 @@ export async function runTest262File(
     // Provide exports back to the runtime so __sget_* getters are discoverable
     if (typeof importResult.setExports === "function") {
       importResult.setExports(instance.exports as any);
+    }
+    // (#3049 C1) Deferred top-level init (host lane): run the exported
+    // `__module_init` now that `setExports` has wired the runtime. Inside the
+    // same try as instantiate + test(), so a top-level throw keeps the exact
+    // classification it had when it surfaced from the `(start)` section
+    // (runtime-negative → pass, else fail — see the catch below).
+    const moduleInit = (instance.exports as any).__module_init;
+    if (typeof moduleInit === "function") {
+      moduleInit();
     }
     const testFn = (instance.exports as any).test;
     if (typeof testFn !== "function") {
@@ -4119,10 +4309,24 @@ function round2(n: number): number {
  *   promise_error   — Promise rejection or async failure
  *   assertion_fail  — Test returned non-1 value (assert counter)
  *   exception_in_test — Test returned -1 (exception caught by wrapper)
- *   wasm_compile    — Wasm validation/instantiation error
+ *   wasm_compile    — GENUINE Wasm validation/instantiation error
+ *                     ("invalid Wasm binary" / "Compiling function #N…failed")
+ *   missing_dependency — (#3187) compiler DI diagnostic: a required extern
+ *                     class or host import function was never wired
+ *                     ("No dependency provided for …") — NOT invalid-Wasm
+ *   missing_builtin — (#3187) an unimplemented builtin / runtime feature
+ *                     ("… is not a function") — NOT invalid-Wasm
+ *   harness_shape   — (#3187) module compiled but exposes no `test` export
+ *                     ("no test export") — NOT invalid-Wasm
  *   negative_test_fail — Negative test that should have failed but passed
  *   runtime_error   — Other Cannot/Invalid runtime errors
  *   other           — Unclassified
+ *
+ * (#3187) The wasm_compile / missing_dependency / missing_builtin / harness_shape
+ * split un-inflates the genuine invalid-Wasm bucket (~448 → ~87): "… is not a
+ * function" and "No dependency provided …" were previously mis-binned as
+ * wasm_compile. This is a verdict-classification change, so ORACLE_VERSION was
+ * bumped (see tests/test262-oracle-version.ts). Label-only: no pass/fail flips.
  */
 export function classifyError(errorMsg: string | undefined): string | undefined {
   if (!errorMsg) return undefined;
@@ -4152,11 +4356,26 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // WITHOUT the constructor-name prefix.
   if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
 
-  // Wasm compile/validation errors (from instantiation)
-  if (/Compiling function|No dependency provided|not a function/i.test(errorMsg)) return "wasm_compile";
+  // Wasm compile/validation errors (from instantiation). (#3187) Order matters:
+  // classify GENUINE invalid-Wasm FIRST so an instantiation error that quotes
+  // source text ("Compiling function #N…failed: …") isn't stolen by the
+  // missing-builtin/missing-dependency rules below.
+  if (/invalid Wasm binary|Compiling function/i.test(errorMsg)) return "wasm_compile";
+  // (#3187) The compiler's own dependency-injection diagnostic — "No dependency
+  // provided for extern class X" / "…for imported function env::__X" — is NOT
+  // invalid-Wasm; it means a required host import/extern was never wired. Its own
+  // bucket so it stops inflating wasm_compile (~56 records were mis-binned).
+  if (/No dependency provided/i.test(errorMsg)) return "missing_dependency";
+  // (#3187) "… is not a function" is a missing builtin / unimplemented runtime
+  // feature (safeBroadcast, transferToImmutable, sumPrecise, then, …), not an
+  // invalid-Wasm binary. Kept AFTER the genuine-wasm_compile rule above so
+  // instantiate errors that quote source aren't stolen (~170 records mis-binned).
+  if (/\bis not a function\b/i.test(errorMsg)) return "missing_builtin";
   if (/expected .+ but compiled/i.test(errorMsg)) return "negative_test_fail";
   if (/expected runtime .+ but succeeded/i.test(errorMsg)) return "negative_test_fail";
-  if (/no test export/i.test(errorMsg)) return "wasm_compile";
+  // (#3187) "no test export" is a harness-shape problem (module compiled fine but
+  // exposes no `test` export), not invalid-Wasm — its own bucket.
+  if (/no test export/i.test(errorMsg)) return "harness_shape";
 
   // Catch-all for other errors
   if (/Cannot |Invalid /i.test(errorMsg)) return "runtime_error";

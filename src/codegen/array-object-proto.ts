@@ -31,6 +31,7 @@ import {
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { emitDataViewProtoMemberBody } from "./dataview-native.js"; // (#3173) reflective DataView member bodies
 import { allocLocal } from "./context/locals.js";
 import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
@@ -44,6 +45,8 @@ import {
   flatStringType,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { COLLECTION_KIND, MAP_LAYOUT, ensureMapHelpers } from "./map-runtime.js"; // (#3171) size getter
+import { emitReceiverBrandCheck } from "./receiver-brand.js"; // (#3171) shared brand preamble
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -258,8 +261,8 @@ const SYMBOL_PROTO_METHODS = ["toString", "valueOf"] as const;
 /** `BigInt.prototype`'s own method names (ES2024 §21.2.3). */
 const BIGINT_PROTO_METHODS = ["toLocaleString", "toString", "valueOf"] as const;
 
-/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3). */
-const WEAKMAP_PROTO_METHODS = ["delete", "get", "has", "set"] as const;
+/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3 + ES2025 emplace). */
+const WEAKMAP_PROTO_METHODS = ["delete", "get", "getOrInsert", "getOrInsertComputed", "has", "set"] as const;
 
 /** `WeakSet.prototype`'s own method names (ES2024 §24.4.3). */
 const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
@@ -269,7 +272,19 @@ const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
  * *getter* on the proto (resolved by the computed-access path), not a data
  * method, so it stays out of the value-read CSV.
  */
-const MAP_PROTO_METHODS = ["clear", "delete", "entries", "forEach", "get", "has", "keys", "set", "values"] as const;
+const MAP_PROTO_METHODS = [
+  "clear",
+  "delete",
+  "entries",
+  "forEach",
+  "get",
+  "getOrInsert",
+  "getOrInsertComputed",
+  "has",
+  "keys",
+  "set",
+  "values",
+] as const;
 
 /** `Set.prototype`'s own method names (ES2024 §24.2.3 + the new set-method
  * proposal). `size` is an accessor getter, kept out of the CSV. */
@@ -381,117 +396,140 @@ const TYPED_ARRAY_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   // some, sort, toSorted) are arity 1 — the default.
 };
 
-/** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
-const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
-  concat: 1,
-  copyWithin: 2,
-  every: 1,
-  fill: 1,
-  forEach: 1,
-  push: 1,
-  reduce: 1,
-  slice: 2,
-  splice: 2,
-  unshift: 1,
-  with: 2,
-  hasOwnProperty: 1,
-  isPrototypeOf: 1,
-  propertyIsEnumerable: 1,
-  // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
-  // default to 1.
-  set: 2,
-  // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
-  // bind/call default to 1.
-  apply: 2,
-  // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
-  at: 1,
-  charAt: 1,
-  charCodeAt: 1,
-  codePointAt: 1,
-  endsWith: 1,
-  includes: 1,
-  indexOf: 1,
-  lastIndexOf: 1,
-  localeCompare: 1,
-  match: 1,
-  matchAll: 1,
-  normalize: 0,
-  padEnd: 1,
-  padStart: 1,
-  repeat: 1,
-  replace: 2,
-  replaceAll: 2,
-  search: 1,
-  split: 2,
-  startsWith: 1,
-  substr: 2,
-  substring: 2,
-  // Number.prototype (ES2024 §21.1.3).
-  toExponential: 1,
-  toFixed: 1,
-  toPrecision: 1,
-  // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
-  // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
-  // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
-  // in the String batch above.)
-  toLowerCase: 0,
-  toUpperCase: 0,
-  toLocaleLowerCase: 0,
-  toLocaleUpperCase: 0,
-  trim: 0,
-  trimEnd: 0,
-  trimStart: 0,
-  isWellFormed: 0,
-  toWellFormed: 0,
-  // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
-  setFullYear: 3,
-  setUTCFullYear: 3,
-  setMonth: 2,
-  setUTCMonth: 2,
-  setHours: 4,
-  setUTCHours: 4,
-  setMinutes: 3,
-  setUTCMinutes: 3,
-  setSeconds: 2,
-  setUTCSeconds: 2,
-  // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
-  // `.length` to 0 so the meta-read path reports the spec arity.
-  getDate: 0,
-  getDay: 0,
-  getFullYear: 0,
-  getYear: 0, // (#2671) Annex B §B.2.4 legacy getter (0-arity)
-  getHours: 0,
-  getMilliseconds: 0,
-  getMinutes: 0,
-  getMonth: 0,
-  getSeconds: 0,
-  getTime: 0,
-  getTimezoneOffset: 0,
-  getUTCDate: 0,
-  getUTCDay: 0,
-  getUTCFullYear: 0,
-  getUTCHours: 0,
-  getUTCMilliseconds: 0,
-  getUTCMinutes: 0,
-  getUTCMonth: 0,
-  getUTCSeconds: 0,
-  setTime: 1,
-  toDateString: 0,
-  toISOString: 0,
-  toTimeString: 0,
-  toUTCString: 0,
-  // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
-  // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
-  // on exact arities, only the member set.
-  toJSON: 1,
-  // WeakRef.prototype.deref (ES2024 §26.1.3.2) is 0-arity; FinalizationRegistry.
-  // prototype.register (§26.2.3.1) is arity 2, unregister (§26.2.3.2) arity 1.
-  // These names don't collide with other builtins, so they live in the shared
-  // table safely.
-  deref: 0,
-  register: 2,
-  unregister: 1,
-};
+/**
+ * Spec arity (`fn.length`) of the proto methods that differ from the default 1.
+ *
+ * (#3181) NULL-PROTOTYPED. A plain object literal inherits `Object.prototype`,
+ * so a lookup of an inherited method name (`toString`/`valueOf`/`toLocaleString`/
+ * `constructor`/`hasOwnProperty`…) returned the INHERITED FUNCTION, not
+ * `undefined` — which slipped past the `?? 1` guard and folded `.length` to a
+ * `Function` value → NaN (e.g. `Number.prototype.toString.length`,
+ * `Array.prototype.toString.length`). With a null prototype, unlisted names
+ * resolve to `undefined` and the `?? 1` fallback fires as intended. The three
+ * `Object.prototype`-shadowed names below are given EXPLICIT arities (all 0 for
+ * every family; Number.prototype.toString(radix) is arity 1 — overridden in the
+ * Number glue's `memberLength`, since this table is shared cross-family).
+ */
+const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = Object.assign(
+  Object.create(null) as Record<string, number>,
+  {
+    // Object.prototype-shadowed method names (see the null-proto note above).
+    toString: 0,
+    valueOf: 0,
+    toLocaleString: 0,
+    concat: 1,
+    copyWithin: 2,
+    every: 1,
+    fill: 1,
+    forEach: 1,
+    push: 1,
+    reduce: 1,
+    slice: 2,
+    splice: 2,
+    unshift: 1,
+    with: 2,
+    hasOwnProperty: 1,
+    isPrototypeOf: 1,
+    propertyIsEnumerable: 1,
+    // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
+    // default to 1.
+    set: 2,
+    // (#3172) ES2025 Map/WeakMap emplace additions — both arity 2.
+    getOrInsert: 2,
+    getOrInsertComputed: 2,
+    // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
+    // bind/call default to 1.
+    apply: 2,
+    // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
+    at: 1,
+    charAt: 1,
+    charCodeAt: 1,
+    codePointAt: 1,
+    endsWith: 1,
+    includes: 1,
+    indexOf: 1,
+    lastIndexOf: 1,
+    localeCompare: 1,
+    match: 1,
+    matchAll: 1,
+    normalize: 0,
+    padEnd: 1,
+    padStart: 1,
+    repeat: 1,
+    replace: 2,
+    replaceAll: 2,
+    search: 1,
+    split: 2,
+    startsWith: 1,
+    substr: 2,
+    substring: 2,
+    // Number.prototype (ES2024 §21.1.3).
+    toExponential: 1,
+    toFixed: 1,
+    toPrecision: 1,
+    // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
+    // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
+    // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
+    // in the String batch above.)
+    toLowerCase: 0,
+    toUpperCase: 0,
+    toLocaleLowerCase: 0,
+    toLocaleUpperCase: 0,
+    trim: 0,
+    trimEnd: 0,
+    trimStart: 0,
+    isWellFormed: 0,
+    toWellFormed: 0,
+    // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
+    setFullYear: 3,
+    setUTCFullYear: 3,
+    setMonth: 2,
+    setUTCMonth: 2,
+    setHours: 4,
+    setUTCHours: 4,
+    setMinutes: 3,
+    setUTCMinutes: 3,
+    setSeconds: 2,
+    setUTCSeconds: 2,
+    // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
+    // `.length` to 0 so the meta-read path reports the spec arity.
+    getDate: 0,
+    getDay: 0,
+    getFullYear: 0,
+    getYear: 0, // (#2671) Annex B §B.2.4 legacy getter (0-arity)
+    getHours: 0,
+    getMilliseconds: 0,
+    getMinutes: 0,
+    getMonth: 0,
+    getSeconds: 0,
+    getTime: 0,
+    getTimezoneOffset: 0,
+    getUTCDate: 0,
+    getUTCDay: 0,
+    getUTCFullYear: 0,
+    getUTCHours: 0,
+    getUTCMilliseconds: 0,
+    getUTCMinutes: 0,
+    getUTCMonth: 0,
+    getUTCSeconds: 0,
+    setTime: 1,
+    toDateString: 0,
+    toISOString: 0,
+    toTimeString: 0,
+    toUTCString: 0,
+    // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
+    // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
+    // on exact arities, only the member set.
+    toJSON: 1,
+    // WeakRef.prototype.deref (ES2024 §26.1.3.2) is 0-arity; FinalizationRegistry.
+    // prototype.register (§26.2.3.1) is arity 2, unregister (§26.2.3.2) arity 1.
+    // These names don't collide with other builtins, so they live in the shared
+    // table safely.
+    deref: 0,
+    register: 2,
+    unregister: 1,
+  },
+);
 
 /**
  * (#2875 slice 3) ABI param-slot counts for `String.prototype` members whose
@@ -1343,6 +1381,77 @@ function emitTypedArrayProtoMemberBody(
   return resultType;
 }
 
+/**
+ * (#3171) Native reflective body for the `Map.prototype.size` / `Set.prototype.size`
+ * accessor GETTER — `gOPD(Map.prototype, "size").get.call(recv)`. Spec
+ * §24.1.3.10 / §24.2.4.14: "If M does not have a [[MapData]]/[[SetData]]
+ * internal slot, throw a TypeError". Routes the receiver through the shared
+ * brand preamble (receiver-brand.ts: non-trapping `ref.test $Map` + the
+ * COLLECTION_KIND tag → catchable TypeError on a miss — a Set receiver must
+ * throw for Map's getter and vice versa), then `__map_size` → boxed number.
+ *
+ * Late-funcidx discipline (mirrors `emitTypedArrayProtoMemberBody`): the
+ * `__box_number` import is resolved + flushed BEFORE the cascade; everything
+ * the brand preamble appends in standalone mode (error ctor funcs, string
+ * globals, exn tag) is append-only — no baked-index shifts.
+ */
+function emitCollectionSizeGetterBody(ctx: CodegenContext, fctx: FunctionContext, name: "Map" | "Set"): ValType | null {
+  const resultType: ValType = { kind: "externref" };
+  const refuseMsg = `TypeError: Method get ${name}.prototype.size called on incompatible receiver`;
+
+  // Register the native Map runtime (append-only defined funcs; idempotent).
+  ensureMapHelpers(ctx);
+  const sizeIdx = ctx.mapHelpers.get("__map_size");
+  if (sizeIdx === undefined || ctx.mapTypeIdx < 0) {
+    // No native collection runtime in this module → no receiver can carry the
+    // internal slot → the RequireInternalSlot throw applies unconditionally.
+    emitBrandCheckTypeError(ctx, fctx.body, refuseMsg);
+    return resultType;
+  }
+
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  // Closure ABI: local 0 = self wrapper, local 1 = externref `this`.
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  emitReceiverBrandCheck(
+    ctx,
+    fctx,
+    { kind: "externref" },
+    {
+      message: refuseMsg,
+      structTypeIdx: ctx.mapTypeIdx,
+      kindField: {
+        fieldIdx: MAP_LAYOUT.M_KIND,
+        accept: [name === "Map" ? COLLECTION_KIND.MAP : COLLECTION_KIND.SET],
+      },
+    },
+  );
+  // (ref $Map) on the stack → size (i32) → boxed number externref.
+  fctx.body.push({ op: "call", funcIdx: sizeIdx } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  return resultType;
+}
+
+/**
+ * (#3171) Glue factory for Map/Set — `makeGlue` plus the `size` accessor
+ * getter (real reflective body via {@link emitCollectionSizeGetterBody}).
+ */
+function makeCollectionGlue(brand: number, name: "Map" | "Set", members: readonly string[]): NativeProtoBuiltinGlue {
+  return {
+    brand,
+    name,
+    memberCsv: [...members, "size"].join(","),
+    memberKind: (member) => (member === "size" ? "getter" : "method"),
+    memberLength: (member) => (member === "size" ? 0 : (PROTO_METHOD_LENGTH[member] ?? 1)),
+    emitMemberBody: (c, fctx, member) =>
+      member === "size"
+        ? emitCollectionSizeGetterBody(c, fctx, name)
+        : emitProtoMemberBodyRefusal(c, fctx, name, member),
+  };
+}
+
 function makeGlue(
   ctx: CodegenContext,
   brand: number,
@@ -1357,7 +1466,10 @@ function makeGlue(
     // on the prototype itself; `length` is an own data property of an instance,
     // not the proto).
     memberKind: () => "method",
-    memberLength: (member) => PROTO_METHOD_LENGTH[member] ?? 1,
+    // (#3181) `Number.prototype.toString(radix)` is arity 1 (§21.1.3.7) — the
+    // only family where `toString` differs from the shared default of 0. Every
+    // other family (Array/String/Object/Boolean/Date/…) keeps 0 from the table.
+    memberLength: (member) => (name === "Number" && member === "toString" ? 1 : (PROTO_METHOD_LENGTH[member] ?? 1)),
     // (#2875 slice 3) String search-family members carry an uncounted optional
     // `position` arg — give their closures a real param slot for it. Non-String
     // families return 0 (= "no override": the slot count falls back to the spec
@@ -1564,7 +1676,9 @@ export function ensureMapNativeProtoGlue(ctx: CodegenContext): number | undefine
   const brand = getBuiltinBrand(ctx, "Map");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Map", MAP_PROTO_METHODS));
+    // (#3171) Collection glue = makeGlue + the `size` accessor getter with a
+    // real brand-checked reflective body.
+    registerNativeProtoBuiltin(ctx, makeCollectionGlue(brand, "Map", MAP_PROTO_METHODS));
   }
   return brand;
 }
@@ -1574,7 +1688,9 @@ export function ensureSetNativeProtoGlue(ctx: CodegenContext): number | undefine
   const brand = getBuiltinBrand(ctx, "Set");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Set", SET_PROTO_METHODS));
+    // (#3171) Collection glue = makeGlue + the `size` accessor getter with a
+    // real brand-checked reflective body.
+    registerNativeProtoBuiltin(ctx, makeCollectionGlue(brand, "Set", SET_PROTO_METHODS));
   }
   return brand;
 }
@@ -1667,16 +1783,25 @@ export function ensureDataViewNativeProtoGlue(ctx: CodegenContext): number | und
   const brand = getBuiltinBrand(ctx, "DataView");
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
-    registerNativeProtoBuiltin(
-      ctx,
-      makeGlueWithGetters(
-        brand,
-        "DataView",
-        DATAVIEW_PROTO_METHODS,
-        DATAVIEW_PROTO_GETTERS,
-        DATAVIEW_PROTO_METHOD_LENGTH,
-      ),
+    const glue = makeGlueWithGetters(
+      brand,
+      "DataView",
+      DATAVIEW_PROTO_METHODS,
+      DATAVIEW_PROTO_GETTERS,
+      DATAVIEW_PROTO_METHOD_LENGTH,
     );
+    // (#3173) Real reflective member bodies: get*/set* delegate to the shared
+    // `__dv_m_<member>` native core (brand → ToIndex → [ToNumber] → detached →
+    // bounds → op); `buffer`/`byteLength`/`byteOffset` getters brand-check and
+    // read the `$__dv_window` inline. This is what makes
+    // `DataView.prototype.getUint8.call({})` throw the §24.3.1.1 TypeError
+    // (this-has-no-dataview-internal.js) instead of refusing.
+    glue.emitMemberBody = (c, fctx, member) => emitDataViewProtoMemberBody(c, fctx, member);
+    // The uncounted littleEndian arg needs a real param slot: get*(offset[, le])
+    // → 2 slots (spec length 1), set*(offset, value[, le]) → 3 slots (length 2).
+    // Getter members return 0 (no slots).
+    glue.memberParamSlots = (member) => (member.startsWith("get") ? 2 : member.startsWith("set") ? 3 : 0);
+    registerNativeProtoBuiltin(ctx, glue);
   }
   return brand;
 }

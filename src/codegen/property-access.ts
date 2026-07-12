@@ -33,7 +33,11 @@ import {
   pushBuiltinFnSingletonValueInstrs,
   STANDALONE_STATIC_METHOD_META,
 } from "./builtin-fn-meta.js";
-import { emitBuiltinConstructorIdentity, isBuiltinConstructorIdentityName } from "./builtin-static-globals.js";
+import {
+  emitBuiltinConstructorIdentity,
+  emitBuiltinNamespaceObject,
+  isBuiltinConstructorIdentityName,
+} from "./builtin-static-globals.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
@@ -50,6 +54,7 @@ import {
   classifyTypedArrayType,
   reserveVecMethodHelper,
   resolveWasmType,
+  undefinedTypedMemberReadProducesExternref,
   TYPED_ARRAY_NAMES,
   typedArrayPackedSignedness,
   typedArrayVecStorage,
@@ -113,7 +118,7 @@ import {
   localGlobalIdx,
   recordInModuleInitFlagRead,
 } from "./registry/imports.js";
-import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
+import { dvDetachedThrowInstrs, getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing; (#3173) detached TypeError
 import {
   getArrTypeIdxFromVec,
   getOrRegisterResizableAbType,
@@ -312,6 +317,19 @@ export function maybeWrapAnyReadEqualityCarrier(
   if (!ctx.standalone) return result;
   if (!result || result.kind !== "externref") return result;
   if (!isAnyEqualityOperand(ctx, expr)) return result;
+  // (#3169) The enclosing equality must be the ACTIVE `$AnyValue` dispatch
+  // (recorded by binary-ops around `compileAnyBinaryDispatch`). The static
+  // shape gate above mirrors binary-ops' entry CONDITION, but not its entry
+  // STATE: when `$AnyValue` gets lazily registered as a side effect of THIS
+  // operand's compile (e.g. the standalone dynamic-index read pulling in the
+  // `__unbox_number` union native), `ctx.anyValueTypeIdx` flips ≥ 0 after
+  // binary-ops already chose the plain externref equality path — wrapping then
+  // hands that path a `ref $AnyValue` it compares by struct identity, so
+  // value-equal operands answer a spurious `!==` (`obj[idx] !== val`, the
+  // -c-ii test262 family). Requiring the live marker guarantees the carrier is
+  // consumed by `__any_strict_eq` and nothing else; under-firing stays safe
+  // (bare externref → the chosen path's own equality semantics).
+  if (ctx.activeAnyEqDispatchExpr !== expr.parent) return result;
   // (#3037 CS1b(ii)) Mirror binary-ops.ts:1081's `ctx.anyValueTypeIdx >= 0` guard,
   // and check it BEFORE `ensureAnyFromExternHelper` (which lazily REGISTERS the
   // `$AnyValue` type as a side effect). binary-ops routes an `any===any` pair
@@ -884,7 +902,7 @@ function reportUnsupportedStandaloneBuiltinValueRead(ctx: CodegenContext, builti
   );
 }
 
-function makeBuiltinClosureFctx(
+export function makeBuiltinClosureFctx(
   name: string,
   selfType: ValType,
   paramTypes: ValType[],
@@ -3666,6 +3684,40 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#3133) Standalone `.constructor` on a PLAIN-OBJECT or ARRAY receiver → the
+  // SAME identity-stable namespace-object singleton the bare `Object` / `Array`
+  // identifier resolves to (`emitBuiltinNamespaceObject`, identifiers.ts ~769).
+  // #3006 deliberately EXCLUDED `Object`/`Array` from its per-builtin ctor
+  // singletons because their bare values already carry genuine namespace-object
+  // identity — but the `.constructor` READ path for their instances was never
+  // routed anywhere, so `({}).constructor` / `[1].constructor` /
+  // `Object.prototype.constructor` / `Array.prototype.constructor` fell through
+  // to the dynamic `$Object` own-prop read and returned `undefined`
+  // (`({}).constructor === Object` → false). Routing the read to the SAME
+  // per-name `__builtin_<Name>` global makes the identity GENUINELY true (same
+  // WasmGC object, `ref.eq`) while the swap-wrong-builtin cross-check
+  // (`({}).constructor === Array`) stays GENUINELY false (distinct singletons).
+  //
+  // Conservative gates: static-type-driven like the #3006 arm above; declines
+  // (falls through, current behavior) for any/unknown/union receivers, callables,
+  // receivers whose type declares a USER-written `constructor` member, and — as
+  // a module-wide guard against runtime shadowing — any module that assigns to
+  // or deletes a `.constructor` property anywhere. Standalone-only: gc/host mode
+  // keeps the genuine `Object_get_constructor` host read.
+  if (ctx.standalone && propName === "constructor") {
+    const nsName = classifyPlainCtorReceiverNamespace(ctx, objType);
+    if (nsName !== undefined && !moduleTouchesConstructorProp(expr.getSourceFile())) {
+      // Evaluate the receiver for its side effects (spec: MemberExpression is
+      // evaluated), then discard it — the constructor identity is static.
+      const objResult = compileExpression(ctx, fctx, expr.expression);
+      if (objResult) {
+        fctx.body.push({ op: "drop" });
+      }
+      const t = emitBuiltinNamespaceObject(ctx, fctx, nsName);
+      if (t) return t.kind === "externref" ? t : { kind: "externref" };
+    }
+  }
+
   // (#2660 S2) `F.prototype` on a user function constructor (standalone): return
   // the per-fnctor prototype `$Object` global instead of `__extern_get($closure,
   // "prototype")` (which misses `ref.test $Object` → null). Makes
@@ -3905,6 +3957,11 @@ export function compilePropertyAccess(
       const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
       const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
       const fieldIdx = propName === "byteOffset" ? 1 : 2;
+      // (#3173) §25.3.4.2/3 — the byteLength/byteOffset getters throw TypeError
+      // on a detached buffer (marker: buffer vec length < 0). Template built
+      // BEFORE the receiver compile (funcIdx-capture ordering rule).
+      const detachedThrow = dvDetachedThrowInstrs(ctx);
+      flushLateImportShifts(ctx, fctx);
       const recvType = compileExpression(ctx, fctx, expr.expression);
       const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
       if (recvType?.kind === "externref") {
@@ -3912,6 +3969,15 @@ export function compilePropertyAccess(
       }
       fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
       const winBranch: Instr[] = [
+        // detached? → TypeError
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] } as Instr,
         { op: "local.get", index: anyLocal } as Instr,
         { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
         { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
@@ -4064,11 +4130,13 @@ export function compilePropertyAccess(
       if (byteArrTypeIdx >= 0) {
         const byteLenLocal = allocLocal(fctx, `__tabuf_len_${fctx.locals.length}`, { kind: "i32" });
         if (bufIsDataView) {
-          // A DataView receiver is either a `$__dv_window` wrapper (windowed view
-          // → byte length is its field-2 `byteLength`) or a bare `$__vec_i32_byte`
-          // (offset-0 view → field-0 IS the byte count). Mirror the byteLength arm's
-          // runtime `ref.test $__dv_window` branch so both shapes work — a static
-          // cast to one shape would `illegal cast` the other.
+          // (#3173) §25.3.4.1 — a DataView's `.buffer` is its ACTUAL viewed
+          // buffer, identity included (`sample.buffer === buffer`, works on a
+          // detached buffer too). Standalone DataViews are `$__dv_window`
+          // wrappers whose `buf` field HOLDS the shared buffer vec — return it
+          // directly instead of synthesizing a fresh zero-filled copy (the
+          // pre-#3173 non-identity floor). A bare-vec receiver (legacy shape)
+          // IS the buffer — return it unchanged.
           const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
           const recvType = compileExpression(ctx, fctx, expr.expression);
           const anyLocal = allocLocal(fctx, `__tabuf_any_${fctx.locals.length}`, { kind: "anyref" });
@@ -4079,22 +4147,22 @@ export function compilePropertyAccess(
           const winBranch: Instr[] = [
             { op: "local.get", index: anyLocal } as Instr,
             { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf (shared)
+            { op: "extern.convert_any" } as Instr,
           ];
           const vecBranch: Instr[] = [
             { op: "local.get", index: anyLocal } as Instr,
-            { op: "ref.cast", typeIdx: byteVecTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "extern.convert_any" } as Instr,
           ];
           fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
           fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
           fctx.body.push({
             op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
+            blockType: { kind: "val", type: { kind: "externref" } },
             then: winBranch,
             else: vecBranch,
           } as Instr);
-          fctx.body.push({ op: "local.set", index: byteLenLocal } as Instr);
+          return { kind: "externref" };
         } else {
           // TypedArray: backing is an f64 vec (or i8 for standalone Uint8Array);
           // byteLen = element-count (field 0) × BYTES_PER_ELEMENT.
@@ -4938,8 +5006,19 @@ export function compilePropertyAccess(
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
-      // ClassName.constructor — return the constructor function reference
-      if (propName === "constructor") {
+      // ClassName.constructor — return the constructor function reference.
+      // (#3024) A class may declare a STATIC method literally named
+      // `constructor` (`static * constructor() {}` — legal, distinct from the
+      // instance constructor; the `grammar-static-ctor-*-meth-valid` test262
+      // family). `C.constructor` then reads that static method as a value and
+      // must be boxed like any other static method (a closure struct →
+      // `extern.convert_any`, the arm below). The legacy raw path here emitted
+      // `ref.func <C_constructor>` + `extern.convert_any` — but a funcref is
+      // NOT in the anyref hierarchy, so `extern.convert_any` on it is invalid
+      // Wasm (`call[N] expected externref, found ref.func of (ref M)`). Skip
+      // the raw path when a static method owns the name, letting the
+      // static-method closure arm below handle it correctly.
+      if (propName === "constructor" && !ctx.staticMethodSet.has(fullName)) {
         const ctorName = `${resolvedClass}_constructor`;
         const funcIdx = ctx.funcMap.get(ctorName);
         if (funcIdx !== undefined) {
@@ -6388,6 +6467,16 @@ export function compilePropertyAccess(
     const objWasmType = resolveWasmType(ctx, objType);
     const isExternObj =
       objWasmType.kind === "externref" ||
+      // (#3033 Bug 2b) CHAINED dynamic read: the receiver is itself a purely-
+      // undefined-typed member read off an externref receiver (`this.type` in
+      // acorn's `this.type.keyword`). Its static type resolves NUMERIC
+      // (resolveWasmType(undefined)), so the externref clause above misses it
+      // and the read fell through to the terminal "unresolvable" fallback — a
+      // constant `ref.null.extern` — making `x.var` throw. The receiver's
+      // RUNTIME value is externref (the inner read compiles through this very
+      // arm), so admit it here. Shared predicate with Bug 2a's var-slot typing
+      // (`varBindingNeedsExternrefForUndefined`) — single source of truth.
+      undefinedTypedMemberReadProducesExternref(ctx, expr.expression) ||
       (ts.isIdentifier(expr.expression) &&
         (() => {
           const localIdx = fctx.localMap.get(expr.expression.text);
@@ -7712,6 +7801,36 @@ export function isAnyTypedIndexExpression(ctx: CodegenContext, index: ts.Express
   return fact.kind === "any" || fact.kind === "unknown";
 }
 
+/**
+ * (#3169) True when an expression's receiver chain is rooted at the
+ * MATERIALIZED `arguments` object (`arguments`, `arguments[2]`,
+ * `arguments[2][arguments[1]]`, `(arguments[0]).x[y]`, …). Used to exclude
+ * such reads from the standalone dynamic-index positional retry — the
+ * materialized arguments state is not reliably positional for
+ * 0-declared-param HOF callbacks, so those reads keep the byte-exact legacy
+ * `__extern_get` behaviour (arguments fidelity is a separate follow-on).
+ */
+function isArgumentsRootedExpression(fctx: FunctionContext, node: ts.Expression): boolean {
+  let cur: ts.Expression = node;
+  for (;;) {
+    if (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+      continue;
+    }
+    if (ts.isElementAccessExpression(cur) || ts.isPropertyAccessExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    break;
+  }
+  return ts.isIdentifier(cur) && cur.text === "arguments" && fctx.localMap.has("arguments");
+}
+
 /** Inner element access logic — assumes objType is on the stack and non-null */
 export function compileElementAccessBody(
   ctx: CodegenContext,
@@ -7906,6 +8025,144 @@ export function compileElementAccessBody(
       }
       // Defensive fallback — helpers unavailable (unreachable in host mode). Read
       // via the host from the stored key so the stack stays balanced.
+      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+      if (extGetIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+    // (#3169) STANDALONE twin of the #2773 dynamic-`any`-index arm above (which
+    // is host/gc-only). The untyped `idx` param of a named-function-declaration
+    // HOF callback (`function cb(val, idx, obj) { obj[idx] … }`) is implicit
+    // `any`, so `isNumericIndexExpression` is false and the read previously fell
+    // to the string-keyed `__extern_get(recv, boxed-number-key)` — which finds
+    // nothing on a vec/`$ObjVec`/closed-struct receiver and answered `undefined`
+    // (the test262 "callbackfn called with correct parameters" `-c-ii` family:
+    // `obj[idx] !== val` wrongly true).
+    //
+    // ORDER: the legacy `__extern_get(recv, key)` runs FIRST and stays
+    // authoritative — some producers (the materialized `arguments` object) key
+    // their `$Object` entries by BOXED NUMBER, which `__extern_get` finds
+    // directly but a `number_toString` re-canonicalized key would MISS, so
+    // positional-first regressed the `arguments[2][arguments[1]]` c-ii-13
+    // family. Only a MISS (null / undefined) with a NUMERIC, non-string key
+    // retries through the positional `__extern_get_idx(recv, f64)` — the
+    // standalone reader that dispatches vecs, `$ObjVec`, array-like `$Object`
+    // (canonical `number_toString` key, #2551) AND the #3169 closed-struct
+    // array-like arms. A genuine string key keeps the byte-exact old result
+    // (the string gate below); so does every read the old path answered.
+    // Standalone only (NOT wasi: the `$Object` delegation arm inside
+    // `__extern_get_idx` is `ctx.standalone`-gated, same reasoning as the
+    // #2166 numeric arm below).
+    if (
+      ctx.standalone &&
+      isAnyTypedIndexExpression(ctx, expr.argumentExpression) &&
+      // EXCLUSION — a read whose receiver chain is rooted at the materialized
+      // `arguments` object (`arguments[i]`, `arguments[2][arguments[1]]`, …)
+      // keeps the legacy `__extern_get` path untouched. The materialized
+      // arguments state is not reliably positional for 0-declared-param
+      // callbacks (the HOF inline loop pushes only the DECLARED params, so
+      // `arguments` there is synthesized, order-fragile state); the positional
+      // retry surfaced half-correct values that flipped the vacuously-passing
+      // `arguments[2][arguments[1]] === arguments[0]` c-ii-13 family to real
+      // failures. Real arguments-fidelity work is a follow-on; this arm only
+      // targets HOF callback params (`obj[idx]`) and other genuine receivers.
+      !isArgumentsRootedExpression(fctx, expr.expression)
+    ) {
+      // recv externref is on the stack → recvLocal (allocated FIRST so local
+      // numbering is stable through the key compile, per #3007).
+      const recvLocal = allocLocal(fctx, `__sdyn_recv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      // Compile the key as externref FIRST (preserves a string key's identity
+      // for the string-keyed read) BEFORE capturing helper funcIdxs — the
+      // key's own lowering may register late imports that shift them (#3007).
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+      const keyLocal = allocLocal(fctx, `__sdyn_key_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+      const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+      const getIdxFn = ensureLateImport(
+        ctx,
+        "__extern_get_idx",
+        [{ kind: "externref" }, { kind: "f64" }],
+        [{ kind: "externref" }],
+      );
+      const extGetIdx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      // Miss gate: under the #2106 S1 singleton regime a missing property reads
+      // back as the (non-null) undefined singleton, so `ref.is_null` alone
+      // under-detects the miss; `__extern_is_undefined` covers it (same gate as
+      // the member-get dispatcher's #2963 miss test).
+      const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (unboxIdx !== undefined && getIdxFn !== undefined && extGetIdx !== undefined) {
+        const resLocal = allocLocal(fctx, `__sdyn_res_${fctx.locals.length}`, { kind: "externref" });
+        const idxF64 = allocLocal(fctx, `__sdyn_idxf_${fctx.locals.length}`, { kind: "f64" });
+        // res = __extern_get(recv, key) — the legacy read, byte-exact.
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: resLocal } as Instr);
+        // miss = res == null || __extern_is_undefined(res)
+        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
+        fctx.body.push({ op: "ref.is_null" } as Instr);
+        if (isUndefIdx !== undefined) {
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } as ValType },
+            then: [{ op: "i32.const", value: 1 } as Instr],
+            else: [{ op: "local.get", index: resLocal } as Instr, { op: "call", funcIdx: isUndefIdx } as Instr],
+          } as Instr);
+        }
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // idxF64 = Number(key); NaN (non-numeric key) → keep the miss.
+            { op: "local.get", index: keyLocal } as Instr,
+            { op: "call", funcIdx: unboxIdx } as Instr,
+            { op: "local.tee", index: idxF64 } as Instr,
+            { op: "local.get", index: idxF64 } as Instr,
+            { op: "f64.eq" } as Instr, // not-NaN ⇒ numeric key
+            // …AND the key is not a genuine STRING. The native `__unbox_number`
+            // is the ToNumber engine, so a numeric-looking string key ("1e3",
+            // "01") would unbox non-NaN and retry positionally under a
+            // canonically DIFFERENT key (get_idx re-stringifies 1000 as
+            // "1000" ≠ "1e3"). String keys keep the exact old miss.
+            ...[ctx.anyStrTypeIdx, ctx.nativeStrTypeIdx]
+              .filter((t) => t >= 0)
+              .flatMap((strTypeIdx) => [
+                { op: "local.get", index: keyLocal } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "ref.test", typeIdx: strTypeIdx } as Instr,
+                { op: "i32.eqz" } as Instr,
+                { op: "i32.and" } as Instr,
+              ]),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: recvLocal } as Instr,
+                { op: "local.get", index: idxF64 } as Instr,
+                { op: "call", funcIdx: getIdxFn } as Instr,
+                { op: "local.set", index: resLocal } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr);
+        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
+        return { kind: "externref" };
+      }
+      // Defensive fallback — helpers unavailable. Read via the string-keyed
+      // path from the stored locals so the stack stays balanced.
       fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
       fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
       if (extGetIdx !== undefined) {
@@ -8523,4 +8780,93 @@ export function compileElementAccessBody(
     emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx, externUndefOobArr, taSignednessArr);
   }
   return valueType;
+}
+
+/**
+ * (#3133) Classify a `.constructor` receiver whose constructor is one of the
+ * two namespace-object builtins (`Object` / `Array`) that #3006 deliberately
+ * left out of `BUILTIN_CONSTRUCTOR_IDENTITY_NAMES`. Returns the namespace name
+ * to route the read to, or `undefined` to decline (fall through to the current
+ * lowering). Deliberately conservative:
+ *
+ * - declines `any` / `unknown` (the #2026 tag-dispatch arm owns those) and
+ *   union/intersection receivers;
+ * - array/tuple static types (checker-confirmed) → `"Array"` — covers `[1]`,
+ *   `Array.prototype` (typed `any[]`), `new Array(n)`;
+ * - the `Object` interface itself → `"Object"` — covers `Object.prototype`,
+ *   `new Object()`, `Object(x)` results;
+ * - anonymous object-literal shapes (`{}` / `{ a: 1 }`) → `"Object"`, but only
+ *   when the type is not callable/constructable and does not declare a
+ *   USER-written `constructor` member (a user `{ constructor: v }` keeps its
+ *   own property read).
+ */
+function classifyPlainCtorReceiverNamespace(ctx: CodegenContext, objType: ts.Type): "Object" | "Array" | undefined {
+  if (
+    (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Union | ts.TypeFlags.Intersection)) !==
+    0
+  ) {
+    return undefined;
+  }
+  const checkerAny = ctx.checker as unknown as {
+    isArrayType?: (t: ts.Type) => boolean;
+    isTupleType?: (t: ts.Type) => boolean;
+  };
+  if (checkerAny.isArrayType?.(objType) || checkerAny.isTupleType?.(objType)) return "Array";
+  if ((objType.flags & ts.TypeFlags.Object) === 0) return undefined;
+  const symName = objType.getSymbol()?.name;
+  if (symName === "Array" || symName === "ReadonlyArray") return "Array";
+  if (symName === "Object") return "Object";
+  // "__object" = object-LITERAL expression types only. Deliberately NOT
+  // "__type" (type-literal annotations like `const o: {} = new A()`), where the
+  // annotation says nothing about the runtime constructor.
+  if (symName === "__object") {
+    if (objType.getCallSignatures().length > 0 || objType.getConstructSignatures().length > 0) return undefined;
+    // A user-declared `constructor` member (non-lib declaration) keeps its own
+    // property read; a lib-inherited `constructor` (Object.prototype) is fine.
+    const ctorProp = objType.getProperty("constructor");
+    if (ctorProp !== undefined && (ctorProp.declarations ?? []).some((d) => !d.getSourceFile().isDeclarationFile)) {
+      return undefined;
+    }
+    return "Object";
+  }
+  return undefined;
+}
+
+/**
+ * (#3133) Module-wide shadowing guard for the static `.constructor` identity
+ * fold: if the module ever ASSIGNS to or DELETES a `.constructor` property
+ * (any receiver — syntactic scan, cached per source file), decline the fold so
+ * runtime-shadowed reads keep their current dynamic behavior.
+ */
+const constructorPropTouchCache = new WeakMap<ts.SourceFile, boolean>();
+function moduleTouchesConstructorProp(sourceFile: ts.SourceFile): boolean {
+  let touched = constructorPropTouchCache.get(sourceFile);
+  if (touched === undefined) {
+    touched = false;
+    const isCtorMember = (e: ts.Expression): boolean =>
+      (ts.isPropertyAccessExpression(e) && e.name.text === "constructor") ||
+      (ts.isElementAccessExpression(e) &&
+        ts.isStringLiteralLike(e.argumentExpression) &&
+        e.argumentExpression.text === "constructor");
+    const walk = (node: ts.Node): void => {
+      if (touched) return;
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        isCtorMember(node.left)
+      ) {
+        touched = true;
+        return;
+      }
+      if (ts.isDeleteExpression(node) && isCtorMember(node.expression)) {
+        touched = true;
+        return;
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(sourceFile);
+    constructorPropTouchCache.set(sourceFile, touched);
+  }
+  return touched;
 }

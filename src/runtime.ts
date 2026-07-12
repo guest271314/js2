@@ -129,7 +129,23 @@ function _fnctorProtoLookup(
   if (!_canBeWeakKey(obj)) return undefined;
   const ctor = _fnctorInstanceCtor.get(obj);
   if (ctor == null) return undefined;
-  const proto = _sidecarGet(ctor, "prototype");
+  let proto = _sidecarGet(ctor, "prototype");
+  // (#3123) A top-level `F.prototype = <expr>` write may land in the closure
+  // STRUCT's typed `prototype` field slot (the #2664 `__set_member_prototype`
+  // dispatcher's struct arm) instead of the sidecar. Read the field through
+  // the compiled `__sget_prototype` getter so the live prototype the compiled
+  // side reads back is the SAME object the host walk starts from.
+  if (proto === undefined && exports !== undefined && _isWasmStruct(ctor)) {
+    const sgetProto = exports.__sget_prototype as ((v: any) => any) | undefined;
+    if (typeof sgetProto === "function") {
+      try {
+        const v = sgetProto(ctor);
+        if (v != null) proto = v;
+      } catch {
+        /* not a field of this struct shape */
+      }
+    }
+  }
   if (proto == null || typeof proto !== "object") return undefined;
   let cur: any = proto;
   let guard = 0;
@@ -278,6 +294,29 @@ let _GeneratorInstancePrototypeCache: any = null;
 let _AsyncGeneratorInstancePrototypeCache: any = null;
 let _IteratorPrototypeCache: any = null;
 let _AsyncIteratorPrototypeCache: any = null;
+// (#3049) Shared `%ArrayIteratorPrototype%` stand-in for iterators the
+// `__iterator` host import SYNTHESIZES over compiled vec structs. §23.1.5.2:
+// array iterators are ObjectCreate(%ArrayIteratorPrototype%), whose
+// [[Prototype]] is %IteratorPrototype%. The old one-level chain made the
+// spec-shaped walk `getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))`
+// (hardcoded by tests + the runner's `Iterator` shim) overshoot the
+// helper-bearing proto onto Object.prototype → every
+// `Iterator.prototype.<helper>` lookup was undefined. One SHARED cached
+// middle object keeps getPrototypeOf identity stable across iterators.
+let _SynthArrayIteratorPrototypeCache: any = null;
+function _getSynthArrayIteratorPrototype(base: any): any {
+  if (_SynthArrayIteratorPrototypeCache) return _SynthArrayIteratorPrototypeCache;
+  const proto = Object.create(base ?? null);
+  _SynthArrayIteratorPrototypeCache = proto;
+  // §23.1.5.2.2 %ArrayIteratorPrototype% [ @@toStringTag ]
+  Object.defineProperty(proto, Symbol.toStringTag, {
+    value: "Array Iterator",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  return proto;
+}
 
 /**
  * Install a built-in method on a prototype with spec-mandated descriptor
@@ -2343,15 +2382,60 @@ function _wrapWasmClosureUnknownArity(
       break;
     }
   }
+  // (#2623 P-7 / B-1) The closure's REAL declared arity, resolved lazily via the
+  // `__closure_arity` export (emitted alongside `__is_closure`). -2 = not yet
+  // probed, -1 = unknown (no export / not a closure). Cached per wrapper — the
+  // arity of a given closure struct never changes.
+  let realArityCache = -2;
   const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
+    // (#3051 Slice 3) Host-side [[Construct]] (`new bridge(...)` — e.g. V8's
+    // `Construct(C_species, «rx, flags»)` in the RegExp @@split protocol): a
+    // raw wasm-struct return must be marshalled to its host mirror so the
+    // native consumer can read the constructed object. `new`-path only —
+    // plain-call returns stay raw (marshalling generic call exits regressed
+    // ~85 dstr files, #3123/#2835).
+    const viaNew = new.target !== undefined;
+    const marshalNew = (ret: any): any =>
+      viaNew && ret != null && typeof ret === "object" && _isWasmStruct(ret)
+        ? _wrapForHost(ret, callbackState?.getExports())
+        : ret;
     // METHOD call (receiver-bound `o.m(...)` → `fn.apply(wrappedObj, …)`): dispatch
-    // at the max method arity so a closure whose declared arity exceeds the caller's
-    // arg count is still matched. Each closure receives exactly its own arity.
+    // at an arity ≥ the closure's declared arity so the closure is still matched.
+    // Each closure receives exactly its own declared formals at the wasm arm.
     if (methodMaxArity >= 0 && this !== undefined && this !== globalThis) {
-      const methodCallFn = exports[`__call_fn_method_${methodMaxArity}`];
+      // (#2623 P-7 / B-1) Prefer dispatching at EXACTLY max(args.length,
+      // realArity): the #820l argc/extras plumbing derives `arguments.length`
+      // from the DISPATCHER arity, so padding to `methodMaxArity`
+      // (indistinguishable from real undefined args) inflated the callee's
+      // `arguments.length` (V8-native `.finally` invokes a patched `then` with
+      // exactly 2 args; the wasm `then` observed 5 — the test262
+      // `finally/invokes-then-with-*` assert-#3 failure). Falls back to the
+      // historical max-arity dispatch when the module has no `__closure_arity`
+      // export or the exact-arity dispatcher isn't emitted — never dispatches
+      // BELOW the closure's declared arity (the #2664 acorn omission hazard).
+      let dispatchArity = methodMaxArity;
+      if (realArityCache === -2) {
+        realArityCache = -1;
+        const arityFn = exports.__closure_arity as ((v: any) => number) | undefined;
+        if (typeof arityFn === "function") {
+          try {
+            const a = arityFn(closure);
+            if (typeof a === "number" && a >= 0) realArityCache = a;
+          } catch {
+            realArityCache = -1;
+          }
+        }
+      }
+      if (realArityCache >= 0) {
+        const exact = Math.max(args.length, realArityCache);
+        if (exact < methodMaxArity && typeof exports[`__call_fn_method_${exact}`] === "function") {
+          dispatchArity = exact;
+        }
+      }
+      const methodCallFn = exports[`__call_fn_method_${dispatchArity}`];
       if (typeof methodCallFn === "function") {
         const padded: any[] = [];
-        for (let i = 0; i < methodMaxArity; i++) padded.push(args[i]);
+        for (let i = 0; i < dispatchArity; i++) padded.push(args[i]);
         // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
         // struct before installing it as `__current_this`. `__extern_method_call`
         // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host
@@ -2360,7 +2444,7 @@ function _wrapWasmClosureUnknownArity(
         // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
         // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
         const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
-        return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
+        return marshalNew(methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded));
       }
     }
     // Free-function / extracted-method (`const f = o.m; f()`) path: dispatch by the
@@ -2372,7 +2456,7 @@ function _wrapWasmClosureUnknownArity(
     if (typeof callFn !== "function") return undefined;
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
-    return callFn(closure, ...padded);
+    return marshalNew(callFn(closure, ...padded));
   };
   try {
     if (wrapped.prototype && closure != null) {
@@ -2598,13 +2682,16 @@ function _instanceofResult(
   // `strict` distinguishes the two call paths. The STRING path (`__instanceof`)
   // resolves `target` from `globalThis[ctorName]`, so a non-callable object
   // there is GENUINELY non-callable (`x instanceof Math`) → always throw. The
-  // DYNAMIC path (`__instanceof_check`) receives an arbitrary runtime value that
-  // may be a callable our WasmGC representation does not expose as a JS function
-  // (e.g. a `Function(...)`-constructor result). To avoid throwing on such a
-  // mis-represented callable (which would regress `primitive instanceof
-  // Function(...)` → must be `false`), the dynamic path only throws for a
-  // non-callable object that carries its OWN `@@hasInstance` (i.e. one that opts
-  // into the protocol); otherwise it conservatively returns `false`.
+  // DYNAMIC path (`__instanceof_check`) receives an arbitrary runtime value.
+  // (#2740) `null`/`undefined`, primitives, and non-callable HOST objects are
+  // decidably non-callable on both paths → TypeError. The one remaining
+  // conservative case is a WasmGC data struct: class constructors, class
+  // instances, and object literals share one representation (`__is_closure`
+  // === 0, `__is_data_struct` === 1), so a genuinely-callable class value held
+  // in an any-typed variable cannot be told apart from a plain object until
+  // the class-value rep unification (#2763/#3134). On the dynamic path such a
+  // struct only throws when it carries its OWN `@@hasInstance` (i.e. opts into
+  // the protocol); otherwise it conservatively answers `false`.
   strict = false,
 ): number {
   // A wasm-closure target must look like a function to the spec checks below.
@@ -2614,10 +2701,14 @@ function _instanceofResult(
   // §13.10.2 step 1: If Type(target) is not Object, throw a TypeError.
   // A genuine primitive (number / string / boolean / symbol / bigint) always
   // throws. `null`/`undefined`, however, are also produced by features our
-  // backend does not yet lower (notably a `Function(...)` constructor result),
-  // and the pre-#2702 dynamic path returned `false` for them — so on the DYNAMIC
-  // path we keep that conservative `false` to avoid regressing `primitive
-  // instanceof Function(...)`. The STRING path (`strict`) and the codegen
+  // backend does not yet lower, and the pre-#2702 dynamic path returned
+  // `false` for them — so on the DYNAMIC path we keep that conservative
+  // `false`. (#2740 verified 2026-07-12: the body-only `Function("...")` /
+  // `new Function()` forms now yield real closure wrappers, but the
+  // params+body form `Function("name", "this.name=name;")` STILL lowers to
+  // `null` — throwing here regresses `primitive instanceof FACTORY` → must be
+  // `false`, S15.3.5.3_A1_T1..T8. Do not lift this until that form returns a
+  // real callable.) The STRING path (`strict`) and the codegen
   // unconditional-throw path (a statically primitive/`undefined`/`null` RHS)
   // still throw for a genuinely non-object RHS.
   if (target === null || target === undefined) {
@@ -2651,15 +2742,28 @@ function _instanceofResult(
   // §13.10.2 step 4: If IsCallable(target) is false, throw a TypeError.
   if (typeof target !== "function") {
     if (strict) return _INSTANCEOF_THROW;
-    // Dynamic path: `target` is an object (primitives were thrown at step 1) of
-    // unknown callability. An OWN `@@hasInstance` (even null/undefined) means it
-    // is deliberately used as a non-callable RHS → TypeError. Otherwise it may
-    // be a callable our representation does not surface as a JS function (a
-    // `Function(...)` result); return `false` to match OrdinaryHasInstance's
-    // §7.3.20 step 3 outcome for a primitive V rather than spuriously throwing.
+    // Dynamic path: `target` is an object (primitives were thrown at step 1).
+    // An OWN `@@hasInstance` (even null/undefined) means it is deliberately
+    // used as a non-callable RHS → TypeError.
     if (Object.prototype.hasOwnProperty.call(target, Symbol.hasInstance)) {
       return _INSTANCEOF_THROW;
     }
+    // (#2740) A HOST object (not a WasmGC struct) is native JS — if it were
+    // callable, `typeof` would say "function". So a host object here is
+    // decidably non-callable → TypeError (`x instanceof Math` routed through
+    // an any-typed variable, §13.10.2 step 4). EXCEPTION: a `_wrapForHost`
+    // proxy presents as a host object (proto `Object.prototype`, writable) but
+    // wraps a WasmGC struct whose callability is NOT decidable — fall through
+    // to the conservative struct handling below for those.
+    if (!_isWasmStruct(target) && !_hostProxyReverse.has(target)) {
+      return _INSTANCEOF_THROW;
+    }
+    // A WasmGC struct of unknown callability must stay conservative: class
+    // constructors, class instances and object literals are all `__is_data_
+    // struct` === 1 / `__is_closure` === 0 — indistinguishable until the
+    // class-value rep unification (#2763/#3134). Throwing here would turn
+    // `x instanceof C` (a class held in an any-typed variable, spec answer
+    // true/false) into a spurious TypeError. Return `false` instead.
     return 0;
   }
 
@@ -2813,6 +2917,126 @@ function _readIterResultField(result: any, field: string, exports: Record<string
 }
 
 /**
+ * (#3195) Resolve a member (`next` / `done` / `value` / `return`) of a closure-
+ * iterator object or its result record. Tries native access first, then the
+ * safe getter, then the `__sget_<key>` struct export — so it reads both plain-JS
+ * and opaque-WasmGC-struct iterators/results. Functionally equivalent to
+ * {@link _readIterResultField} for both shapes (a wasm struct's native/`_safeGet`
+ * reads yield `undefined`, so both fall through to `__sget_<key>`).
+ */
+function _resolveIterProp(target: any, key: string, exports: Record<string, Function> | undefined): any {
+  let direct: any;
+  try {
+    direct = target?.[key];
+  } catch {
+    direct = undefined;
+  }
+  if (direct !== undefined) return direct;
+  const safe = _safeGet(target, key);
+  if (safe !== undefined) return safe;
+  const sget = exports?.[`__sget_${key}`];
+  if (typeof sget === "function") return sget(target);
+  return undefined;
+}
+
+/**
+ * (#3195) The single closure-iterator step loop shared by the three drainers
+ * (`_drainClosureIterableToArray`, `_drainWasmClosureIterable`, and the nested
+ * `_walkWasmIterator`). Given an already-obtained `iteratorObj`, step it through
+ * the closure protocol — native `next()` OR `__call_fn_0` on a wasm-struct
+ * `next` — reading each result's `done`/`value` via {@link _resolveIterProp},
+ * collecting values into a real JS array.
+ *
+ * The callers' historical divergences are the options (verified 1:1 against the
+ * three originals, #1849 review):
+ *  - `cap`: defensive runaway guard (`1e6` for the single-value #1 cases,
+ *    `1 << 16` elsewhere).
+ *  - `limit`: stop after `limit` values (`Infinity` = full drain).
+ *  - `closeOnStop`: §7.4.6 IteratorClose (`return()`) when the loop stops on a
+ *    finite `limit` or the `cap` (a NormalCompletion stop) — NOT on natural
+ *    `done`. Only the bounded destructuring walk sets it. A non-Object
+ *    `return()` result throws a TypeError (§7.4.6 step 9).
+ *  - `nullOnMalformedNext`: return `null` (abort — caller keeps the original)
+ *    instead of breaking with the values so far, when no usable `.next()` is
+ *    found (`_drainClosureIterableToArray`).
+ *  - `nullOnMissingCallFn0`: return `null` when the `next` is a wasm-struct
+ *    closure but `__call_fn_0` is unavailable (`_drainWasmClosureIterable`'s
+ *    wrapper path); others break instead.
+ */
+function _stepClosureIterator(
+  iteratorObj: any,
+  exports: Record<string, Function> | undefined,
+  opts: {
+    cap?: number;
+    limit?: number;
+    closeOnStop?: boolean;
+    nullOnMalformedNext?: boolean;
+    nullOnMissingCallFn0?: boolean;
+  } = {},
+): any[] | null {
+  const callFn0 = exports?.["__call_fn_0"];
+  const cap = opts.cap ?? 1 << 16;
+  const limit = opts.limit ?? Infinity;
+  const out: any[] = [];
+  let stopped = false;
+  let iterCount = 0;
+  while (true) {
+    if (out.length >= limit) {
+      stopped = true;
+      break;
+    }
+    if (iterCount++ >= cap) {
+      stopped = true;
+      break;
+    }
+    const nextFn = _resolveIterProp(iteratorObj, "next", exports);
+    let result: any;
+    if (typeof nextFn === "function") {
+      result = nextFn.call(iteratorObj);
+    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      // Wasm-struct next — invoke via __call_fn_0. Spec-mandated throws from the
+      // user's next() propagate.
+      if (typeof callFn0 !== "function") {
+        if (opts.nullOnMissingCallFn0) return null;
+        break;
+      }
+      result = callFn0(nextFn);
+    } else {
+      // No usable .next — malformed iterator.
+      if (opts.nullOnMalformedNext) return null;
+      break;
+    }
+    if (result == null) break;
+    if (_resolveIterProp(result, "done", exports)) break;
+    out.push(_resolveIterProp(result, "value", exports));
+  }
+  if (opts.closeOnStop && stopped) {
+    // §7.4.6 IteratorClose: call return(); a non-Object return result IS
+    // observable on this NormalCompletion stop (step 9 → TypeError). Absent
+    // return method → NormalCompletion, no call.
+    const returnFn = _resolveIterProp(iteratorObj, "return", exports);
+    let innerResult: any;
+    let called = false;
+    if (typeof returnFn === "function") {
+      innerResult = returnFn.call(iteratorObj);
+      called = true;
+    } else if (
+      returnFn != null &&
+      typeof returnFn === "object" &&
+      _isWasmStruct(returnFn) &&
+      typeof callFn0 === "function"
+    ) {
+      innerResult = callFn0(returnFn);
+      called = true;
+    }
+    if (called && (innerResult === null || (typeof innerResult !== "object" && typeof innerResult !== "function"))) {
+      throw new TypeError("iterator close: return() did not return an Object");
+    }
+  }
+  return out;
+}
+
+/**
  * (#1320/#1684) Drain a closure-backed iterable into a real JS array.
  *
  * When compiled code does `obj[Symbol.iterator] = function () { … }`, the
@@ -2838,35 +3062,10 @@ function _drainClosureIterableToArray(obj: any, exports: Record<string, Function
   if (iterFn == null || typeof iterFn !== "object" || !_isWasmStruct(iterFn)) return null;
   const iterator = callFn0(iterFn);
   if (iterator == null) return null;
-  // The iterator object may itself be an opaque WasmGC struct — read its
-  // `next` member through the struct getter, not native property access.
-  const sgetNext = exports?.__sget_next;
-  const out: any[] = [];
-  // Guard against a runaway iterator (bug in compiled next()): the test262
-  // cases that reach here yield a single value, so a generous cap is safe.
-  for (let guard = 0; guard < 1_000_000; guard++) {
-    let nextFn = _safeGet(iterator, "next");
-    if (nextFn == null && typeof sgetNext === "function" && _isWasmStruct(iterator)) {
-      try {
-        nextFn = sgetNext(iterator);
-      } catch {
-        /* not a struct field */
-      }
-    }
-    let result: any;
-    if (typeof nextFn === "function") {
-      result = nextFn.call(iterator);
-    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
-      result = callFn0(nextFn);
-    } else {
-      return null; // no usable next() — not a well-formed iterator
-    }
-    if (result == null) break;
-    const done = _readIterResultField(result, "done", exports);
-    if (done) break;
-    out.push(_readIterResultField(result, "value", exports));
-  }
-  return out;
+  // (#3195) Drain through the shared step loop. A generous cap is safe — the
+  // test262 cases that reach here yield a single value; a malformed `next()`
+  // aborts (returns null → caller keeps the original value).
+  return _stepClosureIterator(iterator, exports, { cap: 1_000_000, nullOnMalformedNext: true });
 }
 
 function _materializeIterable(
@@ -2953,39 +3152,10 @@ function _drainWasmClosureIterable(
     }
   }
   if (iteratorObj == null || typeof iteratorObj !== "object") return null;
-  const out: any[] = [];
-  const MAX_ITER = 1 << 16;
-  let iterCount = 0;
-  const resolveProp = (target: any, key: string): any => {
-    let direct: any;
-    try {
-      direct = target?.[key];
-    } catch {
-      direct = undefined;
-    }
-    if (direct !== undefined) return direct;
-    const safe = _safeGet(target, key);
-    if (safe !== undefined) return safe;
-    const sget = exports?.[`__sget_${key}`];
-    if (typeof sget === "function") return sget(target);
-    return undefined;
-  };
-  while (iterCount++ < MAX_ITER) {
-    const nextFn = resolveProp(iteratorObj, "next");
-    let result: any;
-    if (typeof nextFn === "function") {
-      result = nextFn.call(iteratorObj);
-    } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
-      if (typeof callFn0 !== "function") return null;
-      result = callFn0(nextFn);
-    } else {
-      break;
-    }
-    if (result == null) break;
-    if (resolveProp(result, "done")) break;
-    out.push(resolveProp(result, "value"));
-  }
-  return out;
+  // (#3195) Drain via the shared step loop. `nullOnMissingCallFn0` preserves
+  // this path's abort when a result's `next` is a wasm-struct closure but
+  // `__call_fn_0` is unavailable (the wrapper path may leave it undefined).
+  return _stepClosureIterator(iteratorObj, exports, { nullOnMissingCallFn0: true });
 }
 
 /**
@@ -4769,7 +4939,30 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
       if (wasmKey) {
         const sc2 = _sidecarGet(obj, wasmKey);
         if (sc2 !== undefined) return sc2;
+        // (#3123) A computed well-known-symbol property in an object LITERAL
+        // (`{ [Symbol.iterator]: 0 }`) compiles to a typed struct FIELD named
+        // "@@iterator" — invisible to the sidecar read above. Read it through
+        // the per-shape `__sget_@@<name>` getter so a NON-CALLABLE @@iterator
+        // (the flatMap iterable-to-iterator-fallback shape, which must make
+        // GetMethod throw TypeError) is observable host-side.
+        const exports2 = callbackState?.getExports();
+        const fieldGetter = exports2?.[`__sget_${wasmKey}`];
+        if (typeof fieldGetter === "function") {
+          try {
+            const v = fieldGetter(obj);
+            if (v !== undefined && v !== null) return v;
+          } catch {
+            /* not a field of this struct shape */
+          }
+        }
       }
+    }
+    // (#3123) Compiled class methods/getters on a registered fnctor-subclass
+    // instance — the own-C.prototype level, shadowing the fnctor parent's
+    // prototype chain below.
+    {
+      const v = _resolveClassMemberOnInstance(obj, key, callbackState?.getExports());
+      if (v !== _MISS) return v;
     }
     // (#1712) fnctor instances: resolve through the constructor's vivified
     // prototype object before giving up. Accessors run with the instance
@@ -5627,6 +5820,99 @@ function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined)
  * non-callable object — #1627) need the unmasked underlying value. Returns
  * `undefined` when nothing resolves.
  */
+/**
+ * (#3123, ported from the #3049-stack's bridge-exit marshaling — ONLY the
+ * function, not the stack's wiring of it into the generic `__call_fn` bridge
+ * exits, which regressed ~85 dstr iterator-close files in the parked #2835)
+ * Marshal a Wasm-struct value host-usably: vec / data-struct → `_wrapForHost`
+ * live mirror; closure struct → cached host-callable wrapper; anything
+ * already host-usable passes through untouched. Called exclusively from the
+ * fnctor-subclass member resolution below, so every other path keeps its
+ * pre-#3123 bytes-for-bytes behavior.
+ */
+function _marshalBridgeResult(v: any, callbackState?: { getExports: () => Record<string, Function> | undefined }): any {
+  if (v == null || typeof v !== "object" || !_isWasmStruct(v)) return v;
+  const exports = callbackState?.getExports();
+  if (!exports) return v;
+  try {
+    // Positive data-struct / vec discrimination FIRST (#2794 —
+    // `__is_closure` can false-positive on layout-canonicalization
+    // collisions; the data/vec markers cannot).
+    const isVec = exports.__is_vec as unknown as ((x: any) => number) | undefined;
+    if (typeof isVec === "function" && isVec(v) === 1) return _wrapForHost(v, exports);
+    const isData = exports.__is_data_struct as unknown as ((x: any) => number) | undefined;
+    if (typeof isData === "function" && isData(v) === 1) return _wrapForHost(v, exports);
+    const isCl = exports.__is_closure as unknown as ((x: any) => number) | undefined;
+    if (typeof isCl === "function" && isCl(v) === 1) {
+      return _wrapWasmClosureUnknownArity(v, callbackState) ?? v;
+    }
+  } catch {
+    /* discriminators unavailable — fall through to the generic proxy */
+  }
+  return _wrapForHost(v, exports);
+}
+
+/**
+ * (#3123) Cached host bridges for compiled class methods resolved on
+ * registered fnctor-subclass instances — identity-stable per (instance, key).
+ */
+const _classMethodHostBridges = new WeakMap<object, Map<string, Function>>();
+
+/**
+ * (#3123) Resolve a compiled CLASS method/getter on a registered
+ * fnctor-subclass instance (`class C extends F`, F a top-level plain function)
+ * via the module's dispatch exports:
+ *   - `__member_kind_<key>(recv)` → 0 none / 1 method / 2 getter;
+ *   - kind 1 → an identity-stable host function bridging to the 0-arg tag
+ *     dispatcher `__call_<key>(recv)` (the iterator protocol: `next()` /
+ *     `return()`);
+ *   - kind 2 → the getter's RESULT per [[Get]], marshaled host-usably (the
+ *     map/filter `get next()` exhaustion shape returns a FRESH closure per
+ *     read — do NOT cache).
+ * Returns `_MISS` when the exports are absent or the struct carries neither.
+ * The method bridge dispatches on the CAPTURED instance (correct for
+ * `Call(nextMethod, iterator)` where nextMethod was read from that instance;
+ * an extracted re-bind `f.call(other)` is out of scope — documented #3123).
+ */
+function _resolveClassMemberOnInstance(obj: any, key: any, exports: Record<string, Function> | undefined): any {
+  if (exports === undefined || typeof key !== "string") return _MISS;
+  if (obj == null || typeof obj !== "object" || !_canBeWeakKey(obj)) return _MISS;
+  if (!_fnctorInstanceCtor.has(obj)) return _MISS;
+  const kindFn = exports[`__member_kind_${key}`] as unknown as ((v: any) => number) | undefined;
+  if (typeof kindFn !== "function") return _MISS;
+  let kind = 0;
+  try {
+    kind = kindFn(obj);
+  } catch {
+    return _MISS;
+  }
+  const cbState = { getExports: () => exports };
+  if (kind === 2) {
+    const getFn = exports[`__call_get_${key}`] as unknown as ((v: any) => any) | undefined;
+    if (typeof getFn !== "function") return _MISS;
+    return _marshalBridgeResult(getFn(obj), cbState);
+  }
+  if (kind === 1) {
+    const callFn = exports[`__call_${key}`] as unknown as ((v: any) => any) | undefined;
+    if (typeof callFn !== "function") return _MISS;
+    let map = _classMethodHostBridges.get(obj);
+    if (!map) {
+      map = new Map();
+      _classMethodHostBridges.set(obj, map);
+    }
+    let fn = map.get(key);
+    if (!fn) {
+      fn = function classMethodHostBridge(this: any) {
+        return _marshalBridgeResult(callFn(obj), cbState);
+      };
+      Object.defineProperty(fn, "name", { value: key, configurable: true });
+      map.set(key, fn);
+    }
+    return fn;
+  }
+  return _MISS;
+}
+
 function _resolveHostField(obj: any, key: any, exports: Record<string, Function> | undefined): any {
   // #1336 — accessor properties (Object.defineProperty(obj, k, {get})) must
   // INVOKE the getter, not return a descriptor. Sidecar stores the descriptor
@@ -5669,6 +5955,19 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
         // receiver's struct shape doesn't carry the field at all.
         const v = getter(obj);
         if (v !== undefined && v !== null) return v;
+        // (#3051 Slice 3) `null` disambiguation: a compiled `null` literal is
+        // stored as ref.null (reads back `null` — same as the dispatcher's
+        // shape-miss), while compiled `undefined` is the distinguished host
+        // undefined. When the receiver's OWN struct shape carries the field,
+        // a `null` read is the REAL stored value, not a miss — e.g. the exec
+        // result `{ groups: null }` must expose `groups === null` so V8's
+        // @@replace step 14.j/l `ToObject(namedCaptures)` throws the
+        // spec-mandated TypeError (result-coerce-groups-err). Shape check only
+        // on the rare null path — the common hit path above is unchanged.
+        if (v === null) {
+          const fieldNames = _getStructFieldNames(obj, exports);
+          if (fieldNames !== null && fieldNames.includes(String(key))) return null;
+        }
       } catch {
         /* not a field of this struct type */
       }
@@ -5680,7 +5979,27 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
     if (wasmKey !== undefined) {
       const v = _sidecarGet(obj, wasmKey);
       if (v !== undefined) return v;
+      // (#3123) Computed well-known-symbol LITERAL property → typed struct
+      // FIELD named "@@<name>" — read via the per-shape `__sget_@@<name>`
+      // getter (see the matching arm in `_safeGet`). Makes a non-callable
+      // `{ [Symbol.iterator]: 0 }` observable so native GetMethod throws.
+      const fieldGetter = exports?.[`__sget_${wasmKey}`];
+      if (typeof fieldGetter === "function") {
+        try {
+          const fv = fieldGetter(obj);
+          if (fv !== undefined && fv !== null) return fv;
+        } catch {
+          /* not a field of this struct shape */
+        }
+      }
     }
+  }
+  // (#3123) Compiled class methods/getters on a registered fnctor-subclass
+  // instance — the own-C.prototype level, which must SHADOW the fnctor
+  // parent's prototype chain below.
+  {
+    const v = _resolveClassMemberOnInstance(obj, key, exports);
+    if (v !== _MISS) return v;
   }
   // (#1712) fnctor instances: resolve through the constructor's vivified
   // prototype object. Accessors run with the live-mirror proxy as the receiver.
@@ -5719,6 +6038,84 @@ function _resolveHostField(obj: any, key: any, exports: Record<string, Function>
  * so the callability throws + size ToNumber coercion happen per spec. Scoped to
  * the 7 set-algebra methods only — no change to `_wrapForHost`'s own behaviour.
  */
+/**
+ * (#3049) Iterator-record faithfulness shim for the ES2025 Iterator helpers
+ * (`Iterator.prototype.map/filter/take/…`), which drive the RECEIVER via the
+ * spec iterator record (Call(next, iter) → Get(result, "done"/"value")).
+ * Compiled shapes break that: a raw-struct receiver has opaque reads; a
+ * `next` whose value is a Wasm closure struct isn't host-callable ("object is
+ * not a function" — the this-plain-iterator cluster); Wasm-struct step
+ * results have opaque done/value (infinite drive loop). The shim bridges the
+ * record methods callable and host-mirrors struct step results. Mirrors the
+ * `_setLikeRecordForHost` (#1627) precedent — scoped to the Iterator-helper
+ * dispatch sites only; no change to `_wrapForHost` itself.
+ */
+const _ITER_HELPER_NAMES = [
+  "map",
+  "filter",
+  "take",
+  "drop",
+  "flatMap",
+  "reduce",
+  "toArray",
+  "forEach",
+  "some",
+  "every",
+  "find",
+] as const;
+function _isIteratorHelperFn(f: any): boolean {
+  if (typeof f !== "function") return false;
+  const I: any = (globalThis as any).Iterator;
+  const p = I?.prototype;
+  if (p == null || typeof p !== "object") return false;
+  for (const n of _ITER_HELPER_NAMES) {
+    if (p[n] === f) return true;
+  }
+  return false;
+}
+function _iteratorRecordForHost(
+  v: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (v == null || typeof v !== "object") return v;
+  const exports = callbackState?.getExports();
+  const base = _isWasmStruct(v) ? _wrapForHost(v, exports) : v;
+  const wrapStep = (r: any): any =>
+    r != null && typeof r === "object" && _isWasmStruct(r) ? _wrapForHost(r, exports) : r;
+  const shim: any = Object.create(base);
+  // LAZY accessors, resolved only when the helper itself performs the spec
+  // `Get(iterator, "next")` — an EAGER read here fired user getter effects
+  // BEFORE the helper's own argument validation, breaking the
+  // `argument-effect-order.js` family (spec §: IsCallable(mapper) throws
+  // before GetIteratorDirect ever touches `next`). defineProperty (not `=`)
+  // because `base` may carry `next` as a getter-only accessor
+  // (`{ get next() {…} }`), which a proto-chain-walking assignment rejects.
+  const defineLazy = (k: string): void => {
+    Object.defineProperty(shim, k, {
+      get() {
+        let f: any = base[k]; // user getter effects fire exactly at the spec Get
+        if (f != null && typeof f === "object" && _isWasmStruct(f)) {
+          f = _maybeWrapCallableUnknownArity(f, callbackState);
+        }
+        if (typeof f !== "function") return f; // non-callable: let the helper throw per spec
+        const fn = f as Function;
+        return function (this: any, ...args: any[]) {
+          return wrapStep(fn.apply(base, args));
+        };
+      },
+      set(val: any) {
+        Object.defineProperty(shim, k, { value: val, writable: true, enumerable: true, configurable: true });
+      },
+      enumerable: false,
+      configurable: true,
+    });
+  };
+  defineLazy("next");
+  defineLazy("return");
+  defineLazy("throw");
+  return shim;
+}
+
 function _setLikeRecordForHost(
   arg: any,
   exports: Record<string, Function> | undefined,
@@ -6187,6 +6584,15 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
   const handler: ProxyHandler<any> = {
     get(_t, key) {
       const val = safeGetField(key);
+      if (process.env.JS2WASM_DEBUG_3051) {
+        console.error(
+          "[3051] proxy.get",
+          String(key),
+          "->",
+          val === null ? "null" : typeof val,
+          val != null && typeof val === "object" && _isWasmStruct(val) ? "(struct)" : "",
+        );
+      }
       // If val is a wasmGC closure struct (method stored as a field), wrap
       // it in a JS function that dispatches via the compiled __call_<name>
       // export so JS callers (including native ToPrimitive / Array built-ins)
@@ -6228,12 +6634,49 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
         const exportKey = typeof key === "string" ? key : typeof key === "symbol" ? _symbolToWasm.get(key) : undefined;
+        // (#3051 Slice 3) A closure struct that CARRIES its own properties —
+        // sidecar entries beyond the codegen's name/length meta stamps, or
+        // symbol-keyed accessors — must be presented as the full callable host
+        // mirror (`_wrapCallableForHost`), not the property-less closureBridge
+        // below. The canonical case is the @@split species protocol: the test
+        // stores `rx.constructor = function(){}` (raw closure in the sidecar)
+        // then `rx.constructor[Symbol.species] = fn` (symbol prop on the
+        // closure's OWN sidecar). V8's SpeciesConstructor does
+        // `Get(C, @@species)` on the value it read from `rx.constructor`; the
+        // bare bridge hid the sidecar, so the species silently defaulted to
+        // %RegExp% and `new RegExp(<opaque rx proxy>)` threw "Cannot convert
+        // object to primitive value". The callable mirror delegates property
+        // reads to `_wrapForHost(closure)` (sidecar-aware), is constructible
+        // ([[Construct]] trap), and is identity-cached per closure.
+        {
+          const scOwn = _wasmStructProps.get(val);
+          let carriesOwnProps = _wasmStructAccessors.has(val);
+          if (!carriesOwnProps && scOwn) {
+            for (const k of Object.keys(scOwn)) {
+              if (k !== "name" && k !== "length") {
+                carriesOwnProps = true;
+                break;
+              }
+            }
+            if (!carriesOwnProps && Object.getOwnPropertySymbols(scOwn).length > 0) carriesOwnProps = true;
+          }
+          if (carriesOwnProps) {
+            const callable = _wrapCallableForHost(val, { getExports: () => exports });
+            if (typeof callable === "function") return callable;
+          }
+        }
         if (exportKey !== undefined) {
           const callFn = exports[`__call_${exportKey}`];
           if (typeof callFn === "function") {
-            return function closureBridge(this: any, ...args: any[]) {
+            const namedBridge = function closureBridge(this: any, ...args: any[]) {
               return callFn(obj);
             };
+            // (#3051 Slice 3) `exec` protocol reads: marshal the RESULT object
+            // so V8's Get + ToXxx protocol observes struct fields (mirrors the
+            // Slice-1 `regexp.exec = fn` extern_set wrap).
+            return exportKey === "exec"
+              ? _wrapExecReturnForHost(namedBridge, { getExports: () => exports })
+              : namedBridge;
           }
         }
         // Generic closure caller fallback — wraps any WasmGC closure struct
@@ -6262,28 +6705,45 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
           const mcall0 = exports["__call_fn_method_0"];
           const mcall1 = exports["__call_fn_method_1"];
           const mcall2 = exports["__call_fn_method_2"];
-          return function closureBridge(this: any, ...args: any[]) {
-            const hasRecv = this !== undefined && this !== null && this !== globalThis;
-            const rawThis = hasRecv && typeof this === "object" ? _unwrapForHost(this) : this;
-            const recv = _isWasmStruct(rawThis) ? rawThis : undefined;
-            if (recv !== undefined) {
-              if (args.length === 0 && typeof mcall0 === "function") return mcall0(recv, val);
-              if (args.length === 1 && typeof mcall1 === "function") return mcall1(recv, val, args[0]);
-              if (args.length >= 2 && typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
-              if (typeof mcall1 === "function") return mcall1(recv, val, args[0]);
-              if (typeof mcall0 === "function") return mcall0(recv, val);
-              if (typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+          const genericBridge = function closureBridge(this: any, ...args: any[]) {
+            // (#3051 Slice 3) Host-side [[Construct]] of a compiled closure
+            // (V8's `Construct(C_species, «rx, flags»)` in @@split) — a raw
+            // wasm-struct return must be marshalled to its host mirror so the
+            // native protocol can drive the constructed splitter's
+            // exec/lastIndex. Only the `new` path marshals; plain calls keep
+            // their raw returns (marshalling generic call exits regressed ~85
+            // dstr files — see #3123/#2835).
+            const viaNew = new.target !== undefined;
+            const dispatch = (): any => {
+              const hasRecv = this !== undefined && this !== null && this !== globalThis;
+              const rawThis = hasRecv && typeof this === "object" ? _unwrapForHost(this) : this;
+              const recv = _isWasmStruct(rawThis) ? rawThis : undefined;
+              if (recv !== undefined) {
+                if (args.length === 0 && typeof mcall0 === "function") return mcall0(recv, val);
+                if (args.length === 1 && typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+                if (args.length >= 2 && typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+                if (typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+                if (typeof mcall0 === "function") return mcall0(recv, val);
+                if (typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+              }
+              if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
+              if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
+              if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
+              // Fallback: try the highest-arity dispatcher available, padding
+              // missing args with undefined or dropping extras.
+              if (typeof callFn1 === "function") return callFn1(val, args[0]);
+              if (typeof callFn0 === "function") return callFn0(val);
+              if (typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
+              return undefined;
+            };
+            const ret = dispatch();
+            if (viaNew && ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
+              return _wrapForHost(ret, exports);
             }
-            if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
-            if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
-            if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
-            // Fallback: try the highest-arity dispatcher available, padding
-            // missing args with undefined or dropping extras.
-            if (typeof callFn1 === "function") return callFn1(val, args[0]);
-            if (typeof callFn0 === "function") return callFn0(val);
-            if (typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
-            return undefined;
+            return ret;
           };
+          // (#3051 Slice 3) See the named-arm exec wrap above.
+          return key === "exec" ? _wrapExecReturnForHost(genericBridge, { getExports: () => exports }) : genericBridge;
         }
         // Non-closure WasmGC struct (e.g. nested object with valueOf/toString) —
         // wrap with _wrapForHost so its properties are accessible from JS (#1090)
@@ -6297,6 +6757,25 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // catches only true JS arrays the resolver returned directly.
       if (Array.isArray(val) && exports) {
         return _wrapHostArrayElems(val, exports);
+      }
+      // (#3051 Slice 3) Inherited `Object.prototype.toString` / `valueOf`
+      // fallthrough. A Proxy's get trap intercepts INHERITED lookups too, so a
+      // native ToPrimitive on the mirror of a plain-object struct saw
+      // `toString === undefined` and threw "Cannot convert object to primitive
+      // value" — but an ordinary object converts via the inherited
+      // `Object.prototype.toString` ("[object Object]", §7.1.1.1). The @@split
+      // default-constructor path (`new RegExp(<rx mirror>, flags)` when the
+      // receiver has no species) must NOT throw (species-ctor-ctor-non-obj's
+      // guard call). Scoped to exactly these two keys, only when nothing own
+      // resolves — an OWN `toString: undefined` / `valueOf: undefined` (the
+      // test262 `*-tostring-throws-toprimitive` poison pattern) SHADOWS the
+      // inherited method per ordinary [[Get]], so ToPrimitive must still throw
+      // TypeError. The first merge_group run of PR #2910 regressed exactly that
+      // cluster (15 files: String.prototype.* this-value coercions,
+      // Error.prototype.toString, Number.toFixed, TypedArray join) before this
+      // own-property guard.
+      if (val === undefined && (key === "toString" || key === "valueOf") && !_wasmStructHasOwn(obj, key, exports)) {
+        return (Object.prototype as Record<string, unknown>)[key as string];
       }
       return val;
     },
@@ -6563,6 +7042,12 @@ function _wrapCallableForHost(
       // dispatch resolves on whichever instance escapes.
       if (inst !== self && _canBeWeakKey(inst) && !_fnctorInstanceCtor.has(inst)) {
         _fnctorInstanceCtor.set(inst, closure);
+      }
+      // (#3051 Slice 3) A raw wasm-struct return escapes to the HOST consumer
+      // that ran Construct (e.g. V8's @@split species protocol driving the
+      // constructed splitter's exec/lastIndex) — marshal it to its host mirror.
+      if (inst !== self && _isWasmStruct(inst)) {
+        return _wrapForHost(inst, callbackState?.getExports());
       }
       return inst;
     },
@@ -9101,7 +9586,12 @@ assert._isSameValue = isSameValue;
           // returned match-result object via Get + ToXxx. A compiled result
           // object literal is an opaque WasmGC struct, so wrap the return in a
           // host proxy for the spec coercions to observe its fields.
-          if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+          // (Slice 3) Guard widened from `obj instanceof RegExp` to any object:
+          // the @@split species protocol drives `exec` on FAKE-regexp plain
+          // objects (`splitter = Construct(C_species, …)` returning
+          // `{ exec, get/set lastIndex }` — a host plain object under #1239),
+          // whose exec result needs the identical marshalling.
+          if (typeof wrappedVal === "function" && key === "exec" && obj !== null && typeof obj === "object") {
             wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
           }
           _safeSet(obj, key, wrappedVal, undefined, callbackState);
@@ -9117,7 +9607,8 @@ assert._isSameValue = isSameValue;
           let wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
           // (#3051) See __extern_set: wrap a `regexp.exec` override's return so
           // the native RegExp protocol can read the compiled result object.
-          if (typeof wrappedVal === "function" && key === "exec" && obj instanceof RegExp) {
+          // (Slice 3) Widened to any object receiver — see __extern_set.
+          if (typeof wrappedVal === "function" && key === "exec" && obj !== null && typeof obj === "object") {
             wrappedVal = _wrapExecReturnForHost(wrappedVal, callbackState);
           }
           _safeSet(obj, key, wrappedVal, undefined, callbackState, /* strict */ true);
@@ -9171,6 +9662,16 @@ assert._isSameValue = isSameValue;
                 /* not a field */
               }
             }
+            // (#3139) Inherited `length` through the fnctor instance→ctor
+            // prototype chain (§7.3.2 Get is prototype-inclusive). The classic
+            // shape: `foo.prototype = new Array(1,2,3); var f = new foo();
+            // Array.prototype.every.call(f, cb)` — the compiled array-generic
+            // loop reads the receiver's length via THIS import, and the live
+            // length lives on the Array-valued prototype (the walk's vec arm
+            // serves it). Own reads above always shadow. Requires the #3138
+            // call-site instance→ctor registration to have linked the instance.
+            const pd = _fnctorProtoLookup(obj, "length", exports);
+            if (pd) return toLength(coerceLen(pd.get ? pd.get.call(obj) : pd.value));
             return 0;
           }
           const len = obj.length;
@@ -9221,6 +9722,14 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${strKey}`];
           if (typeof getter === "function") return getter(obj);
+          // (#3139) Inherited index through the fnctor instance→ctor prototype
+          // chain (`foo.prototype = new Array(11,22,33); new foo()[1]` → 22).
+          // Sits BEFORE the Object.prototype extended-index table below because
+          // the receiver's own [[Prototype]] chain shadows %Object.prototype%.
+          if (_isWasmStruct(obj)) {
+            const pd = _fnctorProtoLookup(obj, strKey, exports);
+            if (pd) return pd.get ? pd.get.call(obj) : pd.value;
+          }
           // (#2580 M3 B-protoextend) Inherited indexed data/accessor on the
           // Object.prototype chain. Reached only after own fields + sidecar +
           // own accessor descriptors miss — so a real array / $Vec / receiver
@@ -9292,6 +9801,10 @@ assert._isSameValue = isSameValue;
               /* getter not defined for this struct variant — fall through */
             }
           }
+          // (#3139) Inherited index through the fnctor instance→ctor prototype
+          // chain (HasProperty §7.3.12 is prototype-inclusive). Before the
+          // Object.prototype table for the same shadowing reason as get_idx.
+          if (_isWasmStruct(obj) && _fnctorProtoLookup(obj, strKey, exports) !== undefined) return 1;
           // (#2580 M3 B-protoextend) Inherited index on the Object.prototype
           // chain. HasProperty (§7.3.12) walks `[[Prototype]]`; an array-like
           // plain-object receiver inherits `Object.prototype[i]`. Presence is
@@ -9957,94 +10470,13 @@ assert._isSameValue = isSameValue;
         // natural `done:true`, a null result, or a missing `.next`). Shared by
         // both the wasm-closure-`@@iterator` path and `_drainIterable` (a
         // native `@@iterator` that RETURNS a wasm-struct iterator).
-        const _walkWasmIterator = (iteratorObj: any, limit: number): any[] => {
-          const exps = callbackState?.getExports();
-          const callFn0 = exps?.["__call_fn_0"];
-          const resolveProp = (target: any, key: string): any => {
-            const direct = target?.[key];
-            if (direct !== undefined) return direct;
-            const safe = _safeGet(target, key);
-            if (safe !== undefined) return safe;
-            const sget = exps?.[`__sget_${key}`];
-            if (typeof sget === "function") return sget(target);
-            return undefined;
-          };
-          const out: any[] = [];
-          // Defensive cap: a non-spec-compliant iterator that never sets
-          // `done:true` would otherwise hang. 64K is well above any reasonable
-          // destructuring source (#1219).
-          const MAX_ITER = 1 << 16;
-          let iterCount = 0;
-          let cappedOut = false;
-          while (true) {
-            // A no-rest binding pattern consumes EXACTLY `limit` IteratorStep
-            // calls; §8.5.3 then requires IteratorClose because the record's
-            // [[Done]] is still false. Rest/spread pass limit === Infinity and
-            // drain to natural done WITHOUT closing (dstr/*-iter-no-close).
-            if (out.length >= limit) {
-              cappedOut = true;
-              break;
-            }
-            if (iterCount++ >= MAX_ITER) {
-              cappedOut = true;
-              break;
-            }
-            const nextFn = resolveProp(iteratorObj, "next");
-            let result: any;
-            if (typeof nextFn === "function") {
-              result = nextFn.call(iteratorObj);
-            } else if (
-              nextFn != null &&
-              typeof nextFn === "object" &&
-              _isWasmStruct(nextFn) &&
-              typeof callFn0 === "function"
-            ) {
-              // Wasm closure — invoke via __call_fn_0. Spec-mandated throws
-              // from the user's `next()` propagate (dstr/*-iter-step-err).
-              result = callFn0(nextFn);
-            } else {
-              // No callable .next — malformed iterator. Spec says NOT to call
-              // return() here (dstr/*-ary-init-iter-no-close).
-              break;
-            }
-            if (result == null) break;
-            const done = resolveProp(result, "done");
-            if (done) break;
-            // §7.4.5 IteratorValue — a `.value` getter may throw; propagate.
-            const value = resolveProp(result, "value");
-            out.push(value);
-          }
-          if (cappedOut) {
-            const returnFn = resolveProp(iteratorObj, "return");
-            // §7.4.6 IteratorClose steps 6+9: call `return`, and if it returns
-            // a value whose Type is not Object, throw a TypeError. (The bounded
-            // stop is a NormalCompletion, so step 7's "outer throw wins" does not
-            // apply here — a non-object return result IS observable.) Absent
-            // return method → step 4 NormalCompletion, no call, no throw.
-            let innerResult: any;
-            let called = false;
-            if (typeof returnFn === "function") {
-              innerResult = returnFn.call(iteratorObj);
-              called = true;
-            } else if (
-              returnFn != null &&
-              typeof returnFn === "object" &&
-              _isWasmStruct(returnFn) &&
-              typeof callFn0 === "function"
-            ) {
-              innerResult = callFn0(returnFn);
-              called = true;
-            }
-            // Else: no return method — spec §7.4.6 returns NormalCompletion.
-            if (
-              called &&
-              (innerResult === null || (typeof innerResult !== "object" && typeof innerResult !== "function"))
-            ) {
-              throw new TypeError("iterator close: return() did not return an Object");
-            }
-          }
-          return out;
-        };
+        // (#3195) The bounded destructuring walk: consume at most `limit`
+        // IteratorStep calls; §8.5.3 closes the iterator when stopped by a finite
+        // `limit` / the defensive cap (a NormalCompletion stop — `closeOnStop`),
+        // while `limit === Infinity` (rest/spread) drains to natural done WITHOUT
+        // closing. Shares the single step loop with the other two drainers.
+        const _walkWasmIterator = (iteratorObj: any, limit: number): any[] =>
+          _stepClosureIterator(iteratorObj, callbackState?.getExports(), { limit, closeOnStop: true }) as any[];
         // Materialize an iterable/array-like to a real JS array, consuming AT
         // MOST `limit` iterator steps. `limit === Infinity` (the unbounded
         // case, used by rest patterns and spread) is byte-for-byte the legacy
@@ -10966,6 +11398,13 @@ assert._isSameValue = isSameValue;
               wrappedArgs[slot.argIdx] = _maybeWrapCallable(wrappedArgs[slot.argIdx], slot.arity, callbackState);
             }
           }
+          // (#3049) `Iterator.prototype.<helper>.call(iter, …)` — the receiver
+          // is consumed as a spec iterator record by the native/polyfill
+          // helper. Present it faithfully (closure-struct next/return bridged,
+          // Wasm-struct step results host-mirrored) via the record shim.
+          if ((method === "call" || method === "apply") && _isIteratorHelperFn(wrappedObj) && (args ?? []).length > 0) {
+            wrappedArgs[0] = _iteratorRecordForHost(args[0], callbackState);
+          }
           // #1637 — `Boolean.prototype.toString.call(prim)` / `.valueOf.call(prim)`
           // route here as obj=Boolean.prototype.method, method="call"/"apply".
           // Boolean primitives travel i32→externref via __box_number so the
@@ -11289,7 +11728,12 @@ assert._isSameValue = isSameValue;
             }
             throw new TypeError(method + " is not a function");
           }
-          const ret = fn.apply(wrappedObj, wrappedArgs);
+          // (#3049) Direct helper-method dispatch (`iter.map(cb)` on an
+          // externref/any receiver): shim the RECEIVER as a faithful iterator
+          // record (see _iteratorRecordForHost) so the native/polyfill helper
+          // can drive a compiled iterator.
+          const dispatchRecv = _isIteratorHelperFn(fn) ? _iteratorRecordForHost(obj, callbackState) : wrappedObj;
+          const ret = fn.apply(dispatchRecv, wrappedArgs);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
           if (
             (method === "exec" || method === "test") &&
@@ -11309,7 +11753,7 @@ assert._isSameValue = isSameValue;
               }
             }
           }
-          return ret === wrappedObj ? obj : _unwrapForHost(ret);
+          return ret === wrappedObj || ret === dispatchRecv ? obj : _unwrapForHost(ret);
         };
       // (#1439) RegExp.prototype[@@replace/@@match/@@search/@@split/@@matchAll]
       // protocol invocation. The compiler resolves `regex[Symbol.replace]` to
@@ -11507,6 +11951,15 @@ assert._isSameValue = isSameValue;
           return ret === wrappedReceiver ? receiver : _unwrapForHost(ret);
         };
       // Get actual JS built-in object by name (#965) — fixes WI3 null receiver for built-in classes
+      // (#2623 P-7b design decision) This handler resolves the HOST realm on
+      // purpose. A sandbox-first arm for `Promise` was prototyped and REVERTED:
+      // partial (per-builtin) realm unification is inherently leaky — Promise
+      // sandbox-first while Object/Boolean stayed host-realm regressed
+      // `prototype/proto.js` + `catch/this-value-obj-coercible.js` (cross-
+      // builtin proto/ToObject realm mixing). The vm sandbox is a LOCAL-runner
+      // isolation mechanism, not a product surface; the CI lane is single-realm
+      // (no sandbox) and relies on the worker's #1220 static snapshot/restore.
+      // See "P-7b DESIGN DECISION" in plan/issues/2623-*.md.
       if (name === "__get_builtin") return (n: string) => (globalThis as any)[n];
       // Object.hasOwn(obj, key) — ES2022 static method (#965)
       // (#3060) Object.hasOwn(O, P) ≡ HasOwnProperty(ToObject(O), ToPropertyKey(P)),
@@ -12855,6 +13308,17 @@ assert._isSameValue = isSameValue;
         // throw a TypeError exception`) — which is what test262
         // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
         // undefined/null/primitive/non-constructor values.
+        // (#2623 P-7b) HOST realm on purpose (see the __get_builtin design
+        // note). In the single-realm CI lane this IS the object the user's
+        // `Promise.resolve = fn` patch lands on (the declarations.ts
+        // __module_init keep), so V8's `Get(C, "resolve")` in
+        // PerformPromiseAll/Race (§27.2.4.1.1 step 5) observes the patch —
+        // the `all/race/allSettled invoke-resolve.js` observable-resolve
+        // contract. A sandbox-first arm here was prototyped and REVERTED:
+        // capability-C sandbox + host-realm minting broke the §27.2.4.7
+        // `nextPromise.constructor === C` identity fast path (the historical
+        // `any/invoke-then` regression), and unifying minting too leaked
+        // cross-builtin (see the design-decision section in the issue file).
         if (directCall) return Promise;
         // (#1694 A.i / #1632b-1) When the user passes a COMPILED FUNCTION as the
         // capability constructor — `Promise.all.call(NotPromise, …)` where
@@ -12988,6 +13452,12 @@ assert._isSameValue = isSameValue;
           const C = _resolveCtor(thisArg, directCall);
           return (Promise as any).any.call(C, _toIterable(arr));
         };
+      // (#2623 P-7b) HOST-realm minting on purpose: minting and the capability
+      // lane (`_resolveCtor`) MUST share one realm — a split breaks the
+      // §27.2.4.7 `nextPromise.constructor === C` identity fast path (the
+      // historical `any/invoke-then` regression). Both stay HOST; the
+      // prototyped sandbox-first unification leaked cross-builtin and was
+      // reverted (see the __get_builtin design note).
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject")
         return (val: any) => {
@@ -13012,7 +13482,7 @@ assert._isSameValue = isSameValue;
         return () => {
           let r: (v: any) => void = () => {};
           let j: (e: any) => void = () => {};
-          const p: any = new Promise((res, rej) => {
+          const p: any = new Promise((res: any, rej: any) => {
             r = res;
             j = rej;
           });
@@ -13211,21 +13681,32 @@ assert._isSameValue = isSameValue;
           _AsyncGeneratorState.set(obj, { buf, index: 0, pendingThrow });
           return obj;
         };
+      // (#3123) Shared miss-arm for the __gen_* dispatchers: a registered
+      // fnctor-subclass instance's `next`/`return`/`throw` is a compiled class
+      // method/getter invisible to a native property read — resolve it through
+      // the wasm-aware reader (class-member kind dispatch + fnctor prototype
+      // walk). Gated on the registration WeakMap so every other receiver keeps
+      // the exact pre-#3123 behavior.
+      const genMemberFallback = (gen: any, key: string): any => {
+        if (gen == null || typeof gen !== "object") return undefined;
+        if (!_isWasmStruct(gen) || !_canBeWeakKey(gen) || !_fnctorInstanceCtor.has(gen)) return undefined;
+        return _safeGet(gen, key, callbackState);
+      };
       if (name === "__gen_next")
         return (gen: any) => {
-          const next = gen.next ?? _sidecarGet(gen, "next");
+          const next = gen.next ?? _sidecarGet(gen, "next") ?? genMemberFallback(gen, "next");
           if (typeof next === "function") return next.call(gen);
           throw new TypeError("generator.next is not a function");
         };
       if (name === "__gen_return")
         return (gen: any, val: any) => {
-          const ret = gen.return ?? _sidecarGet(gen, "return");
+          const ret = gen.return ?? _sidecarGet(gen, "return") ?? genMemberFallback(gen, "return");
           if (typeof ret === "function") return ret.call(gen, val);
           return { value: val, done: true };
         };
       if (name === "__gen_throw")
         return (gen: any, err: any) => {
-          const thr = gen.throw ?? _sidecarGet(gen, "throw");
+          const thr = gen.throw ?? _sidecarGet(gen, "throw") ?? genMemberFallback(gen, "throw");
           if (typeof thr === "function") return thr.call(gen, err);
           throw err;
         };
@@ -13290,12 +13771,17 @@ assert._isSameValue = isSameValue;
                 let i = 0;
                 // (#1367) Synthesized iterators MUST inherit from
                 // Iterator.prototype so .drop/.take/.map/.filter etc. resolve.
+                // (#3049) …but at spec DEPTH: iter → %ArrayIteratorPrototype%
+                // (shared stand-in) → %IteratorPrototype% (helpers), so the
+                // spec-shaped double-getPrototypeOf walk lands on the helper
+                // proto instead of overshooting it (see
+                // _getSynthArrayIteratorPrototype).
                 const iterProto = (
                   typeof (globalThis as any).Iterator === "function"
                     ? ((globalThis as any).Iterator as any).prototype
                     : null
                 ) as any;
-                const iterObj: any = iterProto ? Object.create(iterProto) : {};
+                const iterObj: any = iterProto ? Object.create(_getSynthArrayIteratorPrototype(iterProto)) : {};
                 iterObj.next = () => {
                   if (i >= len) return { value: undefined, done: true };
                   const val = vecGet(obj, i);
@@ -13903,6 +14389,19 @@ assert._isSameValue = isSameValue;
             userClassParents.set(className, parentName == null ? null : parentName);
           }
         };
+      // (#3123) `class C extends F` where F is a top-level PLAIN FUNCTION
+      // (fnctor — the test262 harness `Iterator` shim shape): the ctor
+      // registers each instance → F's closure struct so host-side member
+      // resolution (`_fnctorProtoLookup` via `_safeGet` / `_resolveHostField` /
+      // `__extern_method_call`) walks F's LIVE `.prototype` chain for
+      // inherited reads (`inst.drop` → the runtime-assigned helper proto).
+      if (name === "__register_fnctor_instance")
+        return (instance: any, ctorClosure: any): void => {
+          if (instance == null || typeof instance !== "object") return;
+          if (ctorClosure == null || typeof ctorClosure !== "object") return;
+          if (!_canBeWeakKey(instance)) return;
+          _fnctorInstanceCtor.set(instance, ctorClosure);
+        };
       // (#1455) Subclasses of host builtins: after `__new_<Parent>(args)`
       // returns the bare host instance whose [[Prototype]] is Parent.prototype,
       // we set the instance's prototype to a synthetic `Sub.prototype` that
@@ -14221,7 +14720,28 @@ assert._isSameValue = isSameValue;
               return undefined;
             }
           }
-          return exports?.[`__cb_${id}`]?.(cap, this, ...args);
+          const ret = exports?.[`__cb_${id}`]?.(cap, this, ...args);
+          // (#3051 Slice 3) GETTER returns (no args ⇒ getter; setters return
+          // undefined): a compiled getter body returning an OBJECT LITERAL
+          // (`get lastIndex() { return { valueOf() {…} } }` — the @@split
+          // fake-regexp protocol shape) hands the host consumer a raw WasmGC
+          // struct; V8's ToLength/ToPrimitive on it throws "Cannot convert
+          // object to primitive value" without ever reaching the struct's
+          // valueOf closure. Marshal DATA-struct/vec returns to their host
+          // mirror (positive discriminators only — closures pass through raw,
+          // and plain-call closure bridges elsewhere keep raw returns,
+          // #3123/#2835).
+          if (args.length === 0 && ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
+            try {
+              const isData = exports?.__is_data_struct as unknown as ((v: any) => number) | undefined;
+              if (typeof isData === "function" && isData(ret) === 1) return _wrapForHost(ret, exports);
+              const isVec = exports?.__is_vec as unknown as ((v: any) => number) | undefined;
+              if (typeof isVec === "function" && isVec(ret) === 1) return _wrapForHost(ret, exports);
+            } catch {
+              /* discriminators unavailable — keep the raw return */
+            }
+          }
+          return ret;
         };
     case "await":
       return (v: any) => v;

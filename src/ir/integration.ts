@@ -26,7 +26,7 @@ import { ts } from "../ts-api.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
-import { ensureLateImport } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration
+import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import {
   addGeneratorImports,
@@ -61,7 +61,14 @@ import {
 import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
-import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
+// (#3156) — on-demand guarded charCodeAt helper materialization
+import {
+  ensureHostCharCodeAtGuarded,
+  ensureNativeCharCodeAtHelper,
+  JSSTR_CHARCODEAT_FN,
+  NATIVE_CHARCODEAT_FN,
+} from "../codegen/char-code-at-helpers.js";
+import { IR_STRING_COMPARE_FN, lowerFunctionAstToIr, STRING_METHOD_TABLE, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
   lowerIrTypeToValType,
@@ -1005,6 +1012,69 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     nativeStrings(): boolean {
       return ctx.nativeStrings;
     },
+    // (#2955 slice 2) The WHOLE string-prototype-method mode decision table,
+    // relocated here from from-ast's `lowerStringMethodCall` so the front-end
+    // reads no `nativeStrings` at that site. Byte-inert by construction: the
+    // returned plan reproduces exactly the decisions the old inline reads
+    // made — same demotes (null), same target names, same index reps, same
+    // pad strategy — so the emitted IR per mode is unchanged. The demote
+    // half MUST stay a build-time answer (there is no lower-time demote
+    // channel), which is why this is a resolver callback and not an
+    // abstract-instr lowering case; promoting the rep half into a true
+    // `str.method` instr is #2955's follow-up slice.
+    stringMethodPlan(method: string, argCount: number) {
+      const native = ctx.nativeStrings;
+      // (#3156) charCodeAt — BOTH modes lower to a guarded defined helper
+      // `(recv, i32 idx) -> f64` (src/codegen/char-code-at-helpers.ts;
+      // materialized on demand by resolveFunc below). NOT the bare
+      // `wasm:js-string charCodeAt` builtin: that one traps out-of-range
+      // (#2003) and its bare funcMap name is shadowable by a user function
+      // named `charCodeAt` (#1072). An omitted position pads i32 0.
+      if (method === "charCodeAt") {
+        return {
+          funcName: native ? "__str_charCodeAt" : "__jsstr_charCodeAt",
+          indexArgRep: "i32" as const,
+          padOmitted: "charcode-zero" as const,
+        };
+      }
+      // #2002 — the native string backend lowers the position arg via its
+      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
+      // native path rather than re-implement position handling in the IR.
+      if (
+        native &&
+        (method === "indexOf" || method === "includes" || method === "startsWith" || method === "endsWith")
+      ) {
+        return null;
+      }
+      const sig = STRING_METHOD_TABLE[method];
+      if (!sig) return null;
+      const omitted = argCount < sig.hostArgs.length;
+      // (#3156) substring — native `__str_substring` clamps both indices to
+      // [0, len], so omissions pad exact sentinels (start 0 / end 0x7fffffff,
+      // the legacy native arm's convention) and every arity lowers; host mode
+      // rides the #1248 length-default pad in from-ast.
+      if (method === "substring") {
+        return native
+          ? {
+              funcName: "__str_substring",
+              indexArgRep: "i32" as const,
+              padOmitted: "native-substring" as const,
+            }
+          : {
+              funcName: "string_substring",
+              indexArgRep: "f64" as const,
+              padOmitted: "host" as const,
+            };
+      }
+      // #1248 — native mode only lowers fully-specified call sites, except
+      // `slice(start)` whose implicit end defaults to recv.length.
+      if (native && omitted && !(method === "slice" && argCount === 1)) return null;
+      return {
+        funcName: native ? `__str_${method}` : `string_${method}`,
+        indexArgRep: (native ? "i32" : "f64") as "i32" | "f64",
+        padOmitted: (native ? "native-slice-len" : "host") as "native-slice-len" | "host",
+      };
+    },
     resolveString(): ValType {
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
         return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
@@ -1044,6 +1114,22 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     // host-extern arms.
     jsHostExterns(): boolean {
       return !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+    },
+    // (#2955 number-box slice) Capability: this lane owns the
+    // `__box_number` / `__unbox_number` f64⇄externref host imports (legacy
+    // registers them via `addUnionImports`). The from-ast boxing arms
+    // (`coerceToExpectedExtern`, `coerceReturnValue`) consult THIS predicate
+    // instead of reading `nativeStrings` directly — the mode knowledge lives
+    // here, on the lower/integration side, per #2955's de-polymorph
+    // direction. Implementation is deliberately the exact truth value the
+    // old in-place `nativeStrings?.() === false` reads produced (byte-inert
+    // relocation). Widening — e.g. allowing the box pair under a
+    // native-strings HOST compile, or lowering to `$AnyValue` boxing in
+    // standalone instead of demoting — is a semantic follow-up tracked in
+    // #2955's remaining-slices map, and must be validated against the
+    // standalone floor (the demote arm is load-bearing there).
+    hasHostNumberBox(): boolean {
+      return !ctx.nativeStrings;
     },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
@@ -1224,6 +1310,56 @@ function makeResolver(
           throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
         }
         return helperIdx;
+      }
+      // (#3156) Guarded charCodeAt helpers — materialized on demand, same
+      // append-only defined-function discipline as ensureFmod (never an
+      // import, no existing funcIdx shifts). Idempotent via funcMap. The
+      // host variant bakes the `wasm:js-string` builtin import indices from
+      // `ctx.jsStringImports` (the #1072 shadowing-safe registry; import
+      // indices never shift) — `preregisterStringSupport` guarantees
+      // `addStringImports` ran before Phase-3 emission whenever a lowered
+      // function calls this helper.
+      if (ref.name === JSSTR_CHARCODEAT_FN) {
+        const helperIdx = ensureHostCharCodeAtGuarded(ctx);
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (wasm:js-string builtins not registered)`);
+        }
+        return helperIdx;
+      }
+      if (ref.name === NATIVE_CHARCODEAT_FN) {
+        const helperIdx = ensureNativeCharCodeAtHelper(ctx);
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (native-string helpers unavailable)`);
+        }
+        return helperIdx;
+      }
+      // (#3167) String relational compare helper. Resolve mode-appropriately:
+      //   native/WASI → the `__str_compare` defined helper (idempotently
+      //     ensured via `ensureNativeStringHelpers`; append-only, so no funcIdx
+      //     shift — same discipline as `ensureFmod`/the charCodeAt helpers).
+      //   host → the `string_compare` env import (registered by the legacy
+      //     declaration-collection pass whenever source has a string relational,
+      //     so it is already in `ctx.funcMap`; its import index is stable).
+      // Both are `(str, str) -> i32` returning a -1/0/1 lexicographic sign.
+      if (ref.name === IR_STRING_COMPARE_FN) {
+        if (ctx.nativeStrings) {
+          ensureNativeStringHelpers(ctx);
+          const helperIdx = ctx.nativeStrHelpers.get("__str_compare");
+          if (helperIdx === undefined) {
+            throw new Error(`ir/integration: cannot materialize ${ref.name} (native __str_compare unavailable)`);
+          }
+          // Re-resolve by name against the post-shift function table (the
+          // helper map's captured index can predate later import inserts).
+          for (let i = 0; i < ctx.mod.functions.length; i++) {
+            if (ctx.mod.functions[i]!.name === "__str_compare") return ctx.numImportFuncs + i;
+          }
+          return helperIdx;
+        }
+        const hostIdx = ctx.funcMap.get("string_compare");
+        if (hostIdx === undefined) {
+          throw new Error(`ir/integration: cannot resolve ${ref.name} (host string_compare import not registered)`);
+        }
+        return hostIdx;
       }
       const idx = ctx.funcMap.get(ref.name);
       if (idx !== undefined) return idx;
@@ -1494,6 +1630,24 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
   const walk = (instr: IrInstr): void => {
     if (instrUsesStrings(instr)) usesStringOp = true;
     if (instr.kind === "string.const") literals.add(instr.value);
+    // (#3156) The host guarded-charCodeAt helper wraps the `wasm:js-string`
+    // charCodeAt/length builtins — its materialization (resolveFunc) reads
+    // `ctx.jsStringImports`, so `addStringImports` must have run BEFORE
+    // Phase-3 emission. A claimed function can carry this call with NO other
+    // string op (e.g. `f(s: string) { return s.charCodeAt(0); }` — receiver
+    // is a param, no literals), so detect the call target explicitly.
+    if (instr.kind === "call" && instr.target.name === JSSTR_CHARCODEAT_FN) {
+      usesStringOp = true;
+    }
+    // (#3167) A body may carry a string relational (`a < b` on string params)
+    // with NO other string op — no literal, concat, or eq. Detect the compare
+    // call so host-mode pre-registration (`addStringImports` + any literal
+    // globals) and native-mode helper availability are guaranteed before
+    // Phase-3 emission. (`resolveFunc` also ensures the native `__str_compare`
+    // on demand, but flagging here keeps the host string-import path uniform.)
+    if (instr.kind === "call" && instr.target.name === IR_STRING_COMPARE_FN) {
+      usesStringOp = true;
+    }
     if (instr.kind === "extern.regex") {
       // RegExp literal lowers via emitStringConst(pattern) + emitStringConst(flags).
       usesStringOp = true;
@@ -1502,6 +1656,18 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
     }
     if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
       for (const sub of instr.body) walk(sub);
+    }
+    // (#3156) Value-producing if/else arms and try bodies are nested instr
+    // buffers too — a `s.charCodeAt(i)` (or any string op) inside a ternary
+    // arm or try block would otherwise escape pre-registration.
+    if (instr.kind === "if") {
+      for (const sub of instr.then) walk(sub);
+      for (const sub of instr.else) walk(sub);
+    }
+    if (instr.kind === "try") {
+      for (const sub of instr.body) walk(sub);
+      if (instr.catchClause) for (const sub of instr.catchClause.body) walk(sub);
+      if (instr.finallyBody) for (const sub of instr.finallyBody) walk(sub);
     }
   };
   for (const entry of fns) {
@@ -1694,6 +1860,35 @@ function preregisterExceptionSupport(ctx: CodegenContext, fns: readonly BuiltFnR
  * `jsTag` presence is the dynamic-operand discriminator for unbox/tag.test
  * (verifier R2/R3 make it REQUIRED exactly there and reject it elsewhere).
  */
+/**
+ * (#3143) The function names `addUnionImports` (src/codegen/index.ts) registers
+ * — host `env::*` imports OR wasi/standalone native funcs of the same names. A
+ * from-ast boxing/unboxing coercion can emit a DIRECT symbolic `call` to one of
+ * these (bypassing the `box`/`unbox` IR instruction), relying on legacy's
+ * dual-compile side effect to have registered it. Under IR-first that side
+ * effect is skipped, so `preregisterDynamicSupport` must register the family
+ * itself when it sees such a call. Kept in lockstep with `addUnionImports`.
+ */
+const UNION_IMPORT_FUNC_NAMES: ReadonlySet<string> = new Set([
+  "__box_number",
+  "__unbox_number",
+  "__box_boolean",
+  "__unbox_boolean",
+  "__box_bigint",
+  "__to_bigint",
+  "__bigint_ctor",
+  "__box_symbol",
+  "__is_truthy",
+  "__typeof",
+  "__typeof_number",
+  "__typeof_string",
+  "__typeof_boolean",
+  "__typeof_bigint",
+  "__typeof_object",
+  "__typeof_function",
+  "__typeof_undefined",
+]);
+
 function isDynamicOp(instr: IrInstr): boolean {
   if (instr.kind === "box") return instr.toType.kind === "dynamic";
   if (instr.kind === "unbox" || instr.kind === "tag.test") return instr.jsTag !== undefined;
@@ -1787,6 +1982,24 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   let usesDynamicOps = false;
   let usesEq = false;
   let usesMemberGet = false;
+  // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
+  // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
+  // / …) rather than a `box`/`unbox` IR instruction — e.g. `coerceToExpectedExtern`
+  // boxes f64→externref via `emitCall({name:"__box_number"})` (from-ast.ts:3355),
+  // and `coerceReturnValue` unboxes via `__unbox_number`. Under the OVERLAY those
+  // imports are registered as a side effect of legacy's own compile of the same
+  // function (the documented dual-compile assumption at from-ast.ts:3345). Under
+  // IR-first the legacy body is skipped, so that side effect never happens and the
+  // funcref resolves to nothing — a hard `unknown function ref` at Phase 3. Detect
+  // such a named call here (a `call` whose symbolic target is a union-import name)
+  // and pre-register the family. `isDynamicOp` does NOT catch these: they are plain
+  // `call` instrs, not the `box`/`unbox`/`dyn.*` kinds it inspects.
+  let usesNamedUnionImport = false;
+  // (#3143) `__extern_is_undefined` ((externref)->i32) is a from-ast-emitted
+  // late-import helper (from-ast.ts:6261, `x !== undefined` on an externref)
+  // that legacy registers on demand via `ensureLateImport` — another
+  // dual-compile side effect IR-first skips. Detect + register the same way.
+  let usesExternIsUndefined = false;
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
@@ -1794,12 +2007,34 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
           if (isDynamicOp(i)) usesDynamicOps = true;
           if (usesDynEq(i)) usesEq = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
+          if (i.kind === "call") {
+            if (UNION_IMPORT_FUNC_NAMES.has(i.target.name)) usesNamedUnionImport = true;
+            else if (i.target.name === "__extern_is_undefined") usesExternIsUndefined = true;
+          }
         });
-        if (usesDynamicOps && usesEq && usesMemberGet) break;
       }
-      if (usesDynamicOps && usesEq && usesMemberGet) break;
     }
-    if (usesDynamicOps && usesEq && usesMemberGet) break;
+  }
+  // (#3143) A named union-import call needs the host/native import family
+  // registered even when no `dyn.*` op is present (the boxing-coercion path).
+  // `addUnionImports` covers host (env imports) AND wasi/standalone (native
+  // funcs), is idempotent, and runs here — before any Phase-3 body buffer —
+  // so its defined-funcIdx shift is hazard-free, exactly like the dynamic-op
+  // path below. In `fast` (gc) mode the any-helper family owns boxing, but a
+  // from-ast `__box_number` funcref is only emitted when the lane actually has
+  // that host import (its `hasHostNumberBox` gate), so registering it here is
+  // correct in every mode the call can appear.
+  if (usesNamedUnionImport) addUnionImports(ctx);
+  if (usesExternIsUndefined) {
+    ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    // (#3143) Apply the deferred import's funcIdx shift + defined-body fix-up
+    // NOW, before Phase-3 emission bakes any funcIdx. `ensureLateImport` only
+    // BATCHES the import; leaving it pending here desyncs the Phase-3 resolver
+    // (a sibling IR function's `ctx.funcMap` funcIdx would be read pre-shift and
+    // fall out of the defined-function range — the #329/#2078 late-shift class).
+    // `addUnionImports` above already self-flushes; this covers the bare
+    // extern-is-undefined path (no union import present).
+    flushLateImportShifts(ctx, null);
   }
   if (!usesDynamicOps) return;
   if (ctx.fast) {
@@ -2585,6 +2820,24 @@ class ClassRegistry {
     }
     allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
 
+    // (#3144) instanceof-compatible tags: own tag + every transitive
+    // descendant's. Mirrors legacy `collectInstanceOfTags` (typeof-delete.ts)
+    // exactly — the walk finds children via `classParentMap` (child → parent)
+    // so `class.instanceof` compares the identical set `compileInstanceOf`
+    // emits. Empty when the class has no tag (lowering folds to false).
+    const collectTags = (className: string, seen: Set<string>): number[] => {
+      if (seen.has(className)) return []; // circular-inheritance guard
+      seen.add(className);
+      const ownTag = ctx.classTagMap.get(className);
+      if (ownTag === undefined) return [];
+      const tags = [ownTag];
+      for (const [child, parent] of ctx.classParentMap) {
+        if (parent === className) tags.push(...collectTags(child, seen));
+      }
+      return tags;
+    };
+    const instanceOfTags = collectTags(shape.className, new Set());
+
     const lowering: IrClassLowering = {
       structTypeIdx,
       fieldIdx: (name: string): number => {
@@ -2596,6 +2849,7 @@ class ClassRegistry {
       },
       constructorFuncName,
       initFuncName,
+      instanceOfTags,
       methodFuncName: (name: string): string => {
         // Returns a NAME — the resolver's `resolveFunc` maps it to the
         // funcIdx via `ctx.funcMap`, which the legacy collection pass

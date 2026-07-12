@@ -8,7 +8,7 @@ status: ready
 # GATED (see the audit doc's G1–G4) — do not start Phase 1 before the gates.
 sprint: current
 created: 2026-07-08
-updated: 2026-07-10
+updated: 2026-07-11
 priority: high
 horizon: xl
 feasibility: medium
@@ -142,8 +142,40 @@ per-kind bucket closure, IR→runtime entry points).
       slice; equivalence suite green.
 - [ ] No file in the STAYS/RUNTIME buckets or any deferred-kind handler is
       modified by Phase 1.
-- [ ] `knip` wired into the `quality` CI job (Phase 2); no new orphaned
-      exports.
+- [x] Dead-export gate wired into the `quality` CI job (Phase 2); no new
+      orphaned exports. (2026-07-10 — implemented **dep-free** via the Phase 0
+      audit tool instead of `knip`: `pnpm run check:dead-exports` ratchets the
+      unreferenced set against `scripts/dead-export-baseline.json`, same
+      baseline/--update convention as the other quality ratchets. `knip` can
+      still be added later if repo-wide unused-dependency coverage is wanted;
+      for the #3090 enforcement goal the audit tool is a superset for
+      src/codegen and adds no dependency. Phase 2a PR #2856 deleted the dead
+      `collect*Imports` family (-1,474); Phase 2b PR #2858 the remaining
+      strays (-332).)
+
+## Phase 2d — fresh audit re-run + confirmed-dead deletions (2026-07-11)
+
+Fresh `audit-legacy-reachability.mjs` run @ `026f40f771` (main advanced ~25
+PRs since Phase 0): FRONTEND legacy-only grew 59,976 → **61,118** fn-lines
+(calls.ts 16.2K → 16.9K — the legacy front-end is still growing; motivates
+Phase-3 coupling). Remaining unreferenced set: **470 fn-lines** across all
+buckets, of which `regex/vm.ts` (245) is a deliberate keep (executable
+reference spec — `native-regex.ts` imports `REGEX_STEP_CAP`; `search` is the
+oracle in `tests/regex-bytecode.test.ts` / `tests/issue-2091-*`), and 9 more
+functions are test-imported (audit's known tests-blind-spot:
+`value-tags` trio, `getBuiltinParent`, `withSpeculativeCompile`,
+`fallback-telemetry` pair, `quickJsLibRegexpEngineConfig`, index.ts
+`getPseudoExternClassInfo`/`resolveMethodDispatchTarget`).
+
+Deleted the confirmed-dead residue (-198 lines): `expressions.ts` superseded
+`emitCoercedLocalSet`/`updateLocalType`/`widenLocalToNullable` trio (live
+copies live in `expressions/helpers.ts`), `index.ts#registerExternClassImports`,
+`type-coercion.ts#emitSafeExternrefToF64`, `registry/types.ts#valTypeEq`
+(`emit/binary.ts` has its own local copy), `async-cps.ts` PR1 stubs
+(`compileNestedAwait`/`emitAsyncStateMachineFromIr`), `timsort.ts#LT`.
+Dead-export baseline ratcheted 36 → 16 entries (19 stale entries from
+already-landed deletions also cleared). Byte-inertness proven: 13 playground
+examples × 2 string modes SHA-identical vs base commit.
 
 ## Guardrails / hazards
 

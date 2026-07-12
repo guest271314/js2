@@ -35,6 +35,7 @@ import {
   addFuncType,
   destructureParamArray,
   destructureParamObject,
+  addGeneratorImports,
   destructureParamObjectExternref,
   ensureExnTag,
   ensureStructForType,
@@ -43,8 +44,10 @@ import {
   getOrRegisterVecType,
   hoistLetConstWithTdz,
   hoistVarDeclarations,
+  isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
+  resolveWasmTypeForClosureReturn,
 } from "./index.js";
 import {
   coerceType,
@@ -82,6 +85,15 @@ import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
 import { planAsyncClosureActivation, emitAsyncClosureBody } from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
+// (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
+// closure body emits the state-struct factory instead of the eager-buffer host
+// path. `generators-native` does not import `closures`, so no cycle.
+import {
+  compileNativeGeneratorFunction,
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+} from "./generators-native.js";
+import type { NativeGeneratorInfo } from "./context/types.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
 
@@ -1632,6 +1644,25 @@ export function computeClosureWrapperSig(
     if (ctx.forceExternrefCallbackParams && isVecOrArrayRefType(ctx, wasmType)) {
       wasmType = { kind: "externref" };
     }
+    // (#3137) TUPLE-typed params of a native `.then`/`.catch` callback widen to
+    // externref. TS contextually types combinator callbacks over tuple inputs
+    // as tuples (`Promise.allSettled([x]).then((rs) => …)` ⇒ rs:
+    // `[PromiseSettledResult<…>]`, lowered to a concrete 1-field struct), but
+    // the native then-wrapper ABI always delivers externref — the combinator
+    // results vec can never BE that tuple struct, so the wrapper's `ref.cast`
+    // trapped (illegal cast in __then_fulfill_N). Widened, the body reads the
+    // value through the dynamic reader (vec length/index + status objects),
+    // which is representation-correct for both the combinator vec and a
+    // genuine tuple value. Scoped to the then-callback compile window
+    // (`widenTupleCallbackParams`, set in compileStandalonePromiseThenCallback)
+    // so every other closure compile is byte-identical.
+    if (
+      ctx.widenTupleCallbackParams === true &&
+      (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+      isTupleType(paramType)
+    ) {
+      wasmType = { kind: "externref" };
+    }
     arrowParams.push(wasmType);
   }
 
@@ -1650,7 +1681,11 @@ export function computeClosureWrapperSig(
       closureReturnType = { kind: "externref" };
     }
     if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
+      // (#3051 Slice 3) accessor-bearing object-literal return types lower to
+      // externref — the runtime value is a HOST plain object; a struct-typed
+      // return null-drops it on the failed ref.test (see
+      // resolveWasmTypeForClosureReturn).
+      closureReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
     }
   }
   if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
@@ -1921,6 +1956,25 @@ export function compileArrowAsClosure(
   // shadow set, so the param's own binding names stay excluded.
   collectParamDefaultReferences(arrow.parameters, referencedNames, ownLocals);
 
+  // (#3040) Parameter DEFAULT initializers can reference enclosing-scope names
+  // that appear NOWHERE in the body — e.g. `f = async function*([x] = iter)`
+  // where `iter` is an outer local used ONLY in the default. The body-only scan
+  // above misses them, so such a name is never captured and the lifted
+  // default-init reads a null local, which then destructures to "Cannot
+  // destructure null". This is the function-expression / arrow twin of the
+  // FunctionDeclaration fix in statements/nested-declarations.ts (the async-gen /
+  // gen / fn EXPRESSION variants of the `ary-init-iter-close` cluster lower here,
+  // not through the declaration path). Scan each parameter subtree (its
+  // `= <default>` initializer AND nested binding-pattern element defaults like
+  // `[x = outer]`) with `ownLocals` as the shadow set so the destructured binding
+  // names and earlier params stay local while free references in the defaults
+  // become captures. Placed BEFORE the transitive-capture loop so a default that
+  // calls a capturing nested function also pulls in that function's transitive
+  // captures.
+  for (const p of arrow.parameters) {
+    collectReferencedIdentifiers(p, referencedNames, ownLocals);
+  }
+
   // Transitively add captures needed by called nested functions.
   // E.g. if this closure calls g() and g has nestedFuncCaptures {first, second},
   // this closure must also capture first and second so it can pass ref cells to g.
@@ -1943,6 +1997,12 @@ export function compileArrowAsClosure(
   } else {
     collectWrittenIdentifiers(body, writtenInClosure, ownLocals);
   }
+  // (#3040) Symmetric with the referencedNames scan above: a param default that
+  // ASSIGNS an outer var (rare, e.g. `[x] = (outer = 5, [outer])`) must keep that
+  // capture boxed rather than snapshotted.
+  for (const p of arrow.parameters) {
+    collectWrittenIdentifiers(p, writtenInClosure, ownLocals);
+  }
 
   // Also detect variables written in the enclosing scope (not just the closure).
   // If the outer function writes to a captured variable, the capture must use a
@@ -1955,16 +2015,38 @@ export function compileArrowAsClosure(
     try {
       // Find the symbol for this variable
       const sym = ctx.checker.getSymbolAtLocation(ts.isBlock(body) ? (body.statements[0] ?? body) : body);
-      // Use the enclosing function body to find all writes to this name
+      // Use the enclosing function body to find all writes to this name.
+      // (#3128) Walk PAST function nodes the call-site inliner flattened into
+      // this fctx (`fctx.inlinedIifeNodes`): an inlined IIFE is not a real
+      // scope boundary in the emitted Wasm — its "locals" live in fctx's
+      // frame, so writes to the captured name in the REAL enclosing body
+      // (e.g. `p2 = (function(){ return () => p2; })()`) must count as outer
+      // writes. Stopping at the erased boundary made the capture by-value:
+      // a stale copy the outer assignment never reached.
+      //
+      // Shadow guard: only walk past an inlined IIFE that does NOT itself
+      // declare `name` (params / own function-scoped decls). If it does, the
+      // capture refers to the IIFE's OWN binding — an outer same-named write
+      // targets a DIFFERENT variable and must not force-box the shadow
+      // (`var x=1; (function(){ var x=5; return ()=>x; })(); x=2;` — the
+      // closure must keep seeing 5).
+      const iifeDeclaresName = (fn: ts.Node): boolean => {
+        const own = new Set<string>();
+        addFunctionOwnLocals(fn, own);
+        return own.has(name);
+      };
       let enclosing: ts.Node | undefined = arrow.parent;
       while (
         enclosing &&
-        !ts.isFunctionDeclaration(enclosing) &&
-        !ts.isFunctionExpression(enclosing) &&
-        !ts.isArrowFunction(enclosing) &&
-        !ts.isMethodDeclaration(enclosing) &&
-        !ts.isConstructorDeclaration(enclosing) &&
-        !ts.isSourceFile(enclosing)
+        (!(
+          ts.isFunctionDeclaration(enclosing) ||
+          ts.isFunctionExpression(enclosing) ||
+          ts.isArrowFunction(enclosing) ||
+          ts.isMethodDeclaration(enclosing) ||
+          ts.isConstructorDeclaration(enclosing) ||
+          ts.isSourceFile(enclosing)
+        ) ||
+          ((fctx.inlinedIifeNodes?.has(enclosing) ?? false) && !iifeDeclaresName(enclosing)))
       ) {
         enclosing = enclosing.parent;
       }
@@ -2767,6 +2849,39 @@ export function compileArrowAsClosure(
     hoistLetConstWithTdz(ctx, liftedFctx, body.statements);
   }
 
+  // (#3164) Native generator FUNCTION EXPRESSION (standalone/wasi). When the
+  // extended candidate gate admits the fn-expr (zero/identifier params, no
+  // `this`/`arguments`/self-name/capture — the same gate
+  // `sourceNeedsGeneratorHostImports` consulted, so the `__gen_*` host imports
+  // were NOT registered for it), register it under the lifted closure name with
+  // the `__self` param threaded as a leading synthetic capture: the state
+  // struct's param fields then align 1:1 with the lifted wasm params
+  // (`local.get 0..n` in the factory), and the resume prelude rehydrates the
+  // user params by name. The closure ABI is UNCHANGED (externref return) — the
+  // factory's `(ref $GenState)` is widened via `extern.convert_any`, and every
+  // consumer dispatches dynamically: `.next()/.return()/.throw()` through the
+  // open anyref dispatch (`tryCompileNativeGeneratorMethodCall`), for-of /
+  // destructuring / spread through the `__iterator` runtime's GENSTATE arm
+  // (iterator-native.ts, filled at finalize).
+  let nativeGenExprInfo: NativeGeneratorInfo | null = null;
+  if (
+    isGenerator &&
+    !isAsync &&
+    (ctx.standalone || ctx.wasi) &&
+    ts.isFunctionExpression(arrow) &&
+    ts.isBlock(body) &&
+    isNativeGeneratorCandidate(ctx, arrow)
+  ) {
+    nativeGenExprInfo = registerNativeGenerator(
+      ctx,
+      arrow,
+      closureName,
+      [{ kind: selfParamKind, typeIdx: selfTypeIdx }, ...arrowParams],
+      /* synthesizedThis */ false,
+      [{ name: "__self" }],
+    );
+  }
+
   if (
     isGenerator &&
     isAsync &&
@@ -2784,6 +2899,17 @@ export function compileArrowAsClosure(
     // the resume fn. TDZ-flagged captures store PARAM indices in
     // `boxedTdzFlags` (wrong in the resume fn's local layout) → legacy path.
     emitAsyncGenerator(ctx, liftedFctx, arrow);
+  } else if (isGenerator && ts.isBlock(body) && nativeGenExprInfo) {
+    // (#3164) Emit the native state-struct factory (mirrors the class-method /
+    // object-literal wiring, #2571/#2581): construct `$GenState_<closure>` from
+    // the lifted wasm params (param 0 = `__self`, threaded as a leading
+    // synthetic capture; user params follow), then widen to the closure's
+    // externref return. The body itself compiles once, inside the resume
+    // function (`ensureNativeGeneratorResumeFunction`). ZERO host imports —
+    // no `__gen_create_buffer` / `__create_generator` / `__get_caught_exception`.
+    compileNativeGeneratorFunction(ctx, liftedFctx, arrow, nativeGenExprInfo);
+    liftedFctx.body.push({ op: "extern.convert_any" } as Instr);
+    conciseBodyHasValue = true;
   } else if (isGenerator && ts.isBlock(body)) {
     // Generator function expression: eagerly evaluate body, collect yields
     // into a buffer, then wrap with __create_generator.
@@ -2816,6 +2942,16 @@ export function compileArrowAsClosure(
       arrow.parameters.length === 0 &&
       !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
       !genBodyReferencesThis(body);
+    // (#3164) Defensive: in a no-JS-host target the eager-buffer path needs the
+    // `__gen_*` host imports, which the pre-scan (`sourceNeedsGeneratorHostImports`)
+    // skips when it classifies every generator as native. If this fn-expr was
+    // admitted by the pre-scan but the emit-time registration bailed (a
+    // candidate/plan desync), baking an undefined funcIdx would produce an
+    // INVALID module — late-register the import bundle instead (idempotent,
+    // shift-safe; the IR path does the same mid-emission).
+    if ((ctx.standalone || ctx.wasi) && !ctx.funcMap.has("__gen_create_buffer")) {
+      addGeneratorImports(ctx, { allowNoJsHost: true });
+    }
     const genOuterBody = liftedFctx.body;
     const eagerSeq: Instr[] = [];
     if (genLazyEligible) liftedFctx.body = eagerSeq;
@@ -3277,7 +3413,9 @@ export function compileArrowAsCallback(
     if (sig) {
       const retType = ctx.checker.getReturnTypeOfSignature(sig);
       if (!isVoidType(retType)) {
-        cbReturnType = resolveWasmType(ctx, retType);
+        // (#3051 Slice 3) see resolveWasmTypeForClosureReturn — accessor-bearing
+        // object-literal return types lower to externref (host plain objects).
+        cbReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
       }
     }
   } catch {
@@ -3542,6 +3680,21 @@ export function compileArrowAsCallback(
         // The struct.new result (ref cell) is on the stack for the capture struct
         refCellLocals.push({ refCellLocal, outerLocalIdx: cap.localIdx, refCellTypeIdx, valType: cap.type });
         options?.sharedRefCells?.set(cap.name, { refCellLocal, refCellTypeIdx, valType: cap.type });
+        // (#3051 Slice 3) Stored accessor callbacks (needsThis): rebind the
+        // OUTER local to the shared cell (`boxedCaptures` + localMap — the
+        // closure path's convention, closures.ts ~467) so outer WRITES after
+        // creation flow through the cell and the stored getter observes them.
+        // The cell→local writebacks below only sync the reverse direction
+        // (callback writes → outer reads) and only after call expressions; an
+        // outer reassignment between host calls (`badLastIndex = Symbol.split`
+        // in test262 @@split str-coerce-lastindex-err) was invisible to the
+        // getter, which kept reading the creation-time snapshot. The orphaned
+        // original local slot keeps receiving writebacks — harmless (no reads
+        // resolve to it once localMap points at the box).
+        if (needsThis) {
+          fctx.localMap.set(cap.name, refCellLocal);
+          (fctx.boxedCaptures ??= new Map()).set(cap.name, { refCellTypeIdx, valType: cap.type });
+        }
       } else {
         // Immutable capture or already-boxed: push directly
         fctx.body.push({ op: "local.get", index: cap.localIdx });
@@ -3597,160 +3750,6 @@ export function compileArrowAsCallback(
 
   fctx.body.push({ op: "call", funcIdx: makeCallbackIdx });
   return { kind: "externref" };
-}
-
-/** A captured local that must flow into an async continuation. */
-export interface AsyncCapture {
-  readonly name: string;
-  readonly type: ValType;
-  readonly localIdx: number;
-}
-
-/** Result of synthesizing an async continuation `__cb_N` function. */
-export interface SyntheticContinuation {
-  /** Callback id — the host dispatches `__cb_${cbId}(captures, awaitValue)`. */
-  readonly cbId: number;
-  /** Capture struct type index (field i holds capture[i]), or -1 if no captures. */
-  readonly capStructTypeIdx: number;
-  /** The captures, in struct-field order. */
-  readonly captures: readonly AsyncCapture[];
-}
-
-/**
- * (#1042) Synthesize an async-continuation function for the CPS state machine.
- *
- * Unlike {@link compileArrowAsCallback} this is driven by an explicit statement
- * list + capture set (not an arrow AST node). It emits an exported
- * `__cb_${cbId}(captures: externref, awaitValue: externref) -> externref`
- * function compatible with the `__make_callback` host bridge: the host invokes
- * it with the settled promise value as `awaitValue`. The function restores
- * captured locals from the capture struct, binds the awaited result to
- * `resumeBinding` (if any), runs `segmentStmts`, and returns `ref.null.extern`
- * (the host ignores a continuation's result).
- *
- * Returns the cbId + capture-struct info so the caller emits the creation site
- * (`i32.const cbId` + capture struct + `extern.convert_any` + `__make_callback`).
- *
- * Captures are immutable snapshots (value-copied into the struct) — async
- * continuations don't write back to the suspended frame, so no ref cells.
- */
-export function compileSyntheticAsyncContinuation(
-  ctx: CodegenContext,
-  outerFctx: FunctionContext,
-  segmentStmts: readonly ts.Statement[],
-  captures: readonly AsyncCapture[],
-  resumeBinding: { name: string; type: ValType } | null,
-  options?: { returnAwaitValue?: boolean },
-): SyntheticContinuation {
-  const cbId = ctx.callbackCounter++;
-  const cbName = `__cb_${cbId}`;
-
-  // 1. Capture struct: field i = captures[i].type (immutable snapshot).
-  let capStructTypeIdx = -1;
-  if (captures.length > 0) {
-    const fields: FieldDef[] = captures.map((c) => ({ name: c.name, type: c.type, mutable: false }));
-    capStructTypeIdx = ctx.mod.types.length;
-    ctx.mod.types.push({ kind: "struct", name: `__cb_cap_${cbId}`, fields } as StructTypeDef);
-  }
-
-  // 2. Function signature: (externref captures, externref awaitValue) -> externref.
-  const cbParams: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
-  const cbResults: ValType[] = [{ kind: "externref" }];
-  const cbTypeIdx = addFuncType(ctx, cbParams, cbResults, `${cbName}_type`);
-
-  const cbFctx: FunctionContext = {
-    name: cbName,
-    params: [
-      { name: "__captures", type: { kind: "externref" } },
-      { name: "__awaitValue", type: { kind: "externref" } },
-    ],
-    locals: [],
-    localMap: new Map(),
-    returnType: { kind: "externref" },
-    body: [],
-    blockDepth: 0,
-    breakStack: [],
-    continueStack: [],
-    labelMap: new Map(),
-    savedBodies: [],
-    enclosingClassName: outerFctx.enclosingClassName ?? resolveEnclosingClassName(outerFctx),
-    isStaticContext: outerFctx.isStaticContext,
-    readsCurrentThis: true,
-  };
-  for (let i = 0; i < cbFctx.params.length; i++) cbFctx.localMap.set(cbFctx.params[i]!.name, i);
-
-  // (#1384) track body for late-import index shifting before any emission.
-  ctx.liveBodies.add(cbFctx.body);
-
-  // 3. Restore captured locals from the captures struct.
-  //    __captures is externref; convert to anyref + cast to the cap struct.
-  if (captures.length > 0) {
-    const capLocal = allocLocal(cbFctx, "__cap_struct", { kind: "ref", typeIdx: capStructTypeIdx });
-    cbFctx.body.push({ op: "local.get", index: 0 }); // __captures (externref)
-    cbFctx.body.push({ op: "any.convert_extern" } as Instr);
-    cbFctx.body.push({ op: "ref.cast", typeIdx: capStructTypeIdx } as Instr);
-    cbFctx.body.push({ op: "local.set", index: capLocal });
-    for (let i = 0; i < captures.length; i++) {
-      const cap = captures[i]!;
-      const localIdx = allocLocal(cbFctx, cap.name, cap.type);
-      cbFctx.body.push({ op: "local.get", index: capLocal });
-      cbFctx.body.push({ op: "struct.get", typeIdx: capStructTypeIdx, fieldIdx: i });
-      cbFctx.body.push({ op: "local.set", index: localIdx });
-    }
-  }
-
-  // 4. Bind the awaited result. `__awaitValue` arrives as externref; coerce to
-  //    the binding's declared wasm type (e.g. f64 via __unbox_number).
-  if (resumeBinding) {
-    const bindIdx = allocLocal(cbFctx, resumeBinding.name, resumeBinding.type);
-    cbFctx.body.push({ op: "local.get", index: 1 }); // __awaitValue
-    if (resumeBinding.type.kind === "externref") {
-      // already externref — store as-is
-    } else {
-      coerceType(ctx, cbFctx, { kind: "externref" }, resumeBinding.type);
-    }
-    cbFctx.body.push({ op: "local.set", index: bindIdx });
-  }
-
-  // 5. Compile the post-await segment statements.
-  const savedFunc = ctx.currentFunc;
-  if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
-  if (savedFunc) ctx.funcStack.push(savedFunc);
-  ctx.currentFunc = cbFctx;
-  for (const stmt of segmentStmts) compileStatement(ctx, cbFctx, stmt);
-  if (savedFunc) ctx.funcStack.pop();
-  if (savedFunc) ctx.parentBodiesStack.pop();
-  ctx.currentFunc = savedFunc;
-
-  // 6. Tail value. For `return await P` (returnAwaitValue) the continuation is
-  //    the identity: the chained promise must resolve to the awaited value, so
-  //    return `__awaitValue` (param index 1). Otherwise the continuation's own
-  //    `return` settles the chained promise; a bare suffix falls through to
-  //    `undefined` (ref.null.extern).
-  const last = cbFctx.body[cbFctx.body.length - 1];
-  if (!last || last.op !== "return") {
-    if (options?.returnAwaitValue) {
-      cbFctx.body.push({ op: "local.get", index: 1 });
-    } else {
-      cbFctx.body.push({ op: "ref.null.extern" });
-    }
-  }
-
-  // 7. Register + export the continuation (the __make_callback host bridge
-  //    dispatches by the exported `__cb_${cbId}` name).
-  const cbFuncIdx = mintDefinedFunc(ctx);
-  pushDefinedFunc(ctx, cbFuncIdx, {
-    name: cbName,
-    typeIdx: cbTypeIdx,
-    locals: cbFctx.locals,
-    body: cbFctx.body,
-    exported: true,
-  });
-  ctx.liveBodies.delete(cbFctx.body);
-  ctx.funcMap.set(cbName, cbFuncIdx);
-  ctx.mod.exports.push({ name: cbName, desc: { kind: "func", index: cbFuncIdx } });
-
-  return { cbId, capStructTypeIdx, captures };
 }
 
 /**
@@ -3815,6 +3814,29 @@ export function getOrCreateFuncRefWrapperTypes(
   ctx.funcRefWrapperCache.set(sigKey, closureInfo);
 
   return { structTypeIdx, liftedFuncTypeIdx, closureInfo };
+}
+
+/**
+ * (#2873 park fix) The ROOT funcref-wrapper struct type — the FIRST wrapper
+ * `getOrCreateFuncRefWrapperTypes` created in this module. Every later
+ * per-signature wrapper struct is a `sub final` of it (see the star chaining
+ * above), so the root is the ONLY wrapper type a `ref.test`/`ref.cast` is
+ * guaranteed to accept for a closure value of ANY signature's wrapper.
+ *
+ * Why callers need it: wrapper structs are all layout-identical
+ * `(struct (field funcref))`, but WasmGC isorecursive canonicalization keys on
+ * (fields, supertype, finality) — a `sub final $root` sibling does NOT
+ * canonicalize with the root or with another sibling. A call site that casts a
+ * closure value to the wrapper of its *declared* signature therefore nulls out
+ * whenever the value was allocated under a different signature's wrapper
+ * (e.g. an activated async closure: its wrapper is minted for the REWRITTEN
+ * `... -> externref` Promise signature, while an `fn: () => void` param casts
+ * to the void wrapper) — unless creation ORDER happened to make the declared
+ * wrapper the root. Cast to the root instead and discriminate on the funcref's
+ * exact type (which encodes the true signature).
+ */
+export function getFuncRefWrapperRootTypeIdx(ctx: CodegenContext): number | undefined {
+  return (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx;
 }
 
 /**

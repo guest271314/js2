@@ -9,8 +9,9 @@
 // (by the IR) instead of twice (legacy body thrown away, IR body kept).
 //
 // Contract under test:
-//   1. Flag OFF (default): behavior unchanged — no skip telemetry, and the
-//      pipeline order is literally the pre-#2138 one (plan after body pass).
+//   1. Flag OFF (`JS2WASM_IR_FIRST=0` escape hatch — the default is ON as of
+//      #3143): behavior unchanged — no skip telemetry, and the pipeline
+//      order is literally the pre-#2138 one (plan after body pass).
 //   2. Flag ON, fully-claimed closure: legacy bodies skipped, IR bodies
 //      ship, results correct.
 //   3. Flag ON, partially-claimed program: un-claimed functions keep their
@@ -24,15 +25,13 @@
 //      selector↔builder capability drift (#2135).
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
-import { irFirstBodyReadsHostNode } from "../src/codegen/ir-first-gate.js";
 import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
 async function compileFlag(on: boolean, src: string): Promise<CompileResult> {
-  // "" is falsy for the codegen's truthyEnv reader — equivalent to unset for
-  // the flag check (and biome's noDelete forbids `delete process.env.X`;
-  // note `process.env.X = undefined` would coerce to the STRING "undefined").
-  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "");
+  // (#3143) IR-first is default-ON: only the explicit "0"/"false" escape
+  // hatch disables it, so the off-arm stubs "0" (unset/"" now mean ON).
+  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "0");
   try {
     return await compile(src, { fileName: "issue-2138.ts" });
   } finally {
@@ -98,7 +97,7 @@ export function m(a: number, b: number): number {
 `;
 
 describe("#2138 IR-first compile-once inversion (JS2WASM_IR_FIRST)", () => {
-  it("flag OFF (default): no skip telemetry, program runs", async () => {
+  it("flag OFF (JS2WASM_IR_FIRST=0 escape hatch, #3143): no skip telemetry, program runs", async () => {
     const r = await compileFlag(false, FIB_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(r.irFirstSkipped).toBeUndefined();
@@ -172,88 +171,11 @@ describe("#2138 IR-first compile-once inversion (JS2WASM_IR_FIRST)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Gate 4 (#2138 Trap 4 / #2856 sequencing) — host-node skip exclusion.
-//
-// `computeIrFirstSkipSet` must never skip the legacy body of a function whose
-// body reads a host node (property/element access or bare call rooted at an
-// identifier that is neither function-local nor a module top-level binding).
-// Today the selector rejects such bodies wholesale, so the gate is latent; it
-// becomes load-bearing the moment #2856's extern-in-IR selector arm starts
-// ACCEPTING host-global receivers (`document.body`,
-// `document.createElement(…)`). These unit tests pin the scan's semantics —
-// especially its calibration against the shapes today's selector legitimately
-// claims (Math whitelist, extern-class `new`), which must NOT be flagged.
+// (#3143) Skip-set integration — the allowlist must not disturb the proven
+// pure-numeric skip set (guards against over-exclusion collateral).
 // ---------------------------------------------------------------------------
 
-/** Parse `src`, return the FunctionDeclaration named `fnName` plus the module
- *  top-level binding names (functions / classes / consts) — mirroring what
- *  `computeIrFirstSkipSet` derives from the real source file. */
-function parseFn(src: string, fnName: string): { fn: ts.FunctionDeclaration; moduleNames: Set<string> } {
-  const sf = ts.createSourceFile("gate4.ts", src, ts.ScriptTarget.ES2022, true);
-  const moduleNames = new Set<string>();
-  let fn: ts.FunctionDeclaration | undefined;
-  for (const s of sf.statements) {
-    if (ts.isFunctionDeclaration(s) && s.name) {
-      moduleNames.add(s.name.text);
-      if (s.name.text === fnName) fn = s;
-    } else if (ts.isClassDeclaration(s) && s.name) {
-      moduleNames.add(s.name.text);
-    } else if (ts.isVariableStatement(s)) {
-      for (const d of s.declarationList.declarations) {
-        if (ts.isIdentifier(d.name)) moduleNames.add(d.name.text);
-      }
-    }
-  }
-  expect(fn, `function ${fnName} not found in test source`).toBeDefined();
-  return { fn: fn!, moduleNames };
-}
-
-function readsHost(src: string, fnName = "f"): boolean {
-  const { fn, moduleNames } = parseFn(src, fnName);
-  return irFirstBodyReadsHostNode(fn, moduleNames);
-}
-
-describe("#2138 gate 4 — irFirstBodyReadsHostNode (host-node skip exclusion)", () => {
-  it("flags host-global property reads (the #2856 HostMemberGet shape)", () => {
-    expect(readsHost(`function f(): number { const host = document.body; return 1; }`)).toBe(true);
-    expect(readsHost(`function f(): string { return window.location.href; }`)).toBe(true);
-    expect(readsHost(`function f(): number { return globalThis.foo; }`)).toBe(true);
-  });
-
-  it("flags host-global method calls (the #2856 HostMethodCall shape)", () => {
-    expect(readsHost(`function f(): number { const box = document.createElement("div"); return 1; }`)).toBe(true);
-    expect(readsHost(`function f(): void { console.log("x"); }`)).toBe(true);
-  });
-
-  it("flags host element access and bare out-of-scope calls", () => {
-    expect(readsHost(`function f(): number { return document["title"].length; }`)).toBe(true);
-    expect(readsHost(`function f(s: string): number { return parseInt(s); }`)).toBe(true);
-  });
-
-  it("does NOT flag the Math whitelist (proven #1371 lowering)", () => {
-    expect(readsHost(`function f(x: number): number { return Math.sqrt(x) + Math.abs(x); }`)).toBe(false);
-    expect(readsHost(`function f(x: number): number { return Math.min(x, 2); }`)).toBe(false);
-  });
-
-  it("does NOT flag locally-bound or module-bound receivers/callees", () => {
-    expect(readsHost(`function f(o: { a: number }): number { return o.a; }`)).toBe(false);
-    expect(readsHost(`function f(): number { const o = { a: 1 }; return o.a; }`)).toBe(false);
-    expect(readsHost(`function g(): number { return 1; }\nfunction f(): number { return g(); }`)).toBe(false);
-    expect(readsHost(`const CFG = { n: 2 };\nfunction f(): number { return CFG.n; }`)).toBe(false);
-    expect(readsHost(`function f(xs: number[]): number { return xs[0] + xs.length; }`)).toBe(false);
-  });
-
-  it("does NOT flag extern-class `new` chains (opaque sanctioned root, slice 10)", () => {
-    expect(readsHost(`function f(): number { return new Uint8Array(4).length; }`)).toBe(false);
-  });
-
-  it("does NOT flag nested-scope bindings (over-approximated locals are safe)", () => {
-    expect(readsHost(`function f(): number { { const inner = { a: 1 }; return inner.a; } }`)).toBe(false);
-    expect(readsHost(`function f(xs: number[]): number { let t = 0; for (const x of xs) { t += x; } return t; }`)).toBe(
-      false,
-    );
-  });
-
+describe("#2138 IR-first skip-set integration", () => {
   it("integration: gate 4 does not disturb today's skip set (no over-exclusion collateral)", async () => {
     // FIB_SRC's claimed functions read no host nodes — the flag-on skip set
     // must be unchanged by the gate (guards against a scan that is stricter
