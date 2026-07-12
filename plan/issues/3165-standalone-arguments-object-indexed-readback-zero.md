@@ -16,6 +16,10 @@ area: codegen, standalone
 language_feature: arguments-object, dynamic-properties
 goal: standalone-mode
 related: [3053, 3037, 2580, 1511, 3015]
+# (#3131) LOC allowance: the fix replaces the emitElemBoxToExternref stub with
+# the per-element-kind boxing arms inside the same subsystem module (+20 net).
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 origin: "2026-07-12 architect standalone audit: the TypedArray/Array `predicate-call-parameters` family fails with 'Cannot access property on null or undefined' inside the harness region; minimal repro isolated the arguments-capture readback."
 ---
 
