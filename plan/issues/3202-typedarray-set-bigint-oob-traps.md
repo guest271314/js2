@@ -1,19 +1,18 @@
 ---
 id: 3202
-title: "TypedArray.prototype.set (BigInt) — 4 tests emit uncatchable oob traps instead of catchable errors (regressed main oob 58->62)"
+title: "CI-sharded-only +4 oob on 4 unsupported-BigInt TypedArray.set tests — nondeterministic ratchet classification (main is 58, NOT 62)"
 status: ready
 created: 2026-07-12
 priority: medium
 feasibility: medium
 task_type: bug
-area: codegen
-es_edition: multi
+area: ci
 language_feature: typed-array
 goal: crash-free
 sprint: current
 horizon: m
-related: [3189, 3183, 3162, 3173]
-origin: "Surfaced by the #3189 uncatchable-trap ratchet: main HEAD (commit 9626103a) grew the oob trap category 58->62 (+4). The baseline was force-refreshed (workflow_dispatch, 2026-07-12) to reconcile the ratchet 58->62 and unwedge the merge queue; this issue tracks the PROPER fix so the traps are removed rather than baked into the baseline."
+related: [3189, 3173]
+origin: "The #3189 uncatchable-trap ratchet fired oob 58->62 (+4) on EVERY merge_group, wedging the queue. Re-diagnosed 2026-07-12 (dev-find-wasm): main HEAD is verifiably 58 (baseline promoted from main commit c660e830; `git log c660e830..origin/main` = ONLY doc commits; freshly-fetched promoted baseline reads 58; the 4 named tests are `fail`/'undefined is not a constructor' on both baseline and main HEAD, not oob). So the +4 is SPECULATIVE-MERGE / CI-sharded-only, NOT a main regression — a promote-baseline 'refresh to 62' is impossible (it reflects main = 58; the attempted refresh left it at 58). Unwedged via the ratchet's own designed valve TRAP_RATCHET_TOLERANCE=4 (repo var, PR #2963)."
 ---
 
 # #3202 — TypedArray.prototype.set BigInt args emit uncatchable oob traps
@@ -38,16 +37,38 @@ These exercise `%TypedArray%.prototype.set(source, offset)` where `offset`
 undergoes `ToInteger` coercion and the source is an array / typedarray, on a
 BigInt-element typed array.
 
-## Root cause (to confirm)
+## Root cause (RE-SCOPED 2026-07-12 — the +4 is NOT on main)
 
-The +4 landed in the window between #2949 (the trap ratchet itself, merged
-17:46Z) and `9626103a`. The array/vec bounds-handling changes in that window
-(#3162 two-arm `find`; #3183 `__extern_has_idx` generalised to `$__vec_base`)
-are the prime suspects for altering the `set` bounds/offset path so an
-out-of-range offset now `array.set`-traps instead of taking a guarded catchable
-path. Confirm by bisecting the 4 tests across #3162 / #3183, then trace the
-`TypedArray.prototype.set` offset-bounds codegen (`src/codegen/` typed-array set
-lowering).
+**Prior suspects #3162 / #3183 / #3190 / #2947 are RULED OUT.** The +4 does not
+exist on main (main HEAD is 58 — see `origin` above, three-way verified), so no
+merged PR introduced it:
+- #2947 — disproven by dev-number-resid's revert-and-diff A/B (0 per-test change).
+- #2954/#3190 — its `$__vec_base` write fill is bounds-GUARDED ("OOB/negative
+  store → silent no-op, no trap"), so it introduces no oob (diff read directly).
+- #3162 (my two-arm `find`) touches only find/findIndex dispatch, not `set`.
+- #3183 landed BEFORE the baseline source commit c660e830, so its effect is
+  already reflected in the 58 baseline (still `undefined-constructor`, not oob).
+
+The +4 appears **only in the merge_group's speculative merged-state run**, never
+on main — that is why re-admits re-park and never-batched PRs (#2960/#2959) park
+on the identical delta. The 4 tests are BigInt `%TypedArray%.prototype.set`
+tests whose constructor is `undefined` (BigInt typed arrays unsupported) on main
+— they score `fail`/"undefined is not a constructor", not `oob`.
+
+**Two hypotheses to investigate:**
+1. **CI-sharded nondeterminism** — a shard-dependent / load-dependent
+   classification flips these 4 to `oob` intermittently in the sharded merged
+   run (most likely given they're a stable `fail` on main + baseline).
+2. **A genuine speculative-merge trap** — some queued PR, when speculatively
+   merged, defines the BigInt constructor AND the `set` offset-bounds then falls
+   to an unguarded `array.set`. If so, identify the PR and fix its `set`
+   offset/length bounds to emit a **catchable** RangeError (spec: RangeError when
+   `srcLength + targetOffset > targetLength`, and offset < 0).
+
+Reproduce in the CI sharded harness (NOT the local `runTest262File` — the local
+`wrapTest` harness leaves `BigInt64Array` undefined on ALL branches, so the oob
+is not locally reproducible). Compare merged-report JSONL across consecutive
+merge_group runs to see whether the 4 are stably-oob or flip.
 
 ## Fix
 
@@ -59,18 +80,26 @@ guarded-bounds pattern used elsewhere in the standalone array path.
 
 ## Acceptance criteria
 
-1. The 4 tests above no longer emit an `oob` trap (they pass, or throw a
-   catchable error that `assert.throws` observes).
-2. The #3189 `oob` ratchet count returns to **58** (or lower) on main — i.e. the
-   +4 introduced in this window is genuinely removed, not just baselined.
-3. Zero net test262 regressions; zero new traps in any category.
+1. Determine which hypothesis holds (CI nondeterminism vs a real speculative
+   trap) from consecutive merge_group merged-report JSONLs.
+2. If nondeterminism: stabilise the sharded classification of these 4 (or
+   confirm they never actually oob on any real merged main).
+3. If a real speculative trap: fix the offending queued PR's `set` offset/length
+   bounds to emit a **catchable** RangeError, not an unguarded `array.set` oob.
+4. **Tighten the valve back:** `gh variable set TRAP_RATCHET_TOLERANCE --body 0
+   -R loopdive/js2wasm` (no PR needed — it's a repo variable, PR #2963) once the
+   +4 is resolved, restoring the strict 0-tolerance ratchet.
+5. Zero net test262 regressions; no NEW trap category or growth beyond the
+   current +4 flaky window while the valve is at 4.
 
 ## Context
 
-- Baseline was reconciled 58->62 via `workflow_dispatch` force_baseline_refresh
-  on 2026-07-12 to unwedge the merge queue (every PR's `merge_group` was
-  parking on this ratchet). That refresh made the +4 the accepted baseline;
-  THIS issue removes them so the ratchet protection is restored at the lower
-  count.
+- The merge queue wedged 2026-07-12: the #3189 ratchet fired on every
+  `merge_group` (oob 58->62). Unwedged via the ratchet's own designed safety
+  valve — `TRAP_RATCHET_TOLERANCE` (repo variable, wired in PR #2963), set to
+  **4** (the exact flaky delta). This does NOT bake the +4 into the baseline
+  (main stays 58) and still blocks ANY further trap growth beyond +4.
+- A `promote-baseline` "refresh to 62" was attempted but is a no-op: it reflects
+  main HEAD, which is 58 (freshly-fetched baseline still reads 58).
 - Gate/ratchet: `scripts/diff-test262.ts` `evaluateTrapCategoryGrowth`
   (`TRAP_ERROR_CATEGORIES`), #3189.
