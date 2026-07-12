@@ -8,6 +8,8 @@ sprint: current
 priority: low
 horizon: m
 feasibility: hard
+loc-budget-allow:
+  - src/codegen/expressions/assignment.ts
 created: 2026-06-29
 updated: 2026-07-12
 task_type: bugfix
