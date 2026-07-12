@@ -3,14 +3,30 @@ id: 808
 title: "Extract string/import infrastructure from index.ts → imports.ts"
 status: ready
 created: 2026-03-26
-updated: 2026-04-28
-priority: medium
+updated: 2026-07-12
+priority: high
 feasibility: medium
 reasoning_effort: high
-goal: async-model
-sprint: Backlog
+goal: maintainability
+sprint: current
 subtask_of: 688
+related: [3182]
 ---
+
+> **2026-07-12 refresh (#3182 groom, elevated to current/high).** Partially
+> landed since written: `addImport` now lives in
+> `src/codegen/registry/imports.ts` (the natural extraction target — use it,
+> not a new `imports.ts`), and several `collect*Imports` functions no longer
+> exist under those names. Still in `src/codegen/index.ts` (15,693 LOC) as of
+> today: `collectAllSourceImports` (:7680), `addStringImports` (:10093),
+> `addUnionImports` (:10439), `addUnionImportsAsNativeFuncs` (:10758),
+> `addIteratorImports` (:11701), `addArrayIteratorImports` (:11737),
+> `addGeneratorImports` (:11779), `addForInImports` (:11819),
+> `collectUsedExternImports` (:13825). The line numbers in the original body
+> below are stale — re-anchor by symbol. Mind the `addUnionImports`
+> index-shift invariant (CLAUDE.md "addUnionImports").
+> (Also: original `goal: async-model` was a mis-tag; corrected to
+> maintainability.)
 # #808 — Extract string/import infrastructure from index.ts → imports.ts
 
 ## What moves
