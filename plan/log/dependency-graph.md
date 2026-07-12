@@ -742,3 +742,28 @@ remeasure 2026-07-12: honest gap 12,801). All `sprint: current`,
 Edges: #3169 → #3170 (receiver ladder before/alongside value-read);
 #3171 → #3172, #3174 (shared brand-preamble helper); #2992 (in-progress)
 owns the defineProperty/create descriptor cluster — deliberately not sliced.
+
+## 2026-07-12 — #3178 host async-machinery retirement family (architect)
+
+Umbrella **#3178** (sprint: current, XL): the 4,467-leaky-pass generator/
+async/Promise host-import family — the largest standalone lever (~10.3 pts).
+Native substrate exists (microtask ring / $Promise / #2906 N-state machine);
+the family is admission-coverage slices:
+
+- **S1 = #3164** sync gen fn-expressions (~1,741 leaky, plan ready, fable-now)
+- **S2 = #3132** async-gen methods/yield*/return (~2,408, in-progress)
+- **S3** capturing generators → ref-cell capture slots (NEW child at staffing;
+  opus-design; coordinate #3032)
+- **S4** for-await-of dstr legacy async lowering (90; NEW child; overlaps #2602)
+- **S5/S6 = #2903** R1–R4 (non-inline executor, extends-Promise, lazy Iterator
+  helpers, TypedArray callbacks — all fable-now, re-grounded 2026-07-12)
+- **S7** `__get_caught_exception` zero-assert (mechanical, last)
+
+**#2040** re-grounded + restaffable (`ready`, sprint: current): slices 1–4
+(lazy defaults 198 / obj-rest ToPrimitive 190 / abrupt step-err 115 / gen
+brand-check 48) fable-now; A1 rest-identity (382) stays BLOCKED on
+#2580 M2/#3032/#3053 — do not re-attempt the tag-5 classifier. **#2723**
+(RegExp linear) plan confirmed adequate; stays Backlog below the async family.
+
+Edges: #3164 → #3178-S3 (same admission seam); #3132 ∥ #3164 ∥ #2903-R;
+#2040 slices ⊥ all of the above; #3178-S7 after S1+S2.

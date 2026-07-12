@@ -354,3 +354,15 @@ implementation; start with Slice A.**
   emission pattern.
 - `src/codegen/regexp-standalone.ts` — the compile-time router selecting linear
   vs. backtracking per the AST predicate; host path untouched.
+
+### Adequacy note (architect, 2026-07-12 standalone-family pass)
+
+Reviewed against the 2026-07-12 gap map (~533 standalone RegExp fails across
+sub-buckets): the plan above is **already dev-executable as written** (slice
+ladder, router predicate, file map, sizing) — no deepening needed. Family
+classification: **opus-owned** for Slice A's PikeVM construction + router
+(engine design; the §4.x mappings are the load-bearing subtleties), fable-
+executable for B–D once A's skeleton exists. Priority vs. the async family:
+BELOW #3164/#3132/#2903-R-slices — those retire ~4,000 leaky passes for far
+less effort than Slice A's ~1–2 dev-weeks for ~500 fails. Keep `sprint:
+Backlog` until the async family's S1/S2 are landed or staffing frees up.

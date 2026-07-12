@@ -358,3 +358,90 @@ traps `illegal cast`.
 - Array-iterator reification is a separate gap: `[1,2,3].values()` returns
   NULL standalone, so `.values().find(...)` shapes stay failing (not a helper
   problem).
+
+---
+
+## Re-ground 2026-07-12 (architect, arch-standalone-family-plans) — remaining scope, measured
+
+Fresh-baseline measurement (2026-07-12 standalone JSONL, official scope) +
+live compile probes on main @ 6dcdf30135. **The Promise core is DONE**:
+`Promise.resolve(1).then(v=>v).catch(e=>e)`, `Promise.all/allSettled([...])`,
+`.finally(cb)` all compile with **zero env imports** standalone. Of the 4,467
+leaky passes, only **182** are Promise/callback-only (no generator machinery);
+the gap map's ~1,500 `Promise_then2/resolve/reject` column co-occurs with
+`__create_async_generator` in >90% of rows — it is the async-gen HOST
+fallback's own promise traffic and **rides #3132, not this issue**. Family
+sequencing lives in umbrella **#3178**.
+
+What remains HERE, ranked, each a bounded PR:
+
+### R1 — `new Promise(NON-inline executor)` (fable-executable-now, S)
+
+Probe: `function make(ex){ return new Promise(ex); } make((res)=>res(42))`
+leaks `Promise_new + __make_callback + Promise_then`.
+`emitStandalonePromiseFromExecutor` (src/codegen/promise-executor.ts:69)
+requires a syntactically inline arrow/fn-expression (it needs the executor's
+`ClosureInfo`); an identifier/param-held executor returns `false` and
+new-super.ts:3120 sets `ctx.moduleHasHostPromiseSource = true` + falls to the
+`Promise_new` import (new-super.ts:3123-3126).
+
+**Fix**: a runtime executor arm. When the executor arg is a VALUE (not an
+inline literal), emit: allocate the pending `$Promise`, build the two settle
+closures via `ensurePromiseExecutorClosures` (async-scheduler.ts — already
+exported for the #3125 thenable jobs; takes the promise local), then invoke
+the executor value through the SAME guarded funcref dispatch used for any
+2-arg closure call (`emitGuardedFuncRefCast` on the canonical
+`(externref, externref) -> ()` wrapper shape; try/catch → reject on throw,
+mirroring the inline arm's throw-before-settle handling). Non-callable
+executor → native TypeError (§27.2.3.1 step 2). Keep the host arm for gc/host
+lanes byte-identical, and drop the `moduleHasHostPromiseSource` flag set for
+the newly-native shapes so the then-bridge de-leak applies. Edge cases:
+executor called exactly once, synchronously, with (resolve, reject);
+re-entrant resolve inside the executor; a zero-param executor value (the
+wrapper shape still admits it — verify `make(function(){})`).
+
+### R2 — `class X extends Promise` producer (fable-executable-now, S/M)
+
+Probe: `class P extends Promise {} P.resolve(1).then(...)` leaks
+`__new_Promise + FileSystemDirectoryHandle_resolve (the mislabeled
+lib-interface name) + __make_callback + Promise_then`. The heritage-scan
+producer flag (declarations.ts, added by the finally sub-front) correctly
+keeps host arms — but the STATICS route through a symbol-derived import that
+is unsatisfiable host-free. **Fix direction**: native subclass statics —
+`P.resolve/reject` on a Promise-heritage class allocate the native `$Promise`.
+Measure FIRST how many of the ~15 leaky + fail-bucket rows need real
+`@@species`/constructor-chain semantics (`instanceof P` on the result); if
+species is load-bearing, keep host and document as deferred (graveyard rule:
+measure-first honest yield).
+
+### R3 — lazy Iterator helpers `map/filter/take/drop/flatMap` (fable-executable-now, M)
+
+Sub-front 2 covered the EAGER helpers. The lazy five need a wrapper-iterator:
+ONE closed struct `$LazyIterHelper { kind i32, src externref,
+fn (ref null $wrap2), state (mut f64) }` whose step drives `__iter_hof_next`
+on `src` and applies a kind-dispatched transform (map: apply; filter: loop
+until predicate true; take/drop: counter in `state`; flatMap: inner-iterator
+field, drain-then-advance). Register an arm for it in `__iter_hof_open`
+(iter-hof-native.ts) so helpers CHAIN (`g().map(f).toArray()`). ~10 leaky
+passes + the `Iterator/prototype/{map,filter,take,drop,flatMap}` fail
+directories (~250 files; tree currently 92/373 post-sub-front-2). Follow the
+iter-hof-native.ts reserve-then-fill discipline (#1719) exactly.
+
+### R4 — TypedArray callback methods (sub-front 4, fable-executable-now, S)
+
+`Uint8ClampedArray_find + __make_callback` style leaks (~5 rows) + fail rows.
+Native %TypedArray% HOF bodies invoking via `call_ref` — same pattern as the
+vec HOF arm; ground in `closed-method-dispatch.ts` + the #2651 family.
+
+### NOT this issue (re-affirmed)
+
+- The 69-fail `Promise/{all,race,any,allSettled}` custom-capability cluster
+  (combinator capability protocol) — #2671's standalone twin.
+- Async-gen promise leaks — #3132. Dynamic-import chains (47) — #1089/#1512.
+- for-await-of dstr legacy async lowering (90 leaky) — umbrella #3178 S4.
+
+### Validation (each R-slice)
+
+Leak probe (zero family env imports + bare `{}` instantiate OK), construct-
+sampled corpus flip, `prove-emit-identity` gc/wasi byte-identical, merge_group
+standalone floor as the decider.
