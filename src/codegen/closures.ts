@@ -46,6 +46,7 @@ import {
   isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
+  resolveWasmTypeForClosureReturn,
 } from "./index.js";
 import {
   coerceType,
@@ -1670,7 +1671,11 @@ export function computeClosureWrapperSig(
       closureReturnType = { kind: "externref" };
     }
     if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
+      // (#3051 Slice 3) accessor-bearing object-literal return types lower to
+      // externref — the runtime value is a HOST plain object; a struct-typed
+      // return null-drops it on the failed ref.test (see
+      // resolveWasmTypeForClosureReturn).
+      closureReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
     }
   }
   if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
@@ -3344,7 +3349,9 @@ export function compileArrowAsCallback(
     if (sig) {
       const retType = ctx.checker.getReturnTypeOfSignature(sig);
       if (!isVoidType(retType)) {
-        cbReturnType = resolveWasmType(ctx, retType);
+        // (#3051 Slice 3) see resolveWasmTypeForClosureReturn — accessor-bearing
+        // object-literal return types lower to externref (host plain objects).
+        cbReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
       }
     }
   } catch {
@@ -3609,6 +3616,21 @@ export function compileArrowAsCallback(
         // The struct.new result (ref cell) is on the stack for the capture struct
         refCellLocals.push({ refCellLocal, outerLocalIdx: cap.localIdx, refCellTypeIdx, valType: cap.type });
         options?.sharedRefCells?.set(cap.name, { refCellLocal, refCellTypeIdx, valType: cap.type });
+        // (#3051 Slice 3) Stored accessor callbacks (needsThis): rebind the
+        // OUTER local to the shared cell (`boxedCaptures` + localMap — the
+        // closure path's convention, closures.ts ~467) so outer WRITES after
+        // creation flow through the cell and the stored getter observes them.
+        // The cell→local writebacks below only sync the reverse direction
+        // (callback writes → outer reads) and only after call expressions; an
+        // outer reassignment between host calls (`badLastIndex = Symbol.split`
+        // in test262 @@split str-coerce-lastindex-err) was invisible to the
+        // getter, which kept reading the creation-time snapshot. The orphaned
+        // original local slot keeps receiving writebacks — harmless (no reads
+        // resolve to it once localMap points at the box).
+        if (needsThis) {
+          fctx.localMap.set(cap.name, refCellLocal);
+          (fctx.boxedCaptures ??= new Map()).set(cap.name, { refCellTypeIdx, valType: cap.type });
+        }
       } else {
         // Immutable capture or already-boxed: push directly
         fctx.body.push({ op: "local.get", index: cap.localIdx });

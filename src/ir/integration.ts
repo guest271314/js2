@@ -61,6 +61,13 @@ import {
 import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
+// (#3156) — on-demand guarded charCodeAt helper materialization
+import {
+  ensureHostCharCodeAtGuarded,
+  ensureNativeCharCodeAtHelper,
+  JSSTR_CHARCODEAT_FN,
+  NATIVE_CHARCODEAT_FN,
+} from "../codegen/char-code-at-helpers.js";
 import { lowerFunctionAstToIr, STRING_METHOD_TABLE, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
@@ -1017,6 +1024,19 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     // `str.method` instr is #2955's follow-up slice.
     stringMethodPlan(method: string, argCount: number) {
       const native = ctx.nativeStrings;
+      // (#3156) charCodeAt — BOTH modes lower to a guarded defined helper
+      // `(recv, i32 idx) -> f64` (src/codegen/char-code-at-helpers.ts;
+      // materialized on demand by resolveFunc below). NOT the bare
+      // `wasm:js-string charCodeAt` builtin: that one traps out-of-range
+      // (#2003) and its bare funcMap name is shadowable by a user function
+      // named `charCodeAt` (#1072). An omitted position pads i32 0.
+      if (method === "charCodeAt") {
+        return {
+          funcName: native ? "__str_charCodeAt" : "__jsstr_charCodeAt",
+          indexArgRep: "i32" as const,
+          padOmitted: "charcode-zero" as const,
+        };
+      }
       // #2002 — the native string backend lowers the position arg via its
       // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
       // native path rather than re-implement position handling in the IR.
@@ -1029,6 +1049,23 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
       const sig = STRING_METHOD_TABLE[method];
       if (!sig) return null;
       const omitted = argCount < sig.hostArgs.length;
+      // (#3156) substring — native `__str_substring` clamps both indices to
+      // [0, len], so omissions pad exact sentinels (start 0 / end 0x7fffffff,
+      // the legacy native arm's convention) and every arity lowers; host mode
+      // rides the #1248 length-default pad in from-ast.
+      if (method === "substring") {
+        return native
+          ? {
+              funcName: "__str_substring",
+              indexArgRep: "i32" as const,
+              padOmitted: "native-substring" as const,
+            }
+          : {
+              funcName: "string_substring",
+              indexArgRep: "f64" as const,
+              padOmitted: "host" as const,
+            };
+      }
       // #1248 — native mode only lowers fully-specified call sites, except
       // `slice(start)` whose implicit end defaults to recv.length.
       if (native && omitted && !(method === "slice" && argCount === 1)) return null;
@@ -1271,6 +1308,28 @@ function makeResolver(
         const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
         if (helperIdx === null) {
           throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
+      }
+      // (#3156) Guarded charCodeAt helpers — materialized on demand, same
+      // append-only defined-function discipline as ensureFmod (never an
+      // import, no existing funcIdx shifts). Idempotent via funcMap. The
+      // host variant bakes the `wasm:js-string` builtin import indices from
+      // `ctx.jsStringImports` (the #1072 shadowing-safe registry; import
+      // indices never shift) — `preregisterStringSupport` guarantees
+      // `addStringImports` ran before Phase-3 emission whenever a lowered
+      // function calls this helper.
+      if (ref.name === JSSTR_CHARCODEAT_FN) {
+        const helperIdx = ensureHostCharCodeAtGuarded(ctx);
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (wasm:js-string builtins not registered)`);
+        }
+        return helperIdx;
+      }
+      if (ref.name === NATIVE_CHARCODEAT_FN) {
+        const helperIdx = ensureNativeCharCodeAtHelper(ctx);
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (native-string helpers unavailable)`);
         }
         return helperIdx;
       }
@@ -1543,6 +1602,15 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
   const walk = (instr: IrInstr): void => {
     if (instrUsesStrings(instr)) usesStringOp = true;
     if (instr.kind === "string.const") literals.add(instr.value);
+    // (#3156) The host guarded-charCodeAt helper wraps the `wasm:js-string`
+    // charCodeAt/length builtins — its materialization (resolveFunc) reads
+    // `ctx.jsStringImports`, so `addStringImports` must have run BEFORE
+    // Phase-3 emission. A claimed function can carry this call with NO other
+    // string op (e.g. `f(s: string) { return s.charCodeAt(0); }` — receiver
+    // is a param, no literals), so detect the call target explicitly.
+    if (instr.kind === "call" && instr.target.name === JSSTR_CHARCODEAT_FN) {
+      usesStringOp = true;
+    }
     if (instr.kind === "extern.regex") {
       // RegExp literal lowers via emitStringConst(pattern) + emitStringConst(flags).
       usesStringOp = true;
@@ -1551,6 +1619,18 @@ function preregisterStringSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[
     }
     if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
       for (const sub of instr.body) walk(sub);
+    }
+    // (#3156) Value-producing if/else arms and try bodies are nested instr
+    // buffers too — a `s.charCodeAt(i)` (or any string op) inside a ternary
+    // arm or try block would otherwise escape pre-registration.
+    if (instr.kind === "if") {
+      for (const sub of instr.then) walk(sub);
+      for (const sub of instr.else) walk(sub);
+    }
+    if (instr.kind === "try") {
+      for (const sub of instr.body) walk(sub);
+      if (instr.catchClause) for (const sub of instr.catchClause.body) walk(sub);
+      if (instr.finallyBody) for (const sub of instr.finallyBody) walk(sub);
     }
   };
   for (const entry of fns) {
