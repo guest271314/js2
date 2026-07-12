@@ -923,23 +923,20 @@ function isNumberMethodReceiver(ctx: CodegenContext, receiverType: ts.Type): boo
  * prototype object carries no [[PrimitiveValue]] slot, so the unbox yields NaN
  * (rendered `"NaN"`). Recover the +0 directly at the receiver site instead.
  *
- * Guarded so a shadowing user binding (`const Number = {...}`) is not treated
- * as the global constructor: the global `Number` has only ambient (lib.d.ts)
- * declarations, never a user var/param/function/class/binding-element decl.
+ * Guarded against a shadowing user binding: a LOCAL `const Number = {...}` /
+ * param is caught by `fctx.localMap`/`boxedCaptures` (mirrors the sibling
+ * `tryCompileStandaloneBuiltinProtoMemberMeta` shadow check). A module-level
+ * shadow does not reach here at all — every caller is gated on the receiver
+ * TYPE being the `Number` wrapper (`isNumberMethodReceiver` /
+ * `recvSymName === "Number"`), which a non-Number shadow would not satisfy.
+ * Uses no direct TS-checker read (oracle-ratchet, #1930).
  */
-function isNumberDotPrototype(ctx: CodegenContext, expr: ts.Expression): boolean {
+function isNumberDotPrototype(fctx: FunctionContext, expr: ts.Expression): boolean {
   if (!ts.isPropertyAccessExpression(expr)) return false;
   if (expr.name.text !== "prototype") return false;
   const base = expr.expression;
   if (!ts.isIdentifier(base) || base.text !== "Number") return false;
-  const sym = ctx.checker.getSymbolAtLocation(base);
-  const decls = sym?.declarations ?? [];
-  // The global `Number` constructor is declared ONLY in ambient lib.d.ts
-  // (`declare var Number: NumberConstructor` + `interface Number`). A user
-  // shadow (`const Number = {...}`, a param, an import) has at least one
-  // declaration in a NON-declaration (user) source file. Treat any such
-  // user-source declaration as a shadow and bail.
-  const shadowed = decls.some((d) => !d.getSourceFile().isDeclarationFile);
+  const shadowed = fctx.localMap.has("Number") || (fctx.boxedCaptures?.has("Number") ?? false);
   return !shadowed;
 }
 
@@ -1043,7 +1040,7 @@ function emitNumberMethodReceiverF64(
   // (#3175) `Number.prototype.<m>(...)` — the prototype object's [[NumberData]]
   // is +0 (§21.1.3). Recover the +0 directly; the wrapper `__to_primitive`
   // recovery below finds no [[PrimitiveValue]] slot and would yield NaN.
-  if (isNumberDotPrototype(ctx, propAccess.expression)) {
+  if (isNumberDotPrototype(fctx, propAccess.expression)) {
     fctx.body.push({ op: "f64.const", value: 0 });
     return;
   }
@@ -11527,7 +11524,7 @@ function compileCallExpression(
         recvSymName === "Number" &&
         wrapperMethodName === "valueOf" &&
         expr.arguments.length === 0 &&
-        isNumberDotPrototype(ctx, propAccess.expression)
+        isNumberDotPrototype(fctx, propAccess.expression)
       ) {
         fctx.body.push({ op: "f64.const", value: 0 });
         return { kind: "f64" };
