@@ -67,3 +67,86 @@ return the same backing vec each time).
 
 - Banked probe under the #2794 branch `.tmp/` (`vec-read.ts` + `vec-read-run.mjs`,
   the multi-push + join case). Compile is small/fast (no full acorn needed).
+
+## Implementation Plan
+
+(arch, 2026-07-12. Verify-first, per the issue. Anchors verified on main.)
+
+### Where the round-trip actually lives (read this before instrumenting)
+
+Host (gc) mode; `s: any` is a WasmGC `$Scope` struct handled as externref.
+
+- `s.lexical` read → host import `__extern_get(s, "lexical")`
+  (src/runtime.ts sidecar machinery) → returns the vec struct, possibly
+  wrapped by `_wrapForHost` (identity-stable per struct via
+  `_hostProxyCache`, runtime.ts:5281).
+- `.push("a")` → `__extern_method_call` → the **#1712 vec-mutator arm**
+  (runtime.ts:11517-11565): `_unwrapForHost(obj)` → `rawVec`, then
+  `__vec_mut_supported(rawVec)` gate → `exports.__vec_push(rawVec, x)`
+  (Wasm-side per-vec-type dispatch, reserved up front by #2784 S3 —
+  src/codegen/index.ts:5923-5940; `__vec_mut_supported` emit at :6352-6381).
+  If the gate says NO, control falls to the **#2794 read-materialize arm**
+  (runtime.ts:11570-11600): `_VEC_PRIMITIVE_READ_METHODS` copies the vec
+  into a fresh JS array and applies the native method — for a READ that is
+  fine; if a PUSH ever falls past the mut arm, the mutation lands on a
+  transient copy and is lost.
+- `.join("|")` → the same #2794 read-materialize arm (join is read-only).
+
+### Step 1 — reproduce + pin the arm (half a day)
+
+1. Re-run the banked probe on current main (the #2784/#2794 fixes may have
+   moved the behavior; the issue predates them in detail).
+2. Instrument runtime.ts: log per call — method name, whether
+   `__vec_mut_supported(rawVec)` returned 1, `__vec_len` before/after, and a
+   stable id for `rawVec` (e.g. a WeakMap counter). Three pushes then join:
+   the log will show exactly which push (if any) took the fallthrough arm
+   and whether all four calls saw the SAME rawVec identity.
+3. Prime suspect A — **empty-literal vec typing**: `this.lexical = []` in
+   the constructor may allocate a DIFFERENT vec type (generic/externref vec)
+   than the field's declared `string[]` vec; `__vec_push`'s per-vec-type
+   dispatch (index.ts:5923) then rejects the first push (returns <0 / gate
+   fails) → first element lands via some fallback → dropped or stored on a
+   replaced backing. Check the WAT: which vec type the constructor stores vs
+   which type `__vec_push`'s dispatch arms cover.
+4. Prime suspect B — **first-push backing replacement**: `__vec_push` grows
+   by replacing the `data` array field inside the vec struct. If the FIELD
+   READ (`s.lexical`) returned a copy/snapshot rather than the struct (or
+   the host cached a materialized JS array across the push), the first
+   push's grow is invisible to later reads. The `indexOf`-correct /
+   `join`-wrong asymmetry fits a stale materialization cached between the
+   read-materialize arm calls.
+
+### Step 2 — fix per finding
+
+- **If A (typing)**: make the empty-array-literal initializer in a class
+  field/constructor assignment adopt the DECLARED field vec type (codegen
+  side — the array-literal typing at the assignment site), or add the
+  missing vec-type arm to the `__vec_push` dispatch builder
+  (index.ts:5923-5960 region). Prefer the former: one representation, no
+  dispatch growth.
+- **If B (stale materialization/identity)**: ensure the #2794
+  read-materialize arm NEVER caches the built JS array across calls (it
+  currently builds fresh each call — verify), and that `_unwrapForHost`
+  reverses every wrapper shape the field read can produce (the
+  closure-bridge reverse at runtime.ts:11534-11539 is one such repair;
+  the miss may be an analogous unreversed wrapper for string-vecs).
+
+### Reuse
+
+- The #1712 vec-mutator arm + #2794 read arm (runtime.ts:11517-11600) —
+  extend the existing arms; do not add a new method-call path.
+- `__vec_push`/`__vec_mut_supported` Wasm exports
+  (src/codegen/index.ts:5923/:6352, the #2784 S3 reserve-up-front pattern) —
+  any new vec-type arm goes into the same builders.
+- `_wrapForHost`/`_hostProxyCache`/`_unwrapForHost` (runtime.ts:5281) for
+  identity-stability questions.
+
+### Acceptance / tests
+
+- The issue's repro yields `"a|b|c"`; `length`/`indexOf`/`join` consistent
+  across interleaved push/read sequences on a nested `any`-vec field.
+- Add `tests/issue-2802.test.ts`: the repro + an interleaved
+  push/read/push/join variant + a `this.field = []`-then-push-in-same-method
+  variant (distinguishes A from B).
+- acorn dogfood lane unchanged (this edge is off acorn's real path — #2794
+  diffed EQUAL — so any fix must be regression-neutral there).

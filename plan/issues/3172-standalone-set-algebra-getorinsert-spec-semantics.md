@@ -116,3 +116,106 @@ Standalone lane (`TEST262_TARGET=standalone`, filter
 - The 14 `has/keys-is-callable` regressions from the first measurement were
   fixed in-branch (`__setrec_check_callable` reserve-then-fill IsCallable
   gate); final run is 0-regression.
+
+## Implementation Plan — residual buckets as independently claimable plan-lets
+
+(arch, 2026-07-12. The protocol layer landed — PR merged as
+`src/codegen/collections-es2025.ts` (1,248 lines): `ensureSetRecFieldGetters`
+reserve at :558-600, `fillSetRecFieldGetters` finalize fill at :613,
+`__setrec_check_callable` fill at :683, `ensureSetAlgebraAnyDispatch` at
+:780, `ensureGetOrInsertKernels` at :160, `compileCollectionGetOrInsert` at
+:342. Each bucket below is a separate S/M slice, one PR each; all
+standalone-gated, zero host-lane bytes.)
+
+### Plan-let R1 — class-based set-likes (~14 tests, M) — `allows-set-like-class`, `set-like-class-order`
+
+**Gap**: `__setrec_field_<size|has|keys>` (fill at collections-es2025.ts:613)
+reads only DATA properties off the argument. A set-like written as
+`class MySetLike { get size() {...} has(k) {...} keys() {...} }` needs (a)
+accessor `get size()` invocation and (b) METHODS on a closed class struct
+materialized as callable values.
+
+**Change**: in `fillSetRecFieldGetters`'s `ref.test` arm for closed class
+structs, route the read through the same accessor-aware path
+`__extern_get` uses (getter descriptor → call; see the accessor arm
+object-runtime.ts ~:1127), and for method members mint the method as a
+closure value via `closed-method-dispatch.ts`'s method-as-value machinery
+(the #3098-adjacent closed-struct dispatch — grep
+`closed-method-dispatch.ts:171` comment block for the HOF callback arm
+pattern). The invocation side (`__setrec_call_has`/keys-iteration) already
+dispatches through `__apply_closure` — only the field READ is the gap.
+
+**Reuse**: `__extern_get`'s accessor arm (object-runtime.ts);
+`closed-method-dispatch.ts` method minting; `__apply_closure`
+(reserveApplyClosure, object-runtime.ts). Do NOT add a per-class glue.
+
+**Tests**: `Set/prototype/*/allows-set-like-class.js`,
+`set-like-class-order.js` (also asserts read/call ORDER: size → has → keys,
+then keys() iteration last — the fill must preserve GetSetRecord step order).
+
+### Plan-let R2 — `set-like-array` (~7 tests, S)
+
+**Gap**: expando `size`/`has`/`keys` properties written onto a vec-backed
+array (`const a = [1,2]; a.size = 2; a.has = ...`). The `__setrec_field_*`
+readers miss expando fields on vec carriers.
+
+**Change**: extend the fill's receiver dispatch with the vec-expando arm —
+the sidecar/expando lookup that `__extern_get` already performs for
+vec-backed arrays (grep object-runtime.ts for the vec expando arm used by
+`__extern_get`; reuse that helper by funcidx, per the #2108
+coercion-sites discipline).
+
+**Reuse**: the existing vec-expando read arm in object-runtime.ts —
+one `call`, no new reader.
+
+### Plan-let R3 — getOrInsert boxed-any value rows (~10 tests, S–M, may be a no-op here)
+
+**Gap**: `assert.sameValue(map.getOrInsert(k, obj), obj)` — two boxed anys
+compared by the harness comparator; the values round-trip tag-5 and compare
+vacuously/wrongly. This is the **#3056 boxed-compare lane** (and the #3053
+U3 carrier), NOT collection dispatch.
+
+**Action**: verify per-row that the failure is the comparator (compile one
+row with `JS2WASM_TAG5_CLASSIFIER=1`); if so, tag the rows to #3056/#3053 in
+the lane baseline and do NOT patch collections code. Only genuinely-wrong
+STORED values (identity lost through the map kernel itself,
+`ensureGetOrInsertKernels` :160) belong here.
+
+### Plan-let R4 — `builtins.js` function-object meta (7 tests, M)
+
+**Gap**: `Object.isExtensible(Set.prototype.union)`,
+`Object.getPrototypeOf(...)`, `.toString()` on the method VALUE — the
+algebra methods need function-object meta surface when read as values.
+
+**Change**: this is the same machinery as #3181 cluster A/B (builtin proto
+method values with meta surface) — implement AFTER the #3181 pattern lands
+and reuse its glue (`array-object-proto.ts` `registerNativeProtoBuiltin` +
+`tryCompileStandaloneBuiltinProtoMemberMeta`, property-access.ts:1104) for
+the Set brand. Do not build a Set-specific meta path first.
+
+### Plan-let R5 — re-entrant mutation ordering + IteratorClose (~7 tests, M–L, lowest priority)
+
+**Gap**: `set-like-class-mutation` (the argument's `has`/`keys` mutates the
+receiver mid-algorithm — spec fixes `size` and snapshots per-method reads)
+and `set-like-iter-return` (abrupt completion must call the keys iterator's
+`return()` — IteratorClose).
+
+**Change**: in `ensureSetAlgebraAnyDispatch` (:780) kernels: (a) read + 
+ToNumber `size` ONCE into a local before iteration (verify current fill
+order — likely already correct from `size-is-a-number`); (b) snapshot the
+receiver's backing entries where §24.2.4.x prescribes (intersection/
+difference iterate `O.[[SetData]]` live — follow the per-method spec text,
+not a blanket copy); (c) wrap the keys-iteration loop with an IteratorClose
+arm on early exit — reuse the iterator-protocol close helper from
+`iterator-native.ts` (the ITER close discipline the #3098 iterator steppers
+use) rather than a new close path.
+
+**Out of scope stays out**: `class MySubset extends Set` rows (~12) are
+#2917 builtin-super lineage — do not touch here.
+
+### Sequencing / ownership
+
+R2 (S) → R1 (M) → R5 (M–L) independent of each other; R3 is triage-first;
+R4 blocks on #3181 cluster A/B landing. Each PR: scoped standalone sweep of
+`built-ins/{Map,Set,WeakMap}/prototype` vs the 559/700 post-#3172 baseline,
+0 host-lane regressions, `tests/issue-3172.test.ts` stays green.
