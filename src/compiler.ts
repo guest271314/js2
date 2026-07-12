@@ -710,6 +710,24 @@ function buildCodegenOptions(
     jsxRuntime?: import("./import-resolver.js").JsxRuntimeImport;
   },
 ): CodegenOptions {
+  // (#86) Measurement-integrity guard. The standalone / wasi codegen regime is
+  // derived ONLY from `options.target` (below). There is NO `standalone` /
+  // `wasi` boolean OPTION — a caller that passes `{ standalone: true }` (or
+  // `{ wasi: true }`) to `compile()` intends a standalone/wasi run but silently
+  // gets the default gc-host lane, i.e. VACUOUS standalone coverage (the entire
+  // point of #86). TypeScript's excess-property check catches the direct-literal
+  // form (the fields are typed `never` on CompileOptions), but callers that
+  // widen options to `Record<string, unknown>` erase that — so fail LOUDLY here
+  // too. Use `target: "standalone"` / `target: "wasi"`.
+  const strayRegime = (options as Record<string, unknown>).standalone ?? (options as Record<string, unknown>).wasi;
+  if (strayRegime !== undefined) {
+    const key = (options as Record<string, unknown>).standalone !== undefined ? "standalone" : "wasi";
+    throw new Error(
+      `Unknown compile option '${key}' — the ${key} codegen regime is selected via ` +
+        `target: "${key}", not a '${key}' boolean. Passing { ${key}: true } silently ran the ` +
+        `default gc-host lane (vacuous ${key} coverage). Use { target: "${key}" }. (#86)`,
+    );
+  }
   return {
     sourceMap: emitSourceMap,
     fast: options.fast,

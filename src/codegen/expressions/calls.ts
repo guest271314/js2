@@ -22,7 +22,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js"; // (#2984)
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
-import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
+import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
 import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
 import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.js"; // (#1983 / #3123)
 import { ensureIterStepScratchGlobal, ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain / (#3146) Iterator-statics intrinsics
@@ -36,6 +36,7 @@ import {
   reserveApplyClosure,
   reserveBindDynHelper,
 } from "../object-runtime.js";
+import { ensureStringRawHelper } from "../string-raw.js"; // (#3147)
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseFinally,
@@ -6737,6 +6738,52 @@ function compileCallExpression(
       }
     }
 
+    // (#3147) Standalone-native `String.raw(template, ...substitutions)` — the
+    // ordinary FUNCTION-CALL form (§22.1.2.4). The tagged-template form
+    // `String.raw\`...\`` is a TaggedTemplateExpression and never reaches this
+    // CallExpression path (#2008/#2510). Without this arm the call falls to the
+    // generic member-call path → `__get_builtin` → #1472 Phase B refusal
+    // (22 hard CEs under built-ins/String/raw/). Host mode is untouched. A
+    // spread argument (`String.raw(...args)`) keeps today's refusal — the
+    // substitution list must be statically enumerable to build the $ObjVec.
+    if (
+      ctx.standalone &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "String" &&
+      propAccess.name.text === "raw" &&
+      !expr.arguments.some((a) => ts.isSpreadElement(a))
+    ) {
+      // Register the helper (and the $ObjVec builders) BEFORE lowering the
+      // args — append-only, no funcidx shift of this in-flight function; same
+      // discipline as the Object.groupBy arm below.
+      const stringRawIdx = ensureStringRawHelper(ctx);
+      const { newIdx: vecNewIdx, pushIdx: vecPushIdx } = ensureObjVecBuilders(ctx);
+      // template — evaluated first (argument order). Missing → ToObject(
+      // undefined) throws; the null externref is the nullish carrier the
+      // helper's TypeError check reads.
+      if (expr.arguments.length >= 1) {
+        const tType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (tType === null) fctx.body.push({ op: "ref.null.extern" });
+        else if (tType.kind !== "externref") coerceType(ctx, fctx, tType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // substitutions — each evaluated exactly once, in order, into an $ObjVec.
+      const subsLocal = allocLocal(fctx, `__strraw_subs_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "call", funcIdx: vecNewIdx });
+      fctx.body.push({ op: "local.set", index: subsLocal });
+      for (let ai = 1; ai < expr.arguments.length; ai++) {
+        fctx.body.push({ op: "local.get", index: subsLocal });
+        const aType = compileExpression(ctx, fctx, expr.arguments[ai]!, { kind: "externref" });
+        if (aType === null) fctx.body.push({ op: "ref.null.extern" });
+        else if (aType.kind !== "externref") coerceType(ctx, fctx, aType, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: vecPushIdx });
+      }
+      fctx.body.push({ op: "local.get", index: subsLocal });
+      fctx.body.push({ op: "call", funcIdx: stringRawIdx });
+      return nativeStringType(ctx);
+    }
+
     // Handle Array.fromAsync(items, mapFn?, thisArg?) — ES2024 (#1517)
     // Delegates to host import which implements the spec algorithm using
     // native `for await...of` over async iterables, sync iterables (awaiting
@@ -8912,6 +8959,54 @@ function compileCallExpression(
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
+    }
+
+    // (#3149) Handle Map.groupBy(items, callback) — ES2024 §24.1.1.2 grouping
+    // into a WasmGC-native `$Map` keyed by SameValueZero. Standalone-only; the
+    // gc/host lane keeps its `Map.groupBy` host builtin. Mirrors the
+    // Object.groupBy arm below (indexable-items gate; raw-GC-closure callback so
+    // no `__make_callback` env import leaks) but returns a `ref $Map`.
+    if (
+      (ctx.standalone || ctx.nativeStrings) &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Map" &&
+      propAccess.name.text === "groupBy" &&
+      expr.arguments.length >= 2
+    ) {
+      const mgItemsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+      const mgItemsIndexable =
+        ts.isArrayLiteralExpression(expr.arguments[0]!) || mgItemsType.getNumberIndexType() !== undefined;
+      if (mgItemsIndexable) {
+        // `ensureMapGroupBy` resolves `__box_number`/`__extern_length`/
+        // `__extern_get_idx` (from the union + object runtime) via `!`-asserted
+        // funcMap lookups, and the Map key equality/hash arms
+        // (`__same_value_zero`/`__hash_anyref`) only include their number/string
+        // comparison when `__unbox_number`/`__typeof_number`/`__typeof_string`/
+        // `__str_equals` are registered BEFORE `ensureMapHelpers` runs. Both
+        // require the union + native-string helpers up front (a module whose
+        // ONLY Map use is `Map.groupBy` has no prior `new Map()` to register
+        // them). Ensure them here first — mirrors the new-super.ts `new Map()`
+        // order (`addUnionImports` before `ensureMapHelpers`). Omitting them
+        // makes ensureMapGroupBy trip an undefined funcIdx → the arm throws and
+        // silently falls back to the refusing `__get_builtin` path.
+        addUnionImports(ctx);
+        ensureNativeStringHelpers(ctx);
+        // ensureMapGroupBy sets up the Map runtime types (mapTypeIdx) as a
+        // side effect, so it is called BEFORE reading ctx.mapTypeIdx.
+        const mapGroupByIdx = ensureMapGroupBy(ctx);
+        const itemsTy = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (itemsTy && itemsTy.kind !== "externref") coerceType(ctx, fctx, itemsTy, { kind: "externref" });
+        const cbArg = expr.arguments[1]!;
+        const cbTy =
+          ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+            ? compileArrowAsClosure(ctx, fctx, cbArg)
+            : compileExpression(ctx, fctx, cbArg, { kind: "externref" });
+        if (cbTy && cbTy.kind !== "externref") coerceType(ctx, fctx, cbTy, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: mapGroupByIdx });
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
+      // Non-indexable (generic iterable) items → fall through to the refusing
+      // host path (#2864 iterator-carrier follow-up), not a silent empty Map.
     }
 
     // Handle Object.groupBy(iterable, keyFn) — ES2024 grouping (#965)

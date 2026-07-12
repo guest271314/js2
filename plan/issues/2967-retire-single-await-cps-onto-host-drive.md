@@ -1,7 +1,8 @@
 ---
 id: 2967
 title: "Async engine convergence: retire emitAsyncStateMachine/splitBodyAtAwait onto the #2906 host-drive engine; widen planLinearAwaits gaps once for both lanes"
-status: in-progress
+status: done
+completed: 2026-07-11
 assignee: ttraenkler/fable-senior
 created: 2026-07-02
 updated: 2026-07-11
@@ -462,7 +463,49 @@ mapfn-result-awaited-once-per-iteration); issue-1712's single fail
 control-verified identical on pristine main (2ff0db4f0a). merge_group A/B
 is the hard gate (the await-using cluster flips CPS→drive).
 
-## Slice 2c (CPS deletion) — BLOCKED on class-2 rep-unification (2026-07-11)
+## Slice 2c (CPS deletion) — DONE (2026-07-11, unblocked by #3134)
+
+The CPS engine is DELETED. #3134 (Promise<T> value-slot rep → externref)
+landed first and dissolved the class-2 blocker below: a `Promise<T>[]` vec
+element now resolves to `vec<externref>`, matching the stored promise, so the
+async-frame spill guess no longer diverges and the class-2 fromAsync closures
+DRIVE on the frame engine.
+
+**Measured (this branch, corpus sweep: fromAsync + await-using +
+AsyncDisposableStack, 134 files, js-host baseline):**
+
+- baseline (main+#3134, class-2 still declined to CPS): pass **80**;
+- CPS deleted + class-2 admitted: pass **81** — **0 regressions, +1
+  improvement** (`fromAsync/non-iterable-input-does-not-use-array-prototype`).
+  The prediction held: with the rep fixed, the former CPS population drives
+  identically-or-better.
+
+**Deleted** (~-582 src LOC across 6 files):
+
+- `emitAsyncStateMachine` + `emitMakeContinuationCallback` (async-cps.ts);
+- `compileSyntheticAsyncContinuation` + `AsyncCapture`/`SyntheticContinuation`
+  (closures.ts);
+- the `cps` lane in `decideAsyncActivation`/`emitAsyncLane` + the `AsyncLane`
+  `"cps"` variant + the whole `planAsyncClosureActivation` CPS re-lane
+  (discard-tail / value-return-suffix guards + `suffixReturnsValue`)
+  (async-activation.ts);
+- `asyncClosureCellSpillHazard` (async-frame.ts — class-2 no longer declines);
+- `asyncCpsActive` (context/types.ts) + its `AwaitExpression` guard
+  (expressions.ts).
+
+**KEPT** (still-live classifier predicates, not the CPS emitter):
+`asyncFnNeedsCps` + `splitBodyAtAwait` remain in async-cps.ts — used by
+`collectAsyncCpsImports` (declarations.ts, host-import registration) and
+`calleeIsDriveLowered` (expressions.ts, wasi drive shape check). They classify;
+they no longer drive an emitter.
+
+One suspension engine on the JS-host lane (`async-frame.ts`), acceptance met.
+The 2 pre-existing `promise-combinators` failures (Promise.all/race with
+resolved values) are engine-independent and out of scope.
+
+---
+
+### (superseded) Slice 2c — BLOCKED on class-2 rep-unification (2026-07-11)
 
 Attempted the CPS-engine deletion (`emitAsyncStateMachine`,
 `splitBodyAtAwait`, `compileSyntheticAsyncContinuation`, `asyncCpsActive`).

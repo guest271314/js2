@@ -28,6 +28,9 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions.ts
+  - src/codegen/index.ts
+coercion-sites-allow:
+  - src/codegen/iter-hof-native.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
@@ -283,3 +286,75 @@ host-free on main ⇒ no host_free_pass/floor/gc-lane gate sees it.
   capability protocol, #2671's standalone twin) — not part of #2903.
 - Tag-5 `__any_strict_eq` object identity (`===` through `$AnyValue` boxes) —
   owned by #2580 M2 / #3032, NOT this issue; see the accepted-delta note.
+
+---
+
+## Landed: sub-front 2 — eager Iterator.prototype helpers, RE-GROUNDED (fable, 2026-07-12)
+
+**PR:** `issue-2903-standalone-callback-leak`.
+
+### Re-ground (the sub-front-2 premise changed on main)
+
+The original sub-front 2 framing — "Iterator helpers leak `env.__make_callback`
+because their native bodies are refusal stubs" — **no longer holds**. Verified
+2026-07-12 on main: `(g() as any).find(pred)` compiles with **zero env
+imports** and instantiates host-free; the callback compiles natively. The
+RESIDUAL is **silently-wrong results**: a generator/iterator receiver matches
+neither the closed-struct arms (no `<Struct>_find`) nor the vec/$ObjVec HOF arm
+in `__call_m_<name>_<arity>`, so it falls to `__extern_method_call`, whose
+non-`$Object` arm answers `undefined`. Baseline measured:
+`built-ins/Iterator/prototype` standalone = **72/373 pass**.
+
+A second gap surfaced while fixing the first: an `any`-held DRIVEN native sync
+generator has **no arm in the `__iterator` GetIterator ladder** (for-of drives
+resume functions statically at the call site), so routing one into the ladder
+traps `illegal cast`.
+
+### The lowering
+
+- **`src/codegen/iter-hof-native.ts` (new)** — native stepped loops
+  `__iter_hof_{find,every,some,forEach,reduce,toArray}` per ES2025 §27.1.4:
+  predicate gets `(value, counter)` via `__apply_closure`; early exits run
+  IteratorClose; reduce seeds the accumulator from the first step when no
+  initial value. Plus three STEPPERS (`__iter_hof_open/_next/_close`,
+  reserve-then-fill #1719): `open` is a positive-admission classifier —
+  driven-generator frames pass through (the fill bakes per-producer
+  `ref.test frame → __gen_resume_*` arms off `ctx.nativeGenerators`, whose
+  resume funcs are guaranteed emitted by factory-compile time), ladder-safe
+  carriers (canonical `$Vec`, `@@iterator`/`next` closed structs) go to
+  `__iterator`, and EVERYTHING ELSE gets a null sentinel → the helpers answer
+  the legacy `undefined` (never a trap — class instances / strings / arbitrary
+  data structs measured trapping under a naive ladder route).
+- **`closed-method-dispatch.ts`** — the fill splits the bottom arm: `$Object`
+  receivers keep the open `__extern_method_call` route; other non-vec,
+  non-null receivers route to `__iter_hof_<name>`. Reserve hook mirrors #3098.
+- `fillIterHofSteppers` wired into index.ts finalize after
+  `fillNativeIteratorLateArms`.
+
+### Proofs (all measured on this branch vs main)
+
+- `built-ins/Iterator/prototype` standalone per-file diff: **20 fail→pass,
+  ZERO losses** (72 → 92 pass of 373).
+- `prove-emit-identity`: all 39 (file,target) sha-identical — gc + wasi +
+  standalone example corpus byte-untouched.
+- `tests/issue-2903.test.ts` + `tests/issue-1326.test.ts`: 25/25 green.
+- Guard probes: class-instance / string / plain-literal receivers answer the
+  legacy `undefined` (main behavior), array `.find`/`.reduce` stay on the
+  native vec HOF arm, Map/Set `.forEach` unchanged (their any-typed failures
+  are PRE-EXISTING on main — `WeakMap_set` import leak, separate issue).
+
+### Boundaries (documented, not gate regressions)
+
+- Helper on a non-iterator receiver → `undefined`, not the spec TypeError
+  (same no-throw discipline as `__hof_reduce` #3098).
+- Early-exit IteratorClose on a DRIVEN generator frame is a no-op (finally
+  blocks not triggered) — §27.5.3.3 boundary.
+- Lazy helpers (`map`/`filter`/`take`/`drop`/`flatMap`) are NOT in this slice —
+  they need a lazy wrapper-iterator struct (follow-up).
+- Plain-`$Object` iterators (`Object.create(Iterator.prototype)` shapes) still
+  route to the open arm; dev-iterators' #3146 OBJ-arm additions make them
+  drivable by `__iterator`, after which a `$Object`-miss refinement can admit
+  them (follow-up).
+- Array-iterator reification is a separate gap: `[1,2,3].values()` returns
+  NULL standalone, so `.values().find(...)` shapes stay failing (not a helper
+  problem).
