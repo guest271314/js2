@@ -1,7 +1,7 @@
 {
-  "generated": "2026-07-11",
+  "generated": "2026-07-12",
   "threshold": 1500,
-  "totalCeiling": 397463,
+  "totalCeiling": 397526,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -26,7 +26,7 @@
     "src/codegen/expressions/new-super.ts": 5750,
     "src/codegen/expressions/unary-updates.ts": 1896,
     "src/codegen/generators-native.ts": 4696,
-    "src/codegen/index.ts": 15472,
+    "src/codegen/index.ts": 15477,
     "src/codegen/iterator-native.ts": 2354,
     "src/codegen/json-codec-native.ts": 2859,
     "src/codegen/literals.ts": 4272,
@@ -38,7 +38,7 @@
     "src/codegen/object-ops.ts": 4819,
     "src/codegen/object-runtime.ts": 10598,
     "src/codegen/parse-number-native.ts": 1838,
-    "src/codegen/property-access.ts": 8653,
+    "src/codegen/property-access.ts": 8664,
     "src/codegen/regexp-standalone.ts": 2893,
     "src/codegen/stack-balance.ts": 2772,
     "src/codegen/statements/control-flow.ts": 1529,
@@ -48,7 +48,7 @@
     "src/codegen/string-ops.ts": 3495,
     "src/codegen/type-coercion.ts": 3508,
     "src/codegen/typeof-delete.ts": 1589,
-    "src/compiler.ts": 1550,
+    "src/compiler.ts": 1577,
     "src/compiler/early-errors/node-checks.ts": 1865,
     "src/emit/binary.ts": 1989,
     "src/ir/builder.ts": 1633,
@@ -57,6 +57,6 @@
     "src/ir/lower.ts": 3617,
     "src/ir/nodes.ts": 2987,
     "src/ir/select.ts": 3296,
-    "src/runtime.ts": 16038
+    "src/runtime.ts": 16058
   }
 }
