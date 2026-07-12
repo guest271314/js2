@@ -36,6 +36,7 @@ import {
   reserveApplyClosure,
   reserveBindDynHelper,
 } from "../object-runtime.js";
+import { ensureStringRawHelper } from "../string-raw.js"; // (#3147)
 import {
   emitMicrotaskEnqueue,
   emitStandalonePromiseFinally,
@@ -6657,6 +6658,52 @@ function compileCallExpression(
         if (r === null) return r;
         return { kind: "externref" };
       }
+    }
+
+    // (#3147) Standalone-native `String.raw(template, ...substitutions)` — the
+    // ordinary FUNCTION-CALL form (§22.1.2.4). The tagged-template form
+    // `String.raw\`...\`` is a TaggedTemplateExpression and never reaches this
+    // CallExpression path (#2008/#2510). Without this arm the call falls to the
+    // generic member-call path → `__get_builtin` → #1472 Phase B refusal
+    // (22 hard CEs under built-ins/String/raw/). Host mode is untouched. A
+    // spread argument (`String.raw(...args)`) keeps today's refusal — the
+    // substitution list must be statically enumerable to build the $ObjVec.
+    if (
+      ctx.standalone &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "String" &&
+      propAccess.name.text === "raw" &&
+      !expr.arguments.some((a) => ts.isSpreadElement(a))
+    ) {
+      // Register the helper (and the $ObjVec builders) BEFORE lowering the
+      // args — append-only, no funcidx shift of this in-flight function; same
+      // discipline as the Object.groupBy arm below.
+      const stringRawIdx = ensureStringRawHelper(ctx);
+      const { newIdx: vecNewIdx, pushIdx: vecPushIdx } = ensureObjVecBuilders(ctx);
+      // template — evaluated first (argument order). Missing → ToObject(
+      // undefined) throws; the null externref is the nullish carrier the
+      // helper's TypeError check reads.
+      if (expr.arguments.length >= 1) {
+        const tType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (tType === null) fctx.body.push({ op: "ref.null.extern" });
+        else if (tType.kind !== "externref") coerceType(ctx, fctx, tType, { kind: "externref" });
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      // substitutions — each evaluated exactly once, in order, into an $ObjVec.
+      const subsLocal = allocLocal(fctx, `__strraw_subs_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "call", funcIdx: vecNewIdx });
+      fctx.body.push({ op: "local.set", index: subsLocal });
+      for (let ai = 1; ai < expr.arguments.length; ai++) {
+        fctx.body.push({ op: "local.get", index: subsLocal });
+        const aType = compileExpression(ctx, fctx, expr.arguments[ai]!, { kind: "externref" });
+        if (aType === null) fctx.body.push({ op: "ref.null.extern" });
+        else if (aType.kind !== "externref") coerceType(ctx, fctx, aType, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: vecPushIdx });
+      }
+      fctx.body.push({ op: "local.get", index: subsLocal });
+      fctx.body.push({ op: "call", funcIdx: stringRawIdx });
+      return nativeStringType(ctx);
     }
 
     // Handle Array.fromAsync(items, mapFn?, thisArg?) — ES2024 (#1517)
