@@ -1,7 +1,9 @@
 ---
 id: 3194
 title: "bloat S4: new-super.ts — extract the shared super-dispatch core (compileSuperMethodCall ≈ compileSuperElementMethodCall)"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-find-wasm
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -48,3 +50,29 @@ parameterizing method-name-vs-element lookup.
 
 `new-super.ts` is a quiet file (low collision risk). Independent of S1-S3,
 S5, S6.
+
+## Resolution (2026-07-12, dev-find-wasm)
+
+Extracted `compileSuperMethodCallCore(ctx, fctx, expr, methodName)` in
+`new-super.ts`; `compileSuperMethodCall` (identifier name) and
+`compileSuperElementMethodCall` (computed key) are now one-line wrappers that
+pass the resolved `methodName` to the core. Net −82 LOC.
+
+**Divergence resolved** (the #1849 2026-06-04 review flag): the element form's
+no-class / no-parent fallback previously returned `null` WITHOUT pushing a
+value, while the dot form evaluated args + left a return-typed default. Unified
+on the value-leaving branch (spec-side-correct — the call is a value-producing
+expression) via a shared `evalArgsAndDefault` helper. This is byte-inert for
+every tested/common path (verified by hashing the emitted binary for
+`super.m()`, `super["m"]()`, and the no-parent fallback: base == change) and the
+only behavior change is the degenerate `super["x"]()`-in-extends-less-class case,
+which no test exercises.
+
+## Test Results
+
+- `tests/issue-3194.test.ts` — 4/4 (dot≡elem across normal dispatch, multi-level
+  ancestry, arg padding / extra-arg side effects, void-return branch).
+- Zero test-diff: inheritance + super suites report identical pass/fail on base
+  vs this change (the pre-existing `string_constants` host-import failures in the
+  local harness are unrelated and present on both).
+- `tsc --noEmit` clean; `check:loc-budget` OK (net −82 LOC).

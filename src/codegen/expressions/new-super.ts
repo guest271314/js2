@@ -542,60 +542,53 @@ function emitSuperExternMethodCall(
   return { kind: "externref" };
 }
 
-function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
-  const propAccess = expr.expression as ts.PropertyAccessExpression;
-  const methodName = propAccess.name.text;
+/**
+ * (#3194) Shared super-method-dispatch core for `super.method(args)` and
+ * `super['method'](args)`. The two call forms differ ONLY in how `methodName`
+ * is obtained (identifier vs computed key), so both resolve through here.
+ *
+ * The no-class / no-parent fallbacks (super in an object-literal method, or in
+ * an `extends`-less class — no statically-resolvable parent method) evaluate the
+ * arguments for side effects and leave a return-typed default on the stack. That
+ * is the spec-side-correct branch: the call is a value-producing expression, so
+ * a value must remain. The pre-#3194 element form returned `null` WITHOUT
+ * pushing a value (the divergence flagged in #1849's 2026-06-04 review); the two
+ * forms are now unified on the value-leaving branch.
+ */
+function compileSuperMethodCallCore(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  methodName: string,
+): ValType | null {
+  // Degenerate fallback: evaluate args for side effects and leave a
+  // return-typed default (0 / 0 / undefined) so a value remains for the
+  // enclosing expression.
+  const evalArgsAndDefault = (): ValType | null => {
+    for (const arg of expr.arguments) {
+      const argType = compileExpression(ctx, fctx, arg);
+      if (argType !== null) fctx.body.push({ op: "drop" });
+    }
+    const fbSig = ctx.checker.getResolvedSignature(expr);
+    if (!fbSig) return null;
+    const wasmType = resolveWasmType(ctx, ctx.checker.getReturnTypeOfSignature(fbSig));
+    if (wasmType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (wasmType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return wasmType;
+  };
 
-  // Determine which class we're in
+  // Determine which class we're in.
   const currentClassName = resolveEnclosingClassName(fctx);
-  if (!currentClassName) {
-    // super.method() in object literal — evaluate args for side effects, return default
-    for (const arg of expr.arguments) {
-      const argType = compileExpression(ctx, fctx, arg);
-      if (argType !== null) fctx.body.push({ op: "drop" });
-    }
-    const sig = ctx.checker.getResolvedSignature(expr);
-    if (sig) {
-      const retType = ctx.checker.getReturnTypeOfSignature(sig);
-      const wasmType = resolveWasmType(ctx, retType);
-      if (wasmType.kind === "f64") {
-        fctx.body.push({ op: "f64.const", value: 0 });
-      } else if (wasmType.kind === "i32") {
-        fctx.body.push({ op: "i32.const", value: 0 });
-      } else {
-        fctx.body.push({ op: "ref.null.extern" });
-      }
-      return wasmType;
-    }
-    return null;
-  }
-
-  // Find parent class
+  if (!currentClassName) return evalArgsAndDefault(); // super in object literal
   const parentClassName = ctx.classParentMap.get(currentClassName);
-  if (!parentClassName) {
-    // super.method() in class without extends — no parent to resolve.
-    // Evaluate args for side effects, return default value.
-    for (const arg of expr.arguments) {
-      const argType = compileExpression(ctx, fctx, arg);
-      if (argType !== null) fctx.body.push({ op: "drop" });
-    }
-    const sig = ctx.checker.getResolvedSignature(expr);
-    if (sig) {
-      const retType = ctx.checker.getReturnTypeOfSignature(sig);
-      const wasmType = resolveWasmType(ctx, retType);
-      if (wasmType.kind === "f64") {
-        fctx.body.push({ op: "f64.const", value: 0 });
-      } else if (wasmType.kind === "i32") {
-        fctx.body.push({ op: "i32.const", value: 0 });
-      } else {
-        fctx.body.push({ op: "ref.null.extern" });
-      }
-      return wasmType;
-    }
-    return null;
-  }
+  if (!parentClassName) return evalArgsAndDefault(); // class without extends
 
-  // Resolve parent method — walk up the inheritance chain
+  // Resolve parent method — walk up the inheritance chain.
   let ancestor: string | undefined = parentClassName;
   let funcIdx: number | undefined;
   while (ancestor) {
@@ -614,41 +607,41 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
     return null;
   }
 
-  // Push this as first argument
+  // Push this as first argument.
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx !== undefined) {
     fctx.body.push({ op: "local.get", index: selfIdx });
   }
 
-  // Push remaining arguments with type hints
+  // Push remaining arguments with type hints.
   const paramTypes = getFuncParamTypes(ctx, funcIdx);
-  // User-visible param count excludes self (param 0)
+  // User-visible param count excludes self (param 0).
   const superParamCount = paramTypes ? paramTypes.length - 1 : expr.arguments.length;
   for (let i = 0; i < expr.arguments.length; i++) {
     if (i < superParamCount) {
       compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]); // +1 to skip self
     } else {
       // Extra argument beyond method's parameter count — evaluate for
-      // side effects (JS semantics) and discard the result
+      // side effects (JS semantics) and discard the result.
       const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
       if (extraType !== null) {
         fctx.body.push({ op: "drop" });
       }
     }
   }
-  // Pad missing arguments with defaults (skip self param at index 0)
+  // Pad missing arguments with defaults (skip self param at index 0).
   if (paramTypes) {
     for (let i = expr.arguments.length + 1; i < paramTypes.length; i++) {
       pushDefaultValue(fctx, paramTypes[i]!, ctx);
     }
   }
-  // Re-lookup funcIdx: argument compilation may trigger addUnionImports
+  // Re-lookup funcIdx: argument compilation may trigger addUnionImports.
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
   maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
-  // Determine return type
+  // Determine return type.
   const sig = ctx.checker.getResolvedSignature(expr);
   if (sig) {
     const retType = ctx.checker.getReturnTypeOfSignature(sig);
@@ -659,9 +652,15 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   return null;
 }
 
+function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
+  const propAccess = expr.expression as ts.PropertyAccessExpression;
+  return compileSuperMethodCallCore(ctx, fctx, expr, propAccess.name.text);
+}
+
 /**
- * Compile `super['method'](args)` — resolve to ParentClass_method and call with this.
- * Same logic as compileSuperMethodCall but the method name comes from a computed key.
+ * Compile `super['method'](args)` — resolve to ParentClass_method and call with
+ * this. Same logic as {@link compileSuperMethodCall}; the method name comes from
+ * a computed key resolved by the caller (see compileSuperMethodCallCore).
  */
 function compileSuperElementMethodCall(
   ctx: CodegenContext,
@@ -669,88 +668,7 @@ function compileSuperElementMethodCall(
   expr: ts.CallExpression,
   methodName: string,
 ): ValType | null {
-  // Determine which class we're in
-  const currentClassName = resolveEnclosingClassName(fctx);
-  if (!currentClassName) {
-    // super['method']() in object literal — evaluate args, return default
-    for (const arg of expr.arguments) {
-      const argType = compileExpression(ctx, fctx, arg);
-      if (argType !== null) fctx.body.push({ op: "drop" });
-    }
-    return null;
-  }
-
-  // Find parent class
-  const parentClassName = ctx.classParentMap.get(currentClassName);
-  if (!parentClassName) {
-    // super['method']() in class without extends — evaluate args, return default
-    for (const arg of expr.arguments) {
-      const argType = compileExpression(ctx, fctx, arg);
-      if (argType !== null) fctx.body.push({ op: "drop" });
-    }
-    return null;
-  }
-
-  // Resolve parent method — walk up the inheritance chain
-  let ancestor: string | undefined = parentClassName;
-  let funcIdx: number | undefined;
-  while (ancestor) {
-    funcIdx = ctx.funcMap.get(`${ancestor}_${methodName}`);
-    if (funcIdx !== undefined) break;
-    ancestor = ctx.classParentMap.get(ancestor);
-  }
-
-  if (funcIdx === undefined) {
-    // (#1614) Builtin extern-class parent — dispatch dynamically.
-    const externResult = emitSuperExternMethodCall(ctx, fctx, expr, methodName, parentClassName);
-    if (externResult !== null) return externResult;
-    reportError(ctx, expr, `Cannot find method '${methodName}' on parent class '${parentClassName}'`);
-    return null;
-  }
-
-  // Push this as first argument
-  const selfIdx = fctx.localMap.get("this");
-  if (selfIdx !== undefined) {
-    fctx.body.push({ op: "local.get", index: selfIdx });
-  }
-
-  // Push remaining arguments with type hints
-  const paramTypes = getFuncParamTypes(ctx, funcIdx);
-  // User-visible param count excludes self (param 0)
-  const superElemParamCount = paramTypes ? paramTypes.length - 1 : expr.arguments.length;
-  for (let i = 0; i < expr.arguments.length; i++) {
-    if (i < superElemParamCount) {
-      compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]); // +1 to skip self
-    } else {
-      // Extra argument beyond method's parameter count — evaluate for
-      // side effects (JS semantics) and discard the result
-      const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-      if (extraType !== null) {
-        fctx.body.push({ op: "drop" });
-      }
-    }
-  }
-  // Pad missing arguments with defaults (skip self param at index 0)
-  if (paramTypes) {
-    for (let i = expr.arguments.length + 1; i < paramTypes.length; i++) {
-      pushDefaultValue(fctx, paramTypes[i]!, ctx);
-    }
-  }
-  // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-  const resolvedName = `${ancestor}_${methodName}`;
-  const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
-  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superElemParamCount);
-  fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
-
-  // Determine return type
-  const sig = ctx.checker.getResolvedSignature(expr);
-  if (sig) {
-    const retType = ctx.checker.getReturnTypeOfSignature(sig);
-    if (isEffectivelyVoidReturn(ctx, retType, resolvedName)) return null;
-    if (wasmFuncReturnsVoid(ctx, finalSuperIdx)) return null;
-    return getWasmFuncReturnType(ctx, finalSuperIdx) ?? resolveWasmType(ctx, retType);
-  }
-  return null;
+  return compileSuperMethodCallCore(ctx, fctx, expr, methodName);
 }
 
 /**

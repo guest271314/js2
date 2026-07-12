@@ -85,6 +85,41 @@ folds in the trap-first mandate (§4) for its own methods:
 
 This issue stays the tracking umbrella.
 
+## Re-slicing note (2026-07-12) — the M method-family slices were mis-sized
+
+Root-causing #3199 (fold/predicate, done) with fresh-process probes over the
+baseline jsonl showed the original decomposition **sized by fail-count, not by
+where the fix lives**. The three M slices (#3199/#3200/#3201) each contain only
+a small margin fixable inside `array-methods.ts`; the bulk is **architectural
+and out of that file**. Measured for #3199 (281 fails), and expected to repeat
+across #3200/#3201:
+
+- **~102/slice — real-array observable semantics** (getters / `defineProperty`
+  / `delete` / mutation-during-iteration on **vec-backed** arrays). Getters &
+  delete never fire on the WasmGC vec, so `testResult`/`accessed`/`callCnt`
+  asserts fail. **BLOCKED ON rep-unification #3134** — belongs in its own **XL
+  child gated on #3134**, NOT in the array-methods.ts method-family slices.
+  This is the single largest lever for the umbrella's `< 600` target and
+  cannot land until #3134.
+- **~125/slice — `.call(arrayLike)` generic-path gaps** that are **cross-file**,
+  not array-methods work: `instanceof`-on-host-externref inside callbacks
+  (`o instanceof Date` → false), Function-value receivers (`object is not a
+  function`), etc. Should be filed as **distinct feature issues** (instanceof
+  on host refs; array-like receiver-type coverage), not folded into the
+  array-methods slices.
+- **Small in-file margin** — the genuinely `array-methods.ts`-local, zero-
+  regression wins (e.g. #3199's reduce accumulator-type-from-initial-value fix,
+  ~2 test262 flips). This is what the array-methods.ts owner can harvest per
+  slice; it is NOT the ≥150 the slice acceptance asked for.
+
+**Action for re-decomposition:** (1) create an XL child "real-array observable
+semantics for Array.prototype HOFs (getters/defineProperty/delete on vec-backed
+arrays)" **depends_on: 3134**, absorbing the ~102/slice bulk; (2) file the
+cross-file `.call` gaps (instanceof-on-host-ref, Function/array-like receiver
+coverage) as their own issues; (3) keep #3199/#3200/#3201 as the thin in-file
+behavioral-margin slices (drop the ≥150 acceptance — retarget to "harvest the
+zero-regression in-file wins + honest re-slice"). #3199 is done on that basis.
+
 ## Acceptance criteria (umbrella)
 
 1. Child slices filed per mechanism above (trap slice first), each with

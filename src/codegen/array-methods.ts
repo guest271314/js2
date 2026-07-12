@@ -21,7 +21,8 @@ import {
   resolveWasmType,
   typedArrayPackedSignedness,
 } from "./index.js";
-import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
+import { buildThrowStringInstrs, emitThrowString, noJsHost } from "./js-errors.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
@@ -34,7 +35,6 @@ import {
   isTaViewTypeIdx,
 } from "./registry/types.js";
 import { emitTaDynViewToVec, emitTaDynViewValidate, emitTaViewToVec, emitTaViewWriteBack } from "./dataview-native.js"; // (#3054 B1 Option A) de-view; (B3) write-through; (#3058) dyn-view materialize+validate
-import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
@@ -134,19 +134,11 @@ function nativeStringElementEqInstrs(
   ];
 }
 
-/** Emit throw with a string message (local version to avoid circular dep on expressions.ts) */
-function emitThrowString(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
-  addStringConstantGlobal(ctx, message);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
-  const tagIdx = ensureExnTag(ctx);
-  fctx.body.push({ op: "throw", tagIdx });
-}
-
-function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
-  addStringConstantGlobal(ctx, message);
-  const tagIdx = ensureExnTag(ctx);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
-}
+// (#3191) The former private `emitThrowString` / `throwStringInstrs` copies (a
+// verbatim duplicate of the canonical bare-string throw, kept local to avoid a
+// circular dep on `expressions/`) now route through the layering-safe leaf
+// module `./js-errors.ts` — `emitThrowString` (push) + `buildThrowStringInstrs`
+// (returns the terminal `Instr[]` for an `if.then`/`else` arm).
 
 // unpackedElemType / elemGetOp are canonical in shared.ts (#2934 — needed by
 // loops.ts and type-coercion.ts too, and array-methods.ts is not importable
@@ -323,7 +315,7 @@ function emitReceiverNullGuard(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: throwStringInstrs(ctx, "TypeError: Array method called on null or undefined"),
+    then: buildThrowStringInstrs(ctx, "TypeError: Array method called on null or undefined"),
     else: [],
   });
 }
@@ -1597,7 +1589,7 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
         });
       }
 
@@ -1761,7 +1753,7 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
         });
       }
 
@@ -7391,7 +7383,14 @@ function compileArrayMap(
  * `externref` local instead of being forced through a numeric unbox that
  * traps with "illegal cast" (#1994).
  */
-function resolveReduceAccType(setup: ArrayCallbackSetup, numKind: "i32" | "f64"): ValType {
+function resolveReduceAccType(
+  setup: ArrayCallbackSetup,
+  numKind: "i32" | "f64",
+  // (#3199) True when an explicit initial-value argument is a reference-typed
+  // value (string / object / …). Seeds the accumulator when no callback type
+  // pins it.
+  initIsReference = false,
+): ValType {
   const ci = setup.closureInfo;
   if (ci) {
     // A void-returning callback (returnType === null) yields `undefined`; keep
@@ -7405,7 +7404,31 @@ function resolveReduceAccType(setup: ArrayCallbackSetup, numKind: "i32" | "f64")
       return accParam;
     }
   }
+  // (#3199) Callback type doesn't pin the accumulator (void / untyped callback,
+  // e.g. `function () {}`). A reference-typed explicit initial value then seeds
+  // it as `externref` instead of the numeric default — otherwise
+  // `[].reduce(function () {}, "seed")` coerces the string seed to f64 (→ NaN).
+  if (initIsReference) return { kind: "externref" };
   return { kind: numKind };
+}
+
+/**
+ * (#3199) Whether a reduce/reduceRight initial value is reference-typed (the
+ * externref-boxed tags) and so should seed the accumulator as externref.
+ * Via the type oracle (#1930) — no direct TS-checker use. Numeric / boolean /
+ * undefined / mixed tags keep the numeric default.
+ */
+function initArgIsReference(ctx: CodegenContext, initArg: ts.Expression): boolean {
+  switch (ctx.oracle.staticJsTypeOf(initArg)) {
+    case "string":
+    case "object":
+    case "function":
+    case "symbol":
+    case "bigint":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -7433,8 +7456,11 @@ function compileArrayReduce(
   if (!setup) return null;
 
   // The accumulator local must match the actual accumulator type, not always
-  // the numeric kind — string/object accumulators are externref (#1994).
-  const accType = resolveReduceAccType(setup, numKind);
+  // the numeric kind — string/object accumulators are externref (#1994). When a
+  // void/untyped callback leaves the accumulator type unpinned, an explicit
+  // reference-typed initial value seeds it as externref (#3199).
+  const redInitIsRef = callExpr.arguments.length >= 2 && initArgIsReference(ctx, callExpr.arguments[1]!);
+  const accType = resolveReduceAccType(setup, numKind, redInitIsRef);
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "red");
   const accTmp = allocLocal(fctx, `__arr_red_acc_${fctx.locals.length}`, accType);
@@ -7451,7 +7477,7 @@ function compileArrayReduce(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
     } as Instr);
     fctx.body.push({ op: "local.get", index: loop.dataTmp });
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -7600,8 +7626,11 @@ function compileArrayReduceRight(
   if (!setup) return null;
 
   // The accumulator local must match the actual accumulator type, not always
-  // the numeric kind — string/object accumulators are externref (#1994).
-  const accType = resolveReduceAccType(setup, numKind);
+  // the numeric kind — string/object accumulators are externref (#1994). A
+  // reference-typed explicit initial value seeds an otherwise-unpinned
+  // accumulator as externref (#3199).
+  const rrInitIsRef = callExpr.arguments.length >= 2 && initArgIsReference(ctx, callExpr.arguments[1]!);
+  const accType = resolveReduceAccType(setup, numKind, rrInitIsRef);
 
   // Set up receiver: vec/data/len
   const vecTmp = allocLocal(fctx, `__arr_rr_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
@@ -7650,7 +7679,7 @@ function compileArrayReduceRight(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: throwStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
     } as Instr);
     fctx.body.push({ op: "local.get", index: dataTmp });
     fctx.body.push({ op: "local.get", index: lenTmp });
