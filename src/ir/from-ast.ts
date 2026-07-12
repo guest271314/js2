@@ -3787,6 +3787,36 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
  * Returns `null` for unsupported methods so the caller can fall back to
  * legacy via a clean throw.
  */
+/**
+ * (#3167) Sentinel func-ref name for the string relational compare helper.
+ * `resolveFunc` (integration.ts) maps it mode-appropriately to the native
+ * `__str_compare` defined helper or the host `string_compare` env import —
+ * both `(str, str) -> i32` returning a -1/0/1 lexicographic sign. Keeping the
+ * mode decision in `resolveFunc` (not from-ast) mirrors the #3156 charCodeAt
+ * sentinel pattern, so from-ast reads no `nativeStrings`.
+ */
+export const IR_STRING_COMPARE_FN = "__ir_str_compare";
+
+/**
+ * (#3167) Emit a both-string relational `<`/`>`/`<=`/`>=`. Calls the mode-
+ * resolved compare helper for a -1/0/1 sign, then folds to the operator's
+ * boolean via a signed i32 compare of the sign against 0 (`foldOp`). Total
+ * for two strings — the sign is never the dynamic-path `2` sentinel.
+ */
+function emitStringRelational(
+  lhs: IrValueId,
+  rhs: IrValueId,
+  foldOp: "i32.lt_s" | "i32.gt_s" | "i32.le_s" | "i32.ge_s",
+  cx: LowerCtx,
+): IrValueId {
+  const sign = cx.builder.emitCall({ kind: "func", name: IR_STRING_COMPARE_FN }, [lhs, rhs], irVal({ kind: "i32" }));
+  if (sign === null) {
+    throw new Error(`ir/from-ast: string compare produced void result (${cx.funcName})`);
+  }
+  const zero = cx.builder.emitConst({ kind: "i32", value: 0 }, irVal({ kind: "i32" }));
+  return cx.builder.emitBinary(foldOp, sign, zero, irVal({ kind: "i32" }));
+}
+
 interface StringMethodSig {
   /** User-arg ValTypes in JS-host mode (excluding receiver). Used to
    *  hint `lowerExpr` and to choose i32-truncation for native mode. */
@@ -5817,6 +5847,27 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
       case ts.SyntaxKind.ExclamationEqualsEqualsToken:
       case ts.SyntaxKind.ExclamationEqualsToken:
         return cx.builder.emitStringEq(lhs, rhs, true);
+      // (#3167) String relational operators `<` `>` `<=` `>=` — §7.2.13
+      // IsLessThan for two String operands is lexicographic code-unit
+      // comparison (NOT locale, NOT numeric). Both operands are statically
+      // `IrType.string` here (the mixed-string case already threw above), so
+      // the compare is always well-defined: emit a call to the mode-resolved
+      // compare helper (`IR_STRING_COMPARE_FN` → native `__str_compare` /
+      // host `string_compare`, resolved by `resolveFunc`), which yields a
+      // -1/0/1 sign i32, then FOLD the sign to the operator's boolean via a
+      // signed i32 compare against 0. This mirrors legacy `emitAnyRelational`'s
+      // both-string arm (binary-ops.ts) but stays representation-agnostic in
+      // from-ast (the #3156 emit-a-named-call pattern — no new IR node kind).
+      // The -1/0/1 sign is total for two strings (never the dynamic path's
+      // `2` incomparable sentinel), so `sign {<,>,<=,>=} 0` is exact.
+      case ts.SyntaxKind.LessThanToken:
+        return emitStringRelational(lhs, rhs, "i32.lt_s", cx);
+      case ts.SyntaxKind.GreaterThanToken:
+        return emitStringRelational(lhs, rhs, "i32.gt_s", cx);
+      case ts.SyntaxKind.LessThanEqualsToken:
+        return emitStringRelational(lhs, rhs, "i32.le_s", cx);
+      case ts.SyntaxKind.GreaterThanEqualsToken:
+        return emitStringRelational(lhs, rhs, "i32.ge_s", cx);
       default:
         throw new Error(`ir/from-ast: string operator '${ts.tokenToString(op)}' not in slice 1 (${cx.funcName})`);
     }
