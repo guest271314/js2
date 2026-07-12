@@ -730,7 +730,8 @@ remeasure 2026-07-12: honest gap 12,801). All `sprint: current`,
 - **#3171** Map/Set/WeakMap/WeakSet receiver brand-check protocol (~142, M).
 - **#3172** Set-algebra set-like protocol + getOrInsert(Computed) (120, M) —
   shares #3171's brand gate.
-- **#3173** DataView get*/set* spec semantics (230, L).
+- ~~**#3173** DataView get*/set* spec semantics (230, L)~~ — DONE (217/230
+  flipped; 7 residual rows blocked on the #3179 any-array index-read family).
 - **#3174** Date brand + ToPrimitive coercion order (107, M) — slices #2671.
 - **#3175** Number.prototype toString(radix)/toFixed/valueOf (74, M).
 - **#3176** JSON parse/stringify residual (67, M) — slices #2671; array-holder

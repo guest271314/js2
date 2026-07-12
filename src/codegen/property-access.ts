@@ -118,7 +118,7 @@ import {
   localGlobalIdx,
   recordInModuleInitFlagRead,
 } from "./registry/imports.js";
-import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
+import { dvDetachedThrowInstrs, getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing; (#3173) detached TypeError
 import {
   getArrTypeIdxFromVec,
   getOrRegisterResizableAbType,
@@ -3957,6 +3957,11 @@ export function compilePropertyAccess(
       const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
       const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
       const fieldIdx = propName === "byteOffset" ? 1 : 2;
+      // (#3173) §25.3.4.2/3 — the byteLength/byteOffset getters throw TypeError
+      // on a detached buffer (marker: buffer vec length < 0). Template built
+      // BEFORE the receiver compile (funcIdx-capture ordering rule).
+      const detachedThrow = dvDetachedThrowInstrs(ctx);
+      flushLateImportShifts(ctx, fctx);
       const recvType = compileExpression(ctx, fctx, expr.expression);
       const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
       if (recvType?.kind === "externref") {
@@ -3964,6 +3969,15 @@ export function compilePropertyAccess(
       }
       fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
       const winBranch: Instr[] = [
+        // detached? → TypeError
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] } as Instr,
         { op: "local.get", index: anyLocal } as Instr,
         { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
         { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
@@ -4116,11 +4130,13 @@ export function compilePropertyAccess(
       if (byteArrTypeIdx >= 0) {
         const byteLenLocal = allocLocal(fctx, `__tabuf_len_${fctx.locals.length}`, { kind: "i32" });
         if (bufIsDataView) {
-          // A DataView receiver is either a `$__dv_window` wrapper (windowed view
-          // → byte length is its field-2 `byteLength`) or a bare `$__vec_i32_byte`
-          // (offset-0 view → field-0 IS the byte count). Mirror the byteLength arm's
-          // runtime `ref.test $__dv_window` branch so both shapes work — a static
-          // cast to one shape would `illegal cast` the other.
+          // (#3173) §25.3.4.1 — a DataView's `.buffer` is its ACTUAL viewed
+          // buffer, identity included (`sample.buffer === buffer`, works on a
+          // detached buffer too). Standalone DataViews are `$__dv_window`
+          // wrappers whose `buf` field HOLDS the shared buffer vec — return it
+          // directly instead of synthesizing a fresh zero-filled copy (the
+          // pre-#3173 non-identity floor). A bare-vec receiver (legacy shape)
+          // IS the buffer — return it unchanged.
           const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
           const recvType = compileExpression(ctx, fctx, expr.expression);
           const anyLocal = allocLocal(fctx, `__tabuf_any_${fctx.locals.length}`, { kind: "anyref" });
@@ -4131,22 +4147,22 @@ export function compilePropertyAccess(
           const winBranch: Instr[] = [
             { op: "local.get", index: anyLocal } as Instr,
             { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf (shared)
+            { op: "extern.convert_any" } as Instr,
           ];
           const vecBranch: Instr[] = [
             { op: "local.get", index: anyLocal } as Instr,
-            { op: "ref.cast", typeIdx: byteVecTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "extern.convert_any" } as Instr,
           ];
           fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
           fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
           fctx.body.push({
             op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
+            blockType: { kind: "val", type: { kind: "externref" } },
             then: winBranch,
             else: vecBranch,
           } as Instr);
-          fctx.body.push({ op: "local.set", index: byteLenLocal } as Instr);
+          return { kind: "externref" };
         } else {
           // TypedArray: backing is an f64 vec (or i8 for standalone Uint8Array);
           // byteLen = element-count (field 0) × BYTES_PER_ELEMENT.
