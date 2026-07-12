@@ -77,3 +77,33 @@ wrong-value rows:
   - `test/built-ins/Map/prototype/getOrInsert/append-new-values-normalizes-zero-key.js`
 - Zero host-mode regressions; zero standalone high-water regressions.
 - One PR, this family only.
+
+## Test Results (2026-07-12, implementation)
+
+Standalone lane (`TEST262_TARGET=standalone`, filter
+`built-ins/{Map,Set,WeakMap,WeakSet}/prototype`) vs the post-#3171 run:
+
+- **81 flips fail→pass, 0 regressions** (suite 478→559 of 700). All three
+  acceptance samples pass (`intersection/receiver-not-set`,
+  `isSupersetOf/size-is-a-number`,
+  `getOrInsert/append-new-values-normalizes-zero-key`).
+- **Below the ≥120-gap/≥90 bar (81)** — the residual buckets each have a
+  DIFFERENT root cause than this issue's protocol layer and are separable
+  slices:
+  - class-getter set-likes (`allows-set-like-class`, `set-like-class-order`,
+    ~14): accessor `get size()` + METHOD has/keys on closed class structs —
+    needs method-as-closure minting in the `__setrec_field_*` fill;
+  - `class MySubset extends Set` rows (`subclass*`, ~12): builtin-super
+    construction lineage — #2917, explicitly out of scope;
+  - getOrInsert value rows comparing two boxed anys via `assert.sameValue`
+    (~10): the #3056 boxed-compare lane, not dispatch;
+  - `set-like-array` (~7): expando `size/has/keys` on vec-backed arrays;
+  - `builtins.js` (7): Object.isExtensible/toString/getPrototypeOf on the
+    method VALUE (function-object meta);
+  - `set-like-class-mutation` / `set-like-iter-return` (~7): re-entrant
+    mutation ordering + IteratorClose — documented out of scope.
+- Equivalence: `tests/issue-3172.test.ts` 34 tests; regression batch
+  (#2604/#2607/#2162-set-algebra/#3171) 149/149 green. Probe 29/29.
+- The 14 `has/keys-is-callable` regressions from the first measurement were
+  fixed in-branch (`__setrec_check_callable` reserve-then-fill IsCallable
+  gate); final run is 0-regression.
