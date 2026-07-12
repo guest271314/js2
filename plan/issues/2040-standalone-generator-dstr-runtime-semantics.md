@@ -1,12 +1,12 @@
 ---
 id: 2040
 title: "standalone: generator/destructuring runtime-semantics residual — rest-pattern iterator consumption, lazy defaults, private elements (~1,750 tests)"
-status: in-progress
-sprint: 64
+status: ready
+sprint: current
 created: 2026-06-10
-updated: 2026-06-22
-assignee: cascade-lead
+updated: 2026-07-12
 priority: critical
+horizon: l
 feasibility: hard
 reasoning_effort: high
 task_type: bugfix
@@ -621,3 +621,86 @@ lastIndexOf). `tests/issue-2040-tag5-field4-eq.test.ts`: 4 classifier cases
 `it.skip`ped with the #2580 M2 reference; the rest pass. `tests/issue-2579.test.ts`
 folded in (8/8) so closing #1864 loses no coverage. Authoritative gate = the
 merge_group standalone floor.
+
+---
+
+## RE-GROUND + RESTAFFING PLAN (architect, 2026-07-12) — supersedes the counts above; this is the dev-executable slicing
+
+Issue stalled since 2026-06-22 (assignee cleared, re-tagged `sprint: current`,
+`status: ready`). Everything above is diagnosis HISTORY — accurate but
+layered. This section is the current truth against main @ 6dcdf30135 and the
+fresh standalone baseline (2026-07-12 JSONL). **Read this section first.**
+
+### Fresh dstr decomposition (all `/dstr/` rows, standalone lane)
+
+5,158 pass / 2,365 fail / 43 CE. The 2,365 fails classify by assertion:
+
+| Slice | Count | Mechanism | Owner |
+| --- | ---: | --- | --- |
+| A1 `assert.notSameValue(x, values)` rest-identity | 382 | tag-5 `===` object-identity vacuity — `_isSameValue`'s `a===b` over two `any`-boxed refs answers the legacy constant, NOT a rest-copy bug (the rest array IS fresh — proven above). The 3-way classifier is flag-gated OFF pending the dstr-unmask | **BLOCKED on #2580 M2 / #3032 / #3053** — do NOT re-attempt the classifier here (two failed landings above; the −162 eject) |
+| A2 `assert.sameValue(initCount, 0)` lazy defaults | 198 | default initializer evaluated (or its counter bumped) when the element value is PRESENT — §8.6.2: default only on `undefined`/done | **THIS ISSUE — slice 1 (fable-now)** |
+| A3 obj-rest ToPrimitive (`Cannot convert object to primitive`, `obj-ptrn-rest-*`) | 190 | `{...rest}` copy path coerces a non-primitive-able source property; skip-non-enumerable/getter shapes | **THIS ISSUE — slice 2** (overlaps #2602 rest-object; check its state first) |
+| A4 vacuous harness-wrapper | 164 | #2940 reclassification | #3086 (in-progress) — NOT here |
+| A5 uncaught wasm exn (`*-step-err`, `*-rtrn-close-err`) | 115 | abrupt iterator step/close errors trap instead of surfacing as catchable | **THIS ISSUE — slice 3** |
+| B1 iterCount/callCount wrong (eager gen body / consumption order) | 114 | mostly the eager-buffer gen running at creation | rides **#3164/#3032** — re-measure after they land |
+| B2 `Cannot destructure 'null'` in async-gen dstr | 61 | for-await/async-gen binding-init null step value | rides **#3132**; residual → #3178 S4 |
+| B3 `Generator.prototype.next requires 'this' be a Generator` brand check | 48 | native gen struct fails the prototype-method brand test | **THIS ISSUE — slice 4** |
+| other sameValue / other | 1,093 | heterogeneous; re-classify AFTER slices 1-4 + #3164 land | re-measure |
+
+### Slice 1 (START HERE, fable-now, ~198 rows): lazy default evaluation
+
+Repro family: `language/expressions/function/dstr/dflt-ary-ptrn-elem-id-init-skipped.js`
+(`assert.sameValue(initCount, 0)` — `function f([x = (initCount += 1)]) {}`
+called with a PRESENT value must not evaluate the initializer).
+Ground in `src/codegen/destructuring-params.ts` (the param-pattern element
+lowering; the #2574 fix added default-on-`undefined` — the residual is the
+CONVERSE: default evaluated eagerly or the guard testing the wrong condition
+for iterator-driven bindings). Diagnose ONE file's WAT first: find whether the
+initializer instrs are emitted unconditionally before the presence check, or
+whether the presence check mis-reads the `done` flag. Spec: §8.6.2
+IteratorBindingInitialization, SingleNameBinding step 5 ("if v is undefined
+… evaluate Initializer"). Acceptance: the `dflt-*-init-skipped` /
+`initCount, 0` family flips (~198), zero host-lane byte delta.
+
+### Slice 2 (fable-now, ~190 rows): object-rest copy ToPrimitive
+
+Repro: `language/expressions/object/dstr/gen-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js`
+(`L119: Cannot convert object to primitive value`). The `{...rest}` copy in
+the standalone lane routes property VALUES through a primitive coercion it
+must not apply (CopyDataProperties, §14.7.5.6 — values are copied as-is).
+Check `__extern_rest_object` / the object-rest lowering in
+destructuring-params.ts + object-runtime.ts; coordinate with #2602 (for-of
+assignment-rest unimplemented) — if #2602 is still open, take only the
+binding-pattern (non-assignment) arm here.
+
+### Slice 3 (fable-now, ~115 rows): abrupt iterator-step errors trap
+
+Repro: `language/expressions/class/dstr/async-gen-meth-ary-ptrn-elision-step-err.js`
+(uncaught Wasm-GC exception). A throwing `next()`/`return()` during
+IteratorBindingInitialization must surface as a catchable error completion
+(the tests assert a TYPED error), not a trap. The dstr drive loop needs
+try/catch (native `__exn` tag) around the step call with rethrow-as-JS-error.
+Ground where the binding-init loop calls `__iterator_next`
+(iterator-native.ts consumers + destructuring-params.ts).
+
+### Slice 4 (fable-now, ~48 rows): Generator.prototype method brand check
+
+Repro: `language/statements/class/dstr/gen-meth-ary-ptrn-elem-ary-elision-init.js`
+(`TypeError: Generator.prototype.next requires that 'this' be a Generator`).
+A native driven-gen frame consumed through `Generator.prototype.next.call(g)`
+or an inherited-method read fails the brand test. Extend the brand-check
+admission to the native frame structs (`ctx.nativeGenerators` per-producer
+`ref.test` arms — same pattern as `__iter_hof_open`'s driven-frame admission,
+iter-hof-native.ts).
+
+### Sequencing / dependency notes
+
+- Slices 1-4 are independent of each other and of #3164/#3132 — each its own
+  PR, each construct-sample-validated, merge_group floor as decider.
+- A1 (382 rows, the headline) is EXPLICITLY not staffable here — it unblocks
+  via the #2580 M2 / #3032 / #3053 substrate track. Do not re-litigate the
+  classifier (see the two shelved attempts + the −162 eject above).
+- B1/B2 re-measure after #3164 + #3132 S2 land; fold the residual back here.
+- The old acceptance criteria above are superseded: acceptance is now
+  per-slice (the four assertion-family counts → ~0) + dstr standalone fail
+  count ≤ 1,800 after slices 1-4.
