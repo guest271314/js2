@@ -12,8 +12,8 @@ reasoning_effort: max
 goal: async-model
 sprint: current
 parent: 1042
-depends_on: [1042]
-related: [2906, 2957, 1373b]
+depends_on: [1042, 3134]
+related: [2906, 2957, 1373b, 3134]
 origin: "#1042 host-drive PR (2026-07-02) — deliberate scope cut: the CPS lane was left byte-stable; convergence is its own measured step"
 loc-budget-allow:
   - src/codegen/async-frame.ts
@@ -461,3 +461,50 @@ baseline-identical, incl. an identical illegal-cast failure mode on
 mapfn-result-awaited-once-per-iteration); issue-1712's single fail
 control-verified identical on pristine main (2ff0db4f0a). merge_group A/B
 is the hard gate (the await-using cluster flips CPS→drive).
+
+## Slice 2c (CPS deletion) — BLOCKED on class-2 rep-unification (2026-07-11)
+
+Attempted the CPS-engine deletion (`emitAsyncStateMachine`,
+`splitBodyAtAwait`, `compileSyntheticAsyncContinuation`, `asyncCpsActive`).
+The deletion mechanics are straightforward (the decl lane never uses CPS
+post-slice-1; only the class-2 closure re-lane does). **But it regresses 8
+baseline-PASSING test262 files** and cannot ship until class-2 is solved:
+
+**Hard evidence (measured, this session).** With CPS deleted, class-2 closures
+(a non-resume-binding body local whose spill GUESS is a typed vec/struct — the
+`fromAsync` iterable-input family) fall to the legacy sync-void path and
+return NaN. Corpus sweep delta vs phase-3a: **pass 80 → 72**, all 8
+regressions are baseline-`pass` files, every one a class-2 closure:
+`fromAsync/{async-iterable-input, async-iterable-input-does-not-await-input,
+non-iterable-input, non-iterable-input-with-thenable,
+non-iterable-with-non-promise-thenable, sync-iterable-input,
+sync-iterable-input-with-non-promise-thenable, sync-iterable-input-with-thenable}`.
+Only the CPS engine currently lowers these correctly, so CPS is **not
+deletable** while they pass.
+
+**Why class-2 can't be fixed at the frame-layout level** (four approaches
+tried, all fail):
+
+1. cell of the guess type → `struct.set[0] expected (ref null 18), found (ref
+null 4)` — the spill GUESS's vec typeIdx (18) diverges from the body's
+   context-specific array-literal vec typeIdx (4). Invalid Wasm.
+2. cell of the nullable-widened guess → same typeIdx divergence. Invalid.
+3. externref-valued cell → validates, but `arr[0]` derefs the cell to
+   externref and the vec loses its indexable rep → NaN.
+4. plain externref spill field (no cell) → validates, same NaN.
+
+The root cause is structural: the resume fn allocates the spill LOCAL (and the
+frame field) from a type GUESS **before** the body compiles, but the body's
+true local rep is only known AFTER it compiles (array literals mint
+context-specific vec typeIdxs; `#3134`'s Promise-unwrap re-types elements).
+Correct handling needs either **compile-body-then-build-frame** (a two-phase
+frame builder — the resume body learns real local types, then the layout is
+fixed) or **#3134's rep unification** (a single canonical vec rep so guess ==
+actual). Both are their own hard tasks.
+
+**Recommendation:** keep the CPS engine until #3134 (or a two-phase frame
+builder) lands; then 2c is a mechanical deletion. The convergence is otherwise
+COMPLETE — after slices 1/2a/2b + phase 3a, CPS's ONLY remaining live route is
+the class-2 closure re-lane (~8 corpus files). Reframed acceptance: 2c depends
+on #3134. (The class-1 force-boxing + #2623 fix from phase 3a are already on
+`main`; this class-2 residue is the sole blocker.)
