@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2903 R3 — native standalone LAZY Iterator-helper wrappers for dynamic
+ * #2903 R3/R3b — native standalone LAZY Iterator-helper wrappers for dynamic
  * (`any`/externref) iterator receivers: `%Iterator.prototype%.map / filter /
- * take / drop` (ES2025 §27.1.4.2/.3/.4/.5). Sub-front 2 (iter-hof-native.ts)
+ * take / drop / flatMap` (ES2025 §27.1.4.2/.3/.4/.5/.6). Sub-front 2 (iter-hof-native.ts)
  * covered the EAGER helpers (find/every/some/forEach/reduce/toArray) that drive
  * the source to completion and return a value; the lazy helpers instead return
  * a NEW iterator that produces transformed elements on demand.
@@ -19,7 +19,8 @@
  *   - filter: loop pulling until `fn(value, counter)` is truthy.
  *   - take:   `state` = remaining; 0 ⇒ IteratorClose(src) + done.
  *   - drop:   `state` = remaining-to-skip; drain that many, then pass through.
- * (`inner` is reserved for a future flatMap slice — unused here.)
+ *   - flatMap: `inner` = the current inner-iterator handle; drain it fully
+ *     (`__iter_hof_open(mapper(v, counter))`) before advancing `src`.
  *
  * The wrapper is itself an iterator: it is admitted by `__iter_hof_open`
  * (pass-through) so it CHAINS into downstream eager helpers / `.toArray()` /
@@ -56,17 +57,17 @@ import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
 
 /** Method names served by {@link ensureNativeLazyIter}. */
-export const LAZY_ITER_METHODS: ReadonlySet<string> = new Set(["map", "filter", "take", "drop"]);
+export const LAZY_ITER_METHODS: ReadonlySet<string> = new Set(["map", "filter", "take", "drop", "flatMap"]);
 
 /** `state` semantics differ by kind (see module header). */
-const KIND: Record<string, number> = { map: 0, filter: 1, take: 2, drop: 3 };
+const KIND: Record<string, number> = { map: 0, filter: 1, take: 2, drop: 3, flatMap: 4 };
 
 /** Field indices of `$LazyIterHelper` — load-bearing order. */
 const F_KIND = 0;
 const F_SRC = 1;
 const F_FN = 2;
 const F_STATE = 3;
-// const F_INNER = 4; // reserved for flatMap
+const F_INNER = 4; // flatMap: the current inner-iterator handle (or null)
 
 /** True when `methodName`/`arity` is a form the lazy arm services. */
 export function isLazyIterForm(methodName: string, arity: number): boolean {
@@ -106,6 +107,8 @@ interface LazyDeps {
   isTruthyIdx: number;
   objVecNewIdx: number;
   objVecPushIdx: number;
+  arrayFromIterNIdx: number;
+  iteratorIdx: number;
 }
 
 /** Gather (registering as needed) every dependency the lazy runtime needs.
@@ -119,7 +122,7 @@ function gatherLazyDeps(ctx: CodegenContext): LazyDeps | undefined {
   // spread (which route through `__iterator_rest`) have it available; the
   // `__iterator_rest` lazy arm delegates to it, and the finalize rebuild admits
   // `$LazyIterHelper` to its drain guard.
-  ensureNativeArrayFromIterN(ctx);
+  const arrayFromIterNIdx = ensureNativeArrayFromIterN(ctx);
   reserveApplyClosure(ctx);
   const steppers = reserveIterHofSteppers(ctx);
   if (steppers === undefined) return undefined;
@@ -130,13 +133,15 @@ function gatherLazyDeps(ctx: CodegenContext): LazyDeps | undefined {
   const isTruthyIdx = ctx.funcMap.get("__is_truthy");
   const objVecNewIdx = ctx.funcMap.get("__objvec_new");
   const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  const iteratorIdx = ctx.funcMap.get("__iterator");
   if (
     applyClosureIdx === undefined ||
     boxNumIdx === undefined ||
     unboxNumIdx === undefined ||
     isTruthyIdx === undefined ||
     objVecNewIdx === undefined ||
-    objVecPushIdx === undefined
+    objVecPushIdx === undefined ||
+    iteratorIdx === undefined
   ) {
     return undefined;
   }
@@ -151,6 +156,8 @@ function gatherLazyDeps(ctx: CodegenContext): LazyDeps | undefined {
     isTruthyIdx,
     objVecNewIdx,
     objVecPushIdx,
+    arrayFromIterNIdx,
+    iteratorIdx,
   };
 }
 
@@ -176,11 +183,20 @@ export function ensureNativeLazyIter(ctx: CodegenContext, methodName: string): n
 /** Reserve the shared `__lazy_iter_step` / `__lazy_iter_close`. Idempotent. */
 function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
   if (ctx.funcMap.get("__lazy_iter_step") !== undefined) return;
-  const { helperTypeIdx, nextIdx, closeIdx, applyClosureIdx, boxNumIdx, isTruthyIdx, objVecNewIdx, objVecPushIdx } =
-    deps;
+  const {
+    helperTypeIdx,
+    nextIdx,
+    closeIdx,
+    applyClosureIdx,
+    boxNumIdx,
+    isTruthyIdx,
+    objVecNewIdx,
+    objVecPushIdx,
+    iteratorIdx,
+  } = deps;
 
   // Locals: 0 param (externref), 1 helperAny (anyref), 2 src, 3 kind (i32),
-  // 4 st (f64), 5 done (i32), 6 val, 7 args, 8 res.
+  // 4 st (f64), 5 done (i32), 6 val, 7 args, 8 res, 9 inner (flatMap).
   const P = 0;
   const HANY = 1;
   const SRC = 2;
@@ -190,6 +206,7 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
   const VAL = 6;
   const ARGS = 7;
   const RES = 8;
+  const INNER = 9;
 
   const cast = (): Instr[] => [
     { op: "local.get", index: HANY } as Instr,
@@ -333,6 +350,72 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     { op: "return" } as Instr,
   ];
 
+  // flatMap (§27.1.4.6): drain the current `inner` iterator fully before pulling
+  // the next outer value, whose `mapper(v, counter)` result is opened into a new
+  // `inner`. `inner` persists in the struct across steps. A non-iterable mapper
+  // result opens to null ⇒ SKIPPED (no-throw discipline; spec is a TypeError).
+  const flatMapArm: Instr[] = [
+    {
+      op: "loop",
+      blockType: { kind: "empty" },
+      body: [
+        // inner = helper.inner
+        ...cast(),
+        { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
+        { op: "local.set", index: INNER } as Instr,
+        // if inner != null: try to step it
+        { op: "local.get", index: INNER } as Instr,
+        { op: "ref.is_null" } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: INNER } as Instr,
+            { op: "call", funcIdx: nextIdx } as Instr,
+            { op: "local.set", index: VAL } as Instr,
+            { op: "local.set", index: DONE } as Instr,
+            // inner yielded → return (0, val)
+            { op: "local.get", index: DONE } as Instr,
+            { op: "i32.eqz" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "i32.const", value: 0 } as Instr,
+                { op: "local.get", index: VAL } as Instr,
+                { op: "return" } as Instr,
+              ],
+            } as Instr,
+            // inner exhausted → clear it
+            ...cast(),
+            { op: "ref.null.extern" } as Instr,
+            { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
+          ],
+        } as Instr,
+        // pull next outer value
+        ...pullStep,
+        // res = mapper(val, counter); counter++
+        ...buildArgs,
+        ...invoke,
+        ...bumpCounter,
+        // helper.inner = __iterator(res) — GetIterator over the mapper result.
+        // The full ladder (unlike `__iter_hof_open`) normalizes typed vecs /
+        // $ObjVec / arrays via the #3100 vec-family arms AND drives generators,
+        // closed iterables, and (via the R3 prepend) nested lazy wrappers. A
+        // non-null non-iterable result traps (§27.1.4.6 step 6.b is a TypeError;
+        // the trap is our no-throw-boundary approximation — the mapper is
+        // required to return an iterable).
+        ...cast(),
+        { op: "local.get", index: RES } as Instr,
+        { op: "call", funcIdx: iteratorIdx } as Instr,
+        { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
+        // loop to drain the freshly-opened inner
+        { op: "br", depth: 0 } as Instr,
+      ],
+    } as Instr,
+  ];
+
   const stepBody: Instr[] = [
     { op: "local.get", index: P } as Instr,
     { op: "any.convert_extern" } as Instr,
@@ -371,6 +454,11 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     { op: "i32.const", value: 3 } as Instr,
     { op: "i32.eq" } as Instr,
     { op: "if", blockType: { kind: "empty" }, then: dropArm } as Instr,
+    // if kind==flatMap
+    { op: "local.get", index: KIND_L } as Instr,
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "i32.eq" } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: flatMapArm } as Instr,
     // fallthrough: unknown kind ⇒ done.
     ...doneReturn,
   ];
@@ -390,6 +478,7 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
       { name: "val", type: { kind: "externref" } },
       { name: "args", type: { kind: "externref" } },
       { name: "res", type: { kind: "externref" } },
+      { name: "inner", type: { kind: "externref" } },
     ],
     body: stepBody,
     exported: false,

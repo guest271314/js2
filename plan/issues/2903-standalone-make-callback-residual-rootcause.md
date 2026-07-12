@@ -510,8 +510,46 @@ The wrapper is itself an iterator, wired into BOTH drive paths:
   negative/NaN.
 - `result-is-iterator` / `x instanceof Iterator` brand identity is NOT modeled
   (the wrapper is a bespoke struct, not `%IteratorHelperPrototype%`).
-- **flatMap is NOT in this slice** — it needs the `inner`-iterator drain-then-
-  advance state machine (the struct field is reserved for it). Follow-up R3b.
 - Array-iterator reification is still a separate gap: `[1,2,3].values()` returns
   NULL standalone, so `.values().map(...)` shapes stay failing (not a helper
   problem).
+
+---
+
+## Landed: sub-front R3b — lazy Iterator.prototype.flatMap (opus-r3, 2026-07-13)
+
+**PR:** stacked on `issue-2903-r3-lazy-iter-helpers` (branch
+`issue-2903-r3b-flatmap`). Extends the R3 `$LazyIterHelper` with the reserved
+`inner` field.
+
+### The lowering
+
+`flatMap` = kind 4 on the SAME `$LazyIterHelper` struct — reuses the R3
+constructor (fn = mapper, state = counter). The FLATMAP arm of the shared
+`__lazy_iter_step` drains the current `inner` iterator fully before pulling the
+next outer value; each `mapper(v, counter)` result is opened into a new `inner`
+via **`__iterator(res)`** (the full GetIterator ladder, NOT `__iter_hof_open`),
+so typed-vec / `$ObjVec` / array-literal mapper results normalize through the
+#3100 vec-family arms while generators, closed iterables, and nested lazy
+wrappers (via the R3 `__iterator` prepend) all drive correctly. `inner` persists
+in the struct field across steps.
+
+Also: `flatMap` added to the #3098 standalone closure-path exemption in
+`calls.ts` (via `LAZY_ITER_METHODS`) — the mapper arrow now crosses as a GC
+closure struct (invoked by `__apply_closure`) instead of leaking
+`env.__make_callback` (map/filter already had this through `NATIVE_HOF_METHODS`;
+flatMap was not in that set).
+
+### Proofs
+- `tests/issue-2903-r3.test.ts` (+4, 18 total): array-literal inners,
+  generator inners, empty inners, counter, `flatMap(...).map(...)` chaining —
+  host-free + value-correct.
+- R3 map/filter/take/drop probes unchanged (no regression).
+
+### Boundaries
+- A non-iterable non-null mapper result traps (`__iterator` hard-cast) rather
+  than the spec TypeError (§27.1.4.6 step 6.b) — the no-throw-boundary
+  approximation; the mapper is required to return an iterable.
+- Inner iteration via `__iterator` normalizes finite iterables; per-element
+  laziness WITHIN an inner is preserved (the ladder is stepped, not
+  materialized).

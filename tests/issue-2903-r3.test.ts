@@ -139,6 +139,49 @@ describe("#2903 R3 — lazy Iterator helpers are host-free and correct", () => {
     ).toBe(206); // [2, 4]
   });
 
+  it("flatMap flattens array inners (typed-vec mapper results)", async () => {
+    expect(
+      await runHostFree(
+        `function* g(){ yield 1; yield 2; yield 3; }
+         const r = (g() as any).flatMap((x: number) => [x, x * 10]).toArray();
+         export function test(): number {
+           return r.length * 1000 + r[0] + r[1] + r[2] + r[3] + r[4] + r[5];
+         }`,
+      ),
+    ).toBe(6066); // [1,10, 2,20, 3,30]
+  });
+
+  it("flatMap flattens generator inners", async () => {
+    expect(
+      await runHostFree(
+        `function* g(){ yield 1; yield 2; }
+         function* h(x: number){ yield x; yield x + 100; }
+         const r = (g() as any).flatMap((x: number) => h(x)).toArray();
+         export function test(): number { return r.length * 1000 + r[0] + r[1] + r[2] + r[3]; }`,
+      ),
+    ).toBe(4206); // [1,101, 2,102]
+  });
+
+  it("flatMap via Array.from + empty inners + counter", async () => {
+    expect(
+      await runHostFree(
+        `function* g(){ yield 5; yield 6; }
+         const r = (g() as any).flatMap((x: number, c: number) => [c]).toArray();
+         export function test(): number { return r.length * 100 + r[0] * 10 + r[1]; }`,
+      ),
+    ).toBe(201); // counters [0, 1]
+  });
+
+  it("flatMap(...).map(...) chains natively", async () => {
+    expect(
+      await runHostFree(
+        `function* g(){ yield 1; yield 2; }
+         const r = (g() as any).flatMap((x: number) => [x, x]).map((y: number) => y * 10).toArray();
+         export function test(): number { return r.length * 10000 + r[0] + r[1] + r[2] + r[3]; }`,
+      ),
+    ).toBe(40060); // [10,10,20,20]
+  });
+
   it("empty source → empty result (no trap)", async () => {
     expect(
       await runHostFree(
