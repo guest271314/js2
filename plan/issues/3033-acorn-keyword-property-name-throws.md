@@ -173,3 +173,55 @@ f64.convert_i32_s`) — the next slice should instrument via a minimal side-effe
 sink or extract the `parseIdent`/`next` closures from the WAT. `.tmp/probe-3033-*`
 recipes bank the reproduction. This is genuinely senior-depth (acorn-scale
 tokenizer state), matching the issue's `feasibility: hard`.
+
+## Bug 2b — DEEPER root cause (dev-3051c, 2026-07-12, second pass)
+
+Root-caused past the "unexpected() from parseIdentNode" framing. Step-traced
+`x.var` through compiled acorn (`.tmp/b2b-*.mts` recipes):
+
+1. `parseSubscript` correctly eats `.` and enters the member branch with the
+   `var` keyword token, calling `parseIdent(true)`.
+2. `parseIdent` → `parseIdentNode` for `var`: `this.type === types$1.name` is
+   **false** (correct), but `else if (this.type.keyword)` is **FALSY** → falls to
+   the `else` → `this.unexpected()` → throws. (Bug 2a fixed the SEPARATE
+   `var __L = this.type` local-slot truncation; that was a different manifestation.)
+3. The exact defect (probe `.tmp/b2b-cond.mts`): reading `this.type.keyword`
+   TWO ways at the same point yields DIFFERENT results —
+   - `var __t = this.type; __t.keyword` → `"var"` ✓ (via a local; the local is
+     externref post-Bug-2a, so `.keyword` reads correctly)
+   - `this.type.keyword` (direct chained) → **`null`** ✗
+
+**Mechanism:** `this.type.keyword` is a CHAINED member read. The checker types
+the whole expression `this.type.keyword` as pure `undefined`, AND types the
+intermediate `this.type` as pure `undefined`. The intermediate `this.type` READ
+itself now returns externref (verified via instrumentation: `this.type` result
+= `externref`), but the OUTER `.keyword` read's result is typed by
+`resolveWasmType(undefined)` = i32 → the externref TokenType is unboxed to the
+numeric undefined-sentinel and `.keyword` off it reads null.
+
+**Why the Bug-2a-style fix did NOT land here (attempted + reverted):** extending
+the fix to the dynamic-member-get result typing (`accessWasm` in
+`compileExternPropertyGet`, property-access.ts ~6366) via a shared
+`isPurelyUndefinedDynamicMemberAccess` predicate (with a RECURSIVE
+`receiverProducesExternref` to catch the chained `this.type` receiver whose
+static type is undefined→i32 but whose runtime value is externref) did NOT fix
+`x.var`: the outer `.keyword` read on an `undefined`-typed RECEIVER
+(`typeof this.type === undefined`) does **not reach line 6366** — it returns from
+one of ~46 inline numeric-return paths earlier in `compilePropertyAccess`
+(between the pinned-struct check at ~3743 and the dynamic fallback at ~6366).
+Locating the exact inline path requires instrumenting the ~46 return sites
+(runtime instrumentation is blocked by a codegen stack-balance bug on complex
+injected probe expressions). Reverted the non-working change to avoid shipping
+speculative code (stakeholder anti-speculation directive).
+
+**Next slice — precise target:** find which inline path in
+`compilePropertyAccess` (property-access.ts, between ~3743 and ~6366) handles a
+member read whose RECEIVER type is purely `undefined`/`void` (the outer
+`.keyword` on `this.type`), and route it through the dynamic externref read
+(`__extern_get`, result externref) when the receiver produces externref at
+runtime (reuse the reverted `receiverProducesExternref` recursion — it correctly
+identifies `this.type` as runtime-externref). The Bug-2a helper
+`varBindingNeedsExternrefForUndefined` (index.ts) is the model. Repro:
+`.tmp/b2b-cond.mts` (shows `kwDirect=null` vs `kwVia_t=var`) is the tightest
+signal — fix is correct when `kwDirect` reads `"var"`. Related: the
+`new (Fn as any)()`-returns-null bug (#3163) blocks minimal-scale repros.
