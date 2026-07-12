@@ -1,12 +1,12 @@
 {
   "generated": "2026-07-12",
   "threshold": 1500,
-  "totalCeiling": 399208,
+  "totalCeiling": 399427,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
     "src/codegen/any-helpers.ts": 2688,
-    "src/codegen/array-methods.ts": 9565,
+    "src/codegen/array-methods.ts": 9611,
     "src/codegen/array-object-proto.ts": 2028,
     "src/codegen/async-cps.ts": 2384,
     "src/codegen/async-frame.ts": 2313,
@@ -16,7 +16,7 @@
     "src/codegen/closures.ts": 4981,
     "src/codegen/context/types.ts": 2562,
     "src/codegen/dataview-native.ts": 4319,
-    "src/codegen/declarations.ts": 5599,
+    "src/codegen/declarations.ts": 5632,
     "src/codegen/destructuring-params.ts": 2119,
     "src/codegen/expressions.ts": 1525,
     "src/codegen/expressions/assignment.ts": 7459,
@@ -36,7 +36,7 @@
     "src/codegen/number-format-native.ts": 1712,
     "src/codegen/number-ryu.ts": 1632,
     "src/codegen/object-ops.ts": 4819,
-    "src/codegen/object-runtime.ts": 10598,
+    "src/codegen/object-runtime.ts": 10453,
     "src/codegen/parse-number-native.ts": 1838,
     "src/codegen/property-access.ts": 8664,
     "src/codegen/regexp-standalone.ts": 2893,
@@ -57,6 +57,6 @@
     "src/ir/lower.ts": 3617,
     "src/ir/nodes.ts": 2987,
     "src/ir/select.ts": 3296,
-    "src/runtime.ts": 16231
+    "src/runtime.ts": 16257
   }
 }

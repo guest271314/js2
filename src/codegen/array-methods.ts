@@ -3020,7 +3020,38 @@ const ARRAY_METHODS = new Set([
  * `sort` — Bucket B, need write-back) and species/new-view producers (`slice`/`subarray`/
  * `map`/`filter`/`with`/`toSorted`/`toReversed` — Bucket C, need real-buffer identity).
  */
-const DYN_VIEW_READ_METHODS = new Set<string>(["at", "indexOf", "lastIndexOf", "includes", "toLocaleString"]);
+const DYN_VIEW_READ_METHODS = new Set<string>([
+  "at",
+  "indexOf",
+  "lastIndexOf",
+  "includes",
+  "toLocaleString",
+  // (#2872) Read-side CALLBACK methods that return a scalar (NO new TypedArray
+  // allocation) with Array-identical semantics. The two-arm materializes the
+  // dyn-view to an `$__vec_f64` and re-enters the ORDINARY array-method HOF impl
+  // — reusing the existing native array-HOF machinery verbatim (no per-method TA
+  // handler). Scoped to `reduce`/`reduceRight` in this slice: they measured
+  // clean (+2 pass, 0 CE, 0 regression). Deliberately EXCLUDED pending
+  // follow-ups: `find`/`findIndex` (the materialized `find` impl emits invalid
+  // wasm on the `predicate-call-changes-value` shape — type mismatch in the
+  // arm), `findLast`/`findLastIndex` (the array impl misses a `__call_1_f64`
+  // registration on this path → CE), `every`/`some`/`forEach` (detached-buffer
+  // tests regress — the materialization snapshots before a mid-callback detach),
+  // `map`/`filter` (return a NEW same-kind TA, not an f64-vec), `sort`/`toSorted`
+  // (TA default comparator is NUMERIC, not Array's lexicographic), `with`/
+  // `toReversed` (new TAs). `includes` (above) is boolean-returning and lights
+  // up via the {@link BOOLEAN_RESULT_METHODS} boxing fix below.
+  "reduce",
+  "reduceRight",
+]);
+
+/**
+ * (#2872) Dyn-view read-side methods whose result is a BOOLEAN (`true`/`false`),
+ * so the two-arm boxes the impl's raw i32 via `__box_boolean` (not the generic
+ * number box) — see {@link coerceArmToExternref}. `includes` was already in the
+ * read set and shared the same latent mis-box.
+ */
+const BOOLEAN_RESULT_METHODS = new Set<string>(["every", "some", "includes"]);
 
 /**
  * (#3058) Call expressions whose dyn-view two-arm ELSE arm is CURRENTLY re-dispatching
@@ -3059,6 +3090,14 @@ function coerceArmToExternref(
   fctx: FunctionContext,
   r: ValType | null | undefined | typeof VOID_RESULT,
   treatNullAsVoid = false,
+  // (#2872) When the arm result is a BOOLEAN-returning method (`every`/`some`/
+  // `includes`), its impl leaves a raw i32 (0/1). The generic `coerceType`
+  // i32→externref path boxes it as a NUMBER (`__box_number`), so the boxed
+  // result is `0`/`1`, not `false`/`true` — `result === false` then fails
+  // (truthiness still works, which masked this). Box via `__box_boolean` so the
+  // spec `assert.sameValue(…, false)` identity holds. Falls back to the generic
+  // number box when the native helper is unavailable (byte-identical to before).
+  boolResult = false,
 ): boolean {
   if (r === undefined || r === null) {
     // THEN arm (treatNullAsVoid=false): a null/undefined from the recursive f64-vec
@@ -3075,6 +3114,13 @@ function coerceArmToExternref(
     return true;
   }
   const vt = r as ValType;
+  if (boolResult && vt.kind === "i32") {
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+    if (boxBoolIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+      return true;
+    }
+  }
   if (vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
   return true;
 }
@@ -3155,7 +3201,7 @@ function emitDynViewMethodTwoArm(
   const rThen = compileArrayMethodCall(ctx, fctx, propAccess, callExpr, receiverType, methodName, expectedType, true);
   if (savedBind !== undefined) fctx.localMap.set(name, savedBind);
   else fctx.localMap.delete(name);
-  const thenOk = coerceArmToExternref(ctx, fctx, rThen);
+  const thenOk = coerceArmToExternref(ctx, fctx, rThen, false, BOOLEAN_RESULT_METHODS.has(methodName));
 
   // --- ELSE arm (exact existing non-dyn-view impl) — re-dispatch the WHOLE call
   // through compileExpression so the caller's host/externref fallback (which lives
