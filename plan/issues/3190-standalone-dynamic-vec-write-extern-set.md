@@ -1,8 +1,9 @@
 ---
 id: 3190
 title: "standalone: dynamic STORE to an any-typed array element is a no-op — __extern_set lacks a $__vec_base arm (write-side sibling of #3183)"
-status: in-progress
+status: done
 assignee: ttraenkler/dev-vec-arms
+completed: 2026-07-12
 created: 2026-07-12
 priority: high
 feasibility: hard
@@ -16,6 +17,17 @@ sprint: current
 horizon: l
 related: [3183, 3179, 3169, 2186, 2860]
 origin: "Found while implementing #3183 (the READ-side fix). #3183 made an any-typed vec enumerate for-in and answer string-key reads; this is the remaining WRITE face."
+# The `$__vec_base` write fill is new native-runtime codegen that belongs in
+# object-runtime.ts (its read sibling `fillExternGetIdxVecArms` lives there); the
+# index.ts delta is just the import + one finalize call. Intended feature growth.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/index.ts
+# The write arm REUSES the engine's `__unbox_number` (ToNumber for both the index
+# key and per-carrier value coercion) — it does NOT hand-roll a fresh ToNumber
+# matrix; the gate counts the added call sites, so grant the allowance.
+coercion-sites-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 # #3190 — standalone: dynamic `arr[i] = v` on an any-typed array does not land (write-path vec arm missing in `__extern_set`)
@@ -94,3 +106,39 @@ Two sub-problems, likely different difficulty:
 - `__extern_set`'s signature and the coercion of `value` (externref) down to the
   carrier element kind is the crux — reuse the existing unbox helpers
   (`__unbox_number`, etc.) rather than adding parallel ones (anti-bloat).
+
+## Resolution (2026-07-12) — IN-BOUNDS OVERWRITE half
+
+Implemented as `fillExternSetVecArms` (`src/codegen/object-runtime.ts`), wired
+into the finalize sequence in `src/codegen/index.ts` right after
+`fillExternGetIdxVecArms` (its read sibling). It PREPENDS a self-contained
+`ref.test $__vec_base`-guarded arm into `__extern_set` (the `fillExternGetErrorProps`
+splice discipline — append locals, never renumber; falls through untouched for
+non-vec receivers so host / non-vec output is byte-identical):
+`n = __unbox_number(key)` (ToNumber; skip on NaN) → `i = trunc_sat(n)` →
+in-bounds `0 <= i < len` via `$__vec_base` → per-carrier `ref.test <carrier>` →
+`array.set(data, i, unbox(value))`. Value coercion reuses the engine's
+`__unbox_number` via the new `unboxExternrefToVecElement` (the inverse of the
+read fill's `boxVecElementToExternref`): f64 / numeric-i32 / externref carriers;
+string/ref/bool/f32/i64 carriers have no trap-free unbox and stay a silent no-op
+(same as before), so the store is scoped to the trap-free numeric + externref
+carriers (the dominant `number[]`/`any[]` case).
+
+Verified standalone (zero host imports, `tests/issue-3190.test.ts`, 8 cases;
+writes observed via NUMERIC index reads which are vec-aware since #2190,
+independent of #3183's for-in/string-key read fill):
+- in-bounds overwrite lands (number[] → 42; overwrite-all sum → 6); index from
+  an any var → 77; non-integer value coerced (3.5 → *2 = 7); externref (any[])
+  carrier → 9.
+- OOB / negative-index store → silent no-op, no trap, existing data intact.
+- plain any-typed object element store unchanged.
+
+`quality` cheap gates green locally (loc-budget + coercion-sites allowances
+granted above; ir-fallbacks / any-box / stack-balance / codegen-fallbacks OK).
+
+### Deferred (documented, not this PR): GROWTH
+`var a: any = new Array(); a[0] = 1` and `a[len] = v` (grow) still no-op — a
+WasmGC `array` is fixed-length, so growth needs the resizable-vec representation
+which the dynamic path does not drive. Tracked here for a follow-up slice; the
+in-bounds overwrite (this PR) is the tractable, high-value half. `new Array()`
+starts empty, so its for-in/read also yields nothing until growth lands.
