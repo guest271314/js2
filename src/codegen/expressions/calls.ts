@@ -144,6 +144,7 @@ import {
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
 import {
   ensureArrayNativeProtoGlue,
+  ensureDataViewNativeProtoGlue,
   ensureObjectNativeProtoGlue,
   ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
@@ -273,6 +274,7 @@ import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
   emitDataViewAccessor,
+  ensureDvAccessorHelper,
   ensureTaDynCopyWithinHelper,
   ensureTaDynFillHelper,
   ensureTaDynReverseHelper,
@@ -1122,18 +1124,45 @@ function tryEmitNativeProtoReflectiveCall(
   } catch {
     return undefined;
   }
-  const member = sym?.getName();
+  let member = sym?.getName();
   const decl = sym?.declarations?.[0];
-  if (!member || !decl || !ts.isMethodSignature(decl)) return undefined;
-  const ifaceDecl = decl.parent;
-  if (!ifaceDecl || !ts.isInterfaceDeclaration(ifaceDecl)) return undefined;
-  const ifaceName = ifaceDecl.name.text;
+  let ifaceName: string | undefined;
+  if (member && decl && ts.isMethodSignature(decl) && decl.parent && ts.isInterfaceDeclaration(decl.parent)) {
+    ifaceName = decl.parent.name.text;
+  } else {
+    // (#3173) LIB-MISSING members (`DataView.prototype.getFloat16` — ES2025
+    // members absent from the bundled lib have NO method-signature symbol):
+    // resolve from the receiver variable's declaration-initializer SYNTAX —
+    // `var m = <Builtin>.prototype.<member>; m.call(x, …)`. The glue's member
+    // CSV is string-keyed, so the closure resolution below is lib-independent.
+    member = undefined;
+    if (ts.isIdentifier(receiver)) {
+      const varSym = ctx.checker.getSymbolAtLocation(receiver);
+      const varDecl = varSym?.valueDeclaration;
+      if (varDecl && ts.isVariableDeclaration(varDecl) && varDecl.initializer) {
+        const init = varDecl.initializer;
+        if (
+          ts.isPropertyAccessExpression(init) &&
+          ts.isPropertyAccessExpression(init.expression) &&
+          init.expression.name.text === "prototype" &&
+          ts.isIdentifier(init.expression.expression)
+        ) {
+          member = init.name.text;
+          ifaceName = init.expression.expression.text;
+        }
+      }
+    }
+    if (!member || !ifaceName) return undefined;
+  }
+  if (!member || !ifaceName) return undefined;
 
   // Map the lib interface → builtin brand. Array<T> / ReadonlyArray<T> / Object.
   let brand: number | undefined;
   if (ifaceName === "Array" || ifaceName === "ReadonlyArray") brand = ensureArrayNativeProtoGlue(ctx);
   else if (ifaceName === "Object") brand = ensureObjectNativeProtoGlue(ctx);
-  else if (ifaceName === "String") brand = ensureStringNativeProtoGlue(ctx); // (#2875)
+  else if (ifaceName === "String")
+    brand = ensureStringNativeProtoGlue(ctx); // (#2875)
+  else if (ifaceName === "DataView") brand = ensureDataViewNativeProtoGlue(ctx); // (#3173)
   if (brand === undefined) return undefined;
 
   const glue = getNativeProtoBuiltinGlue(ctx, brand);
@@ -11080,7 +11109,23 @@ function compileCallExpression(
           (e, hint) => compileExpression(ctx, fctx, e, hint),
         );
         if (dvResult) {
-          return dvResult.kind === "get" ? dvResult.result : VOID_RESULT;
+          if (dvResult.kind === "get") return dvResult.result;
+          // (#3173) Setter used as an EXPRESSION (`assert.sameValue(
+          // dv.setUint8(0, 1), undefined)` — set-values-return-undefined.js):
+          // §24.3.4.* setters return undefined. VOID_RESULT in a value
+          // position desyncs the caller's argument stack; hand back the
+          // canonical `undefined` singleton instead (null ≠ undefined under
+          // strict equality). Statement position keeps the zero-cost
+          // VOID_RESULT.
+          if (!ts.isExpressionStatement(expr.parent)) {
+            // Standalone lowers `undefined` to the null externref (undefined ≡
+            // null-extern; `x === undefined` is `ref.is_null` — see
+            // `__extern_is_undefined`, object-runtime.ts), so this IS the
+            // canonical undefined here.
+            fctx.body.push({ op: "ref.null.extern" } as Instr);
+            return { kind: "externref" };
+          }
+          return VOID_RESULT;
         }
       }
     }
@@ -13326,6 +13371,15 @@ function compileCallExpression(
           // import cycle that reserving from `closed-method-dispatch.ts` would form.
           if ((methodName === "push" && arity === 1) || (methodName === "pop" && arity === 0)) {
             reserveVecMethodHelper(ctx, methodName === "push" ? "push" : "pop");
+          }
+          // (#3173) DataView get*/set* on an `any` receiver — mint the shared
+          // native accessor helper NOW so the dispatcher fill (which only READS
+          // funcMap, #1719) can add its `$__dv_window` brand arm. Reserved from
+          // this module (which already imports dataview-native) to avoid the
+          // eval-time import cycle a closed-method-dispatch.ts import would form
+          // (same reasoning as the #2927 reserveVecMethodHelper placement above).
+          if (noJsHost(ctx) && isDataViewAccessor(methodName)) {
+            ensureDvAccessorHelper(ctx, methodName);
           }
           flushLateImportShifts(ctx, fctx);
           // (#2872) A mutating `%TypedArray%.prototype` method on a receiver

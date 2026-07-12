@@ -81,6 +81,7 @@ import {
 import { emitMappedArgParamSync, emitMappedArgReverseSync } from "./logical-ops.js";
 import { resolveStructName, resolveStructNameForExpr } from "./misc.js";
 import { tryCompileStandaloneRegExpLastIndexWrite } from "../regexp-standalone.js";
+import { tryCompileStandaloneDetachedWrite } from "../dataview-native.js"; // (#3173) $DETACHBUFFER marker write
 import { getOrRegisterErrorStructType } from "../registry/error-types.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
@@ -3282,6 +3283,17 @@ function compilePropertyAssignment(
   {
     const standaloneLastIndexWrite = tryCompileStandaloneRegExpLastIndexWrite(ctx, fctx, target, value);
     if (standaloneLastIndexWrite !== undefined) return standaloneLastIndexWrite;
+  }
+
+  // (#3173) `buf.__detached__ = true` — the test262 `$DETACHBUFFER` shim's
+  // marker write. Standalone marks the i32_byte buffer vec detached
+  // (length = −1) so the DataView accessor / byteLength detached-buffer
+  // TypeErrors fire; the host lane keeps its runtime-sidecar path untouched.
+  {
+    const detachedWrite = tryCompileStandaloneDetachedWrite(ctx, fctx, target, value, (e, hint) =>
+      compileExpression(ctx, fctx, e, hint),
+    );
+    if (detachedWrite !== undefined) return detachedWrite;
   }
 
   // Compile-away: if the target object is frozen, emit TypeError throw

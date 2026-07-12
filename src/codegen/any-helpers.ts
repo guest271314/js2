@@ -606,6 +606,38 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
         },
       ],
     },
+    // (#3173) $BigInt-box arm: two DISTINCT bigint boxes with the same i64
+    // value are `===` (§7.2.15 step 1: both BigInt → BigInt::equal). The
+    // `__any_from_extern` classification below has no bigint tag — it folded
+    // bigint boxes into the object fallback, so `dv.getBigInt64(0) === 0n`
+    // (each side freshly boxed) compared by REFERENCE and was always false
+    // whenever this helper (not the inline `===` cascade, which has a
+    // typeof_bigint arm) served the comparison. Mixed bigint/number operands
+    // fall through — the classification keeps them unequal, matching
+    // `1n === 1` → false.
+    ...(ctx.nativeBigIntTypeIdx >= 0
+      ? ([
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
+          { op: "local.get", index: 3 },
+          { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: ctx.nativeBigIntTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBigIntTypeIdx, fieldIdx: 0 },
+              { op: "local.get", index: 3 },
+              { op: "ref.cast", typeIdx: ctx.nativeBigIntTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBigIntTypeIdx, fieldIdx: 0 },
+              { op: "i64.eq" },
+              { op: "return" },
+            ],
+          },
+        ] as Instr[])
+      : []),
     // Primitive comparison (numbers unified via f64.eq, strings by content,
     // booleans, null/undefined by tag) for everything the fast path didn't match.
     { op: "local.get", index: 0 },

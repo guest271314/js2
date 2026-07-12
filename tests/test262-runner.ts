@@ -2482,16 +2482,37 @@ export function wrapTest(
   // e.g. assert_sameValue(__executed[index], __expected[index])
   body = body.replace(/assert_sameValue\s*\(\s*(\w+\[\w+\])\s*,\s*(\w+\[\w+\])\s*\)/g, "assert_sameValue_str($1, $2)");
 
-  // Route boolean comparisons to boolean-aware assert
-  body = body.replace(/assert_sameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, "assert_sameValue_bool($1, $2)");
-  body = body.replace(/assert_sameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, "assert_sameValue_bool($1, $2)");
-  body = body.replace(
-    /assert_notSameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g,
-    "assert_notSameValue_bool($1, $2)",
+  // Route boolean comparisons to boolean-aware assert.
+  // (#3173) Guard: only rewrite when the captured operand has BALANCED parens.
+  // `[^,]+?` happily stops inside a nested call's own boolean argument —
+  // `assert_sameValue(sample.getFloat16(0, false), 3.078125)` matched with
+  // $1 = "sample.getFloat16(0" and $2 = "false", producing
+  // `assert_sameValue_bool(sample.getFloat16(0, false), 3.078125)` — a bool
+  // compare against 3.078125, which can never hold. Every DataView
+  // `get*(idx, littleEndian-literal)` assert hit this. An unbalanced capture
+  // keeps the generic `assert_sameValue`, which compares correctly.
+  const parensBalanced = (s: string): boolean => {
+    let depth = 0;
+    for (const ch of s) {
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth < 0) return false;
+      }
+    }
+    return depth === 0;
+  };
+  body = body.replace(/assert_sameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(a) ? `assert_sameValue_bool(${a}, ${b})` : m,
   );
-  body = body.replace(
-    /assert_notSameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g,
-    "assert_notSameValue_bool($1, $2)",
+  body = body.replace(/assert_sameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(b) ? `assert_sameValue_bool(${a}, ${b})` : m,
+  );
+  body = body.replace(/assert_notSameValue\s*\(\s*([^,]+?)\s*,\s*(true|false)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(a) ? `assert_notSameValue_bool(${a}, ${b})` : m,
+  );
+  body = body.replace(/assert_notSameValue\s*\(\s*(true|false)\s*,\s*([^)]+?)\s*\)/g, (m, a: string, b: string) =>
+    parensBalanced(b) ? `assert_notSameValue_bool(${a}, ${b})` : m,
   );
 
   // Route compareArray assertions through assert_true

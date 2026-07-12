@@ -125,7 +125,11 @@ function compilePrefixUnary(
         fctx.body.push({ op: "i64.const", value: 0n });
         fctx.body.push({ op: "local.get", index: tmp });
         fctx.body.push({ op: "i64.sub" });
-        return { kind: "i64" };
+        // (#3173) Preserve the bigint brand: `-1n` must stay a bigint carrier
+        // so any-boxing picks `__box_bigint` (a stripped brand boxed −1n as a
+        // NUMBER, so `dv.getBigInt64(0) === -1n` compared bigint-box vs
+        // number-box and was always false).
+        return operandType.bigint ? { kind: "i64", bigint: true } : { kind: "i64" };
       }
       // Non-f64 operand → coerce to f64 before negating
       if (operandType?.kind !== "f64") {
@@ -150,7 +154,8 @@ function compilePrefixUnary(
         // ~bigint => bigint ^ -1n
         fctx.body.push({ op: "i64.const", value: -1n });
         fctx.body.push({ op: "i64.xor" });
-        return { kind: "i64" };
+        // (#3173) Preserve the bigint brand (see MinusToken above).
+        return operandType.bigint ? { kind: "i64", bigint: true } : { kind: "i64" };
       }
       if (ctx.fast) {
         if (operandType?.kind !== "i32") coerceType(ctx, fctx, operandType!, { kind: "i32" });
