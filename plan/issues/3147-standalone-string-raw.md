@@ -17,6 +17,13 @@ origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
 # itself lives in the new src/codegen/string-raw.ts subsystem module).
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
+# (#2108/#3131) NOT a fresh coercion matrix — string-raw.ts DELEGATES to the
+# engine's canonical runtime walkers: __extern_toString IS the single §7.1.17
+# ToString entry point for externref values (its $Object arm runs
+# __to_primitive, which the gate counts from the doc comment). No new
+# ToString/ToNumber ordering is defined here.
+coercion-sites-allow:
+  - src/codegen/string-raw.ts
 ---
 
 # #3147 — standalone String.raw
