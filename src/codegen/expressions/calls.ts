@@ -25,7 +25,7 @@ import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from; (#3149) native Map.groupBy
 import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
 import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.js"; // (#1983 / #3123)
-import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
+import { ensureIterStepScratchGlobal, ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain / (#3146) Iterator-statics intrinsics
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
@@ -4775,6 +4775,76 @@ function tryWasiTimerCall(
   return { kind: "f64" };
 }
 
+/**
+ * (#3146) Iterator-statics prelude intrinsics — the four `__j2w_iter_*`
+ * bare-identifier calls the injected standalone `Iterator.zip / zipKeyed /
+ * concat / from` prelude (src/iterator-statics-prelude.ts) rides on. Each
+ * lowers onto the NATIVE iterator runtime (iterator-native.ts), so the
+ * prelude inherits the full GetIterator ladder (vec / vec-family / USER
+ * closed-struct / OBJ plain-object / host-gen / async-gen carriers),
+ * receiver-correct `.next()` stepping, and `.return()`-forwarding
+ * IteratorClose without any new host import:
+ *   - `__j2w_iter_rec(o)`    → `__iterator(o)`             (externref rec)
+ *   - `__j2w_iter_step(rec)` → `__iterator_next(rec)`; the step VALUE is
+ *     parked in the scratch global, the i32 done flag is returned as f64 0/1
+ *   - `__j2w_iter_value()`   → reads the parked step value
+ *   - `__j2w_iter_close(rec)`→ `__iterator_return(rec)`    (IteratorClose)
+ *
+ * Returns `undefined` when this is not an intrinsic call (generic dispatch
+ * continues). Gated to the host-free targets — the prelude is only ever
+ * injected under `--target standalone|wasi`, and in JS-host mode the
+ * runtime.ts polyfills own these helpers (#1464).
+ */
+function tryIteratorStaticsIntrinsicCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.standalone && !ctx.wasi) return undefined;
+  if (!ts.isIdentifier(expr.expression)) return undefined;
+  const name = expr.expression.text;
+  if (
+    name !== "__j2w_iter_rec" &&
+    name !== "__j2w_iter_step" &&
+    name !== "__j2w_iter_value" &&
+    name !== "__j2w_iter_close"
+  ) {
+    return undefined;
+  }
+
+  ensureNativeIteratorRuntime(ctx);
+
+  if (name === "__j2w_iter_value") {
+    const scratchIdx = ensureIterStepScratchGlobal(ctx);
+    fctx.body.push({ op: "global.get", index: scratchIdx } as Instr);
+    return { kind: "externref" };
+  }
+
+  const arg = expr.arguments[0];
+  if (arg === undefined) return undefined; // malformed — let generic dispatch report
+  const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (argType && argType.kind !== "externref") {
+    coerceType(ctx, fctx, argType, { kind: "externref" });
+  }
+  flushLateImportShifts(ctx, fctx);
+
+  if (name === "__j2w_iter_rec") {
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__iterator")! });
+    return { kind: "externref" };
+  }
+  if (name === "__j2w_iter_step") {
+    const scratchIdx = ensureIterStepScratchGlobal(ctx);
+    // (i32 done, externref value) — park the value, surface done as f64 0/1.
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__iterator_next")! });
+    fctx.body.push({ op: "global.set", index: scratchIdx } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+  // __j2w_iter_close
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__iterator_return")! });
+  return VOID_RESULT;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -4865,6 +4935,14 @@ function compileCallExpression(
       fctx.body.push({ op: "call", funcIdx: drainIdx });
     }
     return VOID_RESULT;
+  }
+
+  // (#3146) Iterator-statics prelude intrinsics (`__j2w_iter_*`) — lower onto
+  // the native iterator runtime under the host-free targets. Byte-neutral for
+  // every program the prelude was not injected into.
+  {
+    const r = tryIteratorStaticsIntrinsicCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
   }
 
   // Node-shaped process APIs are lowered in their own module so the generic
