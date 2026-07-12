@@ -53,6 +53,132 @@ const F64: IrType = irVal({ kind: "f64" });
 const irCache = new Map<string, IrFunction>();
 
 /**
+ * #3159 — generalized self-hosted builtin definition (beyond the pure-f64
+ * Math pilot shape). `paramTypes` / `returnType` are concrete IrTypes and
+ * MAY carry ctx-bound `typeIdx` values (e.g. `(ref null $arr_f64)` data
+ * arrays), which is why `emitSelfHostedFunc` does NOT process-memoize the
+ * IR: a typeIdx is only meaningful inside the CodegenContext that
+ * registered it. Emission is funcMap-guarded once per compilation by the
+ * caller — the same lifecycle the hand-emitted `Instr[]` bodies had
+ * (rebuilt per compilation).
+ *
+ * Every name in `calleeTypes` (siblings AND intrinsics) must already be
+ * registered in `ctx.funcMap` before `emitSelfHostedFunc` runs — callers
+ * emit leaf-first and pre-materialize intrinsics (see timsort.ts's
+ * `ensureArrayIntrinsics`).
+ */
+export interface SelfHostedFuncDef {
+  /** funcMap registration name — also the function's name in `source`. */
+  readonly name: string;
+  /** Ordinary TS source, IR-claimable subset. */
+  readonly source: string;
+  /** Positional IR types for the function's own params (override-authoritative). */
+  readonly paramTypes: readonly IrType[];
+  /** IR return type, or null for void. */
+  readonly returnType: IrType | null;
+  /** Callee name → signature, seeds from-ast `calleeTypes`. */
+  readonly calleeTypes: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
+}
+
+/**
+ * Parse + from-ast + verify + hygiene passes for a generalized builtin.
+ * NOT memoized (see `SelfHostedFuncDef` — the IR may embed ctx-bound
+ * typeIdx values).
+ */
+function buildFuncIr(def: SelfHostedFuncDef): IrFunction {
+  const sourceFile = ts.createSourceFile(
+    `stdlib/${def.name}.ts`,
+    def.source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.TS,
+  );
+  const fnDecl = sourceFile.statements.find(
+    (s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === def.name,
+  );
+  if (!fnDecl) {
+    throw new Error(`stdlib-selfhost: source for ${def.name} has no matching function declaration`);
+  }
+
+  const { main, lifted } = lowerFunctionAstToIr(fnDecl, {
+    funcName: def.name,
+    exported: false,
+    calleeTypes: def.calleeTypes,
+    paramTypeOverrides: def.paramTypes,
+    returnTypeOverride: def.returnType,
+  });
+  if (lifted.length > 0) {
+    throw new Error(`stdlib-selfhost: ${def.name} unexpectedly produced ${lifted.length} lifted functions`);
+  }
+
+  const buildErrors = verifyIrFunction(main);
+  if (buildErrors.length > 0) {
+    throw new Error(`stdlib-selfhost: IR verify failed for ${def.name}: ${buildErrors[0]!.message}`);
+  }
+
+  let ir = main;
+  for (let iter = 0; iter < 10; iter++) {
+    const next = simplifyCFG(deadCode(constantFold(ir)));
+    if (next === ir) break;
+    ir = next;
+  }
+
+  const postErrors = verifyIrFunction(ir);
+  if (postErrors.length > 0) {
+    throw new Error(`stdlib-selfhost: post-pass IR verify failed for ${def.name}: ${postErrors[0]!.message}`);
+  }
+  return ir;
+}
+
+/**
+ * Lower a generalized self-hosted builtin against the live context and
+ * register it as a defined function under `def.name`. Same registration
+ * discipline as `emitSelfHostedMathFunc` (stable-regime mint + push,
+ * funcMap entry); cross-function references resolve by funcMap name so
+ * self-hosted code composes with hand-written helpers (leaf-first).
+ */
+export function emitSelfHostedFunc(ctx: CodegenContext, def: SelfHostedFuncDef): number {
+  const existing = ctx.funcMap.get(def.name);
+  if (existing !== undefined) return existing;
+
+  const ir = buildFuncIr(def);
+
+  const resolver: IrLowerResolver = {
+    resolveFunc(ref) {
+      const idx = ctx.funcMap.get(ref.name);
+      if (idx === undefined) {
+        throw new Error(
+          `stdlib-selfhost: ${def.name} calls "${ref.name}" but it is not registered yet — ` +
+            `emit leaf-first and pre-materialize intrinsics before emitSelfHostedFunc`,
+        );
+      }
+      return idx;
+    },
+    resolveGlobal(ref) {
+      throw new Error(`stdlib-selfhost: ${def.name} must not reference globals (got "${ref.name}")`);
+    },
+    resolveType(ref) {
+      throw new Error(`stdlib-selfhost: ${def.name} must not reference named types (got "${ref.name}")`);
+    },
+    internFuncType(type) {
+      return addFuncType(ctx, type.params, type.results, type.name);
+    },
+  };
+
+  const { func } = lowerIrFunctionToWasm(ir, resolver);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: def.name,
+    typeIdx: func.typeIdx,
+    locals: func.locals,
+    body: func.body,
+    exported: false,
+  });
+  ctx.funcMap.set(def.name, funcIdx);
+  return funcIdx;
+}
+
+/**
  * Parse the builtin's TS source and lower it to a verified, optimized
  * `IrFunction`. Pure function of the builtin definition — memoized.
  */
