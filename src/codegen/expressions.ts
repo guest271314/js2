@@ -163,6 +163,32 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
   // exact lockstep with the route actually emitted; the legacy host route
   // (producer modules, gc/host lane) never marks and KEEPS the wrap.
   if (ctx.standaloneNativeFinallyNodes?.has(expr) === true) return false;
+  // (#2623 P-7 / B-5) `.finally(...)` on the gc/host lane must NOT get the
+  // fulfilled-wrap either. §27.2.5.3 defines `finally` via
+  // `Invoke(promise, "then", «thenFinally, catchFinally»)`: an abrupt
+  // completion from reading a poisoned `then` accessor or invoking a throwing
+  // patched `then` propagates SYNCHRONOUSLY out of `.finally()`
+  // (test262 `finally/this-value-then-{poisoned,throws}.js` assert #2), and
+  // the result IS whatever the receiver's own `then` returned
+  // (`finally/invokes-then-with-*.js` — `result === returnValue` identity).
+  // The wrap broke both: its try/catch_all converted the sync throw into a
+  // `Promise_reject`, and its `Promise_resolve(result)` re-wrap destroyed the
+  // return-value identity for a patched `then`. The STANDALONE producer-module
+  // lane is deliberately excluded — the #2903 measurement found the
+  // subclass-`finally` tests pass through that host route only WITH the wrap.
+  if (
+    ctx.standalone !== true &&
+    ctx.wasi !== true &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    (expr.expression.name.text === "finally" ||
+      // `Promise.prototype.finally.call(target, …)` / `.apply(target, …)` —
+      // the same §27.2.5.3 entry reached reflectively.
+      ((expr.expression.name.text === "call" || expr.expression.name.text === "apply") &&
+        ts.isPropertyAccessExpression(expr.expression.expression) &&
+        expr.expression.expression.name.text === "finally"))
+  ) {
+    return false;
+  }
   // Built-in Promise static methods already return a Promise object. Wrapping
   // `Promise.resolve(v)` in another `Promise.resolve(...)` is harmless in the
   // JS host due to native assimilation, but standalone `$Promise` currently has
