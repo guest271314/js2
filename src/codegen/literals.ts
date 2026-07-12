@@ -3721,9 +3721,10 @@ export function compileArrayLiteral(
         // through the dynamic `any` path already, and NaN self-inequality on a
         // *genuine* NaN element is spec-correct (§7.2.16), not corruption.
         const allPlainNumbers = expr.elements.every((el) => {
-          if (ts.isOmittedExpression(el) || _isUndefinedLike(el)) return false;
-          const t = ctx.checker.getTypeAtLocation(el);
-          return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+          if (ts.isOmittedExpression(el) || _isUndefinedLike(el) || ts.isSpreadElement(el)) return false;
+          // (#1930) Classify via the oracle's static JS-type helper rather than
+          // a direct checker call, to satisfy the oracle-ratchet gate.
+          return ctx.oracle.staticJsTypeOf(el) === "number";
         });
         if (!allPlainNumbers) {
           elemWasm = { kind: "externref" };
