@@ -47,13 +47,16 @@ The issue's Phase 1 assumed handlers for `ir-owned` kinds are "unreachable
 when `experimentalIR: true`". The pipeline disproves this; deletion is gated
 on four structural facts:
 
-- **G1 — legacy compiles EVERYTHING first.** By default the IR is an
-  _overlay_: "The legacy path has already produced a working `body` for every
-  function before `compileIrPathFunctions` runs" (`src/codegen/index.ts`,
-  overlay block at ~:2096). IR-compiled bodies _replace_ legacy bodies after
-  the fact. Only under `JS2WASM_IR_FIRST=1` (#2138, flag-gated, NOT default)
-  is legacy emission skipped for claimed functions. **Deleting any live
-  handler breaks compilation until IR-first is the default.**
+- **G1 — legacy compiles EVERYTHING first.** ~~By default the IR is an
+  _overlay_~~ **CLEARED 2026-07-11 by #3143**: IR-first is now the default
+  (`JS2WASM_IR_FIRST=0` is a one-release escape hatch) — legacy emission is
+  skipped for claimed functions that pass `computeIrFirstSkipSet`'s gates
+  (2 generators-standalone, 4 host-nodes, 5 string-element, 6
+  dynamic-signature, 7 `??` residual). NOTE this clears G1 only for the
+  *skipped* population: functions excluded by gates 2/4/5/6/7, selector-
+  rejected functions (G2), top-level statements (G3), and class members
+  still compile via legacy — per-kind handler deletion still requires
+  G2/G3/G4 plus emptying the relevant skip-gate.
 - **G2 — whole-function claim unit keeps every handler live.** The selector
   claims `FunctionDeclaration`s; any rejection (every non-zero bucket in
   `plan/log/ir-adoption.md`, every `mixed`/`direct-only`/`deferred` kind in

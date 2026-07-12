@@ -895,7 +895,7 @@ function runPipeline(input: PipelineInput): CompileResult {
   let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
   // (#3000) genuine-emission signal — functions/class-members actually IR-emitted.
   let capturedIrCompiledFuncs: import("./index.js").CompileResult["irCompiledFuncs"];
-  // (#2138) IR-first skip telemetry — populated only under JS2WASM_IR_FIRST=1.
+  // (#2138) IR-first skip telemetry — populated when IR-first is active (default as of #3143).
   let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
   try {
     if (useLinear) {

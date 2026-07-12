@@ -70,7 +70,8 @@ type Row = {
 };
 
 async function compileOnce(src: string, flag: boolean): Promise<{ r: any; ms: number }> {
-  process.env.JS2WASM_IR_FIRST = flag ? "1" : "";
+  // (#3143) IR-first is default-ON; off-arm uses the explicit "0" escape hatch.
+  process.env.JS2WASM_IR_FIRST = flag ? "1" : "0";
   const t0 = performance.now();
   let r: any;
   try {

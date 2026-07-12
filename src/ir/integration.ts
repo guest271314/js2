@@ -26,7 +26,7 @@ import { ts } from "../ts-api.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
-import { ensureLateImport } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration
+import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import {
   addGeneratorImports,
@@ -1860,6 +1860,35 @@ function preregisterExceptionSupport(ctx: CodegenContext, fns: readonly BuiltFnR
  * `jsTag` presence is the dynamic-operand discriminator for unbox/tag.test
  * (verifier R2/R3 make it REQUIRED exactly there and reject it elsewhere).
  */
+/**
+ * (#3143) The function names `addUnionImports` (src/codegen/index.ts) registers
+ * — host `env::*` imports OR wasi/standalone native funcs of the same names. A
+ * from-ast boxing/unboxing coercion can emit a DIRECT symbolic `call` to one of
+ * these (bypassing the `box`/`unbox` IR instruction), relying on legacy's
+ * dual-compile side effect to have registered it. Under IR-first that side
+ * effect is skipped, so `preregisterDynamicSupport` must register the family
+ * itself when it sees such a call. Kept in lockstep with `addUnionImports`.
+ */
+const UNION_IMPORT_FUNC_NAMES: ReadonlySet<string> = new Set([
+  "__box_number",
+  "__unbox_number",
+  "__box_boolean",
+  "__unbox_boolean",
+  "__box_bigint",
+  "__to_bigint",
+  "__bigint_ctor",
+  "__box_symbol",
+  "__is_truthy",
+  "__typeof",
+  "__typeof_number",
+  "__typeof_string",
+  "__typeof_boolean",
+  "__typeof_bigint",
+  "__typeof_object",
+  "__typeof_function",
+  "__typeof_undefined",
+]);
+
 function isDynamicOp(instr: IrInstr): boolean {
   if (instr.kind === "box") return instr.toType.kind === "dynamic";
   if (instr.kind === "unbox" || instr.kind === "tag.test") return instr.jsTag !== undefined;
@@ -1953,6 +1982,24 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   let usesDynamicOps = false;
   let usesEq = false;
   let usesMemberGet = false;
+  // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
+  // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
+  // / …) rather than a `box`/`unbox` IR instruction — e.g. `coerceToExpectedExtern`
+  // boxes f64→externref via `emitCall({name:"__box_number"})` (from-ast.ts:3355),
+  // and `coerceReturnValue` unboxes via `__unbox_number`. Under the OVERLAY those
+  // imports are registered as a side effect of legacy's own compile of the same
+  // function (the documented dual-compile assumption at from-ast.ts:3345). Under
+  // IR-first the legacy body is skipped, so that side effect never happens and the
+  // funcref resolves to nothing — a hard `unknown function ref` at Phase 3. Detect
+  // such a named call here (a `call` whose symbolic target is a union-import name)
+  // and pre-register the family. `isDynamicOp` does NOT catch these: they are plain
+  // `call` instrs, not the `box`/`unbox`/`dyn.*` kinds it inspects.
+  let usesNamedUnionImport = false;
+  // (#3143) `__extern_is_undefined` ((externref)->i32) is a from-ast-emitted
+  // late-import helper (from-ast.ts:6261, `x !== undefined` on an externref)
+  // that legacy registers on demand via `ensureLateImport` — another
+  // dual-compile side effect IR-first skips. Detect + register the same way.
+  let usesExternIsUndefined = false;
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
@@ -1960,12 +2007,34 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
           if (isDynamicOp(i)) usesDynamicOps = true;
           if (usesDynEq(i)) usesEq = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
+          if (i.kind === "call") {
+            if (UNION_IMPORT_FUNC_NAMES.has(i.target.name)) usesNamedUnionImport = true;
+            else if (i.target.name === "__extern_is_undefined") usesExternIsUndefined = true;
+          }
         });
-        if (usesDynamicOps && usesEq && usesMemberGet) break;
       }
-      if (usesDynamicOps && usesEq && usesMemberGet) break;
     }
-    if (usesDynamicOps && usesEq && usesMemberGet) break;
+  }
+  // (#3143) A named union-import call needs the host/native import family
+  // registered even when no `dyn.*` op is present (the boxing-coercion path).
+  // `addUnionImports` covers host (env imports) AND wasi/standalone (native
+  // funcs), is idempotent, and runs here — before any Phase-3 body buffer —
+  // so its defined-funcIdx shift is hazard-free, exactly like the dynamic-op
+  // path below. In `fast` (gc) mode the any-helper family owns boxing, but a
+  // from-ast `__box_number` funcref is only emitted when the lane actually has
+  // that host import (its `hasHostNumberBox` gate), so registering it here is
+  // correct in every mode the call can appear.
+  if (usesNamedUnionImport) addUnionImports(ctx);
+  if (usesExternIsUndefined) {
+    ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    // (#3143) Apply the deferred import's funcIdx shift + defined-body fix-up
+    // NOW, before Phase-3 emission bakes any funcIdx. `ensureLateImport` only
+    // BATCHES the import; leaving it pending here desyncs the Phase-3 resolver
+    // (a sibling IR function's `ctx.funcMap` funcIdx would be read pre-shift and
+    // fall out of the defined-function range — the #329/#2078 late-shift class).
+    // `addUnionImports` above already self-flushes; this covers the bare
+    // extern-is-undefined path (no union import present).
+    flushLateImportShifts(ctx, null);
   }
   if (!usesDynamicOps) return;
   if (ctx.fast) {
