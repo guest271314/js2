@@ -73,6 +73,7 @@ import {
   fillDynamicForinVecArms,
   fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
+  fillExternSetVecArms,
   fillExternIsArray,
   fillProxyDispatch,
 } from "./object-runtime.js";
@@ -2615,6 +2616,12 @@ export function generateModule(
     // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
+
+    // (#3190) Write-side sibling of the fill above: splice `$__vec_base` STORE
+    // arms into `__extern_set` so `(arr as any)[i] = v` on an any-typed array
+    // lands the in-bounds element instead of silently no-op'ing. Standalone
+    // only (no-op otherwise).
+    fillExternSetVecArms(ctx);
 
     // (#3169) Splice CLOSED-STRUCT array-like arms into the standalone
     // dynamic-reader trio (`__extern_length`/`__extern_get_idx`/

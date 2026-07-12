@@ -9880,6 +9880,39 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
 }
 
 /**
+ * (#3190) INVERSE of `boxVecElementToExternref`: coerce the externref `value` on
+ * the stack DOWN to a carrier's `data` element type, for the standalone dynamic
+ * STORE path (`(arr as any)[i] = v` → `__extern_set` → `fillExternSetVecArms`).
+ *
+ *   - f64            → `__unbox_number(value)` (ToNumber; NaN for a non-number).
+ *   - i32 (numeric)  → `__unbox_number` then `i32.trunc_sat_f64_s`.
+ *   - externref      → identity (the canonical `externref` `$Vec`).
+ *
+ * Returns null for the kinds `boxVecElementToExternref` also skips
+ * (boolean-i32 — number box ≠ boolean box; string/ref carriers — a value cast
+ * could trap when the any-typed value is not that ref type; f32/i64/v128) so the
+ * store is a no-op for those carriers, exactly as before this fill (host-lenient
+ * silent no-op). Scoping the write to the trap-free numeric + externref carriers
+ * covers the dominant `number[]`/`any[]` case; string-carrier writes are a
+ * follow-up.
+ */
+function unboxExternrefToVecElement(ctx: CodegenContext, elemType: ValType): Instr[] | null {
+  if (elemType.kind === "f64") {
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    return unboxIdx === undefined ? null : [{ op: "call", funcIdx: unboxIdx } as Instr];
+  }
+  if (elemType.kind === "i32") {
+    if ((elemType as { boolean?: boolean }).boolean) return null;
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    return unboxIdx === undefined
+      ? null
+      : [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr];
+  }
+  if (elemType.kind === "externref") return [];
+  return null;
+}
+
+/**
  * (#2190) Parameters needed to build the `__extern_get_idx` body, shared by the
  * eager registration (empty `vecArms`) and the FINALIZE fill (full `vecArms`).
  */
@@ -10400,6 +10433,146 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
     ];
     getFn.body.splice(0, 0, ...arm);
   }
+}
+
+/**
+ * (#3190) Finalize-time `$__vec_base` write arms for the standalone dynamic
+ * STORE helper `__extern_set`. The write-side sibling of `fillExternGetIdxVecArms`
+ * (#2190, the read fill).
+ *
+ * A computed store `(arr as any)[i] = v` on an any-typed receiver lowers to
+ * `__extern_set(obj, box(i), box(v))`. A real array is a `__vec_<elemKind>`
+ * struct subtyping `$__vec_base` (#2186), NOT a `$Object`, so `__extern_set`'s
+ * `ref.test $Object` misses it and the store is silently dropped — the element
+ * is never written (#3183 fixed the READ side; this is the WRITE side).
+ *
+ * This fill PREPENDS a self-contained arm at body index 0 (the
+ * `fillExternGetErrorProps` splice discipline — append locals, never renumber;
+ * falls through untouched for non-vec receivers so host / non-vec output is
+ * byte-identical). The arm:
+ *   1. `ref.test $__vec_base` — a vec receiver enters the block and ALWAYS
+ *      returns (writes on a hit, else a host-lenient silent no-op), never
+ *      falling through to the `$Object` body.
+ *   2. index `i = trunc_sat(__unbox_number(key))` (the key is `box(i)`;
+ *      `__unbox_number` is ToNumber so a string index works too); skip on NaN.
+ *   3. in-bounds `0 <= i < len` (len via `$__vec_base` field 0) — else no-op.
+ *   4. per-carrier `ref.test <carrier>` → `array.set(data, i, unbox(value))`
+ *      with per-kind UNBOXING (`unboxExternrefToVecElement`). An unsupported
+ *      element kind (string/ref/bool/f32/i64) has no unbox arm → the store is a
+ *      no-op for that carrier (same as before the fill).
+ *
+ * SCOPE: this is the IN-BOUNDS OVERWRITE half. GROWTH (`a[len] = v`,
+ * `new Array()` then writes) needs the resizable-vec representation, which the
+ * dynamic path does not drive — deferred (see #3190 "Grow" note). Standalone
+ * only (gated on `ctx.externGetIdxReserved`, set when the trio was registered
+ * with the standalone arms); host output untouched.
+ */
+export function fillExternSetVecArms(ctx: CodegenContext): void {
+  if (!ctx.externGetIdxReserved) return; // host owns the write path
+  const fn = ctx.mod.functions.find((f) => f.name === "__extern_set");
+  if (!fn) return;
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  if (unboxNumIdx === undefined) return;
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+
+  // Enumerate concrete `__vec_<elemKind>` carriers (same filter as
+  // `fillExternGetIdxVecArms`) with a trap-free write unbox arm.
+  const seen = new Set<number>();
+  const carrierArms: Instr[] = [];
+  const carriers: { typeIdx: number; arrTypeIdx: number; elemType: ValType }[] = [];
+  for (const [elemKind, vecTypeIdx] of ctx.vecTypeMap.entries()) {
+    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    if (seen.has(vecTypeIdx)) continue;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) continue;
+    const arrDef = ctx.mod.types[arrTypeIdx];
+    if (!arrDef || arrDef.kind !== "array") continue;
+    seen.add(vecTypeIdx);
+    carriers.push({ typeIdx: vecTypeIdx, arrTypeIdx, elemType: arrDef.element });
+  }
+  carriers.sort((a, b) => a.typeIdx - b.typeIdx);
+
+  // params: 0=obj 1=key 2=value ; append locals: setAny(anyref) setN(f64) setI(i32)
+  const setAny = 3 + fn.locals.length;
+  const setN = setAny + 1;
+  const setI = setAny + 2;
+
+  for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
+    const unbox = unboxExternrefToVecElement(ctx, elemType);
+    if (unbox === null) continue; // unsupported element kind → store no-op (as before)
+    carrierArms.push(
+      { op: "local.get", index: setAny } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // vec.data[i] = unbox(value)
+          { op: "local.get", index: setAny } as Instr,
+          { op: "ref.cast", typeIdx } as Instr,
+          { op: "struct.get", typeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: setI } as Instr,
+          { op: "local.get", index: 2 } as Instr,
+          ...unbox,
+          { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+          { op: "return" } as Instr,
+        ],
+      } as Instr,
+    );
+  }
+  if (carrierArms.length === 0) return; // no writable carriers → leave body untouched
+
+  fn.locals.push(
+    { name: "__vec_set_any", type: { kind: "anyref" } },
+    { name: "__vec_set_n", type: { kind: "f64" } },
+    { name: "__vec_set_i", type: { kind: "i32" } },
+  );
+
+  const arm: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: setAny },
+    { op: "ref.test", typeIdx: vecBaseIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // n = __unbox_number(key) ; skip if NaN (non-numeric key)
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: unboxNumIdx },
+        { op: "local.tee", index: setN },
+        { op: "local.get", index: setN },
+        { op: "f64.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // i = trunc_sat(n) ; if 0 <= i < len → per-carrier array.set
+            { op: "local.get", index: setN },
+            { op: "i32.trunc_sat_f64_s" },
+            { op: "local.set", index: setI },
+            { op: "local.get", index: setI },
+            { op: "i32.const", value: 0 },
+            { op: "i32.ge_s" },
+            { op: "local.get", index: setI },
+            { op: "local.get", index: setAny },
+            { op: "ref.cast", typeIdx: vecBaseIdx },
+            { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 },
+            { op: "i32.lt_s" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: carrierArms,
+            } as Instr,
+          ],
+        } as Instr,
+        // vec receiver, OOB / non-numeric / grow / unsupported kind → no-op
+        { op: "return" },
+      ],
+    } as Instr,
+  ];
+  fn.body.splice(0, 0, ...arm);
 }
 
 /**
