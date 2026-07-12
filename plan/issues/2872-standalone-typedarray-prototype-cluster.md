@@ -1,11 +1,13 @@
 ---
 id: 2872
 title: "Standalone: TypedArray.prototype.* cluster (294 host-pass/standalone-fail, de-masked from #2862)"
-status: ready
+status: in-progress
+assignee: ttraenkler/agent-a30d0acc00d3c78c5
 created: 2026-06-30
-updated: 2026-07-11
+updated: 2026-07-12
 priority: high
 task_type: bug
+feasibility: hard
 area: codegen
 goal: standalone
 sprint: current
