@@ -1,7 +1,9 @@
 ---
 id: 3167
 title: "IR: lower string relational operators (< > <= >=) — #3143 flip-track post-claim divergence class 2"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/fable-eqfix
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
@@ -15,7 +17,50 @@ language_feature: strings, operators
 goal: ir-full-coverage
 related: [3143, 3153, 3156, 2949, 2138]
 origin: "2026-07-12 architect IR audit: #3153 census class 2; blocks the #3143 IR-first flip (post-claim throw = hard error under IR-first)."
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
 ---
+
+## Resolution (2026-07-12, fable-eqfix)
+
+Landed the both-string relational lowering following the #3156 minimal
+`emit-a-named-call` pattern — **no new IR node kind** (contrary to the initial
+plan's node-based sketch). from-ast's both-string switch (`from-ast.ts` ~:5821)
+gains `<`/`>`/`<=`/`>=` cases that emit a call to the sentinel
+`IR_STRING_COMPARE_FN` (a -1/0/1 lexicographic sign) then fold the sign to the
+operator's boolean via a signed i32 compare against 0 (`i32.lt_s`/`gt_s`/
+`le_s`/`ge_s`) — using only existing `call`/`const`/`binary` IR nodes.
+
+`integration.ts` `resolveFunc` maps the sentinel mode-appropriately: native/
+WASI → the `__str_compare` defined helper (idempotently ensured via
+`ensureNativeStringHelpers`, append-only → no funcIdx shift; re-resolved by
+name against the post-shift function table); host → the `string_compare` env
+import (already registered by the legacy declaration-collection pass whenever
+source has a string relational — `declarations.ts` ~:587-599 — so no new host
+surface, stable import index). `preregisterStringSupport` flags the compare
+call so a pure-compare body (`f(a,b:string){return a<b}`, no other string op)
+still pre-registers host string support before Phase-3.
+
+**Both operands statically string** is the delivered scope (census class 2 —
+the common `if (a < b)` shape). Verified: 24 regression tests
+(`tests/issue-3167.test.ts`) × both lanes; `irPostClaimErrors: []` +
+`fallbackCounts: {}` for a string-relational body under `JS2WASM_IR_FIRST=1`
+(IR claims and emits it — no demotion, no post-claim throw); ir-fallbacks,
+oracle-ratchet, coercion-sites all clean; #3156 / ir-cluster / ir-widening
+suites green.
+
+**Selector-mirror note for #3143 (important):** the architect plan asked for a
+select.ts mirror rejecting the MIXED string/non-string relational pre-claim.
+`select.ts` is **checker-free / purely syntactic** (`isPhase1Expr` has no type
+access — it explicitly defers "type compatibility ... to from-ast"), so a
+type-aware mixed-operand reject is NOT expressible there. The mixed case keeps
+its existing from-ast throw (unchanged from today; it already demoted under the
+overlay). It is **not** a #3167 regression. For the #3143 flip, the mixed
+relational is handled empirically by the #3153 post-claim meter: if it appears
+on the corpus it must be lowered too (ToNumber-both + f64 compare, mirroring
+legacy `emitAnyRelational`'s numeric arm) — a small follow-up, tracked under
+#3143's gate-check step, not blocking this slice.
 
 # #3167 — IR string relational operators
 
