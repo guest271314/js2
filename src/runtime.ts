@@ -6701,8 +6701,14 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // default-constructor path (`new RegExp(<rx mirror>, flags)` when the
       // receiver has no species) must NOT throw (species-ctor-ctor-non-obj's
       // guard call). Scoped to exactly these two keys, only when nothing own
-      // resolves.
-      if (val === undefined && (key === "toString" || key === "valueOf")) {
+      // resolves — an OWN `toString: undefined` / `valueOf: undefined` (the
+      // test262 `*-tostring-throws-toprimitive` poison pattern) SHADOWS the
+      // inherited method per ordinary [[Get]], so ToPrimitive must still throw
+      // TypeError. The first merge_group run of PR #2910 regressed exactly that
+      // cluster (15 files: String.prototype.* this-value coercions,
+      // Error.prototype.toString, Number.toFixed, TypedArray join) before this
+      // own-property guard.
+      if (val === undefined && (key === "toString" || key === "valueOf") && !_wasmStructHasOwn(obj, key, exports)) {
         return (Object.prototype as Record<string, unknown>)[key as string];
       }
       return val;

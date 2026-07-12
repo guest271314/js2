@@ -46,6 +46,7 @@ import {
   isTupleType,
   nextModuleGlobalIdx,
   resolveWasmType,
+  resolveWasmTypeForClosureReturn,
 } from "./index.js";
 import {
   coerceType,
@@ -1670,7 +1671,11 @@ export function computeClosureWrapperSig(
       closureReturnType = { kind: "externref" };
     }
     if (closureReturnType === null && !isVoidType(retType) && !(retType.flags & ts.TypeFlags.Never)) {
-      closureReturnType = resolveWasmType(ctx, retType);
+      // (#3051 Slice 3) accessor-bearing object-literal return types lower to
+      // externref — the runtime value is a HOST plain object; a struct-typed
+      // return null-drops it on the failed ref.test (see
+      // resolveWasmTypeForClosureReturn).
+      closureReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
     }
   }
   if (closureReturnType === null && isAssignedToSymbolIterator(arrow)) {
@@ -3344,7 +3349,9 @@ export function compileArrowAsCallback(
     if (sig) {
       const retType = ctx.checker.getReturnTypeOfSignature(sig);
       if (!isVoidType(retType)) {
-        cbReturnType = resolveWasmType(ctx, retType);
+        // (#3051 Slice 3) see resolveWasmTypeForClosureReturn — accessor-bearing
+        // object-literal return types lower to externref (host plain objects).
+        cbReturnType = resolveWasmTypeForClosureReturn(ctx, retType);
       }
     }
   } catch {

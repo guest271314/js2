@@ -12319,22 +12319,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (name && !ctx.structMap.has(name)) {
       name = ctx.classExprNameMap.get(name) ?? name;
     }
-    // (#3051 Slice 3) An ANONYMOUS object type carrying a get/set ACCESSOR
-    // property (`{ get index() {…} }`) is runtime-represented as a HOST plain
-    // object — `compileObjectLiteralWithAccessors` (#1239) lowers the literal
-    // via `__new_plain_object` + `__defineProperty_accessor`, never as a WasmGC
-    // struct. Resolving its TS type to a struct ref makes every typed slot
-    // (closure returns above all) coerce externref→struct, whose failed
-    // `ref.test` null-fallback (type-coercion.ts) silently DROPPED the object:
-    // a `regexp.exec` override returning a poisoned `{ get index() { throw … } }`
-    // arrived at V8's @@replace protocol as `null` (= no match), so the getter
-    // never fired and the test262 `result-get-*-err` abrupt completions never
-    // happened. Resolve such types to externref so the host object survives
-    // end-to-end. Scoped to anonymous (`__type`/`__object`) types — named
-    // class/interface accessors keep their struct lowering.
-    if ((name === "__type" || name === "__object") && typeHasAccessorProperty(tsType)) {
-      return { kind: "externref" };
-    }
+    // (#3051 Slice 3, NARROWED after the PR-#2910 merge_group park) Accessor-
+    // bearing ANONYMOUS object types are NOT blanket-lowered to externref here:
+    // #2724's guard in ensureStructForType deliberately keeps getter-ONLY
+    // literal types registered as structs because the object-REST copy paths
+    // (`{...x} = { get v() {…} }`, for-await rest) steer by that registration
+    // (struct→externref→__extern_rest_object); unregistering routed them to the
+    // externref-rest path which never invokes the getter (regressed
+    // dstr/obj-rest-getter-abrupt-get-error in the merge_group re-validation).
+    // The host-object-representation fix for CLOSURE RETURNS lives at the two
+    // return-type resolution sites in closures.ts via
+    // `resolveWasmTypeForClosureReturn` instead.
     // Check named structs (interfaces, type aliases)
     if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
       // (#1366a) Externref-backed user classes (e.g. `class Sub extends Error`)
@@ -12393,20 +12388,48 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
 
 /**
  * (#3051 Slice 3) True when the object type carries at least one property
- * declared as a get/set accessor (`{ get x() {…} }` / `{ set x(v) {…} }`).
- * Such values are runtime-represented as HOST plain objects (see
- * `compileObjectLiteralWithAccessors`, #1239), so their TS type must resolve
- * to externref, never a WasmGC struct ref.
+ * declared as an OBJECT-LITERAL get/set accessor (`{ get x() {…} }` /
+ * `{ set x(v) {…} }`). Such values are runtime-represented as HOST plain
+ * objects (see `compileObjectLiteralWithAccessors`, #1239). Class/interface
+ * accessors (declaration parent is not an ObjectLiteralExpression) do NOT
+ * qualify — those instances keep their struct representation.
  */
-function typeHasAccessorProperty(tsType: ts.Type): boolean {
+function typeHasObjLitAccessorProperty(tsType: ts.Type): boolean {
   for (const p of tsType.getProperties()) {
     const decls = p.getDeclarations?.() ?? p.declarations;
     if (!decls) continue;
     for (const d of decls) {
-      if (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) return true;
+      if (
+        (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
+        d.parent != null &&
+        ts.isObjectLiteralExpression(d.parent)
+      ) {
+        return true;
+      }
     }
   }
   return false;
+}
+
+/**
+ * (#3051 Slice 3, narrowed) Resolve a CLOSURE/CALLBACK return type, lowering
+ * accessor-bearing anonymous object-literal types to externref. The runtime
+ * value of `{ get index() {…} }` is a HOST plain object
+ * (`compileObjectLiteralWithAccessors`, #1239); typing the closure's wasm
+ * return as the checker's struct made the return-path coercion
+ * externref→struct null-drop on the failed `ref.test` (type-coercion.ts) —
+ * a `regexp.exec` override returning a poisoned `{ get index() { throw … } }`
+ * arrived at V8's @@replace protocol as `null` (= no match) and the getter
+ * never fired (the test262 `result-get-*-err` cluster). Scoped to RETURN-type
+ * resolution ONLY: blanket-lowering these types in `resolveWasmType` broke the
+ * #2724 object-REST steering (see the note in `resolveWasmType`).
+ */
+export function resolveWasmTypeForClosureReturn(ctx: CodegenContext, retType: ts.Type): ValType {
+  const symName = retType.getSymbol()?.name;
+  if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(retType)) {
+    return { kind: "externref" };
+  }
+  return resolveWasmType(ctx, retType);
 }
 
 /**
@@ -12511,13 +12534,6 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   }
   // Callable types (functions) are compiled as closures, not structs
   if (tsType.getCallSignatures().length > 0) return;
-  // (#3051 Slice 3) Accessor-bearing anonymous object types are host plain
-  // objects (compileObjectLiteralWithAccessors) — see resolveWasmType's
-  // matching externref guard. Never register a struct for them.
-  {
-    const n = tsType.symbol?.name;
-    if ((n === "__type" || n === "__object") && typeHasAccessorProperty(tsType)) return;
-  }
   // (#2542) A pure string-index-signature type — `{ [s: string]: T }` with no own
   // named properties — is an open dictionary that lowers to a `$Object` externref
   // (see resolveWasmType's #2542 guard), NOT an empty WasmGC struct. Registering an
