@@ -738,19 +738,20 @@ const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set<string>([
 
 /**
  * (#1461/#54) Whether an array-like `.call(...)` over a non-array receiver is
- * refused under `--target standalone`/`wasi`. Beyond the static
- * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set, `reduce`/`reduceRight` are
- * refused ONLY in their no-initial-value form (the forward hole-scan trips a
- * module-finalization func-index shift → invalid Wasm). The with-initial-value
- * form compiles to valid, host-free Wasm and is allowed through.
+ * refused under `--target standalone`/`wasi` — now only the static
+ * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set (currently empty).
+ *
+ * (#3169) The `reduce`/`reduceRight` NO-INITIAL-VALUE refusal is retired: the
+ * M2.2c "forward hole-scan trips a module-finalization func-index shift" bug
+ * it guarded against is gone — the loop re-resolves `__extern_has_idx` /
+ * `__extern_get_idx` / `__is_truthy` BY NAME after the receiver+callback
+ * compiles (the #16 discipline, see `hasIdxFnNow` below), so no baked funcIdx
+ * can go stale-low. The no-init form now compiles the §23.1.3.24 step-6
+ * hole-scan seed (first HasProperty index → acc) natively, host-free.
  */
 function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallExpression): boolean {
-  if (STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) return true;
-  if (methodName === "reduce" || methodName === "reduceRight") {
-    // args: [receiver, callback, initialValue?]. No initial value ⇒ refuse.
-    return callExpr.arguments.length < 3;
-  }
-  return false;
+  void callExpr;
+  return STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName);
 }
 
 /**

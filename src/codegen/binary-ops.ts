@@ -1134,8 +1134,26 @@ export function compileBinaryExpression(
         op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
       // Only dispatch through AnyValue for + (string concat possible) and equality
       if (isPlusOp || isEqualityOp) {
-        const anyDispatch = compileAnyBinaryDispatch(ctx, fctx, expr, op);
-        if (anyDispatch !== null) return anyDispatch;
+        // (#3169) Record the ACTIVE any-equality dispatch expr so the #3037
+        // read-carrier (`maybeWrapAnyReadEqualityCarrier`) fires ONLY for
+        // operands whose enclosing equality really routes through
+        // `__any_strict_eq`. Without this, an operand compile that lazily
+        // registers `$AnyValue` as a SIDE EFFECT (e.g. the #3169 standalone
+        // dynamic-index read pulling in the `__unbox_number` union native)
+        // flips `ctx.anyValueTypeIdx` ≥ 0 mid-expression: this entry gate saw
+        // −1 (no dispatch), but the carrier's own guard then saw ≥ 0 and
+        // wrapped the read into a `ref $AnyValue` that the already-chosen
+        // externref equality path compares by struct identity → value-equal
+        // operands spuriously `!==` (the `obj[idx] !== val` -c-ii family).
+        // Save/restore (not clear) so nested equalities keep their own marker.
+        const prevAnyEqExpr = ctx.activeAnyEqDispatchExpr;
+        if (isEqualityOp) ctx.activeAnyEqDispatchExpr = expr;
+        try {
+          const anyDispatch = compileAnyBinaryDispatch(ctx, fctx, expr, op);
+          if (anyDispatch !== null) return anyDispatch;
+        } finally {
+          ctx.activeAnyEqDispatchExpr = prevAnyEqExpr;
+        }
       }
       // For strictly numeric ops, fall through to compile with numeric hint
     }

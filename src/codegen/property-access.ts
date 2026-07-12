@@ -317,6 +317,19 @@ export function maybeWrapAnyReadEqualityCarrier(
   if (!ctx.standalone) return result;
   if (!result || result.kind !== "externref") return result;
   if (!isAnyEqualityOperand(ctx, expr)) return result;
+  // (#3169) The enclosing equality must be the ACTIVE `$AnyValue` dispatch
+  // (recorded by binary-ops around `compileAnyBinaryDispatch`). The static
+  // shape gate above mirrors binary-ops' entry CONDITION, but not its entry
+  // STATE: when `$AnyValue` gets lazily registered as a side effect of THIS
+  // operand's compile (e.g. the standalone dynamic-index read pulling in the
+  // `__unbox_number` union native), `ctx.anyValueTypeIdx` flips ≥ 0 after
+  // binary-ops already chose the plain externref equality path — wrapping then
+  // hands that path a `ref $AnyValue` it compares by struct identity, so
+  // value-equal operands answer a spurious `!==` (`obj[idx] !== val`, the
+  // -c-ii test262 family). Requiring the live marker guarantees the carrier is
+  // consumed by `__any_strict_eq` and nothing else; under-firing stays safe
+  // (bare externref → the chosen path's own equality semantics).
+  if (ctx.activeAnyEqDispatchExpr !== expr.parent) return result;
   // (#3037 CS1b(ii)) Mirror binary-ops.ts:1081's `ctx.anyValueTypeIdx >= 0` guard,
   // and check it BEFORE `ensureAnyFromExternHelper` (which lazily REGISTERS the
   // `$AnyValue` type as a side effect). binary-ops routes an `any===any` pair
@@ -7772,6 +7785,36 @@ export function isAnyTypedIndexExpression(ctx: CodegenContext, index: ts.Express
   return fact.kind === "any" || fact.kind === "unknown";
 }
 
+/**
+ * (#3169) True when an expression's receiver chain is rooted at the
+ * MATERIALIZED `arguments` object (`arguments`, `arguments[2]`,
+ * `arguments[2][arguments[1]]`, `(arguments[0]).x[y]`, …). Used to exclude
+ * such reads from the standalone dynamic-index positional retry — the
+ * materialized arguments state is not reliably positional for
+ * 0-declared-param HOF callbacks, so those reads keep the byte-exact legacy
+ * `__extern_get` behaviour (arguments fidelity is a separate follow-on).
+ */
+function isArgumentsRootedExpression(fctx: FunctionContext, node: ts.Expression): boolean {
+  let cur: ts.Expression = node;
+  for (;;) {
+    if (
+      ts.isParenthesizedExpression(cur) ||
+      ts.isAsExpression(cur) ||
+      ts.isNonNullExpression(cur) ||
+      ts.isTypeAssertionExpression(cur)
+    ) {
+      cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+      continue;
+    }
+    if (ts.isElementAccessExpression(cur) || ts.isPropertyAccessExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    break;
+  }
+  return ts.isIdentifier(cur) && cur.text === "arguments" && fctx.localMap.has("arguments");
+}
+
 /** Inner element access logic — assumes objType is on the stack and non-null */
 export function compileElementAccessBody(
   ctx: CodegenContext,
@@ -7966,6 +8009,144 @@ export function compileElementAccessBody(
       }
       // Defensive fallback — helpers unavailable (unreachable in host mode). Read
       // via the host from the stored key so the stack stays balanced.
+      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+      if (extGetIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      return { kind: "externref" };
+    }
+    // (#3169) STANDALONE twin of the #2773 dynamic-`any`-index arm above (which
+    // is host/gc-only). The untyped `idx` param of a named-function-declaration
+    // HOF callback (`function cb(val, idx, obj) { obj[idx] … }`) is implicit
+    // `any`, so `isNumericIndexExpression` is false and the read previously fell
+    // to the string-keyed `__extern_get(recv, boxed-number-key)` — which finds
+    // nothing on a vec/`$ObjVec`/closed-struct receiver and answered `undefined`
+    // (the test262 "callbackfn called with correct parameters" `-c-ii` family:
+    // `obj[idx] !== val` wrongly true).
+    //
+    // ORDER: the legacy `__extern_get(recv, key)` runs FIRST and stays
+    // authoritative — some producers (the materialized `arguments` object) key
+    // their `$Object` entries by BOXED NUMBER, which `__extern_get` finds
+    // directly but a `number_toString` re-canonicalized key would MISS, so
+    // positional-first regressed the `arguments[2][arguments[1]]` c-ii-13
+    // family. Only a MISS (null / undefined) with a NUMERIC, non-string key
+    // retries through the positional `__extern_get_idx(recv, f64)` — the
+    // standalone reader that dispatches vecs, `$ObjVec`, array-like `$Object`
+    // (canonical `number_toString` key, #2551) AND the #3169 closed-struct
+    // array-like arms. A genuine string key keeps the byte-exact old result
+    // (the string gate below); so does every read the old path answered.
+    // Standalone only (NOT wasi: the `$Object` delegation arm inside
+    // `__extern_get_idx` is `ctx.standalone`-gated, same reasoning as the
+    // #2166 numeric arm below).
+    if (
+      ctx.standalone &&
+      isAnyTypedIndexExpression(ctx, expr.argumentExpression) &&
+      // EXCLUSION — a read whose receiver chain is rooted at the materialized
+      // `arguments` object (`arguments[i]`, `arguments[2][arguments[1]]`, …)
+      // keeps the legacy `__extern_get` path untouched. The materialized
+      // arguments state is not reliably positional for 0-declared-param
+      // callbacks (the HOF inline loop pushes only the DECLARED params, so
+      // `arguments` there is synthesized, order-fragile state); the positional
+      // retry surfaced half-correct values that flipped the vacuously-passing
+      // `arguments[2][arguments[1]] === arguments[0]` c-ii-13 family to real
+      // failures. Real arguments-fidelity work is a follow-on; this arm only
+      // targets HOF callback params (`obj[idx]`) and other genuine receivers.
+      !isArgumentsRootedExpression(fctx, expr.expression)
+    ) {
+      // recv externref is on the stack → recvLocal (allocated FIRST so local
+      // numbering is stable through the key compile, per #3007).
+      const recvLocal = allocLocal(fctx, `__sdyn_recv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      // Compile the key as externref FIRST (preserves a string key's identity
+      // for the string-keyed read) BEFORE capturing helper funcIdxs — the
+      // key's own lowering may register late imports that shift them (#3007).
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
+      const keyLocal = allocLocal(fctx, `__sdyn_key_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+      const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+      const getIdxFn = ensureLateImport(
+        ctx,
+        "__extern_get_idx",
+        [{ kind: "externref" }, { kind: "f64" }],
+        [{ kind: "externref" }],
+      );
+      const extGetIdx = ensureLateImport(
+        ctx,
+        "__extern_get",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      // Miss gate: under the #2106 S1 singleton regime a missing property reads
+      // back as the (non-null) undefined singleton, so `ref.is_null` alone
+      // under-detects the miss; `__extern_is_undefined` covers it (same gate as
+      // the member-get dispatcher's #2963 miss test).
+      const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (unboxIdx !== undefined && getIdxFn !== undefined && extGetIdx !== undefined) {
+        const resLocal = allocLocal(fctx, `__sdyn_res_${fctx.locals.length}`, { kind: "externref" });
+        const idxF64 = allocLocal(fctx, `__sdyn_idxf_${fctx.locals.length}`, { kind: "f64" });
+        // res = __extern_get(recv, key) — the legacy read, byte-exact.
+        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: resLocal } as Instr);
+        // miss = res == null || __extern_is_undefined(res)
+        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
+        fctx.body.push({ op: "ref.is_null" } as Instr);
+        if (isUndefIdx !== undefined) {
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } as ValType },
+            then: [{ op: "i32.const", value: 1 } as Instr],
+            else: [{ op: "local.get", index: resLocal } as Instr, { op: "call", funcIdx: isUndefIdx } as Instr],
+          } as Instr);
+        }
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // idxF64 = Number(key); NaN (non-numeric key) → keep the miss.
+            { op: "local.get", index: keyLocal } as Instr,
+            { op: "call", funcIdx: unboxIdx } as Instr,
+            { op: "local.tee", index: idxF64 } as Instr,
+            { op: "local.get", index: idxF64 } as Instr,
+            { op: "f64.eq" } as Instr, // not-NaN ⇒ numeric key
+            // …AND the key is not a genuine STRING. The native `__unbox_number`
+            // is the ToNumber engine, so a numeric-looking string key ("1e3",
+            // "01") would unbox non-NaN and retry positionally under a
+            // canonically DIFFERENT key (get_idx re-stringifies 1000 as
+            // "1000" ≠ "1e3"). String keys keep the exact old miss.
+            ...[ctx.anyStrTypeIdx, ctx.nativeStrTypeIdx]
+              .filter((t) => t >= 0)
+              .flatMap((strTypeIdx) => [
+                { op: "local.get", index: keyLocal } as Instr,
+                { op: "any.convert_extern" } as Instr,
+                { op: "ref.test", typeIdx: strTypeIdx } as Instr,
+                { op: "i32.eqz" } as Instr,
+                { op: "i32.and" } as Instr,
+              ]),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: recvLocal } as Instr,
+                { op: "local.get", index: idxF64 } as Instr,
+                { op: "call", funcIdx: getIdxFn } as Instr,
+                { op: "local.set", index: resLocal } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr);
+        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
+        return { kind: "externref" };
+      }
+      // Defensive fallback — helpers unavailable. Read via the string-keyed
+      // path from the stored locals so the stack stays balanced.
       fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
       fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
       if (extGetIdx !== undefined) {
