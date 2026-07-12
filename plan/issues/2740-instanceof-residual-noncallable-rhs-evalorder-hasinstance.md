@@ -19,6 +19,11 @@ goal: test262-conformance
 parent: 2702
 depends_on: []
 children: [2763, 2764, 2765]
+# (#2740 close-out) the decidable non-callable dynamic RHS TypeError lives in
+# _instanceofResult — runtime.ts is the host-boundary subsystem this fix
+# belongs to; the +20 lines are the guarded step-1/step-4 branches + rationale.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 # #2740 — `instanceof` residual after #2702 (UMBRELLA — do not implement directly)
 
