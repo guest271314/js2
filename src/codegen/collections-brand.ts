@@ -106,15 +106,13 @@ function collectionMethodTarget(
     if (COLLECTION_METHODS[cls].has(method)) return { cls, method };
     return undefined;
   }
-  // `<collectionExpr>.METHOD` where the expression is statically a lib collection.
-  try {
-    const symName = ctx.checker.getTypeAtLocation(obj).getSymbol()?.name;
-    if (symName !== undefined && symName in COLLECTION_METHODS) {
-      const cls = symName as CollectionClass;
-      if (COLLECTION_METHODS[cls].has(method)) return { cls, method };
-    }
-  } catch {
-    /* type unavailable */
+  // `<collectionExpr>.METHOD` where the expression is statically a lib
+  // collection. (#1930) Resolved through the oracle (`declaredNameOf` — the
+  // ratchet-sanctioned way to read the declared type-symbol name).
+  const symName = ctx.oracle.declaredNameOf(obj);
+  if (symName !== undefined && symName in COLLECTION_METHODS) {
+    const cls = symName as CollectionClass;
+    if (COLLECTION_METHODS[cls].has(method)) return { cls, method };
   }
   return undefined;
 }
