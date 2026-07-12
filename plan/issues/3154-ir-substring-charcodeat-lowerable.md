@@ -16,6 +16,9 @@ language_feature: strings
 goal: ir-full-coverage
 parent: 2855
 related: [3143, 3144, 3153, 2955, 1072, 1248, 2124]
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
 ---
 
 # #3154 — IR: make `s.substring(...)` / `s.charCodeAt(...)` lowerable
@@ -45,6 +48,53 @@ Per the legacy reference:
   bounds guard (string-ops.ts arm) — assess in-slice; plan-demote if not
   cleanly expressible.
 
-## Work log
+## Implementation (landed by this issue's PR)
 
-(see PR)
+Route (a) — genuinely lowerable, BOTH modes, whole method family arity range:
+
+- `src/ir/from-ast.ts` — `STRING_METHOD_TABLE` gains `substring`
+  (`hostArgs [f64,f64]`, result string, `requiredArgs 0`) and `charCodeAt`
+  (`hostArgs [f64]`, result f64-val, `requiredArgs 0`). Pad-loop arms:
+  `charcode-zero` (omitted position → i32 0, both modes),
+  `native-substring` (start → i32 0, end → i32 0x7fffffff — `__str_substring`
+  clamps, the legacy native sentinel), and the #1248 host length-default arm
+  extended from `slice` to `substring` (padding 0 would trigger the spec's
+  start/end SWAP and return the wrong prefix).
+- `src/ir/integration.ts` — `stringMethodPlan` arms for both methods;
+  `resolveFunc` materializes the guarded helpers on demand;
+  `preregisterStringSupport` walk extended to (1) detect
+  `call __jsstr_charCodeAt` so `addStringImports` runs before Phase-3
+  emission even for literal-free functions, (2) walk `if`/`try` nested
+  instruction buffers (pre-existing gap).
+- `src/codegen/char-code-at-helpers.ts` (new) — `ensureHostCharCodeAtGuarded`
+  (`__jsstr_charCodeAt (externref, i32) -> f64`, wraps the `wasm:js-string`
+  `charCodeAt`/`length` builtins — read via `ctx.jsStringImports`, the #1072
+  shadowing-safe registry — in the §22.1.3.3 bounds guard; the raw builtin
+  traps out of range, #2003) and `ensureNativeCharCodeAtHelper`
+  (`__str_charCodeAt (ref $AnyString, i32) -> f64`, flatten + guard +
+  `array.get_u`, mirroring the legacy native inline arm). Both follow the
+  `ensureFmod` append-only defined-function discipline.
+- `tests/issue-3154.test.ts` — 17 cases × {host, standalone}: dual-run
+  equivalence vs `experimentalIR: false` + JS oracle, AND
+  `irPostClaimErrors === []` (the load-bearing #3143 assertion).
+
+## Grounding notes
+
+- Correction to the #3153 map: host-mode `substring` does NOT lower via the
+  `wasm:js-string.substring` builtin in the legacy method-call arm — it rides
+  the generic `env.string_substring` import `(externref, f64, f64) ->
+  externref` (substring IS in the legacy `STRING_METHODS` table; registered
+  by `collectStringMethodImports` for any string-receiver use, independent of
+  IR claim). Only `charCodeAt` uses the wasm:js-string builtin family, and
+  only there does the #1072 bare-name `resolveFunc` collision bite.
+- Native helpers (`__str_substring`/`__str_slice`) take `(ref $AnyString)`
+  and flatten internally (`wrapBodyWithFlatten`) — the "flat receiver"
+  concern from the map does not require from-ast-side flatten insertion.
+- Explicit-`undefined` end args (`s.substring(1, undefined)`, #2124) never
+  reach from-ast: the selector rejects `undefined` (unresolvable identifier)
+  at claim time, so that shape safely stays legacy.
+- Residual post-claim throws kept (parity with slice/charAt, all narrow):
+  arg counts above table arity (extra-args-evaluated-for-side-effects), and
+  lower-time resolver misses when the legacy scan didn't register the
+  backing import/helpers.
+
