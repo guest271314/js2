@@ -17,6 +17,12 @@ horizon: m
 umbrella: 3185
 related: [3185, 3169, 3180, 3015, 3170]
 origin: "2026-07-12 Fable codebase audit §F2; method-family slice of #3185"
+# (#3131) Behavioral fix: the reduce/reduceRight accumulator-seed helper
+# (initArgIsReference + resolveReduceAccType) adds a small, self-contained
+# amount to the already-over-threshold array-methods.ts. Genuine growth for a
+# correctness fix; the file's shrink is tracked by the #3182/#3105 splits.
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 ---
 
 # #3199 — default-lane Array fold/predicate generics (~283)

@@ -7412,24 +7412,19 @@ function resolveReduceAccType(
       return accParam;
     }
   }
-  // (#3199) No callback type pins the accumulator (a void / untyped callback
-  // such as `function () {}`). When an explicit initial value is present and
-  // is a reference type (string / object — not the numeric family), seed the
-  // accumulator as `externref` rather than the numeric default. Otherwise
-  // `[].reduce(function () {}, "seed")` coerces the string initial value to
-  // f64 (→ NaN) and returns the wrong value. Numeric inits keep `numKind`.
-  if (initIsReference) {
-    return { kind: "externref" };
-  }
+  // (#3199) Callback type doesn't pin the accumulator (void / untyped callback,
+  // e.g. `function () {}`). A reference-typed explicit initial value then seeds
+  // it as `externref` instead of the numeric default — otherwise
+  // `[].reduce(function () {}, "seed")` coerces the string seed to f64 (→ NaN).
+  if (initIsReference) return { kind: "externref" };
   return { kind: numKind };
 }
 
 /**
- * (#3199) Whether a reduce/reduceRight initial-value argument is a
- * reference-typed value (string / object / function / symbol / bigint — the
- * externref-boxed tags), used only to decide the accumulator seed type. Routed
- * through the type oracle (#1930) — no direct TS-checker use in codegen. A
- * numeric / boolean / undefined / mixed tag keeps the numeric default.
+ * (#3199) Whether a reduce/reduceRight initial value is reference-typed (the
+ * externref-boxed tags) and so should seed the accumulator as externref.
+ * Via the type oracle (#1930) — no direct TS-checker use. Numeric / boolean /
+ * undefined / mixed tags keep the numeric default.
  */
 function initArgIsReference(ctx: CodegenContext, initArg: ts.Expression): boolean {
   switch (ctx.oracle.staticJsTypeOf(initArg)) {
