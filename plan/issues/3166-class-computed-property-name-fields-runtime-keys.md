@@ -1,10 +1,11 @@
 ---
 id: 3166
 title: "Class fields/accessors with RUNTIME computed property names are silently dropped ([f()] = 1 → read returns 0) — ~150 cpn tests"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-07-12
 updated: 2026-07-12
+assignee: ttraenkler/agent-a52eb84a
 priority: medium
 horizon: m
 feasibility: medium
@@ -14,6 +15,8 @@ area: codegen
 language_feature: classes, computed-property-names
 goal: standalone-mode
 related: [2515, 1472, 2042]
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 origin: "2026-07-12 architect standalone audit: 192 cpn-* failures (120 class-field, 30 class-accessor, 14 obj-lit variants); class-field root cause verified live."
 ---
 
@@ -131,3 +134,93 @@ to a follow-up and land fields first (120 of the 150).
 **fable-executable-now** for fields (steps 1–3; the dynamic-write helper
 exists). Accessors (step 4) may need the #2042 descriptor path — if it
 resists, slice it to a follow-up rather than stalling the field win.
+
+## Re-grounding (2026-07-12, sendev-3164 — READ BEFORE IMPLEMENTING)
+
+Probed against post-#3164 main before implementing. **Two of the plan's
+premises are wrong; the scope is heterogeneous:**
+
+1. **The "dynamic property write helper on class instances" does NOT work in
+   standalone** — the plan's step 3 depends on it. Probes:
+   `class C {}; c[f()] = 7; c[f()]` → 0, and `class C { x = 5 }; c["y"] = 7;
+   c.x + c["y"]` → NaN. Closed class-instance structs have no property table;
+   out-of-shape writes are silently dropped. The only side-table precedent is
+   the Error-subclass `$Error_struct.$props` field (#2101a,
+   assignment.ts `emitExternrefBackedOwnFieldWrite`). Generalizing that (a
+   `$props` overflow field on classes with dynamic members + read/write path
+   threading) is substrate work, not a `continue` removal.
+2. **Constant-foldable cpn tests already pass** (`[1+1]`, string/numeric
+   literals — `cpn-class-expr-fields-computed-property-name-from-additive-*`
+   PASS on main). The 150-fail population concentrates in:
+   - `fields-methods-*` variants (~26 of 31 fields-methods files fail): a
+     class with BOTH a computed field and a computed METHOD; even the
+     STATIC-key ones fail at assert #3 (returned 4) — the failing assert is
+     the later dynamic access (`c[String(1+1)]` string-key read of a
+     numeric-named member, or the method invocation through a computed key),
+     NOT the field collection.
+   - genuinely-runtime keys (function-expression / arrow / assignment /
+     coalesce / yield / await keys) — these DO hit the :748 `continue`, but
+     fixing them requires the missing dynamic-write substrate above.
+3. Suggested slicing (verify counts per slice before starting):
+   - **S1 (no new substrate):** dynamic READ canonicalization on closed class
+     structs — `c[String(1+1)]` / `c[2]` must both find struct field "2"
+     (numeric-key ToPropertyKey canonicalization in the any-receiver read),
+     plus computed-key METHOD invocation dispatch. Likely flips the
+     static-key `fields-methods` bucket (assert #3 class).
+   - **S2 (substrate):** generalized `$props` overflow table for classes with
+     runtime-computed members (fields first, accessors after), keyed at
+     class-eval time per §15.7.14 (evaluate-once ordering).
+   - Static members (`C[1+1]`) need the class-object carrier to answer
+     computed reads — verify which bucket asserts them (assert #2/#4 in the
+     same files).
+
+Claim released pending re-slice; the probes live in this branch's history
+(`.tmp/probe-3166*.mts` shapes are reproduced inline above).
+
+## S1 landed (2026-07-12, agent-a52eb84a — PR against loopdive/js2)
+
+**Scope of this PR: S1 only** (read-side canonicalisation + computed-key method
+dispatch on CLOSED class structs; no new substrate). S2 ($props overflow table
+for genuinely-runtime-key MEMBERS) remains OPEN under this issue.
+
+### Root cause (S1)
+For a computed-name class FIELD (`[1+1] = () => 2`), TypeScript does not track a
+member named `"2"`, so the element-access callee `c[1+1]` carries no call
+signature — `compileCallableElementAccessCall` bailed — and it is not a
+prototype method (no `ClassName_2` in `funcMap`), so the method-dispatch paths
+missed it too. The struct-field READ already canonicalises the key
+(numeric `c[1+1]` / string `c[String(1+1)]`) to field `"2"` and returns the
+closure; only the INVOCATION was dropped, falling to the `ref.null.extern`
+fallback (call returned the missing-property default `0`).
+
+### Fix
+`src/codegen/expressions/calls.ts`: at the two element-access-call fallback
+sites (resolved-key-no-method and unresolved-key), when the receiver is a
+user-class instance (and, for the static-key site, the resolved key names a
+struct field), route the read + call through the existing ref.test-guarded
+dynamic `call_ref` machinery (`tryEmitInlineDynamicCall`) that an `any`-typed
+identifier call already uses. Two small `elemAccessReceiverIsUserClass` /
+`classInstanceHasField` gates keep primitive/array/host receivers on their
+existing lowering; a non-closure field value hits the safe default arm.
+
+### Measured impact
+`cpn-class-*fields*` standalone: **34 → 64 pass (+30)**, zero in-family
+regressions; gc/host lane matches (64/124). The const-foldable + read-canonical
++ instance method-call asserts of the `fields`/`fields-methods` buckets now pass
+(incl. the full 4-assert additive-add shape once static reads type-resolve).
+
+### Remaining (S2 — separate slice, still failing)
+The ~60 remaining `cpn-class-*fields*` fails are the genuinely-runtime-key
+variants (`from-arrow-function`, `from-assignment-expression`,
+`from-function-declaration`, `from-await`/`yield`, …) where the member is
+DROPPED at collection time (`resolveClassMemberName` → `undefined` → `continue`)
+because a closed class struct has no property table. These need the `$props`
+overflow substrate (evaluate-once key capture at class-eval time per §15.7.14 +
+read/write threading), as scoped in the Re-grounding section above. Static
+members (`C[key]`) additionally need the class-object carrier to answer computed
+reads.
+
+### Tests
+`tests/issue-3166.test.ts` — 6 standalone cases (numeric/string computed-key
+invocation, arg passing, named-field no-regression, value-field read control,
+full instance-assert shape). All green.

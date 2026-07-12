@@ -3221,6 +3221,44 @@ function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFil
  * Returns `{ kind: "externref" }` on success, or `null` to let the caller
  * fall back to the existing `ref.null.extern` behavior.
  */
+/**
+ * (#3166) Resolve the receiver of an element-access expression to a
+ * user-defined class name (present in `ctx.classSet`, incl. class expressions
+ * aliased via `classExprNameMap`), or `undefined`. Uses the type oracle
+ * (#1930) rather than a raw checker query.
+ */
+function elemAccessReceiverClassName(ctx: CodegenContext, elemAccess: ts.ElementAccessExpression): string | undefined {
+  let name = ctx.oracle.declaredNameOf(elemAccess.expression);
+  if (name && !ctx.classSet.has(name)) name = ctx.classExprNameMap.get(name) ?? name;
+  return name && ctx.classSet.has(name) ? name : undefined;
+}
+
+/**
+ * (#3166) True when the element-access receiver resolves to a user-class
+ * instance. Gates the field-closure dynamic-call route so primitive / array /
+ * host receivers keep their existing lowering.
+ */
+function elemAccessReceiverIsUserClass(ctx: CodegenContext, elemAccess: ts.ElementAccessExpression): boolean {
+  return elemAccessReceiverClassName(ctx, elemAccess) !== undefined;
+}
+
+/**
+ * (#3166) True when the receiver class of an element access declares a struct
+ * field named `fieldName`. A computed-name class field (`[1+1] = …`) lands here
+ * under its ToPropertyKey-canonicalised name ("2"); distinguishes a
+ * field-holding-closure from a prototype method for the static-key call route.
+ */
+function classInstanceHasField(
+  ctx: CodegenContext,
+  elemAccess: ts.ElementAccessExpression,
+  fieldName: string,
+): boolean {
+  const name = elemAccessReceiverClassName(ctx, elemAccess);
+  if (!name) return false;
+  const fields = ctx.structFields.get(name);
+  return !!fields && fields.some((f) => f.name === fieldName);
+}
+
 function tryEmitInlineDynamicCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -17149,6 +17187,22 @@ function compileCallExpression(
         if (cea !== undefined) return cea;
       }
 
+      // (#3166 S1) Computed-key call on a class-instance FIELD holding a
+      // closure: `c[1+1]()` where `[1+1] = () => …` is a class field. TS does
+      // NOT track a member named "2" for a computed-name field, so the callee
+      // (`c[1+1]`) carries no call signature — `compileCallableElementAccessCall`
+      // above bailed — and it is NOT a prototype method (no `ClassName_2` in
+      // funcMap). The struct-field READ works (numeric/string keys already
+      // canonicalise to field "2"); only the INVOCATION was dropped. Route the
+      // read + dynamic closure dispatch through the same ref.test-guarded
+      // `call_ref` machinery an `any`-typed identifier call uses. The runtime
+      // ref.test guards make this safe for a non-closure field value (the
+      // default arm reproduces the historical `ref.null.extern`).
+      if (elemAccessReceiverIsUserClass(ctx, elemAccess) && classInstanceHasField(ctx, elemAccess, methodName)) {
+        const dyn = tryEmitInlineDynamicCall(ctx, fctx, expr, true);
+        if (dyn !== null) return dyn;
+      }
+
       // Fallback for resolved element access calls that didn't match any known method:
       // compile receiver, discard; compile each argument for side effects; return externref.
       {
@@ -17173,6 +17227,18 @@ function compileCallExpression(
     {
       const cea = compileCallableElementAccessCall(ctx, fctx, expr, elemAccess);
       if (cea !== undefined) return cea;
+    }
+
+    // (#3166 S1) Runtime-key call on a class-instance field holding a closure:
+    // `c[String(1+1)]()` — the key is not const-foldable so no static field
+    // name is known, but the dynamic element READ already canonicalises the key
+    // (ToPropertyKey) and finds struct field "2". Only the INVOCATION was
+    // dropped. Route the read + ref.test-guarded dynamic closure dispatch, gated
+    // on a user-class-instance receiver so primitive/array receivers keep their
+    // historical behaviour. A non-closure read value hits the safe default arm.
+    if (elemAccessReceiverIsUserClass(ctx, elemAccess)) {
+      const dyn = tryEmitInlineDynamicCall(ctx, fctx, expr, true);
+      if (dyn !== null) return dyn;
     }
 
     // Fallback for element access calls where the key couldn't be resolved statically:
