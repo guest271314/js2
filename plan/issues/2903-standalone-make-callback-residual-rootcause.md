@@ -29,6 +29,8 @@ loc-budget-allow:
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions.ts
   - src/codegen/index.ts
+coercion-sites-allow:
+  - src/codegen/iter-hof-native.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
