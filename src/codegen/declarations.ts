@@ -4728,6 +4728,31 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
             ctx.moduleInitStatements.push(stmt);
             continue;
           }
+          // (#2623 P-7b) `Promise.<prop> = …` — a top-level static patch on the
+          // BUILTIN Promise (the test262 observable-resolve shape
+          // `Promise.resolve = function(){…}`, `all/race invoke-resolve.js`).
+          // `Promise` is neither a module global nor a top-level function, so
+          // the generic check below dropped the statement — the patch silently
+          // never existed at runtime (the exact #2671 `Test262Error.thrower`
+          // elision mechanism). Keep it in `__module_init` so the ordinary
+          // property-write arm runs: the write routes through `__extern_set`
+          // onto the sandbox-realm Promise object, which the combinator
+          // capability `C` (`_resolveCtor`, runtime.ts) and `__get_builtin`
+          // now consult (P-7b realm unification). Host/GC lane + `Promise`
+          // receiver only — a blanket builtin-receiver keep flips patches on
+          // every builtin at once and is separate, measured work. Shadowed
+          // user bindings named `Promise` are module globals / functions and
+          // are caught by the arms above/below, never reaching this keep.
+          if (
+            ts.isIdentifier(receiver) &&
+            receiver.text === "Promise" &&
+            !ctx.moduleGlobals.has("Promise") &&
+            !ctx.topLevelFunctionNames.has("Promise") &&
+            !ctx.classSet.has("Promise")
+          ) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
         }
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {

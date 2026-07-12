@@ -23,6 +23,17 @@ goal: async-model
 sprint: current
 parent: 1528
 architect_spec: authored
+# (#3102 LOC ratchet) P-7a/P-7b grow four over-threshold files intentionally:
+# a new dispatcher-mirroring export (index.ts), the bridge dispatch-arity +
+# realm-unification arms (runtime.ts), the finally wrap-exclusion
+# (expressions.ts) and the typeof unsound-fold guards (typeof-delete.ts) —
+# each sits beside the machinery it corrects; extraction is #3102's job.
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/typeof-delete.ts
+  - src/runtime.ts
+  - src/codegen/expressions.ts
+  - src/codegen/declarations.ts
 related: [2614, 2618, 1373b, 1042, 86, 56, 2613, 2958, 2867, 2906, 2959, 2980]
 note: "Spun off from #86 (class-ctor arm, merged) + #55 async-bucket scope (PR #1947). The #56/#1940 closure-construct bridge + #86 executor-call host-routing landed the SURFACE of the capability lane; this issue is the DEEPER shared substrate behind three clusters that the surface fixes did NOT close."
 ---
@@ -1164,7 +1175,63 @@ dispatch/typeof tests + async/promise suites + acorn-dispatch suites green
 `issue-1712-capture-closure-dispatch` ×1). Broad-impact (closure-call hot
 path) → merge_group floor authoritative.
 
-## §P7 P-7b remaining — B-4 observable-resolve + Promise.try (findings, NOT yet landed)
+## §P7 P-7b SHIPPED — B-4 observable-resolve + Promise realm unification (dev-promise-p7, 2026-07-12)
+
+**Banked (577-file Promise-family sweep vs main baseline — see PR):
+`all/race/allSettled invoke-resolve.js` fail→pass + `try/promise.js` (local
+lane), with the historical `any/invoke-then` composed-regression FIXED rather
+than reintroduced.**
+
+Four coordinated changes (tests in `tests/issue-2623-p7b-observable-resolve.test.ts`):
+
+1. **Top-level static-patch elision closed** (`src/codegen/declarations.ts`):
+   `Promise.resolve = fn` at top level had no module-global root, so the
+   `__module_init` collection dropped the statement entirely — the exact
+   #2671 `Test262Error.thrower` mechanism. A narrow keep (host/GC lane,
+   `Promise` receiver, unshadowed) routes it to the ordinary property-write
+   arm → `__extern_set` onto the observable Promise object.
+2. **Realm unification, capability side** (`src/runtime.ts`):
+   `_resolveCtor(directCall=1)` and `__get_builtin("Promise")` now resolve
+   sandbox-first (`globalSandbox?.Promise ?? Promise`) — `C` IS the object
+   user code observes as `Promise`, so V8's `Get(C,"resolve")` sees the patch
+   (§25.4.4.1.1 step 5).
+3. **Realm unification, minting side** (`src/runtime.ts`): `Promise_new`,
+   `Promise_resolve`, `Promise_reject`, `Promise_new_pending` mint
+   sandbox-first. THIS is what makes the composed fix net-positive where the
+   pre-#1940 attempt was net-negative: with capability-C sandbox but instances
+   host-realm, `C.resolve(hostPromise)` fails the §27.2.4.7 constructor
+   identity fast path → V8 wraps in a NEW C-realm promise → the user's patched
+   `promise.then` is never Invoke()d (`any/invoke-then` regressed exactly so,
+   re-measured 2026-07-12) plus one extra assimilation tick. Realm-unified
+   minting restores the fast path; `__instanceof` gained a sandbox-first arm
+   (host fallback kept). No sandbox supplied ⇒ all fallbacks ⇒ old behavior.
+4. **Runner sentinel** (`tests/test262-runner.ts`): `["Promise","resolve"]`
+   added to `SENTINEL_KEYS` — a landed static patch on the sandbox Promise is
+   discarded before the next test.
+
+**Composes on P-7a B-1**: the patched `resolve` is a wasm closure V8 invokes
+with 1 arg; `invoke-resolve` assert #2 (`arguments.length === 1`) only holds
+with the exact-arity bridge dispatch.
+
+**CI-vs-local note**: `try/promise.js` and `any/invoke-then.js` are `pass` in
+the CI baseline but diverged under the LOCAL sandbox runner (CI's sharded
+worker supplies no vm sandbox, so both realms were the host realm there).
+P-7b makes the sandbox lane behave like CI; the `invoke-resolve` rows are
+genuine CI flips.
+
+### P-7b residuals (deferred)
+
+- **`try/not-a-constructor.js`** — `new Promise.try(fn)` must throw TypeError,
+  but a NewExpression on a builtin-static callee is ELIDED entirely by codegen
+  (no import emitted, WAT-probe-verified 2026-07-12). Fix locus:
+  `compileNewExpression`'s builtin-member-callee fallback (route through the
+  dynamic construct boundary / `Reflect.construct`); 1 row, separate slice.
+- **`any/invoke-resolve.js`** — vacuous (#2940 runner drain), P-8's lane.
+- A blanket builtin-receiver keep for top-level static patches (Array/Object/…)
+  is deliberately NOT included — it flips patches on every builtin at once;
+  measured follow-up.
+
+### P-7b pre-landing findings (superseded by the SHIPPED record above)
 
 Probe-verified loci for the follow-up slice (all probes reproduced 2026-07-12):
 
@@ -1193,3 +1260,43 @@ Probe-verified loci for the follow-up slice (all probes reproduced 2026-07-12):
 - Sandbox-pollution note for the runner: a landed static-patch would persist on
   the vm-sandbox `Promise` — add `["Promise", "resolve"]` to `SENTINEL_KEYS`
   in `tests/test262-runner.ts` when landing P-7b.
+
+---
+
+## §P7 P-7b STATUS CORRECTION — WIP branch, NOT yet a PR (dev-promise-p7, 2026-07-12, end of session)
+
+The SHIPPED record above was written before the extended 577-file sweep
+completed. Final sweep result (local sandbox lane, vs main CI baseline):
+**12 flips / 2 regressions** — the flips include the 3 genuine
+`all/race/allSettled invoke-resolve` targets, bonus `all/allSettled/race
+invoke-then` flips, and the 4 already-merged P-7a finally rows.
+
+**The 2 LOCAL-lane regressions block the PR as-is:**
+- `prototype/proto.js` — `Object.getPrototypeOf(Promise.prototype) ===
+  Object.prototype` now mixes realms: `Promise.*` resolves sandbox-first (this
+  slice) while `Object` still resolves host-realm, so the compare is
+  sandbox-ObjectProto vs host-ObjectProto. Partial (Promise-only) realm
+  unification is inherently leaky ACROSS builtins.
+- `prototype/catch/this-value-obj-coercible.js` — same class
+  (`Boolean.prototype.then` patch realm vs the realm `ToObject(true)` uses).
+
+**Open design question for the architect/next dev:** either
+(a) FULL sandbox-first `__get_builtin` (all builtins — fixes the cross-builtin
+    mixing, but must be measured against cross-realm `instanceof`/error-identity
+    fallout), or
+(b) drop the sandbox-side unification entirely and rely on the fact that CI's
+    sharded worker supplies NO vm sandbox: in CI the declarations.ts keep alone
+    lands the patch on the (single-realm) host Promise and `invoke-resolve`
+    flips with no realm split. Then the LOCAL sandbox runner keeps its
+    pre-existing local-only divergences. **Verify first** whether the sharded
+    worker executes tests in per-test processes — if a worker process is shared,
+    a landed `Promise.resolve` patch on the HOST global leaks across tests
+    (the runner-side sentinel added here only protects the sandbox lane).
+
+**Branch state:** all P-7b work is committed on
+`issue-2623-p7b-observable-resolve` (stacked on merged P-7a): declarations.ts
+keep, runtime realm arms (capability + minting + `__instanceof`), runner
+sentinel, `tests/issue-2623-p7b-observable-resolve.test.ts` (5 tests, green).
+Local gates green (tsc, oracle-ratchet, loc-budget via the issue-file grant).
+Sweep artifacts: `.tmp/p7b-sweep.txt` + `.tmp/compare-sweep.mjs` (gitignored).
+Resume: decide (a)/(b), fix the 2 rows, re-sweep, then PR.
