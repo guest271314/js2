@@ -17,6 +17,12 @@ sprint: current
 horizon: m
 related: [2860, 2671, 3046, 1353, 1636]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; slices the JSON area of tracking issue #2671"
+loc-budget-allow:
+  - src/codegen/json-codec-native.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
+coercion-sites-allow:
+  - src/codegen/json-codec-native.ts
 ---
 
 # #3176 — standalone: JSON.parse/stringify spec residual
