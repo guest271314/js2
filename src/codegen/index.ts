@@ -2440,13 +2440,9 @@ export function generateModule(
     }
     fillNativeIteratorLateArms(ctx);
 
-    // (#2903) Rebuild the Iterator-helper stepper bodies (`__iter_hof_open`/
-    // `_next`/`_close`, iter-hof-native.ts) with a driven-generator arm per
-    // registered native sync generator — an `any`-held generator frame reaching
-    // the generic `__iterator` ladder has no arm and traps on the legacy vec
-    // hard-cast. Runs after all bodies compiled (every constructible
-    // generator's resume funcIdx is set); read-only per #1719. No-op unless an
-    // Iterator-helper call site reserved the steppers.
+    // (#2903) Rebuild the Iterator-helper steppers (iter-hof-native.ts) with
+    // per-producer driven-generator arms + the positive-admission classifier.
+    // Read-only per #1719; no-op unless a helper call site reserved them.
     fillIterHofSteppers(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same

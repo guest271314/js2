@@ -28,6 +28,7 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions.ts
+  - src/codegen/index.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
