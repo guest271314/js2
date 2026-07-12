@@ -2637,13 +2637,16 @@ function _instanceofResult(
   // `strict` distinguishes the two call paths. The STRING path (`__instanceof`)
   // resolves `target` from `globalThis[ctorName]`, so a non-callable object
   // there is GENUINELY non-callable (`x instanceof Math`) → always throw. The
-  // DYNAMIC path (`__instanceof_check`) receives an arbitrary runtime value that
-  // may be a callable our WasmGC representation does not expose as a JS function
-  // (e.g. a `Function(...)`-constructor result). To avoid throwing on such a
-  // mis-represented callable (which would regress `primitive instanceof
-  // Function(...)` → must be `false`), the dynamic path only throws for a
-  // non-callable object that carries its OWN `@@hasInstance` (i.e. one that opts
-  // into the protocol); otherwise it conservatively returns `false`.
+  // DYNAMIC path (`__instanceof_check`) receives an arbitrary runtime value.
+  // (#2740) `null`/`undefined`, primitives, and non-callable HOST objects are
+  // decidably non-callable on both paths → TypeError. The one remaining
+  // conservative case is a WasmGC data struct: class constructors, class
+  // instances, and object literals share one representation (`__is_closure`
+  // === 0, `__is_data_struct` === 1), so a genuinely-callable class value held
+  // in an any-typed variable cannot be told apart from a plain object until
+  // the class-value rep unification (#2763/#3134). On the dynamic path such a
+  // struct only throws when it carries its OWN `@@hasInstance` (i.e. opts into
+  // the protocol); otherwise it conservatively answers `false`.
   strict = false,
 ): number {
   // A wasm-closure target must look like a function to the spec checks below.
@@ -2653,10 +2656,14 @@ function _instanceofResult(
   // §13.10.2 step 1: If Type(target) is not Object, throw a TypeError.
   // A genuine primitive (number / string / boolean / symbol / bigint) always
   // throws. `null`/`undefined`, however, are also produced by features our
-  // backend does not yet lower (notably a `Function(...)` constructor result),
-  // and the pre-#2702 dynamic path returned `false` for them — so on the DYNAMIC
-  // path we keep that conservative `false` to avoid regressing `primitive
-  // instanceof Function(...)`. The STRING path (`strict`) and the codegen
+  // backend does not yet lower, and the pre-#2702 dynamic path returned
+  // `false` for them — so on the DYNAMIC path we keep that conservative
+  // `false`. (#2740 verified 2026-07-12: the body-only `Function("...")` /
+  // `new Function()` forms now yield real closure wrappers, but the
+  // params+body form `Function("name", "this.name=name;")` STILL lowers to
+  // `null` — throwing here regresses `primitive instanceof FACTORY` → must be
+  // `false`, S15.3.5.3_A1_T1..T8. Do not lift this until that form returns a
+  // real callable.) The STRING path (`strict`) and the codegen
   // unconditional-throw path (a statically primitive/`undefined`/`null` RHS)
   // still throw for a genuinely non-object RHS.
   if (target === null || target === undefined) {
@@ -2690,15 +2697,28 @@ function _instanceofResult(
   // §13.10.2 step 4: If IsCallable(target) is false, throw a TypeError.
   if (typeof target !== "function") {
     if (strict) return _INSTANCEOF_THROW;
-    // Dynamic path: `target` is an object (primitives were thrown at step 1) of
-    // unknown callability. An OWN `@@hasInstance` (even null/undefined) means it
-    // is deliberately used as a non-callable RHS → TypeError. Otherwise it may
-    // be a callable our representation does not surface as a JS function (a
-    // `Function(...)` result); return `false` to match OrdinaryHasInstance's
-    // §7.3.20 step 3 outcome for a primitive V rather than spuriously throwing.
+    // Dynamic path: `target` is an object (primitives were thrown at step 1).
+    // An OWN `@@hasInstance` (even null/undefined) means it is deliberately
+    // used as a non-callable RHS → TypeError.
     if (Object.prototype.hasOwnProperty.call(target, Symbol.hasInstance)) {
       return _INSTANCEOF_THROW;
     }
+    // (#2740) A HOST object (not a WasmGC struct) is native JS — if it were
+    // callable, `typeof` would say "function". So a host object here is
+    // decidably non-callable → TypeError (`x instanceof Math` routed through
+    // an any-typed variable, §13.10.2 step 4). EXCEPTION: a `_wrapForHost`
+    // proxy presents as a host object (proto `Object.prototype`, writable) but
+    // wraps a WasmGC struct whose callability is NOT decidable — fall through
+    // to the conservative struct handling below for those.
+    if (!_isWasmStruct(target) && !_hostProxyReverse.has(target)) {
+      return _INSTANCEOF_THROW;
+    }
+    // A WasmGC struct of unknown callability must stay conservative: class
+    // constructors, class instances and object literals are all `__is_data_
+    // struct` === 1 / `__is_closure` === 0 — indistinguishable until the
+    // class-value rep unification (#2763/#3134). Throwing here would turn
+    // `x instanceof C` (a class held in an any-typed variable, spec answer
+    // true/false) into a spurious TypeError. Return `false` instead.
     return 0;
   }
 
