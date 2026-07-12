@@ -1,7 +1,9 @@
 ---
 id: 3187
 title: "test262 runner: error_category classifier mis-bins ~80% of 'wasm_compile' — missing-builtin / missing-dependency need own buckets"
-status: ready
+status: done
+completed: 2026-07-12
+assignee: ttraenkler/dev-forin-sound
 created: 2026-07-12
 priority: medium
 feasibility: easy
@@ -82,6 +84,40 @@ label-only). Check `tests/issue-1908.test.ts:52` / `tests/issue-1781.test.ts:48`
    `missing_dependency` buckets absorb the rest; zero pass/fail flips.
 2. `oracle_version` bumped; affected fixture tests updated.
 3. #3024's problem statement re-anchored to the honest count (one-line edit).
+
+## Resolution (2026-07-12, dev-forin-sound)
+
+`classifyError` (`tests/test262-runner.ts`) now classifies in this order:
+
+1. `/invalid Wasm binary|Compiling function/` → `wasm_compile` (genuine, first).
+2. `/No dependency provided/` → `missing_dependency` (new — captures BOTH
+   `extern class "X"` and `imported function env::__X` forms; broader than the
+   issue's `extern class`-only suggestion so the DI diagnostic is binned
+   consistently).
+3. `/\bis not a function\b/` → `missing_builtin` (new — kept AFTER rule 1 so an
+   instantiate error that quotes source isn't stolen).
+4. `/no test export/` → `harness_shape` (new — was `wasm_compile`; the module
+   compiled fine, it just exposes no `test` export).
+
+- `ORACLE_VERSION` bumped 2 → 3 (`tests/test262-oracle-version.ts`) with a
+  history entry; the `check-verdict-oracle-bump` gate passes. **Label-only:
+  zero pass/fail flips** — no verdict changes, only category names. The
+  regression-gate bucket diff on the next promote is label-noise (ORACLE_REBASE).
+- Fixtures: `tests/issue-1781.test.ts` updated (the `No dependency provided …`
+  record moves `wasm_compile` → `missing_dependency`, signature + assertion).
+  `tests/issue-1908.test.ts` unchanged — its error quotes `Compiling function`
+  so it stays `wasm_compile` (rule 1). New unit test `tests/issue-3187.test.ts`
+  pins all four buckets + the ordering guarantee + the oracle bump.
+- #3024 problem statement re-anchored (one-line block) — its 131 is the genuine
+  validator-error subset, not the ~448 raw `wasm_compile` error_category count.
+
+### Acceptance criteria disposition
+1. Post-change: genuine `wasm_compile` narrowed to `invalid Wasm binary`/
+   `Compiling function` (~87–131); `missing_builtin` / `missing_dependency` /
+   `harness_shape` absorb the rest; zero pass/fail flips. ✓ (verified via
+   `classifyError` unit test; baseline bucket counts shift on next promote.)
+2. `oracle_version` bumped; affected fixtures updated. ✓
+3. #3024 re-anchored to the honest count. ✓
 
 ## Audit cross-link
 

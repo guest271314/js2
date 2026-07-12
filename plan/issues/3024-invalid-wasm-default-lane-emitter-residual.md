@@ -33,6 +33,17 @@ several `standalone-invalid-wasm-*` issues already tracked (#2039, #2878,
 #2934 — all standalone-target-specific), this bucket is on the **default
 `gc` target**, so it's a distinct residual not covered by those.
 
+> **Re-anchor (#3187, 2026-07-12):** this **131** figure is the *genuine*
+> validator-error subset (harvested by the `invalid Wasm binary` /
+> `Compiling function … failed` text). It is **not** the raw
+> `error_category: "wasm_compile"` bucket, which carried **~448** records
+> before #3187 because the classifier mis-binned `… is not a function`
+> (missing builtin) and `No dependency provided …` (missing dependency) as
+> `wasm_compile`. Post-#3187 the `wasm_compile` category is narrowed to the
+> genuine class (~87–131 depending on baseline), so this issue's scope was
+> already the honest count; use the `wasm_compile` bucket directly now that
+> it is un-inflated.
+
 ## Breakdown by validator error
 
 | reason                                              |               count |
