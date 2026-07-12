@@ -78,3 +78,36 @@ TypeError is thrown at all (the bulk). Same story for
 - Zero host-mode regressions; zero standalone high-water regressions.
 - Out of scope: `class MySet extends Set` subclassing CEs (8 rows — separate
   root cause, builtin-super construction lineage #2917), and #3172's methods.
+
+## Test Results (2026-07-12, implementation)
+
+Measured on the standalone lane (`TEST262_TARGET=standalone`,
+filter `built-ins/{Map,Set,WeakMap,WeakSet}/prototype`) vs the
+`test262-standalone-current.jsonl` main baseline:
+
+- **158 flips fail→pass, 0 regressions** (suite: 320→478 of 700).
+  150 are brand/receiver-protocol rows (`does-not-have-*`,
+  `this-not-object-*`, `context-is-*`); 8 bonus rows (size descriptor
+  meta `name`/`length`/`size.js`, `Map.set` return-map rows). Acceptance
+  bar was ≥120 ✓.
+- Host (gc) lane on the same filter: 0 flips, 0 regressions — byte-inert as
+  intended (all paths `nativeStrings`/standalone-gated).
+- `tests/issue-3171.test.ts`: 48 equivalence tests. Regression suites green:
+  #2604 (31), #2607 set-algebra (27), #2377/#2861 proto-value-read,
+  collection batch (116; 3 pre-existing failures reproduced on clean tree).
+
+### What landed (for #3172/#3174 reuse)
+
+- `src/codegen/receiver-brand.ts` — **the shared brand preamble**:
+  `emitReceiverBrandCheck(ctx, fctx, recvType, spec)` with
+  `spec: { message, structTypeIdx, kindField?: { fieldIdx, accept[] } }`.
+  Consumes the compiled receiver, leaves non-null `(ref structTypeIdx)`,
+  throws catchable TypeError on a miss. #3172: pass the Set spec from
+  `collectionBrandSpec(ctx, "Set")` (collections-brand.ts). #3174: pass
+  Date's struct typeIdx with no `kindField`.
+- `src/codegen/collections-brand.ts` — reflective `.call` dispatch, all four
+  collections; `collectionBrandSpec` exported.
+- `COLLECTION_KIND` tag field on `$Map` (map-runtime.ts, `MAP_LAYOUT.M_KIND`),
+  stamped by `__map_new(kind)`.
+- `size` accessor getter glue for Map/Set (array-object-proto.ts,
+  `makeCollectionGlue` → `emitCollectionSizeGetterBody`).
