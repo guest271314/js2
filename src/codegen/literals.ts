@@ -3743,7 +3743,43 @@ export function compileArrayLiteral(
   // element is boxed by its own static type at construction, not by Wasm kind
   // after the fact. Scoped strictly to `any` contextual elements: number[] /
   // string[] / struct[] literals are untouched (byte-identical).
-  if (!hasSpread && (elemWasm.kind === "i32" || elemWasm.kind === "f64")) {
+  //
+  // (#3244) EXTENDED to object-struct elements. `[{ x: 777 }]` in an `any` /
+  // `Array<any>` context (`const a: any = [{ x: 777 }]`, `f([{ x: 777 }])` with
+  // `f(a: any)`) infers a homogeneous element type `{ x: number }`, so the
+  // first-element heuristic picks a CLOSED anon-struct carrier
+  // (`__vec_<__anon_0>`). But the object literal itself, compiled in an `any`
+  // context, is a DYNAMIC `$Object` (externref) — and the element store then
+  // coerces `$Object → (ref null __anon_0)` via `ref.test`/`ref.cast`, which
+  // FAILS (a `$Object` is not the closed struct) → the element is stored as
+  // NULL. `a[0]` reads back null → `a[0].x` throws / reads NaN. Widening the
+  // carrier to `externref` (exactly as the numeric case does) stores each object
+  // element by its own dynamic rep, so the read-back + member dispatch work
+  // identically to a heterogeneous `[1, { x: 777 }]` array (which already boxes
+  // every element). Scoped, like the numeric widening, to an `any`/`Array<any>`
+  // contextual type — a genuinely-typed `Iface[]` / `{x:number}[]` literal keeps
+  // its closed-struct carrier byte-identical (and reads back correctly through
+  // the #3244 `boxVecElementToExternref` arm when it later crosses the boundary).
+  // NESTED-ARRAY (vec-struct) elements are EXCLUDED — they already read back via
+  // the typed `__extern_get_idx` vec arm — so this only re-keys plain objects.
+  const elemIsPlainObjectStructRef =
+    // Standalone/nativeStrings only — the closed-struct-carrier + lossy
+    // `$Object`→struct downcast is the STANDALONE array-build path (the host lane
+    // uses `__js_array_new` + real JS values, already correct at 777). Gating
+    // here keeps the host lane byte-identical (the numeric widenings above stay
+    // ungated because they fix genuine any[]-boxing needed in both lanes).
+    (ctx.standalone || ctx.nativeStrings) &&
+    (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") &&
+    (() => {
+      const ti = (elemWasm as { typeIdx: number }).typeIdx;
+      if (ti < 0) return false;
+      if (ti === ctx.anyStrTypeIdx || ti === ctx.nativeStrTypeIdx) return false; // strings keep their carrier
+      const rt = ctx.mod.types[ti];
+      if (rt?.kind !== "struct") return false;
+      for (const v of ctx.vecTypeMap.values()) if (v === ti) return false; // exclude nested-array vec carriers
+      return true;
+    })();
+  if (!hasSpread && (elemWasm.kind === "i32" || elemWasm.kind === "f64" || elemIsPlainObjectStructRef)) {
     const ctxArrType = ctx.checker.getContextualType(expr);
     if (ctxArrType) {
       const ctxArrSym = (ctxArrType as ts.TypeReference).symbol ?? ctxArrType.symbol;

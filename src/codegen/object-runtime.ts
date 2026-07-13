@@ -10160,8 +10160,33 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
   // behaviour to those paths.
   if (elemType.kind === "ref" || elemType.kind === "ref_null") {
     const ti = (elemType as { typeIdx: number }).typeIdx;
-    if (ti >= 0 && (ti === ctx.anyStrTypeIdx || ti === ctx.nativeStrTypeIdx)) {
-      return [{ op: "extern.convert_any" } as Instr];
+    // (#3244) GENERALISED from the string-only arm this replaces. A homogeneous
+    // reference-element array — `[{ x: 777 }]` (element = object STRUCT ref) or a
+    // nested `[[10, 20, 30]]` (element = inner `__vec_<k>` STRUCT ref) — compiles
+    // to a typed `__vec_<structKind>` carrier, NOT `__vec_externref`. Boxing it
+    // to `any`/externref and reading an element back (`(a as any)[0].x`,
+    // `(a as any)[0][1]`, and the destructure-param inner object/array pattern)
+    // routes through `__extern_get_idx`; without an arm here the carrier was
+    // skipped → the element read fell to the null fallback → read back
+    // undefined/NaN (and the nested-pattern destructure then saw null → the
+    // "Cannot destructure null" trap). `extern.convert_any` is the universal
+    // GC-ref → externref boxing (identity round-trip: the consuming site
+    // re-tests/casts the returned externref back to the object/vec type, exactly
+    // as for a heterogeneous `__vec_externref` element or the string sub-array
+    // that the prior narrow arm handled — `$AnyString`/`$NativeString` are
+    // struct types, so they still match here).
+    //
+    // GUARD — only GC STRUCT/ARRAY referents are subtypes of `anyref`, the input
+    // `extern.convert_any` requires. A FUNC-typed ref (`funcref` hierarchy) is
+    // NOT an `anyref` subtype, so converting it is invalid Wasm; those carriers
+    // stay on the null fallback (the rare closure/funcref-element vec — never
+    // read positionally through the boundary in practice). An unknown/negative
+    // typeIdx also skips, conservatively.
+    if (ti >= 0) {
+      const referent = ctx.mod.types[ti];
+      if (referent && (referent.kind === "struct" || referent.kind === "array")) {
+        return [{ op: "extern.convert_any" } as Instr];
+      }
     }
   }
   // other ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
