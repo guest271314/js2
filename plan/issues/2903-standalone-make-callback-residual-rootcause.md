@@ -629,3 +629,74 @@ flatMap was not in that set).
 - Inner iteration via `__iterator` normalizes finite iterables; per-element
   laziness WITHIN an inner is preserved (the ladder is stepped, not
   materialized).
+
+---
+
+## Landed: sub-front R4 — TypedArray SCALAR callback HOFs (opus-r4, 2026-07-13)
+
+**PR:** `issue-2903-r4-typedarray-hof`. Standalone-gated; gc/wasi byte-identical
+(prove-emit-identity: 0/26 corpus + 0/12 typed-array-snippet (file,target) pairs
+differ vs main).
+
+### Re-ground (correcting the opus-r3 R4 grounding above)
+
+The grounding claimed `__extern_get_idx`/`__extern_length` "read the typed `any`
+correctly (`b[0]`=5, `.length`=3)". **Only half true, verified on main
+@7bb01d2d:** `__extern_length` reads (the generic `$__vec_base` arm), but
+`__extern_get_idx` does NOT read the packed byte carriers — `fillExternGetIdxVecArms`
+(object-runtime.ts) explicitly skipped `NON_ARRAY_BYTE_VEC_ELEM_KINDS`, so an
+`any`-held `u8[2]` returned `0` and `u8.indexOf`/HOFs saw `undefined` at every
+index. That skipped element read — NOT the proto glue — is the root of the
+any-path wrong results. And the STATIC (untyped, test262-shape) `u8.find(cb)`
+routed to the `compileArrayMethodCall` externref arm (array-methods.ts), a
+`__make_callback` NO-OP stub that leaked the import and never ran the predicate.
+Neither path went through `emitProtoMemberBodyRefusal`.
+
+### The fix (three files, all `ctx.standalone`-gated)
+
+1. **object-runtime.ts** — `__extern_get_idx` now reads the packed byte carriers
+   (`i8_byte`/`i16_byte` unsigned via `array.get_u`; `i32_elem` plain), the single
+   chokepoint the native `__hof_*` loop + `a[i]` + `indexOf`/`includes` + for-in
+   read through. `i32_byte` (ArrayBuffer byte buffer) stays excluded.
+2. **closures.ts** — `isHostCallbackArgument` → false for a standalone
+   typed-array-receiver SCALAR HOF (callback compiles as a WasmGC closure struct,
+   not the host `__make_callback` bridge).
+3. **calls.ts** — a standalone DIRECT-carrier typed-array scalar HOF is
+   intercepted BEFORE `compileArrayMethodCall` and routed to the native
+   `__call_m_<name>_<arity>` / `__hof_<name>` substrate (`$__vec_base` arm drives
+   the predicate via `__apply_closure`, host-free).
+
+Scope: find/findIndex/findLast/findLastIndex/forEach/some/every/reduce/reduceRight.
+`map`/`filter` (typed-RESULT construction) deferred to **R4b**.
+
+### Signedness boundary (documented, not a regression)
+
+Int8Array/Uint8Array share the `i8_byte` carrier type (index.ts
+TYPED_ARRAY_PACKED_STORAGE) — no signedness tag — so the generic read is UNSIGNED
+regardless of static type. Uint8/Uint8Clamped/Uint16 correct; Int8/Int16 with
+non-negative values correct + host-free (net gain); negative Int8/Int16 elements
+read as their unsigned bit-pattern (wrong) — but those modules leaked
+`__make_callback` and failed to instantiate on main, so nothing regresses.
+Recovering sub-i32 signed dynamic reads needs a per-signedness carrier type
+(deferred).
+
+### #3162 handoff (avoid a double-path)
+
+The array-methods.ts `__make_callback` bank (~line 3010) is annotated to point
+here: the DIRECT-carrier scalar HOFs are de-leaked in calls.ts; that banked ELSE
+arm still serves the `$__ta_dyn_view` DYNAMIC-VIEW shape (kept per #3058/#3162 —
+a disjoint receiver) and `join`. Whoever de-leaks the dyn-view case must NOT add
+a competing direct-carrier de-leak there.
+
+### Proofs
+- `tests/issue-2903-r4.test.ts` (13 tests): static + untyped + `any`-held +
+  Uint16/Int32 + the signedness boundary — all host-free (zero imports) +
+  value-correct.
+- prove-emit-identity gc/wasi byte-identical (measured, above).
+- No regression: `tests/issue-2903.test.ts` + `issue-1326` (25) + the typed-array
+  suite `issue-2648`/`2872-dynview`/`2593`/`1787` (66) green; tsc clean.
+
+### Remaining sub-fronts (issue stays `ready`)
+- **R4b** — TypedArray `map`/`filter` (typed-RESULT construction, per-#2593
+  element-width wrapping).
+- **R2** — `class X extends Promise` producer. **R3 lazy iter helpers** landed.

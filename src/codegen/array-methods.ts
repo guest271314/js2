@@ -3010,7 +3010,14 @@ const ARRAY_METHODS = new Set([
  *   - the callback methods `find`/`findIndex`/`findLast`/`findLastIndex`/`every`/`some`/
  *     `forEach`/`reduce`/`reduceRight` → `env.__make_callback`
  * These flip only once the standalone externref-receiver callback/join paths are native
- * (a separate follow-up). Also banked: in-place mutators (`fill`/`copyWithin`/`reverse`/
+ * (a separate follow-up). (#2903 R4 UPDATE) The SCALAR callback methods above
+ * (find/findIndex/findLast/findLastIndex/every/some/forEach/reduce/reduceRight)
+ * on a DIRECT (`$__vec_i8_byte`-style) carrier are now de-leaked BEFORE reaching
+ * here — intercepted in `expressions/calls.ts` and routed to the native
+ * `__call_m_<name>`/`__hof_<name>` substrate (host-free). This banked ELSE arm
+ * still serves the `$__ta_dyn_view` dynamic-view shape (kept per #3058/#3162) and
+ * `join`; do NOT add a competing direct-carrier de-leak here. `map`/`filter`
+ * (typed-RESULT) remain banked for #2903 R4b. Also banked: in-place mutators (`fill`/`copyWithin`/`reverse`/
  * `sort` — Bucket B, need write-back) and species/new-view producers (`slice`/`subarray`/
  * `map`/`filter`/`with`/`toSorted`/`toReversed` — Bucket C, need real-buffer identity).
  */
