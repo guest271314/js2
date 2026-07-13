@@ -2014,6 +2014,15 @@ type ImplicitYieldAwaitMode = { readonly oracle: TypeOracle } | null;
  */
 function yieldOperandIsPromiseTyped(oracle: TypeOracle, operand: ts.Expression): boolean {
   if (oracle.builtinReceiverOf(operand) === "Promise") return true;
+  // (#3207) §27.6.3.8 `AsyncGeneratorYield` awaits ANY thenable, not only the
+  // `Promise` builtin. A `PromiseLike<T>`-typed operand is a structural
+  // thenable, so it must route through the SAME suspend+settleYield(fromSent)
+  // lane as a `Promise`-typed operand. This is correct-or-inert: when the
+  // operand is backed by a native `$Promise` at runtime the suspend arm adopts
+  // it (delivering the resolved value); a NON-native thenable fails the
+  // suspend's `ref.test $Promise` and falls through to the plain delivery — the
+  // exact pre-#3207 raw-yield behaviour — so no shape regresses.
+  if (oracle.declaredNameOf(operand) === "PromiseLike") return true;
   const parts = oracle.unionPartsOf(operand);
   return parts !== undefined && parts.some((p) => p.kind === "builtin" && p.name === "Promise");
 }
