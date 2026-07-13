@@ -1,19 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
+import { compileAndRunImportObject as compileAndRun } from "./helpers/compile.js";
 
 // #2053 — a spread followed by trailing positional args used to greedily
 // consume every remaining parameter, reading past the spread array (OOB → NaN)
 // and leaving the trailing args as surplus stack values. The fix reserves the
 // trailing positional param slots so the spread only fills the params it covers.
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
-    true,
-  );
-  const { instance } = await WebAssembly.instantiate(result.binary, result.importObject!);
-  return instance.exports as Record<string, Function>;
-}
 
 const SUM3 = `function sum3(a: number, b: number, c: number): number { return a * 100 + b * 10 + c; }`;
 const SUM4 = `function sum4(a: number, b: number, c: number, d: number): number { return a * 1000 + b * 100 + c * 10 + d; }`;
