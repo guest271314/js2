@@ -1,22 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(
-    result.success,
-    `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-  ).toBe(true);
-  const imports = {
-    env: {
-      console_log_number: () => {},
-      console_log_string: () => {},
-      console_log_bool: () => {},
-    },
-  };
-  const { instance } = await WebAssembly.instantiate(result.binary, imports);
-  return instance.exports as Record<string, Function>;
-}
+import { compileAndRunStubs as compileAndRun } from "./helpers/compile.js";
 
 describe("arithmetic", () => {
   it("add", async () => {

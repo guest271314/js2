@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
+import { compileAndRunImportObject as compileAndRun } from "./helpers/compile.js";
 
 // #2067 — the generic for-of iterator lowering carried a hard `br_if` guard that
 // silently `break`ed after 1,000,000 iterations, and its counter local was never
@@ -7,15 +7,6 @@ import { compile } from "../src/index.js";
 // accumulated toward the cap. The guard is removed: the loop runs to the
 // iterator's own `done`. (The eager-generator buffer's separate `RangeError`
 // cap is out of scope here.)
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
-    true,
-  );
-  const { instance } = await WebAssembly.instantiate(result.binary, result.importObject!);
-  return instance.exports as Record<string, Function>;
-}
 
 const GEN = `function* gen(n: number): Generator<number> { for (let i = 0; i < n; i++) yield 1; }`;
 
