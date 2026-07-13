@@ -691,6 +691,64 @@ with `JS2WASM_UNDEF_SINGLETON=1` (runner-level env, no code change needed);
 merge_group; (3) S2 (sNaN carve-out codify), S3 (number|undefined→externref,
 needs the box-protocol fix), S4 (union-collapse reversal) remain per plan.
 
+## Default-flip A/B — authoritative measurement + residual (opus-2106flip, 2026-07-13)
+
+Ran the AUTHORITATIVE fork A/B for the default-ON flip (branch
+`issue-2106-undef-default-flip`, the one-line `undefinedSingleton` default
+OFF→ON in `create-context.ts`, rollback `JS2WASM_UNDEF_SINGLETON=0`).
+
+**STALE-A/B trap (documented so nobody repeats it):** the FIRST A/B (run
+29234941937) merged `origin/main` at 7a895d20c8 — a few minutes BEFORE PR-1
+(#3003 = commit `dfe4ff7bac` "complete the array-absence producer arm") landed.
+It measured the flip WITHOUT PR-1 → floor delta **-952**, dominated (958 rows)
+by "Cannot destructure 'null' or 'undefined'" in destructuring PARAMETER
+defaults. Root cause: the omitted-arg padding producer (`emitUndefinedValue`,
+type-coercion.ts — a dedupe copy of the canonical `emitUndefined`) still emitted
+`ref.null.extern`, which the singleton-only `__extern_is_undefined` consumer no
+longer recognized → param defaults stopped firing → the null flowed into the
+destructure guard and threw. **PR-1 already fixes exactly this** (routes
+`emitUndefinedValue` through `undefinedExternInstrs` under the flag). Repro:
+`function f([a,b]=[10,20]){return a+b}; f()` throws flag-ON on pre-PR-1 main,
+PASSES both flag ON/OFF on freshest main. Lesson: always re-base onto freshest
+`origin/main` and confirm the intended predecessor commit is an ancestor BEFORE
+triggering the fork A/B.
+
+**Authoritative re-run (run 29236694670, freshest main + PR-1):**
+
+  current pass (flip ON) = 22399 · mark (flag OFF) = 22727 · floor 22677
+  **DELTA = -328 host_free_pass → still a floor breach → NO-GO.**
+
+Trend: -952 → -328 (PR-1 recovered ~624 host-free passes; the entire
+destructuring-param-default bucket — 958 "Cannot destructure" + 374 async-dstr
+"vacuous" — is GONE).
+
+**Residual -328 bucketing** (fresh baseline jsonl re-fetched to match the mark;
+raw-pass NET -133, 654 regressed / 522 gained). ONE cluster dominates:
+
+- **231 "illegal cast [in test()]" — RegExp** (e.g.
+  `built-ins/RegExp/S15.10.2.6_A4_T4.js`). 35% of all regressions, CONSTANT
+  across every diff (pre/post-PR-1, stale/fresh baseline) → a genuine flip-caused
+  residual PR-1 does not touch. **This is the next byte-inert completion PR
+  target.** Hypothesis: an absent/undefined value on a RegExp-result path is now
+  the tag-1 `$undefined` singleton (a non-null `$AnyValue` ref) instead of
+  `ref.null.extern`, so a downstream `ref.cast` to a typed struct (or an
+  externref-expecting call) traps ("illegal cast"). Fix = a singleton-aware arm
+  at that RegExp-result box/cast site, gated on `undefinedSingletonActive(ctx)`
+  (byte-inert flag-OFF), same pattern as PR-1.
+- Long-tail (thin, ~6-13 each): `Object.defineProperty`/`create`/
+  `defineProperties` + class-element ASI `verifyProperty {value: undefined}` /
+  `typeof desc.set === "undefined"` asserts. **Largely NOISE** — a direct
+  `Object.getOwnPropertyDescriptor` + `typeof desc.set === "undefined"` repro
+  PASSES both flag ON and OFF; the test262 failures are verifyProperty-harness
+  edge cases, not the core descriptor path. Do NOT chase these before the RegExp
+  cluster.
+
+**Next step:** file the RegExp-illegal-cast byte-inert completion PR (flag-OFF
+default, merges on normal gates), then re-run the fork A/B. Repeat until the
+A/B is net-non-negative, at which point the default-flip (PR-2) is floor-safe
+— go/no-go routes through the lead each time. Flag stays default-OFF meanwhile;
+flip PR-2 is unopened. Artifacts: run 29236694670 `test262-merged-report`.
+
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — the referencing merged PR was a REVERT (PR #2025 auto-parked: standalone floor breach, NET -1245 test262 rows), so it is floor-neutral undo, NOT progress. S1 (standalone tag-1 $undefined singleton) still requires the FULL ~40-site producer+consumer sweep (architect re-spec) — no narrow floor-saving subset exists. S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object all remain. Stays in-progress; resume-only for a senior-dev at max effort.

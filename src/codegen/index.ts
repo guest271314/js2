@@ -64,6 +64,7 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
+import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
 import {
   fillApplyClosure,
   fillBindDynHelper,
@@ -2614,6 +2615,11 @@ export function generateModule(
     // stored getter/setter closure runs with the original receiver as `this`.
     // No-op when no accessor arm reserved a driver (no standalone object runtime).
     fillAccessorDrivers(ctx);
+
+    // (#3231) Fill the reserved `__disposablestack_dispose` driver now that
+    // `__call_fn_0`/`__call_fn_1` are registered — runs each stored disposer LIFO.
+    // No-op when no `.dispose()` site reserved the driver.
+    fillDisposableStackDisposeDriver(ctx);
 
     // (#1888 Slice 1) Fill the reserved `__apply_closure` bridge body now that
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any

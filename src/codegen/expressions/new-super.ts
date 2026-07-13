@@ -36,6 +36,7 @@ import {
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
 import { emitObjectCoercion } from "./calls-guards.js"; // (#3118) shared Object(...) / new Object(...) ToObject coercion
 import { COLLECTION_KIND, ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
+import { ensureDisposableStackNew } from "../disposable-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
@@ -2719,6 +2720,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
   // so the binding/receiver is typed (see resolveWasmType Map case + the
   // method/.size dispatch in extern.ts / property-access.ts).
+  // (#3231) `new DisposableStack()` in standalone / nativeStrings mode → the
+  // WasmGC-native DisposableStack runtime (externref-carried struct). The ctor
+  // takes no args (extra args ignored per spec). AsyncDisposableStack is Phase 2
+  // and keeps the host `AsyncDisposableStack_new` path.
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "DisposableStack") {
+    addUnionImports(ctx);
+    const newIdx = ensureDisposableStackNew(ctx);
+    fctx.body.push({ op: "call", funcIdx: newIdx });
+    return { kind: "externref" };
+  }
+
   if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Map") {
     const args = expr.arguments ?? ([] as readonly ts.Expression[]);
     // `new Map([[k,v],...])` — an array literal of 2-element array-literal pairs
