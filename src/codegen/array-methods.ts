@@ -5219,13 +5219,8 @@ function compileArrayPop(
       ? holeToUndefinedInstrs(ctx, fctx)
       : [];
 
-  const thenInstrs: Instr[] = [
-    // newLen = length - 1
-    { op: "local.get", index: lenTmp } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.sub" } as Instr,
-    { op: "local.set", index: newLenTmp } as Instr,
-    // result = data[newLen]
+  // The `result = data[newLen]` element read.
+  const popReadInstrs: Instr[] = [
     { op: "local.get", index: vecTmp } as Instr,
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
     { op: "local.get", index: newLenTmp } as Instr,
@@ -5233,6 +5228,36 @@ function compileArrayPop(
     ...popHoleMap,
     ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
+  ];
+  // (#3201) On a sparse array (logical `.length` > physical backing) `newLen`
+  // can land beyond `array.len(data)`, so the raw `array.get` above TRAPS
+  // ("array element access out of bounds"). Per §23.1.3.21 the popped slot is
+  // then an absent index whose value is `undefined` — which `resultTmp` already
+  // holds (initialised above). So gate the read on `newLen < array.len(data)`
+  // and leave `resultTmp` at its `undefined` default when out of backing. Only
+  // the externref-result (sparse `any[]`) lane can hit this — a numeric result
+  // has no `undefined` sentinel and its backing always covers the length, so it
+  // keeps the unguarded read. The length decrement is unconditional.
+  const popReadGuarded: Instr[] =
+    resultType.kind === "externref"
+      ? [
+          { op: "local.get", index: newLenTmp } as Instr,
+          { op: "local.get", index: vecTmp } as Instr,
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "array.len" } as Instr,
+          { op: "i32.lt_s" } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: popReadInstrs } as Instr,
+        ]
+      : popReadInstrs;
+
+  const thenInstrs: Instr[] = [
+    // newLen = length - 1
+    { op: "local.get", index: lenTmp } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.sub" } as Instr,
+    { op: "local.set", index: newLenTmp } as Instr,
+    // result = data[newLen] (bounds-guarded for sparse arrays)
+    ...popReadGuarded,
     // Decrement length: vec.length = newLen
     { op: "local.get", index: vecTmp } as Instr,
     { op: "local.get", index: newLenTmp } as Instr,
@@ -5609,11 +5634,10 @@ export function compileArraySliceFromVecLocal(
   // the `array.copy` below TRAPS ("array element access out of bounds"). The
   // result must stay `sliceLen` long — the beyond-backing tail is a hole (spec
   // skips absent indices), which the default-initialised `newData` already
-  // represents. So copy only the in-backing prefix.
-  const copyLenTmp = emitBackingClampedCopyLen(fctx, dataTmp, startLocal, sliceLenTmp);
-
-  // array.copy newData[0..copyLen] = data[start..start+copyLen] (bounds-safe)
-  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataTmp, startLocal, copyLenTmp);
+  // represents. So copy only the in-backing prefix (guarded: a start past the
+  // backing must skip the copy entirely — array.copy traps on an out-of-backing
+  // srcOffset even at count 0).
+  emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, null, dataTmp, startLocal, sliceLenTmp);
 
   // struct.new vec { sliceLen, newData }
   fctx.body.push({ op: "local.get", index: sliceLenTmp });
@@ -5661,6 +5685,38 @@ function emitBackingClampedCopyLen(
 }
 
 /**
+ * (#3201) Backing-safe `array.copy`: clamps the copy count to the SOURCE's
+ * physical backing (via `emitBackingClampedCopyLen`) AND guards the copy on
+ * `count > 0`. The guard is load-bearing, not an optimisation: per the WasmGC
+ * spec `array.copy` traps when `srcOffset + count > array.len(src)` — and the
+ * bound is checked even when `count == 0`, so a `srcOffset` past the backing
+ * traps DESPITE a zero count. The clamp guarantees `srcOffset < backing`
+ * whenever `count > 0`, so the guarded copy is always in bounds; when
+ * `count == 0` the (default-initialised) destination is already correct and the
+ * copy is skipped. Non-sparse arrays are unaffected (clamp == requested,
+ * always > 0 for a real copy).
+ */
+function emitBackingClampedArrayCopy(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  dstArr: number,
+  dstOffset: number | null,
+  srcArr: number,
+  srcOffset: number | null,
+  requestedLenLocal: number,
+): void {
+  const count = emitBackingClampedCopyLen(fctx, srcArr, srcOffset, requestedLenLocal);
+  const copyInstrs = collectElemInstrs(ctx, fctx, () =>
+    emitArrayCopy(fctx, arrTypeIdx, dstArr, dstOffset, srcArr, srcOffset, count),
+  );
+  fctx.body.push({ op: "local.get", index: count });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.gt_s" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: copyInstrs } as Instr);
+}
+
+/**
  * arr.concat(other) -> create new vec struct with combined data.
  */
 function compileArrayConcat(
@@ -5694,10 +5750,9 @@ function compileArrayConcat(
     fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
     fctx.body.push({ op: "local.set", index: newData });
 
-    // array.copy newData[0..lenA] = dataA[0..lenA] — (#3201) copy count clamped
-    // to the backing so a sparse receiver (lenA > array.len(dataA)) doesn't trap.
-    const catCopyLenA0 = emitBackingClampedCopyLen(fctx, dataA, null, lenA);
-    emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, catCopyLenA0);
+    // array.copy newData[0..lenA] = dataA[0..lenA] — (#3201) backing-clamped +
+    // guarded so a sparse receiver (lenA > array.len(dataA)) doesn't trap.
+    emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, null, dataA, null, lenA);
 
     // Create new vec struct: { lenA, newData }
     fctx.body.push({ op: "local.get", index: lenA });
@@ -5773,15 +5828,14 @@ function compileArrayConcat(
   fctx.body.push({ op: "local.set", index: newData });
 
   // array.copy newData[0..lenA] = dataA[0..lenA] — (#3201) clamp both copy
-  // counts to each source's backing so a sparse operand (logical length >
-  // array.len(data)) doesn't array.copy past the backing (which traps). The
-  // destination keeps totalLen slots; beyond-backing tails stay default holes.
-  const catCopyLenA = emitBackingClampedCopyLen(fctx, dataA, null, lenA);
-  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, catCopyLenA);
+  // counts to each source's backing (and guard) so a sparse operand (logical
+  // length > array.len(data)) doesn't array.copy past the backing (which
+  // traps). The destination keeps totalLen slots; beyond-backing tails stay
+  // default holes.
+  emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, null, dataA, null, lenA);
 
   // array.copy newData[lenA..lenA+lenB] = dataB[0..lenB]
-  const catCopyLenB = emitBackingClampedCopyLen(fctx, dataB, null, lenB);
-  emitArrayCopy(fctx, arrTypeIdx, newData, lenA, dataB, null, catCopyLenB);
+  emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, lenA, dataB, null, lenB);
 
   // Create new vec struct: { totalLen, newData }
   fctx.body.push({ op: "local.get", index: totalLen });
@@ -6452,8 +6506,11 @@ function compileArraySplice(
   fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.set", index: delData });
 
-  // array.copy delData[0..delCount] = data[start..start+delCount]
-  emitArrayCopy(fctx, arrTypeIdx, delData, null, dataTmp, startTmp, delCountTmp);
+  // array.copy delData[0..delCount] = data[start..start+delCount] — (#3201)
+  // clamp the copy count to the physical backing so a sparse receiver (logical
+  // `.length` > array.len(data)) doesn't read past the backing (which traps).
+  // delData keeps its delCount slots; the beyond-backing tail stays a hole.
+  emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, delData, null, dataTmp, startTmp, delCountTmp);
 
   // tailStart = start + delCount
   fctx.body.push({ op: "local.get", index: startTmp });
@@ -6483,8 +6540,8 @@ function compileArraySplice(
     fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
     fctx.body.push({ op: "local.set", index: newData });
 
-    // Part 1: head — newData[0..start] = data[0..start]
-    emitArrayCopy(fctx, arrTypeIdx, newData, null, dataTmp, null, startTmp);
+    // Part 1: head — newData[0..start] = data[0..start] — (#3201) clamp to backing.
+    emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, null, dataTmp, null, startTmp);
 
     // Part 2: items — newData[start..start+insertCount] = arguments[2..]
     fctx.body.push({ op: "local.get", index: startTmp });
@@ -6507,7 +6564,8 @@ function compileArraySplice(
     fctx.body.push({ op: "i32.const", value: insertCount });
     fctx.body.push({ op: "i32.add" });
     fctx.body.push({ op: "local.set", index: writeTmp });
-    emitArrayCopy(fctx, arrTypeIdx, newData, writeTmp, dataTmp, tailStartTmp, tailCountTmp);
+    // (#3201) clamp the tail read to the backing (+ guard) so a sparse receiver doesn't trap.
+    emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, newData, writeTmp, dataTmp, tailStartTmp, tailCountTmp);
 
     // Write new backing array + length back into the same vec struct (in place)
     fctx.body.push({ op: "local.get", index: vecTmp });
@@ -6520,7 +6578,9 @@ function compileArraySplice(
   } else {
     // No insertion: shift tail left in-place (newLen <= len, capacity suffices).
     // array.copy data[start..start+tailCount] = data[tailStart..tailStart+tailCount]
-    emitArrayCopy(fctx, arrTypeIdx, dataTmp, startTmp, dataTmp, tailStartTmp, tailCountTmp);
+    // (#3201) clamp the tail read to the backing (+ guard) so a sparse receiver
+    // (logical `.length` > array.len(data)) doesn't array.copy past the backing.
+    emitBackingClampedArrayCopy(ctx, fctx, arrTypeIdx, dataTmp, startTmp, dataTmp, tailStartTmp, tailCountTmp);
 
     // newLen = len - delCount
     fctx.body.push({ op: "local.get", index: lenTmp });

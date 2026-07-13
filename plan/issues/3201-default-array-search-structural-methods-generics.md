@@ -141,3 +141,44 @@ preamble — not cleanly bounded), revoked-Proxy casts (deferred, #1355/#1472),
 and `includes`/`splice`/`sort`/`pop` sparse reads (includes needs a
 bounds-checked read rather than a loop-clamp because §Array.prototype.includes
 treats absent indices as `undefined` — a follow-up).
+
+## Progress — sparse-array pop/splice trap-safety + guarded-copy hardening (opus-dstr, 2026-07-13)
+
+Third and final trap-first slice for the sparse-array read/copy family (after
+#2968 indexOf/lastIndexOf and #2970 slice/concat):
+
+- **pop** — guarded `data[length-1]` read on `newLen < array.len(data)`; a
+  beyond-backing pop yields `undefined` (the absent-index value, §23.1.3.21),
+  the length decrement stays unconditional. Numeric-result arrays keep the
+  unguarded read (backing covers length; no `undefined` sentinel).
+- **splice** — all four `array.copy` sites (delData / head / tail / in-place
+  shift) routed through the new `emitBackingClampedArrayCopy`.
+- **Hardening** — `emitBackingClampedArrayCopy` clamps the copy count to the
+  source backing AND **guards the copy on `count > 0`**. The guard is
+  load-bearing, not an optimisation: WasmGC `array.copy` traps when
+  `srcOffset + count > array.len(src)` **even at `count == 0`**, so a
+  `srcOffset` past the backing (e.g. `slice(2)` on a 1-backed sparse array)
+  traps despite a clamped-to-zero count. This also **fixes a latent trap in the
+  already-merged #2970 slice/concat** copies (their raw clamp left `srcOffset`
+  past the backing for `start > backing`); those sites now use the guarded
+  helper too.
+
+Zero array-suite regressions (`tests/issue-3201-pop-splice.test.ts` 9/9; the two
+pre-existing `array-oob-bounds-check > destructuring shorter array` and
+`fast-arrays > array find` fails are unrelated, present on clean main).
+
+### Family status after this slice
+
+Read/copy sparse traps for **indexOf / lastIndexOf / slice / concat / pop /
+splice** are now trap-safe. Still open (documented above, need fresh dispatches
+— NOT bounded extensions of the clamp pattern):
+- **sort** — the numeric Timsort / insertion-sort helpers read the logical
+  length; a numeric `number[]` with `.length = N` beyond its backing still
+  traps. Fixing needs clamping inside the shared sort helpers (or fixing the
+  `.length` setter to grow a numeric backing). Not a copy-site clamp.
+- **includes** — needs a bounds-checked READ (absent index ⇒ `undefined`),
+  not a loop-clamp, because §Array.prototype.includes finds `undefined` at
+  absent indices (a loop-clamp would wrongly miss `includes(undefined)`).
+- **huge sparse-index WRITES** (`arr[2**32-2] = v`) — write-path rework.
+- **`Array.prototype`-mutation `illegal cast`** — harness-entangled (reproduces
+  only through the full test262 preamble); needs preamble bisection.
