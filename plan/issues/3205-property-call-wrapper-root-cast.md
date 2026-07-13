@@ -124,7 +124,21 @@ Controls (all trap on `main`, WAT-verified wrapper mismatch):
 
 No regressions: `illegal-cast-closures-585`, `class-method-calls`,
 `optional-direct-closure-call` fail IDENTICALLY on main and branch (all
-pre-existing). Async + Promise test262 suite A/B recorded below.
+pre-existing).
+
+test262 A/B (`runTest262File`, branch vs pristine-main), **2,386 files across
+the affected suites** — `language/expressions/async-{arrow-,}function`,
+`built-ins/Promise`, `language/statements/class/elements`, `built-ins/Array/from`:
+
+- async+Promise (805 files): **113 pass both, 0 flips**;
+- class/elements+Array.from (1,581 files): **1,281 pass both, 0 flips**.
+
+**Zero regressions, zero improvements** on the sampled suites — the fix is inert
+where the exact shape (covariant/async closure stored in a callable field,
+called via property/element access) is not exercised, and the controls above
+prove it fixes that shape where it IS exercised. So the yield is a genuine
+latent-miscompilation-class removal with no conformance regression; the
+merge_group full-corpus run is the backstop for any suite not sampled here.
 
 Known residual (follow-up, NOT a regression — main also fails): covariant
 `() => string` in STANDALONE mode returns a native-string REF (not externref),
