@@ -6,7 +6,6 @@ sprint: current
 created: 2026-07-03
 updated: 2026-07-13
 assignee: ttraenkler/opus-3024
-status_note: slice 5 in-progress (opus-3024)
 priority: high
 horizon: m
 feasibility: medium
@@ -22,6 +21,7 @@ loc-budget-allow:
   - src/codegen/expressions/calls.ts
   - src/codegen/index.ts
   - src/codegen/property-access.ts
+  - src/codegen/destructuring-params.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
@@ -632,3 +632,87 @@ cross-statement eval-promotion family (banked, broad-impact) and ≤4-file
 per-root-cause singletons (`struct.set (ref null #)`, `call expected externref
 found ref.func`, Atomics `__cb_#` fallthru, `i#.lt_s`, `__vec_from_extern`
 element-rep).
+
+---
+
+## Landed: packed carrier arm in array-destructuring source normalizer (opus-3024, 2026-07-13, slice 5)
+
+**PR:** `issue-3024-invalid-wasm-slice5` — clears the 8-file `array.get: Array
+type N has packed type i8. Use array.get_s or array.get_u instead.` cluster
+(resizable-ArrayBuffer / typed-array tests; function `test` /
+`ValuesFrom{Array,TypedArray}Entries`). Default-lane 144-candidate re-harvest
+(fresh baseline jsonl, run `20260713-072429`): **still-invalid 86 → 78**, exactly
+this cluster, zero new invalid signatures.
+
+### Root cause (packed carrier read in the vec-carrier-enumeration normalizer)
+
+`destructureParamArray` (`src/codegen/destructuring-params.ts` ~L1449) normalizes
+an `any`/externref array-destructuring SOURCE to a uniform externref vec so the
+pattern can index it. When the source is externref (a for-of loop var
+`[ta, length]` over a heterogeneous `[TypedArray, number]` tuple array, or an
+`any` param), it emits a RUNTIME DISPATCH: for every registered vec carrier
+(`ctx.vecTypeMap`) a `ref.test`/`if` arm copies the source's elements into a
+fresh externref array. All arms must VALIDATE even though only one executes.
+
+The per-carrier arm read the element with a plain `{ op: "array.get", typeIdx:
+srcArrTypeIdx }` (L1510) and boxed via `boxToExternref`, whose only non-string
+fallback is `extern.convert_any`. When a **packed** (i8/i16) carrier is
+registered — the byte store of a typed array / resizable ArrayBuffer, type
+`(array (mut i8))`, shared by `$__vec_i32_byte` and `$__resizable_ab` — BOTH ops
+are invalid on a packed array: `array.get` needs `_s`/`_u`, and `extern.convert_any`
+on the resulting i32 is a hierarchy error. The validator stops at the first
+(`array.get`), failing the WHOLE module even though the packed arm is DEAD for a
+heterogeneous-tuple source (which matches the externref arm at runtime).
+
+Verified by WAT dump of `TypedArray/prototype/length/resized-out-of-bounds-1.js`:
+the `for (let [ta, length] of tas_and_lengths)` normalizer emitted
+`struct.get 47 1` (data, `ref null 46` = packed i8) → `array.get 46` →
+`extern.convert_any` → `array.set 1`.
+
+Same bug **class** as the already-fixed R4 dynamic-dispatch chokepoint
+(`object-runtime.ts` `packedElemReadBox`, #2903) and the for-of packed read
+(#2934), but for THIS destructuring-source normalizer.
+
+### Fix (two coupled sites, mirrors R4)
+
+- **Read** (L1510): choose `array.get_u` when `srcElemType.kind` is `i8`/`i16`,
+  else plain `array.get` (byte-identical for non-packed). `_u`/`_s` are ONLY
+  valid on packed arrays so the guard is required both ways.
+- **Box** (`boxToExternref`): new `i8`/`i16` branch → `f64.convert_i32_s` +
+  `__box_number` (the `array.get_u` zero-extend is 0..255 / 0..65535, always
+  non-negative, so `convert_i32_s` == `_u`). Without it the packed carrier fell
+  to the `ref`-type `extern.convert_any` default → invalid on an i32.
+
+SIGNEDNESS: the shared carrier type loses the constructor's signedness (Int8Array
+and Uint8Array both map to kind `i8`), so this generic read is unsigned — the
+SAME documented limitation as the R4 read; a negative Int8/Int16 reads its
+unsigned bit-pattern. These arms were previously TOTALLY invalid (whole module
+failed), so this is strictly an improvement, never a regression.
+
+### Proofs
+
+- All 8 real test262 files flip `compile_error` (invalid Wasm) → **valid Wasm**.
+  They now `fail` on a DISTINCT unimplemented resizable-ArrayBuffer semantic
+  (`CreateResizableArrayBuffer` / RAB constructor — separate, larger feature),
+  so this is CE→fail (invalid-Wasm eliminated), NOT a pass gain. The dashboard
+  pass count is unchanged; the `wasm_compile` compile-error bucket drops by 8.
+- Full 144-candidate default-lane re-harvest (`runTest262File`, oracle path):
+  **86 → 78 still-invalid**, exactly this cluster, no new invalid signatures.
+- **Byte-identical** (sha256) output vs `origin/main` across a 14-program corpus
+  (plain/any/nested/param array-destructuring, for-of, `entries`, typed arrays,
+  spread, objects, classes, strings, closures) — the fix only adds packed-carrier
+  arms and is a no-op for every previously-valid module.
+- New `tests/issue-3024-packed-array-dstr-normalize.test.ts` (guards
+  `status !== "compile_error"` on the 8 files) passes; 87 adjacent tests pass
+  (issue-1372-ir-destructuring-params, fn-param-dstr-rest-in-rest,
+  issue-2158/2648/2934 packed-typedarray, issue-2903-r4/r4c R-series,
+  issue-1787 packed semantics, issue-3024, issue-3024-incdec-element).
+
+### Still open (roll forward)
+
+The remaining ~78 default-lane invalid-Wasm files: the banked 7-file `fN.ne`
+cross-statement eval-promotion family (broad-impact, needs a full-CI window) and
+≤4-file per-root-cause singletons (`struct.set (ref null #)`, `__cb_#` fallthru,
+`__anon_#_method` global-get numeric desync, `Parent_new` tail-call, `__new_function_#`
+funcref-cast). The 8 files here still need genuine resizable-ArrayBuffer support
+to reach `pass`.
