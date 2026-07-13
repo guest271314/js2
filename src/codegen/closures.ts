@@ -1307,6 +1307,49 @@ function isArrayLikeReceiverType(recvType: ts.Type, ctx: CodegenContext): boolea
   return false;
 }
 
+/** (#2903 R4) The nine typed-array view constructor names — a receiver of one
+ *  of these types is a native packed-carrier typed array in standalone. */
+const TYPED_ARRAY_VIEW_NAMES: ReadonlySet<string> = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+]);
+
+/** (#2903 R4) Scalar-returning callback HOFs whose standalone typed-array
+ *  dispatch is handled natively via `__call_m_*`/`__hof_*` (calls.ts). Excludes
+ *  map/filter (typed-RESULT construction — deferred to R4b). */
+const STANDALONE_TYPED_ARRAY_SCALAR_HOFS: ReadonlySet<string> = new Set([
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+  "forEach",
+  "some",
+  "every",
+  "reduce",
+  "reduceRight",
+]);
+
+/**
+ * (#2903 R4) True when `recvType` is one of the nine typed-array view types
+ * (`Uint8Array`, `Int8Array`, …). Recognises the type via its symbol name and,
+ * defensively, via the apparent type so a narrowed/aliased view still matches.
+ */
+function isTypedArrayReceiverType(recvType: ts.Type, _ctx: CodegenContext): boolean {
+  // A concrete typed-array receiver carries its view name directly on the type
+  // symbol; the interception is scoped to that (known-element-kind) shape. A
+  // narrowed/aliased view without a direct symbol falls through to the host
+  // path (no regression — that path already worked pre-#2903).
+  const n = recvType.getSymbol?.()?.getName?.();
+  return n !== undefined && TYPED_ARRAY_VIEW_NAMES.has(n);
+}
+
 /**
  * (#2640) True when `wt` is a (nullable) ref to a typed WasmGC vec/array
  * struct (`__vec_*`/`__arr_*`/`$__vec_base`). Used to widen array-like
@@ -1422,6 +1465,26 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
         // HOST_CALLBACK_METHODS allowlist still governs the invoke-during-call
         // host methods (array HOFs, Promise.then, String.replace, …).
         if ((methodName === "push" || methodName === "unshift") && isArrayLikeReceiverType(receiverType, ctx)) {
+          return false;
+        }
+        // (#2903 R4) Standalone typed-array SCALAR-returning callback HOFs
+        // (find/findIndex/…/forEach/some/every/reduce) are dispatched natively
+        // through the `__call_m_<name>`/`__hof_<name>` substrate (see the
+        // interception in `expressions/calls.ts`), which drives the predicate
+        // via `__apply_closure` on a WasmGC closure STRUCT — NOT the host
+        // `__make_callback` externref. Routing the callback through the host
+        // bridge here would leak `env.__make_callback` (breaking host-free
+        // instantiation) AND hand the substrate an externref it can't `ref.cast`
+        // to the closure struct. So give these the closure-struct path.
+        // Standalone-gated (js-host/gc keep the pre-existing host path,
+        // byte-identical). map/filter (typed-RESULT construction) are NOT here —
+        // deferred to R4b. The dyn-view (`$__ta_dyn_view`) receiver shape stays
+        // on its own #3058/#3162 path in array-methods.ts.
+        if (
+          ctx.standalone &&
+          STANDALONE_TYPED_ARRAY_SCALAR_HOFS.has(methodName) &&
+          isTypedArrayReceiverType(receiverType, ctx)
+        ) {
           return false;
         }
       } catch {
