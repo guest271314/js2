@@ -1438,6 +1438,25 @@ function getProtoOfCallArg(expr: ts.Expression): ts.Expression | undefined {
 }
 
 /**
+ * (#2903 R4) Scalar-returning `%TypedArray%.prototype` callback HOFs whose
+ * STANDALONE dispatch on a DIRECT (`$__vec_i8_byte`-style) carrier is routed to
+ * the native `__call_m_<name>_<arity>` / `__hof_<name>` substrate (see the
+ * interception in {@link compileCallExpression}'s array-method arm). Excludes
+ * `map`/`filter` (typed-RESULT construction — deferred to R4b) and the mutators.
+ */
+const STANDALONE_TA_SCALAR_HOFS: ReadonlySet<string> = new Set([
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+  "forEach",
+  "some",
+  "every",
+  "reduce",
+  "reduceRight",
+]);
+
+/**
  * (#2901) True iff `expr` (statically, following single-init var bindings) denotes
  * the abstract `%TypedArray%` intrinsic constructor, in either shape the test262
  * TypedArray corpus reaches it:
@@ -12413,6 +12432,60 @@ function compileCallExpression(
           }
           return VOID_RESULT;
         }
+      }
+    }
+
+    // (#2903 R4) Standalone DIRECT-carrier typed-array SCALAR callback HOFs
+    // (find/findIndex/…/forEach/some/every/reduce) → the native
+    // `__call_m_<name>_<arity>` / `__hof_<name>` substrate, BEFORE the
+    // array-methods.ts path. On main the standalone typed-array externref arm in
+    // `compileArrayMethodCall` is a `__make_callback` no-op STUB (banked at
+    // array-methods.ts ~"BANKED … the callback methods … → env.__make_callback"
+    // as "a separate follow-up") — it leaks `env.__make_callback` (breaking
+    // host-free instantiation) and never runs the predicate. The closed-method
+    // dispatcher's `$__vec_base` HOF arm drives the callback via `__apply_closure`
+    // on a WasmGC closure struct (host-free), reading elements through the
+    // byte-carrier-aware `__extern_get_idx` (this PR). Only DIRECT carriers reach
+    // here; the dynamic-view (`$__ta_dyn_view`) shape keeps its own #3058/#3162
+    // path in array-methods.ts (disjoint receiver). map/filter (typed-RESULT)
+    // deferred to R4b. Standalone-gated → gc/wasi byte-identical.
+    if (ctx.standalone && STANDALONE_TA_SCALAR_HOFS.has(propAccess.name.text)) {
+      // A concrete typed-array receiver carries its view name directly on the
+      // type symbol (the known-element-kind shape this interception targets).
+      const taName = receiverType.getSymbol?.()?.getName?.();
+      const hasSpread = expr.arguments.some((a) => ts.isSpreadElement(a));
+      const dispatchArgs = hasSpread ? flattenCallArgs(expr.arguments) : [...expr.arguments];
+      if (
+        taName !== undefined &&
+        isWiredTypedArrayViewName(taName) &&
+        dispatchArgs !== null &&
+        dispatchArgs.length >= 1
+      ) {
+        const methodName = propAccess.name.text;
+        const arity = dispatchArgs.length;
+        const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
+        flushLateImportShifts(ctx, fctx);
+        // Receiver → externref.
+        const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+        if (recvT && recvT.kind !== "externref") coerceType(ctx, fctx, recvT, { kind: "externref" });
+        else if (recvT === null) fctx.body.push({ op: "ref.null.extern" });
+        // Args → externref; an INLINE arrow/function callback compiles as a raw
+        // WasmGC closure struct (crossing as externref) — NOT the host
+        // `__make_callback` bridge — so the dispatcher's HOF arm can drive it via
+        // `__apply_closure` (same rep an identifier-held callback crosses with).
+        for (const arg of dispatchArgs) {
+          if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) {
+            const at = compileArrowAsClosure(ctx, fctx, arg);
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+          } else {
+            const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+          }
+        }
+        fctx.body.push({ op: "call", funcIdx: dispatchIdx });
+        return { kind: "externref" };
       }
     }
 
