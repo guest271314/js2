@@ -41,6 +41,13 @@ export interface StdlibMathBuiltin {
   readonly callees: readonly string[];
   /** Ordinary TS source, IR-claimable subset (see header). */
   readonly source: string;
+  /**
+   * Number of `(f64) -> f64` positional params (default 1). `2` is used by
+   * `atan2(y, x)` — still pure f64, just binary, so it flows through the
+   * generalized #3161 typed path with `paramTypes: [F64, F64]`. Callees
+   * remain unary `(f64) -> f64`.
+   */
+  readonly arity?: 1 | 2;
 }
 
 /**
@@ -384,6 +391,56 @@ export function Math_acos(x: number): number {
 `;
 
 /**
+ * Math.atan2(y, x) — binary, pure f64 (#3226 pointer: NOT a dialect gap,
+ * just 2-arg, so it flows through the generalized #3161 typed path with
+ * `paramTypes: [F64, F64]`; the sole callee `Math_atan` stays unary f64).
+ * Mirrors the deleted hand `Instr[]` body op-for-op — and, crucially,
+ * calls the SAME self-hosted `Math_atan`, so results are bit-identical to
+ * the hand version (they share that polynomial), not merely to JS Math.atan2.
+ *
+ * Dialect encodings of the hand ops:
+ *   - NaN in either arg → return that NaN;
+ *   - `copysign(mag, y)` with `mag >= 0` is `y < 0 ? -mag : mag` in the
+ *     finite-nonzero-y branches (the sign of y is exactly its sign bit),
+ *     and `1 / y < 0 ? -mag : mag` in the `y === 0` branch (probing the
+ *     sign of ±0 via 1/±0 = ±Infinity);
+ *   - `copysign(0, y)` for finite nonzero y is `y * 0` (IEEE multiply
+ *     carries y's sign into the zero: (-5)*0 = -0, 5*0 = +0);
+ *   - `x === ±Infinity` is `x > MAX_VALUE` / `x < -MAX_VALUE` (only ±Inf
+ *     exceeds the finite max), `|y| === Infinity` is
+ *     `Math.abs(y) > MAX_VALUE` (NaN already returned).
+ * Constants are the exact f64s the hand body used: π = 3.141592653589793,
+ * 3π/4 = 2.356194490192345, π/4 = 0.7853981633974483, π/2 = 1.5707963267948966.
+ */
+const ATAN2_SOURCE = `
+export function Math_atan2(y: number, x: number): number {
+  if (y !== y) return y;
+  if (x !== x) return x;
+  if (y === 0) {
+    if (x > 0) return y;
+    if (x < 0) return 1 / y < 0 ? -3.141592653589793 : 3.141592653589793;
+    if (1 / x > 0) return y;
+    return 1 / y < 0 ? -3.141592653589793 : 3.141592653589793;
+  }
+  if (x > 1.7976931348623157e308) {
+    if (Math.abs(y) > 1.7976931348623157e308) return y < 0 ? -0.7853981633974483 : 0.7853981633974483;
+    return y * 0;
+  }
+  if (x < -1.7976931348623157e308) {
+    if (Math.abs(y) > 1.7976931348623157e308) return y < 0 ? -2.356194490192345 : 2.356194490192345;
+    return y < 0 ? -3.141592653589793 : 3.141592653589793;
+  }
+  if (Math.abs(y) > 1.7976931348623157e308) return y < 0 ? -1.5707963267948966 : 1.5707963267948966;
+  if (x > 0) return Math_atan(y / x);
+  if (x < 0) {
+    let a: number = Math_atan(y / x);
+    return y >= 0 ? a + 3.141592653589793 : a - 3.141592653589793;
+  }
+  return y < 0 ? -1.5707963267948966 : 1.5707963267948966;
+}
+`;
+
+/**
  * Early-core self-hosted builtins (#3204) — registered INLINE by
  * `emitInlineMathFunctions` at the exact emission point their hand-`Instr[]`
  * predecessors occupied (BEFORE the later hand cores that call them by
@@ -410,15 +467,21 @@ export const TAN_BUILTIN: StdlibMathBuiltin = {
 };
 export const ASIN_BUILTIN: StdlibMathBuiltin = { name: "Math_asin", callees: ["Math_atan"], source: ASIN_SOURCE };
 export const ACOS_BUILTIN: StdlibMathBuiltin = { name: "Math_acos", callees: ["Math_atan"], source: ACOS_SOURCE };
+export const ATAN2_BUILTIN: StdlibMathBuiltin = {
+  name: "Math_atan2",
+  callees: ["Math_atan"],
+  source: ATAN2_SOURCE,
+  arity: 2,
+};
 
 /**
  * The self-hosted subset of the Math family, keyed by `Math.<method>`
- * name. Remaining hand-emitted cores (exp, atan2, pow, log10, random) are
- * the ones with real dialect gaps (exp: i32 2^n squaring; pow: i32
- * exp-by-squaring; log10: `f64.nearest`; random: RNG import; atan2: 2-arg
- * quadrant ladder) — converting them needs the intrinsics groundwork
- * (#3204 follow-up). `log`/`log2` and the trig cores (reduce_trig,
- * sin/cos/tan, atan/asin/acos) moved to EARLY cores above.
+ * name. Remaining hand-emitted cores (exp, pow, log10, random) are the
+ * ones with real dialect gaps (exp: i32 2^n squaring; pow: i32
+ * exp-by-squaring; log10: `f64.nearest`; random: RNG import) — converting
+ * them needs the intrinsics groundwork (#3226). `log`/`log2`, the trig
+ * cores (reduce_trig, sin/cos/tan, atan/asin/acos) and `atan2` (binary,
+ * pure f64 — #3233) moved to EARLY cores above.
  */
 export const SELF_HOSTED_MATH: ReadonlyMap<string, StdlibMathBuiltin> = new Map([
   ["cbrt", { name: "Math_cbrt", callees: [], source: CBRT_SOURCE }],
