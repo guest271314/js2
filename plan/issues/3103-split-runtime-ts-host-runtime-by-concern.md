@@ -2,9 +2,10 @@
 id: 3103
 title: "Split src/runtime.ts (15,032 LOC) host runtime by concern; decompose resolveImport (6,517-line function)"
 status: ready
+assignee: ttraenkler/opus-splitrt
 sprint: Backlog
 created: 2026-07-09
-updated: 2026-07-09
+updated: 2026-07-13
 priority: high
 horizon: l
 feasibility: medium
@@ -121,3 +122,59 @@ documents `runtime.ts:1626` vs `:1720`) and repeated coercion preambles ≈
    in tests and `src/index.ts`.
 4. `prove-emit-identity check` trivially passes (belt-and-braces).
 5. #3102's baseline updated (banked shrinkage) if it has landed.
+
+## Progress — Slice 1 (opus-splitrt, 2026-07-13)
+
+**Landed:** first bounded, byte-identical slice of the decomposition. Three
+self-contained concerns lifted verbatim out of `src/runtime.ts` into
+`src/runtime/`; `runtime.ts` shrank **16,242 → 14,618 LOC** (−1,624).
+
+| New module | Extracted | LOC | Wiring |
+| --- | --- | --- | --- |
+| `src/runtime/wasi-polyfill.ts` | `buildWasiPolyfill` (public) | ~300 | re-exported from `runtime.ts` (barrel) — public API unchanged |
+| `src/runtime/string-constants.ts` | `buildStringConstants`, `buildStringConstants16` (public) | ~50 | imported back (used in `buildImports`) **and** re-exported |
+| `src/runtime/iterator-polyfills.ts` | generator/iterator prototype machinery + `_installIteratorHelperPolyfills` (ES2025 helpers) | ~1,310 | 8 symbols still used by `runtime.ts` re-exported and imported back |
+
+**Why these three (root-cause selection, not arbitrary):** a pure file-split is
+only safe when the moved region has **no live coupling** back into the parent
+module (else you get import cycles or dangling state). I proved each region's
+dependency footprint statically before cutting:
+
+- `buildWasiPolyfill` references **zero** module-scope decls and **zero**
+  top-of-file imports — fully standalone (only local params + JS globals).
+- `buildStringConstants`/`16` depend only on `string-surrogate.js` (an
+  external import the new module takes directly); `hasLoneSurrogate`/
+  `hexCodeUnits` were dropped from `runtime.ts`'s import (now unused there).
+- The generator/iterator block (`L230–710` + `L761–1572`, non-contiguous —
+  the sidecar wasm-struct state at `L711–760` is a **different** concern and
+  was deliberately left behind) references **nothing** outside itself. Its
+  state cells (`_GeneratorState`, `_AsyncGeneratorState`, the proto caches)
+  move **with** it and stay in exactly one module, imported back — never
+  duplicated (per the issue's warning about split state cells).
+
+This yields **one-directional** imports (`runtime.ts` → `runtime/*`), no
+cycles. Bodies moved **verbatim**; the only added lines are license headers,
+one import block, and the re-export lists (net +37 LOC across the change-set).
+
+**Safety proof (this is a REFACTOR — zero behavior change):**
+- `prove-emit-identity check`: **IDENTICAL, all 39 (file,target) emits match**
+  the pre-change baseline byte-for-byte (runtime.ts is host-side JS, not in the
+  Wasm emit path — the split cannot change an emitted byte by construction).
+- `tsc --noEmit`: clean. `biome lint` (2,600 files): clean. `prettier
+  --check`: clean.
+- Quality gates green: loc-budget (no new file crosses the 1,500 threshold;
+  largest new module ~1,310), dead-exports, any-box-sites, coercion-sites,
+  speculative-rollback, codegen-fallbacks, stack-balance, oracle-ratchet,
+  ir-adoption, ir-fallbacks, issues.
+- Targeted vitest (generators, iterators, WASI, string-constants, promise,
+  object, map/set, weak, equivalence): the only failing files
+  (`imported-string-constants`, `generator-yield-contexts`,
+  `struct-proxy-wrappers`, `map-set-basic`'s broken `../../src/runtime.js`
+  path) fail **identically on pristine `origin/main`** — pre-existing, not
+  introduced here.
+
+**Remaining (future slices, issue stays open):** `resolveImport` handler-map
+decomposition (the 6.5k-line function), `sidecar.ts`, `to-primitive.ts`,
+`wrap-host.ts`, `instantiate.ts`, and the `imports/*` handler groups per the
+Target-structure table above. `runtime.ts` is still 14,618 LOC; acceptance
+criterion #2 (<600 LOC barrel) is a multi-PR target.

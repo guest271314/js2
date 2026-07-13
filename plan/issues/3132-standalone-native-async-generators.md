@@ -20,10 +20,46 @@ loc-budget-allow:
   - src/codegen/class-bodies.ts
   - src/codegen/async-cps.ts
   - src/codegen/expressions.ts
+  - src/codegen/async-frame.ts
+  - src/codegen/expressions/calls.ts
 origin: "FABLE task 30 — env::__create_async_generator touches ~2,800 leaky-passes (largest unowned chunk of the standalone-vs-host gap)."
 ---
 
 # #3132 — standalone native async generators
+
+## Slice — async-gen binding-PATTERN params (PR #3011, opus-asyncgen2)
+
+Substrate PR (decoupled). `isAsyncGenDriveCandidate` hard-rejected any
+binding-pattern param (`async function* f([x]){…}`) → the whole module hit the
+#680 native-gen refusal in standalone. Fix threads the #2967
+`collectDerivedPatternParams` → `derivedSpillInit` machinery (already used by
+the async-FUNCTION path) into `emitAsyncGenerator`, capturing pattern-param
+locals as live frame spill fields; the resume fn restores them by name.
+Consumer half: `tryEmitAsyncGenNextDispatch` drops the host `__gen_next`
+miss-arm on standalone (not just wasi) when no legacy buffer async gen was
+emitted — the dispatch is type-gated to async-gen receivers so the arm is
+provably dead in an all-driven module (mirrors #2903's `.then` de-leak).
+
+Measured (compile, all 558 `async-generator/dstr` files, standalone): main 174
+hard #680 CE + 348 `__gen_`-leaky, 0 gen-host-free → 0 CE, 522 error-free, 498
+gen-host-free. **Floor delta ≈ 0** (converted modules still leak
+`env::Promise_resolve/Promise_reject/__get_caught_exception`) — value is
+retiring the 174 hard CEs + providing the driven substrate. NET≥0 on the floor.
+
+## Stacked follow-on — the actual floor lever (PR-2, measure-gated)
+
+The host-free floor flip is blocked on `widenAsyncGenFallback`
+(async-scheduler.ts): `isStandalonePromiseActive = wasi || (standalone &&
+!moduleHasAsyncGen)` disables the native `$Promise` carrier for ANY module with
+an async gen (#2980's conservative fallback — native `$Promise` mixing into a
+host `__gen_*` buffer caused the 07-09 −4). A driven module has NO legacy
+buffer, so the carrier is safe there. PR-2 refines the fallback via a
+CONSERVATIVE pre-pass drive-candidate gate: keep the carrier ON only when ALL a
+module's async gens are provably drive-lowered. Carrier-on ceiling measured
+~294 fully host-free; a further ~204-file `env::__make_callback`
+(`.then`-callback) front sits beyond the carrier (a later slice). PR-2 gate is
+go/no-go on a FULL merge_group standalone-floor A/B, routed through the tech
+lead — never a scoped measurement.
 
 ## Problem
 
@@ -116,6 +152,28 @@ isAsyncGenDriveCandidate`) routes through `emitAsyncGenerator` — covers
 - **S3 — general `yield*` / control-flow yields**: CFG loop states over the
   native `__iterator` protocol (runtime loop, not static unroll).
 - **S4 — `return` in async-gen body**: needs a settleReturn terminator.
+
+## S-consumer — async-gen CONSUMER drive (2026-07-13, opus-asyncgen)
+
+Measure-first found the producer already drives host-free (S1/S2a); the residual
+leak on the `for await (const … of <async-gen>)` files is the CONSUMER, in two
+parts landed as two PRs:
+
+- **PR-1 (foundation, #3001, merged)** — (a) `resolveAsyncGenNextHelperName`
+  resolves a var-held / IIFE async-gen FRAME source (identifier → var-initializer
+  → producer; `(async function*(){})()` → producer-by-decl), not only a direct
+  named call; (b) `calleeIsDriveLowered` recognises the standalone async-gen
+  consumer drive lane (carrier-independent, returns a native `$Promise`) so the
+  CALL site skips the host `Promise_reject`/`__get_caught_exception` try/catch
+  wrap. Identifier-binding var/inline/`yield*`-literal sources → host-free.
+- **PR-2 (dstr composition, #3007)** — a DESTRUCTURING head over an async-gen
+  source now drives natively, composing #2996/#3228's `compileForOfDestructuring`
+  delivery into the async-gen consumer CFG (`forAwaitAsyncNeedsDrive` +
+  `planForAwaitAsyncCfg`: drop the identifier-only guards; run `destructureElem`
+  via `postDeliverEmit` on the `bodyId` state against the `FORAWAIT_ELEM`
+  carrier). Flips the ~195 `async-func-dstr-*-async-*` corpus files. The
+  consumer whose source is itself an async GENERATOR (`async-gen-dstr-*`, +195)
+  is a harder nested shape, banked for a later slice.
 
 ## Graveyard discipline
 
