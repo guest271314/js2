@@ -55,6 +55,7 @@ import type { StringBuilderPresizeInfo } from "./string-builder.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitWasiErrorConstructor, getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
+import { emitStandaloneObjectConstructor } from "./object-runtime.js"; // (#3238) native `class Sub extends Object`
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   cacheParamDefaultArgc,
@@ -1769,6 +1770,12 @@ function compileClassBodiesInner(
         if ((ctx.wasi || ctx.standalone) && isWasiErrorName(parentName)) {
           emitWasiErrorConstructor(ctx, parentName, implicitForwarderArity);
           funcIdx = ctx.funcMap.get(importName);
+        } else if ((ctx.wasi || ctx.standalone) && parentName === "Object") {
+          // (#3238) `class Sub extends Object` — construct a fresh native plain
+          // object instead of leaking the `env::__new_Object` host import. The
+          // subclass proto/brand fixups below re-point [[Prototype]].
+          emitStandaloneObjectConstructor(ctx, implicitForwarderArity);
+          funcIdx = ctx.funcMap.get(importName);
         } else {
           funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
           flushLateImportShifts(ctx, fctx);
@@ -2948,6 +2955,12 @@ export function compileSuperCall(
     let funcIdx: number | undefined;
     if ((ctx.wasi || ctx.standalone) && isWasiErrorName(builtinParent)) {
       emitWasiErrorConstructor(ctx, builtinParent, forwardArity);
+      funcIdx = ctx.funcMap.get(importName);
+    } else if ((ctx.wasi || ctx.standalone) && builtinParent === "Object") {
+      // (#3238) Explicit `super(...)` in a `class Sub extends Object` ctor —
+      // native fresh plain object, no `env::__new_Object` leak. Arg side
+      // effects are still evaluated below and passed as (ignored) params.
+      emitStandaloneObjectConstructor(ctx, forwardArity);
       funcIdx = ctx.funcMap.get(importName);
     } else {
       funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
