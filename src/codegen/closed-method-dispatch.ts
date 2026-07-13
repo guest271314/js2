@@ -687,12 +687,73 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         { op: "call", funcIdx: externLengthIdx } as Instr,
         { op: "local.set", index: lenLocalIdx } as Instr,
       ];
-      // Loop body. Forward: i=0; while i<len { … i+=1 }. Backward: i=len-1; while i>=0 { … i-=1 }.
+      // (#3170) `fromIndex` support. The generic `$__vec_base` search arm
+      // previously IGNORED the 2nd argument, so `indexOf(x, n)` /
+      // `lastIndexOf(x, n)` / `includes(x, n)` over an any-array receiver always
+      // scanned the whole array (wrong per §23.1.3.14/.20/.15). When a
+      // `fromIndex` arg is present (arity ≥ 2) it overrides the scan START:
+      //   n = ToIntegerOrInfinity(fromIndex)  — `__unbox_number` then NaN→0,
+      //       else trunc toward zero.
+      //   forward (indexOf/includes): k = n≥0 ? n : max(len+n, 0)
+      //   backward (lastIndexOf):     k = n≥0 ? min(n, len-1) : len+n
+      // ±∞ falls out naturally: forward n=+∞ → k=+∞ ≥ len → 0 iterations → miss;
+      // backward n=-∞ → k=len+(-∞)=-∞ < 0 → 0 iterations → miss. arity 1 (no
+      // fromIndex) keeps the byte-identical default start (forward 0 / len-1).
+      // A non-numeric fromIndex (`__unbox_number` → NaN → 0) matches
+      // ToIntegerOrInfinity for the numeric/undefined cases; a fromIndex that is
+      // an object/string requiring ToPrimitive/StringToNumber is out of scope
+      // (deferred residual — see #3170).
+      const hasFromIndex = arity >= 2 && ci.unboxNumIdx !== undefined;
+      const nLocalIdx = iLocalIdx + 1;
+      if (hasFromIndex) locals.push({ name: "__vecfrom", type: { kind: "f64" } });
+      // n = ToIntegerOrInfinity(fromIndex) into __vecfrom.
+      const toInteger: Instr[] = hasFromIndex
+        ? [
+            { op: "local.get", index: 2 } as Instr, // fromIndex (arg1)
+            { op: "call", funcIdx: ci.unboxNumIdx as number } as Instr,
+            { op: "local.tee", index: nLocalIdx } as Instr,
+            { op: "local.get", index: nLocalIdx } as Instr,
+            { op: "f64.ne" } as Instr, // n !== n ⇒ NaN
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: nLocalIdx } as Instr],
+              else: [
+                { op: "local.get", index: nLocalIdx } as Instr,
+                { op: "f64.trunc" } as Instr, // toward zero
+                { op: "local.set", index: nLocalIdx } as Instr,
+              ],
+            } as Instr,
+          ]
+        : [];
+
+      // Loop body. Forward: i=k; while i<len { … i+=1 }. Backward: i=k; while i>=0 { … i-=1 }.
       let loopInit: Instr[];
       let loopExitTest: Instr[];
       let loopStep: Instr[];
       if (forward) {
-        loopInit = [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: iLocalIdx } as Instr];
+        loopInit = hasFromIndex
+          ? [
+              ...toInteger,
+              // k = n≥0 ? n : max(len+n, 0)
+              { op: "local.get", index: nLocalIdx } as Instr,
+              { op: "f64.const", value: 0 } as Instr,
+              { op: "f64.ge" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "f64" } },
+                then: [{ op: "local.get", index: nLocalIdx } as Instr],
+                else: [
+                  { op: "local.get", index: lenLocalIdx } as Instr,
+                  { op: "local.get", index: nLocalIdx } as Instr,
+                  { op: "f64.add" } as Instr,
+                  { op: "f64.const", value: 0 } as Instr,
+                  { op: "f64.max" } as Instr,
+                ],
+              } as Instr,
+              { op: "local.set", index: iLocalIdx } as Instr,
+            ]
+          : [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: iLocalIdx } as Instr];
         loopExitTest = [
           { op: "local.get", index: iLocalIdx } as Instr,
           { op: "local.get", index: lenLocalIdx } as Instr,
@@ -705,12 +766,37 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           { op: "local.set", index: iLocalIdx } as Instr,
         ];
       } else {
-        loopInit = [
-          { op: "local.get", index: lenLocalIdx } as Instr,
-          { op: "f64.const", value: 1 } as Instr,
-          { op: "f64.sub" } as Instr,
-          { op: "local.set", index: iLocalIdx } as Instr,
-        ];
+        loopInit = hasFromIndex
+          ? [
+              ...toInteger,
+              // k = n≥0 ? min(n, len-1) : len+n
+              { op: "local.get", index: nLocalIdx } as Instr,
+              { op: "f64.const", value: 0 } as Instr,
+              { op: "f64.ge" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "f64" } },
+                then: [
+                  { op: "local.get", index: nLocalIdx } as Instr,
+                  { op: "local.get", index: lenLocalIdx } as Instr,
+                  { op: "f64.const", value: 1 } as Instr,
+                  { op: "f64.sub" } as Instr,
+                  { op: "f64.min" } as Instr,
+                ],
+                else: [
+                  { op: "local.get", index: lenLocalIdx } as Instr,
+                  { op: "local.get", index: nLocalIdx } as Instr,
+                  { op: "f64.add" } as Instr,
+                ],
+              } as Instr,
+              { op: "local.set", index: iLocalIdx } as Instr,
+            ]
+          : [
+              { op: "local.get", index: lenLocalIdx } as Instr,
+              { op: "f64.const", value: 1 } as Instr,
+              { op: "f64.sub" } as Instr,
+              { op: "local.set", index: iLocalIdx } as Instr,
+            ];
         loopExitTest = [
           { op: "local.get", index: iLocalIdx } as Instr,
           { op: "f64.const", value: 0 } as Instr,
