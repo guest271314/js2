@@ -156,6 +156,94 @@ isAsyncGenDriveCandidate`) routes through `emitAsyncGenerator` — covers
   native `__iterator` protocol (runtime loop, not static unroll).
 - **S4 — `return` in async-gen body**: needs a settleReturn terminator.
 
+## S2/S3/S4 PRODUCER-runtime slice spec (2026-07-13, opus-asyncgen2, post-carrier)
+
+Context: after PR-1 #3011 (pattern-param producer + `.next()` de-leak) and PR-2
+#3013 (native `$Promise` carrier for all-drivable modules), the `.then`-callback
+`__make_callback` front is CLOSED (stale-baseline artifact — the native `.then`
+scheduler `emitStandalonePromiseThen` already routes callbacks host-free; verified
+live by opus-asyncthen). The remaining `__gen_*`/`__create_async_generator`
+PRODUCER-runtime leak in the async-gen/dstr corpus is **~76 files**, in three
+disjoint drive-shape gaps. Each is a self-contained slice a fresh agent can own.
+Owner of the drive machinery: opus-asyncgen2 (PR-1/PR-2) — ping to pair.
+
+**Important carrier interaction (read first):** a non-drivable async gen in a
+module now forces `moduleHasNonDrivableAsyncGen=true` → the whole module's native
+`$Promise` carrier goes OFF (host Promise pipeline). So each slice below is
+DOUBLE-valued: it removes the gen's own `__gen_*` leak AND (by making the gen
+drivable) lets its module keep the carrier → also drops that module's
+`env::Promise_*` leak. Extend `asyncGenDrivableUnderCarrier` (async-frame.ts) in
+lockstep with the emit gate so the pre-pass verdict stays == the emit decision
+(the invariant that guarantees no native-`$Promise`-into-host-buffer mix).
+
+### S2 — async-gen METHODS (remaining after S2a)
+- **Leak sites**: class methods that touch `this`/`super`/`arguments` fall to
+  the legacy buffer — the exclusion is at `class-bodies.ts:2328`
+  (`!genBodyReferencesThis(member.body) && !bodyUsesArguments(member.body)` gate
+  in front of `emitAsyncGenerator`). OBJECT-LITERAL async-gen methods are
+  entirely unwired: `literals.ts:~2959` (`isGeneratorMethod && prop.body`) has NO
+  drive interception at all — it always emits `__create_async_generator`
+  (`literals.ts:3008`). Same for the closure-trampoline path (`closures.ts:3076`).
+- **Root cause**: the resume fn is a fresh lifted function; a `this`-reading body
+  needs the receiver captured into the frame and re-materialized in the resume
+  prologue. S2a shipped the receiver-FREE subset only.
+- **Native approach**: (i) receiver threading — capture the receiver (instance
+  method's fctx param 0) into a frame param field and resolve `this` in the
+  resume body against it, reusing the `readsCurrentThis`/`selfCaptureLayout`
+  machinery `emitAsyncGenerator` ALREADY threads for nested-closure producers
+  (async-frame.ts, `info.readsCurrentThis`/`info.selfCaptureLayout`). Lift the
+  `!genBodyReferencesThis` half of the gate once `this` resolves. (ii)
+  object-literal methods — wire `literals.ts:~2959` to the same
+  `isAsyncGenDriveCandidate` → `emitAsyncGenerator` interception as
+  `class-bodies.ts:2314-2332`, AFTER auditing the `__argc_default`/closure
+  trampoline interplay (#2581) and the #2938 class-STATIC / computed-name hazards.
+- **Stem key**: methods must key `asyncGenStem` as `${className}_${methodName}` /
+  the object-literal method's funcMap name — verify it matches the `.next()`
+  dispatch registry key so the consumer resolves the driver.
+- **Rough yield**: the single biggest bucket (issue's decomposition: 1,725+
+  method files corpus-wide; ~part of the 76 in the dstr slice). Heaviest lift.
+
+### S3 — non-literal `yield*` / control-flow yields
+- **Leak site**: `analyzeAsyncGen` (async-cps.ts:2214) accepts `yield*` ONLY over
+  an ARRAY LITERAL (static unroll, S1). A `yield*` over an iterable identifier /
+  call / string, or a `yield` nested in control flow (loop/if), returns `null` →
+  the gen is non-drivable → legacy buffer + `__gen_yield_star`.
+- **Native approach**: a RUNTIME CFG loop over the inner (async-)iterator, not a
+  static unroll — `GetAsyncIterator(operand)` at a head state, then loop {`p =
+  inner.next()`; `await p`; read `{done,value}`; if `done` break; `settleYield`
+  value; back-edge}. This is the DUAL of the 3d-ii consumer already built in
+  async-cps.ts (`planForAwaitAsyncCfg` / the `for await` consumer CFG) — reuse
+  that machine as a producer-side delegation loop. Control-flow yields need the
+  general expression-level suspend numbering the bounded analyzer currently
+  rejects (the `containsAwaitOrYield` lead guards) — a larger CFG generalization.
+- **Rough yield**: moderate; the delegation-loop variant is bounded and reuses
+  existing machinery; the general control-flow-yield variant is the big one.
+
+### S4 — `return` completion in async-gen body
+- **Leak site**: `analyzeAsyncGen` rejects any own-scope `return` —
+  `containsOwnScopeReturn(st)` at async-cps.ts:2259 → non-drivable → legacy.
+- **Root cause**: the async-gen CFG has only `settleUndefined` (body-end ⇒
+  `{value:undefined, done:true}`) and `settleYield` terminators; there is no
+  terminator that settles the result promise with a RETURN VALUE and `done:true`.
+- **Native approach**: (a) admit a top-level `return E` in `analyzeAsyncGen`
+  (a trailing tail segment, or a mid-body return that becomes a terminator);
+  (b) add a `settleReturn` CFG terminator + emitter that settles
+  `frame.result_promise` `{value: E, done: true}` (§27.6.3.8 AsyncGenerator
+  return-completion — NOT the same as body fall-through, which yields
+  `value:undefined`). Mind that a `return` inside a try/finally must still run
+  the finally (out of scope for the first bounded slice — top-level `return E`
+  only, correct-or-legacy).
+- **Rough yield**: smallest, most self-contained of the three; ~172+5 has-return
+  files in the corpus decomposition.
+
+### Suggested order
+Bucket-2 (dstr binding-correctness, #1042/#1048/#1543) is already dispatched to
+opus-asyncthen. For this producer bucket: **S4** first (smallest, one terminator),
+then **S3** delegation-loop, then **S2** receiver-threading (biggest but heaviest,
++ the #2938 static/computed audit). Each is measure-first: sample by CONSTRUCT,
+verify host-free + runtime-correct on a corpus sample BEFORE PR, and confirm the
+carrier stays consistent (0 invalid wasm across the async-gen corpus).
+
 ## S-consumer — async-gen CONSUMER drive (2026-07-13, opus-asyncgen)
 
 Measure-first found the producer already drives host-free (S1/S2a); the residual
