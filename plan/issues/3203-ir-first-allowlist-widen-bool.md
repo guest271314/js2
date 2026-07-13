@@ -1,11 +1,12 @@
 ---
 id: 3203
 title: "IR-first allowlist widen: f64 → f64+boolean (Phase-3a enabler)"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-sendev
 sprint: current
 created: 2026-07-13
 updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 horizon: m
 feasibility: hard
