@@ -3256,6 +3256,27 @@ function compilePropertyAssignment(
         const recvResult = compileExpression(ctx, fctx, target.expression);
         if (!recvResult) return null;
         const setterParamTypes = getFuncParamTypes(ctx, funcIdx);
+        // (#3232) Coerce the receiver to the setter's declared self-param type
+        // (param 0) BEFORE compiling the value, while it is still the stack top.
+        // The value param below is already coerced via `valTypeHint`; the
+        // receiver had no matching coercion, so on the standalone/nativeStrings
+        // lane a static-private setter receiver (`this` in a static method →
+        // an `externref` static-class carrier) was pushed raw where the
+        // accessor declares `(ref null $Class)`, producing `call[0] expected
+        // type (ref …), found … externref` invalid Wasm. The getter read path
+        // does the equivalent `any.convert_extern` + `ref.cast`. `coerceType`
+        // is a no-op when the types already match, so the gc/host lane (whose
+        // receiver is already the struct ref) stays byte-identical.
+        const selfParamType = setterParamTypes?.[0];
+        if (
+          (ctx.standalone || ctx.wasi) &&
+          selfParamType &&
+          recvResult.kind === "externref" &&
+          selfParamType.kind !== "externref" &&
+          !valTypesMatch(recvResult, selfParamType)
+        ) {
+          coerceType(ctx, fctx, recvResult, selfParamType);
+        }
         const valTypeHint = setterParamTypes?.[1]; // param 0 = self, param 1 = value
         const valResult = compileExpression(ctx, fctx, value, valTypeHint);
         if (!valResult) return null;
