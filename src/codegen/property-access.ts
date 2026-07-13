@@ -62,7 +62,10 @@ import {
 import { emitJsonStringifyValue } from "./json-codec-native.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
-import { tryCompileNativeDisposableStackDisposedGet } from "./disposable-runtime.js";
+import {
+  tryCompileNativeDisposableStackAnyDisposedGet,
+  tryCompileNativeDisposableStackDisposedGet,
+} from "./disposable-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
 import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
 import { tryEmitFnctorPrototypeRead } from "./expressions/fnctor-prototype.js";
@@ -3566,6 +3569,23 @@ export function compilePropertyAccess(
     if (isDynamicReceiver) {
       const r = emitTaViewDynamicByteLength(ctx, fctx, () => compileExpression(ctx, fctx, expr.expression));
       if (r) return r;
+    }
+  }
+
+  // (#3237 Slice 1) `.disposed` on a DYNAMIC (`any`/`unknown`/union) receiver
+  // carrying a native `$DisposableStack` (the runner hoists a captured
+  // `var stack = new DisposableStack()` to `let stack: any`). The className arm
+  // below can't fire (no nominal symbol), so it fell to the generic dynamic
+  // reader — a `__extern_get` miss on the non-`$Object` native struct → always
+  // false, silently wrong after `dispose()`. Runtime `ref.test $DisposableStack`
+  // dispatch: match → the struct's disposed flag; miss → the generic read (a user
+  // object's own `.disposed` still resolves). Byte-inert unless a
+  // `DisposableStack` extern class is registered; `nativeStrings`-gated.
+  if (propName === "disposed" && ctx.nativeStrings && ctx.externClasses.has("DisposableStack")) {
+    const isDynamicReceiver = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || objType.isUnion();
+    if (isDynamicReceiver) {
+      const r = tryCompileNativeDisposableStackAnyDisposedGet(ctx, fctx, expr.expression);
+      if (r !== undefined) return r as ValType;
     }
   }
 

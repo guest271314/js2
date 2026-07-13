@@ -650,6 +650,158 @@ function compileArgAsExternref(ctx: CodegenContext, fctx: FunctionContext, arg: 
 }
 
 /**
+ * (#3237 Slice 1) Intercept a native `DisposableStack` method call whose STATIC
+ * receiver is `any`/externref (the test262 runner hoists a nested-closure-captured
+ * `var stack = new DisposableStack()` to `let stack: any`, so `stack.dispose()`
+ * loses the nominal `DisposableStack` symbol). Without this, the any-receiver
+ * first-match extern loop (`tryExternClassMethodOnAny`, calls-closures.ts) binds
+ * `dispose` to the `DisposableStack_dispose` HOST import — unsatisfiable
+ * standalone, so the whole module fails to instantiate BEFORE dispose ever runs.
+ *
+ * Dispatch on the RUNTIME shape instead: `ref.test $DisposableStack` on the
+ * receiver. Match → the native dispose driver (same reserve/fill func the typed
+ * path uses). Miss (incl. null/undefined) → a clean TypeError (RequireInternalSlot
+ * fail, §12.3.3.2 step 2) — NEVER the host import.
+ *
+ * Caller (`tryExternClassMethodOnAny`) gates this to fire only where the
+ * first-match loop WOULD have bound the host import: `ctx.nativeStrings`, no
+ * user-defined member of the same name shadows it (the #3033 refusal already ran),
+ * and `DisposableStack` is a registered extern class declaring the method. A
+ * user object-literal `{ dispose() {} }` on an `any` receiver keeps taking the
+ * closed-struct dispatch path (#2151) — it never reaches here.
+ *
+ * Slice 1 handles `dispose` only. The callback methods (`defer`/`adopt`/`use`)
+ * additionally need the standalone closure gate to fire on the any-receiver path
+ * (Slice 2); they fall through (`undefined`) here.
+ */
+export function tryCompileNativeDisposableStackAnyMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  methodName: string,
+): InnerResult | undefined {
+  if (!ctx.nativeStrings) return undefined;
+  // Slice 1: `dispose` (zero-arg) only. Callback methods are Slice 2.
+  if (methodName !== "dispose") return undefined;
+  if (callExpr.arguments.length !== 0) return undefined;
+
+  const t = ensureDisposableStackTypes(ctx);
+  const driver = reserveDisposableStackDisposeDriver(ctx);
+
+  // Evaluate the receiver ONCE into an externref local — it is consumed twice
+  // (the `ref.test` brand check and, on a hit, the driver call).
+  const recvLocal = allocLocal(fctx, `__ds_anyrecv_${fctx.locals.length}`, EXTERNREF);
+  const rt = compileExpression(ctx, fctx, propAccess.expression);
+  if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // if ref.test $DisposableStack(recv): native dispose ; else TypeError.
+  // `ref.test (ref $DisposableStack)` is 0 for null and for a non-matching ref,
+  // so a null/undefined or wrong-type receiver lands in the TypeError arm —
+  // matching RequireInternalSlot without ever emitting the host import.
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: driver } as Instr],
+    else: buildThrowJsErrorInstrs(
+      ctx,
+      "TypeError",
+      "DisposableStack.prototype.dispose requires a DisposableStack receiver",
+      { flush: fctx },
+    ),
+  } as Instr);
+
+  // `dispose()` returns undefined. In a VALUE position (`assert.sameValue(
+  // s.dispose(), undefined)` — returns-undefined.js) hand back the undefined
+  // singleton (null externref ≡ undefined in standalone; cf. the DataView-setter
+  // precedent in calls.ts) so the caller's argument stack stays balanced.
+  // Statement position keeps the zero-cost VOID_RESULT.
+  if (!ts.isExpressionStatement(callExpr.parent)) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return { kind: "externref" };
+  }
+  return VOID_RESULT;
+}
+
+/**
+ * (#3237 Slice 1) Read `.disposed` on a DYNAMIC (`any`/`unknown`/union) receiver
+ * that may carry a native `$DisposableStack`. The compile-time className arm
+ * (`tryCompileNativeDisposableStackDisposedGet`, gated on the nominal symbol)
+ * cannot fire when the runner hoists `var stack = new DisposableStack()` to
+ * `let stack: any`, so `stack.disposed` fell to the generic dynamic reader — a
+ * `__extern_get` MISS on the non-`$Object` native struct → always
+ * `undefined`/false, i.e. silently wrong AFTER `dispose()` (breaks
+ * `sets-state-to-disposed.js`).
+ *
+ * Runtime `ref.test $DisposableStack` dispatch instead: a match reads the struct
+ * `disposed` flag (boxed as a boolean externref, matching the `any`-context value
+ * contract); a miss falls to the same generic `__extern_get` read the receiver
+ * would otherwise have taken — so a user object's own `.disposed` property (an
+ * `$Object` field) is preserved. Gated `nativeStrings`; caller additionally
+ * requires a dynamic receiver + a registered `DisposableStack` extern class.
+ */
+export function tryCompileNativeDisposableStackAnyDisposedGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: ts.Expression,
+): InnerResult | undefined {
+  if (!ctx.nativeStrings) return undefined;
+  const t = ensureDisposableStackTypes(ctx);
+  // `__extern_get` + the boxing helpers live in the native object runtime.
+  ensureObjectRuntime(ctx);
+
+  // Evaluate the receiver ONCE into an externref local (consumed by the brand
+  // test AND, on a miss, the generic fallback read).
+  const recvLocal = allocLocal(fctx, `__ds_dget_${fctx.locals.length}`, EXTERNREF);
+  const rt = compileExpression(ctx, fctx, receiver);
+  if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // Register the boxing + dynamic-read helpers AFTER the receiver's own imports
+  // settle, then flush late-import index shifts against this body before baking
+  // the funcIdxs (mirrors the `use()` path).
+  const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [I32], [EXTERNREF]);
+  ensureLateImport(ctx, "__extern_get", [EXTERNREF, EXTERNREF], [EXTERNREF]);
+  flushLateImportShifts(ctx, fctx);
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  if (boxBoolIdx === undefined || externGetIdx === undefined) {
+    // Substrate unavailable — hand back `undefined` (null externref) rather than
+    // an unbalanced body. (Should not happen once ensureObjectRuntime ran.)
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return { kind: "externref" };
+  }
+  addStringConstantGlobal(ctx, "disposed");
+
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: EXTERNREF },
+    then: [
+      // Native DisposableStack → box the i32 disposed flag as a boolean externref.
+      { op: "local.get", index: recvLocal } as Instr,
+      ...externToStack(ctx),
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "call", funcIdx: boxBoolIdx } as Instr,
+    ],
+    else: [
+      // Not a DisposableStack → the generic dynamic property read (`$Object`
+      // sidecar), so a user object's own `.disposed` property still resolves.
+      { op: "local.get", index: recvLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, "disposed"),
+      { op: "call", funcIdx: externGetIdx } as Instr,
+    ],
+  } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * (#3231) Intercept a `DisposableStack.prototype.*` method call in standalone /
  * `nativeStrings` mode. Handles `dispose` / `defer` / `adopt` / `move`. Returns
  * the result ValType/sentinel when handled, else `undefined` (host fallthrough —
