@@ -14,6 +14,7 @@
 import { ts } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import { classifyAsyncConsumer, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
+import { asyncGenConsumerNeedsDrive } from "./async-frame.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -394,14 +395,28 @@ function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression
  * genuinely suspends (`asyncFnNeedsCps`). Inert off the carrier (gc/host).
  */
 function calleeIsDriveLowered(ctx: CodegenContext, expr: ts.CallExpression): boolean {
-  if (!isStandalonePromiseActive(ctx)) return false;
   const sig = ctx.checker.getResolvedSignature(expr);
   const decl = sig?.getDeclaration();
   if (!decl || !ts.isFunctionDeclaration(decl) || decl.body === undefined) return false;
   if (decl.asteriskToken) return false; // async generator — returns AsyncGenerator, not Promise
   const isAsyncDecl = (decl.modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
   if (!isAsyncDecl) return false;
-  return asyncFnNeedsCps(decl, analyzeAsyncBody(ctx, decl));
+  // Carrier lane (wasi): a genuinely-suspending async fn is frame-driven and
+  // already returns a real `$Promise`.
+  if (isStandalonePromiseActive(ctx)) return asyncFnNeedsCps(decl, analyzeAsyncBody(ctx, decl));
+  // (#3132) `--target standalone` with the native-`$Promise` CARRIER still OFF
+  // (#2980): the async-gen-CONSUMER drive lane (`for await (x of asyncGen)`) is
+  // carrier-independent — every suspension awaits a promise MINTED by the
+  // producer's own `__async_gen_next_<name>` driver (a native `$Promise` on
+  // every lane), and the driven consumer settles its result via native
+  // `__promise_fulfill`. So its CALL result is already a native `$Promise` and
+  // must pass through UN-wrapped: the HOST try/catch wrap
+  // (`Promise_reject`/`__get_caught_exception`) was the last host dependency for
+  // the for-await-over-async-gen files whose consumer drives natively but whose
+  // call site still pulled in the host Promise machinery. Plain awaits / Promise
+  // statics stay on the legacy path pending the #2980 carrier widen.
+  if (ctx.standalone === true) return asyncGenConsumerNeedsDrive(ctx, decl, analyzeAsyncBody(ctx, decl));
+  return false;
 }
 
 /**

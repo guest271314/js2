@@ -15,9 +15,11 @@ umbrella: 2860
 related: [3075, 2906, 2865, 2938, 2936, 2980, 2895, 2922, 1042, 3120]
 created: 2026-07-10
 updated: 2026-07-10
-assignee: ttraenkler/fable-3075
+assignee: ttraenkler/opus-asyncgen
 loc-budget-allow:
   - src/codegen/class-bodies.ts
+  - src/codegen/async-cps.ts
+  - src/codegen/expressions.ts
 origin: "FABLE task 30 — env::__create_async_generator touches ~2,800 leaky-passes (largest unowned chunk of the standalone-vs-host gap)."
 ---
 
