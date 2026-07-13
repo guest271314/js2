@@ -107,21 +107,58 @@ So:
 
 ## Byte-inertness proof (the −16/−29 discipline)
 
-sha256 of representative programs × {gc, standalone, wasi}, origin/main base vs
-branch (`.tmp/hash-3220.mts`, base restored via
-`git checkout origin/main -- src/codegen/expressions.ts`). Every gc lane is
-byte-identical; every non-async program is byte-identical in all three lanes;
-only a `$Promise`-returning-call-as-thenable program changes on the
-standalone + wasi carrier lanes (the intended unlock — see the `## Byte-inertness`
-table below for the measured hashes).
+sha256 (first 16 hex) of representative programs × {gc, standalone, wasi},
+origin/main base vs branch (`.tmp/hash-3220.mts`, base restored via
+`git checkout origin/main -- src/codegen/expressions.ts`). 16/18 identical; the
+ONLY two changes are the async-gen fix on wasi:
+
+| program            | gc        | standalone                 | wasi                          |
+| ------------------ | --------- | -------------------------- | ----------------------------- |
+| nonAsync           | identical | identical                  | identical                     |
+| **promiseCallYield** | identical | identical (widenAsyncGenFb) | **CHANGED** (intended unlock) |
+| **promiseCallLocal** | identical | identical (widenAsyncGenFb) | **CHANGED** (intended unlock) |
+| awaitCallYield     | identical | identical                  | identical                     |
+| directPromiseYield | identical | identical                  | identical                     |
+| plainGen           | identical | identical                  | identical                     |
+
+For an async-generator module, the standalone lane keeps `widenAsyncGenFallback`
+on (carrier off) so it is byte-identical (host-consistency preserved). A separate
+**non-generator** module (`mk().then(v=>v+1)`, `.tmp/probe-standalone-nongen.mts`)
+confirms the standalone carrier lane IS reached and changed by the fix, while gc
+stays identical:
+
+| lane       | base       | branch     |
+| ---------- | ---------- | ---------- |
+| gc         | `57aab3fa…` | `57aab3fa…` (identical) |
+| standalone | `45b4b9f6…` | `b8101202…` (CHANGED)  |
+| wasi       | `ad9f20df…` | `d1b5dc32…` (CHANGED)  |
 
 ## Verification
 
-`tests/issue-3220-promise-return-double-wrap.test.ts` (6 host-free wasi tests:
-the `yield mk()` fix → 5; the `const pv = mk(); yield pv` fix → 5; the
+`tests/issue-3220-promise-return-double-wrap.test.ts` (6 host-free wasi tests,
+all pass: the `yield mk()` fix → 5; the `const pv = mk(); yield pv` fix → 5; the
 `yield await mk()` control parity; a genuinely-pending call whose promise settles
 on a later microtask (suspends at kick, resumes to 42 on drain); a
 mixed call-then-plain-yield sequence; and the direct-expression control).
-`tsc --noEmit` clean. Process-isolated test262 async/async-gen/Promise
-measurement vs pristine-main control shows genuine fail→pass only, zero
-regressions (see `## Test Results`).
+`tsc --noEmit` clean.
+
+## Test Results
+
+- **Repro (host-free wasi, `.tmp/probe-promise-identity.mts`)** — before → after:
+  `yield mk()` NaN → 5; `const pv = mk(); yield pv` NaN → 5; the three controls
+  (`yield await mk()`, `yield Promise.resolve(5)`, direct local) stay 5.
+- **test262 standalone A/B** (process-isolated `runTest262File`, 590 files:
+  async-function / async-arrow / await / Promise resolve·reject·then·all·race·finally),
+  branch vs base: `{pass:348, fail:226, compile_error:16}` on BOTH — **zero flips,
+  zero regressions**. (These files don't isolate the double-wrap shape, so no
+  fail→pass here; the genuine unlock is the wasi async-gen drive lane the harness
+  can't target, proven non-vacuously by the vitest tests above.)
+- **test262 gc A/B** (249 files: async-function / async-arrow / await), branch vs
+  base: **zero flips** — confirms the hash-proven gc inertness behaviourally.
+- **vitest async/async-gen/Promise blast radius** (17 files, 129 tests:
+  async-await, async-census, 1042[-host-drive], 2895[-drain-hook],
+  2906-3a/3b/3di/3dii/multiawait/gap3, 2865, 3134, 2623, 3207, 3220): 124 pass;
+  the 5 failures (3× gap3-tryfinally throw-path, 2× issue-2865 AG0-wasi harness)
+  are **pre-existing on origin/main** — verified an identical 5-fail set on the
+  base checkout (`git checkout origin/main -- src/codegen/expressions.ts`). Zero
+  regressions.
