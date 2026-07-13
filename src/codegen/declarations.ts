@@ -1734,7 +1734,30 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // ── collectCallbackImports finalize ──
   if (state.callbackFound || state.getterCallbackFound || state.asyncCpsFound) {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
-    if ((state.callbackFound || state.asyncCpsFound) && !ctx.funcMap.has("__make_callback")) {
+    // (#3235) The plain-`callbackFound` scan (collectCallbackImports above) fires
+    // for ANY arrow / function-expression anywhere in the module — a very coarse
+    // trigger. In JS-host mode that pre-registers `__make_callback` with a stable
+    // funcIdx so genuine host-callback call sites (`compileArrowAsCallback`) can
+    // bake in its index without the late-import shift hazard (#1384). But in
+    // STANDALONE / WASI mode there is NO JS host: a `call __make_callback` can never
+    // succeed, so no currently-passing standalone module actually *calls* it — the
+    // native callback-dispatch substrate (#3098: `__apply_closure` / `__hof_*` /
+    // `__iter_hof_*`) services every exercised callback host-free. The eager
+    // registration therefore only ever *declares* an unsatisfiable import that is
+    // never called (verified: `iterator.find(() => {})` emits the import decl with
+    // ZERO call sites), which needlessly fails the host-free-pass metric on ~25
+    // sole-leak entries (Iterator-helper tails etc.) and de-leaks ~2.3k multi-import
+    // ones. Gate it off in standalone/WASI, mirroring the async-CPS detector below
+    // which is already `!ctx.standalone`-gated. Any genuine host-callback site that
+    // still reaches `compileArrowAsCallback` degrades to the native closure-struct
+    // path (see the standalone fallback there) — never a dangling call. The JS-host
+    // lane is byte-identical (this branch is unchanged when not standalone/WASI).
+    const makeCallbackHostUnavailable = ctx.standalone || ctx.wasi;
+    if (
+      !makeCallbackHostUnavailable &&
+      (state.callbackFound || state.asyncCpsFound) &&
+      !ctx.funcMap.has("__make_callback")
+    ) {
       addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
     }
     if (state.getterCallbackFound) {
