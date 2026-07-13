@@ -11,6 +11,7 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, isPromiseType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { getFuncRefWrapperRootTypeIdx, getOrCreateFuncRefWrapperTypes } from "../closures.js";
+import { tryCompileNativeDisposableStackAnyMethodCall } from "../disposable-runtime.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
@@ -1459,6 +1460,20 @@ export function tryExternClassMethodOnAny(
     for (const p of sig.params) if (p.kind !== "externref") return false;
     return true;
   };
+
+  // (#3237 Slice 1) Native `DisposableStack` dispatch on an `any` receiver.
+  // Reaching here means every ambiguity/user-member refusal above already
+  // passed, so if `DisposableStack` is a registered extern class declaring this
+  // method the first-match loop below WOULD bind it to the `DisposableStack_*`
+  // HOST import (unsatisfiable standalone → module fails to instantiate before
+  // dispose runs). In `nativeStrings` mode, run a `ref.test $DisposableStack`
+  // runtime dispatch to the native driver instead (miss → clean TypeError, never
+  // the import). Gated inside the helper to Slice-1 `dispose`; other methods fall
+  // through to the loop unchanged. Host lane (`!nativeStrings`) is untouched.
+  if (ctx.nativeStrings && ctx.externClasses.get("DisposableStack")?.methods.has(methodName)) {
+    const dsAny = tryCompileNativeDisposableStackAnyMethodCall(ctx, fctx, propAccess, expr, methodName);
+    if (dsAny !== undefined) return dsAny;
+  }
 
   for (const [key, info] of ctx.externClasses) {
     if (key !== info.className) continue;
