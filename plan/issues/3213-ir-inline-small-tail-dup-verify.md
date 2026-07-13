@@ -1,7 +1,8 @@
 ---
 id: 3213
 title: "IR: inline-small tail-duplication trips post-inline verify (use of SSA value before def) for a call-result live across a duplicated if"
-status: in-progress
+status: done
+completed: 2026-07-13
 assignee: ttraenkler/opus-2856
 sprint: current
 created: 2026-07-13
@@ -105,3 +106,30 @@ the un-inlined (pred-not-inlinable) control.
 - `src/ir/integration.ts` — post-inline verify wiring (~469-492).
 - `src/ir/verify.ts` — dominance / use-before-def checks (~349-410) if the gap
   is verify-side.
+
+## Resolution (2026-07-13, opus-2856)
+
+**Root cause confirmed (not the hypothesis's "def-block bookkeeping" — simpler):**
+`inlineIntoFunction` declared `callerRename` (the map `callSite.result →
+inlinedReturnId`) **inside** the `for (const block of caller.blocks)` loop, so it
+was reset every block. When an inlined call's result is a **cross-block** value
+(`const b = pred(n); if (…){…b…}; …b…` — `b` defined in the entry block, used in
+the then-block + continuation), the downstream uses were never repointed to the
+inlined return id. `b` became an undefined SSA value → `verifyIrFunction` reported
+"use of SSA value before def" → whole-function demote (IR-first hard error).
+
+**Fix (1 line + comment):** hoist `callerRename` to **function scope** so a
+call's rename reaches the blocks that consume its result. Safe because from-ast
+emits reducible, forward-only CFGs (blocks visited in dominance order — a call's
+rename is recorded before its consumer blocks are processed) and SSA ids are
+globally unique (a rename only repoints its own def's uses). No new IR-node or
+lowering work — the inlined value was always correct; only the caller-side
+operand repointing was incomplete.
+
+**Validation:** `tests/issue-3213-inline-small-crossblock.test.ts` (3 tests,
+IR-vs-legacy parity + anti-vacuity `irFirstSkipped` assertions: cross-block use,
+use-only-in-later-block, two cross-block results). tsc clean; IR suites green
+(`ir-if-else`/`ir-let-const`/`ir-algorithms-cluster`/`issue-3203`/`issue-2952`;
+`ir-scaffold`'s 2 failures are pre-existing container-env, verified on base);
+`check:ir-fallbacks` OK (14→14, no delta — this unblocks correctness/IR-first
+claims, it is not a bucket reducer); `check:loc-budget` OK (net +11).
