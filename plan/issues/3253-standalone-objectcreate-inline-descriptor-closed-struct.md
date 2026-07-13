@@ -15,6 +15,8 @@ goal: standalone-mode
 umbrella: 1781
 related: [3246, 2076, 2580, 1906, 2515]
 es_edition: ES5
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 # #3253 — standalone Object.create inline descriptor literal → closed struct
 
