@@ -1,14 +1,14 @@
 {
   "generated": "2026-07-13",
   "threshold": 1500,
-  "totalCeiling": 408801,
+  "totalCeiling": 408955,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
     "src/codegen/any-helpers.ts": 2720,
-    "src/codegen/array-methods.ts": 10141,
+    "src/codegen/array-methods.ts": 10152,
     "src/codegen/array-object-proto.ts": 2210,
-    "src/codegen/async-cps.ts": 2466,
+    "src/codegen/async-cps.ts": 2524,
     "src/codegen/async-frame.ts": 2317,
     "src/codegen/async-scheduler.ts": 4338,
     "src/codegen/binary-ops.ts": 4580,
@@ -17,9 +17,9 @@
     "src/codegen/context/types.ts": 2578,
     "src/codegen/dataview-native.ts": 5287,
     "src/codegen/declarations.ts": 5637,
-    "src/codegen/destructuring-params.ts": 2187,
-    "src/codegen/expressions.ts": 1551,
-    "src/codegen/expressions/assignment.ts": 7471,
+    "src/codegen/destructuring-params.ts": 2200,
+    "src/codegen/expressions.ts": 1552,
+    "src/codegen/expressions/assignment.ts": 7492,
     "src/codegen/expressions/builtins.ts": 3895,
     "src/codegen/expressions/calls-closures.ts": 1517,
     "src/codegen/expressions/calls.ts": 19044,
@@ -47,7 +47,7 @@
     "src/codegen/statements/nested-declarations.ts": 2719,
     "src/codegen/statements/variables.ts": 1535,
     "src/codegen/string-ops.ts": 3495,
-    "src/codegen/type-coercion.ts": 3563,
+    "src/codegen/type-coercion.ts": 3576,
     "src/codegen/typeof-delete.ts": 1672,
     "src/compiler.ts": 1610,
     "src/compiler/early-errors/node-checks.ts": 1865,
@@ -58,6 +58,6 @@
     "src/ir/lower.ts": 3638,
     "src/ir/nodes.ts": 2993,
     "src/ir/select.ts": 3296,
-    "src/runtime.ts": 16242
+    "src/runtime.ts": 14618
   }
 }

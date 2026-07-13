@@ -2141,9 +2141,9 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3400,
-    "fail": 796,
-    "ce": 38,
+    "pass": 3407,
+    "fail": 797,
+    "ce": 30,
     "skip": 0,
     "total": 4234,
     "pct": 80,
@@ -2213,12 +2213,12 @@
       },
       {
         "name": "resizable-arraybuffer",
-        "pass": 266,
-        "fail": 151,
-        "ce": 15,
+        "pass": 273,
+        "fail": 152,
+        "ce": 7,
         "skip": 0,
         "total": 432,
-        "pct": 62
+        "pct": 63
       },
       {
         "name": "class-static-fields-private",
