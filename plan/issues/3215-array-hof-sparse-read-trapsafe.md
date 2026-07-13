@@ -1,7 +1,8 @@
 ---
 id: 3215
 title: "standalone: Array.prototype HOF sparse-array read trap-safety (forEach/map/filter/reduce/every/some/find/findIndex/findLast/findLastIndex)"
-status: ready
+status: done
+completed: 2026-07-13
 created: 2026-07-13
 priority: high
 feasibility: medium
