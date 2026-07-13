@@ -17,6 +17,14 @@ language_feature: destructuring, object-rest
 goal: standalone-mode
 related: [2075, 2620, 2515, 3053, 1552, 2714]
 test262_bucket: standalone-object-rest-de-leak
+# (#3102/#3131) Intended growth: the native standalone __extern_rest_object
+# helper (ensureExternRestObject) lives in the object-runtime subsystem module
+# beside its sibling native helpers (ensureObjectGroupBy), and the call-site
+# standalone branch is in the destructuring-params module. Both are the correct
+# homes for this feature code.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/destructuring-params.ts
 ---
 
 # #3218 — native standalone `__extern_rest_object` (object-rest de-leak)
