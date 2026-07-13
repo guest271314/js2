@@ -91,16 +91,40 @@ describe("#3132 consumer — standalone async-gen for-await drive (identifier bi
     expect(await runStandalone(src)).toBe(30);
   });
 
-  it("boundary: destructuring head over an async-gen source stays legacy (composition PR follows)", async () => {
-    // Not yet host-free — the dstr-head drive over an async-gen source is the
-    // #2996-stacked follow-up. This asserts the current correct-or-legacy
-    // boundary so the follow-up PR flips it deliberately.
-    const r = await compileStandalone(`
+  it("array-pattern destructuring head over async-gen source is host-free and correct", async () => {
+    // Composes with #2996/#3228: the async-gen consumer CFG runs
+    // IteratorBindingInitialization (compileForOfDestructuring) against the
+    // settled element carrier — the shape of ~195 `async-func-dstr-*-async-*`
+    // test262 files.
+    const src = `
       var asyncIter = (async function*() { yield* [[1, 2, 3]]; })();
       let out = 0;
       async function fn() { for await (const [x, y, z] of asyncIter) { out += x + y + z; } }
       export function test() { fn(); return out; }
-    `);
-    expect(hostImportNames(r).length).toBeGreaterThan(0);
+    `;
+    expect(hostImportNames(await compileStandalone(src))).toEqual([]);
+    expect(await runStandalone(src)).toBe(6);
+  });
+
+  it("object-pattern destructuring head over async-gen source is host-free and correct", async () => {
+    const src = `
+      var asyncIter = (async function*() { yield* [{ a: 2, b: 3 }]; })();
+      let out = 0;
+      async function fn() { for await (const { a, b } of asyncIter) { out += a * b; } }
+      export function test() { fn(); return out; }
+    `;
+    expect(hostImportNames(await compileStandalone(src))).toEqual([]);
+    expect(await runStandalone(src)).toBe(6);
+  });
+
+  it("inline async-gen call source, array pattern, multiple yields", async () => {
+    const src = `
+      async function* g() { yield [1, 2]; yield [3, 4]; }
+      let out = 0;
+      async function fn() { for await (const [p, q] of g()) { out += p + q; } }
+      export function test() { fn(); return out; }
+    `;
+    expect(hostImportNames(await compileStandalone(src))).toEqual([]);
+    expect(await runStandalone(src)).toBe(10);
   });
 });

@@ -1779,7 +1779,7 @@ function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expressio
     return null;
   }
   if (!ts.isCallExpression(source)) return null;
-  let callee = source.expression;
+  let callee: ts.Expression = source.expression;
   while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
   if (ts.isIdentifier(callee)) {
     const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
@@ -1832,10 +1832,10 @@ export function forAwaitAsyncNeedsDrive(
 ): boolean {
   const shape = analyzeForAwait(fn, plan);
   if (shape === null) return false;
-  // (#3228) The async-gen CONSUMER path is identifier-only for now; a
-  // destructuring head over an async-gen source stays on legacy (#3132's dstr
-  // follow-up owns it).
-  if (shape.pattern !== undefined) return false;
+  // (#3132) A destructuring head over an async-gen source is now driven natively
+  // (composes #2996's IteratorBindingInitialization delivery with the async-gen
+  // consumer CFG — see `planForAwaitAsyncCfg`). Both identifier and pattern heads
+  // route here once the source resolves to a host-free async-gen next-helper.
   return resolveAsyncGenNextHelperName(ctx, shape.source) !== null;
 }
 
@@ -1859,10 +1859,26 @@ export function planForAwaitAsyncCfg(
 ): AsyncCfgPlan | null {
   const shape = analyzeForAwait(fn, plan);
   if (shape === null) return null;
-  if (shape.pattern !== undefined) return null; // (#3228) async-gen dstr head → legacy (#3132's lane)
   const nextHelperName = resolveAsyncGenNextHelperName(ctx, shape.source);
   if (nextHelperName === null) return null;
-  const { pre, source, binding, body, post } = shape;
+  const { pre, source, binding, pattern, body, post, forStmt } = shape;
+
+  // (#3132) Destructuring head over an async-gen source: `chk`'s `unpackResult`
+  // binds the IteratorResult `.value` into the `FORAWAIT_ELEM` carrier (because
+  // `binding.name === FORAWAIT_ELEM` for a pattern head, per `analyzeForAwait`);
+  // then — reusing the SAME `compileForOfDestructuring` the sync for-of and
+  // #2996's array-source for-await use — run IteratorBindingInitialization
+  // against the carrier at the top of the `bodyId` state (only reached when
+  // done=false, before the body leads read the bound names). `undefined` for an
+  // identifier head (byte-identical to the pre-#3132 plan).
+  const destructureElem: AsyncCfgStepEmit | undefined =
+    pattern === undefined
+      ? undefined
+      : (ctx, fctx) => {
+          const elemLocal = fctx.localMap.get(FORAWAIT_ELEM);
+          if (elemLocal === undefined) return; // carrier absent (unreachable in the drive lane)
+          compileForOfDestructuring(ctx, fctx, pattern, elemLocal, { kind: "externref" }, forStmt);
+        };
 
   // Wasm locals shared across the emit hooks, resolved at emit time. `iter` is
   // the persisted spill slot (allocated by the resume-fn prologue from
@@ -1975,6 +1991,11 @@ export function planForAwaitAsyncCfg(
     {
       id: bodyId,
       resumeFrom: null,
+      // (#3132) Destructuring head: bind the element carrier into the pattern
+      // BEFORE the body leads (which reference the bound names). `undefined` for
+      // an identifier head. `bodyId` is reached only when done=false, so the
+      // pattern is never destructured against the terminal `{value:undefined}`.
+      postDeliverEmit: destructureElem,
       lead: asLead(body),
       terminator: { kind: "goto", target: headId },
     },
