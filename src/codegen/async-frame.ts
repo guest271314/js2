@@ -1352,6 +1352,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       let curHandler = 0;
       if (hasHandlers) out.push(...setHandler(0));
       if (st.resumeFrom) emitDeliver(out, st.resumeFrom);
+      // (#3228) Destructuring for-await head: bind the settled element carrier
+      // into the head's pattern AFTER delivery, BEFORE the leads read the bound
+      // names. `undefined` (no hook) for every other plan and identifier heads.
+      if (st.postDeliverEmit) st.postDeliverEmit(ctx, resumeFctx);
 
       // Compile the lead, toggling the region local at each boundary so a throw
       // in an in-region statement (or the terminator's own evaluation) runs the

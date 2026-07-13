@@ -1,6 +1,6 @@
 ---
 id: 3228
-title: "standalone: for-await-of with a DESTRUCTURING binding falls to the legacy host-CPS lowering (~120 leaky passes) — widen the native async-iterator DRIVE admission"
+title: "standalone: for-await-of with a DESTRUCTURING binding over an ARRAY source falls to the legacy host-CPS lowering (24 leaky passes) — widen the native async-iterator DRIVE admission"
 status: in-progress
 sprint: current
 assignee: ttraenkler/opus-gapmap
@@ -34,9 +34,22 @@ whole async function falls to the legacy host-CPS lowering that emits
 `env::__get_caught_exception`.
 
 Measured on the fresh standalone baseline (2026-07-13, official scope):
-**~120 leaky passes** under `language/statements/for-await-of/async-func-dstr-*`
-(the test262 for-await destructuring harness). All PASS today via the host
-shims; de-leaking flips them leaky → host_free_pass.
+**120 leaky passes** under `language/statements/for-await-of/async-func-dstr-*`.
+
+**Corrected scope (measure-first, 2026-07-13).** The 120 split by SOURCE shape:
+- **24 array-source** (`for await (const {a} of [ … ])`) — the bounded slice
+  THIS issue flips. Verified: all 24 now compile host-free AND pass on the
+  standalone lane (`runTest262File(..., "standalone")` → `{pass: 24}`, zero
+  non-pass).
+- **96 `asyncIter` async-generator-VAR source** (`var asyncIter = (async
+  function*(){…})(); for await (const {…} of asyncIter)`) — a SEPARATE blocker:
+  an async-generator instance held in a VARIABLE is not natively driven even for
+  an IDENTIFIER binding (`resolveAsyncGenNextHelperName` matches only a direct
+  call `g()`, not a var; `elementFactOf(asyncIter)` is unresolvable so the sync
+  carrier declines too). That is the async-gen-consumer-over-var-source gap =
+  **#3132's lane**, NOT a destructuring gap. Out of scope here; a follow-up
+  extends the async-gen consumer (`planForAwaitAsyncCfg`) to var-held sources
+  AND dstr, coordinated with #3132.
 
 ## Root cause
 
@@ -98,4 +111,6 @@ for-of destructuring helper against it.
 
 ## Expected floor delta
 
-~90–120 leaky → host_free_pass. Part of banking the #3178 family's 90%.
+**+24 leaky → host_free_pass** (measured, verified). The remaining 96
+`asyncIter`-source files need the #3132 async-gen-var-source drive first
+(follow-up). Part of banking the #3178 family.
