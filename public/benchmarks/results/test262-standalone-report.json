@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-13T12:04:54.474Z",
-  "baseline_generated_at": "2026-07-13T12:04:54.474Z",
-  "baseline_sha": "e7661c91139ef540dc25995afb0045a254575023",
+  "timestamp": "2026-07-13T12:52:17.152Z",
+  "baseline_generated_at": "2026-07-13T12:52:17.153Z",
+  "baseline_sha": "4f81217587ea3a8f1b975299bc205eb7acc03574",
   "oracle_version": 3,
   "mode": {
     "target": "standalone",
@@ -10,26 +10,26 @@
   },
   "summary": {
     "total": 43106,
-    "pass": 26821,
-    "fail": 15074,
+    "pass": 26830,
+    "fail": 15065,
     "compile_error": 1179,
     "compile_timeout": 13,
     "skip": 19,
     "compilable": 41895,
-    "host_free_pass": 22600,
-    "leaky_pass": 4221,
+    "host_free_pass": 22611,
+    "leaky_pass": 4219,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42020,
-        "pass": 26556,
-        "fail": 14294,
+        "pass": 26565,
+        "fail": 14285,
         "compile_error": 1138,
         "compile_timeout": 13,
         "skip": 19,
         "compilable": 40850,
-        "host_free_pass": 22337,
-        "leaky_pass": 4219,
+        "host_free_pass": 22348,
+        "leaky_pass": 4217,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -61,27 +61,27 @@
       },
       "official": {
         "total": 43106,
-        "pass": 26821,
-        "fail": 15074,
+        "pass": 26830,
+        "fail": 15065,
         "compile_error": 1179,
         "compile_timeout": 13,
         "skip": 19,
         "compilable": 41895,
-        "host_free_pass": 22600,
-        "leaky_pass": 4221,
+        "host_free_pass": 22611,
+        "leaky_pass": 4219,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48088,
-        "pass": 27297,
-        "fail": 19255,
+        "pass": 27306,
+        "fail": 19246,
         "compile_error": 1398,
         "compile_timeout": 14,
         "skip": 124,
         "compilable": 46552,
-        "host_free_pass": 23064,
-        "leaky_pass": 4233,
+        "host_free_pass": 23075,
+        "leaky_pass": 4231,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -89,38 +89,38 @@
   },
   "official_summary": {
     "total": 43106,
-    "pass": 26821,
-    "fail": 15074,
+    "pass": 26830,
+    "fail": 15065,
     "compile_error": 1179,
     "compile_timeout": 13,
     "skip": 19,
     "compilable": 41895,
-    "host_free_pass": 22600,
-    "leaky_pass": 4221,
+    "host_free_pass": 22611,
+    "leaky_pass": 4219,
     "stale": 0
   },
   "full_summary": {
     "total": 48088,
-    "pass": 27297,
-    "fail": 19255,
+    "pass": 27306,
+    "fail": 19246,
     "compile_error": 1398,
     "compile_timeout": 14,
     "skip": 124,
     "compilable": 46552,
-    "host_free_pass": 23064,
-    "leaky_pass": 4233,
+    "host_free_pass": 23075,
+    "leaky_pass": 4231,
     "stale": 0
   },
   "strict_summary": {
     "total": 40597,
-    "pass": 25748,
-    "fail": 13731,
+    "pass": 25757,
+    "fail": 13722,
     "compile_error": 1086,
     "compile_timeout": 13,
     "skip": 19,
     "compilable": 39479,
-    "host_free_pass": 21639,
-    "leaky_pass": 4109,
+    "host_free_pass": 21650,
+    "leaky_pass": 4107,
     "stale": 0
   },
   "scope_summaries": {
@@ -150,14 +150,14 @@
     },
     "standard": {
       "total": 42020,
-      "pass": 26556,
-      "fail": 14294,
+      "pass": 26565,
+      "fail": 14285,
       "compile_error": 1138,
       "compile_timeout": 13,
       "skip": 19,
       "compilable": 40850,
-      "host_free_pass": 22337,
-      "leaky_pass": 4219,
+      "host_free_pass": 22348,
+      "leaky_pass": 4217,
       "stale": 0
     }
   },
@@ -385,13 +385,13 @@
     {
       "name": "built-ins/DisposableStack",
       "path": "built-ins/DisposableStack",
-      "pass": 45,
-      "fail": 42,
+      "pass": 54,
+      "fail": 33,
       "compile_error": 4,
       "compile_timeout": 0,
       "skip": 0,
       "total": 91,
-      "host_free_pass": 43
+      "host_free_pass": 54
     },
     {
       "name": "built-ins/encodeURI",
@@ -1198,19 +1198,19 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 11147,
+    "assertion_fail": 11136,
     "illegal_cast": 396,
     "missing_builtin": 9,
     "missing_dependency": 73,
     "negative_test_fail": 55,
     "null_deref": 292,
     "oob": 49,
-    "other": 5001,
-    "promise_error": 159,
+    "other": 5002,
+    "promise_error": 158,
     "range_error": 29,
     "runtime_error": 271,
     "syntax_error": 6,
-    "type_error": 2897,
+    "type_error": 2899,
     "unreachable": 9,
     "wasm_compile": 260
   },
@@ -1223,8 +1223,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 20667,
-    "classified": 20667,
+    "total_non_pass_non_skip": 20658,
+    "classified": 20658,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1299,8 +1299,8 @@
         "error_categories": {
           "other": 2852,
           "assertion_fail": 1051,
-          "illegal_cast": 2,
           "wasm_compile": 53,
+          "illegal_cast": 2,
           "null_deref": 53,
           "type_error": 221,
           "oob": 2
@@ -1308,51 +1308,51 @@
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-timezone-string-year-zero.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: Temporal is not defined",
           "assertion_fail:returned # — assert ## at L#: assert.throws( RangeError, () => instance.round({ largestUnit: \"months\", relativeTo: { year: #, month: #, day: #, timeZone } }), \"reject minus zero as extended year\" );",
           "other:ReferenceError: TemporalHelpers is not defined",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]"
         ]
       },
       {
         "id": "disposable-stack",
         "issues": ["#1036", "#990"],
         "label": "DisposableStack / explicit resource management",
-        "count": 71,
+        "count": 62,
         "statuses": {
           "pass": 0,
-          "fail": 63,
+          "fail": 54,
           "compile_error": 8,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 71,
+          "total": 62,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 54,
           "other": 8,
-          "type_error": 8,
+          "assertion_fail": 43,
+          "type_error": 10,
           "missing_builtin": 1
         },
         "sample_files": [
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
-          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-not-object.js"
+          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
+          "test/built-ins/AsyncDisposableStack/prototype/disposed/getter.js",
+          "test/built-ins/DisposableStack/prototype/Symbol.dispose.js",
+          "test/built-ins/AsyncDisposableStack/prototype/defer/this-does-not-have-internal-asyncdisposablestate-throws.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { stack.use({ }); }, 'true');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { stack.use({ [Symbol.dispose]: null }); }, 'true');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { stack.use(true); }, 'true');"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
+          "type_error:TypeError: Cannot access property on null or undefined at #:#",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(DisposableStack.prototype[Symbol.dispose], DisposableStack.prototype.dispose);",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { defer.call({ ['[[AsyncDisposableState]]']: {} }); }, 'Ordinary object without [[AsyncDisposableState]]');"
         ]
       },
       {
@@ -1458,14 +1458,14 @@
           "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
           "test/built-ins/JSON/stringify/space-string.js",
-          "test/built-ins/JSON/parse/text-object.js"
+          "test/built-ins/JSON/stringify/value-number-object.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(hint, 'string');"
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(new Number(#)), '#');"
         ]
       },
       {
@@ -1630,15 +1630,15 @@
         },
         "sample_files": [
           "test/built-ins/Atomics/wait/bigint/was-woken-before-timeout.js",
-          "test/built-ins/Atomics/notify/count-from-nans.js",
-          "test/built-ins/Atomics/wait/bigint/no-spurious-wakeup-on-xor.js",
           "test/built-ins/Atomics/waitAsync/bigint/value-not-equal-agent.js",
+          "test/built-ins/Atomics/wait/bigint/no-spurious-wakeup-on-xor.js",
+          "test/built-ins/Atomics/notify/count-from-nans.js",
           "test/built-ins/Atomics/store/bigint/good-views.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
-          "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).; L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal o",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(keys[#], \"foo\");",
+          "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).; L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal o",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { delete p.attr; });",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(_handler, handler, 'handler is context');"
         ]
@@ -1692,9 +1692,9 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 1514,
+          "assertion_fail": 1516,
           "type_error": 320,
-          "other": 146,
+          "other": 144,
           "illegal_cast": 95,
           "wasm_compile": 38,
           "promise_error": 14,
@@ -1734,11 +1734,11 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 367,
+          "assertion_fail": 368,
           "type_error": 42,
           "wasm_compile": 9,
           "negative_test_fail": 2,
-          "other": 5,
+          "other": 4,
           "range_error": 1,
           "null_deref": 3
         },
@@ -1772,10 +1772,10 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 4163,
+          "assertion_fail": 4162,
           "runtime_error": 58,
           "type_error": 913,
-          "other": 121,
+          "other": 122,
           "illegal_cast": 161,
           "wasm_compile": 62,
           "promise_error": 29,
@@ -1928,10 +1928,10 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 1177,
+          "assertion_fail": 1176,
           "type_error": 479,
           "wasm_compile": 3,
-          "other": 19,
+          "other": 20,
           "missing_dependency": 8,
           "negative_test_fail": 4,
           "runtime_error": 7,
@@ -2014,8 +2014,8 @@
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
-          "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
           "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
+          "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
         ],
@@ -2386,11 +2386,11 @@
         },
         "error_categories": {
           "type_error": 5,
-          "assertion_fail": 82,
+          "assertion_fail": 81,
           "promise_error": 5,
           "wasm_compile": 8,
           "negative_test_fail": 13,
-          "other": 43,
+          "other": 44,
           "range_error": 4,
           "null_deref": 2,
           "runtime_error": 2,
@@ -2426,18 +2426,18 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "promise_error": 72,
+          "promise_error": 71,
           "null_deref": 10,
           "assertion_fail": 56,
           "wasm_compile": 14,
           "type_error": 16,
-          "other": 5,
+          "other": 6,
           "illegal_cast": 5
         },
         "sample_files": [
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/iter-next-val-err-reject.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js"
         ],
@@ -2549,7 +2549,7 @@
           "test/language/line-terminators/S7.3_A7_T6.js",
           "test/language/directive-prologue/14.1-3-s.js",
           "test/language/expressions/import.meta/syntax/goal-script.js",
-          "test/language/line-terminators/S7.3_A7_T8.js"
+          "test/language/line-terminators/S7.3_A7_T2.js"
         ],
         "sample_signatures": [
           "assertion_fail:Test262Error: ##: Check Function Expression for automatic semicolon insertion",
