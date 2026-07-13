@@ -1,10 +1,11 @@
 ---
 id: 3237
 title: "Standalone: any-receiver dispatch for builtin-native methods (DisposableStack/Map/Set/…) leaks host imports"
-status: in-progress
-assignee: opus-anyrecv
+status: done
+assignee: opus-anyrecv2
 created: 2026-07-13
 updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -138,8 +139,64 @@ are inert for programs that don't use it.
 - Wired into `tryExternClassMethodOnAny` (calls-closures.ts) and
   `compilePropertyAccess` (property-access.ts).
 
-**Remaining (Slice 2 / future):** the callback methods `defer`/`adopt`/`use` on an
-`any` receiver still leak — they additionally need the standalone closure gate
-(`closures.ts`) to fire on the any-receiver path (currently only reached when the
-call is recognised as a typed native DisposableStack method). Also the broader
-`Map`/`Set`/`WeakMap`/… any-receiver `className ===` arms (out of Slice-1 scope).
+**Remaining (future):** the broader `Map`/`Set`/`WeakMap`/… any-receiver
+`className ===` arms (out of scope here — DisposableStack-specific).
+
+## Slice 2 — DONE (PR pending)
+
+**Scope shipped:** the callback methods `defer(cb)` / `adopt(value, cb)` /
+`use(value)` on an `any`/externref receiver, plus a value-position `undefined`
+correctness fix that also covered a latent Slice-1 `dispose` bug.
+
+**Root cause confirmed (measure-first, on current main):** a `let s: any = new
+DisposableStack(); s.defer(fn)` / `s.adopt(v, fn)` / `s.use(v)` reached
+`tryExternClassMethodOnAny`'s first-match extern loop and lazily bound
+`env::DisposableStack_defer` / `_adopt` / `_use` HOST imports — module fails to
+instantiate standalone, exactly the Slice-1 `dispose` leak for the callback
+methods. (Reproduced: each leaked its sole `DisposableStack_*` import.) The
+`__make_callback` bridge did NOT additionally leak — the #3235 standalone gate
+already degrades the `defer`/`adopt` arrow callbacks to native first-class
+closures.
+
+**Implementation** (`disposable-runtime.ts`, gated `ctx.nativeStrings`; host lane
+byte-identical because the whole path is unreachable in host mode):
+- `tryCompileNativeDisposableStackAnyMethodCall` now routes `defer`/`adopt`/`use`
+  to `compileNativeDisposableStackAnyCallbackMethod`.
+- `compileNativeDisposableStackAnyCallbackMethod` — evaluates receiver + args ONCE
+  into externref locals (call-site order), then `ref.test $DisposableStack`: hit →
+  the native `__disposablestack_append` (defer/adopt) substrate; miss → a clean
+  TypeError (RequireInternalSlot, §12.3.3.{2,4}) — never the host import, never a
+  `ref.cast_null` trap on a non-stack ref (the append/use helpers cast externref→
+  struct and would trap without the brand gate). `use` delegates to
+  `compileNativeDisposableStackAnyUse`, wrapping the typed use logic
+  (disposed-throw + `GetDisposeMethod(value, @@dispose)` read + conditional
+  append) in the same guard; a non-stack `this` → TypeError, null/undefined
+  `value` → return value with no resource added.
+- **funcIdx-ordering (the crux):** every late import is registered FIRST (the
+  append/check helpers → `__new_ReferenceError`; object substrate →
+  `__extern_get`/`__box_symbol`/`__extern_is_undefined`); the guard TypeError's
+  `buildThrowJsErrorInstrs` performs the final `flushLateImportShifts` against
+  `fctx.body`; only THEN are the native helper funcIdxs re-fetched from
+  `ctx.funcMap` (post-shift, final) and baked into the nested `if` arms. No late
+  import registers after the re-fetch. (The value-position `emitUndefined` runs
+  AFTER the `if` is in `fctx.body`, so any shift it triggers correctly updates the
+  baked `appendIdx` via the recursive nested-body shifter.)
+
+**Value-position `undefined` fix (Slice-1 defect, also affected Slice 2 `defer`):**
+`dispose()`/`defer()` in value position returned a raw `ref.null.extern`, but
+under the #2106 undefined-singleton regime `x === undefined` compares against the
+SINGLETON, not null — so `let u = s.dispose(); u === undefined` was FALSE
+(`returns-undefined.js`). Fixed to emit the canonical undefined via
+`emitUndefined` (the singleton in standalone, `__get_undefined` in host). This
+un-breaks the pre-existing Slice-1 `returns undefined (value position)` unit test
+(deterministically red on main, but not in the `quality` CI gate's named-file
+allowlist, so it never blocked main).
+
+**Verified host-free + correct** (`tests/issue-3237-…`): defer LIFO, adopt returns
+value + disposes it, use runs `value[Symbol.dispose]()`, use(null) returns value,
+reverse-order dispose across all three registrars, `=== undefined` for
+dispose/defer value position, user-object `defer` still routes to the #2151
+closed-struct path (via the #3033 refusal), typed nominal path unchanged. No
+`DisposableStack_*` / `__make_callback` import on any. This slice + the landed
+#3234 SuppressedError aggregation flip the dispose-SuppressedError cluster
+host-free.

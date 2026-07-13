@@ -33,6 +33,7 @@
  */
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
+import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
 import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -531,20 +532,27 @@ export function emitLooseEq(
  * excluded too (content equality already works via the tag-5 arm and needs no
  * identity fast path). Unions qualify only when EVERY constituent qualifies, so
  * a `number | object` operand conservatively stays on the legacy path.
+ *
+ * Classifies via `ctx.oracle` (#1930 type-query boundary), not the raw checker.
  */
-function isReferenceLikeEqOperand(t: ts.Type): boolean {
-  const primitiveValue =
-    ts.TypeFlags.NumberLike |
-    ts.TypeFlags.BooleanLike |
-    ts.TypeFlags.BigIntLike |
-    ts.TypeFlags.ESSymbolLike |
-    ts.TypeFlags.StringLike |
-    ts.TypeFlags.EnumLike;
-  if (t.flags & primitiveValue) return false;
-  if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return true;
-  if (t.flags & ts.TypeFlags.Object) return true;
-  if (t.isUnion()) return t.types.every(isReferenceLikeEqOperand);
-  return false;
+function isReferenceLikeEqFact(fact: TypeFact): boolean {
+  switch (fact.kind) {
+    case "array":
+    case "tuple":
+    case "function":
+    case "class":
+    case "builtin":
+    case "object":
+    case "any":
+    case "unknown":
+      return true;
+    case "union":
+      return fact.parts.every(isReferenceLikeEqFact);
+    default:
+      // number / boolean / string / bigint / symbol / undefined / null / void /
+      // unresolvable → keep the existing tag-3/tag-4/tag-5 path.
+      return false;
+  }
 }
 
 function emitAnyEquality(
@@ -572,9 +580,10 @@ function emitAnyEquality(
   // their exact existing tag-3/tag-4 path untouched. Standalone/WASI only — the
   // host lane emits nothing new (byte-identical).
   if (helperName === "__any_strict_eq" && (ctx.standalone || ctx.wasi)) {
-    const leftTs = ctx.checker.getTypeAtLocation(expr.left);
-    const rightTs = ctx.checker.getTypeAtLocation(expr.right);
-    if (isReferenceLikeEqOperand(leftTs) && isReferenceLikeEqOperand(rightTs)) {
+    if (
+      isReferenceLikeEqFact(ctx.oracle.typeFactOf(expr.left)) &&
+      isReferenceLikeEqFact(ctx.oracle.typeFactOf(expr.right))
+    ) {
       const externEqIdx = ensureExternStrictEqHelper(ctx);
       if (externEqIdx !== undefined) {
         const lt = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
