@@ -6771,7 +6771,19 @@ function setupArrayCallback(
 interface ArrayLoopLocals {
   vecTmp: number;
   dataTmp: number;
+  /**
+   * (#3215) The loop bound — CLAMPED to the physical backing
+   * (`min(field0, array.len(data))`) so a sparse receiver (logical `.length`
+   * beyond the backing) never OOB-traps on `data[i]`. Equal to the logical
+   * length for dense arrays.
+   */
   lenTmp: number;
+  /**
+   * (#3215) The UNCLAMPED logical `.length` (vec field 0). Use this — not
+   * `lenTmp` — for result-object sizing that must be the logical length
+   * (map's result, §23.1.3.19). Equal to `lenTmp` for dense arrays.
+   */
+  logicalLenTmp: number;
   iTmp: number;
   getOp: string;
 }
@@ -6822,11 +6834,26 @@ function setupArrayLoop(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
+  // (#3215) Clamp the shared loop bound to the physical WasmGC backing so a
+  // sparse receiver (logical `.length` set beyond the backing) never TRAPS on
+  // the out-of-bounds `array.get data[i]` in the HOF loop. Per spec these HOFs
+  // use HasProperty (holes are SKIPPED), so iterating only the physical defined
+  // prefix — and skipping the beyond-backing holes — is spec-correct. The
+  // UNCLAMPED logical length is preserved in `logicalLenTmp` for consumers that
+  // must size a result by the logical length (map, §23.1.3.19). Dense arrays
+  // keep `lenTmp` unchanged (backing capacity ≥ length ⇒ min is the length ⇒
+  // runtime no-op). This is the HOF analog of the #2980 sort/includes and #2968
+  // indexOf backing-clamps.
+  const logicalLenTmp = allocLocal(fctx, `__arr_${tag}_loglen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "local.set", index: logicalLenTmp });
+  emitBackingLenClamp(fctx, lenTmp, dataTmp);
+
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
   const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
-  return { vecTmp, dataTmp, lenTmp, iTmp, getOp };
+  return { vecTmp, dataTmp, lenTmp, logicalLenTmp, iTmp, getOp };
 }
 
 /**
@@ -7484,8 +7511,13 @@ function compileArrayMap(
 
   const resData = allocLocal(fctx, `__arr_map_rd_${fctx.locals.length}`, { kind: "ref_null", typeIdx: mapArrTypeIdx });
 
-  // Allocate result array with same length
-  fctx.body.push({ op: "local.get", index: loop.lenTmp });
+  // Allocate result array with the LOGICAL length (§23.1.3.19 — map's result is
+  // the same length as the source). (#3215) `loop.lenTmp` is clamped to the
+  // physical backing for trap-safety, so size the result from the UNCLAMPED
+  // `loop.logicalLenTmp`; the loop below only writes the in-backing prefix, and
+  // the beyond-backing result slots stay default-initialised (consistent with
+  // the #2001-S2 deferred map-result-hole behavior). Equal for dense arrays.
+  fctx.body.push({ op: "local.get", index: loop.logicalLenTmp });
   fctx.body.push({ op: "array.new_default", typeIdx: mapArrTypeIdx });
   fctx.body.push({ op: "local.set", index: resData });
 
@@ -7529,7 +7561,10 @@ function compileArrayMap(
 
   emitArrayLoop(fctx, loopBody);
 
-  fctx.body.push({ op: "local.get", index: loop.lenTmp });
+  // (#3215) Result vec length is the LOGICAL length (unclamped) so a sparse
+  // source's map result keeps the source length (§23.1.3.19), matching the
+  // logical-length `resData` allocation above.
+  fctx.body.push({ op: "local.get", index: loop.logicalLenTmp });
   fctx.body.push({ op: "local.get", index: resData });
   fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "struct.new", typeIdx: mapVecTypeIdx });
@@ -7799,6 +7834,7 @@ function compileArrayReduceRight(
   const vecTmp = allocLocal(fctx, `__arr_rr_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_rr_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_rr_len_${fctx.locals.length}`, { kind: "i32" });
+  const logicalLenTmp = allocLocal(fctx, `__arr_rr_loglen_${fctx.locals.length}`, { kind: "i32" });
   const iTmp = allocLocal(fctx, `__arr_rr_i_${fctx.locals.length}`, { kind: "i32" });
 
   compileExpression(ctx, fctx, propAccess.expression);
@@ -7809,6 +7845,17 @@ function compileArrayReduceRight(
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // (#3215) reduceRight seeds from / iterates down from `length - 1`; clamp the
+  // length to the physical backing so a sparse receiver does not TRAP on the
+  // out-of-bounds `data[length-1]` seed read (or the reverse scan). Beyond-
+  // backing indices are absent holes, skipped by reduceRight (§23.1.3.24), so
+  // seeding from and iterating the physical prefix is spec-correct. No-op for
+  // dense arrays. (reduceRight builds its own loop struct rather than going
+  // through setupArrayLoop, so it gets the clamp inline.)
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "local.set", index: logicalLenTmp });
+  emitBackingLenClamp(fctx, lenTmp, dataTmp);
 
   const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
   const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, accType);
@@ -7822,6 +7869,7 @@ function compileArrayReduceRight(
     vecTmp,
     dataTmp,
     lenTmp,
+    logicalLenTmp,
     iTmp,
     getOp,
   };
@@ -8650,14 +8698,16 @@ function compileArraySort(
  * required helpers are unavailable (caller falls back to the numeric Timsort).
  */
 /**
- * (#3201) In-place clamp of a sort's length local to the physical WasmGC
- * backing: `lenLocal = min(lenLocal, array.len(dataLocal))`. A sparse array
- * (logical `.length` set beyond the backing) would otherwise trap on the
- * out-of-bounds `array.get`/`array.set` in the sort loop; per §23.1.3.30 the
- * beyond-backing indices are holes that sort to the end, so sorting only the
- * defined physical prefix is spec-correct. No-op for dense arrays.
+ * (#3201/#3215) In-place clamp of an array method's length local to the
+ * physical WasmGC backing: `lenLocal = min(lenLocal, array.len(dataLocal))`. A
+ * sparse array (logical `.length` set beyond the backing) would otherwise trap
+ * on the out-of-bounds `array.get`/`array.set` in the method's element loop.
+ * The beyond-backing indices are holes that every affected method treats as
+ * absent (sort moves them to the end §23.1.3.30; the HasProperty-driven HOFs
+ * SKIP them), so iterating only the defined physical prefix is spec-correct.
+ * No-op for dense arrays (backing ≥ length ⇒ min is the length).
  */
-function emitSortLenBackingClamp(fctx: FunctionContext, lenLocal: number, dataLocal: number): void {
+function emitBackingLenClamp(fctx: FunctionContext, lenLocal: number, dataLocal: number): void {
   fctx.body.push({ op: "local.get", index: lenLocal });
   fctx.body.push({ op: "local.get", index: dataLocal });
   fctx.body.push({ op: "array.len" });
@@ -8745,7 +8795,7 @@ function compileArrayDefaultToStringSort(
   // beyond-backing indices are holes that sort to the END, so sorting only the
   // physical defined prefix and leaving the holes in place is spec-correct.
   // Dense vecs keep `lenTmp` (backing ≥ length ⇒ runtime no-op).
-  emitSortLenBackingClamp(fctx, lenTmp, dataTmp);
+  emitBackingLenClamp(fctx, lenTmp, dataTmp);
 
   const getOp: Instr["op"] =
     elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
@@ -8935,7 +8985,7 @@ function tryCompileComparatorSort(
   // (#3201) Clamp the comparator sort length to the physical backing so a sparse
   // receiver does not trap on the out-of-bounds element access below. Holes sort
   // to the end (§23.1.3.30); no-op for dense arrays.
-  emitSortLenBackingClamp(fctx, lenTmp, dataTmp);
+  emitBackingLenClamp(fctx, lenTmp, dataTmp);
 
   const getOp: Instr["op"] =
     elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
