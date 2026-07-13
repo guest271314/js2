@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3220 — Array join/toString/for-of sparse-array bounds-checked-read trap-safety.
+ * #3224 — Array join/toString/for-of sparse-array bounds-checked-read trap-safety.
  *
  * Bounds-checked-read analog of the #3201 clamp family (#2968/#2970/#2973/#2980/
  * #2982). On a sparse array (logical `.length` set beyond the physical WasmGC
@@ -17,14 +17,14 @@ import { compile } from "../src/index.js";
 
 async function numResult(body: string, target?: "standalone"): Promise<number> {
   const src = `export function test(): number {\n${body}\n}`;
-  const r = await compile(src, { fileName: "issue-3220-join-forof-sparse.ts", target, skipSemanticDiagnostics: true });
+  const r = await compile(src, { fileName: "issue-3224-join-forof-sparse.ts", target, skipSemanticDiagnostics: true });
   expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   const { instance } = await WebAssembly.instantiate(r.binary, {});
   return (instance.exports as { test(): number }).test();
 }
 
 for (const target of ["standalone"] as const) {
-  describe(`#3220 join/toString/for-of trap-safety on sparse arrays (${target})`, () => {
+  describe(`#3224 join/toString/for-of trap-safety on sparse arrays (${target})`, () => {
     // --- join / toString: absent index → "" (trailing empties preserved) ---
     it('join(",") on a sparse array yields the trailing empty slots (no OOB trap)', async () => {
       // [1,2,3]; a.length=6  →  "1,2,3,,,"  (length 8)

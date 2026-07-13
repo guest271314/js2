@@ -6181,7 +6181,7 @@ function compileArrayJoinNative(
   fctx.body.push({ op: "local.set", index: iTmp });
 
   // #2088 — shared fold (host + native lanes route through this).
-  // (#3220) Bounds-check the per-element read against the physical WasmGC
+  // (#3224) Bounds-check the per-element read against the physical WasmGC
   // backing so a sparse array (logical `.length` set beyond the backing) does
   // not TRAP on the out-of-bounds `data[i]`. §23.1.3.18: an absent index joins
   // as the empty string, so a beyond-backing index yields "" — NOT a clamp: the
@@ -6430,7 +6430,7 @@ function compileArrayJoin(
   }
 
   // #2088 — shared fold (host + native lanes route through this).
-  // (#3220) Bounds-check the per-element read against the physical WasmGC
+  // (#3224) Bounds-check the per-element read against the physical WasmGC
   // backing so a sparse array (logical `.length` set beyond the backing) does
   // not TRAP on the out-of-bounds `data[i]`. §23.1.3.18: an absent index joins
   // as the empty string, so a beyond-backing index yields "" — NOT a clamp: the

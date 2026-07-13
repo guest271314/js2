@@ -1,5 +1,5 @@
 ---
-id: 3220
+id: 3224
 title: "standalone: Array join/toString/for-of sparse-array bounds-checked-read trap-safety"
 status: done
 completed: 2026-07-13
@@ -18,7 +18,7 @@ loc-budget-allow: [src/codegen/array-methods.ts, src/codegen/statements/loops.ts
 origin: "2026-07-13 opus-3201b — bounds-checked-read analog of the #3201/#3215 clamp family"
 ---
 
-# #3220 — Array join/toString/for-of sparse-array read trap-safety
+# #3224 — Array join/toString/for-of sparse-array read trap-safety
 
 Bounds-checked-read analog of the #3201 clamp family (#2968 indexOf/lastIndexOf,
 #2970 slice/concat, #2973 pop/splice, #2980 sort/includes, #2982 HOFs). On a
@@ -70,7 +70,7 @@ concern if a huge-length test surfaces.
 1. join/toString/for-of on a sparse array → NO trap; spec-correct value
    (join trailing empties; for-of yields undefined for holes).
 2. Dense arrays behaviourally unchanged.
-3. Dedicated `tests/issue-3220-join-forof-sparse.test.ts`, standalone lane.
+3. Dedicated `tests/issue-3224-join-forof-sparse.test.ts`, standalone lane.
 4. No standalone-lane regressions.
 
 ## Out of scope

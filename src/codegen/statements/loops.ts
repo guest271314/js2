@@ -4050,7 +4050,7 @@ function compileForOfArray(
   // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
   // a growth that reallocated the backing array leaves the hoisted `dataLocal`
   // stale.
-  // (#3220) In standalone, bounds-check the per-element read against the
+  // (#3224) In standalone, bounds-check the per-element read against the
   // physical WasmGC backing so a sparse array (logical `.length` set beyond the
   // backing) yields the absent value instead of an OOB TRAP. The array iterator
   // visits every index up to the LOGICAL length (§23.1.5.1) — so this does NOT
@@ -4368,7 +4368,7 @@ function compileForOfArrayEntries(
     fctx.body.push({ op: "f64.convert_i32_s" });
     fctx.body.push({ op: "local.set", index: keyLocal! });
     // value = data[i] (packed i8/i16 widens to i32 on read, #2934)
-    // (#3220) In standalone, bounds-check the read against the physical backing
+    // (#3224) In standalone, bounds-check the read against the physical backing
     // so a sparse array (logical length beyond the backing) yields the absent
     // value (undefined ≡ ref.null.extern; f64 → sNaN sentinel) instead of an OOB
     // trap. entries() visits every index up to the logical length; the read is
