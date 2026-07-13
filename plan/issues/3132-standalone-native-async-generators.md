@@ -117,6 +117,28 @@ isAsyncGenDriveCandidate`) routes through `emitAsyncGenerator` — covers
   native `__iterator` protocol (runtime loop, not static unroll).
 - **S4 — `return` in async-gen body**: needs a settleReturn terminator.
 
+## S-consumer — async-gen CONSUMER drive (2026-07-13, opus-asyncgen)
+
+Measure-first found the producer already drives host-free (S1/S2a); the residual
+leak on the `for await (const … of <async-gen>)` files is the CONSUMER, in two
+parts landed as two PRs:
+
+- **PR-1 (foundation, #3001, merged)** — (a) `resolveAsyncGenNextHelperName`
+  resolves a var-held / IIFE async-gen FRAME source (identifier → var-initializer
+  → producer; `(async function*(){})()` → producer-by-decl), not only a direct
+  named call; (b) `calleeIsDriveLowered` recognises the standalone async-gen
+  consumer drive lane (carrier-independent, returns a native `$Promise`) so the
+  CALL site skips the host `Promise_reject`/`__get_caught_exception` try/catch
+  wrap. Identifier-binding var/inline/`yield*`-literal sources → host-free.
+- **PR-2 (dstr composition, #3007)** — a DESTRUCTURING head over an async-gen
+  source now drives natively, composing #2996/#3228's `compileForOfDestructuring`
+  delivery into the async-gen consumer CFG (`forAwaitAsyncNeedsDrive` +
+  `planForAwaitAsyncCfg`: drop the identifier-only guards; run `destructureElem`
+  via `postDeliverEmit` on the `bodyId` state against the `FORAWAIT_ELEM`
+  carrier). Flips the ~195 `async-func-dstr-*-async-*` corpus files. The
+  consumer whose source is itself an async GENERATOR (`async-gen-dstr-*`, +195)
+  is a harder nested shape, banked for a later slice.
+
 ## Graveyard discipline
 
 Measure-first honest yield (sample by CONSTRUCT, not directory — the #2938
