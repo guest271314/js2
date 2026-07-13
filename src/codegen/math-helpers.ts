@@ -11,12 +11,15 @@
  * with arithmetic range reduction. Precision target: within 4 ULP of
  * IEEE 754 for the common range.
  *
- * #3141 — the derived family (sinh/cosh/tanh, asinh/acosh/atanh, cbrt,
- * expm1, log1p) is SELF-HOSTED: written as ordinary TS source in
- * `src/stdlib/math.ts` and compiled through the compiler's own IR
- * pipeline (`stdlib-selfhost.ts`) instead of hand-emitted `Instr[]`.
- * Only the precision-sensitive range-reduction cores (sin/cos/exp/log/
- * atan + atan2/pow/log2/log10/tan/random) remain hand-written here.
+ * #3141/#3204/#3233/#3226 — nearly the whole family is now SELF-HOSTED: written
+ * as ordinary TS source in `src/stdlib/math.ts`, compiled through the compiler's
+ * own IR pipeline (`stdlib-selfhost.ts`) instead of hand-emitted `Instr[]` —
+ * the derived family (sinh/cosh/tanh, asinh/acosh/atanh, cbrt, expm1, log1p),
+ * the log/trig cores (log/log2, reduce_trig, sin/cos/tan, atan/asin/acos),
+ * atan2 (#3233), and exp/pow/log10 (#3226 established none needs new dialect
+ * intrinsics — the presumed i32-bit-op / reinterpret / f64.nearest gaps are all
+ * avoidable in pure f64). The ONLY Math core still hand-written here is
+ * `random` — a host RNG import, not a dialect gap.
  */
 import type { Instr, ValType } from "../ir/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
@@ -34,76 +37,22 @@ import {
   TAN_BUILTIN,
   ASIN_BUILTIN,
   ACOS_BUILTIN,
-} from "../stdlib/math.js"; // (#3141/#3204) TS-source builtin bodies
+  ATAN2_BUILTIN,
+  EXP_BUILTIN,
+  LOG10_BUILTIN,
+  POW_BUILTIN,
+} from "../stdlib/math.js"; // (#3141/#3204/#3233/#3226) TS-source builtin bodies
 
 // ─── Instruction shorthand helpers ──────────────────────────────────
+// Only `Math.random` remains hand-emitted (WASI `random_get` host import —
+// not a dialect gap); every other Math core is self-hosted TS source in
+// `src/stdlib/math.ts`. These are the few shorthands its body still needs.
 const f64c = (v: number): Instr => ({ op: "f64.const", value: v }) as Instr;
-const localGet = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-const localSet = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-const add: Instr = { op: "f64.add" } as Instr;
-const sub: Instr = { op: "f64.sub" } as Instr;
 const mul: Instr = { op: "f64.mul" } as Instr;
-const div: Instr = { op: "f64.div" } as Instr;
-const neg: Instr = { op: "f64.neg" } as Instr;
-const fabs: Instr = { op: "f64.abs" } as Instr;
-const fsqrt: Instr = { op: "f64.sqrt" } as Instr;
-const ffloor: Instr = { op: "f64.floor" } as Instr;
-const ftrunc: Instr = { op: "f64.trunc" } as Instr;
-const feq: Instr = { op: "f64.eq" } as Instr;
-const fne: Instr = { op: "f64.ne" } as Instr;
-const flt: Instr = { op: "f64.lt" } as Instr;
-const fgt: Instr = { op: "f64.gt" } as Instr;
-const fle: Instr = { op: "f64.le" } as Instr;
-const fge: Instr = { op: "f64.ge" } as Instr;
-const ret: Instr = { op: "return" } as Instr;
-const copysign: Instr = { op: "f64.copysign" } as Instr;
 const i32const = (v: number): Instr => ({ op: "i32.const", value: v }) as Instr;
-const i32eqz: Instr = { op: "i32.eqz" } as Instr;
-const truncSatI32: Instr = { op: "i32.trunc_sat_f64_s" } as Instr;
-const i32sub: Instr = { op: "i32.sub" } as Instr;
-
-function ifThenRet(cond: Instr[], result: Instr[]): Instr[] {
-  return [...cond, { op: "if", blockType: { kind: "empty" }, then: [...result, ret] } as Instr];
-}
-
-function ifElse(type: ValType, thenBody: Instr[], elseBody: Instr[]): Instr {
-  return {
-    op: "if",
-    blockType: { kind: "val", type },
-    then: thenBody,
-    else: elseBody,
-  } as Instr;
-}
-
-function call(funcIdx: number): Instr {
-  return { op: "call", funcIdx } as Instr;
-}
-
-function blockLoop(body: Instr[]): Instr {
-  return {
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body,
-      } as Instr,
-    ],
-  } as Instr;
-}
-
-// ─── Constants ──────────────────────────────────────────────────────
-const PI = Math.PI;
-const HALF_PI = PI / 2;
-const LN2 = Math.LN2;
-const LOG2E = Math.LOG2E;
-const LOG10E = Math.LOG10E;
 
 // ─── Type aliases ───────────────────────────────────────────────────
 const f64Type: ValType = { kind: "f64" };
-const i32Type: ValType = { kind: "i32" };
-const f64Param: ValType[] = [f64Type];
 const f64Result: ValType[] = [f64Type];
 
 type MathFuncDef = {
@@ -135,14 +84,6 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     ctx.funcMap.set(def.name, funcIdx);
     addedFuncs.set(def.name, funcIdx);
     return funcIdx;
-  }
-
-  function getFuncIdx(name: string): number {
-    const idx = addedFuncs.get(name);
-    if (idx === undefined) {
-      throw new Error(`Math helper ${name} not yet added but referenced`);
-    }
-    return idx;
   }
 
   // ─── Math.random ──────────────────────────────────────────────────
@@ -252,122 +193,11 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
   }
 
   // ─── Math.exp ─────────────────────────────────────────────────────
-  // exp(x) = 2^n * exp(r), where x = n*ln2 + r, |r| <= ln2/2
+  // Self-hosted (#3226): 2^n by pure-f64 repeated squaring (no i32 bit-ops /
+  // reinterpret needed). Early core — emitted before its callers (sinh/cosh/
+  // tanh/expm1/pow) so their `Math_exp` calls resolve by funcMap name.
   if (needExp) {
-    // Locals: 0=x, 1=n, 2=r, 3=expR, 4=ni(i32), 5=pow2, 6=base
-    addMathFunc({
-      name: "Math_exp",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "n", type: f64Type },
-        { name: "r", type: f64Type },
-        { name: "expR", type: f64Type },
-        { name: "ni", type: i32Type },
-        { name: "pow2", type: f64Type },
-        { name: "base", type: f64Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(0)]),
-        ...ifThenRet([localGet(0), f64c(709.7), fgt], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-745), flt], [f64c(0)]),
-
-        // n = round(x / ln2)
-        localGet(0),
-        f64c(LOG2E),
-        mul,
-        f64c(0.5),
-        add,
-        ffloor,
-        localSet(1),
-
-        // r = x - n * ln2
-        localGet(0),
-        localGet(1),
-        f64c(LN2),
-        mul,
-        sub,
-        localSet(2),
-
-        // exp(r) via Horner (Taylor order 7):
-        // 1 + r*(1 + r*(1/2 + r*(1/6 + r*(1/24 + r*(1/120 + r*(1/720 + r/5040))))))
-        localGet(2),
-        f64c(1.0 / 5040),
-        mul,
-        f64c(1.0 / 720),
-        add,
-        localGet(2),
-        mul,
-        f64c(1.0 / 120),
-        add,
-        localGet(2),
-        mul,
-        f64c(1.0 / 24),
-        add,
-        localGet(2),
-        mul,
-        f64c(1.0 / 6),
-        add,
-        localGet(2),
-        mul,
-        f64c(1.0 / 2),
-        add,
-        localGet(2),
-        mul,
-        f64c(1),
-        add,
-        localGet(2),
-        mul,
-        f64c(1),
-        add,
-        localSet(3),
-
-        // Compute 2^n via repeated squaring
-        f64c(1),
-        localSet(5),
-        localGet(1),
-        fabs,
-        truncSatI32,
-        localSet(4),
-        f64c(2),
-        localSet(6),
-
-        blockLoop([
-          localGet(4),
-          i32eqz,
-          { op: "br_if", depth: 1 } as Instr,
-          // if ni & 1, pow2 *= base
-          localGet(4),
-          i32const(1),
-          { op: "i32.and" } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: [localGet(5), localGet(6), mul, localSet(5)] } as Instr,
-          // base *= base
-          localGet(6),
-          localGet(6),
-          mul,
-          localSet(6),
-          // ni >>= 1
-          localGet(4),
-          i32const(1),
-          { op: "i32.shr_u" } as Instr,
-          localSet(4),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        // If n < 0, pow2 = 1/pow2
-        localGet(1),
-        f64c(0),
-        flt,
-        { op: "if", blockType: { kind: "empty" }, then: [f64c(1), localGet(5), div, localSet(5)] } as Instr,
-
-        // result = expR * pow2
-        localGet(3),
-        localGet(5),
-        mul,
-      ],
-    });
+    addedFuncs.set("Math_exp", emitSelfHostedMathFunc(ctx, EXP_BUILTIN));
   }
 
   // ─── Math.log ─────────────────────────────────────────────────────
@@ -400,16 +230,10 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     addedFuncs.set("Math_acos", emitSelfHostedMathFunc(ctx, ACOS_BUILTIN));
   }
 
-  // Math.atan2(y, x)
+  // Math.atan2(y, x) — self-hosted (#3233): binary, pure f64, calls the
+  // self-hosted Math_atan (registered just above via `needAtan`).
   if (needed.has("atan2")) {
-    const atanIdx = getFuncIdx("Math_atan");
-    addMathFunc({
-      name: "Math_atan2",
-      params: [f64Type, f64Type],
-      results: f64Result,
-      locals: [{ name: "atmp", type: f64Type }], // local 2 = atan_result temp
-      body: buildAtan2Body(atanIdx),
-    });
+    addedFuncs.set("Math_atan2", emitSelfHostedMathFunc(ctx, ATAN2_BUILTIN));
   }
 
   // Math.log2(x) = e + log2(f), computed via range reduction (exact for powers of 2)
@@ -418,58 +242,17 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     addedFuncs.set("Math_log2", emitSelfHostedMathFunc(ctx, LOG2_BUILTIN));
   }
 
-  // Math.log10(x) = log(x) * LOG10E, with integer rounding for exact powers of 10
-  // Locals: 0=x, 1=result, 2=rounded
+  // Math.log10 — self-hosted (#3226): `Math.floor(result + 0.5)` replaces the
+  // hand `f64.nearest` (bit-identical within the <1e-12 correction guard).
+  // Calls the early-core self-hosted Math_log (registered above).
   if (needed.has("log10")) {
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_log10",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "result", type: f64Type },
-        { name: "rounded", type: f64Type },
-      ],
-      body: [
-        // Compute log(x) * LOG10E
-        localGet(0),
-        call(logIdx),
-        f64c(LOG10E),
-        mul,
-        localSet(1),
-
-        // Round-to-nearest integer when very close (within 1e-12)
-        // This corrects precision loss for exact powers of 10
-        localGet(1),
-        { op: "f64.nearest" } as Instr,
-        localSet(2),
-        localGet(1),
-        localGet(2),
-        sub,
-        fabs,
-        f64c(1e-12),
-        flt,
-        ifElse(f64Type, [localGet(2)], [localGet(1)]),
-      ],
-    });
+    addedFuncs.set("Math_log10", emitSelfHostedMathFunc(ctx, LOG10_BUILTIN));
   }
 
-  // Math.pow(base, exponent)
+  // Math.pow — self-hosted (#3226): pure-f64 exp-by-squaring + exp(e·log b)
+  // general path, calling the self-hosted Math_exp / Math_log. Binary (arity 2).
   if (needed.has("pow")) {
-    const expIdx = getFuncIdx("Math_exp");
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_pow",
-      params: [f64Type, f64Type],
-      results: f64Result,
-      locals: [
-        { name: "absBase", type: f64Type }, // 2
-        { name: "powRes", type: f64Type }, // 3 — squaring accumulator
-        { name: "powBase", type: f64Type }, // 4 — repeatedly squared base
-        { name: "powN", type: i32Type }, // 5 — |exponent| as i32 loop counter
-      ],
-      body: buildPowBody(expIdx, logIdx),
-    });
+    addedFuncs.set("Math_pow", emitSelfHostedMathFunc(ctx, POW_BUILTIN));
   }
 
   // ─── Self-hosted subset (#3141) ───────────────────────────────────
@@ -486,379 +269,4 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
       addedFuncs.set(builtin.name, emitSelfHostedMathFunc(ctx, builtin));
     }
   }
-}
-
-// ─── Complex body builders ──────────────────────────────────────────
-
-function buildAtan2Body(atanIdx: number): Instr[] {
-  // atan2(y, x): params 0=y, 1=x
-  return [
-    // NaN checks
-    ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-    ...ifThenRet([localGet(1), localGet(1), fne], [f64c(NaN)]),
-
-    // y == 0 cases
-    localGet(0),
-    f64c(0),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // y == 0, x > 0 → +0 (preserving sign of y)
-        localGet(1),
-        f64c(0),
-        fgt,
-        { op: "if", blockType: { kind: "empty" }, then: [localGet(0), ret] } as Instr,
-        // y == 0, x < 0 → copysign(pi, y)
-        localGet(1),
-        f64c(0),
-        flt,
-        { op: "if", blockType: { kind: "empty" }, then: [f64c(PI), localGet(0), copysign, ret] } as Instr,
-        // y == 0, x == 0 → copysign(0 or pi based on sign of x)
-        // atan2(+0,+0) = +0, atan2(+0,-0) = pi, atan2(-0,+0) = -0, atan2(-0,-0) = -pi
-        // Check sign of x via 1/x: +0 → +Inf, -0 → -Inf
-        f64c(1),
-        localGet(1),
-        div,
-        f64c(0),
-        fgt,
-        ifElse(f64Type, [f64c(0), localGet(0), copysign], [f64c(PI), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // x == +Inf
-    localGet(1),
-    f64c(Infinity),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        localGet(0),
-        fabs,
-        f64c(Infinity),
-        feq,
-        ifElse(f64Type, [f64c(PI / 4), localGet(0), copysign], [f64c(0), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // x == -Inf
-    localGet(1),
-    f64c(-Infinity),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        localGet(0),
-        fabs,
-        f64c(Infinity),
-        feq,
-        ifElse(f64Type, [f64c((3 * PI) / 4), localGet(0), copysign], [f64c(PI), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // y == ±Inf, x finite
-    ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(HALF_PI), localGet(0), copysign]),
-
-    // General case: atan(y/x) with quadrant adjustment
-    localGet(1),
-    f64c(0),
-    fgt,
-    ifElse(
-      f64Type,
-      [localGet(0), localGet(1), div, call(atanIdx)],
-      [
-        localGet(1),
-        f64c(0),
-        flt,
-        ifElse(
-          f64Type,
-          [
-            localGet(0),
-            localGet(1),
-            div,
-            call(atanIdx),
-            localSet(2),
-            // Add or subtract pi based on sign of y
-            localGet(0),
-            f64c(0),
-            fge,
-            ifElse(f64Type, [localGet(2), f64c(PI), add], [localGet(2), f64c(PI), sub]),
-          ],
-          [
-            // x == 0, y != 0 → copysign(pi/2, y)
-            f64c(HALF_PI),
-            localGet(0),
-            copysign,
-          ],
-        ),
-      ],
-    ),
-  ];
-}
-
-function buildPowBody(expIdx: number, logIdx: number): Instr[] {
-  // pow(base, exponent): params 0=base, 1=exponent; locals 2=absBase
-  return [
-    // exp == 0 → 1 (for any base, including NaN)
-    ...ifThenRet([localGet(1), f64c(0), feq], [f64c(1)]),
-    // NaN checks (must come before base==1, per spec: pow(1, NaN) → NaN)
-    ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-    ...ifThenRet([localGet(1), localGet(1), fne], [f64c(NaN)]),
-    // §21.3.2.26: if abs(base) == 1 and abs(exponent) == +Infinity → NaN
-    // (must come before base == 1 short-circuit; covers pow(±1, ±Infinity))
-    ...ifThenRet(
-      [localGet(0), fabs, f64c(1), feq, localGet(1), fabs, f64c(Infinity), feq, { op: "i32.and" } as Instr],
-      [f64c(NaN)],
-    ),
-    // base == 1 → 1
-    ...ifThenRet([localGet(0), f64c(1), feq], [f64c(1)]),
-    // exp == 1 → base
-    ...ifThenRet([localGet(1), f64c(1), feq], [localGet(0)]),
-    // exp == -1 → 1/base
-    ...ifThenRet([localGet(1), f64c(-1), feq], [f64c(1), localGet(0), div]),
-    // exp == 0.5 → sqrt(base)
-    ...ifThenRet([localGet(1), f64c(0.5), feq], [localGet(0), fsqrt]),
-    // exp == 2 → base*base
-    ...ifThenRet([localGet(1), f64c(2), feq], [localGet(0), localGet(0), mul]),
-
-    // base == 0: check sign of base and parity of exponent
-    localGet(0),
-    f64c(0),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // isNegZero AND isOddInt? → result has negative sign
-        // isNegZero: 1/base == -Infinity
-        // isOddInt: trunc(exp) == exp AND floor(exp/2)*2 != trunc(exp)
-        f64c(1),
-        localGet(0),
-        div,
-        f64c(-Infinity),
-        feq, // isNegZero?
-        localGet(1),
-        localGet(1),
-        ftrunc,
-        feq, // isInteger?
-        { op: "i32.and" } as Instr,
-        localGet(1),
-        ftrunc,
-        f64c(2),
-        div,
-        ffloor, // isOdd?
-        f64c(2),
-        mul,
-        localGet(1),
-        ftrunc,
-        fne,
-        { op: "i32.and" } as Instr,
-        // Stack: i32 (isNegZeroAndOddInt)
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [
-            // Negative zero base + odd integer exp
-            localGet(1),
-            f64c(0),
-            fgt,
-            ifElse(f64Type, [f64c(-0.0)], [f64c(-Infinity)]),
-            ret,
-          ],
-        } as Instr,
-        // Positive zero base (or even/non-integer exp)
-        localGet(1),
-        f64c(0),
-        fgt,
-        ifElse(f64Type, [f64c(0)], [f64c(Infinity)]),
-        ret,
-      ],
-    } as Instr,
-
-    // base == +Inf
-    ...ifThenRet(
-      [localGet(0), f64c(Infinity), feq],
-      [localGet(1), f64c(0), fgt, ifElse(f64Type, [f64c(Infinity)], [f64c(0)])],
-    ),
-
-    // base == -Inf: sign depends on whether exponent is odd integer
-    localGet(0),
-    f64c(-Infinity),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // isOddInt: trunc(exp) == exp AND floor(exp/2)*2 != trunc(exp)
-        localGet(1),
-        localGet(1),
-        ftrunc,
-        feq, // isInteger?
-        localGet(1),
-        ftrunc,
-        f64c(2),
-        div,
-        ffloor, // isOdd?
-        f64c(2),
-        mul,
-        localGet(1),
-        ftrunc,
-        fne,
-        { op: "i32.and" } as Instr,
-        // Now i32 isOddInt is on stack
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [
-            // Odd integer exponent: -Inf or -0
-            localGet(1),
-            f64c(0),
-            fgt,
-            ifElse(f64Type, [f64c(-Infinity)], [f64c(-0.0)]),
-            ret,
-          ],
-        } as Instr,
-        // Even/non-integer exponent: +Inf or +0
-        localGet(1),
-        f64c(0),
-        fgt,
-        ifElse(f64Type, [f64c(Infinity)], [f64c(0)]),
-        ret,
-      ],
-    } as Instr,
-
-    // ── Integer-exponent fast path (exact) ─────────────────────────────
-    // For an integer exponent that fits in an i32 counter, compute base^|exp|
-    // by exponentiation-by-squaring (mirrors V8's `power_double_int`). This is
-    // EXACT for integer base/exponent within f64 range, so e.g. 3**3 === 27 and
-    // (-3)**3 === -27, instead of the ~1-ULP-low `exp(exp*log|base|)` result
-    // (3**3 → 26.999…) the generic path below produces. Repeated multiplication
-    // also carries the sign of a negative base correctly (no separate odd/even
-    // negation needed) and overflows to ±Inf / underflows to ±0 the same way the
-    // generic path would for huge exponents. Reached only after the
-    // exp ∈ {0,1,-1,0.5,2} and base ∈ {0,±1,±Inf} special cases returned, so the
-    // base here is finite, non-zero, ≠ ±1 and the exponent is a finite integer
-    // not already handled. (#2887)
-    localGet(1),
-    localGet(1),
-    ftrunc,
-    feq, // exponent is an integer?
-    localGet(1),
-    fabs,
-    f64c(2147483648), // |exp| < 2^31 so it fits the i32 loop counter
-    flt,
-    { op: "i32.and" } as Instr,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        f64c(1),
-        localSet(3), // powRes = 1
-        localGet(0),
-        localSet(4), // powBase = base
-        localGet(1),
-        fabs,
-        truncSatI32,
-        localSet(5), // powN = |exp|
-        blockLoop([
-          localGet(5),
-          i32eqz,
-          { op: "br_if", depth: 1 } as Instr,
-          // if (powN & 1) powRes *= powBase
-          localGet(5),
-          i32const(1),
-          { op: "i32.and" } as Instr,
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [localGet(3), localGet(4), mul, localSet(3)],
-          } as Instr,
-          // powBase *= powBase
-          localGet(4),
-          localGet(4),
-          mul,
-          localSet(4),
-          // powN >>= 1 (unsigned)
-          localGet(5),
-          i32const(1),
-          { op: "i32.shr_u" } as Instr,
-          localSet(5),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-        // Negative exponent → reciprocal
-        localGet(1),
-        f64c(0),
-        flt,
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [f64c(1), localGet(3), div, localSet(3)],
-        } as Instr,
-        localGet(3),
-        ret,
-      ],
-    } as Instr,
-
-    // base < 0: non-integer exp → NaN; otherwise (a non-finite |exp|, i.e.
-    // ±Infinity, or an integer exponent too large for the i32 fast path above)
-    // → exp(exp * log(|base|)) with the sign reapplied for odd integer exponents.
-    // The common small-integer base<0 case already returned from the fast path;
-    // this branch only covers |exp| ≥ 2^31 and ±Infinity (where the result is
-    // ±Inf / 0 anyway, so the exp/log approximation is exact enough).
-    localGet(0),
-    f64c(0),
-    flt,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // Non-integer (finite) exponent → NaN
-        localGet(1),
-        localGet(1),
-        ftrunc,
-        fne,
-        { op: "if", blockType: { kind: "empty" }, then: [f64c(NaN), ret] } as Instr,
-        // |exp| == Infinity or huge integer: result = exp(exp * log(|base|))
-        localGet(0),
-        fabs,
-        localSet(2),
-        localGet(1),
-        localGet(2),
-        call(logIdx),
-        mul,
-        call(expIdx),
-        localSet(2), // reuse absBase local to store result
-        // If exponent is odd, negate the result (odd: floor(exp/2)*2 != exp)
-        localGet(1),
-        ftrunc,
-        f64c(2),
-        div,
-        ffloor,
-        f64c(2),
-        mul,
-        localGet(1),
-        ftrunc,
-        fne,
-        ifElse(
-          f64Type,
-          [localGet(2), neg], // odd → negate
-          [localGet(2)], // even → keep
-        ),
-        ret,
-      ],
-    } as Instr,
-
-    // General case (base > 0, non-integer exponent): exp(exponent * log(base))
-    localGet(1),
-    localGet(0),
-    call(logIdx),
-    mul,
-    call(expIdx),
-  ];
 }

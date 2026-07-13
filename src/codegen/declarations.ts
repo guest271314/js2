@@ -1766,7 +1766,21 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // ── collectCallbackImports finalize ──
   if (state.callbackFound || state.getterCallbackFound || state.asyncCpsFound) {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
-    if ((state.callbackFound || state.asyncCpsFound) && !ctx.funcMap.has("__make_callback")) {
+    // (#3235) `callbackFound` fires for ANY arrow/function-expr — coarse. In
+    // JS-host mode the upfront registration gives `__make_callback` a stable
+    // funcIdx (#1384). But standalone/WASI has NO host: a `call __make_callback`
+    // can never succeed, so no passing standalone module actually calls it (#3098's
+    // native `__apply_closure`/`__hof_*`/`__iter_hof_*` serve exercised callbacks
+    // host-free) — the eager registration only ever *declares* an unsatisfiable
+    // never-called import that fails the host-free metric. Gate it off (mirrors the
+    // async-CPS `!ctx.standalone` gate below); any residual host-callback site
+    // degrades to the native closure struct (see compileArrowAsCallback). JS-host
+    // lane byte-identical.
+    if (
+      !(ctx.standalone || ctx.wasi) &&
+      (state.callbackFound || state.asyncCpsFound) &&
+      !ctx.funcMap.has("__make_callback")
+    ) {
       addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
     }
     if (state.getterCallbackFound) {
