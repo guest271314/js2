@@ -217,3 +217,28 @@ unregressed) that the other reflective callers depend on.
 `!(ctx.standalone || ctx.wasi)`, so the host path emits nothing new; the shared
 `emitReflectiveNativeProtoClosureCall` param defaults off → existing callers
 byte-identical.
+
+## Implementation Notes (Slice 2 — opus-genproto3)
+
+### What shipped
+
+`Object.getPrototypeOf(<sync generator instance>)` → the identity-stable
+`%GeneratorPrototype%` singleton (default-proto.js §27.5.1). A new
+`argTsType.getSymbol()?.name === "Generator"` branch in
+`Object.getPrototypeOf` (calls.ts, sibling to the #3013 ArrayIterator branch)
+drops the instance arg for side effects and returns
+`emitGeneratorPrototypeSingleton` — the SAME cached global the `genFn.prototype`
+/ `getPrototypeOf(genFn).prototype` paths return, so
+`getPrototypeOf(g()) === getPrototypeOf(g).prototype` holds by identity. Sync
+only (async generators are typed `AsyncGenerator` → keep the host path).
+
+### Root-cause escalation — the real blocker is object `===`, tracked as #3243
+
+The instance wiring alone banks NO flip: default-proto.js's assertion
+`sameValue(getPrototypeOf(g()), GeneratorPrototype)` is an object `===`, which in
+standalone folded to the tag-5 string-content compare and was **layout-fragile**
+— the same fragility that made Slice 1's flips (prototype-relation, descriptor
+tests) pass only coincidentally. The enabling fix (extend #2734's `ref.eq`
+identity fast path to inline `emitStrictEq`, object/`any`-scoped) is **#3243**,
+landed in the same PR. With #3243, default-proto.js passes AND the Slice-1
+cluster is hardened against layout drift. See #3243 for the substrate detail.
