@@ -2027,15 +2027,23 @@ export function emitAsyncFrameStateMachine(
  */
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
-  // (#2865) Params must be plain identifiers: a binding-PATTERN param
-  // (`f([...x] = v)`) destructures into derived LOCALS of the lifted fn's
-  // prologue, which the fresh resume FunctionContext never sees — the body's
-  // reads then mis-resolve (observed: invalid wasm, a null-repaired call arg).
-  // A rest param builds a derived array local the same way. Identifier params
-  // WITH defaults are fine (the default is applied to the param local before
-  // the frame captures it). Correct-or-legacy.
+  // (#3132) Binding-PATTERN params (`f([x])`, `f({x})`) ARE now driven: the
+  // param destructuring prologue (function-body.ts, runs BEFORE this emit) has
+  // already derived their bound locals into the entry fctx, and
+  // `emitAsyncGenerator` captures those as LIVE-INITIALIZED derived spill
+  // fields (`collectDerivedPatternParams` → `derivedSpillInit`), the exact
+  // #2967 slice-2b-2 machinery the async-FUNCTION path uses. The resume fn then
+  // restores each derived name from its spill field, so body reads resolve
+  // correctly (this closes the #2865 decline: pattern params only mis-resolved
+  // because the gen path did not yet thread `derivedParams`). Identifier params
+  // WITH defaults are fine (the default is applied before capture). Still
+  // legacy (correct-or-legacy): a TOP-LEVEL identifier REST param
+  // (`function*(...args)`), whose caller-built vec has no derived-prologue local
+  // to capture — a bounded follow-up. Pattern rest ELEMENTS (`[a, ...rest]`) are
+  // fine (their `p.dotDotDotToken` is undefined — the `...` is on the element,
+  // which the destructuring prologue derives like any other binding).
   for (const p of decl.parameters) {
-    if (!ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined) return false;
+    if (p.dotDotDotToken !== undefined) return false;
   }
   // (#2865) Stem-collision guard: a SECOND same-named gen (different scope)
   // would share the first's `__async_gen_next_<stem>` helper — typed for the
@@ -2117,7 +2125,13 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   const plan = analyzeAsyncBody(ctx, decl);
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
-  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx);
+  // (#3132) A binding-PATTERN param's bound names are derived by the entry
+  // fn's destructuring prologue (function-body.ts, already run) — capture them
+  // as LIVE-INITIALIZED derived spill fields so the resume fn sees them, the
+  // same #2967 mechanism the async-FUNCTION path uses. Empty (byte-inert) for
+  // identifier-only params, so no existing driven async-gen shape changes.
+  const derivedParams = collectDerivedPatternParams(decl, fctx);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, undefined, derivedParams);
   info.asyncGen = true;
   info.asyncGenResultTypeIdx = resultTypeIdx;
   // (#2865) Nested producers: thread the lifted fn's capture-cell metadata so
@@ -2163,7 +2177,27 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
     fctx.body.push({ op: "local.get", index: i });
   }
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    // (#3132) A pattern-DERIVED param spill field starts LIVE from its entry
+    // local (the post-destructure value); every other spill field starts inert
+    // and is initialized by its owning segment's lead in the resume fn. Mirrors
+    // the async-FUNCTION struct.new (emitAsyncFrameStateMachine). `spillCellInfo`
+    // is empty for generators (buildAsyncFrameInfo gates force-boxing on
+    // `decl.asteriskToken === undefined`), so the cell arm is inert here — kept
+    // for parity/robustness.
+    const derivedInitLocal = info.derivedSpillInit?.get(i);
+    const cell = info.spillCellInfo?.get(i);
+    if (cell !== undefined) {
+      if (derivedInitLocal !== undefined) {
+        fctx.body.push({ op: "local.get", index: derivedInitLocal });
+      } else {
+        fctx.body.push(defaultSpillInstr(cell.valType));
+      }
+      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx } as Instr);
+    } else if (derivedInitLocal !== undefined) {
+      fctx.body.push({ op: "local.get", index: derivedInitLocal });
+    } else {
+      fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    }
   }
   // result_promise: fresh pending $Promise (overwritten by the first next()).
   fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });

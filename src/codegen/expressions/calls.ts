@@ -4123,15 +4123,21 @@ function emitHostPromiseThenFallback(
  * `ref.test`ing each registered producer's frame struct (the chain shape
  * `buildNativeGeneratorDispatch` uses for sync gens).
  *
- * Miss arm (a receiver that is none of the driven frames):
- *  - under `--target standalone`, the legacy host `__gen_next` whenever the
- *    module has it registered — EXACTLY what this receiver got before #2865
- *    (buffer async gens, sync host gens, and the user-object `.next()` hijack
- *    all keep their behavior; the in-process runner stubs the import);
- *  - under `--target wasi` (zero-import contract, no stubs — a host fallback
- *    can never succeed), only when a legacy buffer async gen was actually
- *    emitted (`asyncGenLegacyBufferEmitted`); otherwise a plain null result,
- *    so an all-driven module stays host-free.
+ * Miss arm (a receiver that is none of the driven frames): under BOTH
+ * `--target standalone` and `--target wasi`, the legacy host `__gen_next` is
+ * kept ONLY when a legacy buffer async gen was actually emitted in this module
+ * (`asyncGenLegacyBufferEmitted`); otherwise a plain null result, so an
+ * ALL-DRIVEN module stays host-free. (#3132) This dispatch is TYPE-gated to
+ * `AsyncGenerator`/`AsyncIterableIterator`/`AsyncIterator` receivers (see the
+ * call sites), never user objects or sync gens — so in a module with no legacy
+ * buffer async gen, every reachable receiver IS one of the driven frames and
+ * the `__gen_next` miss arm is provably DEAD. Dropping it (previously kept
+ * unconditionally on standalone) removes the `env::__gen_next` import that
+ * blocked these otherwise-driven async gens — consumed via `.next()` — from
+ * counting toward the host-free standalone floor, the CONSUMER half of the
+ * dstr-param slice. Mixed modules (a driven gen AND a legacy buffer async gen)
+ * keep the fallback, exactly as before. Mirrors #2903's `.then` host-arm
+ * de-leak; matches the well-tested wasi semantics byte-for-byte.
  *
  * Returns null (no emission) when the module has no driven producers or the
  * target is the JS-host lane — the caller falls through to its original
@@ -4154,7 +4160,7 @@ function tryEmitAsyncGenNextDispatch(
   fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
   // funcMap lookups happen AFTER the receiver compile (which may register late
   // imports and shift defined indices).
-  const wantHostFallback = ctx.wasi === true ? ctx.asyncGenLegacyBufferEmitted === true : true;
+  const wantHostFallback = ctx.asyncGenLegacyBufferEmitted === true;
   const hostGenNext = wantHostFallback ? ctx.funcMap.get("__gen_next") : undefined;
   let chain: Instr[] =
     hostGenNext !== undefined
