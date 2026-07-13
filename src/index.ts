@@ -342,11 +342,12 @@ export interface CompileOptions {
    * miss, literal stores, boxToAny) and undefined-specific consumers
    * (`__extern_is_undefined`, typeof cluster, strict-eq) flip in lockstep
    * under this flag; nullish-intent consumers widen to `is_null ∨
-   * is-singleton`. Default false (legacy: undefined ≡ null ≡ ref.null.extern,
-   * byte-identical modules). Host (gc) mode is unaffected — it has a real
-   * host `undefined` via `__get_undefined`. `JS2WASM_UNDEF_SINGLETON=1`
-   * defaults it on for whole-runner A/B; the default flip is a separate
-   * measured PR (#2106).
+   * is-singleton`. Default TRUE (#2106 default-flip): the singleton is the
+   * standalone/nativeStrings `undefined` representation. Host (gc) mode is
+   * unaffected — it has a real host `undefined` via `__get_undefined`, and
+   * `undefinedSingletonActive` also gates on standalone||nativeStrings. Set
+   * `JS2WASM_UNDEF_SINGLETON=0` to force the legacy (undefined ≡ null ≡
+   * ref.null.extern, byte-identical) regime for A/B control / rollback.
    */
   undefinedSingleton?: boolean;
   /** #1588 PR-B: dual i8/i16 string storage. When true, string allocation
