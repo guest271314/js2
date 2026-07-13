@@ -251,22 +251,174 @@ export function Math_log2(x: number): number {
 `;
 
 /**
+ * __math_reduce_trig — Cody-Waite reduction of `x` to `[-π, π]`.
+ * `n = floor(x / 2π + 0.5)` then a two-step `x - n·(2π_hi) - n·(2π_lo)`
+ * subtraction (`2π_hi = 6.283185307179586`, `2π_lo = 1.2246467991473532e-16`)
+ * for extra precision. `INV_TWO_PI = 0.15915494309189535` (= 1/2π, exact
+ * round-trip). Mirrors the deleted hand `Instr[]` op-for-op (`x * INV`,
+ * `+ 0.5`, `Math.floor`, then the left-associated double subtract), so
+ * bit-identical. Leaf helper (no callees). (#3204 follow-up)
+ */
+const REDUCE_TRIG_SOURCE = `
+export function __math_reduce_trig(x: number): number {
+  let n: number = Math.floor(x * 0.15915494309189535 + 0.5);
+  return x - n * 6.283185307179586 - n * 1.2246467991473532e-16;
+}
+`;
+
+/**
+ * Math.sin — range-reduce to `[-π, π]` via `__math_reduce_trig`, then the
+ * odd Taylor polynomial in Horner form `r·(1 + r²(-1/6 + r²(1/120 + …)))`.
+ * Special ladder mirrors the hand version exactly: NaN → NaN, `|x| == ∞` →
+ * NaN (spelled `Math.abs(x) > MAX_VALUE`; NaN already returned), `x === 0`
+ * → x (preserves -0). The `- 1/N` subtractions are the exact IEEE
+ * equivalent of the hand `+ f64.const(-1/N)` adds. (#3204 follow-up)
+ */
+const SIN_SOURCE = `
+export function Math_sin(x: number): number {
+  if (x !== x) return x;
+  if (Math.abs(x) > 1.7976931348623157e308) return 0 / 0;
+  if (x === 0) return x;
+  let r: number = __math_reduce_trig(x);
+  let r2: number = r * r;
+  return ((((((r2 * (1 / 6227020800) - 1 / 39916800) * r2 + 1 / 362880) * r2 - 1 / 5040) * r2 + 1 / 120) * r2 - 1 / 6) * r2 + 1) * r;
+}
+`;
+
+/**
+ * Math.cos — same range reduction, even Taylor polynomial
+ * `1 + r²(-1/2 + r²(1/24 + …))`. NaN → NaN, `|x| == ∞` → NaN. No `x === 0`
+ * short-circuit needed (cos(0) falls out of the series as exactly 1, which
+ * the hand version also computed rather than special-cased). (#3204 follow-up)
+ */
+const COS_SOURCE = `
+export function Math_cos(x: number): number {
+  if (x !== x) return x;
+  if (Math.abs(x) > 1.7976931348623157e308) return 0 / 0;
+  let r: number = __math_reduce_trig(x);
+  let r2: number = r * r;
+  return ((((((r2 * (1 / 479001600) - 1 / 3628800) * r2 + 1 / 40320) * r2 - 1 / 720) * r2 + 1 / 24) * r2 - 1 / 2) * r2 + 1);
+}
+`;
+
+/**
+ * Math.atan — argument reduction to `|t| ≤ tan(22.5°)` via two SEQUENTIAL
+ * mid-body statement-ifs (the from-ast subset takes mid-body ifs without an
+ * else), then the odd minimax polynomial. Equivalent to the hand version's
+ * `if ax > 2.414… {…} else if ax > 0.414… {…}`: the first branch sets
+ * `ax = -1/ax ∈ (-0.414…, 0)`, so the second guard is then always false —
+ * exactly the else semantics. Natural statement-if form (a `let`/reassign
+ * following a non-returning mid-body if); the from-ast overlay mis-scoping
+ * that once forced a ternary rewrite was fixed in #2856 (structurizer
+ * materialized-leak) + #2981. The final `copysign(r, x)` is `x < 0 ? -r : r`
+ * (r > 0 for every remaining x since the +∞/−∞/0 cases returned early, so
+ * this equals copysign bit-for-bit). ±∞ → ±π/2, NaN → NaN, 0 → x (keeps
+ * -0). Leaf (no callees). (#3204 follow-up)
+ */
+const ATAN_SOURCE = `
+export function Math_atan(x: number): number {
+  if (x !== x) return x;
+  if (x > 1.7976931348623157e308) return 1.5707963267948966;
+  if (x < -1.7976931348623157e308) return -1.5707963267948966;
+  if (x === 0) return x;
+  let ax: number = Math.abs(x);
+  let offset: number = 0;
+  // Two SEQUENTIAL bare ifs (the from-ast subset takes mid-body ifs without
+  // an else). Equivalent to the hand version's if/else-if: when the first
+  // branch fires it sets ax = -1/ax ∈ (-0.414…, 0), so the second guard
+  // (ax > 0.414…) is then always false — exactly the else semantics.
+  if (ax > 2.414213562373095) {
+    offset = 1.5707963267948966;
+    ax = -(1 / ax);
+  }
+  if (ax > 0.414213562373095) {
+    offset = 0.7853981633974483;
+    ax = (ax - 1) / (ax + 1);
+  }
+  let t2: number = ax * ax;
+  let p: number = (((((((t2 * (-1 / 15) + 1 / 13) * t2 - 1 / 11) * t2 + 1 / 9) * t2 - 1 / 7) * t2 + 1 / 5) * t2 - 1 / 3) * t2 + 1) * ax;
+  let r: number = p + offset;
+  return x < 0 ? -r : r;
+}
+`;
+
+/**
+ * Math.tan = sin/cos. NaN → NaN, `|x| == ∞` → NaN; otherwise
+ * `Math_sin(x) / Math_cos(x)`. (#3204 follow-up)
+ */
+const TAN_SOURCE = `
+export function Math_tan(x: number): number {
+  if (x !== x) return x;
+  if (Math.abs(x) > 1.7976931348623157e308) return 0 / 0;
+  return Math_sin(x) / Math_cos(x);
+}
+`;
+
+/**
+ * Math.asin = atan(x / sqrt(1 - x²)). Domain guard `|x| > 1` → NaN; the
+ * endpoints x = ±1 return ±π/2 directly (the general expression would
+ * divide by sqrt(0) = 0). NaN → NaN. (#3204 follow-up)
+ */
+const ASIN_SOURCE = `
+export function Math_asin(x: number): number {
+  if (x !== x) return x;
+  if (Math.abs(x) > 1) return 0 / 0;
+  if (x === 1) return 1.5707963267948966;
+  if (x === -1) return -1.5707963267948966;
+  return Math_atan(x / Math.sqrt(1 - x * x));
+}
+`;
+
+/**
+ * Math.acos = π/2 - asin(x) = π/2 - atan(x / sqrt(1 - x²)). Domain guard
+ * `|x| > 1` → NaN; x = 1 → 0, x = -1 → π. NaN → NaN. (#3204 follow-up)
+ */
+const ACOS_SOURCE = `
+export function Math_acos(x: number): number {
+  if (x !== x) return x;
+  if (Math.abs(x) > 1) return 0 / 0;
+  if (x === 1) return 0;
+  if (x === -1) return 3.141592653589793;
+  return 1.5707963267948966 - Math_atan(x / Math.sqrt(1 - x * x));
+}
+`;
+
+/**
  * Early-core self-hosted builtins (#3204) — registered INLINE by
  * `emitInlineMathFunctions` at the exact emission point their hand-`Instr[]`
  * predecessors occupied (BEFORE the later hand cores that call them by
- * funcMap name: pow/log10 → Math_log). NOT part of `SELF_HOSTED_MATH` (that
- * map's leaves are emitted last). Both are standalone (no `callees`).
+ * funcMap name: pow/log10 → Math_log; asin/acos/tan → atan/sin/cos). NOT
+ * part of `SELF_HOSTED_MATH` (that map's leaves are emitted last).
+ * Ordering constraint: `__math_reduce_trig` before sin/cos; sin/cos before
+ * tan; atan before asin/acos (callees resolve by funcMap name at lower
+ * time — see the phase order in `emitInlineMathFunctions`).
  */
 export const LOG_BUILTIN: StdlibMathBuiltin = { name: "Math_log", callees: [], source: LOG_SOURCE };
 export const LOG2_BUILTIN: StdlibMathBuiltin = { name: "Math_log2", callees: [], source: LOG2_SOURCE };
+export const REDUCE_TRIG_BUILTIN: StdlibMathBuiltin = {
+  name: "__math_reduce_trig",
+  callees: [],
+  source: REDUCE_TRIG_SOURCE,
+};
+export const SIN_BUILTIN: StdlibMathBuiltin = { name: "Math_sin", callees: ["__math_reduce_trig"], source: SIN_SOURCE };
+export const COS_BUILTIN: StdlibMathBuiltin = { name: "Math_cos", callees: ["__math_reduce_trig"], source: COS_SOURCE };
+export const ATAN_BUILTIN: StdlibMathBuiltin = { name: "Math_atan", callees: [], source: ATAN_SOURCE };
+export const TAN_BUILTIN: StdlibMathBuiltin = {
+  name: "Math_tan",
+  callees: ["Math_sin", "Math_cos"],
+  source: TAN_SOURCE,
+};
+export const ASIN_BUILTIN: StdlibMathBuiltin = { name: "Math_asin", callees: ["Math_atan"], source: ASIN_SOURCE };
+export const ACOS_BUILTIN: StdlibMathBuiltin = { name: "Math_acos", callees: ["Math_atan"], source: ACOS_SOURCE };
 
 /**
  * The self-hosted subset of the Math family, keyed by `Math.<method>`
- * name. Remaining hand-emitted cores (sin/cos/exp/atan, atan2/pow, log10,
- * random) are the precision-sensitive kernels with dialect gaps
- * (exp: exponent-extraction bit ops; pow: i32 exp-by-squaring; log10:
- * `f64.nearest`; random: RNG import) — converting them needs the intrinsics
- * groundwork (#3204 follow-up). `log`/`log2` moved to EARLY cores above.
+ * name. Remaining hand-emitted cores (exp, atan2, pow, log10, random) are
+ * the ones with real dialect gaps (exp: i32 2^n squaring; pow: i32
+ * exp-by-squaring; log10: `f64.nearest`; random: RNG import; atan2: 2-arg
+ * quadrant ladder) — converting them needs the intrinsics groundwork
+ * (#3204 follow-up). `log`/`log2` and the trig cores (reduce_trig,
+ * sin/cos/tan, atan/asin/acos) moved to EARLY cores above.
  */
 export const SELF_HOSTED_MATH: ReadonlyMap<string, StdlibMathBuiltin> = new Map([
   ["cbrt", { name: "Math_cbrt", callees: [], source: CBRT_SOURCE }],
