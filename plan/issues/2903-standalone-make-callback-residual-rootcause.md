@@ -703,3 +703,64 @@ a competing direct-carrier de-leak there.
 - **R4b** — TypedArray `map`/`filter` (typed-RESULT construction, per-#2593
   element-width wrapping).
 - **R2** — `class X extends Promise` producer. **R3 lazy iter helpers** landed.
+
+---
+
+## Landed: sub-front R4b — TypedArray map/filter typed-result (opus-r4, 2026-07-13)
+
+**PR:** `issue-2903-r4b-ta-map-filter`. Standalone-gated; gc/wasi byte-identical
+(prove-emit-identity 0/12 map-filter snippet (file,target) pairs differ vs main).
+
+### The gap (post-R4)
+
+R4 landed the SCALAR HOFs via the generic `__hof_*` loop (scalar / `$ObjVec`
+result). `map`/`filter` on a PACKED typed array (`new Uint8Array([...])`) still
+leaked `env.__make_callback` (host-free instantiation failed) and returned
+nothing — they need a NEW same-kind TypedArray result, which the $ObjVec loop
+cannot produce. (Float32/Float64 already worked — they use the `f64` carrier and
+route through the ordinary array-HOF path.)
+
+### The lowering (new `src/codegen/ta-hof-map-filter.ts`)
+
+`ensureTaMapFilterHelper(ctx, "map"|"filter", vecTypeIdx)` mints
+`__ta_map_<vecTypeIdx>` / `__ta_filter_<vecTypeIdx>`
+`(recv externref, cb externref, thisArg externref) -> (ref $vec)`:
+- allocate `array.new_default(len)` of the packed backing array;
+- loop reading each element via R4's byte-carrier-aware `__extern_get_idx`,
+  build the `[value, index, receiver]` `$ObjVec` args, invoke the callback via
+  the host-free `__apply_closure` bridge (no `__make_callback`);
+- **map**: store `i32.trunc_sat_f64_s(__unbox_number(cbResult))` via a packed
+  `array.set` (masks to element width — JS ToInt8/ToUint8/ToInt16/…);
+- **filter**: SINGLE-PASS (predicate runs once per element, §23.2.3.9 step 6) —
+  over-allocate a length-`len` backing, store the ELEMENT at the kept cursor `k`
+  when `__is_truthy(cbResult)`, return a vec whose LENGTH field is `k`;
+- return the `(ref $vec)` directly so the static result binding (`const b:
+  Uint8Array = a.map(...)`) matches and reads element-correctly (signed views
+  read `array.get_s`).
+
+Routed from `expressions/calls.ts` (mirrors the R4 scalar interception) for the
+six PACKED-INTEGER views before the array-methods.ts `__make_callback` stub.
+
+### Scope / deferred (documented)
+
+- **Uint8ClampedArray** — shares the `i8_byte` carrier but needs round-half-to-
+  even CLAMPING (not truncation), so it is excluded from the packed-view set and
+  keeps the legacy path (follow-up).
+- **`any`-held receiver** — needs a runtime carrier-kind dispatch to pick the
+  result carrier; deferred (the static/known-kind path carries the test262
+  yield, since untyped JS infers the concrete view type).
+- **Float32/Float64Array** — already correct via the `f64` path; untouched.
+
+### Proofs
+- `tests/issue-2903-r4b.test.ts` (10): map application + width-wrapping
+  (300→44, 65535+2→1), filter length/values + empty, Int8 signed static read,
+  Int16/Uint16/Int32, chaining (`map(...).reduce(...)`), untyped shape — all
+  host-free (zero imports) + value-correct.
+- prove-emit-identity gc/wasi byte-identical (0/12 map-filter snippets).
+- No regression: R4 (13) + R4b (10) + `issue-2648` typed-array search (30) green;
+  tsc + prettier + oracle-ratchet clean.
+
+### Remaining sub-fronts (issue stays `ready`)
+- **R4c** (small) — Uint8ClampedArray map/filter (clamp store) + `any`-held
+  map/filter (runtime carrier-kind dispatch).
+- **R2** — `class X extends Promise` producer.
