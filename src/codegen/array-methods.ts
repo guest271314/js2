@@ -6181,7 +6181,26 @@ function compileArrayJoinNative(
   fctx.body.push({ op: "local.set", index: iTmp });
 
   // #2088 — shared fold (host + native lanes route through this).
-  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
+  // (#3224) Bounds-check the per-element read against the physical WasmGC
+  // backing so a sparse array (logical `.length` set beyond the backing) does
+  // not TRAP on the out-of-bounds `data[i]`. §23.1.3.18: an absent index joins
+  // as the empty string, so a beyond-backing index yields "" — NOT a clamp: the
+  // fold still iterates to the LOGICAL length, preserving the trailing empty
+  // slots (`[1,2,3]; a.length=6; a.join(",")` === "1,2,3,,,"). No-op for dense
+  // arrays (backing ≥ length ⇒ the guard is always true).
+  const joinBoundsCheckedElemToStr: Instr[] = [
+    { op: "local.get", index: foldLocals.iTmp } as Instr,
+    { op: "local.get", index: dataTmp } as Instr,
+    { op: "array.len" } as Instr,
+    { op: "i32.lt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: repr.resultType },
+      then: elemToStr,
+      else: repr.literal(""),
+    } as Instr,
+  ];
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, joinBoundsCheckedElemToStr);
 
   // Return the joined native string as externref for the caller.
   fctx.body.push({ op: "local.get", index: resultTmp });
@@ -6411,7 +6430,26 @@ function compileArrayJoin(
   }
 
   // #2088 — shared fold (host + native lanes route through this).
-  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
+  // (#3224) Bounds-check the per-element read against the physical WasmGC
+  // backing so a sparse array (logical `.length` set beyond the backing) does
+  // not TRAP on the out-of-bounds `data[i]`. §23.1.3.18: an absent index joins
+  // as the empty string, so a beyond-backing index yields "" — NOT a clamp: the
+  // fold still iterates to the LOGICAL length, preserving the trailing empty
+  // slots (`[1,2,3]; a.length=6; a.join(",")` === "1,2,3,,,"). No-op for dense
+  // arrays (backing ≥ length ⇒ the guard is always true).
+  const joinBoundsCheckedElemToStr: Instr[] = [
+    { op: "local.get", index: foldLocals.iTmp } as Instr,
+    { op: "local.get", index: dataTmp } as Instr,
+    { op: "array.len" } as Instr,
+    { op: "i32.lt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: repr.resultType },
+      then: elemToStr,
+      else: repr.literal(""),
+    } as Instr,
+  ];
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, joinBoundsCheckedElemToStr);
 
   // An empty array leaves `resultTmp` as the initial null. join/toString of `[]`
   // is the empty String "", not null — substitute it so the result is a real
