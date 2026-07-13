@@ -73,6 +73,7 @@ import {
   getArrTypeIdxFromVec,
   getOrRegisterBoundFnType,
   getOrRegisterVecBaseType,
+  getOrRegisterVecType,
 } from "./registry/types.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
@@ -232,6 +233,84 @@ export function emitStandaloneObjectConstructor(ctx: CodegenContext, argCount: n
   // extra frame is retained.
   const body: Instr[] = [{ op: "return_call", funcIdx: newPlainObjectIdx } as Instr];
   pushDefinedFunc(ctx, funcIdx, { name: "__new_Object", typeIdx, locals: [], body, exported: false });
+}
+
+/**
+ * (#3239) The TypedArray family + `SharedArrayBuffer`, all of whose subclass
+ * parent construction leaks a distinct `env::__new_<Parent>` host import in
+ * standalone. See `emitStandaloneVecBuiltinConstructor` for the shared native
+ * replacement and the identity-only rationale.
+ */
+export const STANDALONE_VEC_BUILTIN_PARENTS: ReadonlySet<string> = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  "SharedArrayBuffer",
+]);
+
+/**
+ * (#3239) Standalone/WASI-native `class Sub extends <TypedArray | SharedArrayBuffer>`
+ * parent construction.
+ *
+ * Like `emitStandaloneObjectConstructor`, but the fresh parent value is an
+ * empty native `$__vec_externref` rather than a plain object. In standalone the
+ * subclass parent creation otherwise lowers to a distinct `env::__new_<Parent>`
+ * host import (one per TypedArray element kind, plus `SharedArrayBuffer`) — the
+ * SOLE remaining host import of the corresponding `subclass-<Parent>`
+ * conformance test, which only asserts `instanceof`. Both `instanceof Sub` and
+ * `instanceof <Parent>` are ALREADY resolved host-free at compile time
+ * (`tryStaticInstanceOf`: the subclass's recorded builtin parent statically
+ * satisfies the hierarchy), so routing the construction native flips the module
+ * to `host_free_pass`.
+ *
+ * SCOPE — identity only, not real typed construction. This deliberately does
+ * NOT model element kind, byteLength, backing buffer, or the `super(length)` /
+ * `super(buffer, …)` argument semantics: the constructor arguments (still
+ * side-effect-evaluated at the call site and passed here as ignored params) are
+ * dropped, and an empty vec is returned. That is safe because NO TypedArray /
+ * SharedArrayBuffer subclass *behavior* test passes in standalone today — only
+ * the `instanceof`-only `subclass-<Parent>` tests do — so there is no
+ * length/behavior-dependent passing test to regress (verified against the
+ * standalone baseline). Faithful typed construction (needed once behavior tests
+ * begin to pass) is left to a follow-up; the arg-honoring Array/Date/RegExp/
+ * ArrayBuffer slices (which DO have passing behavior tests) are separate work.
+ *
+ * Host/gc mode never calls this — the caller gates on `ctx.standalone || ctx.wasi`
+ * and keeps the `__new_<Parent>` import there, so those lanes stay byte-identical.
+ * Idempotent on `importName`.
+ */
+export function emitStandaloneVecBuiltinConstructor(ctx: CodegenContext, importName: string, argCount: number): void {
+  if (ctx.funcMap.has(importName)) return;
+
+  // A single shared externref-element vec type backs every one of these parents:
+  // the element kind is irrelevant to the identity-only `instanceof` result, and
+  // reusing one type keeps the module's type section minimal.
+  const vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+
+  const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(importName, funcIdx);
+  // Ignore the (already side-effect-evaluated) constructor arguments and return
+  // a fresh empty vec boxed to externref (`extern.convert_any` — the same no-op
+  // boxing the object runtime uses to expose `$Object`/vec structs as externref).
+  const body: Instr[] = [
+    { op: "i32.const", value: 0 }, // length = 0
+    { op: "i32.const", value: 0 }, // backing capacity = 0 (identity-only, no growth)
+    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+    { op: "extern.convert_any" } as Instr,
+  ];
+  pushDefinedFunc(ctx, funcIdx, { name: importName, typeIdx, locals: [], body, exported: false });
 }
 
 export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
