@@ -1,11 +1,12 @@
 ---
-id: 3230
+id: 3232
 title: "standalone: static private ACCESSOR setter emits invalid Wasm (C_setPrivateReference — call[0] ref-type mismatch) — 10 compile_error→pass"
-status: ready
+status: done
 sprint: current
-assignee: ""
+assignee: ttraenkler/opus-privref
 created: 2026-07-13
 updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 horizon: m
 feasibility: hard
@@ -18,7 +19,7 @@ related: [1591, 1365, 1364, 2101a]
 origin: "2026-07-13 opus-gapmap standalone measure-first: wasm_compile cluster in the host-passes/standalone-fails set. Documented for a fresh full-budget agent (prior author at budget)."
 ---
 
-# #3230 — static private accessor setter → invalid Wasm on standalone
+# #3232 — static private accessor setter → invalid Wasm on standalone
 
 ## Measured impact (verified via runner, 2026-07-13)
 
@@ -132,7 +133,7 @@ fail — only the setter callsite.
 - The 10 files above → `pass` on standalone via `runTest262File(..., "standalone")`.
 - `prove-emit-identity`: gc/host lane byte-identical (the fix only fires on the
   standalone/nativeStrings arm).
-- Add `tests/issue-3230-*.test.ts`: the harness-shaped repro (static private
+- Add `tests/issue-3232-*.test.ts`: the harness-shaped repro (static private
   get+set accessor, `this.#x = v` in a static method, value read back) compiled
   `target: "wasi"`, asserting `WebAssembly.validate` + correct runtime value.
   NOTE: the isolated shape compiles clean today — the test must reproduce the
@@ -148,3 +149,34 @@ gc-neutral). The one open unknown is the exact minimal trigger — step 1 (pull 
 wrapped WAT) resolves it. Bounded +10; flag the tech lead if root-cause opens
 into an unbounded rep-substrate change (it should not — the getter path already
 works, so it's a localized setter-arg-coercion asymmetry).
+
+## Resolution (2026-07-13, opus-privref)
+
+Root cause confirmed exactly as the plan hypothesised. In
+`compilePropertyAssignment` (`src/codegen/expressions/assignment.ts`, the
+private-accessor setter-dispatch branch ~line 3252) the **value** param was
+coerced via `valTypeHint = setterParamTypes[1]`, but the **receiver** (param 0 =
+self) was compiled with NO coercion. On the standalone/`nativeStrings` lane a
+`this`-in-a-static-method receiver lowers to an `externref` static-class carrier,
+so the emitted `call` pushed an `externref` where the accessor declares
+`(ref $Class)` → `call[0] expected type (ref …), found … externref` (invalid
+Wasm at `C_setPrivateReference`). The gc/host lane already coerces this receiver
+via a pre-existing path, which is why gc passed all 10.
+
+**Fix**: coerce the receiver to `setterParamTypes[0]` before compiling the value
+(while it is the stack top), gated on `(ctx.standalone || ctx.wasi)` +
+`recvResult.kind === "externref"` + a non-externref, non-matching self-param.
+`coerceType` emits the same `any.convert_extern` + guarded `ref.cast` the getter
+read path uses. Standalone/wasi-gated ⇒ **gc byte-identical** (verified: the
+wrapped gc WAT is byte-for-byte unchanged, 3062 bytes).
+
+**Validation**:
+- All 10 `static-private-*` files → `pass` via
+  `runTest262File(..., "standalone")` (was `compile_error`). **+10.**
+- The entire `private-accessor-name/` dir passes on standalone; `private-methods/`
+  CE count unchanged (5, pre-existing, unrelated) → no regression.
+- gc/host lane byte-identical (wrapped WAT diff empty).
+- `tests/issue-3232.test.ts` (3 cases: wasi valid-Wasm, standalone run-value,
+  gc compile) — all green. Minimal trigger is the harness value-type flow
+  (untyped `var stringSet;` + untyped accessor params); the fully-typed isolated
+  shape compiles clean on both lanes even without the fix.
