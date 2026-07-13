@@ -181,6 +181,7 @@ export function createCodegenContext(
     mapBucketsTypeIdx: -1,
     mapIterTypeIdx: -1,
     mapIterResultTypeIdx: -1,
+    weakRefTypeIdx: -1,
     mapHelpers: new Map(),
     mapHelpersEmitted: false,
     refCellTypeMap: new Map(),
