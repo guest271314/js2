@@ -16,6 +16,8 @@ area: codegen, standalone
 language_feature: classes, private-names, accessors
 goal: standalone-mode
 related: [1591, 1365, 1364, 2101a]
+loc-budget-allow:
+  - src/codegen/expressions/assignment.ts
 origin: "2026-07-13 opus-gapmap standalone measure-first: wasm_compile cluster in the host-passes/standalone-fails set. Documented for a fresh full-budget agent (prior author at budget)."
 ---
 
