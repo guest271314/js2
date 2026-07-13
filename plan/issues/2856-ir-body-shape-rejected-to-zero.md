@@ -1,8 +1,8 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: blocked
-assignee: ttraenkler/fable-2856
+status: in-progress
+assignee: ttraenkler/opus-2856
 spec: banked
 sprint: current
 created: 2026-06-30

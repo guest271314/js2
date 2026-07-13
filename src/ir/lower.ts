@@ -3041,8 +3041,29 @@ export function lowerIrFunctionBody<S>(
         // the same drive shape the value-producing `if` instr uses.
         const thenOps: S = emitter.newSink();
         const elseOps: S = emitter.newSink();
+        // #2856: the two arms are SEPARATE runtime paths, and the
+        // structurizer tail-duplicates a shared successor block into each arm
+        // (a converging mid-body `if` guard reaches its continuation from both
+        // the then-block's `br` and this `br_if`'s false edge — see
+        // `lowerStatementList`'s non-terminating-if rewrite in from-ast.ts).
+        // `materialized` tracks "this value's local has been assigned on the
+        // CURRENT path"; it is function-global. An intra-block multi-use value
+        // defined in the duplicated successor is lazily tee'd on first use, so
+        // the then-arm copy marks it materialized — then the else-arm copy sees
+        // it as already-materialized and reads a local the else path never set
+        // (a silent 0, or an "undefined SSA value" throw for a cross-block
+        // def). Snapshot at the branch and restore before the else arm (and
+        // after the `if`) so each path re-materializes its own locals. Values
+        // materialized BEFORE the branch (on `out`) stay live in both arms.
+        const preBranchMaterialized = new Set(materialized);
+        const restoreMaterialized = (): void => {
+          materialized.clear();
+          for (const v of preBranchMaterialized) materialized.add(v);
+        };
         emitBlockBody(thenBlock, thenOps);
+        restoreMaterialized();
         emitBlockBody(elseBlock, elseOps);
+        restoreMaterialized();
         const blockType: BlockType = { kind: "empty" };
         emitter.emitIf(blockType, thenOps, elseOps, out);
         return;
