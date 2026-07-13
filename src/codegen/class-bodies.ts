@@ -13,7 +13,12 @@ import {
   isPrimitiveWrapperSubclassUnsupported,
 } from "./builtin-tags.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2637 B2) host-only Promise-subclass ctor gate
-import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+// (#3132 S2a) Bounded async-generator METHOD drive: no-`this`/`super`/
+// `arguments` methods route through the same native producer as fn
+// declarations/expressions (the drive gate self-limits to standalone/wasi).
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
+import { genBodyReferencesThis, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
+import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
@@ -1977,6 +1982,48 @@ function compileClassBodiesInner(
       }
     }
 
+    // (#3123) `class C extends F` where F is a top-level PLAIN FUNCTION
+    // (fnctor): register the instance with the host runtime so member reads
+    // that MISS the compiled surface resolve through F's LIVE `.prototype`
+    // chain (`_fnctorInstanceCtor` → `_fnctorProtoLookup`). The test262
+    // harness `Iterator` shim assigns `F.prototype` at module init; the
+    // Iterator-helper methods the instance inherits live only on that runtime
+    // object. Host lane only — standalone/wasi have no host MOP (the import
+    // would leak). Runs at the tail of the ctor body (the `_init` body for
+    // split classes), so every construction path — `new C()` and `super()`
+    // from a subclass — registers (WeakMap set, idempotent).
+    if (!isExternrefBacked && !(ctx.wasi || ctx.standalone)) {
+      const fnctorParent = fnctorAncestorOfClass(ctx, className);
+      if (fnctorParent !== undefined) {
+        const regIdx = ensureLateImport(
+          ctx,
+          "__register_fnctor_instance",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [],
+        );
+        flushLateImportShifts(ctx, fctx);
+        // Read F's funcIdx AFTER the late-import flush — the import add above
+        // shifts every defined-func index.
+        const fnctorFuncIdx = ctx.funcMap.get(fnctorParent);
+        if (regIdx !== undefined && fnctorFuncIdx !== undefined) {
+          fctx.body.push({ op: "local.get", index: selfLocal });
+          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          // F's canonical cached closure — identity-stable with the receiver
+          // the top-level `F.prototype = …` write resolved to, so the host
+          // lookup reads the SAME sidecar/field slot.
+          const closTy = emitCachedFuncClosureAccess(ctx, fctx, fnctorParent, fnctorFuncIdx);
+          if (closTy !== null) {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            const finalRegIdx = ctx.funcMap.get("__register_fnctor_instance") ?? regIdx;
+            fctx.body.push({ op: "call", funcIdx: finalRegIdx });
+          } else {
+            // Closure signature unresolvable — drop the self externref, skip.
+            fctx.body.push({ op: "drop" });
+          }
+        }
+      }
+    }
+
     // Return the struct instance
     fctx.body.push({ op: "local.get", index: selfLocal });
 
@@ -2262,6 +2309,27 @@ function compileClassBodiesInner(
         // representation-agnostic. No host imports, instantiates standalone.
         compileNativeGeneratorFunction(ctx, fctx, member, nativeGenInfo);
         fctx.body.push({ op: "return" });
+      } else if (
+        isGeneratorMethod &&
+        isAsyncMethod &&
+        member.body &&
+        // (#3132 S2a) Bounded async-generator METHOD drive — same interception
+        // as function-body.ts (declarations) / closures.ts (expressions), for
+        // the receiver-free subset: a body that never touches `this`/`super`
+        // (one walk covers both) or `arguments` needs no receiver threading
+        // into the `$AsyncFrame`, so `emitAsyncGenerator` applies verbatim
+        // (the frame captures fctx.params — including the synthetic receiver
+        // param of an instance method — as inert param fields). The drive gate
+        // (`isAsyncGenDriveCandidate`) self-limits to the standalone/wasi
+        // lanes and enforces the bounded body + stem-collision rules; every
+        // other shape keeps the legacy eager-buffer path below
+        // (correct-or-legacy).
+        !genBodyReferencesThis(member.body) &&
+        !bodyUsesArguments(member.body) &&
+        isAsyncGenDriveCandidate(ctx, member)
+      ) {
+        emitAsyncGenerator(ctx, fctx, member);
+        fctx.body.push({ op: "return" });
       } else if (isGeneratorMethod && member.body) {
         // Generator method: eagerly evaluate body, collect yields into a buffer,
         // then wrap with __create_generator to return a Generator-like object.
@@ -2327,6 +2395,9 @@ function compileClassBodiesInner(
 
         // Return __create_generator or __create_async_generator depending on async flag
         const createGenName = isAsyncMethod ? "__create_async_generator" : "__create_generator";
+        // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+        if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
+        ctx.legacyGenBufferEmitted = true; // (#3132) sync OR async legacy buffer emitted
         const createGenIdx = ctx.funcMap.get(createGenName)!;
         fctx.body.push({ op: "local.get", index: bufferLocal });
         fctx.body.push({ op: "local.get", index: pendingThrowLocal });

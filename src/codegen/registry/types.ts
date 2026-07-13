@@ -57,32 +57,6 @@ export function addFuncType(ctx: CodegenContext, params: ValType[], results: Val
   return idx;
 }
 
-function valTypeEq(a: ValType, b: ValType): boolean {
-  if (a.kind !== b.kind) return false;
-  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
-    return a.typeIdx === (b as { typeIdx: number }).typeIdx;
-  }
-  // (#2846) Keep the two i64 brands non-equal so `funcTypeEq` (structural-match
-  // callers) does not re-merge a bigint-branded i64 with a plain i64 — mirrors
-  // the `funcTypeKey` `:big` bucket above and the #2795 i32 precedent.
-  if (a.kind === "i64") {
-    return Boolean((a as { bigint?: true }).bigint) === Boolean((b as { bigint?: true }).bigint);
-  }
-  return true;
-}
-
-export function funcTypeEq(t: FuncTypeDef, params: ValType[], results: ValType[]): boolean {
-  if (t.params.length !== params.length) return false;
-  if (t.results.length !== results.length) return false;
-  for (let i = 0; i < params.length; i++) {
-    if (!valTypeEq(t.params[i]!, params[i]!)) return false;
-  }
-  for (let i = 0; i < results.length; i++) {
-    if (!valTypeEq(t.results[i]!, results[i]!)) return false;
-  }
-  return true;
-}
-
 /**
  * Get or register a Wasm array type for a given element kind.
  * Reuses existing registrations so each element type only gets one array type.
@@ -268,6 +242,251 @@ export function getSubviewArrTypeIdx(ctx: CodegenContext, subviewTypeIdx: number
 export function isSubviewTypeIdx(ctx: CodegenContext, typeIdx: number): boolean {
   for (const v of ctx.subviewTypeMap.values()) if (v === typeIdx) return true;
   return false;
+}
+
+/**
+ * (#3054 B1) Get or register the `$__ta_view_<name>` struct — a byte-backed
+ * TypedArray view over an ArrayBuffer that SHARES the buffer's backing store:
+ *   `{length: i32, buf: (ref null $__vec_i32_byte), byteOffset: i32}`.
+ *
+ * Unlike `$__subview` (which pins the parent's raw *element* array), a
+ * `$__ta_view` holds a ref to the ArrayBuffer's `$__vec_i32_byte` **vec struct**
+ * and byte-decodes each element little-endian from `buf.data` at the element's
+ * byteOffset (via the dataview-native engine). This is mandatory because WasmGC
+ * array types are nominal per element kind — the buffer's packed-i8 array
+ * (`$__arr_i32_byte`) cannot be aliased/reinterpreted as an f64/i32 element
+ * array — so uniform byte-decoding is the only sound shared-backing scheme
+ * (Phase A A.1, option (c) impossible). Refing the *vec struct* (not the inner
+ * array) is a deliberate forward-compat choice: a future resize (Phase C) swaps
+ * the vec's `data` field in place and the view — which reads `buf.data` at each
+ * access — observes it, so length-tracking falls out for free.
+ *
+ * `length` is field 0 (subtypes `$__vec_base`) so uniform `.length` reads and the
+ * externref-length helper keep working. Keyed per TS view NAME (each view kind
+ * needs a distinct typeIdx so element access can recover its byte width /
+ * signedness / float / clamp behaviour purely from the receiver's static
+ * ValType.typeIdx — no runtime tag). Idempotent.
+ */
+export function getOrRegisterTaViewType(ctx: CodegenContext, viewName: string): number {
+  const existing = ctx.taViewTypeMap.get(viewName);
+  if (existing !== undefined) return existing;
+
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  // The shared ArrayBuffer/DataView backing vec (packed i8 bytes, one per slot).
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+
+  const idx = ctx.mod.types.length;
+  const name = `__ta_view_${viewName}`;
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    superTypeIdx: vecBaseIdx, // length-prefix compatible with $__vec_base
+    fields: [
+      { name: "length", type: { kind: "i32" }, mutable: true },
+      { name: "buf", type: { kind: "ref_null", typeIdx: bufVecTypeIdx }, mutable: false },
+      { name: "byteOffset", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.taViewTypeMap.set(viewName, idx);
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "buf", type: { kind: "ref_null" as const, typeIdx: bufVecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
+}
+
+/** (#3054 B1) True iff `typeIdx` is a registered `$__ta_view_<name>` struct. */
+export function isTaViewTypeIdx(ctx: CodegenContext, typeIdx: number): boolean {
+  for (const v of ctx.taViewTypeMap.values()) if (v === typeIdx) return true;
+  return false;
+}
+
+/** (#3054 B1) The TS view name (`"Uint8Array"` …) for a `$__ta_view` typeIdx, or undefined. */
+export function getTaViewName(ctx: CodegenContext, typeIdx: number): string | undefined {
+  for (const [name, v] of ctx.taViewTypeMap.entries()) if (v === typeIdx) return name;
+  return undefined;
+}
+
+/**
+ * (#3054 D) Canonical ordered list of TypedArray element kinds a first-class
+ * `$__ta_ctor` value can name. The array INDEX is the runtime `kind` stored in the
+ * struct; every dynamic-construct / `BYTES_PER_ELEMENT` dispatch iterates this list
+ * so the ordering is the single source of truth. BigInt64/Float16 views are omitted
+ * (unsupported elsewhere in the standalone lane).
+ */
+export const TA_CTOR_KINDS: readonly string[] = [
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+];
+
+/** (#3054 D) Element byte width per `TA_CTOR_KINDS` entry (BYTES_PER_ELEMENT). */
+export const TA_CTOR_BYTES: readonly number[] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
+
+/** (#3054 D) The `kind` index for a TS TypedArray name, or -1 if not a first-class TA ctor. */
+export function taCtorKindOf(name: string): number {
+  return TA_CTOR_KINDS.indexOf(name);
+}
+
+/**
+ * (#3054 D) Get or register the `$__ta_ctor` struct — `{kind: i32}` — the
+ * first-class runtime value for a TypedArray CONSTRUCTOR used in value position.
+ * A bare TA name in value position (`const c = Uint8Array`, `[Uint8Array, …]`,
+ * a `new ctor(rab)` callee) previously degraded to `ref.null.extern`
+ * (indistinguishable — `Uint8Array === Int8Array` was `true`), so a dynamic
+ * `new ctor(rab)` dropped the ctor and produced null. The immutable `kind` field
+ * (index into `TA_CTOR_KINDS`) drives the runtime-switch dynamic construct and
+ * `ctor.BYTES_PER_ELEMENT`. A plain struct (NOT a vec subtype) so it never collides
+ * with buffer/view `ref.test`s. Registered late+once, memoized on `ctx.taCtorTypeIdx`.
+ */
+export function getOrRegisterTaCtorType(ctx: CodegenContext): number {
+  if (ctx.taCtorTypeIdx >= 0) return ctx.taCtorTypeIdx;
+  const idx = ctx.mod.types.length;
+  const name = "__ta_ctor";
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    fields: [{ name: "kind", type: { kind: "i32" }, mutable: false }],
+  });
+  ctx.taCtorTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [{ name: "kind", type: { kind: "i32" as const }, mutable: false }]);
+  return idx;
+}
+
+/**
+ * (#3054 D) Get or register `$__ta_dyn_view` — a shared-backing TypedArray view
+ * whose element kind is carried in a runtime `kind` field (index into
+ * `TA_CTOR_KINDS`), for views built by a dynamic `new ctor(rab)` where the kind is
+ * only known at runtime. B1's per-kind `$__ta_view_<K>` are structurally identical
+ * → WasmGC canonicalizes them to ONE runtime type, so a boxed view can't recover
+ * its kind via `ref.test`; this struct stores it explicitly. Subtype of
+ * `$__vec_base` so `.length` reads field0 uniformly. Registered late+once.
+ */
+export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
+  if (ctx.taDynViewTypeIdx >= 0) return ctx.taDynViewTypeIdx;
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+  const idx = ctx.mod.types.length;
+  const name = "__ta_dyn_view";
+  const fields = [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "buf", type: { kind: "ref_null" as const, typeIdx: bufVecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+    { name: "kind", type: { kind: "i32" as const }, mutable: false },
+  ];
+  ctx.mod.types.push({ kind: "struct", name, superTypeIdx: vecBaseIdx, fields });
+  ctx.taDynViewTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, fields);
+  return idx;
+}
+
+/**
+ * (#3140) Get or register `$__bound_fn` — the standalone/WASI native
+ * bound-function carrier minted by `Function.prototype.bind`:
+ * `{target: externref, thisArg: externref, boundArgs: externref}` where
+ * `boundArgs` holds a boxed `$ObjVec` of the partial-application arguments.
+ * Invocation unwraps through the `__apply_closure` front-guard (prepending
+ * `boundArgs` and recursing on `target`, so bound-of-bound chains compose);
+ * the closure classifier (`closure-classifier.ts`) counts it callable so
+ * `typeof bound === "function"`. A plain struct (NOT a vec/closure subtype) so
+ * it never collides with other `ref.test`s. Registered late+once, memoized on
+ * `ctx.boundFnTypeIdx`. Byte-inert: only emitted when a standalone `.bind(...)`
+ * site compiles.
+ */
+export function getOrRegisterBoundFnType(ctx: CodegenContext): number {
+  if (ctx.boundFnTypeIdx >= 0) return ctx.boundFnTypeIdx;
+  const idx = ctx.mod.types.length;
+  const name = "__bound_fn";
+  const fields = [
+    { name: "target", type: { kind: "externref" as const }, mutable: false },
+    { name: "thisArg", type: { kind: "externref" as const }, mutable: false },
+    { name: "boundArgs", type: { kind: "externref" as const }, mutable: false },
+  ];
+  ctx.mod.types.push({ kind: "struct", name, fields });
+  ctx.boundFnTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, fields);
+  return idx;
+}
+
+/**
+ * (#3054 C) Get or register the `$__resizable_ab` struct — a WasmGC SUBTYPE of the
+ * ArrayBuffer backing vec `$__vec_i32_byte`, carrying one extra `maxByteLength`
+ * field:
+ *   `{length: i32 (mut), data: (ref $__arr_i32_byte) (mut), maxByteLength: i32}`.
+ *
+ * `new ArrayBuffer(n, {maxByteLength})` allocates one of these instead of a plain
+ * `$__vec_i32_byte`. The **subtype identity IS the resizable bit**:
+ * `ref.test $__resizable_ab` ⇒ resizable, a plain `$__vec_i32_byte` ⇒ fixed — no
+ * separate flag, so a resizable buffer whose `maxByteLength === byteLength` is
+ * still distinguishable from a fixed one (the flaw of the "over-allocate + derive"
+ * option). Because it is a subtype, every one of the ~23 `i32_byte` read sites
+ * that does `ref.cast $__vec_i32_byte; struct.get 0/1` succeeds on a
+ * `$__resizable_ab` instance UNCHANGED (is-a) — only the resizable-aware sites
+ * (the ctor, `.resize()`, and the `maxByteLength`/`resizable` getters) know the
+ * subtype. `$__vec_i32_byte` is emitted open (`sub`, non-final — every vec
+ * subtypes `$__vec_base` with no `final` flag), so a further subtype of it is
+ * legal.
+ *
+ * Type-index discipline (the one real hazard, Phase A A.2): registered LATE +
+ * ONCE, memoized on `ctx.resizableAbTypeIdx`, mirroring `getOrRegisterTaViewType`
+ * / `getOrRegisterDvWindowType`. `getOrRegisterVecType` is called FIRST so the
+ * parent `$__vec_i32_byte` is always at a LOWER type index than this subtype —
+ * the subtype's supertype reference points BACKWARD, which is valid without a rec
+ * group and never triggers `computeRecGroups` to reorder (that pass only extends a
+ * group FORWARD on forward refs; a backward supertype ref is left as a singleton).
+ * Types are append-only (`ctx.mod.types.length`), and DCE preserves relative
+ * order + keeps a live subtype's supertype reachable (it is referenced as both
+ * `superTypeIdx` and the `data` field's array elem type). So the subtype always
+ * follows its supertype in the final type section. Idempotent.
+ */
+export function getOrRegisterResizableAbType(ctx: CodegenContext): number {
+  if (ctx.resizableAbTypeIdx >= 0) return ctx.resizableAbTypeIdx;
+
+  // Register the parent buffer vec FIRST so it precedes this subtype in the type
+  // index order (the mandatory supertype-before-subtype ordering).
+  const bufVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, bufVecTypeIdx);
+
+  const idx = ctx.mod.types.length;
+  const name = "__resizable_ab";
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    superTypeIdx: bufVecTypeIdx, // SUBTYPE of $__vec_i32_byte — inherits length + data
+    fields: [
+      // fields 0 + 1 MUST match the parent's shape exactly (subtype invariance on
+      // mutable fields): length + data, same types + mutability as $__vec_i32_byte.
+      { name: "length", type: { kind: "i32" }, mutable: true },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx }, mutable: true },
+      // field 2 — the resizable-only metadata. Immutable (a buffer's declared
+      // maxByteLength never changes after construction).
+      { name: "maxByteLength", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.resizableAbTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "data", type: { kind: "ref" as const, typeIdx: arrTypeIdx }, mutable: true },
+    { name: "maxByteLength", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
 }
 
 /**

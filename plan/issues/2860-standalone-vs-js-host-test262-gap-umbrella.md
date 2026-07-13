@@ -3,7 +3,7 @@ id: 2860
 title: "Umbrella: close the standalone-vs-js-host test262 gap (~20,500 host-free, honest metric #2879/#2360)"
 status: ready
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-12
 priority: high
 feasibility: hard
 task_type: epic
@@ -11,7 +11,7 @@ area: codegen
 goal: standalone
 sprint: current
 horizon: xl
-related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879, 3027]
+related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879, 3027, 3169, 3170, 3171, 3172, 3173, 3174, 3175, 3176, 3177]
 ---
 
 # Umbrella: close the standalone-vs-js-host test262 gap
@@ -78,13 +78,23 @@ single fix flips directly.
 
 ### Not-yet-issued follow-ons (tracked here)
 
-- **$Object dynamic-object-property reader** (`__extern_get`/`__extern_rest_object`
-  leak) — now filed as **[#3027](3027-standalone-dynamic-object-property-reader-residual.md)**
-  (2026-07-03 harvest re-measurement, post #2861/#2863 landing: residual is
-  **1,552**, larger than the original ~669 estimate). The known substrate root
-  (`project_standalone_any_string_value_read_substrate`). Heavily overlapped
-  clusters 2/3 — #2861 and #2863 are both `done`; #3027 is the promised
-  post-landing re-measurement.
+- **$Object dynamic-object-property reader** — **[#3027](3027-standalone-dynamic-object-property-reader-residual.md)
+  is `done` (2026-07-05)**, superseding this note. Re-measurement found the
+  originally-hypothesized root cause
+  (`project_standalone_any_string_value_read_substrate`, the dynamic `any`
+  reader dropping native-string VALUES) was already fixed by #2861/#2863 — it
+  is NOT why the residual read 1,552. That residual is a **heterogeneous
+  long tail**, not one root cause: TypedArray(Constructors) internals/
+  prototype (~350), `Temporal` (~230+, a whole deferred feature area, not a
+  codegen bug), `Object.getOwnPropertyDescriptor` (124, itself 3 unrelated
+  shapes — built-in/global descriptors, `ToPropertyKey` coercion, array-
+  element descriptors), the already-tracked eval/Function-shim gaps
+  (#3005/#3017), and many smaller one-off gaps. #3027 fixed the one
+  genuinely-addressable codegen bug found during the trace (computed/
+  bracket string property+method access never dispatching to the native
+  string engine in `--nativeStrings` mode — ~5-9 tests) and recommends the
+  PO/tech-lead triage the remaining clusters into separately-sized follow-on
+  issues (TypedArray internals, ~350, is the next-largest single slice).
 - **spread / `Array.from(iter, n)`** (`__array_from_iter_n`) — ~321 tests.
   Depends on the iterator-protocol carrier (#2864).
 - **Namespace static reads** (`Math.PI`, `JSON.stringify`, `Reflect.get`,
@@ -144,6 +154,35 @@ in parallel on its own track.
   re-based the gap to ~20,500.
 - **#2862** ToPrimitive over built-in exotics — **blocked** (superseded; the
   de-masked clusters #2872/#2873/#2875/#2876 carry the tractable residual).
+
+## 2026-07-12 groom — fresh method-family slices (PO, lane-baseline remeasure)
+
+Remeasured from the two lane baselines (fetched 2026-07-12): the honest gap
+(host `pass` ∧ standalone NOT host-free pass, official scope, file+strict
+match) is **12,801** rows. After mapping every existing sub-front, nine
+genuinely-uncovered method-family clusters were sliced (all `sprint: current`,
+`priority: high`, `umbrella: 2860`):
+
+| issue | cluster | measured gap | horizon |
+| ----- | ------- | -----------: | ------- |
+| **3169** | Array.prototype callback HOFs over array-like receivers | 519 | l |
+| **3170** | Array.prototype indexOf/lastIndexOf/includes as-value + array-likes | 125 | m |
+| **3171** | Map/Set/WeakMap/WeakSet receiver brand-check protocol | ~142 (+ share of 113 residual) | m |
+| **3172** | Set-algebra set-like protocol + getOrInsert(Computed) | 120 | m |
+| **3173** | DataView.prototype get\*/set\* spec semantics | 230 | l |
+| **3174** | Date brand checks + ToPrimitive coercion order | 107 | m |
+| **3175** | Number.prototype toString(radix)/toFixed/valueOf | 74 | m |
+| **3176** | JSON.parse/stringify residual (reviver array walk, strictness) | 67 | m |
+| **3177** | TypedArrayConstructors internals + ctor protocols (the #3027 "~350" slice) | 356 | l |
+
+Deliberately NOT sliced (covered or in-flight): `Object/defineProperty(-ies)`
++ `Object/create` (492 — routes through the in-progress #2992 defineProperties
+MOP + #2984 lane), `Object` statics order/spread (#3155 ready),
+`Function.prototype.bind` residual (63 — fnctor lane #3138/#3139),
+`Array/fromAsync` (#2967 blocked on #3134), Atomics (#3145),
+`Iterator.*` (#3146/#3049), DisposableStack (needs the #2866 Symbol carrier),
+`language/*` (carriers #2864/#2865/#2867 + #2873), annexB residual (~180,
+follow-on candidate after #3069's pattern).
 
 ## Definition of done (umbrella)
 

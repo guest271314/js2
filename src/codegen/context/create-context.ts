@@ -97,6 +97,7 @@ export function createCodegenContext(
     newTargetGlobalIdx: undefined, // (#2023)
     classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
     usesArrayHoles: false, // (#2001 S1) set by the scanForArrayHoles pre-scan
+    arrayProtoIndexDirty: false, // (#2001 S2) set by scanForArrayHoles: Array.prototype index write ⇒ HOF hole-skip disabled
     usesVecValue: false, // (#2083) flipped by genuine getOrRegisterVecType usage
     suppressVecUsageFlag: false, // (#2083) true only during the two prereg calls below
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
@@ -105,6 +106,8 @@ export function createCodegenContext(
     inModuleInitGlobalIdx: undefined, // (#2800) __in_module_init flag global (set at finalize)
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
     dynReadHelpersEmitted: false, // (#2580 M0) ensureDynReadHelpers idempotence latch
+    usesDynMemberGet: false, // (#3053 U0) set by U1's IR member-read call site; U0 adds none
+    dynMemberGetHelpersEmitted: false, // (#3053 U0) ensureDynMemberGet idempotence latch
     classThrowsOnEval: new Set(),
     topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
@@ -193,6 +196,13 @@ export function createCodegenContext(
     dvWindowTypeIdx: -1, // (#2159/#38) standalone DataView windowing wrapper, lazy
     subviewTypeIdx: -1, // (#2159/#2357/#47) standalone TypedArray subarray view, lazy
     subviewTypeMap: new Map(), // (#2357) per-elem-kind $__subview type idx
+    taViewTypeMap: new Map(), // (#3054 B1) per-TA-name $__ta_view shared-backing view idx
+    resizableAbTypeIdx: -1, // (#3054 C) $__resizable_ab subtype of $__vec_i32_byte, lazy
+    taCtorTypeIdx: -1, // (#3054 D) $__ta_ctor {kind:i32} first-class TA constructor value, lazy
+    taCtorSingletonGlobals: new Map(), // (#3054 D) per-kind boxed $__ta_ctor singleton module-globals
+    taDynViewTypeIdx: -1, // (#3054 D) $__ta_dyn_view {length,buf,byteOffset,kind} runtime-kinded view, lazy
+    boundFnTypeIdx: -1, // (#3140) $__bound_fn {target,thisArg,boundArgs} native bound-function carrier, lazy
+    moduleUsesDynTaView: false, // (#3057) set by pre-scan when a dynamic `new ctorVar(buf)` exists
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),

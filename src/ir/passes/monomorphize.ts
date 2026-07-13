@@ -651,7 +651,13 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":
@@ -681,12 +687,23 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 4 (#1169d): class ops.
     case "class.new":
       return instr.args;
+    case "class.alloc":
+      // #3000-C: no SSA operands.
+      return [];
     case "class.get":
       return [instr.value];
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
+      return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];

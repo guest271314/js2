@@ -505,7 +505,7 @@ describe("#2856 — whole algorithms.ts component end-to-end", () => {
   });
 
   it("standalone / wasi compiles stay clean (host-gated Map arm defers)", async () => {
-    for (const extra of [{ standalone: true }, { target: "wasi" as const }]) {
+    for (const extra of [{ target: "standalone" as const }, { target: "wasi" as const }]) {
       const r = await compile(ALGORITHMS, { experimentalIR: true, trackFallbacks: true, ...(extra as object) });
       expect(r.success, `compile ok under ${JSON.stringify(extra)}`).toBe(true);
       expect(r.irPostClaimErrors ?? []).toStrictEqual([]);

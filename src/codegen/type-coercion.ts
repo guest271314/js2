@@ -370,6 +370,21 @@ export function buildVecFromExternref(
       }
       return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" }];
     }
+    // (#3024) i64 (BigInt) element arrays previously fell through to the empty
+    // terminal arm, leaving the externref element on the stack where the i64
+    // `array.set` expects an i64 → invalid Wasm (`array.set expected type i64,
+    // found call of type externref`; the postfix/prefix-inc/dec bigint.js
+    // family). Unbox via §7.1.13 ToBigInt when the module registered it
+    // (precision-preserving, identity on a JS bigint); otherwise the legacy
+    // number-unbox + trunc keeps the module valid.
+    if (et.kind === "i64") {
+      const toBigIdx = ctx.funcMap.get("__to_bigint");
+      if (toBigIdx !== undefined) return [{ op: "call", funcIdx: toBigIdx } as Instr];
+      if (unboxIdx !== undefined) {
+        return [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i64.trunc_sat_f64_s" } as Instr];
+      }
+      return [{ op: "drop" } as Instr, { op: "i64.const", value: 0n } as Instr];
+    }
     if (et.kind === "externref") return [];
     if (et.kind === "ref" || et.kind === "ref_null") {
       const elemTypeIdx = (et as { typeIdx: number }).typeIdx;
@@ -2106,6 +2121,36 @@ export function coerceType(
     const toIdx = (to as { typeIdx: number }).typeIdx;
     // Guarded: ref.test before ref.cast to avoid illegal cast traps
     const tmpEqAny = allocTempLocal(fctx, from);
+    // (#3149) When the target is a VEC struct and the direct cast misses, the
+    // source is an indexable-but-differently-typed native collection (e.g. the
+    // `$ObjVec` group value handed back by `Map.groupBy(...).get(k)` — `map.get`
+    // returns anyref, not the externref `Object.groupBy`'s `__extern_get`
+    // yields). The legacy else-branch emitted `ref.null` + `ref.as_non_null`,
+    // which NULL-DEREF-TRAPPED the moment the harness's `any[]`-typed
+    // `compareArray` read `.length`. Mirror the `externref → ref` arm below:
+    // materialize a real vec by reading the source via
+    // `__extern_length`/`__extern_get_idx` (`buildVecFromExternref`), which an
+    // `$ObjVec` responds to. `buildVecFromExternref` needs an externref, so
+    // convert the anyref first. Non-vec struct targets keep the null fallback.
+    const eqVecInfo = to.kind === "ref" ? getVecInfo(ctx, toIdx) : undefined;
+    if (eqVecInfo) {
+      const tmpEqExtern = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpEqAny });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpEqExtern });
+      fctx.body.push({ op: "local.get", index: tmpEqAny });
+      fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
+        then: [{ op: "local.get", index: tmpEqAny } as Instr, { op: "ref.cast_null", typeIdx: toIdx } as Instr],
+        else: buildVecFromExternref(ctx, fctx, tmpEqExtern, toIdx, eqVecInfo),
+      } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      releaseTempLocal(fctx, tmpEqExtern);
+      releaseTempLocal(fctx, tmpEqAny);
+      return;
+    }
     fctx.body.push({ op: "local.tee", index: tmpEqAny });
     fctx.body.push({ op: "ref.test", typeIdx: toIdx });
     fctx.body.push({
@@ -2125,6 +2170,31 @@ export function coerceType(
   if ((from.kind === "eqref" || from.kind === "anyref") && to.kind === "ref_null") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
     const tmpLocal = allocTempLocal(fctx, from);
+    // (#3149) Vec target + cast-miss → materialize instead of dropping to null.
+    // This is the `any[]`-typed-parameter path (a `ref_null $vec`) that the
+    // harness `compareArray(a: any[], …)` forces on a `Map.groupBy(...).get(k)`
+    // `$ObjVec` group (`map.get` returns anyref). The legacy null fallback then
+    // NULL-DEREF-TRAPPED on `a.length`. Mirror the `externref → ref_null` arm:
+    // read the indexable source via `buildVecFromExternref`. Non-vec targets
+    // keep the null fallback.
+    const anyVecInfo = getVecInfo(ctx, toIdx);
+    if (anyVecInfo) {
+      const tmpExtern = allocTempLocal(fctx, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: tmpLocal });
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpExtern });
+      fctx.body.push({ op: "local.get", index: tmpLocal });
+      fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: to },
+        then: [{ op: "local.get", index: tmpLocal } as Instr, { op: "ref.cast", typeIdx: toIdx } as Instr],
+        else: buildVecFromExternref(ctx, fctx, tmpExtern, toIdx, anyVecInfo),
+      } as Instr);
+      releaseTempLocal(fctx, tmpExtern);
+      releaseTempLocal(fctx, tmpLocal);
+      return;
+    }
     fctx.body.push({ op: "local.tee", index: tmpLocal });
     // Use ref.test to check both null and type compatibility (ref.test returns 0 for null)
     fctx.body.push({ op: "ref.test", typeIdx: toIdx });
@@ -3110,35 +3180,6 @@ function emitToStringResultToF64ByKind(ctx: CodegenContext, fctx: FunctionContex
     if (retKind && retKind !== "void") fctx.body.push({ op: "drop" });
     fctx.body.push({ op: "f64.const", value: NaN });
   }
-}
-
-/**
- * Emit a safe externref-to-f64 conversion that handles GC struct references.
- *
- * When an externref might hold a WasmGC struct (e.g., from `extern.convert_any`
- * on an object literal), calling the JS host `Number(v)` throws
- * "Cannot convert object to primitive value". This function emits inline Wasm
- * that uses `__typeof_number` to check if the externref is a JS number before
- * calling `__unbox_number`. For non-number externrefs (including GC structs),
- * it returns NaN per JS ToNumber semantics for objects without valueOf.
- *
- * Expects one externref on the stack; leaves one f64.
- */
-export function emitSafeExternrefToF64(ctx: CodegenContext, fctx: FunctionContext): void {
-  addUnionImports(ctx);
-  const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-  // (#1379) `__unbox_number` calls JS `Number(v)` which implements the spec
-  // ToNumber operation: null→0, undefined→NaN, "1"→1, "abc"→NaN, true→1,
-  // and ToPrimitive→Number for objects (with #1319's fix that returns
-  // "[object Object]" for wasm-structs without conversion methods, this
-  // path no longer throws on plain GC structs). Pre-#1379 we gated the
-  // call behind a `__typeof_number` check and returned NaN otherwise —
-  // that broke `var x = null; ++x` (expected 1, got NaN), `var x = "1";
-  // x--` (expected 0, got NaN), and the rest of the
-  // language/expressions/{prefix,postfix}-{increment,decrement} cluster.
-  // Routing through `__unbox_number` directly gives spec-correct ToNumeric
-  // for the f64 numeric path.
-  fctx.body.push({ op: "call", funcIdx: unboxIdx });
 }
 
 /**

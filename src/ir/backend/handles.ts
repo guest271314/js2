@@ -144,6 +144,35 @@ export interface IrClassLowering {
   fieldIdx(name: string): number;
   readonly constructorFuncName: string;
   methodFuncName(name: string): string;
+  /**
+   * #3000-E: legacy-registered name of the constructor-init function
+   * (`<className>_init`) — signature `(...ctorParams, self) -> (ref $struct)`,
+   * carrying field inits + the ctor body, operating on a caller-allocated
+   * instance. A derived `super(...)` lowers to `call <parent>_init(args..., self)`.
+   * The resolver's `resolveFunc` maps it to the funcIdx. Present for every
+   * WasmGC-struct (non-externref-backed) class, which is exactly the set that
+   * can appear as an IR-claimable subclass parent.
+   */
+  readonly initFuncName: string;
+  /**
+   * (#3144) The "instanceof-compatible" tag set for THIS class: its own
+   * `__tag` discrimination constant plus every transitive descendant's —
+   * the same walk as legacy `collectInstanceOfTags` (typeof-delete.ts), so
+   * the `class.instanceof` lowering compares against the identical set the
+   * legacy `compileInstanceOf` emits. Empty when the class has no tag
+   * registered (lowering then folds to constant false, legacy parity).
+   */
+  readonly instanceOfTags: readonly number[];
+  /**
+   * #3000-C: the raw Wasm instruction sequence that allocates a fresh,
+   * default-initialised instance of this class — the default field values
+   * (with the `__tag` slot set to the class's discrimination constant)
+   * followed by `struct.new $structTypeIdx`. Byte-identical to the alloc
+   * prefix the legacy `<className>_new` emits before it tail-calls
+   * `<className>_init` (both derive from `ctx.structFields` / `ctx.classTagMap`).
+   * Consumed by the `class.alloc` IR instr's lowering.
+   */
+  readonly allocInstrs: readonly Instr[];
 }
 
 /**
@@ -238,6 +267,105 @@ export interface IrDynamicLowering {
    * see the issue notes + #2106).
    */
   emitTagTest(tag: JsTag, scratch: () => number): readonly Instr[];
+  /**
+   * Carrier on the stack → i32 (0/1): `ToBoolean(carrier)` (§7.1.2, #2949
+   * S5.1). Routes to the SAME `coercion-engine.emitToBoolean` legacy uses —
+   * `__any_unbox_bool` on the gc `$AnyValue` carrier, `__is_truthy` on the
+   * host externref carrier — so `0`/`NaN`/`""`/`null`/`undefined` are falsy
+   * in both strategies, byte-parity with legacy's condition lowering (one
+   * ToBoolean engine, June-audit D4). Unlike `emitUnbox(Boolean)` (which
+   * reads a PROVEN boolean's payload), this is defined over EVERY partition
+   * and needs no `tag.test` proof.
+   */
+  emitToBoolean(): readonly Instr[];
+  /**
+   * Carrier on the stack → f64: `ToNumber(carrier)` (§7.1.4, #2949 S5.3), the
+   * single-operand ToNumber that the numeric-abstract relational lowering
+   * (`< > <= >=`) applies to a dynamic operand before the existing `f64.lt`/
+   * `gt`/`le`/`ge` compare.
+   *   - gc/fast/standalone: `__any_to_f64` — the SAME boxed-any→f64 helper
+   *     legacy's `__any_lt`/`__any_gt`/… + the arithmetic helpers use (null→0,
+   *     undefined→NaN, boolean→0/1, number→value). It is chosen directly (not
+   *     via `coercion-engine.emitToNumber`, whose `$AnyValue` arm routes through
+   *     `coerceType` and REQUIRES temp-local allocation the handle's pure
+   *     `Instr[]` contract cannot provide).
+   *   - host: `coercion-engine.emitToNumber` on the externref carrier →
+   *     `__unbox_number` (`Number(v)`) — the canonical host ToNumber, single
+   *     call, no locals.
+   * SCOPE — numeric-abstract only; string×string lexicographic relational is
+   * DEFERRED (legacy `any < any` is a full ARC, mode-split three ways: host
+   * `__host_compare`, standalone runtime both-strings-else-numeric branch, fast
+   * numeric-hint). Spec-correct only when the OTHER relational operand is a
+   * number — the S5.P producer admits a dynamic relational operand ONLY against
+   * a numeric literal/concrete.
+   */
+  emitToNumber(): readonly Instr[];
+  /**
+   * One carrier on the stack → the operand shape this backend's equality
+   * helper takes (#2949 S5.2). Emitted once per operand, immediately after that
+   * operand is pushed:
+   *   - gc: the carrier IS `(ref null $AnyValue)`, exactly what
+   *     `__any_strict_eq`/`__any_eq` take → identity (`[]`).
+   *   - host: the carrier is `externref`, exactly what
+   *     `__host_eq`/`__host_loose_eq` take → identity (`[]`).
+   * (It exists as a hook because a future backend might need a real
+   * per-operand marshalling; today both are identity.)
+   */
+  emitEqOperand(): readonly Instr[];
+  /**
+   * Two operands on the stack (each run through {@link emitEqOperand}) → i32
+   * (0/1): STRICT equality `===` (§7.2.16), routed to the SAME helper the
+   * matching legacy backend uses (D4, byte-parity with the legacy runtime
+   * result). `negate` appends `i32.eqz` for `!==`.
+   *   - gc/fast/standalone: the native `__any_strict_eq` — its tag-5 field-4
+   *     classifier owns cross-type falsity, numeric-class `23 === 23.0`,
+   *     `NaN === NaN → false` (the helper's `f64.eq`), and reference identity.
+   *   - host: `__host_eq` (JS `===`). (The `__any_strict_eq` path is NOT
+   *     host's — legacy host `any === any` compares the raw externrefs; the
+   *     `__any_*_eq` helper family is the standalone/`noJsHost` branch.)
+   */
+  emitStrictEq(negate: boolean): readonly Instr[];
+  /**
+   * Two operands on the stack → i32 (0/1): LOOSE equality `==` (§7.2.15),
+   * routed to the matching legacy backend's helper (D4). `negate` appends
+   * `i32.eqz` for `!=`.
+   *   - gc/fast/standalone: `__any_eq` (String⇄Number / `null == undefined` /
+   *     ToPrimitive arms live in the helper body).
+   *   - host: `__host_loose_eq` (JS `==`).
+   */
+  emitLooseEq(negate: boolean): readonly Instr[];
+  /**
+   * Two carriers on the stack (`recv`, then `key`) → one carrier: a dynamic
+   * member read `recv[key]` / `recv.name` (#3053 U1 / #2949 S5.4). Both
+   * strategies emit a bare `[call __dyn_member_get]` — the unified reader
+   * primitive (#3053 U0) whose result is the identity-preserving, tag-honest
+   * carrier (object→tag-6, string→tag-5, number→tag-3, …). The helper closes
+   * the externref↔carrier round-trip inside its OWN frame (the receiver peel
+   * `__carrier_recv_to_extern` + `__extern_get` + `__any_from_extern_honest`),
+   * so there is NO externref↔$AnyValue impedance at the IR boundary and reads
+   * compose (`recv.a.z` = two chained calls) without re-triggering the
+   * `__any_to_extern` tag-6 breaker.
+   *
+   * As a side effect this flips `ctx.usesDynMemberGet`, the latch the finalize
+   * `ensureDynMemberGet` pass reads to build the helper (U0 registers it
+   * up-front via `preregisterDynamicSupport`; the funcidx is resolved BY NAME
+   * here — the #2191/#2193 name-based-repoint discipline).
+   *   - gc/fast/standalone: carrier = `(ref null $AnyValue)`; the helper does
+   *     the tag-6 receiver peel + honest re-box internally.
+   *   - host: carrier = `externref`; the helper is a thin `__extern_get`
+   *     wrapper (the host carrier IS externref).
+   */
+  emitMemberGet(): readonly Instr[];
+  /**
+   * Two carriers on the stack (`recv`, then the boxed index `key`) → one
+   * carrier: a dynamic indexed read `recv[i]` (#3053 U1 / #2949 S5.4). The
+   * indexed form of {@link emitMemberGet} — the index is carried `dynamic`
+   * (boxed number) so the helper's own `__any_to_extern(key)` performs the
+   * `ToPropertyKey` number→decimal conversion inside its frame. Emits the same
+   * `[call __dyn_member_get]` (the reader is key-uniform) and flips the same
+   * `ctx.usesDynMemberGet` latch.
+   */
+  emitElementGet(): readonly Instr[];
 }
 
 /**

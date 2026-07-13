@@ -45,8 +45,8 @@ describe("#1781 standalone test262 artifact root-cause map", () => {
         category: "built-ins/Object",
         status: "compile_error",
         error: "No dependency provided for imported function env::__extern_get",
-        error_category: "wasm_compile",
-        error_signature: "wasm_compile:No dependency provided for imported function env::__extern_get",
+        error_category: "missing_dependency",
+        error_signature: "missing_dependency:No dependency provided for imported function env::__extern_get",
         imports: ["env::__extern_get"],
         host_import_leak_class: "dynamic_object_property",
         reached_test: false,
@@ -104,7 +104,7 @@ describe("#1781 standalone test262 artifact root-cause map", () => {
     expect(byId.get("standalone-dynamic-object-property").issues).toContain("#1472");
     expect(byId.get("standalone-regexp-native-engine").issues).toContain("#1914");
     expect(byId.get("standalone-dynamic-object-property").sample_signatures).toContain(
-      "wasm_compile:No dependency provided for imported function env::__extern_get",
+      "missing_dependency:No dependency provided for imported function env::__extern_get",
     );
     expect(byId.get("standalone-dynamic-object-property").sample_signatures).toContain(
       "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).",

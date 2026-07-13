@@ -849,8 +849,21 @@ async function doCompile(source, sourceMapUrl, target, inferModuleStrictArgument
     throw makeWorkerRecycleError(`worker built-ins poisoned before compile: ${preCleanup.reason}`);
   }
   const compileFn = incrementalCompiler ? incrementalCompiler.compile : compile;
+  // (#3049 C1 / #3123) Host lane (no target) defers top-level init:
+  // `__module_init` is exported instead of wired to the wasm `(start)`
+  // section, and the exec path below calls it right after `setExports` so
+  // top-level code runs against a fully-wired runtime. Aligned with
+  // compiler-fork-worker.mjs + tests/test262-runner.ts (#1251 both-paths
+  // rule). Standalone/wasi/linear targets keep their own `_start` init model.
+  // MODULE-GOAL tests (`inferModuleStrictArguments` is exactly the
+  // module-goal flag) are EXCLUDED: the multi-module FIXTURE link already
+  // synthesizes per-module init plumbing, and the flag added a SECOND
+  // `__module_init` export in one binary — V8's "Duplicate export name"
+  // CompileError, the 6-file `language/module-code/*` regression that parked
+  // the stack PR #2835/#2839.
+  const deferOpt = target || inferModuleStrictArguments ? {} : { deferTopLevelInit: true };
   return incrementalCompiler
-    ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map", target, inferModuleStrictArguments })
+    ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map", target, inferModuleStrictArguments, ...deferOpt })
     : (await compile(source, {
               fileName: "test.ts",
               sourceMap: true,
@@ -859,6 +872,7 @@ async function doCompile(source, sourceMapUrl, target, inferModuleStrictArgument
               skipSemanticDiagnostics: true,
               target,
               inferModuleStrictArguments,
+              ...deferOpt,
             }));
 }
 
@@ -1335,6 +1349,42 @@ process.on("message", async (msg) => {
     // Wire up setExports for callback support
     if (typeof importObj.setExports === "function") {
       importObj.setExports(instance.exports);
+    }
+
+    // (#3049 C1) Deferred top-level init (host lane): run the exported
+    // `__module_init` now that `setExports` has wired the runtime. A throw
+    // here keeps the classification the same code had when it surfaced from
+    // the `(start)` section during instantiate: runtime-negative → pass,
+    // anything else → an honest runtime fail (never malformed-wasm
+    // compile_error). Standalone/wasi modules don't export `__module_init`
+    // (they keep `_start`), so this is a no-op for them.
+    // oracle-version-exempt: this arm re-hosts the EXISTING instantiate-throw
+    // classification (runtime-negative → pass, else fail+isException) at the
+    // explicit __module_init call site under deferTopLevelInit (#3123); the
+    // scoring RULE is byte-identical to the pre-defer catch below, so no
+    // existing row is re-scored by policy — row flips come only from the
+    // compiler changes, which the ordinary baseline diff scores normally.
+    const moduleInit = instance.exports.__module_init;
+    if (typeof moduleInit === "function") {
+      try {
+        moduleInit();
+      } catch (initErr) {
+        const execMs = performance.now() - execStart;
+        if (isRuntimeNegative) {
+          sendResult({ id, status: "pass", compileMs, execMs, runtimeNegativePass: true, ...buildResultMetadata(result, true) });
+          return;
+        }
+        sendResult({
+          id,
+          status: "fail",
+          error: extractWasmExceptionMessage(initErr, instance),
+          isException: true,
+          compileMs,
+          execMs,
+          ...buildResultMetadata(result, true),
+        });
+        return;
+      }
     }
 
     const testFn = instance.exports.test;

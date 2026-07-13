@@ -1,4 +1,10 @@
 import { isStringType } from "../../checker/type-mapper.js";
+import {
+  getOrRegisterPromiseType,
+  isStandalonePromiseActive,
+  PROMISE_STATE_FULFILLED,
+  PROMISE_STATE_REJECTED,
+} from "../async-scheduler.js";
 import type { Instr, ValType } from "../../ir/types.js";
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
@@ -38,9 +44,14 @@ import { elemGetOp, resolveArrayInfo, typedArraySearchSignedness, unpackedElemTy
 import { flatStringType, stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
-import { coercionInstrs } from "../type-coercion.js";
+import { coercionInstrs, defaultValueInstrs } from "../type-coercion.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
-import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterRefCellType,
+  getOrRegisterVecBaseType,
+} from "../registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -1359,7 +1370,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   ctx.liveBodies.delete(condInstrs);
 }
 
-function compileForOfDestructuring(
+export function compileForOfDestructuring(
   ctx: CodegenContext,
   fctx: FunctionContext,
   pattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern,
@@ -1686,15 +1697,16 @@ function compileForOfDestructuring(
             if (restIdx === undefined) {
               restIdx = allocLocal(fctx, restName, { kind: "externref" });
             }
+            // (#3100 S4) ensureLateImport routes `__extern_slice` native standalone.
             let sliceIdx = ctx.funcMap.get("__extern_slice");
             if (sliceIdx === undefined) {
-              const importsBefore = ctx.numImportFuncs;
-              const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-              addImport(ctx, "env", "__extern_slice", {
-                kind: "func",
-                typeIdx: sliceType,
-              });
-              shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+              ensureLateImport(
+                ctx,
+                "__extern_slice",
+                [{ kind: "externref" }, { kind: "f64" }],
+                [{ kind: "externref" }],
+              );
+              flushLateImportShifts(ctx, fctx);
               sliceIdx = ctx.funcMap.get("__extern_slice");
             }
             if (sliceIdx !== undefined) {
@@ -2669,14 +2681,13 @@ function emitForOfRestAssignment(
     return true;
   }
 
-  // Ensure __extern_slice is available (env import in JS-host mode; the native
-  // object-runtime slice under --target standalone routes through the same name).
+  // Ensure __extern_slice is available (env import in JS-host mode; #3100 S4:
+  // ensureLateImport routes to the NATIVE defined slice under standalone/wasi —
+  // the raw `env::` addImport this replaces leaked the host import).
   let sliceIdx = ctx.funcMap.get("__extern_slice");
   if (sliceIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const sliceType = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_slice", { kind: "func", typeIdx: sliceType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
+    ensureLateImport(ctx, "__extern_slice", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
     sliceIdx = ctx.funcMap.get("__extern_slice");
   }
   if (sliceIdx === undefined) {
@@ -4039,14 +4050,50 @@ function compileForOfArray(
   // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
   // a growth that reallocated the backing array leaves the hoisted `dataLocal`
   // stale.
-  if (reReadLive) {
-    fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  // (#3224) In standalone, bounds-check the per-element read against the
+  // physical WasmGC backing so a sparse array (logical `.length` set beyond the
+  // backing) yields the absent value instead of an OOB TRAP. The array iterator
+  // visits every index up to the LOGICAL length (§23.1.5.1) — so this does NOT
+  // clamp the loop; it only guards the READ: `if i < array.len(data): data[i]
+  // else <default>`. `defaultValueInstrs` gives the same rep the within-backing
+  // holes use — externref → `ref.null.extern` (≡ standalone `undefined`), f64 →
+  // the sNaN hole sentinel, i32/packed → 0. No-op for dense arrays.
+  if (ctx.standalone) {
+    const dataIterLocal = allocLocal(fctx, `__forof_dataiter_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: arrTypeIdx,
+    });
+    if (reReadLive) {
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+    }
+    fctx.body.push({ op: "local.set", index: dataIterLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: dataIterLocal });
+    fctx.body.push({ op: "array.len" });
+    fctx.body.push({ op: "i32.lt_s" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: readElemType },
+      then: [
+        { op: "local.get", index: dataIterLocal } as Instr,
+        { op: "local.get", index: iLocal } as Instr,
+        { op: elemReadOp, typeIdx: arrTypeIdx } as Instr,
+      ],
+      else: defaultValueInstrs(readElemType),
+    } as Instr);
   } else {
-    fctx.body.push({ op: "local.get", index: dataLocal });
+    if (reReadLive) {
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+    }
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
   }
-  fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
   // (#2001 S1) A for-of over an `any[]` with a literal hole reads `$Hole` at the
   // hole index; map it back to `undefined` (the iteration value of an absent
   // index — for-of uses array iterator Get, which yields undefined for holes).
@@ -4321,9 +4368,31 @@ function compileForOfArrayEntries(
     fctx.body.push({ op: "f64.convert_i32_s" });
     fctx.body.push({ op: "local.set", index: keyLocal! });
     // value = data[i] (packed i8/i16 widens to i32 on read, #2934)
-    fctx.body.push({ op: "local.get", index: dataLocal });
-    fctx.body.push({ op: "local.get", index: iLocal });
-    fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
+    // (#3224) In standalone, bounds-check the read against the physical backing
+    // so a sparse array (logical length beyond the backing) yields the absent
+    // value (undefined ≡ ref.null.extern; f64 → sNaN sentinel) instead of an OOB
+    // trap. entries() visits every index up to the logical length; the read is
+    // guarded, the loop is not clamped. No-op for dense arrays.
+    if (ctx.standalone) {
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "local.get", index: dataLocal });
+      fctx.body.push({ op: "array.len" });
+      fctx.body.push({ op: "i32.lt_s" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: readElemType },
+        then: [
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "local.get", index: iLocal } as Instr,
+          { op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr,
+        ],
+        else: defaultValueInstrs(readElemType),
+      } as Instr);
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
+    }
     const valLocalType = getLocalType(fctx, valLocal!);
     if (valLocalType && !valTypesMatch(readElemType, valLocalType)) {
       coerceType(ctx, fctx, readElemType, valLocalType);
@@ -4771,6 +4840,147 @@ function compileForOfIteratorAssignDestructuring(
 }
 
 /**
+ * (#2978) Iteration ceiling for `for await` loops that are driven by the
+ * SYNCHRONOUS for-of machinery (no CPS/frame suspension — the async fn compiled
+ * as a sync body). On these drives a genuinely-pending or host-carrier promise
+ * element can NEVER be observed settling (a JS host promise's state is not
+ * synchronously readable, and the sync body cannot yield to the microtask
+ * queue), so an iterator that never reports `done` re-enters `next()` forever,
+ * allocating a promise per step — measured ~3 GB JS heap in ~14 s before V8's
+ * OOM kill, which can take a CI shard worker down with it (issue #2978).
+ *
+ * The cap converts that unbounded loop into a LOUD, bounded TypeError that
+ * still routes through IteratorClose (`return()` fires exactly once, and the
+ * enclosing `try/catch` observes the abrupt completion). It fires only on
+ * `for await` sync drives — plain `for..of` loops are uncapped (#2067) — and
+ * only after 100k steps, far beyond any legitimate sync-iterable length in
+ * practice. It is a transitional guard: rejected native-`$Promise` elements
+ * are handled spec-correctly before the cap can trigger (see
+ * `emitForAwaitElementUnwrap`), and the remaining pending-promise shapes move
+ * to the real #2895 frame-suspension drive as it widens, after which this cap
+ * is dead code on those lanes.
+ */
+const FOR_AWAIT_SYNC_DRIVE_STEP_CAP = 100_000;
+
+/**
+ * (#2978) Emit the per-element `Await` for a `for await` loop driven by the
+ * synchronous for-of machinery, under the native `$Promise` carrier
+ * (`isStandalonePromiseActive` — wasi today, `--target standalone` after the
+ * #2980 widen). Spec §27.1.4.4 `AsyncFromSyncIteratorContinuation`: the sync
+ * iterator's `value` is wrapped via `PromiseResolve`; a REJECTED wrapper must
+ * reject the step, which closes the sync iterator and completes the loop
+ * abruptly with the rejection reason.
+ *
+ * `valueLocal` holds the just-read element (externref — the boxed-any rep the
+ * native carrier uses for promise values). Emits:
+ *   - value is a `$Promise` (ref.test after `any.convert_extern`):
+ *       state == REJECTED  → `throw` the reason (field 1) via the shared exn
+ *                            tag. The CALLER is responsible for close-on-throw
+ *                            (the `__iterator` path's #1347 try/catch_all, or
+ *                            the direct path's #2978 wrapper) so `return()`
+ *                            fires exactly once before the rethrow reaches the
+ *                            user `catch`.
+ *       state == FULFILLED → unwrap one level: valueLocal = promise.value
+ *                            (AG0-consistent single unwrap).
+ *       state == PENDING   → leave the promise as the value (the sync drive
+ *                            cannot suspend — the #2895 AG0 limitation; the
+ *                            step cap bounds the pathological infinite case).
+ *   - not a `$Promise` → no-op (`Await(v) = v` for settled plain values).
+ *
+ * The promise ref is narrowed ONCE into a typed local and re-read from there
+ * (repeated `any.convert_extern; ref.cast` chains confuse the stack-balance
+ * type-repair pass — the #2895 slice-1b lesson).
+ */
+function emitForAwaitElementUnwrap(ctx: CodegenContext, fctx: FunctionContext, valueLocal: number): void {
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const tagIdx = ensureExnTag(ctx);
+  const pLocal = allocLocal(fctx, `__forawait_p_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: promiseTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: valueLocal });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // Narrow once into the typed local.
+      { op: "local.get", index: valueLocal } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+      { op: "local.set", index: pLocal } as Instr,
+      // state == REJECTED → throw the reason (abrupt loop completion).
+      { op: "local.get", index: pLocal } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "i32.const", value: PROMISE_STATE_REJECTED } as Instr,
+      { op: "i32.eq" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: pLocal } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "throw", tagIdx } as Instr,
+        ],
+        else: [
+          // state == FULFILLED → unwrap one level.
+          { op: "local.get", index: pLocal } as Instr,
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "i32.const", value: PROMISE_STATE_FULFILLED } as Instr,
+          { op: "i32.eq" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: pLocal } as Instr,
+              { op: "ref.as_non_null" } as Instr,
+              { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+              { op: "local.set", index: valueLocal } as Instr,
+            ],
+            else: [], // PENDING — leave as-is (see doc comment).
+          } as Instr,
+        ],
+      } as Instr,
+    ],
+    else: [],
+  });
+}
+
+/**
+ * (#2978) Emit the per-iteration step-cap check for a `for await` sync drive.
+ * Must be pushed at the TOP of the loop body (before the `next()` call) so
+ * `continue` still passes through it. The counter local must be zero-initialised
+ * immediately before the loop is entered (locals are only zeroed at function
+ * entry — a re-entered loop must not inherit the previous run's count, the
+ * #2067 accumulation bug).
+ */
+function emitForAwaitStepCapCheck(ctx: CodegenContext, fctx: FunctionContext, capLocal: number): void {
+  const throwInstrs = collectInstrs(fctx, () =>
+    emitThrowTypeError(
+      ctx,
+      fctx,
+      "for await: iteration limit exceeded (async carrier cannot observe promise settlement on this target — #2978)",
+    ),
+  );
+  fctx.body.push({ op: "local.get", index: capLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.tee", index: capLocal });
+  fctx.body.push({ op: "i32.const", value: FOR_AWAIT_SYNC_DRIVE_STEP_CAP });
+  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: throwInstrs,
+    else: [],
+  });
+}
+
+/**
  * Compile for...of using direct Wasm method dispatch when the iterable
  * is a known struct with a @@iterator method.
  *
@@ -4916,19 +5126,53 @@ function compileForOfDirectIterator(
   // Look up the return() method on the iterator struct for iterator close (#851)
   const returnMethodIdx = ctx.funcMap.get(`${iterStructName}_return`);
 
+  // (#2978 / #2934-3b) Result arity of the user `return()` method. A VOID
+  // `return()` (e.g. `return() { count += 1; }`) has zero results, so the
+  // unconditional post-close `drop` underflowed the operand stack → invalid
+  // Wasm → the module fail-fasted at validation (which is exactly what hid the
+  // #2978 OOM loop). Guard every close-site `drop` on this arity.
+  let returnMethodResultArity = 0;
+  if (returnMethodIdx !== undefined) {
+    const returnMethodDef = definedFuncAt(ctx, returnMethodIdx);
+    const returnMethodType = returnMethodDef ? ctx.mod.types[returnMethodDef.typeIdx] : undefined;
+    returnMethodResultArity =
+      returnMethodType && returnMethodType.kind === "func" ? returnMethodType.results.length : 0;
+  }
+
+  // (#2978) `for await` on the sync drive: cap the step count (all lanes — a
+  // sync body can never observe a pending/host promise settle), and under the
+  // native `$Promise` carrier also unwrap each element per §27.1.4.4 (REJECTED
+  // → IteratorClose + rethrow). The close-on-throw wrapper below needs one
+  // extra label level, mirroring the __iterator path's +3 (#851).
+  const isForAwait = !!stmt.awaitModifier;
+  const wrapForAwaitClose = isForAwait && returnMethodIdx !== undefined;
+  const carrierAwait = isForAwait && valueFieldType.kind === "externref" && isStandalonePromiseActive(ctx);
+  const forAwaitDepth = wrapForAwaitClose ? 3 : 2;
+  let capLocal = -1;
+  if (isForAwait) {
+    capLocal = allocLocal(fctx, `__forawait_steps_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: capLocal });
+  }
+
   // Done flag: tracks whether iterator completed normally (done=true) (#851)
   const doneFlagDirect = allocLocal(fctx, `__forit_done_${fctx.locals.length}`, { kind: "i32" });
 
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += forAwaitDepth;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += forAwaitDepth;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += forAwaitDepth;
+  adjustRethrowDepth(fctx, forAwaitDepth);
 
   fctx.breakStack.push(1);
   fctx.continueStack.push(0);
+
+  // (#2978) Step cap — first thing in the loop body so `continue` re-checks it.
+  if (isForAwait) {
+    emitForAwaitStepCapCheck(ctx, fctx, capLocal);
+  }
 
   // #2067: no iteration cap — see the matching note in the __iterator_next path.
   // The former 1,000,000-iteration `br_if` guard silently truncated long
@@ -4980,6 +5224,18 @@ function compileForOfDirectIterator(
     fieldIdx: valueFieldIdx,
   });
 
+  // (#2978) `for await` under the native `$Promise` carrier: Await the element
+  // — a REJECTED promise throws its reason (abrupt loop completion; the
+  // close-on-throw wrapper below runs IteratorClose first), a FULFILLED one
+  // unwraps. Runs on the raw externref BEFORE the element coercion so the
+  // unwrapped value (not the promise) is what reaches the loop variable.
+  if (carrierAwait) {
+    const awaitTmp = allocLocal(fctx, `__forawait_val_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: awaitTmp });
+    emitForAwaitElementUnwrap(ctx, fctx, awaitTmp);
+    fctx.body.push({ op: "local.get", index: awaitTmp });
+  }
+
   // Coerce value to element type if needed
   const targetElemType = getLocalType(fctx, elemLocal) ?? elemType;
   if (!valTypesMatch(valueFieldType, targetElemType)) {
@@ -5012,14 +5268,27 @@ function compileForOfDirectIterator(
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= forAwaitDepth;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= forAwaitDepth;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= forAwaitDepth;
+  adjustRethrowDepth(fctx, -forAwaitDepth);
 
   popBody(fctx, savedBody);
 
-  fctx.body.push({
+  // Fresh instrs per call site — the close sequence is emitted at TWO sites
+  // (post-loop break-close and the #2978 catch_all close) and a shared Instr[]
+  // aliased into two branches double-remaps under DCE (see
+  // reference_shared_instr_object_dce_double_remap).
+  const closeCallInstrs = (): Instr[] => [
+    { op: "local.get", index: iterLocal } as Instr,
+    ...(iterResultType.kind === "ref_null" ? [{ op: "ref.as_non_null" } as Instr] : []),
+    { op: "call", funcIdx: returnMethodIdx! } as Instr,
+    // Drop the return value only when return() actually yields one
+    // (#2978 / #2934-3b — a void return() has nothing to drop).
+    ...(returnMethodResultArity > 0 ? [{ op: "drop" } as Instr] : []),
+  ];
+
+  const blockLoop: Instr = {
     op: "block",
     blockType: { kind: "empty" },
     body: [
@@ -5029,7 +5298,43 @@ function compileForOfDirectIterator(
         body: loopBody,
       },
     ],
-  });
+  };
+
+  if (wrapForAwaitClose) {
+    // (#2978) `for await`: close the iterator on ABRUPT (throw) completion —
+    // the element-await rethrows a rejection reason, and per §27.1.4.4 /
+    // §7.4.6 the sync iterator must be closed exactly once before the
+    // rejection reaches the user catch. Per §7.4.6 step 6, an error thrown by
+    // `return()` itself is suppressed (the original throw wins) — hence the
+    // empty inner catch_all. Mirrors the __iterator path's #1347 wrapper.
+    fctx.body.push({
+      op: "try",
+      blockType: { kind: "empty" },
+      body: [blockLoop],
+      catches: [],
+      catchAll: [
+        { op: "local.get", index: doneFlagDirect } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            {
+              op: "try",
+              blockType: { kind: "empty" },
+              body: closeCallInstrs(),
+              catches: [],
+              catchAll: [], // suppress return() errors per §7.4.6 step 6
+            } as Instr,
+          ],
+          else: [],
+        } as Instr,
+        { op: "rethrow", depth: 0 } as Instr,
+      ],
+    });
+  } else {
+    fctx.body.push(blockLoop);
+  }
 
   // Iterator close protocol (#851): call iterator.return() only on abrupt
   // completion (break/return), NOT on normal completion (done=true).
@@ -5039,13 +5344,7 @@ function compileForOfDirectIterator(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: iterLocal } as Instr,
-        ...(iterResultType.kind === "ref_null" ? [{ op: "ref.as_non_null" } as Instr] : []),
-        { op: "call", funcIdx: returnMethodIdx } as Instr,
-        // Drop the return value (return() returns {value, done})
-        { op: "drop" } as Instr,
-      ],
+      then: closeCallInstrs(),
       else: [],
     });
   }
@@ -5121,10 +5420,14 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // #1665: Wasm-native generator for-of. When the iterable is a native
   // generator state struct (the value produced by a `function*` declaration
-  // under --target wasi/standalone), drive the loop via the generator's resume
-  // function — no JS-host iterator protocol, no #681 gate. The subject value is
-  // already on the stack from compileExpression above.
-  if ((ctx.standalone || ctx.wasi) && (iterableType.kind === "ref" || iterableType.kind === "ref_null")) {
+  // under --target wasi/standalone — or, since #3050, a try-region generator
+  // under the JS host), drive the loop via the generator's resume function — no
+  // JS-host iterator protocol, no #681 gate. TYPE-driven, not mode-driven: the
+  // state-struct type only exists when the generator registered natively, and
+  // the host iterator protocol cannot iterate a WasmGC struct (a #3050
+  // host-lane native generator consumed by for-of summed 0). The subject value
+  // is already on the stack from compileExpression above.
+  if (iterableType.kind === "ref" || iterableType.kind === "ref_null") {
     const genInfo = nativeGeneratorInfoForForOfSubject(ctx, iterableType);
     if (genInfo && tryCompileNativeGeneratorForOf(ctx, fctx, stmt, iterableType, genInfo)) {
       return;
@@ -5262,6 +5565,19 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     elemLocal = allocLocal(fctx, `__forof_elem_${fctx.locals.length}`, elemType);
   }
 
+  // (#2978) `for await` on the sync __iterator drive: step cap (all lanes) +
+  // per-element Await under the native `$Promise` carrier. See the direct-path
+  // twin above; here the existing #1347 try/catch_all wrapper already provides
+  // close-on-throw, so the rejection rethrow needs no extra structure.
+  const isForAwaitIter = !!stmt.awaitModifier;
+  const carrierAwaitIter = isForAwaitIter && isStandalonePromiseActive(ctx);
+  let capLocalIter = -1;
+  if (isForAwaitIter) {
+    capLocalIter = allocLocal(fctx, `__forawait_steps_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: capLocalIter });
+  }
+
   // Build loop body
   const savedBody = pushBody(fctx);
 
@@ -5330,6 +5646,11 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   // Silent wrong results violate "compile away, don't emulate"; the loop now
   // runs to the iterator's own `done`, matching JS.
 
+  // (#2978) Step cap — first thing in the loop body so `continue` re-checks it.
+  if (isForAwaitIter) {
+    emitForAwaitStepCapCheck(ctx, fctx, capLocalIter);
+  }
+
   // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
   // Results are pushed left-to-right, so value (externref) is on top of the
   // stack and done (i32) below it: pop value first, then done.
@@ -5351,6 +5672,14 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     ],
     else: [],
   });
+
+  // (#2978) `for await` under the native `$Promise` carrier: Await the element.
+  // A REJECTED promise throws its reason; the #1347 try/catch_all wrapper below
+  // closes the iterator (return() exactly once, errors suppressed) and rethrows,
+  // so the user catch observes the rejection reason (§27.1.4.4).
+  if (carrierAwaitIter) {
+    emitForAwaitElementUnwrap(ctx, fctx, resultLocal);
+  }
 
   // Get value: elem = value (already in resultLocal)
   fctx.body.push({ op: "local.get", index: resultLocal });
@@ -5531,12 +5860,14 @@ function emitArrayForIn(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.ForInStatement,
-  arrayInfo: { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType },
+  _arrayInfo: { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType },
   keyLocal: number,
   memberTarget: ts.PropertyAccessExpression | ts.ElementAccessExpression | null,
   bindingPattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern | null,
 ): void {
-  const { vecTypeIdx } = arrayInfo;
+  // (#3179) `arrayInfo.vecTypeIdx` (the STATIC-type-derived vec type) is
+  // deliberately unused: the loop reads only the length, via the `$__vec_base`
+  // supertype, so the runtime element-kind rep no longer matters (see below).
 
   // Decimal-key formatter (f64 -> externref) for the integer index. Reuses the
   // sealed engine helper — NOT a hand-rolled ToString — via the SAME registration
@@ -5559,15 +5890,48 @@ function emitArrayForIn(
   // Compile the array expression into a vec ref local. A null/undefined receiver
   // would throw in JS; for-in over null/undefined is spec'd as a no-op (§13.7.5.1
   // step 2 returns when the value is undefined/null), so guard with ref.is_null.
-  const vecLocal = allocLocal(fctx, `__forin_arr_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  //
+  // (#3179) The receiver's RUNTIME vec rep can disagree with the vec type derived
+  // from the STATIC TS type: `var a = new Array(); a[0] = 5` is statically `any[]`
+  // (→ `__vec_externref`) but the allocation site's usage inference
+  // (compileNewExpression's Array arm) mints a `__vec_f64` — so the old
+  // unconditional `ref.cast <static vecTypeIdx>` on the externref branch trapped
+  // `illegal cast` at runtime. The loop below only reads the LENGTH (field 0),
+  // which every `__vec_<elemKind>` exposes uniformly through the shared
+  // `$__vec_base` supertype (#2186) — so downcast to `$__vec_base` instead,
+  // guarded by `ref.test` (a non-vec runtime value yields a null local → 0
+  // iterations, matching the nullish-receiver no-op; previously it trapped).
+  // The concrete-ref branch (receiver statically compiles to a vec ref) keeps
+  // its exact type via subtyping into the `$__vec_base` local.
+  const vecBaseTypeIdx = getOrRegisterVecBaseType(ctx);
+  const vecLocal = allocLocal(fctx, `__forin_arr_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: vecBaseTypeIdx,
+  });
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && (exprType.kind === "ref" || exprType.kind === "ref_null")) {
-    // already a vec ref
+    // already a concrete vec ref — a `__vec_<k>` subtypes `$__vec_base`
+    fctx.body.push({ op: "local.set", index: vecLocal });
   } else if (exprType && exprType.kind === "externref") {
+    const anyTmp = allocLocal(fctx, `__forin_any_${fctx.locals.length}`, { kind: "anyref" });
     fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "local.tee", index: anyTmp } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: vecBaseTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyTmp } as Instr,
+        { op: "ref.cast", typeIdx: vecBaseTypeIdx } as Instr,
+        { op: "local.set", index: vecLocal } as Instr,
+      ],
+      // non-vec runtime value → vecLocal stays null → 0 iterations
+    } as Instr);
+  } else {
+    // Defensive: unexpected receiver type on the stack — preserve the historical
+    // bare local.set (validation surfaces a genuine type mismatch, as before).
+    fctx.body.push({ op: "local.set", index: vecLocal });
   }
-  fctx.body.push({ op: "local.set", index: vecLocal });
 
   // length = vec.field0  (0 when the ref is null → loop body never runs)
   const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, { kind: "i32" });
@@ -5580,7 +5944,7 @@ function emitArrayForIn(
     else: [
       { op: "local.get", index: vecLocal } as Instr,
       { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "struct.get", typeIdx: vecBaseTypeIdx, fieldIdx: 0 } as Instr,
     ],
   } as Instr);
   fctx.body.push({ op: "local.set", index: lenLocal });

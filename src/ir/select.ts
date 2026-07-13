@@ -245,6 +245,22 @@ export interface IrSelectionOptions {
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
+  /**
+   * (#3053 U2) True iff the unified gc member-read primitive `__dyn_member_get`
+   * (#3053 U0) has a SOUND body in this compile config. The gc `$AnyValue` body
+   * reads via native `__extern_get` and re-boxes with the native honest
+   * classifier (`$AnyString`/`$Object` shaped) — which is correct in
+   * fast+standalone/wasi (uniform native value-rep) and in every non-fast
+   * (externref-carrier) config (thin `__extern_get` wrapper), but NOT in
+   * `fast && !standalone && !wasi` (host js-string): there the carrier is the gc
+   * `$AnyValue` yet strings are host js-string externrefs, so the classifier
+   * mis-tags them and the emitted body is invalid. In that ONE config the
+   * selector must NOT claim a dynamic member read (a clean pre-claim rejection,
+   * keeping the function in `param-/return-type-not-resolvable`) rather than
+   * claim-then-demote. Provided by the real-compile call site from `ctx`; the
+   * default (undefined ⇒ true) is correct for the default-host fallback path.
+   */
+  readonly dynMemberReadBuildable?: boolean;
 }
 
 /**
@@ -309,6 +325,10 @@ export function planIrCompilation(
   // host-global resolver): in standalone/nativeStrings mode `Map` isn't a
   // registered extern class, so from-ast couldn't lower the calls — the
   // empty set keeps select↔build parity there.
+  // (#3053 U2) Latch the config-soundness of the gc member-read primitive for
+  // this run (default true = the sound default-host / fallback path). Read by
+  // `dynamicUsesAreMoveOnly` to gate the dynamic member/element-access claim.
+  currentDynMemberReadBuildable = options?.dynMemberReadBuildable ?? true;
   currentModuleScopeMapConsts.clear();
   if (hostExternCapability(options?.jsHostExterns === true) !== "defer") {
     for (const stmt of sourceFile.statements) {
@@ -410,6 +430,16 @@ export function planIrCompilation(
     // disqualifying). Track the rejection reason for every method so the
     // telemetry shows them as `class-method` rather than silently dropping.
     const hasParent = stmt.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword) ?? false;
+    // #3000-E: a subclass whose parent is a locally-declared user class is
+    // IR-claimable — `super(...)` chains to the parent's `_init` and
+    // `super.method()` static-dispatches to the parent slot (both need the
+    // parent's WasmGC struct, which only a local user class has). A subclass of a
+    // builtin / externref-backed parent (`extends Error`, `extends Uint8Array`)
+    // stays deferred: `super` there routes through host `__new_<Parent>` shapes
+    // the IR doesn't model. `buildIrClassShapes` mirrors this exact predicate, so
+    // a claim here always finds a shape in Phase B (no post-claim demotion).
+    const parentName = extendsParentName(stmt);
+    const parentIsLocalClass = parentName !== null && localClasses.has(parentName);
     for (const member of stmt.members) {
       let memberName: string;
       let memberNode:
@@ -482,7 +512,16 @@ export function planIrCompilation(
       const isStaticMethod =
         ts.isMethodDeclaration(memberNode) &&
         (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
-      const claimableUnderParent = isStaticMethod && !referencesSuper(memberNode);
+      // A static method with no `super` is claimable under ANY parent (#2857 —
+      // no instance layout dependency). #3000-E adds: INSTANCE members (ctor /
+      // method / accessor) are claimable when the parent is a local user class
+      // (the inheritance/`super` substrate provides `super(...)` → parent `_init`
+      // and `super.method()` → parent slot, both keyed on the instance `this`). A
+      // `super`-using STATIC stays deferred — static `super` is a class-object
+      // mechanism the IR path (which keys `super` off `this`) does not model. The
+      // body-shape gate (`whyNotIrClaimable`, which now accepts instance `super`)
+      // still runs below — this only lifts the wholesale `hasParent` reject.
+      const claimableUnderParent = isStaticMethod ? !referencesSuper(memberNode) : parentIsLocalClass;
       if (hasParent && !claimableUnderParent) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-method");
         continue;
@@ -523,14 +562,58 @@ export function planIrCompilation(
   //
   // Build each function's set of local callers + local callees (restricted
   // to functions declared in this source file). Iteratively remove any
-  // claimed function whose any LOCAL caller or any LOCAL callee is not
-  // also claimed. Repeat until stable.
+  // claimed function whose LOCAL callee is not also claimed (and, in
+  // standalone/wasi, whose LOCAL caller is not claimed either — see below).
+  // Repeat until stable.
   //
   // This safeguards against signature mismatch: the IR path replaces a
   // function's typeIdx after the legacy path has already compiled its
   // callers' bodies. Ensuring both sides of every cross-function edge are
   // on the same side (IR or legacy) avoids cross-signature `call` ops.
+  //
+  // #2858 — the CALLER direction of this closure is only demoted OUTSIDE
+  // JS-host mode. Rationale:
+  //   * A legacy caller of an IR-claimed callee is signature-safe: the
+  //     callee's funcIdx is pre-allocated by legacy `compileDeclarations`
+  //     and its signature is derived from the same TS annotations via the
+  //     same mode-consistent `resolvePositionType`/`resolveWasmType`. The
+  //     historical `f(x: any)` fast-mode ABI divergence that motivated the
+  //     caller-direction demotion was eliminated by #2949 slice 3b
+  //     (AnyKeyword → `irDynamic()`: one `any` ABI for both front-ends in
+  //     both modes). So in host mode the caller-direction demotion is an
+  //     obsolete safeguard — dropping it claims individually-claimable leaf
+  //     helpers whose only unclaimed edge is a legacy caller, driving the
+  //     `call-graph-closure` bucket (measured in host mode) to zero with
+  //     zero post-claim demotions (verified: DOM/benchmark corpus).
+  //   * In standalone / wasi (`jsHostExterns` false) IR coverage still has
+  //     gaps (host-only ops such as f64 `.toString()`, `Map`), so a
+  //     claimed function whose caller defers can surface a *latent*
+  //     post-claim failure that the caller-direction demotion incidentally
+  //     masks (e.g. `joinNums` in `algorithms.ts` under wasi). Keep the
+  //     conservative caller-direction demotion there until those callee
+  //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
+  const demoteOnLegacyCaller = options?.jsHostExterns !== true;
+  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). Relaxing the
+  // caller-direction demotion in host mode is sound for value-param leaf helpers
+  // (the #2949 slice-3b `any`-ABI unification makes a legacy caller of an IR
+  // callee signature-safe). It is NOT sound when the claimed helper takes a
+  // **callable/closure param** (a `FunctionTypeNode` parameter, e.g.
+  // `fn: () => number`): #2949's `any`-ABI unification does not cover the
+  // closure-as-callable-param ABI. If such a helper is claimed for IR only
+  // because its lone unclaimed edge is a legacy caller passing it a
+  // captured-closure argument, the IR lowering illegal-casts that legacy
+  // captured-closure struct (legacy closure ABI ≠ IR callable/funcref
+  // signature) and diverges from the legacy output (the 3 equivalence-gate
+  // regressions on #2752). Keep the conservative caller-direction demotion for
+  // any function carrying a callable param so it stays on the legacy path
+  // alongside its legacy caller; value-param leaves keep the relaxation
+  // (bucket→0 win + the 24 tagged-template fixes preserved).
+  const hasCallableParam = (name: string): boolean => {
+    const fn = declByName.get(name);
+    if (!fn) return false;
+    return fn.parameters.some((p) => p.type !== undefined && ts.isFunctionTypeNode(p.type));
+  };
   const { callers, callees, hasExternalCall } = buildLocalCallGraph(declByName, localClasses);
 
   const claimed = new Set(individuallyClaimed);
@@ -549,13 +632,18 @@ export function planIrCompilation(
   while (changed) {
     changed = false;
     for (const name of [...claimed]) {
-      const myCallers = callers.get(name) ?? new Set<string>();
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      for (const c of myCallers) {
-        if (!claimed.has(c)) {
-          safe = false;
-          break;
+      // Caller-direction demotion: always in standalone/wasi (#2858), and in
+      // host mode only for functions with a callable/closure param (BANKED
+      // 2026-07-06 — see `hasCallableParam` above).
+      if (demoteOnLegacyCaller || hasCallableParam(name)) {
+        const myCallers = callers.get(name) ?? new Set<string>();
+        for (const c of myCallers) {
+          if (!claimed.has(c)) {
+            safe = false;
+            break;
+          }
         }
       }
       if (safe) {
@@ -656,6 +744,20 @@ let currentFnIsGenerator = false;
 let currentFnIsVoidReturn = false;
 
 /**
+ * (#2856) Names LEAKED into the flat scope set by a sibling for-init
+ * (`for (let i = ...)` adds `i` to the outer scope after the loop so
+ * later statements can reference the counter — the scope tracker is a
+ * flat set, not block-scoped). A SECOND sibling `for (let i = ...)`
+ * re-declaring such a leaked name is fine: from-ast scopes each for-init
+ * in its own `innerCx` copy (`lowerForStatement`), so the two loop
+ * counters never collide at build time. Genuine outer bindings (params,
+ * body-level locals) are NOT in this set, so shadowing THOSE still
+ * rejects — which mirrors `lowerVarDecl`'s redeclaration throw exactly
+ * (select↔build parity, #2138). Reset per function walk.
+ */
+let forInitLeakedNames = new Set<string>();
+
+/**
  * (#2856) Host-extern resolution for the CURRENT `planIrCompilation` run.
  * Set (and cleared) at the selector entry from `IrSelectionOptions` —
  * module-level for the same reason as `currentHostGlobalResolver`: the
@@ -676,6 +778,16 @@ let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | n
  * extern-class brand), so accepted shapes always lower.
  */
 const currentModuleScopeMapConsts = new Set<string>();
+
+/**
+ * (#3053 U2) Whether the gc `__dyn_member_get` body is sound in the CURRENT
+ * `planIrCompilation` run's compile config (see `IrSelectionOptions.
+ * dynMemberReadBuildable`). Set at selector entry, read by
+ * `dynamicUsesAreMoveOnly`'s member/element-access arms. Defaults to `true`
+ * (the sound default-host / fallback path). Module-scope, mirroring
+ * `currentModuleScopeMapConsts` — `planIrCompilation` is not reentrant.
+ */
+let currentDynMemberReadBuildable = true;
 
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
@@ -828,6 +940,7 @@ function whyNotIrClaimable(
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;
+  forInitLeakedNames = new Set();
   currentFnIsGenerator = isGenerator;
   currentFnIsVoidReturn = isVoidReturn;
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
@@ -836,6 +949,37 @@ function whyNotIrClaimable(
   // covers `this.field = expr;`, `this.method(...)`, and bare calls. This
   // mirrors how try/catch/finally bodies are checked (see `isPhase1TryStatement`).
   if (ts.isConstructorDeclaration(fn)) {
+    // #3000-C: the IR constructor lowering (`lowerFunctionAstToIr` Phase C)
+    // runs ONLY the constructor body statements — it allocates the instance
+    // with each struct field at its default, then replays the body's
+    // `this.field = …` writes. It does NOT execute two other construction-time
+    // effects the legacy path handles:
+    //   (a) parameter properties (`constructor(private name: string)`) — the
+    //       param both declares AND assigns a field; the IR path treats it as
+    //       a plain param and drops the field write.
+    //   (b) PropertyDeclaration initialisers (`age = 5;`) — these run at
+    //       construction; the IR path leaves the field at its struct default.
+    // A class using either would silently mis-construct (the typeIdx-parity
+    // guard can't catch it — same signature). Reject to legacy so construction
+    // stays correct. Flat classes whose fields are declared without an
+    // initialiser and assigned in the body (the common shape, e.g. classes.ts's
+    // `Animal`) are unaffected.
+    for (const p of fn.parameters) {
+      const isParamProperty = p.modifiers?.some(
+        (m) =>
+          m.kind === ts.SyntaxKind.PublicKeyword ||
+          m.kind === ts.SyntaxKind.PrivateKeyword ||
+          m.kind === ts.SyntaxKind.ProtectedKeyword ||
+          m.kind === ts.SyntaxKind.ReadonlyKeyword,
+      );
+      if (isParamProperty) return "body-shape-rejected";
+    }
+    const parent = fn.parent;
+    if (parent && (ts.isClassDeclaration(parent) || ts.isClassExpression(parent))) {
+      for (const m of parent.members) {
+        if (ts.isPropertyDeclaration(m) && m.initializer) return "body-shape-rejected";
+      }
+    }
     const ctorScope = new Set(scope);
     // (#2856 C1) Constructor bodies never take the early-return arm — their
     // returns route through the implicit `return this` synthesis.
@@ -1158,13 +1302,24 @@ function dynamicUsesAreMoveOnly(
     return e;
   };
 
-  /** Is `e` shaped like a dynamic-typed value? (dyn name | dyn-returning local call) */
+  /**
+   * Does `e` PRODUCE a dynamic-typed value?
+   *   - a dyn name (alias-tracked local / param);
+   *   - a dyn-returning direct local call;
+   *   - (#3053 U2 / #2949 S5.P) a member/element read off a dynamic-producing
+   *     receiver — `dyn.a`, `dyn[i]`, and chains `dyn.a.b` — since a member read
+   *     of any is any (routes through `__dyn_member_get`, result `dynamic`).
+   * The member-read arms only CLASSIFY the receiver here; `scanExpr` re-validates
+   * the full access (key shape, chain) against the from-ast producer contract.
+   */
   const isDynShaped = (e: ts.Expression): boolean => {
     e = unwrap(e);
     if (ts.isIdentifier(e)) return dynNames.has(e.text);
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
       return calleeReturnIsDynamic(e.expression.text, typeMap);
     }
+    if (ts.isPropertyAccessExpression(e)) return isDynShaped(e.expression);
+    if (ts.isElementAccessExpression(e)) return isDynShaped(e.expression);
     return false;
   };
 
@@ -1237,10 +1392,39 @@ function dynamicUsesAreMoveOnly(
       return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
     }
     if (ts.isPropertyAccessExpression(e)) {
+      // #3053 U2 / #2949 S5.P — the claim-flip. A named read off a DYNAMIC
+      // receiver (`dyn.name`) routes through `__dyn_member_get` (U0/U1) and
+      // yields a `dynamic` result, so it is a valid MOVE exactly where a dynamic
+      // value is wanted (`expectDyn`): return of a dyn-returning fn, a dyn-param
+      // arg, a dyn alias/reassignment. from-ast's `lowerPropertyAccess` dyn arm
+      // ALWAYS boxes the named key (tag-5), so there is no key-shape gate here —
+      // the claim is 1:1 with the producer (never claim-then-demote).
+      if (isDynShaped(e.expression)) {
+        return currentDynMemberReadBuildable && expectDyn && scanExpr(e.expression, true);
+      }
+      // Concrete receiver: the existing typed member-read path (unchanged).
       if (expectDyn) return false;
       return scanExpr(e.expression, false);
     }
     if (ts.isElementAccessExpression(e)) {
+      // #3053 U2 / #2949 S5.P — an indexed read off a DYNAMIC receiver
+      // (`dyn[key]`) → `dynamic` result. from-ast's `lowerElementAccess` dyn arm
+      // produces a NON-NULL key (so it does NOT demote) ONLY for: a string-literal
+      // key (tag-5), a dynamic index (used as-is), or a numeric literal (tag-3).
+      // Restrict the scan to EXACTLY those key shapes so the claim is 1:1 with the
+      // producer — any other index (e.g. a bare i32 local, or dynamic arithmetic
+      // like `idx-1`) may box to null / has no dynamic-arith producer, which would
+      // claim-then-demote (a HARD error under JS2WASM_IR_FIRST). Result flows only
+      // to a dyn-accepting position (`expectDyn`).
+      if (isDynShaped(e.expression)) {
+        if (!currentDynMemberReadBuildable || !expectDyn) return false;
+        if (!scanExpr(e.expression, true)) return false;
+        const key = unwrap(e.argumentExpression);
+        if (ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)) return true;
+        if (ts.isIdentifier(key) && dynNames.has(key.text)) return true; // dynamic index → used as-is
+        return false; // any other index shape is out of the producer contract
+      }
+      // Concrete receiver: the existing typed element-read path (unchanged).
       if (expectDyn) return false;
       return scanExpr(e.expression, false) && scanExpr(e.argumentExpression, false);
     }
@@ -1303,6 +1487,34 @@ function dynamicUsesAreMoveOnly(
 // ---------------------------------------------------------------------------
 // Shape check
 // ---------------------------------------------------------------------------
+
+/**
+ * Does `stmt` unconditionally terminate its control flow (return / throw, or a
+ * block / if-else whose every path does)? EXACT mirror of the identically-named
+ * helper in `from-ast.ts` (#1979) — the selector MUST agree with the builder on
+ * which non-tail `if (cond) <then>; <rest>` shapes are early-return rewrites
+ * (terminating then-arm → the then-arm is reinterpreted as a tail and `<rest>`
+ * becomes the else) versus non-terminating guards (side-effecting then-arm →
+ * `<rest>` runs afterward, lowered by the converging-guard path in
+ * `lowerStatementList`). Drift here re-introduces select↔builder mismatch —
+ * under #2138 IR-first that is a live `unreachable` trap, not a silent demote.
+ */
+function thenArmTerminates(stmt: ts.Statement): boolean {
+  if (ts.isReturnStatement(stmt) || ts.isThrowStatement(stmt)) {
+    return true;
+  }
+  if (ts.isBlock(stmt)) {
+    const last = stmt.statements[stmt.statements.length - 1];
+    return last !== undefined && thenArmTerminates(last);
+  }
+  if (ts.isIfStatement(stmt)) {
+    // An `if` terminates only when it has an else and BOTH arms terminate.
+    return (
+      stmt.elseStatement !== undefined && thenArmTerminates(stmt.thenStatement) && thenArmTerminates(stmt.elseStatement)
+    );
+  }
+  return false;
+}
 
 function isPhase1StatementList(
   stmts: ReadonlyArray<ts.Statement>,
@@ -1432,16 +1644,34 @@ function isPhase1StatementList(
       }
       return shapeNo(arm, es);
     }
-    // Phase 2 extension: an `if (cond) <tail>` with NO else and the rest
-    // of the statements forming a tail. This is the classic early-return
-    // pattern: `if (base) return x; <recursive body>`. We structurally
-    // reinterpret as `if (cond) <tail> else { <rest> }`.
+    // Phase 2 extension: an `if (cond)` with NO else, split by whether the
+    // then-arm unconditionally terminates — mirroring `lowerStatementList`'s
+    // `thenArmTerminates` fork in `from-ast.ts` exactly (#1979).
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1Expr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
-      if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
-        return shapeNo("nontail-if-then", s.thenStatement);
-      const rest = stmts.slice(i + 1);
-      return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      if (thenArmTerminates(s.thenStatement)) {
+        // Early-return rewrite: `if (cond) <tail>; <rest>` ≡
+        // `if (cond) <tail> else { <rest> }`. The then-arm must be a Phase-1
+        // tail (terminates on every path); the rest becomes the else block.
+        if (!isPhase1Tail(s.thenStatement, new Set(scope), localClasses, isGenerator, isVoidReturn))
+          return shapeNo("nontail-if-then", s.thenStatement);
+        const rest = stmts.slice(i + 1);
+        return isPhase1StatementList(rest, new Set(scope), localClasses, isGenerator, isVoidReturn);
+      }
+      // (#1979) Non-terminating guard: `if (cond) <side-effecting-stmt>;` where
+      // the then-arm is a plain body statement (assignment, call, nested guard,
+      // …). `from-ast.ts` lowers this via the converging-guard path
+      // (`lowerStatementList` lines ~759-782 → `lowerStmt(thenArm)`), so the
+      // shape-check for the then-arm mirrors `lowerStmt`'s accepted set exactly
+      // (`isPhase1BodyStatement`, not a tail). `<rest>` runs afterward — the
+      // outer loop continues validating it (ending in the tail), matching
+      // from-ast's `lowerStatementList(rest)` in the continuation block. The
+      // then-arm scope is cloned so arm-local `let`s don't leak into `<rest>`.
+      // Not in a loop here → `inLoop=false` (break/continue in the guard stay
+      // rejected; a `return` would have made `thenArmTerminates` true above).
+      if (!isPhase1BodyStatement(s.thenStatement, new Set(scope), localClasses, /* inLoop */ false))
+        return shapeNo("nontail-if-then-guard", s.thenStatement);
+      continue;
     }
     // Slice 6 part 2 (#1181) — for-of statement (always non-tail). The
     // body is itself shape-checked. The bridge in `from-ast.ts` lowers
@@ -1465,9 +1695,13 @@ function isPhase1StatementList(
       // statements can reference the loop counter (TypeScript would
       // narrow scope to the for-statement, but our scope tracker is
       // a flat set; the conservative addition is fine for shape check).
+      // (#2856) Record the leak so a SIBLING for-init may re-declare it.
       if (s.initializer && ts.isVariableDeclarationList(s.initializer)) {
         for (const d of s.initializer.declarations) {
-          if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+          if (ts.isIdentifier(d.name) && !scope.has(d.name.text)) {
+            scope.add(d.name.text);
+            forInitLeakedNames.add(d.name.text);
+          }
         }
       }
       continue;
@@ -1710,7 +1944,11 @@ function isPhase1ForStatement(
         if (!ts.isIdentifier(d.name)) return false;
         if (!d.initializer) return false;
         if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return false;
-        if (innerScope.has(d.name.text)) return false; // duplicate
+        // (#2856) A name a SIBLING for-init leaked into the flat scope set is
+        // NOT a genuine duplicate — from-ast scopes each for-init in its own
+        // innerCx copy, so `for (let i...) {} for (let i...) {}` builds fine.
+        // Genuine outer bindings still reject (build-side redeclaration).
+        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text)) return false; // duplicate
         innerScope.add(d.name.text);
       }
     } else {
@@ -1889,9 +2127,13 @@ function isPhase1BodyStatement(
   }
   if (ts.isForStatement(stmt)) {
     if (!isPhase1ForStatement(stmt, scope, localClasses)) return false;
+    // (#2856) Record the leak so a SIBLING for-init may re-declare it.
     if (stmt.initializer && ts.isVariableDeclarationList(stmt.initializer)) {
       for (const d of stmt.initializer.declarations) {
-        if (ts.isIdentifier(d.name)) scope.add(d.name.text);
+        if (ts.isIdentifier(d.name) && !scope.has(d.name.text)) {
+          scope.add(d.name.text);
+          forInitLeakedNames.add(d.name.text);
+        }
       }
     }
     return true;
@@ -2275,6 +2517,16 @@ function bodyReferencesIdentifier(body: ts.Block, name: string): boolean {
 }
 
 function isPhase1TypeNode(node: ts.TypeNode): boolean {
+  // (#2856) `number[]` array annotation — the from-ast vardecl arm resolves
+  // it to a vec-ref hint (`resolveVecForElement(f64)`), which is what lets an
+  // EMPTY initializer (`const arr: number[] = []`) type its `vec.new_fixed`.
+  // Kept in lockstep with `lowerVarDecl`'s ArrayTypeNode arm (parity: every
+  // annotation accepted here MUST produce a hint there). Only the f64 element
+  // is in scope — `string[]` / `boolean[]` element carriers are backend-
+  // dependent and stay deferred.
+  if (ts.isArrayTypeNode(node)) {
+    return node.elementType.kind === ts.SyntaxKind.NumberKeyword;
+  }
   return (
     node.kind === ts.SyntaxKind.NumberKeyword ||
     node.kind === ts.SyntaxKind.BooleanKeyword ||
@@ -2403,6 +2655,23 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       if (rightUndef) return isPhase1Expr(expr.left, scope, localClasses);
       if (leftUndef) return isPhase1Expr(expr.right, scope, localClasses);
     }
+    // (#3144) `x instanceof C` where C names a LOCAL class (unshadowed).
+    // `instanceof` stays table-deferred for the general/dynamic case
+    // (`binaryOpCapability`), but this shape has an IR lowering:
+    // `class.instanceof`, a static `__tag` compare mirroring legacy
+    // `compileInstanceOf`. from-ast's `lowerInstanceOf` mirrors this arm
+    // exactly (identifier RHS, unshadowed, projected local class); a
+    // class-typed LHS emits the tag check, never-class representations fold
+    // to false, dynamic/extern LHS demotes cleanly (claim-partial, like the
+    // `new C(...)` arm below).
+    if (
+      binOp === ts.SyntaxKind.InstanceOfKeyword &&
+      ts.isIdentifier(expr.right) &&
+      localClasses.has(expr.right.text) &&
+      !scope.has(expr.right.text)
+    ) {
+      return isPhase1Expr(expr.left, scope, localClasses);
+    }
     if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
     return isPhase1Expr(expr.left, scope, localClasses) && isPhase1Expr(expr.right, scope, localClasses);
   }
@@ -2414,6 +2683,32 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     );
   }
   if (ts.isCallExpression(expr)) {
+    // #3000-E: `super(args)` — a derived ctor chaining to its parent. `super` is
+    // a keyword, not an identifier/property-access the generic receiver checks
+    // below handle, so recognise the shape here. Args must be Phase-1 exprs; the
+    // lowerer (from-ast) resolves the parent `_init` and validates arity/types.
+    if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
+      for (const arg of expr.arguments) {
+        if (ts.isSpreadElement(arg)) return shapeNo("super-call-spread", arg);
+        if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      }
+      return true;
+    }
+    // #3000-E: `super.method(args)` — static-dispatch to the parent's method slot.
+    // The receiver is the `super` keyword; recognise it before the generic
+    // property-access receiver check (which would reject `super` as a non-Phase-1
+    // receiver). Method name must be a plain identifier; args Phase-1 exprs.
+    if (
+      ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword
+    ) {
+      if (!ts.isIdentifier(expr.expression.name)) return shapeNo("super-method-computed", expr);
+      for (const arg of expr.arguments) {
+        if (ts.isSpreadElement(arg)) return shapeNo("super-method-spread", arg);
+        if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      }
+      return true;
+    }
     // Slice 4 (#1169d): accept method calls — `<recv>.<methodName>(...)`.
     // The receiver must itself be a Phase-1 expression; the lowerer
     // enforces that the receiver is a class instance whose shape carries
@@ -2452,6 +2747,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         if (expr.arguments.length !== wantArgs) return shapeNo("expr-modmap-arity", expr);
         for (const arg of expr.arguments) {
           if (ts.isSpreadElement(arg)) return shapeNo("expr-modmap-spread", arg);
+          if (!isPhase1Expr(arg, scope, localClasses)) return false;
+        }
+        return true;
+      }
+      // (#3144) Static method call `C.m(args)` — the receiver is a bare
+      // LOCAL class identifier (never in scope, so the generic receiver
+      // check below would reject it). from-ast's static-call arm mirrors
+      // this shape exactly and resolves the `"static"` member descriptor
+      // (projected by `buildIrClassShapes`); a call to a member that did
+      // not project demotes cleanly (claim-partial, like `new C(...)`).
+      // Lowering: `class.static_call` → `call $<C>_<m>` with args only
+      // (legacy statics take no `self` param).
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        localClasses.has(expr.expression.expression.text)
+      ) {
+        for (const arg of expr.arguments) {
+          if (ts.isSpreadElement(arg)) return false;
           if (!isPhase1Expr(arg, scope, localClasses)) return false;
         }
         return true;
@@ -2736,6 +3050,22 @@ function referencesSuper(node: ts.Node): boolean {
   };
   visit(node);
   return found;
+}
+
+/**
+ * #3000-E: the name of a class's `extends` parent when it is a bare identifier
+ * (`class Dog extends Animal`). Returns null for no-extends, an `implements`-only
+ * heritage, or a non-identifier parent expression (e.g. `extends foo.Bar` /
+ * `extends mixin(Base)` — deferred). The caller cross-checks the name against
+ * `localClasses` to confirm the parent is an IR-projectable user class.
+ */
+function extendsParentName(stmt: ts.ClassDeclaration): string | null {
+  for (const h of stmt.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const first = h.types[0]?.expression;
+    if (first && ts.isIdentifier(first)) return first.text;
+  }
+  return null;
 }
 
 // #2135 — the operator predicates consume the shared capability table

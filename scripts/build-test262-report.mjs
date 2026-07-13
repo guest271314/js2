@@ -177,6 +177,22 @@ function isObjectToPrimitiveResidual(record, text) {
 
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
+    // #3086 — honest-vacuity reclassification. A would-be pass whose harness
+    // wrapper or nested callback never executed (so no assertion ran) is scored
+    // `fail` + `vacuous: true` by the runner's vacuity gate (#2463/#2940/#3086).
+    // These are a KNOWN, deliberate honest-metric reclassification, not a
+    // codegen root cause — so they get their own bucket rather than falling into
+    // `unclassified` (which the strict threshold-0 gate would then trip). Placed
+    // FIRST because `vacuous: true` is unambiguous: a vacuity-fail's root cause
+    // IS the dropped callback, never the feature the dead assertion targeted, so
+    // no feature-path bucket should poach it.
+    id: "honest-vacuity-reclassification",
+    issues: ["#3086", "#2940", "#2463"],
+    label:
+      "Honest-vacuity reclassification (harness/nested callback never executed → no assertion ran; scored vacuous fail, excluded from host_free_pass)",
+    match: (record, text) => record.vacuous === true || hasAny(text, ["vacuous:", "no assertion ran"]),
+  },
+  {
     id: "binary-emit-u32-out-of-range",
     issues: ["#1858", "#1862"],
     label: "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
@@ -702,6 +718,23 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     label:
       "De-masked native assertion failure (Test262Error rendered by the #2962 standalone exception renderer) — real assertion mismatch, re-triage by feature path",
     match: (_record, text) => hasAny(text, ["test262error"]),
+  },
+  {
+    // The runner's retry paths (poison retry, #1589 compile_timeout retry —
+    // tests/test262-shared.ts) record the fixed string "fail after retry"
+    // when the retried attempt ends in `fail` but the worker returned NO
+    // error text. The original attempt's message is lost, so the signature
+    // carries zero feature signal and no path/text bucket above can claim
+    // it (e.g. built-ins/Error/isError/non-error-objects-other-realm.js,
+    // the single unclassified record that parked PR #2846's merge_group).
+    // Root cause is runner-side message loss on retry, not a new codegen
+    // failure class — the same test fails with a classifiable assertion
+    // signature when it doesn't go through the retry path.
+    id: "retry-lost-error-text",
+    issues: ["#1589"],
+    label:
+      'Runner retry lost the failure message ("fail after retry": retried attempt failed with empty worker error text) — no feature signal to classify; fix is runner-side message preservation',
+    match: (_record, text) => hasAny(text, ["fail after retry"]),
   },
   {
     id: "misc-spec-tail",

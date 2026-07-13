@@ -1,9 +1,14 @@
 ---
 id: 810
 title: "Extract class compilation from index.ts → class-codegen.ts"
-status: ready
+status: done
+completed: 2026-07-12
 created: 2026-03-26
-updated: 2026-04-28
+updated: 2026-07-12
+# 2026-07-12 (#3182 groom): closed as landed — compileClassBodies,
+# collectClassDeclaration and compileSuperCall now live in
+# src/codegen/class-bodies.ts (3,076 LOC), i.e. the extraction this issue
+# asked for happened (under a different filename than class-codegen.ts).
 priority: medium
 feasibility: medium
 reasoning_effort: high

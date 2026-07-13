@@ -3,7 +3,8 @@ id: 2933
 title: "Standalone: Math/JSON/Reflect/Atomics namespace static VALUE reads refuse — fold constants / native static-method closures"
 status: ready
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-06
+assignee: ttraenkler/opus-2933
 priority: medium
 feasibility: medium
 task_type: feature
@@ -96,6 +97,92 @@ members (`Math["max"]`) fall through unchanged. Covered by `tests/issue-2933.tes
    variadic-closure support. Recommended to split into its own follow-up.
 3. `Reflect.ownKeys(o).length` reflective-read-of-result and `globalThis.Math.PI`
    (niche trap) also remain.
+
+## Progress (2026-07-04, dev-3023) — fixed-arity `Reflect.*` value closures landed
+
+Sub-part 1 is now landed for the **fixed-arity `Reflect.*`** methods
+(`Reflect.get`, `Reflect.has`, `Reflect.set`, `Reflect.ownKeys`). Reading any of
+these as a VALUE under `--target standalone` (`const f: any = Reflect.get;
+f(o, "k")`) previously refused with the `#1907`/`#1888 S6-b` "built-in static
+property value read is not supported" compile error; it now reifies a native
+static-method closure and calls host-free.
+
+**Mechanism** — the standalone CALL path already backs these four with a simple
+externref/i32 native (`calls.ts` §"Reflect API": `__extern_get` / `__extern_has`
+/ `__reflect_set` / `__object_keys`). This slice adds the matching cases to
+`ensureStandaloneBuiltinStaticMethodClosure` (`src/codegen/property-access.ts`)
++ `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`), so the
+value closure calls the SAME native → observationally identical to the call
+form. `Reflect.get`/`set` are fixed at arity 2/3 (no explicit-receiver slot),
+matching the call path which already refuses the receiver form under standalone
+(#2046). Standalone-gated only — host mode (which reads the real JS `Reflect.get`
+via `__get_builtin`/`__extern_get`) is untouched; identity is singleton-stable
+via the existing `pushBuiltinFnSingletonValueInstrs` path (#2963).
+
+Covered by `tests/issue-2933-reflect-static-method-value.test.ts` (10 cases:
+get/has/set/ownKeys value calls, identity stability, distinct-method
+inequality, call-path regression guard, and JSON.stringify/Math.max
+scope-boundary refusal assertions). `tsc --noEmit` + `biome` clean; existing
+`#2933` / `#2963` / `#2896` suites green.
+
+**Remaining (this issue stays open):**
+
+1. Static-method VALUE reads (`const f = JSON.stringify; f(o)`,
+   `Reflect.ownKeys` as a value) — needs the `ensureStandaloneBuiltinStaticMethodClosure`
+   value-closure wiring. `JSON.stringify` carries a native-`$AnyString`-return →
+   externref coercion at the any-call boundary + a 7-arg `__json_stringify_value`
+   call, so it is not a one-line switch add; scope carefully.
+   **(Partially addressed 2026-07-04: the fixed-arity `Reflect.get`/`has`/`set`/
+   `ownKeys` value reads now work — see Progress above. `JSON.stringify` remains.)**
+2. `Math.max` / `Math.min` **as a value** (`const g = Math.max; g(1,2,3)`) is
+   genuinely VARIADIC — value-closures are fixed-arity, so it needs
+   variadic-closure support. Recommended to split into its own follow-up.
+3. `Reflect.ownKeys(o).length` reflective-read-of-result and `globalThis.Math.PI`
+   (niche trap) also remain.
+
+## Progress (2026-07-06, opus-2933) — JSON.stringify value read landed
+
+Sub-part 1's remaining `JSON.stringify` value read now works host-free under
+`--target standalone`. `const f: any = JSON.stringify; f({a:1})` previously
+refused with the `#1907`/`#1888 S6-b` "built-in static property value read is not
+supported" compile error; it now reifies a native static-method closure that
+serialises via the existing 1-arg native `__json_stringify_root`
+(`anyref -> ref $AnyString`, `json-codec-native.ts`) — the SAME entry the direct
+`JSON.stringify(o)` call path uses.
+
+**Mechanism** — added a `JSON.stringify` case to
+`ensureStandaloneBuiltinStaticMethodClosure` (`src/codegen/property-access.ts`)
++ `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`). The value
+closure is fixed 1-arg (externref value in): `local.get; any.convert_extern;
+call __json_stringify_root; extern.convert_any`. It calls `emitJsonStringifyValue`
+(idempotent) to register the codec, then boxes the `$AnyString` result back to
+externref at the any-call boundary. Standalone-gated; identity is singleton-stable
+via `pushBuiltinFnSingletonValueInstrs` (#2963). Objects / numbers / strings /
+nested objects serialise correctly and reify **zero host imports** (a
+standalone-floor-visible CE-to-run flip).
+
+**Known limitation (inherited, NOT a regression):** an array reaching the closure
+through `any`-boxing serialises to `"null"` — but this is the SAME pre-existing
+substrate gap the DIRECT `const x:any=[1,2,3]; JSON.stringify(x)` path already
+has on main (verified). The closure is observationally identical to that direct
+any-path, so it introduces no new divergence; the top-level any-boxed-array gap
+belongs to the separate $Object/array dynamic-reader substrate work. Replacer /
+space args remain out of scope (matching the standalone call-path narrowing).
+
+Covered by `tests/issue-2933-json-stringify-value.test.ts` (9 cases) + the
+`JSON.stringify`-refusal assertion in
+`tests/issue-2933-reflect-static-method-value.test.ts` retargeted to the new
+"now works" behaviour. `tsc --noEmit` + prettier clean; `#2933` / reflect suites
+green.
+
+**Remaining (this issue stays open):**
+
+1. `Math.max` / `Math.min` **as a value** — genuinely VARIADIC (value-closures
+   are fixed-arity); needs variadic-closure support. Split follow-up.
+2. Top-level `any`-boxed **array** → JSON.stringify serialises `"null"`
+   (substrate: $Object/array dynamic reader) — shared with the direct any-path,
+   tracked separately.
+3. `globalThis.Math.PI` still TRAPs (niche).
 
 ## Notes
 

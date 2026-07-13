@@ -8,7 +8,7 @@
 import { ts, forEachChild } from "../../ts-api.js";
 import type { EarlyErrorContext } from "./context.js";
 import {
-  collectBindingNames,
+  collectBindingNamesWithDuplicateCheck,
   collectSwitchClauseLexicalNames,
   collectStatementListBoundNames,
   findNameReference,
@@ -37,15 +37,18 @@ export function checkDuplicateParams(
       (node.asteriskToken !== undefined || node.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))) ||
     params.some((p) => p.initializer !== undefined || p.dotDotDotToken !== undefined || !ts.isIdentifier(p.name));
   if (!alwaysForbid && !isStrictMode(node)) return;
+  // `seen` is shared across every parameter so an INTER-param duplicate
+  // (`(x, x) => …`) is caught; `collectBindingNamesWithDuplicateCheck` also
+  // records INTRA-param duplicates that a single destructuring parameter binds
+  // more than once (`([x, x]) => …`, `({y: x, x}) => …`) — a plain Set collapses
+  // those, which is why the previous per-param Set missed them. BoundNames of a
+  // FormalParameterList / ArrowFormalParameters must contain no duplicates.
   const seen = new Set<string>();
   for (const param of params) {
-    const names = new Set<string>();
-    collectBindingNames(param.name, names);
-    for (const name of names) {
-      if (seen.has(name)) {
-        ctx.addError(param, `Duplicate parameter name '${name}' not allowed`);
-      }
-      seen.add(name);
+    const dupes = new Set<string>();
+    collectBindingNamesWithDuplicateCheck(param.name, seen, dupes);
+    for (const name of dupes) {
+      ctx.addError(param, `Duplicate parameter name '${name}' not allowed`);
     }
   }
 }
@@ -81,6 +84,27 @@ export function checkDuplicateLexicalDeclarations(ctx: EarlyErrorContext, block:
             addLexName(decl.name.text, decl.name);
           }
         }
+      }
+    }
+  }
+}
+
+/**
+ * A switch CaseBlock may contain at most one DefaultClause. ES2015+
+ * (`SwitchStatement` → `CaseBlock`) Static Semantics: Early Errors —
+ * `CaseBlock : { CaseClauses_opt DefaultClause CaseClauses_opt }` — it is a
+ * Syntax Error if a CaseBlock contains more than one DefaultClause. TypeScript's
+ * parser accepts a second `default:` clause with no diagnostic, so nothing else
+ * detects it. Covers test262 `language/statements/switch/S12.11_A2_T1.js`.
+ */
+export function checkDuplicateDefaultClause(ctx: EarlyErrorContext, caseBlock: ts.CaseBlock): void {
+  let seenDefault = false;
+  for (const clause of caseBlock.clauses) {
+    if (ts.isDefaultClause(clause)) {
+      if (seenDefault) {
+        ctx.addError(clause, "More than one default clause in switch statement");
+      } else {
+        seenDefault = true;
       }
     }
   }
@@ -237,8 +261,45 @@ export function checkDuplicatePrivateNames(
   }
 }
 
+/**
+ * True when `block` is the *body* of a function-like node (function
+ * declaration/expression, arrow, method, constructor, or accessor).
+ *
+ * At the top level of such a body — exactly as at SourceFile (Script/Module)
+ * scope — a FunctionDeclaration is VAR-scoped, not lexical: the top-level
+ * statement list uses TopLevelLexicallyDeclaredNames, which excludes
+ * HoistableDeclarations (ES §15.2.2 / FunctionBody §10.2.11). So a same-name
+ * `var` and function declaration legally coexist there
+ * (`function test(){ var f; function f(){} }` is valid, matching V8).
+ *
+ * Only inside a *genuine nested Block statement* (parent is a statement — if /
+ * for / while / labeled / a `{ }` block, etc.) is a FunctionDeclaration
+ * lexically scoped (ES §14.2.1), where `{ var f; function f(){} }` IS a
+ * SyntaxError in both strict and sloppy mode — Annex B relaxes only the
+ * duplicate-FunctionDeclaration rule, never lexical-vs-var.
+ */
+function isFunctionBodyBlock(block: ts.Block | ts.SourceFile): boolean {
+  if (!ts.isBlock(block)) return false;
+  const parent = block.parent;
+  return (
+    !!parent &&
+    (ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isArrowFunction(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isConstructorDeclaration(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent))
+  );
+}
+
 /** Check for var/lexical declaration conflicts in a block or source file. */
 export function checkVarLexicalConflicts(ctx: EarlyErrorContext, block: ts.Block | ts.SourceFile): void {
+  // A FunctionDeclaration contributes a lexical binding (that a same-name `var`
+  // conflicts with) only inside a genuine nested Block statement — not at
+  // SourceFile scope nor at the top level of a function body, where it is
+  // var-scoped. See isFunctionBodyBlock.
+  const functionsAreLexical = ts.isBlock(block) && !isFunctionBodyBlock(block);
   // Collect lexically-declared names (let, const, function, class)
   const lexicalNames = new Set<string>();
   for (const stmt of block.statements) {
@@ -252,10 +313,12 @@ export function checkVarLexicalConflicts(ctx: EarlyErrorContext, block: ts.Block
         }
       }
     } else if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-      // At SourceFile scope, function declarations are var-scoped — no conflict with var
-      // (LexicallyDeclaredNames does not include VarDeclaredNames per ES §13.1.1).
-      // Only inside a Block are function declarations lexically scoped (ES §B.3.2).
-      if (ts.isBlock(block)) {
+      // At SourceFile scope AND at the top level of a function body, function
+      // declarations are var-scoped — no conflict with a same-name var
+      // (TopLevelLexicallyDeclaredNames excludes HoistableDeclarations,
+      // ES §15.2.2 / §10.2.11). Only inside a genuine nested Block are they
+      // lexically scoped (ES §14.2.1 + §B.3.2).
+      if (functionsAreLexical) {
         lexicalNames.add(stmt.name.text);
       }
     } else if (ts.isClassDeclaration(stmt) && stmt.name) {

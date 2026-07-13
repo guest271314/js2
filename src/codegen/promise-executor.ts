@@ -32,132 +32,24 @@
 
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
-import { compileArrowAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import { compileArrowAsClosure } from "./closures.js";
 import { allocLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { ensureExnTag } from "./registry/imports.js";
 import { coerceType, emitGuardedFuncRefCast, pushDefaultValue } from "./type-coercion.js";
 import { emitNullCheckThrow } from "./property-access.js";
+import { ensureObjectRuntime, reserveApplyClosure } from "./object-runtime.js";
+import { addUnionImportsViaRegistry } from "./shared.js";
 import {
   PROMISE_STATE_PENDING,
-  ensurePromiseSettleFunctions,
-  getOrRegisterPromiseType,
+  // (#3125) `ensurePromiseExecutorClosures` + its interface moved to
+  // async-scheduler.ts: the thenable-assimilation job (built inside
+  // `ensurePromiseSettleFunctions`) needs the same settle closures, and this
+  // module already imports from async-scheduler (the reverse import would be
+  // an eval-time cycle).
+  ensurePromiseExecutorClosures,
   isStandalonePromiseActive,
 } from "./async-scheduler.js";
-
-/**
- * Per-module cache of the two synthesised settle-closure funcs + the capturing
- * wrapper struct type. Minted once and reused for every `new Promise` in the
- * module, so the module carries a single `__promise_resolve_cl` /
- * `__promise_reject_cl` pair regardless of executor count.
- */
-interface PromiseExecutorClosures {
-  /** `__promise_resolve_cl` funcIdx — settles the captured promise via resolve-value (assimilating). */
-  resolveClFuncIdx: number;
-  /** `__promise_reject_cl` funcIdx — settles the captured promise via reject. */
-  rejectClFuncIdx: number;
-  /** The `$__promise_settle_cap` struct typeIdx (subtype of the canonical `(externref)->()` wrapper). */
-  capTypeIdx: number;
-  /** `$Promise` struct typeIdx. */
-  promiseTypeIdx: number;
-  /** `__promise_reject(promise, reason) -> reason` funcIdx (used by the executor-throw catch). */
-  rejectFuncIdx: number;
-}
-
-/**
- * Idempotently mint the two capturing settle-closure trampolines and register
- * the `$__promise_settle_cap` wrapper subtype. Cached on the context.
- *
- * `$__promise_settle_cap` is a struct subtype of the canonical `(externref)->()`
- * func-ref wrapper (`getOrCreateFuncRefWrapperTypes(ctx,[externref],[])`), so a
- * value of this type passes the executor's `ref.test (ref $wrap)` and dispatches
- * natively. It inherits field 0 (`func: funcref`) and adds field 1
- * (`cap_promise: (ref $Promise)`).
- *
- * Each trampoline has EXACTLY the canonical lifted func type
- * (`(ref null $wrap, externref) -> ()`) so the executor's
- * `ref.cast (ref $wrapFuncType); call_ref` at the resolve/reject call site
- * succeeds; the body downcasts self to the `cap` subtype to recover the promise.
- */
-function ensurePromiseExecutorClosures(ctx: CodegenContext): PromiseExecutorClosures | null {
-  const cache = ctx as unknown as { __promiseExecutorClosures?: PromiseExecutorClosures };
-  if (cache.__promiseExecutorClosures) return cache.__promiseExecutorClosures;
-
-  ensurePromiseSettleFunctions(ctx);
-  const resolveValueFuncIdx = ctx.funcMap.get("__promise_resolve_value");
-  const rejectFuncIdx = ctx.funcMap.get("__promise_reject");
-  if (resolveValueFuncIdx === undefined || rejectFuncIdx === undefined) return null;
-
-  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
-
-  // Canonical `(externref) -> ()` wrapper — the SAME struct the executor body
-  // ref.tests / ref.casts `resolve`/`reject` against (shared via the signature
-  // cache). Our cap struct subtypes it so the native dispatch matches.
-  const wrapper = getOrCreateFuncRefWrapperTypes(ctx, [{ kind: "externref" }], []);
-  if (!wrapper) return null;
-
-  const capTypeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({
-    kind: "struct",
-    name: "$__promise_settle_cap",
-    fields: [
-      // Field 0 is inherited from the wrapper root (funcref); it MUST be
-      // redeclared identically in the subtype.
-      { name: "func", type: { kind: "funcref" }, mutable: false },
-      { name: "cap_promise", type: { kind: "ref", typeIdx: promiseTypeIdx }, mutable: false },
-    ],
-    superTypeIdx: wrapper.structTypeIdx,
-  });
-
-  // Mint both trampolines UP-FRONT (stable-regime handles) before any code
-  // references them, mirroring ensurePromiseSettleFunctions' discipline.
-  const resolveClFuncIdx = mintDefinedFunc(ctx);
-  const rejectClFuncIdx = mintDefinedFunc(ctx);
-
-  // Body: recover captured promise from self (downcast to the cap subtype),
-  // then settle it with the incoming value. resolve routes through
-  // __promise_resolve_value (assimilation: resolve(aPromise) chains); reject
-  // routes through __promise_reject. The already-settled guard lives in the
-  // settle helpers (buildPromiseSettleBody), so double-settle / settle-after-
-  // throw is a spec-correct no-op by construction.
-  const makeBody = (settleFuncIdx: number): Instr[] => [
-    { op: "local.get", index: 0 }, // self: (ref null $wrap)
-    { op: "ref.cast", typeIdx: capTypeIdx }, // downcast to the cap subtype (non-null)
-    { op: "struct.get", typeIdx: capTypeIdx, fieldIdx: 1 }, // captured (ref $Promise)
-    { op: "local.get", index: 1 }, // value: externref
-    { op: "call", funcIdx: settleFuncIdx }, // settle -> externref
-    { op: "drop" }, // trampoline result type is () — discard the settled value
-  ];
-
-  pushDefinedFunc(ctx, resolveClFuncIdx, {
-    name: "__promise_resolve_cl",
-    typeIdx: wrapper.liftedFuncTypeIdx,
-    locals: [],
-    body: makeBody(resolveValueFuncIdx),
-    exported: false,
-  });
-  ctx.funcMap.set("__promise_resolve_cl", resolveClFuncIdx);
-
-  pushDefinedFunc(ctx, rejectClFuncIdx, {
-    name: "__promise_reject_cl",
-    typeIdx: wrapper.liftedFuncTypeIdx,
-    locals: [],
-    body: makeBody(rejectFuncIdx),
-    exported: false,
-  });
-  ctx.funcMap.set("__promise_reject_cl", rejectClFuncIdx);
-
-  const result: PromiseExecutorClosures = {
-    resolveClFuncIdx,
-    rejectClFuncIdx,
-    capTypeIdx,
-    promiseTypeIdx,
-    rejectFuncIdx,
-  };
-  cache.__promiseExecutorClosures = result;
-  return result;
-}
 
 /**
  * #2959 — Emit the native standalone `new Promise(executor)` lowering.
@@ -310,6 +202,120 @@ export function emitStandalonePromiseFromExecutor(
   } as Instr);
 
   // 6. Result: the pending/settled $Promise as externref.
+  fctx.body.push({ op: "local.get", index: pLocal });
+  fctx.body.push({ op: "extern.convert_any" });
+  return true;
+}
+
+/**
+ * #2903 R1 — native standalone `new Promise(executorVALUE)` where the executor
+ * is NOT a syntactic inline arrow/function-expression (an identifier / param /
+ * any runtime closure value), so {@link emitStandalonePromiseFromExecutor}'s
+ * `ClosureInfo`-based `call_ref` cannot apply. Instead of recovering the
+ * executor's concrete closure struct type at compile time, we invoke the
+ * runtime value through the open-`any` closure bridge `__apply_closure(exec,
+ * undefined, [resolve, reject])` (arity-clamping per #2939), which dispatches
+ * ANY closure struct shape natively — retiring the `Promise_new` +
+ * `__make_callback` host leak for `function make(ex){ return new Promise(ex); }`
+ * and `const ex = (r)=>r(x); new Promise(ex)` shapes.
+ *
+ * `compileExecutorValue` is a caller-provided thunk that leaves the executor as
+ * an externref on `fctx.body` (kept as a callback to avoid an eval-time import
+ * cycle with expressions.ts). Returns `true` having emitted the native path
+ * (leaving an externref `$Promise` on the stack); `false` — emitting NOTHING —
+ * when inapplicable (host/gc mode, deps unavailable), so the caller falls
+ * through to the `Promise_new` host path byte-unchanged.
+ *
+ * BOUNDARY: a non-callable executor value is dispatched through
+ * `__apply_closure` (which no-ops / returns undefined on a non-closure) rather
+ * than throwing the spec §27.2.3.1-step-2 TypeError — the same no-throw
+ * discipline as the other #2903 native bodies; the promise simply stays pending.
+ */
+export function emitStandalonePromiseFromExecutorValue(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  compileExecutorValue: () => void,
+): boolean {
+  if (!isStandalonePromiseActive(ctx)) return false;
+
+  const exnTag = ensureExnTag(ctx);
+  const closures = ensurePromiseExecutorClosures(ctx);
+  if (!closures) return false;
+  const { resolveClFuncIdx, rejectClFuncIdx, capTypeIdx, promiseTypeIdx, rejectFuncIdx } = closures;
+
+  // Open-`any` closure bridge + the boxed-any args vec builders.
+  ensureObjectRuntime(ctx);
+  addUnionImportsViaRegistry(ctx);
+  const applyClosureIdx = reserveApplyClosure(ctx);
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new");
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  if (applyClosureIdx === undefined || objVecNewIdx === undefined || objVecPushIdx === undefined) return false;
+
+  // 1. Compile the executor VALUE to externref, into a local (runs any side
+  //    effects of the executor expression exactly once, before the invoke).
+  const execLocal = allocLocal(fctx, `__pexecv_fn_${fctx.locals.length}`, { kind: "externref" });
+  compileExecutorValue();
+  fctx.body.push({ op: "local.set", index: execLocal });
+
+  // 2. Allocate the pending $Promise.
+  const pLocal = allocLocal(fctx, `__pexecv_p_${fctx.locals.length}`, { kind: "ref", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "local.set", index: pLocal });
+
+  // 3. resolve / reject as capturing closure VALUES (externref), capturing p.
+  const emitSettleValue = (clFuncIdx: number, dst: number): void => {
+    fctx.body.push({ op: "ref.func", funcIdx: clFuncIdx });
+    fctx.body.push({ op: "local.get", index: pLocal });
+    fctx.body.push({ op: "struct.new", typeIdx: capTypeIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "local.set", index: dst });
+  };
+  const rvLocal = allocLocal(fctx, `__pexecv_rv_${fctx.locals.length}`, { kind: "externref" });
+  emitSettleValue(resolveClFuncIdx, rvLocal);
+  const rjLocal = allocLocal(fctx, `__pexecv_rj_${fctx.locals.length}`, { kind: "externref" });
+  emitSettleValue(rejectClFuncIdx, rjLocal);
+
+  // 4. Invoke the executor synchronously via __apply_closure(exec, undefined,
+  //    [resolve, reject]) inside try/catch; a throw-before-settle rejects p.
+  const reasonLocal = allocLocal(fctx, `__pexecv_reason_${fctx.locals.length}`, { kind: "externref" });
+  const argsLocal = allocLocal(fctx, `__pexecv_args_${fctx.locals.length}`, { kind: "externref" });
+  const tryBody: Instr[] = [
+    { op: "call", funcIdx: objVecNewIdx } as Instr,
+    { op: "local.set", index: argsLocal } as Instr,
+    { op: "local.get", index: argsLocal } as Instr,
+    { op: "local.get", index: rvLocal } as Instr,
+    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "local.get", index: argsLocal } as Instr,
+    { op: "local.get", index: rjLocal } as Instr,
+    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "local.get", index: execLocal } as Instr,
+    { op: "ref.null.extern" } as Instr, // undefined `this`
+    { op: "local.get", index: argsLocal } as Instr,
+    { op: "call", funcIdx: applyClosureIdx } as Instr,
+    { op: "drop" } as Instr, // executor return value is ignored (§27.2.3.1)
+  ];
+  fctx.body.push({
+    op: "try",
+    blockType: { kind: "empty" },
+    body: tryBody,
+    catches: [
+      {
+        tagIdx: exnTag,
+        body: [
+          { op: "local.set", index: reasonLocal } as Instr,
+          { op: "local.get", index: pLocal } as Instr,
+          { op: "local.get", index: reasonLocal } as Instr,
+          { op: "call", funcIdx: rejectFuncIdx } as Instr,
+          { op: "drop" } as Instr,
+        ],
+      },
+    ],
+  } as Instr);
+
+  // 5. Result: the pending/settled $Promise as externref.
   fctx.body.push({ op: "local.get", index: pLocal });
   fctx.body.push({ op: "extern.convert_any" });
   return true;

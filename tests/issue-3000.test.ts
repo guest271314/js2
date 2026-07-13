@@ -30,19 +30,26 @@
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-import { compile } from "../src/index.js";
 import { planIrCompilation } from "../src/ir/select.js";
+import { compileAndInstantiate } from "../src/runtime-instantiate.js";
 
 function selection(source: string) {
   const sf = ts.createSourceFile("test.ts", source, ts.ScriptTarget.Latest, true);
   return planIrCompilation(sf, { experimentalIR: true, trackFallbacks: true });
 }
 
+// Instantiate through the PRODUCTION runtime path (`compileAndInstantiate` →
+// native `wasm:js-string` builtins, JS polyfill fallback). #3000 Phase-1b makes
+// string-field class members genuinely IR-emit, and the IR path expresses string
+// ops as native js-string *builtin* imports rather than tracked host imports —
+// so `CompileResult.importObject` (the JS-polyfill map, keyed off
+// `result.imports`) is empty for an all-builtin module and the old raw
+// `WebAssembly.instantiate(binary, importObject)` harness could not resolve
+// `wasm:js-string`. The builtins-first runtime resolves them exactly as test262
+// / the playground do.
 async function runString(source: string): Promise<string> {
-  const r = await compile(source, { fileName: "test.ts" });
-  expect(r.success).toBe(true);
-  const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
-  const fn = (instance.exports as Record<string, () => unknown>).test;
+  const exports = await compileAndInstantiate(source);
+  const fn = (exports as Record<string, () => unknown>).test;
   return String(fn());
 }
 
@@ -104,8 +111,9 @@ describe("#3000 — IR private-field substrate", () => {
     for (const fb of sel.fallbacks ?? []) reasons.set(fb.name, fb.reason);
     expect(reasons.get("Animal_speak")).toBeUndefined();
     expect(reasons.get("Animal_new")).toBeUndefined();
-    // Inheritance / super members stay class-method (later #3000 phases).
-    expect(reasons.get("Dog_speak")).toBe("class-method");
+    // #3000-E landed inheritance/super: `Dog_speak` (a `super.speak()` override)
+    // is now CLAIMED, not deferred as class-method. (Was `class-method` pre-#3000-E.)
+    expect(reasons.get("Dog_speak")).toBeUndefined();
   });
 
   it("compiles + runs: private read via IR, incl. super-dispatch to the IR parent method", async () => {

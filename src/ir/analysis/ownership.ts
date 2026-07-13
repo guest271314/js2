@@ -230,6 +230,7 @@ function applyInstrEffect(instr: IrInstr, state: State, allocOf: Map<IrValueId, 
     // --- field reads -> `read` on the receiver -------------------------------
     case "object.get":
     case "class.get":
+    case "class.instanceof": // (#3144) tag read on the receiver
       touch(state, instr.value, allocOf, null, "read");
       break;
     case "refcell.get":
@@ -281,6 +282,20 @@ function applyInstrEffect(instr: IrInstr, state: State, allocOf: Map<IrValueId, 
       break;
     case "class.call":
       markEscaped(state, instr.receiver, allocOf);
+      for (const a of instr.args) markEscaped(state, a, allocOf);
+      break;
+    // #3000-E: super(...) / super.method() reach into an opaque parent function;
+    // `self`/receiver + args escape with full access, same as class.call.
+    case "class.super_init":
+      markEscaped(state, instr.self, allocOf);
+      for (const a of instr.args) markEscaped(state, a, allocOf);
+      break;
+    case "class.super_call":
+      markEscaped(state, instr.receiver, allocOf);
+      for (const a of instr.args) markEscaped(state, a, allocOf);
+      break;
+    // (#3144): static method call — opaque body, every ref arg escapes.
+    case "class.static_call":
       for (const a of instr.args) markEscaped(state, a, allocOf);
       break;
     case "closure.call":

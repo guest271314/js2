@@ -1,11 +1,12 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { emitWasiErrorConstructor, fillExternGetErrorProps } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -23,17 +24,14 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
-import { irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
+import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import { createCodegenContext } from "./context/create-context.js";
-import {
-  collectModuleTopLevelNames,
-  irFirstBodyReadsHostNode,
-  irFirstBodyReadsStringElement,
-} from "./ir-first-gate.js";
+import { collectLocalCallEdges, irFirstBodyIsProvenLowerable, type ValueDomain } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
+import { truthyEnv } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
@@ -51,11 +49,15 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
-import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
+import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
-import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
+import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
-import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
+import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
+import { fillLazyIterLadderArms } from "./iter-lazy-native.js"; // (#2903 R3)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
 import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -63,8 +65,12 @@ import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import {
   fillApplyClosure,
+  fillBindDynHelper,
   fillBuiltinFnMeta,
+  fillDynamicForinVecArms,
+  fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
+  fillExternSetVecArms,
   fillExternIsArray,
   fillProxyDispatch,
 } from "./object-runtime.js";
@@ -103,7 +109,6 @@ import {
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
-  isStandalonePromiseActive,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
@@ -138,7 +143,7 @@ import {
   collectDeclaredFuncRefs,
   compileClassBodies,
 } from "./class-bodies.js";
-import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983)
+import { classMemberFuncKey, fnctorAncestorOfClass, moduleHasFnctorSubclass } from "./class-member-keys.js"; // (#1983 / #3123)
 import {
   applyShapeInference,
   collectDeclarations,
@@ -344,6 +349,96 @@ function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
     ) {
       found = true;
       return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * (#3057) True when the source dynamically constructs a `$__ta_dyn_view` —
+ * `new <ctorExpr>(bufferArg[, off[, len]])` where `<ctorExpr>` is an IDENTIFIER
+ * that is NOT a statically-named TA constructor (so it's a TA constructor held in
+ * a variable / array element, type `any` or a TA-ctor union — test262
+ * `for (ctor of ctors) new ctor(rab, …)` / `CreateRabForTest`) and NOT a user
+ * class. Mirrors the runtime dynamic-construct gate in `new-super.ts` (buffer-typed
+ * first arg, non-numeric-literal). Used to enable the runtime-kind element byte
+ * codec on the generic index path for helper functions compiled BEFORE the
+ * construct (the `$__ta_dyn_view` type registers lazily). Byte-inert: modules
+ * without this pattern never set the flag, so they never emit the codec arm.
+ */
+function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
+  const TA_NAMES = new Set([
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+  ]);
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (ts.isNewExpression(node)) {
+      let callee: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee) || ts.isNonNullExpression(callee)) {
+        callee = callee.expression;
+      }
+      if (ts.isIdentifier(callee)) {
+        // Static TA name (`new Uint8Array(buf)`) is handled by the static view
+        // ctor path, never the dynamic one — skip it.
+        if (!TA_NAMES.has(callee.text)) {
+          // A user class callee resolves to a ClassDeclaration value — skip; only
+          // a value-bound ctor (variable / param / any) reaches the dynamic path.
+          const sym = checker.getSymbolAtLocation(callee);
+          const decl = sym?.valueDeclaration;
+          const isUserClass = decl !== undefined && ts.isClassDeclaration(decl);
+          if (!isUserClass) {
+            const arg0 = node.arguments && node.arguments.length >= 1 ? node.arguments[0]! : undefined;
+            // Buffer-typed first arg gates the dynamic TA construct (the #3054 D
+            // buffer form) — excludes `new fn(x)` on unrelated identifiers.
+            if (arg0 !== undefined && !ts.isNumericLiteral(arg0)) {
+              let arg0Sym: string | undefined;
+              try {
+                arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
+              } catch {
+                arg0Sym = undefined;
+              }
+              if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
+                found = true;
+                return;
+              }
+            }
+            // (#2872) General dynamic-ctor forms — `new TA(3)`, `new TA([…])`,
+            // `new TA(otherTA)`, `new TA()` on a GENUINELY-dynamic callee (an
+            // `any`/`unknown`-typed param / variable / binding element declared
+            // in real source — the `testWithTypedArrayConstructors(TA => …)`
+            // harness shape). Mirrors `resolvesToDynamicAnyCtorValue`
+            // (new-super.ts): declaration-file symbols (ambient globals) and
+            // typed function/class bindings never set the flag, so ordinary
+            // `new F(...)` function-ctor modules stay byte-identical.
+            if (
+              decl !== undefined &&
+              !decl.getSourceFile().isDeclarationFile &&
+              (ts.isParameter(decl) || ts.isVariableDeclaration(decl) || ts.isBindingElement(decl))
+            ) {
+              try {
+                const calleeType = checker.getTypeAtLocation(callee);
+                if ((calleeType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+                  found = true;
+                  return;
+                }
+              } catch {
+                /* type resolution failure — leave the flag unset */
+              }
+            }
+          }
+        }
+      }
     }
     forEachChild(node, walk);
   }
@@ -906,9 +1001,29 @@ function buildIrClassShapes(
   sourceFile: ts.SourceFile,
 ): Map<string, import("../ir/nodes.js").IrClassShape> {
   const out = new Map<string, import("../ir/nodes.js").IrClassShape>();
+  // #3000-E: className → declaration, for parent-chain field re-derivation and
+  // parent-shape lookup on a subclass.
+  const classDeclByName = new Map<string, ts.ClassDeclaration>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isClassDeclaration(stmt) && stmt.name) classDeclByName.set(stmt.name.text, stmt);
+  }
   for (const stmt of sourceFile.statements) {
     if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
-    if (stmt.heritageClauses && stmt.heritageClauses.length > 0) continue; // slice 4 defers inheritance
+    // #3000-E: a single-level `extends` of a LOCAL user class projects (its own
+    // shape carries the parent as `.parent`, driving `super(...)` / `super.method`
+    // lowering). A class with `extends` of a builtin / externref-backed / not-yet-
+    // built parent, or a non-identifier heritage expression, still defers to legacy
+    // — `parentShape` stays undefined and the `continue` below drops it. An
+    // `implements`-only class (no `extends`) is structurally flat and projects. This
+    // predicate MIRRORS the selector's `hasParent && parentIsLocalClass` gate
+    // (`src/ir/select.ts`) so a claimed subclass member always finds a shape here.
+    let parentShape: import("../ir/nodes.js").IrClassShape | undefined;
+    const extendsName = extendsParentClassName(stmt);
+    if (extendsName !== null) {
+      const ps = out.get(extendsName);
+      if (!ps) continue; // parent isn't a local projected class (builtin, or declared later) → defer
+      parentShape = ps;
+    }
     const className = stmt.name.text;
     if (!ctx.classSet.has(className)) continue;
     if (!ctx.structFields.has(className)) continue;
@@ -936,17 +1051,85 @@ function buildIrClassShapes(
     }
     if (!ctorOk) continue;
 
-    // Fields — read from the legacy `structFields` (already includes
-    // type info that the IR cares about). Strip the `__tag` prefix and
-    // map each remaining field's ValType back to an IrType. If any
-    // field type can't be projected (e.g. tagged-union ref), skip the
-    // whole class.
+    // Fields — read from the legacy `structFields` (which fixes the
+    // authoritative field set: names, count, and the backend ValType each
+    // struct slot commits to). Strip the `__tag` prefix and map each remaining
+    // field to an IrType.
+    //
+    // #3000 Phase-1b (string-field-shape) — re-derive each field's IR type
+    // from the AST/checker instead of the *lossy* legacy ValType. A `string`
+    // field lowers to externref (host) / (ref $AnyString) (native); the ValType
+    // alone can't tell a string from an `any`/object in host mode (both are
+    // externref), so the old `valTypeToIrField(ValType)` returned null for
+    // strings and the WHOLE class (e.g. classes.ts's `Animal`, whose `#name`
+    // is a string) got no IrClassShape — leaving every accessor / method / ctor
+    // byte-inert on legacy. We build a checker-derived field→IrType map keyed
+    // by the SAME mangled name legacy stores in `structFields`, then adopt the
+    // richer type ONLY when it is byte-compatible with the legacy struct slot
+    // (`irFieldTypeMatchesLegacyValType` — a field-level parity guard). Fields
+    // the AST can't resolve, or whose projection disagrees with the struct
+    // slot, fall back to the original ValType path. Net effect: string (and
+    // boolean/number) fields now project; unresolvable shapes still reject the
+    // class, so the worst case remains a clean legacy fallback.
+    const astFieldIr = new Map<string, IrType>();
+    const recordField = (nameNode: ts.PropertyName, tsNode: ts.Node): void => {
+      let mangled: string;
+      if (ts.isPrivateIdentifier(nameNode)) mangled = "__priv_" + nameNode.text.slice(1);
+      else if (ts.isIdentifier(nameNode)) mangled = nameNode.text;
+      else return; // computed / string-literal / numeric names → leave to ValType path
+      if (astFieldIr.has(mangled)) return;
+      const tsType = ctx.checker.getTypeAtLocation(tsNode);
+      const ir = tsTypeToClassPositionIr(ctx, tsType, out);
+      if (ir) astFieldIr.set(mangled, ir);
+    };
+    // #3000-E: the legacy `structFields` for a subclass is `[...parentFields,
+    // ...ownFields]` (see `collectClassDeclaration`), so a subclass's slot set
+    // includes fields DECLARED on its ancestors — e.g. Dog's `__priv_name` is
+    // Animal's string field. The AST re-derivation must therefore walk the whole
+    // ancestor chain (self + every local parent), or an inherited STRING field
+    // has no `astFieldIr` entry and falls to the null-returning ValType path,
+    // rejecting the whole subclass. Numeric/boolean inherited fields survive the
+    // ValType path regardless; this walk is what recovers inherited string fields.
+    const chain: ts.ClassDeclaration[] = [stmt];
+    for (let cursor: string | null = extendsParentClassName(stmt); cursor !== null; ) {
+      const decl = classDeclByName.get(cursor);
+      if (!decl) break; // non-local ancestor (builtin) — its fields aren't struct slots here
+      chain.push(decl);
+      cursor = extendsParentClassName(decl);
+    }
+    for (const decl of chain) {
+      // Property declarations (`#name: string;`, `x: number;`) — legacy reads the
+      // field type off the member node itself; mirror that source exactly.
+      for (const member of decl.members) {
+        if (ts.isPropertyDeclaration(member) && member.name && !hasStaticModifier(member)) {
+          recordField(member.name, member);
+        }
+      }
+      // Constructor-body `this.x = …` field introductions — legacy reads the
+      // field type off the property-access LHS node; mirror that source.
+      const declCtor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
+      if (declCtor?.body) {
+        for (const s of declCtor.body.statements) {
+          if (
+            ts.isExpressionStatement(s) &&
+            ts.isBinaryExpression(s.expression) &&
+            s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isPropertyAccessExpression(s.expression.left) &&
+            s.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+          ) {
+            recordField(s.expression.left.name, s.expression.left);
+          }
+        }
+      }
+    }
+
     const legacyFields = ctx.structFields.get(className)!;
     const fields: { name: string; type: IrType }[] = [];
     let fieldsOk = true;
     for (const f of legacyFields) {
       if (f.name === "__tag") continue;
-      const ir = valTypeToIrField(ctx, f.type);
+      const astIr = astFieldIr.get(f.name);
+      const ir = astIr && irFieldTypeMatchesLegacyValType(ctx, astIr, f.type) ? astIr : valTypeToIrField(ctx, f.type);
       if (!ir) {
         fieldsOk = false;
         break;
@@ -957,7 +1140,12 @@ function buildIrClassShapes(
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Methods — instance methods only, re-derived from the AST.
-    const methods: { name: string; params: IrType[]; returnType: IrType | null }[] = [];
+    const methods: {
+      name: string;
+      params: IrType[];
+      returnType: IrType | null;
+      memberKind?: "method" | "getter" | "setter" | "static";
+    }[] = [];
     let methodsOk = true;
     for (const member of stmt.members) {
       if (!ts.isMethodDeclaration(member) || !member.name) continue;
@@ -999,14 +1187,102 @@ function buildIrClassShapes(
     }
     if (!methodsOk) continue;
 
+    // (#3144) Accessor + static-method descriptor projections — BEST-EFFORT:
+    // an unprojectable accessor/static is simply skipped (a claimed use then
+    // misses the descriptor at from-ast and demotes that one function),
+    // never rejecting the WHOLE class like the instance-method loop above
+    // would (which would regress classes that project today). Getters carry
+    // the property name with `memberKind: "getter"` ([] -> T); setters
+    // `"setter"` ([T] -> null); statics `"static"` (no `this` param at the
+    // Wasm level — invoked via `class.static_call`). Instance-member lookups
+    // filter on `memberKind`, so these never leak into `class.call`
+    // resolution.
+    for (const member of stmt.members) {
+      if (!member.name || !ts.isIdentifier(member.name)) continue;
+      const memberName = member.name.text;
+      if (ts.isGetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (!sig) continue;
+        const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+        if (isVoidType(retTs)) continue; // void getter — degenerate, skip
+        const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [], returnType: ir, memberKind: "getter" });
+      } else if (ts.isSetAccessorDeclaration(member) && !hasStaticModifier(member)) {
+        if (member.parameters.length !== 1) continue;
+        const p = member.parameters[0]!;
+        if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) continue;
+        const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+        if (!ir) continue;
+        methods.push({ name: memberName, params: [ir], returnType: null, memberKind: "setter" });
+      } else if (
+        ts.isMethodDeclaration(member) &&
+        hasStaticModifier(member) &&
+        !hasAbstractModifier(member) &&
+        !member.asteriskToken
+      ) {
+        const params: IrType[] = [];
+        let ok = true;
+        for (const p of member.parameters) {
+          if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) {
+            ok = false;
+            break;
+          }
+          const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), out);
+          if (!ir) {
+            ok = false;
+            break;
+          }
+          params.push(ir);
+        }
+        if (!ok) continue;
+        let returnType: IrType | null = null;
+        const sig = ctx.checker.getSignatureFromDeclaration(member);
+        if (sig) {
+          const retTs = ctx.checker.getReturnTypeOfSignature(sig);
+          if (!isVoidType(retTs)) {
+            const ir = tsTypeToClassPositionIr(ctx, retTs, out);
+            if (!ir) continue;
+            returnType = ir;
+          }
+        }
+        // A same-name instance method + static method share ONE legacy
+        // funcMap key (`${className}_${name}` — class-bodies.ts skips the
+        // second registration), so resolving either would call the wrong
+        // body. Project the static only when no instance member takes the
+        // name (from-ast then demotes the ambiguous call cleanly).
+        if (methods.some((m) => m.name === memberName && (m.memberKind ?? "method") === "method")) continue;
+        methods.push({ name: memberName, params, returnType, memberKind: "static" });
+      }
+    }
+
     out.set(className, {
       className,
       fields,
       methods,
       constructorParams,
+      // #3000-E: present only for a single-level subclass of a local user class.
+      ...(parentShape ? { parent: parentShape } : {}),
     });
   }
   return out;
+}
+
+/**
+ * #3000-E: the name of a class's `extends` parent when it is a bare identifier
+ * (`class Dog extends Animal` → "Animal"). Returns null for no `extends` (flat /
+ * `implements`-only) and for a non-identifier heritage expression (`extends
+ * ns.Base`, `extends mixin(X)` — deferred). Mirrors `extendsParentName` in
+ * `src/ir/select.ts` so the shape builder and selector agree on which subclasses
+ * are IR-eligible.
+ */
+function extendsParentClassName(stmt: ts.ClassDeclaration): string | null {
+  for (const h of stmt.heritageClauses ?? []) {
+    if (h.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+    const first = h.types[0]?.expression;
+    if (first && ts.isIdentifier(first)) return first.text;
+  }
+  return null;
 }
 
 /**
@@ -1059,12 +1335,52 @@ function tsTypeToClassPositionIr(
  */
 function valTypeToIrField(_ctx: CodegenContext, vt: import("../ir/types.js").ValType): IrType | null {
   if (vt.kind === "f64" || vt.kind === "i32") return irVal(vt);
-  // Slice 4 defers `string`-typed class fields exposed as externref or
-  // (ref $AnyString) — the IR's `IrType.string` is backend-agnostic
-  // but the legacy `structFields` already commits to a backend ValType
-  // (externref/ref). Returning null here lets the class fall back to
-  // legacy if it has string fields.
+  // `string`-typed class fields are handled by the AST/checker projection in
+  // `buildIrClassShapes` (#3000 Phase-1b) — the legacy ValType (externref /
+  // (ref $AnyString)) is ambiguous in host mode, so string recovery can't be
+  // done from the ValType alone. This ValType path stays the fallback for
+  // non-string fields; returning null here still rejects any field the AST
+  // couldn't resolve (e.g. tagged-union / `any` refs), so the class falls back
+  // to legacy cleanly.
   return null;
+}
+
+/**
+ * #3000 Phase-1b — field-level parity guard. Does an AST/checker-derived class
+ * field `IrType` lower to the SAME backend `ValType` the legacy struct slot
+ * already committed to? We only adopt the richer AST-derived type when it is
+ * byte-compatible with the struct, so `class.get`/`class.set` against the shape
+ * produce exactly the ValType the struct holds — no invalid Wasm, no ABI drift
+ * versus legacy-compiled callers, and the #1370 method-signature parity guard
+ * (`integration.ts`) sees identical typeIdx on both sides.
+ *
+ * Scope is intentionally narrow: primitives (`f64`/`i32`) and `string`. The
+ * `string` arm mirrors `resolveWasmType`'s string arm + the `ref`→`ref_null`
+ * field widening in `collectClassDeclaration` (native → `(ref/ref_null
+ * $AnyString)`; host → `externref`), which is exactly what `resolveString()`
+ * resolves an `IrType.string` to at lower time. Any other IR kind returns
+ * false → the caller falls back to the ValType path.
+ */
+function irFieldTypeMatchesLegacyValType(
+  ctx: CodegenContext,
+  ir: IrType,
+  vt: import("../ir/types.js").ValType,
+): boolean {
+  if (ir.kind === "val") {
+    const a = ir.val;
+    if (a.kind !== vt.kind) return false;
+    if (a.kind === "ref" || a.kind === "ref_null") {
+      return a.typeIdx === (vt as { typeIdx: number }).typeIdx;
+    }
+    return true;
+  }
+  if (ir.kind === "string") {
+    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      return (vt.kind === "ref" || vt.kind === "ref_null") && vt.typeIdx === ctx.anyStrTypeIdx;
+    }
+    return vt.kind === "externref";
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,8 +1435,12 @@ function isStrictIrBuildError(message: string): boolean {
   return false;
 }
 
-function truthyEnv(v: string | undefined): boolean {
-  return v === "1" || v === "true";
+/**
+ * (#3143) Escape-hatch check for default-ON env flags: only an explicit
+ * `0`/`false` disables. Unset / empty / any other value means "default on".
+ */
+function explicitlyDisabledEnv(v: string | undefined): boolean {
+  return v === "0" || v === "false";
 }
 
 export function irVerifierHardFailureEnabled(env: Record<string, string | undefined> = process.env): boolean {
@@ -1178,114 +1498,163 @@ interface IrOverlayPlan {
 }
 
 /**
- * (#2138) Decide which claimed functions may have their LEGACY body emission
- * skipped under `JS2WASM_IR_FIRST=1`. Deliberately conservative — a function
- * qualifies only when:
+ * (#2138/#3143) Decide which claimed functions may have their LEGACY body
+ * emission skipped under IR-first (the default since #3143).
  *
- *   1. It survived overrideMap resolution (`safeSelection.funcs` — computed
- *      strictly AFTER the #2023 `new.target` clear and after resolve-time
- *      drops), so the IR path WILL attempt it.
- *   2. If it is a generator (`function*`), the compile targets a JS host
- *      (`generatorsSkippable` — `!standalone && !wasi`). #2951 gate-2: the
- *      IR generator lowering is now self-sufficient for the JS-host path —
- *      it pre-registers its own generator host imports
- *      (`addGeneratorImports` in `ir/integration.ts`, driven by any
- *      `funcKind === "generator"` claim) and its own `__exn` tag, and the
- *      source-level scan (`state.generatorFound` in `declarations.ts`)
- *      registers the generator imports independently of ANY individual
- *      generator's legacy body emission — so skipping a claimed generator's
- *      legacy body drops no import/type/tag the IR body relies on. The
- *      predecessor slice (`gen.setReturn`, #2640) closed the last
- *      value-returning-`return` deferral, so value-carrying generators now
- *      IR-claim with zero post-claim demotions (proven on a representative
- *      host-drain corpus, `irPostClaimErrors` empty). Any generator SHAPE the
- *      IR path still can't own is filtered UPSTREAM by the selector (async
- *      generators, generator methods → `deferred-feature`; unresolved yield
- *      shapes) so it never enters `safeSelection.funcs` and never reaches
- *      this gate. STANDALONE/WASI generators stay compile-twice: legacy
- *      restricts them to sequential-numeric-yield native lowering
- *      (`function-body.ts` "#680" guard) and the IR path unconditionally
- *      registers JS-host generator imports, so standalone self-sufficiency
- *      is genuinely unproven (#2138 deviation 3) — lift in a follow-up after
- *      a standalone measurement.
- *   3. Every DIRECT local callee is also in `safeSelection.funcs`. The
- *      selector's Step-2 closure already guarantees this against
- *      `selection.funcs`, but overrideMap resolution can re-open the closure
- *      (a callee dropped at resolve time). Such a caller's IR build then
- *      throws "call to unknown function" — a KNOWN-benign legacy fallback
- *      that must not become a skipped-slot hard error. Non-transitive is
- *      sufficient: only the function's own IR success is load-bearing for
- *      its slot, and a callee that is claimed-but-not-skipped still occupies
- *      its pre-allocated slot with a working body either way.
- *   4. Its body does not read a HOST node (property/element access or bare
- *      call rooted at an identifier that is neither function-local nor a
- *      module top-level binding) — see `irFirstBodyReadsHostNode` (#2138
- *      Trap 4 / #2856 sequencing). A no-op today (the selector still rejects
- *      host-global receivers), load-bearing the moment #2856's extern-in-IR
- *      selector arm lands: host-node functions stay compile-twice until that
- *      lowering is proven, keeping the flag-on measurement clean.
+ * **ALLOWLIST, not denylist (#3143).** An early attempt gated OUT the shapes
+ * from-ast cannot lower (a per-shape denylist). A `result.errors` scan of the
+ * equivalence inline corpus proved that surface is BROAD — ~22 distinct
+ * from-ast throw classes across core operations (string methods, class-member
+ * resolution, call/ctor arity, type-mismatched arith, property assignment,
+ * coercion, `new Date`, …). A denylist cannot enumerate them safely: a single
+ * miss ships a skipped-slot HARD error (an equivalence regression), because a
+ * skipped function whose IR build throws has no legacy body to demote to.
  *
- * Class members are NEVER skipped in this slice (their slot pre-allocation
- * lives in `class-bodies.ts` and carries a typeIdx parity contract with
- * legacy callers — see the parity guard in `integration.ts`); they stay on
- * the legacy-then-overwrite path.
+ * So the decision is inverted: skip ONLY functions that are PROVABLY lowerable.
+ * A function qualifies when ALL of:
+ *   - it is not a `function*` on a standalone/WASI target (gate 2, #2951 —
+ *     subsumed by the numeric allowlist anyway, kept explicit);
+ *   - its SIGNATURE is lowerable: no default/optional/rest/destructuring
+ *     params, and every param + the return type resolve (via `overrideMap`) to
+ *     a numeric/boolean Wasm type (f64 / i32) or void — `signatureLowerable`;
+ *   - its BODY is entirely the proven-lowerable numeric/boolean subset —
+ *     `irFirstBodyIsProvenLowerable` (matched-type arithmetic/compare/logic,
+ *     control flow, correctly-typed local mutation, exact-arity calls to other
+ *     CLAIMED functions, returns; NO method calls / member access / `new` /
+ *     literals-of-ref-type / closures / coercion).
  *
- * Every skipped function gets an `unreachable` placeholder body, so the
- * skip is a *body-emission* change, never an *index-layout* change: the
- * funcIdx/typeIdx slot assignment from `collectDeclarations` is untouched.
- * If the IR path then fails to compile a skipped function, the overlay in
- * `generateModule` promotes that failure to a hard compile error (the
- * placeholder must never ship) — surfacing exactly the selector↔builder
- * divergences this investigation exists to find (#2135).
+ * Safe by construction: a construct the allowlist does not recognise keeps the
+ * function COMPILE-TWICE (correct — the legacy body ships, the IR overlay may
+ * still overwrite it or demote to a warning), never a hard error. The subset
+ * starts narrow and WIDENS as the IR gains real lowering for more kinds
+ * (#2855/#2856); each widening unlocks more of the gated-G1 legacy deletion.
+ * Class members are never skipped here (typeIdx parity contract with legacy
+ * callers — see `integration.ts`).
+ *
+ * Every skipped function gets an `unreachable` placeholder body, so the skip is
+ * a *body-emission* change, never an *index-layout* change; if the IR path
+ * still fails on a skipped (allowlisted) function, `generateModule` promotes it
+ * to a hard error — which the allowlist is designed to make impossible.
  */
 function computeIrFirstSkipSet(
   plan: IrOverlayPlan,
-  sourceFile: ts.SourceFile,
+  _sourceFile: ts.SourceFile,
   generatorsSkippable: boolean,
 ): ReadonlySet<string> {
   const skip = new Set<string>();
   const funcs = plan.safeSelection.funcs;
   if (funcs.size === 0) return skip;
-  const edges = plan.selection.localCallees;
-  // Gate 4 (#2138 Trap 4, coordinated with the extern-in-IR plan in #2856):
-  // module-level user bindings, computed once — receivers/callees rooted at
-  // these are user code, never host globals.
-  const moduleNames = collectModuleTopLevelNames(sourceFile);
+
+  // (#3143/#3203) ALLOWLIST skip — see `irFirstBodyIsProvenLowerable`. A claimed
+  // function's legacy body is skipped ONLY when its whole body is the
+  // proven-lowerable numeric/boolean subset AND its signature is lowerable.
+  // Everything else stays COMPILE-TWICE (safe: no skipped-slot hard error).
+  const isF64 = (t: IrType): boolean => asVal(t)?.kind === "f64";
+  const isI32 = (t: IrType): boolean => asVal(t)?.kind === "i32";
+
+  // `claimedArity`: name → parameter count for every claimed function with a
+  // PURE-`f64` signature (all params + return `f64`). In v1 the allowlist lowers
+  // inter-function calls in NUMBER context only, so a call target must be a
+  // number-signature callee — this keeps the call-result domain sound and also
+  // closes a latent hole in the f64-only allowlist (a call to a claimed
+  // non-f64-return callee was accepted as `number`). Bool-signature functions
+  // are never allowlist call targets.
+  const claimedArity = new Map<string, number>();
+  for (const n of funcs) {
+    const f = plan.declByName.get(n);
+    if (!f) continue;
+    const o = plan.overrideMap.get(n);
+    if (o && o.params.every(isF64) && o.returnType !== null && isF64(o.returnType)) {
+      claimedArity.set(n, f.parameters.length);
+    }
+  }
+
+  // (#3203) Resolve a position's value DOMAIN for the allowlist. `number` = f64.
+  // `bool` = an `i32` carrier WITH an explicit `boolean` AST annotation — the
+  // ONLY checker-free way to disambiguate a boolean from a native-int (`type
+  // i32 = number`), which also resolves to `i32`. Unannotated `i32` (inferred)
+  // and native-int stay compile-twice (native-int is a follow-up widen). Any
+  // other carrier (string/object/closure/extern/dynamic/ref) → null.
+  const positionDomain = (annot: ts.TypeNode | undefined, resolved: IrType): ValueDomain | null => {
+    if (isF64(resolved)) return "number";
+    if (isI32(resolved) && annot?.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
+    return null;
+  };
+  // Resolve the full signature domain, or null when the function is not
+  // skip-eligible. Rejects default/optional/rest/destructuring params (from-ast
+  // throws on those) up front.
+  const resolveSignatureDomains = (
+    fn: ts.FunctionDeclaration,
+    name: string,
+  ): { paramDomains: ValueDomain[]; returnDomain: ValueDomain | "void" } | null => {
+    for (const p of fn.parameters) {
+      if (p.questionToken || p.dotDotDotToken || p.initializer) return null;
+      if (!ts.isIdentifier(p.name)) return null;
+    }
+    const o = plan.overrideMap.get(name);
+    if (!o) return null; // no resolved signature — stay conservative
+    const paramDomains: ValueDomain[] = [];
+    for (let i = 0; i < o.params.length; i++) {
+      const d = positionDomain(fn.parameters[i]?.type, o.params[i]!);
+      if (d === null) return null;
+      paramDomains.push(d);
+    }
+    let returnDomain: ValueDomain | "void";
+    if (o.returnType === null) returnDomain = "void";
+    else {
+      const rd = positionDomain(fn.type, o.returnType);
+      if (rd === null) return null;
+      returnDomain = rd;
+    }
+    return { paramDomains, returnDomain };
+  };
+
   for (const name of funcs) {
     const fn = plan.declByName.get(name);
     if (!fn) continue;
     // gate 2 (#2951) — a claimed generator is skippable only when targeting a
-    // JS host. Standalone/WASI generators stay compile-twice (legacy's
-    // native-generator restriction + unproven IR standalone self-sufficiency,
-    // #2138 deviation 3). Non-generators are unaffected.
+    // JS host; a `function*` body is never in the numeric allowlist anyway, so
+    // this is subsumed, but kept explicit for standalone/WASI clarity.
     if (fn.asteriskToken && !generatorsSkippable) continue;
-    if (irFirstBodyReadsHostNode(fn, moduleNames)) continue; // gate 4 — host nodes
-    if (irFirstBodyReadsStringElement(fn)) continue; // gate 5 — string element read (#2972)
-    // Gate 6 (#2949 slice 2) — dynamic-signature functions stay compile-twice
-    // under IR-first while the dynamic surface is move-only (no box/unbox
-    // lowering yet). The selector's `dynamicUsesAreMoveOnly` scan is designed
-    // to make claims build-proof, but a scan↔builder divergence on this brand-
-    // new surface would otherwise become a skipped-slot HARD error; keep the
-    // legacy body as the demotion target until slice 3 lowering + an ir_first
-    // lane measurement prove the claims robust, then lift this gate.
-    {
-      const o = plan.overrideMap.get(name);
-      if (o && (o.params.some((p) => isDynamic(p)) || (o.returnType !== null && isDynamic(o.returnType)))) {
-        continue;
+    const sig = resolveSignatureDomains(fn, name); // numeric/boolean signature only
+    if (!sig) continue;
+    if (!irFirstBodyIsProvenLowerable(fn, claimedArity, sig.paramDomains, sig.returnDomain)) continue; // #3143/#3203
+    skip.add(name);
+  }
+
+  // (#3143) Signature-parity fixpoint: a skipped function is installed with its
+  // IR-resolved signature, so a LEGACY (non-skipped) caller — whose call-site
+  // arg coercion was resolved against the callee's LEGACY signature — mismatches
+  // it (the boxed-`any`→typed-param `f64.convert_i32_s` validation break). So
+  // keep a function skippable ONLY when EVERY caller is itself skipped. Iterate
+  // to a fixpoint (removing a function can un-skip its callees' other callers).
+  // `<module-init>` (top-level statement calls) is never in `skip`, so any
+  // function called at module scope is correctly excluded.
+  const callEdges = collectLocalCallEdges(_sourceFile);
+  const callers = new Map<string, Set<string>>(); // callee → callers
+  for (const [caller, callees] of callEdges) {
+    for (const callee of callees) {
+      let s = callers.get(callee);
+      if (!s) {
+        s = new Set<string>();
+        callers.set(callee, s);
       }
+      s.add(caller);
     }
-    if (!edges) continue; // no edge info (defensive) — stay conservative
-    const callees = edges.get(name);
-    let closed = true;
-    if (callees) {
-      for (const c of callees) {
-        if (!funcs.has(c)) {
-          closed = false;
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const name of skip) {
+      const cs = callers.get(name);
+      if (!cs) continue; // no internal callers (leaf / host-only) — safe to skip
+      for (const c of cs) {
+        if (!skip.has(c)) {
+          skip.delete(name);
+          changed = true;
           break;
         }
       }
     }
-    if (closed) skip.add(name); // gates 1 + 3
   }
   return skip;
 }
@@ -1314,12 +1683,21 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
   // time from-ast lowers (post-`compileDeclarations`), which is where member
   // resolution happens.
   const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
+  // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
+  // the gc `$AnyValue` but strings are host js-string externrefs, so the native
+  // honest classifier mis-tags reads and the body is invalid. Gate the dynamic
+  // member-read claim off in that ONE config (clean pre-claim rejection, not a
+  // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
+  // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
+  const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
   const selection = planIrCompilation(
     ast.sourceFile,
     {
       experimentalIR: true,
       trackFallbacks,
       jsHostExterns,
+      dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
     },
     typeMap,
@@ -1469,7 +1847,9 @@ export function generateModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
-  // #2138 — legacy bodies skipped under JS2WASM_IR_FIRST=1 (undefined when off).
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
+  // #2138 — legacy bodies skipped under IR-first (default as of #3143; undefined when disabled).
   irFirstSkipped?: readonly string[];
 } {
   const mod = createEmptyModule();
@@ -1499,6 +1879,14 @@ export function generateModule(
   // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
   // `new` sites ⇒ empty result ⇒ no-op).
   ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
+  // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
+  // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
+  // for an `any` receiver) is enabled in helper functions compiled BEFORE the
+  // construct (the `$__ta_dyn_view` type registers lazily). Host-free lane only;
+  // byte-inert when the pattern is absent.
+  if (ctx.standalone || ctx.wasi) {
+    ctx.moduleUsesDynTaView = sourceHasDynamicTaConstruct(ast.checker, ast.sourceFile);
+  }
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1810,22 +2198,25 @@ export function generateModule(
     // No-op unless a function declaration is reassigned.
     registerReassignedFunctionGlobals(ctx, [ast.sourceFile]);
 
-    // (#2138) IR-first compile-once inversion — flag-gated investigation.
-    // Default OFF: with `JS2WASM_IR_FIRST` unset this block is dead and the
-    // pipeline below is byte-identical to the legacy order (IR planning runs
-    // AFTER the body pass, inside the experimentalIR overlay). With the flag
-    // set (+ experimentalIR), the IR plan is computed BEFORE
-    // `compileDeclarations` and legacy body emission is skipped for claimed
-    // functions that pass `computeIrFirstSkipSet`'s gates — those slots get
-    // an `unreachable` placeholder that the IR overlay MUST overwrite (a
-    // post-claim IR failure on a skipped function is promoted to a hard
-    // compile error below, never a silent legacy demote).
+    // (#2138) IR-first compile-once inversion.
+    // (#3143) Default ON — this clears gate G1 of the legacy-frontend
+    // retirement (plan/log/3090-phase0-legacy-delete-list.md): with IR-first
+    // the IR plan is computed BEFORE `compileDeclarations` and legacy body
+    // emission is skipped for claimed functions that pass
+    // `computeIrFirstSkipSet`'s gates — those slots get an `unreachable`
+    // placeholder that the IR overlay MUST overwrite (a post-claim IR
+    // failure on a skipped function is promoted to a hard compile error
+    // below, never a silent legacy demote). Selector-REJECTED functions are
+    // never claimed and still compile via the legacy path, unchanged.
+    // Escape hatch (one release, #3143): `JS2WASM_IR_FIRST=0` restores the
+    // old overlay order (legacy compiles everything, IR overwrites after).
     // (#2973) `disableIrFirst` opts a compile out of the IR-first inversion
     // regardless of the ambient env flag — semantics-critical sub-compiles
     // (eval / new Function host shims) set it so a post-claim IR-first hard
     // error is not swallowed by the shim's fallback catch into a silent
     // `undefined`. The ordinary IR overlay (`experimentalIR`) still runs.
-    const irFirst = !!options?.experimentalIR && !options?.disableIrFirst && truthyEnv(process.env.JS2WASM_IR_FIRST);
+    const irFirst =
+      !!options?.experimentalIR && !options?.disableIrFirst && !explicitlyDisabledEnv(process.env.JS2WASM_IR_FIRST);
     let irPlan: IrOverlayPlan | null = null;
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
@@ -1870,6 +2261,10 @@ export function generateModule(
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
+      // #3000 — record the set of functions/class-members whose slots were
+      // actually patched with an IR body (genuine-emission signal; a mere
+      // selector claim does not imply this — see `irCompiledFuncs` doc).
+      ctx.irCompiledFuncs = report.compiled;
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
       // before `compileIrPathFunctions` runs; an ordinary IR throw here is a
@@ -2055,6 +2450,11 @@ export function generateModule(
     // DataView.prototype.{get,set}{Uint,Int,Float}* on i32_byte vec structs (#1056)
     emitDataViewByteExports(ctx);
 
+    // (#3058) __rab_resize / __ab_max_len exports so the host runtime can
+    // implement ArrayBuffer.prototype.resize + maxByteLength/resizable on
+    // $__resizable_ab vec structs (no-op unless a resizable buffer exists).
+    emitResizableAbExports(ctx);
+
     // (#1503) __vec_set_byte for crypto.getRandomValues to write into Uint8Array vecs.
     emitVecSetByteExport(ctx);
 
@@ -2071,20 +2471,23 @@ export function generateModule(
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
 
-    // (#2038, reserve-then-fill #1719) Rebuild the native `__iterator` /
-    // `__iterator_next` carrier bodies with the USER `{next()}`-protocol arm now
-    // that the closed-struct dispatchers exist: `__sget_value`/`__sget_done`
-    // (emitStructFieldGetters, above) and `__call_@@iterator`/`__call_next`
-    // (emitIteratorMethodExport, just above). No-op unless the standalone native
-    // iterator runtime was registered AND a custom iterable produced those
-    // dispatchers — otherwise the carrier stays vec-only and byte-identical.
+    // (#2038 / #3100, reserve-then-fill #1719) Rebuild the native `__iterator`
+    // body with the LATE ladder arms now that every carrier type is known: the
+    // (#3100) vec-FAMILY normalization arms ($ObjVec + `__vec_<elemKind>` —
+    // dynamic iterables, previously an `illegal cast` trap) and, when the
+    // closed-struct dispatchers just emitted above exist, the (#2038) USER
+    // `{next()}` arm. Full docs on `fillNativeIteratorLateArms`. No-op unless
+    // the standalone native iterator runtime was registered.
     if (
       ctx.nativeIteratorUserArmPending &&
-      ctx.funcMap.has("__call_@@iterator") &&
-      ctx.funcMap.has("__call_next") &&
-      ctx.funcMap.has("__sget_value") &&
-      ctx.funcMap.has("__sget_done") &&
-      !ctx.funcMap.has("__is_truthy")
+      !ctx.funcMap.has("__is_truthy") &&
+      ((ctx.funcMap.has("__call_@@iterator") &&
+        ctx.funcMap.has("__call_next") &&
+        ctx.funcMap.has("__sget_value") &&
+        ctx.funcMap.has("__sget_done")) ||
+        // (#3119) The plain-`$Object` OBJ arm needs `__is_truthy` too (the
+        // `@@iterator`/`res` truthiness gates + the ToBoolean on `done`).
+        (ctx.funcMap.has("__extern_get") && ctx.funcMap.has("__box_symbol") && ctx.objectRuntimeTypes !== undefined))
     ) {
       // The USER `done` flag needs `__is_truthy` (ToBoolean on the boxed bool).
       // `emitStructFieldGetters` usually registers it via `addUnionImports` when a
@@ -2093,7 +2496,19 @@ export function generateModule(
       // Native in standalone/WASI (appends funcs, no funcIdx shift).
       addUnionImports(ctx);
     }
-    fillNativeIteratorUserArms(ctx);
+    fillNativeIteratorLateArms(ctx);
+
+    // (#2903) Rebuild the Iterator-helper steppers (iter-hof-native.ts) with
+    // per-producer driven-generator arms + the positive-admission classifier.
+    // Read-only per #1719; no-op unless a helper call site reserved them.
+    fillIterHofSteppers(ctx);
+
+    // (#2903 R3) Prepend the `$LazyIterHelper` recognition arm to the
+    // GetIterator ladder (`__iterator`/`_next`/`_return`) so `Array.from(...)`,
+    // spread, and `for…of` drive a lazy map/filter/take/drop wrapper natively.
+    // MUST run AFTER `fillNativeIteratorLateArms` (which rebuilds those bodies).
+    // No-op unless a lazy wrapper was constructed.
+    fillLazyIterLadderArms(ctx);
 
     // (#2922) Rebuild `__combinator_to_vec`'s user-iterable arm with the same
     // closed-struct dispatchers (identical five-dispatcher condition, so the
@@ -2204,6 +2619,11 @@ export function generateModule(
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
 
+    // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
+    // closure root is registered (the callable gate needs the COMPLETE
+    // classifier list). No-op when no standalone `.bind`-on-any site reserved it.
+    fillBindDynHelper(ctx);
+
     // (#1100) Fill the reserved standalone Proxy trap-invoke drivers
     // (`__proxy_call_{get,set,has}`) now that `__call_fn_method_2/3/4` are
     // registered. Each driver wraps the matching closure-method dispatcher so a
@@ -2217,6 +2637,19 @@ export function generateModule(
     // at reserve time), so no funcIdx churn. No-op when no any-receiver call site
     // reserved a dispatcher (standalone/wasi only).
     fillClosedMethodDispatch(ctx);
+
+    // (#3125) Fill the reserved `__promise_has_callable_then` predicate — the
+    // native-Promise resolve path's §27.2.1.3.2 Get("then")+IsCallable test —
+    // from the SAME struct/closure collectors as the `__call_m_then_vararg`
+    // dispatcher the thenable job invokes. Read-only over funcMap. No-op unless
+    // the async scheduler's thenable substrate reserved it (standalone/wasi).
+    fillPromiseThenableHelpers(ctx);
+
+    // (#3172) Fill the reserved `__setrec_field_{size,has,keys}` GetSetRecord
+    // readers — one ref.test arm per closed struct carrying the field, bottom
+    // arm = $Object `__extern_get`. Read-only over funcMap. No-op unless a
+    // set-algebra any-dispatch site reserved them (standalone/nativeStrings).
+    fillSetRecFieldGetters(ctx);
 
     // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
     // that EVERY struct type (incl. late-registered fnctor structs like acorn's
@@ -2248,6 +2681,29 @@ export function generateModule(
     // the element instead of null/0. Standalone only (no-op otherwise).
     fillExternGetIdxVecArms(ctx);
 
+    // (#3190) Write-side sibling of the fill above: splice `$__vec_base` STORE
+    // arms into `__extern_set` so `(arr as any)[i] = v` on an any-typed array
+    // lands the in-bounds element instead of silently no-op'ing. Standalone
+    // only (no-op otherwise).
+    fillExternSetVecArms(ctx);
+
+    // (#3169) Splice CLOSED-STRUCT array-like arms into the standalone
+    // dynamic-reader trio (`__extern_length`/`__extern_get_idx`/
+    // `__extern_has_idx`) now that the struct-type table is complete — a plain
+    // `{0:x, 1:y, length:n}` literal (a closed nominal struct, NOT `$Object`)
+    // becomes readable by the generic `Array.prototype.<HOF>.call(obj, cb)`
+    // loop. Standalone only (no-op otherwise).
+    fillExternArrayLikeStructArms(ctx);
+
+    // (#3183) Splice `$__vec_base` arms into the standalone dynamic-path for-in /
+    // string-key helpers (`__object_keys_forin` / `__extern_has` / `__extern_get`)
+    // now that `number_toString` / `__str_to_number` / `__extern_get_idx` exist —
+    // an ANY-typed runtime array (which lowers to a `__vec_<k>` struct, not a
+    // `$Object`) now enumerates its index keys for-in and answers string-key
+    // reads (`arr[k]`, `arr["length"]`) instead of empty / undefined. Standalone
+    // only (no-op otherwise).
+    fillDynamicForinVecArms(ctx);
+
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
     // `__builtinfn_push_ownnames`) now that every builtin closure meta type
@@ -2257,6 +2713,13 @@ export function generateModule(
     // value resolve its spec `name`/`length` at runtime, host-free. No-op when
     // no builtin closure was materialized (standalone only).
     fillBuiltinFnMeta(ctx);
+
+    // (#3130) Splice the `$Error_struct` arm into `__extern_get` so dynamic
+    // reads of `err.message`/`err.name`/`err.stack`/`err.constructor` resolve
+    // on native Error objects instead of missing to `undefined` (see the fill's
+    // doc in registry/error-types.ts). No-op unless the module constructs
+    // native errors (standalone/wasi only) — byte-identical otherwise.
+    fillExternGetErrorProps(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
@@ -2272,6 +2735,12 @@ export function generateModule(
     // (necessary because __vec_len returns 0 for both empty arrays and
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
+
+    // #2623 P-7 (B-1): emit __closure_arity(externref) -> i32 so the JS-side
+    // dynamic bridge can dispatch host→wasm method callbacks at the closure's
+    // REAL declared arity (exact `arguments.length` reflection) instead of the
+    // highest emitted __call_fn_method_N.
+    emitClosureArityExport(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -2324,6 +2793,12 @@ export function generateModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) Emit the unified dynamic-reader carrier primitive
+    // (__dyn_member_get + __carrier_recv_to_extern) iff a call site flagged the
+    // module needs it (U1+). Gated on ctx.usesDynMemberGet, which U0 never sets,
+    // so this is a no-op in U0 → byte-identical. Runs beside ensureDynReadHelpers
+    // (before dead-elim/freeze) so the helper funcIdx values are stable.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -2381,6 +2856,7 @@ export function generateModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
     irFirstSkipped,
   };
 }
@@ -2881,7 +3357,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__sget_value` / `__sget_done` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). No other code looks `__sget_*` up by funcMap
+    // (`fillNativeIteratorLateArms`). No other code looks `__sget_*` up by funcMap
     // key, so this is inert for every other path.
     ctx.funcMap.set(funcName, funcIdx);
   }
@@ -3677,13 +4153,167 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     // (#2038) Register in funcMap so the native iterator carrier's USER arm can
     // resolve `__call_@@iterator` / `__call_next` at finalize-fill time
-    // (`fillNativeIteratorUserArms`). Harmless for the host/GC path — no other
+    // (`fillNativeIteratorLateArms`). Harmless for the host/GC path — no other
     // code looks these up by funcMap key.
     ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
   emitMethodDispatch("next", "__call_next");
+  emitMethodDispatch("return", "__call_return"); // (#3100 S5) IteratorClose §7.4.9 USER-arm dispatcher
+
+  // (#3123) Host-side class-member resolution surface for fnctor-subclass
+  // instances (`class C extends F`, F a top-level plain function — the test262
+  // Iterator-shim shape). The runtime's `_resolveClassMemberOnInstance` reads
+  // `inst.next` / `inst.return` through these:
+  //   __member_kind_<key>(recv) -> i32 : 0 none / 1 method / 2 getter
+  //   __call_get_<key>(recv) -> externref : runs the compiled getter
+  // (the plain-method CALL goes through the existing __call_<key> dispatchers
+  // above). Gated on the module actually containing a fnctor subclass so every
+  // other module's emitted bytes are IDENTICAL.
+  if (!ctx.standalone && !ctx.wasi && moduleHasFnctorSubclass(ctx)) {
+    // The iterator protocol keys plus every instance method / accessor name
+    // of the module's fnctor-subclass classes (a widened binding dispatches
+    // ALL its member calls dynamically — see fnctorWidenedLocals).
+    const keys = new Set<string>(["next", "return"]);
+    for (const className of ctx.classParentMap.keys()) {
+      if (fnctorAncestorOfClass(ctx, className) === undefined) continue;
+      for (const m of ctx.classMethodNames.get(className) ?? []) keys.add(m);
+      const accPrefix = `${className}_`;
+      for (const acc of ctx.classAccessorSet) {
+        if (acc.startsWith(accPrefix)) keys.add(acc.slice(accPrefix.length));
+      }
+    }
+    emitClassMemberKindExports(ctx, dispatchTypeIdx, [...keys].sort());
+  }
+}
+
+/**
+ * (#3123) Emit, per member key, the `__member_kind_<key>` discriminator and
+ * (when any struct carries a getter of that name) the `__call_get_<key>`
+ * getter dispatcher. Mirrors `emitIteratorMethodExport`'s per-struct
+ * ref.test cascade. Only 1-param (self-only) methods/getters are reported —
+ * that is what the 0-arg `__call_<key>` / `__call_get_<key>` dispatchers can
+ * actually invoke; a parameterized `next(v)` stays unreported (kind 0) so the
+ * host falls back instead of emitting an arity-invalid call.
+ */
+function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number, keys: string[]): void {
+  const mod = ctx.mod;
+  const skipStruct = (structName: string): boolean =>
+    structName.startsWith("Wrapper") ||
+    structName === "$AnyValue" ||
+    structName.startsWith("__vec_") ||
+    structName.startsWith("__arr_");
+
+  type KindEntry = { typeIdx: number; funcIdx: number; resultType: ValType };
+  const collect = (nameOf: (structName: string) => string): KindEntry[] => {
+    const entries: KindEntry[] = [];
+    for (const [structName] of ctx.structFields) {
+      const typeIdx = ctx.structMap.get(structName);
+      if (typeIdx === undefined || skipStruct(structName)) continue;
+      const fullName = nameOf(structName);
+      if (ctx.staticMethodSet.has(fullName)) continue; // instance surface only
+      const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
+      if (funcIdx === undefined) continue;
+      const funcDef = definedFuncAt(ctx, funcIdx);
+      const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
+      if (!funcType || funcType.kind !== "func") continue;
+      if (funcType.params.length !== 1) continue; // self-only (0-arg dispatch)
+      const resultType: ValType = funcType.results.length > 0 ? funcType.results[0]! : { kind: "externref" };
+      entries.push({ typeIdx, funcIdx, resultType });
+    }
+    return entries;
+  };
+
+  const kindTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$member_kind_type");
+
+  for (const key of keys) {
+    if (ctx.funcMap.has(`__member_kind_${key}`)) continue; // idempotent
+    const methodEntries = collect((s) => `${s}_${key}`);
+    const getterEntries = collect((s) => `${s}_get_${key}`);
+    if (methodEntries.length === 0 && getterEntries.length === 0) continue;
+
+    // __member_kind_<key>: ref.test cascade → 1 (method) / 2 (getter) / 0.
+    {
+      const funcIdx = ctx.numImportFuncs + mod.functions.length;
+      let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+      const arm = (typeIdx: number, kind: number, tail: Instr[]): Instr[] => [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [{ op: "i32.const", value: kind } as Instr],
+          else: tail,
+        } as Instr,
+      ];
+      for (const e of methodEntries) current = arm(e.typeIdx, 1, current);
+      for (const e of getterEntries) current = arm(e.typeIdx, 2, current);
+      const exportName = `__member_kind_${key}`;
+      mod.functions.push({
+        name: exportName,
+        typeIdx: kindTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.set", index: 1 } as Instr,
+          ...current,
+        ],
+        exported: true,
+      } as WasmFunction);
+      mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+      ctx.funcMap.set(exportName, funcIdx);
+    }
+
+    // __call_get_<key>: run the compiled getter, box-coerce to externref.
+    if (getterEntries.length > 0) {
+      const funcIdx = ctx.numImportFuncs + mod.functions.length;
+      let current: Instr[] = [{ op: "ref.null.extern" } as Instr];
+      for (const e of getterEntries) {
+        const callArm: Instr[] = [
+          { op: "local.get", index: 1 } as Instr,
+          { op: "ref.cast", typeIdx: e.typeIdx } as Instr,
+          { op: "call", funcIdx: e.funcIdx } as Instr,
+        ];
+        if (e.resultType.kind === "ref" || e.resultType.kind === "ref_null") {
+          callArm.push({ op: "extern.convert_any" } as Instr);
+        } else if (e.resultType.kind === "f64") {
+          const boxIdx = ctx.funcMap.get("__box_number");
+          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx } as Instr);
+        } else if (e.resultType.kind === "i32") {
+          callArm.push({ op: "f64.convert_i32_s" } as Instr);
+          const boxIdx = ctx.funcMap.get("__box_number");
+          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx } as Instr);
+        }
+        current = [
+          { op: "local.get", index: 1 } as Instr,
+          { op: "ref.test", typeIdx: e.typeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: callArm,
+            else: current,
+          } as Instr,
+        ];
+      }
+      const exportName = `__call_get_${key}`;
+      mod.functions.push({
+        name: exportName,
+        typeIdx: dispatchTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body: [
+          { op: "local.get", index: 0 } as Instr,
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.set", index: 1 } as Instr,
+          ...current,
+        ],
+        exported: true,
+      } as WasmFunction);
+      mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+      ctx.funcMap.set(exportName, funcIdx);
+    }
+  }
 }
 
 /**
@@ -4661,6 +5291,85 @@ function emitIsClosureExport(ctx: CodegenContext): void {
 }
 
 /**
+ * Emit `__closure_arity(externref) -> i32` (#2623 P-7 / B-1). Returns the
+ * DECLARED formal-parameter count of a registered Wasm closure struct, or -1
+ * when the value is not a closure. Used by the JS-side dynamic bridge
+ * (`_wrapWasmClosureUnknownArity`) to dispatch a host→wasm method callback at
+ * `max(args.length, realArity)` instead of always the HIGHEST emitted
+ * `__call_fn_method_N`: dispatching at max-N padded the arg vector with
+ * undefineds that the #820l argc/extras plumbing cannot distinguish from real
+ * arguments, so the callee's `arguments.length` reported the dispatcher arity
+ * (V8's native `.finally` invokes a patched `then` with exactly 2 args; the
+ * wasm-side `then` observed `arguments.length === 5` — the test262
+ * `Promise/prototype/finally/invokes-then-with-*` assert-#3 failure and the
+ * #2614 assert-#2 finding).
+ *
+ * Dispatch shape mirrors `__call_fn_N` (per-shape funcref extraction via
+ * {@link buildFuncrefExtraction}, then a `ref.test` chain over the distinct
+ * closure FUNC types — the func type determines the formal count). No-op when
+ * the module has no closures, exactly like `__is_closure`.
+ */
+function emitClosureArityExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  const seenFuncTypeIdx = new Set<number>();
+  const entries: { funcTypeIdx: number; selfTypeIdx: number; closureArity: number }[] = [];
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    if (seenFuncTypeIdx.has(info.funcTypeIdx)) continue;
+    seenFuncTypeIdx.add(info.funcTypeIdx);
+    const funcTypeDef = mod.types[info.funcTypeIdx];
+    const selfParam = funcTypeDef?.kind === "func" ? funcTypeDef.params[0] : undefined;
+    const selfTypeIdx =
+      selfParam && (selfParam.kind === "ref" || selfParam.kind === "ref_null")
+        ? (selfParam as { typeIdx: number }).typeIdx
+        : typeIdx;
+    entries.push({ funcTypeIdx: info.funcTypeIdx, selfTypeIdx, closureArity: info.paramTypes.length });
+  }
+  if (entries.length === 0) return;
+
+  const arityTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_arity_type");
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // Locals: 0 = value externref (param), 1 = anyref, 2 = funcref.
+  const anyLocal = 1;
+  const funcLocal = 2;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: anyLocal } as Instr,
+    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+  ];
+  for (const entry of entries) {
+    body.push({ op: "local.get", index: funcLocal } as Instr);
+    body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr);
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: entry.closureArity } as Instr, { op: "return" } as Instr],
+    } as Instr);
+  }
+  body.push({ op: "i32.const", value: -1 } as Instr);
+
+  mod.functions.push({
+    name: "__closure_arity",
+    typeIdx: arityTypeIdx,
+    locals: [
+      { name: "__any", type: { kind: "anyref" } },
+      { name: "__funcref", type: { kind: "funcref" } },
+    ],
+    body,
+    exported: true,
+  } as WasmFunction);
+
+  mod.exports.push({
+    name: "__closure_arity",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * Emit `__is_data_struct(externref) -> i32` (#2794). Returns 1 when the value is
  * a registered **named DATA struct** (a class instance, an object literal, an AST
  * Node — anything the host can read fields off via `__sget_<field>`), 0 otherwise.
@@ -5289,15 +5998,6 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
   emitDispatchForMethod("valueOf", "__call_valueOf");
 }
 
-/** Helper to get the kind of a struct field type */
-function fields_type_kind(ctx: CodegenContext, structTypeIdx: number, fieldIdx: number): string {
-  const structName = ctx.typeIdxToStructName.get(structTypeIdx);
-  if (!structName) return "unknown";
-  const fields = ctx.structFields.get(structName);
-  if (!fields || !fields[fieldIdx]) return "unknown";
-  return fields[fieldIdx]!.type.kind;
-}
-
 /**
  * Emit __vec_get(externref, i32) -> externref and __vec_len(externref) -> i32
  * exports so the runtime can iterate WasmGC vec structs that were coerced to
@@ -5314,8 +6014,9 @@ function fields_type_kind(ctx: CodegenContext, structTypeIdx: number, fieldIdx: 
  * export + funcMap entry (shift-tracked); the finalize pass FILLS the body in
  * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
  */
-export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get"): number {
-  const name = kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : "__vec_get";
+export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get" | "len"): number {
+  const name =
+    kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : kind === "len" ? "__vec_len" : "__vec_get";
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
   const typeIdx =
@@ -5323,11 +6024,13 @@ export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop"
       ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
       : kind === "pop"
         ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
-        : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
+        : kind === "len"
+          ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type")
+          : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
   const idx = ctx.numImportFuncs + ctx.mod.functions.length;
   // Placeholder body must match the declared result type.
   const placeholder: Instr[] =
-    kind === "push" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
+    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
   ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
   ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
   ctx.funcMap.set(name, idx);
@@ -5448,17 +6151,32 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     }
     body.push(...current);
 
-    mod.functions.push({
-      name: "__vec_len",
-      typeIdx: lenTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    mod.exports.push({
-      name: "__vec_len",
-      desc: { kind: "func", index: lenFuncIdx },
-    });
+    // (#2773) FILL-or-build. The dynamic-index native-vec element read
+    // (property-access.ts) reserves a `__vec_len` placeholder before this
+    // finalize pass (so it can bake the length-guard call at compile time); fill
+    // it in place if reserved, else push a fresh definition.
+    const reservedLen = ctx.funcMap.get("__vec_len");
+    if (reservedLen !== undefined) {
+      const fn = definedFuncAt(ctx, reservedLen)! as {
+        locals: { name: string; type: ValType }[];
+        body: Instr[];
+      };
+      fn.locals = [{ name: "__any", type: { kind: "anyref" } as ValType }];
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_len",
+        typeIdx: lenTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_len",
+        desc: { kind: "func", index: lenFuncIdx },
+      });
+      ctx.funcMap.set("__vec_len", lenFuncIdx);
+    }
   }
 
   // __vec_get(externref, i32) -> externref
@@ -6000,6 +6718,20 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
       ctx.funcMap.set("__vec_pop", popFuncIdx);
     }
+  }
+
+  // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]
+  // write-back exports (values into the vec, attributes in the sidecar — see
+  // src/codegen/vec-define-writeback.ts for the full rationale). Gated on a
+  // defineProperty import being present so modules that never define
+  // properties stay byte-identical.
+  const wantsDefineWriteback =
+    ctx.funcMap.has("__defineProperty_value") ||
+    ctx.funcMap.has("__defineProperty_desc") ||
+    ctx.funcMap.has("__defineProperty_accessor") ||
+    ctx.funcMap.has("__defineProperties");
+  if (wantsDefineWriteback) {
+    emitVecDefineWritebackExports(ctx, mutEntries, unboxNumIdx);
   }
 }
 
@@ -6649,6 +7381,8 @@ export function generateMultiModule(
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
   irPostClaimErrors?: { kind: string; func: string; message: string }[];
+  // #3000 — functions/class-members actually IR-emitted (genuine-emission signal).
+  irCompiledFuncs?: readonly string[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -6880,6 +7614,9 @@ export function generateMultiModule(
     // Emit __dv_byte_{len,get,set} exports for DataView host runtime.
     emitDataViewByteExports(ctx);
 
+    // (#3058) Resizable-ArrayBuffer helper exports (mirrors generateModule path).
+    emitResizableAbExports(ctx);
+
     // Emit __test_str_from_externref / __test_str_to_externref helpers
     // (no-op unless ctx.testRuntime && ctx.nativeStrings).
     emitTestRuntimeStringHelpers(ctx);
@@ -6946,6 +7683,9 @@ export function generateMultiModule(
     // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
     // dead-elim/freeze so the helper funcIdx values are stable.
     ensureDynReadHelpers(ctx);
+    // (#3053 U0) See the single-module pipeline note above. No-op unless
+    // ctx.usesDynMemberGet is set (U1+); byte-identical in U0.
+    ensureDynMemberGet(ctx);
 
     // (#2800) Allocate + wire the `__in_module_init` flag global now that every
     // import global has settled (final absolute index), patching the recorded
@@ -7002,6 +7742,7 @@ export function generateMultiModule(
     errors: ctx.errors,
     fallbackCounts: ctx.fallbackCounts,
     irPostClaimErrors: ctx.irPostClaimErrors,
+    irCompiledFuncs: ctx.irCompiledFuncs,
   };
 }
 
@@ -7018,68 +7759,6 @@ function collectAllSourceImports(ctx: CodegenContext, sourceFile: ts.SourceFile)
   const state = createUnifiedCollectorState(sourceFile);
   forEachChild(sourceFile, (node) => unifiedVisitNode(ctx, state, node));
   finalizeUnifiedCollector(ctx, state);
-}
-
-/** Scan source for console.log/warn/error/info/debug() calls and register only needed import variants */
-function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const CONSOLE_METHODS = ["log", "warn", "error", "info", "debug"] as const;
-  // Track needed variants per console method
-  const neededByMethod = new Map<string, Set<"number" | "bool" | "string" | "externref">>();
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "console"
-    ) {
-      const method = node.expression.name.text;
-      if (CONSOLE_METHODS.includes(method as any)) {
-        if (!neededByMethod.has(method)) neededByMethod.set(method, new Set());
-        const needed = neededByMethod.get(method)!;
-        for (const arg of node.arguments) {
-          const argType = ctx.checker.getTypeAtLocation(arg);
-          if (isStringType(argType)) {
-            needed.add("string");
-          } else if (isBooleanType(argType)) {
-            needed.add("bool");
-          } else if (isNumberType(argType)) {
-            needed.add("number");
-          } else {
-            needed.add("externref");
-          }
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  // Scan all statements (including top-level code compiled into __module_init)
-  forEachChild(sourceFile, visit);
-
-  for (const method of CONSOLE_METHODS) {
-    const needed = neededByMethod.get(method);
-    if (!needed) continue;
-    if (needed.has("number")) {
-      const t = addFuncType(ctx, [{ kind: "f64" }], []);
-      addImport(ctx, "env", `console_${method}_number`, { kind: "func", typeIdx: t });
-    }
-    if (needed.has("bool")) {
-      const t = addFuncType(ctx, [{ kind: "i32" }], []);
-      addImport(ctx, "env", `console_${method}_bool`, { kind: "func", typeIdx: t });
-    }
-    if (needed.has("string")) {
-      const t = addFuncType(ctx, [{ kind: "externref" }], []);
-      addImport(ctx, "env", `console_${method}_string`, { kind: "func", typeIdx: t });
-    }
-    if (needed.has("externref")) {
-      const t = addFuncType(ctx, [{ kind: "externref" }], []);
-      addImport(ctx, "env", `console_${method}_externref`, {
-        kind: "func",
-        typeIdx: t,
-      });
-    }
-  }
 }
 
 /**
@@ -9433,169 +10112,6 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
   });
 }
 
-/** Scan source for .toString() / .toFixed() on number types and register needed imports */
-function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const needed = new Set<string>();
-
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const prop = node.expression;
-      const receiverType = ctx.checker.getTypeAtLocation(prop.expression);
-      const methodName = prop.name.text;
-      if (isNumberType(receiverType) && methodName === "toString") {
-        needed.add("number_toString");
-      }
-      // (#1599 Phase 2) JSON.stringify(<string>) in standalone/WASI lowers to
-      // the pure-Wasm `__json_quote_string` helper. Pre-register it here (before
-      // body compilation) so its defined-function index is stable.
-      if (
-        (ctx.standalone || ctx.wasi) &&
-        ts.isIdentifier(prop.expression) &&
-        prop.expression.text === "JSON" &&
-        methodName === "stringify" &&
-        node.arguments.length === 1
-      ) {
-        const jsonArgT = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-        if ((jsonArgT.flags & ts.TypeFlags.StringLike) !== 0) {
-          needed.add("__json_quote_string");
-        }
-      }
-      // (#2160 number-wrapper) Standalone `new Number(x).<fmt>()` routes through
-      // the SAME native `number_*` helpers as a primitive receiver (the wrapper's
-      // f64 is recovered via __to_primitive in calls.ts). The wrapper type is
-      // `TypeFlags.Object` (symbol "Number"), NOT `isNumberType`, so it must be
-      // detected here too or the helper is never pre-registered and the call site
-      // falls through to a null result. Gated on standalone (the recovery path).
-      const isNumMethodRecv = isNumberType(receiverType) || (ctx.standalone && isNumberWrapperType(receiverType));
-      if (isNumMethodRecv && methodName === "toFixed") {
-        needed.add("number_toFixed");
-      }
-      if (isNumMethodRecv && methodName === "toPrecision") {
-        needed.add("number_toPrecision");
-      }
-      if (isNumMethodRecv && methodName === "toExponential") {
-        needed.add("number_toExponential");
-      }
-      // toString(radix)/toLocaleString on a standalone Number wrapper similarly
-      // needs number_toString[_radix] pre-registered (primitive path registers it
-      // broadly, but be explicit for the wrapper receiver).
-      if (
-        ctx.standalone &&
-        isNumberWrapperType(receiverType) &&
-        (methodName === "toString" || methodName === "toLocaleString")
-      ) {
-        needed.add("number_toString");
-      }
-      // Detect Number.prototype.method.call/apply patterns
-      if ((methodName === "call" || methodName === "apply") && ts.isPropertyAccessExpression(prop.expression)) {
-        const innerProp = prop.expression;
-        const innerMethodName = innerProp.name.text;
-        if (
-          ts.isPropertyAccessExpression(innerProp.expression) &&
-          innerProp.expression.name.text === "prototype" &&
-          ts.isIdentifier(innerProp.expression.expression) &&
-          innerProp.expression.expression.text === "Number"
-        ) {
-          if (innerMethodName === "toString") needed.add("number_toString");
-          if (innerMethodName === "toFixed") needed.add("number_toFixed");
-          if (innerMethodName === "toPrecision") needed.add("number_toPrecision");
-          if (innerMethodName === "toExponential") needed.add("number_toExponential");
-        }
-      }
-    }
-    // Template expressions with number/boolean/bigint substitutions need number_toString
-    if (ts.isTemplateExpression(node)) {
-      for (const span of node.templateSpans) {
-        const spanType = ctx.checker.getTypeAtLocation(span.expression);
-        if (isNumberType(spanType) || isBooleanType(spanType) || isBigIntType(spanType)) {
-          needed.add("number_toString");
-        }
-      }
-    }
-    // String(expr) calls need number_toString for number→string coercion
-    if (
-      ts.isCallExpression(node) &&
-      ts.isIdentifier(node.expression) &&
-      node.expression.text === "String" &&
-      node.arguments.length >= 1
-    ) {
-      const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-      if (isNumberType(argType) || !isStringType(argType)) {
-        needed.add("number_toString");
-      }
-    }
-    // String + non-string concatenation needs number_toString for coercion.
-    // Conservative: register whenever either side of + is a string and the
-    // other is not (could be number, any, boolean — all may produce f64 at wasm level).
-    if (
-      ts.isBinaryExpression(node) &&
-      (node.operatorToken.kind === ts.SyntaxKind.PlusToken || node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken)
-    ) {
-      const leftType = ctx.checker.getTypeAtLocation(node.left);
-      const rightType = ctx.checker.getTypeAtLocation(node.right);
-      if (isStringType(leftType) && !isStringType(rightType)) {
-        needed.add("number_toString");
-      }
-      if (!isStringType(leftType) && isStringType(rightType)) {
-        needed.add("number_toString");
-      }
-      // For `any`-typed variables (e.g. `var __str; __str=""`), the left type
-      // won't be detected as string, but at runtime it may hold a string.
-      // When += is used with an `any`-typed LHS and a non-string RHS,
-      // register number_toString so the coercion is available at codegen time.
-      if (
-        node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
-        (leftType.flags & ts.TypeFlags.Any) !== 0 &&
-        !isStringType(rightType)
-      ) {
-        needed.add("number_toString");
-      }
-    }
-    // String comparison operators (< > <= >=) on string types need string_compare import
-    if (
-      ts.isBinaryExpression(node) &&
-      (node.operatorToken.kind === ts.SyntaxKind.LessThanToken ||
-        node.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken ||
-        node.operatorToken.kind === ts.SyntaxKind.GreaterThanToken ||
-        node.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken)
-    ) {
-      const leftType = ctx.checker.getTypeAtLocation(node.left);
-      if (isStringType(leftType)) {
-        needed.add("string_compare");
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  forEachChild(sourceFile, visit);
-
-  if (needed.has("number_toString")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toString", { kind: "func", typeIdx: t });
-  }
-  if (needed.has("number_toFixed")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toFixed", { kind: "func", typeIdx: t });
-  }
-  if (needed.has("number_toPrecision")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toPrecision", { kind: "func", typeIdx: t });
-  }
-  if (needed.has("number_toExponential")) {
-    const t = addFuncType(ctx, [{ kind: "f64" }, { kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "number_toExponential", { kind: "func", typeIdx: t });
-  }
-  if (needed.has("string_compare") && !ctx.nativeStrings) {
-    // In native strings mode, __str_compare Wasm helper handles this — no host import needed
-    const t = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
-    addImport(ctx, "env", "string_compare", { kind: "func", typeIdx: t });
-  }
-  if (needed.has("__json_quote_string")) {
-    // (#1599 Phase 2) emit the pure-Wasm runtime JSON string quoter up-front.
-    emitJsonQuoteString(ctx);
-  }
-}
-
 // String method signatures: name → { params (excluding self), resultKind }
 export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType }> = {
   toUpperCase: { params: [], result: { kind: "externref" } },
@@ -9650,156 +10166,6 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
   codePointAt: { params: [{ kind: "f64" }], result: { kind: "f64" } },
   normalize: { params: [{ kind: "externref" }], result: { kind: "externref" } },
 };
-
-/** Scan source for method calls on string types and register needed imports */
-function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const needed = new Set<string>();
-  /** Methods called with RegExp args — need host import even in native strings mode */
-  const regexpArgMethods = new Set<string>();
-
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const prop = node.expression;
-      const receiverType = ctx.checker.getTypeAtLocation(prop.expression);
-      const methodName = prop.name.text;
-      // (#2576, extends #2187) An `any`/unknown receiver in native-string mode may
-      // hold a native `$AnyString` at runtime; calls.ts emits a runtime-guarded
-      // native string method for it (compileGuardedNativeStringMethodCall). That
-      // guard's then-arm needs the same native helpers (`__str_charAt`,
-      // `__str_slice`, `__str_indexOf`, …) registered, so include `any`-typed
-      // receivers calling a STRING_METHODS name in the pre-scan. Without this the
-      // funcMap lookup misses and the guarded dispatch has no helper to call.
-      const anyReceiverNativeString =
-        (ctx.wasi || ctx.standalone) &&
-        ctx.nativeStrings &&
-        (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
-      if (
-        (isStringType(receiverType) || anyReceiverNativeString) &&
-        Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)
-      ) {
-        needed.add(methodName);
-        // Track if the method has a non-string arg (RegExp or custom object
-        // implementing Symbol.replace/Symbol.match/etc). The native helpers
-        // only handle string search values — for any other type the host
-        // import must be available so JS handles @@replace/@@match dispatch
-        // (#1443).
-        if (
-          (methodName === "replace" ||
-            methodName === "replaceAll" ||
-            methodName === "split" ||
-            methodName === "match" ||
-            methodName === "search") &&
-          node.arguments.length > 0
-        ) {
-          const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-          const isStringLike = (t: ts.Type): boolean => {
-            if ((t.flags & ts.TypeFlags.String) !== 0) return true;
-            if ((t.flags & ts.TypeFlags.StringLiteral) !== 0) return true;
-            if ((t.flags & ts.TypeFlags.Object) !== 0 && t.getSymbol()?.getName() === "String") return true;
-            return false;
-          };
-          let needsHost = false;
-          if ((argType.flags & ts.TypeFlags.Union) !== 0) {
-            const union = argType as ts.UnionType;
-            needsHost = !union.types.every(isStringLike);
-          } else {
-            needsHost = !isStringLike(argType);
-          }
-          if (needsHost) {
-            regexpArgMethods.add(methodName);
-          }
-        }
-      }
-      // Detect String.prototype.method.call(str, ...) and String.prototype.method.apply(str, ...)
-      // These patterns rewrite to str.method(...) at compile time, so we need the import
-      if ((methodName === "call" || methodName === "apply") && ts.isPropertyAccessExpression(prop.expression)) {
-        const innerProp = prop.expression;
-        const innerMethodName = innerProp.name.text;
-        if (
-          ts.isPropertyAccessExpression(innerProp.expression) &&
-          innerProp.expression.name.text === "prototype" &&
-          ts.isIdentifier(innerProp.expression.expression) &&
-          innerProp.expression.expression.text === "String" &&
-          Object.prototype.hasOwnProperty.call(STRING_METHODS, innerMethodName)
-        ) {
-          needed.add(innerMethodName);
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  // Native string methods handled in wasm (native strings mode)
-  const NATIVE_STR_METHODS = new Set([
-    "charAt",
-    "charCodeAt",
-    "substring",
-    "slice",
-    "at",
-    "indexOf",
-    "lastIndexOf",
-    "includes",
-    "startsWith",
-    "endsWith",
-    "trim",
-    "trimStart",
-    "trimEnd",
-    "repeat",
-    "padStart",
-    "padEnd",
-    "toLowerCase",
-    "toUpperCase",
-    "replace",
-    "replaceAll",
-    "split",
-    "codePointAt",
-    "normalize",
-  ]);
-
-  for (const method of needed) {
-    if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && !regexpArgMethods.has(method)) {
-      // These are handled by native string helpers — no import needed
-      ensureNativeStringHelpers(ctx);
-      continue;
-    }
-    if (ctx.nativeStrings && NATIVE_STR_METHODS.has(method) && regexpArgMethods.has(method)) {
-      // Need BOTH native helpers AND host import for RegExp-arg calls
-      ensureNativeStringHelpers(ctx);
-    }
-    const sig = STRING_METHODS[method]!;
-    const params: ValType[] = [{ kind: "externref" }, ...sig.params]; // self + args
-    const t = addFuncType(ctx, params, [sig.result]);
-    addImport(ctx, "env", `string_${method}`, { kind: "func", typeIdx: t });
-  }
-
-  // split()/match() return externref JS arrays — register __extern_get and __extern_length
-  // so that element access and .length work on the result.
-  // With native strings, split returns a native string array — no extern helpers needed.
-  if ((needed.has("split") || needed.has("match")) && !ctx.nativeStrings) {
-    if (!ctx.funcMap.has("__extern_get")) {
-      const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-      addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    }
-    if (!ctx.funcMap.has("__extern_length")) {
-      const lenType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", "__extern_length", { kind: "func", typeIdx: lenType });
-    }
-  }
-}
 
 /** Register wasm:js-string builtin imports (called on demand when strings are used) */
 export function addStringImports(ctx: CodegenContext): void {
@@ -10022,275 +10388,6 @@ export function parseRegExpLiteral(text: string): { pattern: string; flags: stri
   return { pattern, flags };
 }
 
-/** Scan source for string literals and register env imports for each unique one */
-/** Scan source for string literals and register string_constants global imports */
-function collectStringLiterals(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const literals = new Set<string>();
-  let hasTypeofExpr = false;
-  let hasTaggedTemplate = false;
-
-  function visit(node: ts.Node) {
-    // Skip computed property names — their string literals are resolved at
-    // compile time and never appear as runtime values in the wasm output.
-    if (ts.isComputedPropertyName(node)) return;
-
-    if (ts.isStringLiteral(node)) {
-      literals.add(node.text);
-    }
-    if (ts.isNoSubstitutionTemplateLiteral(node)) {
-      literals.add(node.text);
-    }
-    // Template expressions: collect head and span literal texts (include empty strings)
-    if (ts.isTemplateExpression(node)) {
-      literals.add(node.head.text);
-      for (const span of node.templateSpans) {
-        literals.add(span.literal.text);
-      }
-    }
-    // Tagged template expressions: collect ALL string parts (including empty strings)
-    // because tagged templates pass the full strings array to the tag function.
-    // Also collect rawText values for the .raw property on template objects.
-    // Register the template vec type early so tag function bodies can access .raw.
-    if (ts.isTaggedTemplateExpression(node)) {
-      hasTaggedTemplate = true;
-      if (ts.isNoSubstitutionTemplateLiteral(node.template)) {
-        literals.add(node.template.text);
-        const rawText = (node.template as any).rawText;
-        if (rawText !== undefined) literals.add(rawText);
-      } else if (ts.isTemplateExpression(node.template)) {
-        literals.add(node.template.head.text); // include empty strings
-        const headRaw = (node.template.head as any).rawText;
-        if (headRaw !== undefined) literals.add(headRaw);
-        for (const span of node.template.templateSpans) {
-          literals.add(span.literal.text); // include empty strings
-          const spanRaw = (span.literal as any).rawText;
-          if (spanRaw !== undefined) literals.add(spanRaw);
-        }
-      }
-    }
-    // RegExp literals: collect pattern and flags as string literals
-    if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) {
-      const { pattern, flags } = parseRegExpLiteral(node.getText());
-      literals.add(pattern);
-      if (flags) literals.add(flags);
-    }
-    // typeof expressions need type-name string constants
-    if (ts.isTypeOfExpression(node)) {
-      hasTypeofExpr = true;
-    }
-    // import.meta needs placeholder strings
-    if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && node.name.text === "meta") {
-      literals.add("module.wasm");
-      literals.add("[object Object]");
-    }
-    forEachChild(node, visit);
-  }
-
-  // Scan all statements (including top-level code compiled into __module_init)
-  forEachChild(sourceFile, visit);
-
-  // typeof expressions may need type-name constants not present in source
-  if (hasTypeofExpr) {
-    for (const s of ["number", "string", "boolean", "object", "undefined", "function", "symbol"]) {
-      literals.add(s);
-    }
-  }
-
-  // Register the template vec type early so tag function bodies can use .raw
-  if (hasTaggedTemplate) {
-    getOrRegisterTemplateVecType(ctx);
-  }
-
-  if (literals.size === 0) return;
-
-  if (ctx.nativeStrings) {
-    // Native strings mode — ensure helpers are emitted, track literals
-    // No wasm:js-string or string_constants imports needed
-    ensureNativeStringHelpers(ctx);
-    for (const value of literals) {
-      // Track literals in stringGlobalMap so compileStringLiteral can find them.
-      // Use a sentinel value (-1) since we don't import globals in fast mode.
-      if (!ctx.stringGlobalMap.has(value)) {
-        ctx.stringGlobalMap.set(value, -1);
-      }
-    }
-    return;
-  }
-
-  // Register wasm:js-string imports since we have strings
-  addStringImports(ctx);
-
-  // Register a global import from "string_constants" for each unique string literal
-  for (const value of literals) {
-    addStringConstantGlobal(ctx, value);
-  }
-}
-
-/** Register struct field names as string literals for for-in loops.
- *  Uses the type checker to get property names (runs before collectDeclarations). */
-function collectForInStringLiterals(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const literals = new Set<string>();
-
-  function visit(node: ts.Node) {
-    if (ts.isForInStatement(node)) {
-      const exprType = ctx.checker.getTypeAtLocation(node.expression);
-      const props = exprType.getProperties();
-      for (const prop of props) {
-        if (!ctx.stringGlobalMap.has(prop.name)) literals.add(prop.name);
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (literals.size === 0) return;
-
-  if (ctx.nativeStrings) {
-    ensureNativeStringHelpers(ctx);
-    for (const value of literals) {
-      if (!ctx.stringGlobalMap.has(value)) ctx.stringGlobalMap.set(value, -1);
-    }
-    return;
-  }
-
-  // Ensure wasm:js-string imports exist (may already be registered)
-  addStringImports(ctx);
-
-  for (const value of literals) {
-    addStringConstantGlobal(ctx, value);
-  }
-}
-
-/** Register struct field names as string literals for `key in obj` expressions
- *  where the key is a dynamic (non-literal) value. Pre-registers field names
- *  so they can be used for runtime string comparison. */
-function collectInExprStringLiterals(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const literals = new Set<string>();
-
-  function visit(node: ts.Node) {
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InKeyword) {
-      // Only collect for dynamic keys (non-string-literal, non-numeric-literal)
-      if (!ts.isStringLiteral(node.left) && !ts.isNumericLiteral(node.left)) {
-        const rightType = ctx.checker.getTypeAtLocation(node.right);
-        const props = rightType.getProperties();
-        for (const prop of props) {
-          if (!ctx.stringGlobalMap.has(prop.name)) literals.add(prop.name);
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (literals.size === 0) return;
-
-  if (ctx.nativeStrings) {
-    ensureNativeStringHelpers(ctx);
-    for (const value of literals) {
-      if (!ctx.stringGlobalMap.has(value)) ctx.stringGlobalMap.set(value, -1);
-    }
-    return;
-  }
-
-  addStringImports(ctx);
-  for (const value of literals) {
-    addStringConstantGlobal(ctx, value);
-  }
-}
-
-/** Register struct field names as string literals for Object.keys() / Object.values() calls.
- *  Detects Object.keys(expr) and Object.values(expr) patterns and pre-registers
- *  the field names from the argument's type as string thunks. */
-function collectObjectMethodStringLiterals(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const literals = new Set<string>();
-  let hasValues = false;
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "Object" &&
-      (node.expression.name.text === "keys" ||
-        node.expression.name.text === "values" ||
-        node.expression.name.text === "entries") &&
-      node.arguments.length === 1
-    ) {
-      if (node.expression.name.text === "values" || node.expression.name.text === "entries") hasValues = true;
-      const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
-      const props = argType.getProperties();
-      for (const prop of props) {
-        if (!ctx.stringLiteralMap.has(prop.name)) literals.add(prop.name);
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  // Object.values() needs union boxing imports (__box_number etc.)
-  // to box primitive field values into externref. Register them now
-  // before function indices are assigned in collectDeclarations.
-  if (hasValues) {
-    addUnionImports(ctx);
-  }
-
-  if (literals.size === 0) return;
-
-  if (ctx.nativeStrings) {
-    ensureNativeStringHelpers(ctx);
-    for (const value of literals) {
-      if (!ctx.stringGlobalMap.has(value)) ctx.stringGlobalMap.set(value, -1);
-    }
-    return;
-  }
-
-  // Ensure wasm:js-string imports exist (may already be registered)
-  addStringImports(ctx);
-
-  for (const value of literals) {
-    addStringConstantGlobal(ctx, value);
-  }
-}
-
 /** Math methods that need host imports (no native Wasm opcode) */
 export const MATH_HOST_METHODS_1ARG = new Set([
   "exp",
@@ -10314,65 +10411,6 @@ export const MATH_HOST_METHODS_1ARG = new Set([
   "log1p",
 ]);
 export const MATH_HOST_METHODS_2ARG = new Set(["pow", "atan2"]);
-
-/** Scan source for Math.xxx() calls that need host imports */
-function collectMathImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const needed = new Set<string>();
-
-  let needsToUint32 = false;
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "Math"
-    ) {
-      const method = node.expression.name.text;
-      if (MATH_HOST_METHODS_1ARG.has(method) || MATH_HOST_METHODS_2ARG.has(method) || method === "random") {
-        needed.add(method);
-      }
-      // clz32 and imul need __toUint32 for spec-correct ToUint32 conversion
-      if (method === "clz32" || method === "imul") {
-        needsToUint32 = true;
-      }
-    }
-    // ** and **= operators need Math.pow
-    if (
-      ts.isBinaryExpression(node) &&
-      (node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskToken ||
-        node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken)
-    ) {
-      needed.add("pow");
-    }
-    forEachChild(node, visit);
-  }
-
-  // Scan all statements (including top-level code compiled into __module_init)
-  forEachChild(sourceFile, visit);
-
-  for (const method of needed) {
-    if (method === "random") {
-      // #1322: in WASI/standalone mode, route random through WASI random_get
-      // (the import is registered early by registerWasiImports). In JS-host
-      // mode keep the host import.
-      if (ctx.wasi) {
-        ctx.pendingMathMethods.add(method);
-      } else {
-        const typeIdx = addFuncType(ctx, [], [{ kind: "f64" }]);
-        addImport(ctx, "env", `Math_${method}`, { kind: "func", typeIdx });
-      }
-    } else {
-      // All other math methods get pure Wasm implementations
-      ctx.pendingMathMethods.add(method);
-    }
-  }
-
-  // ToUint32: defer until after all imports are added; see emitToUint32Helper.
-  if (needsToUint32) {
-    ctx.needsToUint32 = true;
-  }
-}
 
 /**
  * Emit the __toUint32 Wasm helper function. Must be called AFTER all imports
@@ -10410,101 +10448,6 @@ export function emitToUint32Helper(ctx: CodegenContext): void {
     body,
     exported: false,
   });
-}
-
-/** Scan source for parseInt / parseFloat / Number() / unary + on strings and register host imports */
-function collectParseImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const needed = new Set<string>();
-
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-      const name = node.expression.text;
-      if (name === "parseInt" || name === "parseFloat") {
-        needed.add(name);
-      }
-      // Number(x) uses parseFloat for string→number coercion
-      if (name === "Number") {
-        needed.add("parseFloat");
-      }
-    }
-    // Unary + on string uses parseFloat for coercion (but not for string literals
-    // which are statically resolved by tryStaticToNumber)
-    if (
-      ts.isPrefixUnaryExpression(node) &&
-      node.operator === ts.SyntaxKind.PlusToken &&
-      !ts.isStringLiteral(node.operand) &&
-      !ts.isNoSubstitutionTemplateLiteral(node.operand)
-    ) {
-      const operandType = ctx.checker.getTypeAtLocation(node.operand);
-      if (operandType.flags & ts.TypeFlags.StringLike) {
-        needed.add("parseFloat");
-      }
-    }
-    // Loose equality (== / !=) between string and number/boolean needs parseFloat
-    // to coerce the string operand to a number for comparison (#178)
-    if (
-      ts.isBinaryExpression(node) &&
-      (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken ||
-        node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken)
-    ) {
-      try {
-        const leftType = ctx.checker.getTypeAtLocation(node.left);
-        const rightType = ctx.checker.getTypeAtLocation(node.right);
-        const leftIsStr = isStringType(leftType);
-        const rightIsStr = isStringType(rightType);
-        const leftIsNumOrBool = isNumberType(leftType) || isBooleanType(leftType);
-        const rightIsNumOrBool = isNumberType(rightType) || isBooleanType(rightType);
-        if ((leftIsStr && rightIsNumOrBool) || (rightIsStr && leftIsNumOrBool)) {
-          needed.add("parseFloat");
-        }
-      } catch {
-        // Type resolution may fail for some nodes — skip
-      }
-    }
-    // Arithmetic/bitwise operators on string operands need parseFloat (#430)
-    if (ts.isBinaryExpression(node)) {
-      const opKind = node.operatorToken.kind;
-      const isArithOrBitwise =
-        opKind === ts.SyntaxKind.MinusToken ||
-        opKind === ts.SyntaxKind.AsteriskToken ||
-        opKind === ts.SyntaxKind.AsteriskAsteriskToken ||
-        opKind === ts.SyntaxKind.SlashToken ||
-        opKind === ts.SyntaxKind.PercentToken ||
-        opKind === ts.SyntaxKind.AmpersandToken ||
-        opKind === ts.SyntaxKind.BarToken ||
-        opKind === ts.SyntaxKind.CaretToken ||
-        opKind === ts.SyntaxKind.LessThanLessThanToken ||
-        opKind === ts.SyntaxKind.GreaterThanGreaterThanToken ||
-        opKind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken;
-      if (isArithOrBitwise) {
-        try {
-          const leftType = ctx.checker.getTypeAtLocation(node.left);
-          const rightType = ctx.checker.getTypeAtLocation(node.right);
-          if (isStringType(leftType) || isStringType(rightType)) {
-            needed.add("parseFloat");
-          }
-        } catch {
-          // Type resolution may fail — skip
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  // Scan all statements (including top-level code compiled into __module_init)
-  forEachChild(sourceFile, visit);
-
-  for (const name of needed) {
-    if (name === "parseInt") {
-      // (externref, f64) -> f64  — radix is NaN when omitted
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", name, { kind: "func", typeIdx });
-    } else {
-      // (externref) -> f64
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", name, { kind: "func", typeIdx });
-    }
-  }
 }
 
 /** Known constructors handled natively (not needing __new_ imports) */
@@ -10557,470 +10500,6 @@ export const KNOWN_CONSTRUCTORS = new Set([
   "ReferenceError",
 ]);
 
-/**
- * Scan source for `new X(args...)` where X is not a locally declared class
- * or known extern class, and register `__new_X` host imports so the runtime
- * can provide the constructor.
- */
-function collectUnknownConstructorImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  // Map from constructor name to arg count (max seen)
-  const needed = new Map<string, number>();
-
-  function visit(node: ts.Node) {
-    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
-      const name = node.expression.text;
-      if (!KNOWN_CONSTRUCTORS.has(name)) {
-        // Check if it's a class declared in this source file
-        const sym = ctx.checker.getSymbolAtLocation(node.expression);
-        const decls = sym?.getDeclarations() ?? [];
-        const isLocalClass = decls.some((d) => {
-          if (ts.isClassDeclaration(d) || ts.isClassExpression(d)) return d.getSourceFile() === sourceFile;
-          // const Vec2 = class { ... } — variable whose initializer is a class expression
-          if (ts.isVariableDeclaration(d) && d.initializer && ts.isClassExpression(d.initializer))
-            return d.getSourceFile() === sourceFile;
-          return false;
-        });
-        const isExtern = ctx.externClasses.has(name);
-        if (!isLocalClass && !isExtern) {
-          const argCount = node.arguments?.length ?? 0;
-          const prev = needed.get(name) ?? 0;
-          needed.set(name, Math.max(prev, argCount));
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  forEachChild(sourceFile, visit);
-
-  for (const [name, argCount] of needed) {
-    const importName = `__new_${name}`;
-    if (ctx.funcMap.has(importName)) continue;
-    const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
-    const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
-    addImport(ctx, "env", importName, { kind: "func", typeIdx });
-  }
-}
-
-/**
- * Scan source for `new Number(x)`, `new String(x)`, `new Boolean(x)` and
- * register wrapper struct types so that resolveWasmType returns the correct
- * ref type for wrapper-typed variables.
- */
-function collectWrapperConstructors(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let found = false;
-
-  function visit(node: ts.Node) {
-    if (found) return;
-    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
-      const name = node.expression.text;
-      if (name === "Number" || name === "String" || name === "Boolean") {
-        found = true;
-        return;
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  forEachChild(sourceFile, visit);
-
-  if (found) {
-    ensureWrapperTypes(ctx);
-  }
-}
-
-/** Scan source for String.fromCharCode() calls and register host import */
-function collectStringStaticImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let needsFromCharCode = false;
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "String" &&
-      node.expression.name.text === "fromCharCode"
-    ) {
-      needsFromCharCode = true;
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      for (const member of stmt.members) {
-        if (ts.isMethodDeclaration(member) && member.body) {
-          visit(member.body);
-        }
-      }
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (needsFromCharCode) {
-    // (f64) -> externref  (char code -> string)
-    const typeIdx = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "String_fromCharCode", { kind: "func", typeIdx });
-    if (ctx.nativeStrings) {
-      ensureNativeStringHelpers(ctx);
-    }
-  }
-}
-
-/** Scan source for Promise.all / Promise.race / Promise.resolve / Promise.reject
- *  calls and `new Promise(...)` constructor usage, and register host imports */
-function collectPromiseImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  const needed = new Set<string>();
-  let needConstructor = false;
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "Promise"
-    ) {
-      const method = node.expression.name.text;
-      // (#1368) include allSettled/any so they get pre-registered with the 2-arg
-      // aggregator signature alongside all/race.
-      if (
-        method === "all" ||
-        method === "race" ||
-        method === "allSettled" ||
-        method === "any" ||
-        method === "resolve" ||
-        method === "reject"
-      ) {
-        needed.add(method);
-      }
-    }
-    // (#1368) Detect `Promise.METHOD.call(...)` patterns so their imports get
-    // registered (otherwise the late path would see the existing-but-wrong-arity
-    // pre-registration that was implicit before this fix).
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === "call" &&
-      ts.isPropertyAccessExpression(node.expression.expression) &&
-      ts.isIdentifier(node.expression.expression.expression) &&
-      node.expression.expression.expression.text === "Promise"
-    ) {
-      const method = node.expression.expression.name.text;
-      if (method === "all" || method === "race" || method === "allSettled" || method === "any") {
-        needed.add(method);
-      }
-    }
-    // NOTE: Promise instance methods (.then/.catch/.finally) not detected here.
-    // See #855 regression fix — pre-registering them shifts type indices.
-    // Detect `new Promise(...)`
-    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Promise") {
-      needConstructor = true;
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      for (const member of stmt.members) {
-        if (ts.isMethodDeclaration(member) && member.body) {
-          visit(member.body);
-        }
-      }
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-    // Also visit top-level variable declarations and expressions
-    if (ts.isVariableStatement(stmt)) {
-      visit(stmt);
-    }
-    if (ts.isExpressionStatement(stmt)) {
-      visit(stmt);
-    }
-    if (ts.isReturnStatement(stmt)) {
-      visit(stmt);
-    }
-  }
-
-  for (const method of needed) {
-    const importName = `Promise_${method}`;
-    if (!ctx.funcMap.has(importName)) {
-      // (#1368) Aggregators (all/race/allSettled/any) take (thisArg, iterable);
-      // resolve/reject keep their original 1-arg signature.
-      // (#1116) Aggregators add an i32 `directCall` flag — 1 when codegen used
-      // the bare `Promise.METHOD(iter)` form (substitute globalThis.Promise),
-      // 0 when user wrote `Promise.METHOD.call(thisArg, iter)` (use thisArg).
-      const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
-      const params: ValType[] = isAggregator
-        ? [{ kind: "externref" }, { kind: "externref" }, { kind: "i32" }]
-        : [{ kind: "externref" }];
-      const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
-      addImport(ctx, "env", importName, { kind: "func", typeIdx });
-    }
-  }
-
-  // Register Promise instance methods: .then(cb) and .catch(cb)
-  // These are detected from calls on Promise-typed values (e.g. p.then(...))
-  for (const method of needed) {
-    if (method === "then" || method === "catch") {
-      const importName = `Promise_${method}`;
-      if (!ctx.funcMap.has(importName)) {
-        // Promise_then(promise, callback) -> promise
-        // Promise_catch(promise, callback) -> promise
-        const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-        addImport(ctx, "env", importName, { kind: "func", typeIdx });
-      }
-    }
-  }
-
-  // Register new Promise() constructor import: (externref) -> externref
-  if (needConstructor && !ctx.funcMap.has("Promise_new")) {
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "Promise_new", { kind: "func", typeIdx });
-  }
-}
-
-/** Scan source for JSON.parse / JSON.stringify calls and register host imports */
-function collectJsonImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let needStringify = false;
-  let needParse = false;
-
-  function visit(node: ts.Node) {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "JSON"
-    ) {
-      const method = node.expression.name.text;
-      if (method === "stringify") needStringify = true;
-      if (method === "parse") needParse = true;
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      for (const member of stmt.members) {
-        if (ts.isMethodDeclaration(member) && member.body) {
-          visit(member.body);
-        }
-      }
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (needStringify || needParse) {
-    addUnionImports(ctx);
-  }
-  if (needStringify) {
-    // (value: externref, replacer: externref, space: externref) -> externref
-    const typeIdx = addFuncType(
-      ctx,
-      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
-  }
-  if (needParse) {
-    // #2013 — (text, reviver); reviver is `ref.null.extern` when absent so the
-    // host can apply §25.5.1 InternalizeJSONProperty.
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
-  }
-}
-
-/** Scan source for arrow functions used as call arguments and register __make_callback import */
-function collectCallbackImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let found = false;
-
-  function visit(node: ts.Node) {
-    if (found) return;
-    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
-      found = true;
-      return;
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (found) break;
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (found) {
-    // __make_callback: (i32, externref) → externref
-    const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
-  }
-}
-
-/** Scan source for generator functions (function*) and register generator host imports */
-function collectGeneratorImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let found = false;
-
-  function visitNode(node: ts.Node): void {
-    if (found) return;
-    // Generator function declarations: function* foo() { ... }
-    if (ts.isFunctionDeclaration(node) && node.asteriskToken && node.body && !hasDeclareModifier(node)) {
-      found = true;
-      return;
-    }
-    // Generator function expressions: const gen = function*() { ... }
-    if (ts.isFunctionExpression(node) && node.asteriskToken) {
-      found = true;
-      return;
-    }
-    // Generator class methods: class Foo { *bar() { ... } }
-    if (ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
-      found = true;
-      return;
-    }
-    forEachChild(node, visitNode);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    visitNode(stmt);
-    if (found) break;
-  }
-
-  if (found && !ctx.funcMap.has("__gen_create_buffer")) {
-    // __gen_create_buffer: () → externref  (creates an empty JS array)
-    const bufType = addFuncType(ctx, [], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__gen_create_buffer", {
-      kind: "func",
-      typeIdx: bufType,
-    });
-
-    // __gen_push_f64: (externref, f64) → void  (pushes a number to the buffer)
-    const pushF64Type = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], []);
-    addImport(ctx, "env", "__gen_push_f64", {
-      kind: "func",
-      typeIdx: pushF64Type,
-    });
-
-    // __gen_push_i32: (externref, i32) → void  (pushes a boolean to the buffer)
-    const pushI32Type = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], []);
-    addImport(ctx, "env", "__gen_push_i32", {
-      kind: "func",
-      typeIdx: pushI32Type,
-    });
-
-    // __gen_push_ref: (externref, externref) → void  (pushes a string/object to the buffer)
-    const pushRefType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
-    addImport(ctx, "env", "__gen_push_ref", {
-      kind: "func",
-      typeIdx: pushRefType,
-    });
-
-    // __gen_yield_star: (externref, externref) → void  (iterates inner iterable, pushes all values into outer buffer)
-    addImport(ctx, "env", "__gen_yield_star", {
-      kind: "func",
-      typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
-    });
-
-    // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
-    // generator's `return` value on the buffer as a side property instead of
-    // pushing it as a yielded element; surfaced once as the terminal result)
-    addImport(ctx, "env", "__gen_set_return", {
-      kind: "func",
-      typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
-    });
-
-    // __create_generator: (buf: externref, pendingThrow: externref) → externref
-    // Takes a buffer of yielded values and an optional pending exception,
-    // returns a Generator-like object that defers the throw to the first next() call.
-    const createGenType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__create_generator", {
-      kind: "func",
-      typeIdx: createGenType,
-    });
-    // __create_async_generator: same Wasm signature, but .next()/.return()/.throw() return Promises.
-    addImport(ctx, "env", "__create_async_generator", {
-      kind: "func",
-      typeIdx: createGenType,
-    });
-
-    const genType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-    // __gen_next: (generator: externref) → externref (calls gen.next(), returns IteratorResult)
-    addImport(ctx, "env", "__gen_next", {
-      kind: "func",
-      typeIdx: genType,
-    });
-
-    // __gen_return: (generator: externref, value: externref) → externref (calls gen.return(value), returns IteratorResult)
-    const genReturnType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__gen_return", {
-      kind: "func",
-      typeIdx: genReturnType,
-    });
-
-    // __gen_throw: (generator: externref, error: externref) → externref (calls gen.throw(error), returns IteratorResult)
-    addImport(ctx, "env", "__gen_throw", {
-      kind: "func",
-      typeIdx: genReturnType,
-    });
-
-    // __gen_result_value: (result: externref) → externref (returns result.value)
-    addImport(ctx, "env", "__gen_result_value", {
-      kind: "func",
-      typeIdx: genType,
-    });
-
-    // __gen_result_value_f64: (result: externref) → f64 (returns result.value as number)
-    const resultValF64Type = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
-    addImport(ctx, "env", "__gen_result_value_f64", {
-      kind: "func",
-      typeIdx: resultValF64Type,
-    });
-
-    // __gen_result_done: (result: externref) → i32 (returns result.done as boolean)
-    const resultDoneType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-    addImport(ctx, "env", "__gen_result_done", {
-      kind: "func",
-      typeIdx: resultDoneType,
-    });
-
-    // Ensure __get_caught_exception is available for generator body try/catch wrappers
-    if (!ctx.funcMap.has("__get_caught_exception")) {
-      const getCaughtType = addFuncType(ctx, [], [{ kind: "externref" }]);
-      addImport(ctx, "env", "__get_caught_exception", {
-        kind: "func",
-        typeIdx: getCaughtType,
-      });
-    }
-  }
-}
-
 /** Functional array methods that need host callback bridges */
 export const FUNCTIONAL_ARRAY_METHODS = new Set([
   "filter",
@@ -11033,151 +10512,6 @@ export const FUNCTIONAL_ARRAY_METHODS = new Set([
   "some",
   "every",
 ]);
-
-/** Scan source for functional array methods (filter, map, etc.) and register __call_Nf64 imports */
-function collectFunctionalArrayImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let need1 = false;
-  let need2 = false;
-
-  function visit(node: ts.Node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const method = node.expression.name.text;
-      if (FUNCTIONAL_ARRAY_METHODS.has(method)) {
-        if (method === "reduce" || method === "reduceRight") {
-          need2 = true;
-        } else {
-          need1 = true;
-        }
-      }
-      // Also detect Array.prototype.METHOD.call(...) pattern
-      if (method === "call" && ts.isPropertyAccessExpression(node.expression.expression)) {
-        const innerMethod = node.expression.expression.name.text;
-        if (FUNCTIONAL_ARRAY_METHODS.has(innerMethod)) {
-          if (innerMethod === "reduce" || innerMethod === "reduceRight") {
-            need2 = true;
-          } else {
-            need1 = true;
-          }
-        }
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (need1) {
-    if (ctx.fast) {
-      // __call_1_i32: (externref, i32) → i32 — invoke callback with 1 i32 arg (fast mode)
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "i32" }]);
-      addImport(ctx, "env", "__call_1_i32", { kind: "func", typeIdx });
-    } else {
-      // __call_1_f64: (externref, f64) → f64 — invoke callback with 1 f64 arg
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", "__call_1_f64", { kind: "func", typeIdx });
-    }
-  }
-
-  if (need2) {
-    if (ctx.fast) {
-      // __call_2_i32: (externref, i32, i32) → i32 — invoke callback with 2 i32 args (fast mode)
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }]);
-      addImport(ctx, "env", "__call_2_i32", { kind: "func", typeIdx });
-    } else {
-      // __call_2_f64: (externref, f64, f64) → f64 — invoke callback with 2 f64 args
-      const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }, { kind: "f64" }], [{ kind: "f64" }]);
-      addImport(ctx, "env", "__call_2_f64", { kind: "func", typeIdx });
-    }
-  }
-}
-
-/** Scan source for union types (number | string, etc.) and register needed helper imports */
-function collectUnionImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let found = false;
-
-  function visit(node: ts.Node) {
-    if (found) return;
-    // Check function parameter types for heterogeneous unions
-    if (ts.isFunctionDeclaration(node) && node.parameters) {
-      for (const param of node.parameters) {
-        const paramType = ctx.checker.getTypeAtLocation(param);
-        if (isHeterogeneousUnion(paramType, ctx.checker)) {
-          found = true;
-          return;
-        }
-      }
-    }
-    // Check variable declarations for union types
-    if (ts.isVariableDeclaration(node) && node.type) {
-      const varType = ctx.checker.getTypeAtLocation(node);
-      if (isHeterogeneousUnion(varType, ctx.checker)) {
-        found = true;
-        return;
-      }
-    }
-    // Check for typeof expressions (used in narrowing)
-    if (ts.isTypeOfExpression(node)) {
-      found = true;
-      return;
-    }
-    // Generator functions use externref-based iteration which triggers
-    // ensureI32Condition with externref → needs __is_truthy from union imports
-    if (ts.isFunctionDeclaration(node) && node.asteriskToken && node.body) {
-      found = true;
-      return;
-    }
-    if (ts.isFunctionExpression(node) && node.asteriskToken) {
-      found = true;
-      return;
-    }
-    if (ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
-      found = true;
-      return;
-    }
-    // for-of on non-array types uses externref iterator protocol which
-    // may trigger ensureI32Condition with externref
-    if (ts.isForOfStatement(node)) {
-      const exprType = ctx.checker.getTypeAtLocation(node.expression);
-      const sym = (exprType as ts.TypeReference).symbol ?? (exprType as ts.Type).symbol;
-      if (sym?.name !== "Array") {
-        found = true;
-        return;
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-        visit(decl);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      visit(stmt);
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    }
-  }
-
-  if (found) {
-    addUnionImports(ctx);
-  }
-}
 
 /** Register union type helper imports (typeof checks, boxing/unboxing) */
 export function addUnionImports(ctx: CodegenContext): void {
@@ -12441,64 +11775,6 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   }
 }
 
-/**
- * Scan source for for...of on non-array types (strings, externref iterables)
- * and register the host-delegated iterator protocol imports.
- */
-function collectIteratorImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
-  let found = false;
-
-  function visit(node: ts.Node) {
-    if (found) return;
-    if (ts.isForOfStatement(node)) {
-      const exprType = ctx.checker.getTypeAtLocation(node.expression);
-      // Array types use the existing index-based loop — no iterator imports needed
-      const sym = (exprType as ts.TypeReference).symbol ?? (exprType as ts.Type).symbol;
-      if (sym?.name !== "Array") {
-        // In fast mode, strings are iterated natively — no iterator imports needed
-        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && isStringType(exprType)) {
-          return;
-        }
-        found = true;
-        return;
-      }
-    }
-    forEachChild(node, visit);
-  }
-
-  for (const stmt of sourceFile.statements) {
-    if (found) break;
-    if (ts.isFunctionDeclaration(stmt) && stmt.body) {
-      visit(stmt.body);
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (decl.initializer) visit(decl.initializer);
-      }
-    } else if (ts.isClassDeclaration(stmt)) {
-      for (const member of stmt.members) {
-        if (found) break;
-        if ((ts.isMethodDeclaration(member) || ts.isConstructorDeclaration(member)) && member.body) {
-          visit(member.body);
-        }
-      }
-    } else if (ts.isExpressionStatement(stmt)) {
-      visit(stmt.expression);
-    } else if (ts.isForOfStatement(stmt)) {
-      visit(stmt);
-    }
-  }
-
-  if (found) {
-    // #1320 Slice 1: standalone/WASI binds the four iterator ops to emitted
-    // Wasm fns (no JS host); JS-host mode keeps the env imports.
-    if (ctx.standalone || ctx.wasi) {
-      ensureNativeIteratorRuntime(ctx);
-    } else {
-      addIteratorImports(ctx);
-    }
-  }
-}
-
 /** Register the iterator protocol host imports if not already registered */
 export function addIteratorImports(ctx: CodegenContext): void {
   // Guard: only register once
@@ -12995,23 +12271,18 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (typeArgs.length > 0) {
         const inner = typeArgs[0]!;
         if (isVoidType(inner)) return { kind: "externref" }; // Promise<void> → externref (no value)
-        // (#2905) Under the native `$Promise` carrier (isStandalonePromiseActive
-        // — today WASI, widened to standalone by #2895 slice 1d) a STORED/TYPED
-        // `Promise<T>` is a real `$Promise` externref (produced by wrapAsyncReturn
-        // at the call site / the drive-layer result), NOT the unwrapped `T`.
-        // Lower the value slot to externref so it matches the value end-to-end;
-        // storing the externref into an f64/struct slot would otherwise coerce
-        // `externref → f64` via __unbox_number = NaN (or an illegal struct cast).
-        //
-        // GC/host stays byte-identical: the unwrap-to-T contract only held
-        // because async fns are compiled synchronously, which is exactly when the
-        // carrier is OFF. An async fn's OWN wasm return signature pre-unwraps via
-        // unwrapPromiseType (function-body.ts / declarations.ts), so this branch
-        // is only hit for *value* slots (bindings / params / fields / non-async
-        // returns), never an async fn's own result type. externref is a leaf
-        // valtype — registers no new type, so no DCE remap / funcIdx churn.
-        if (isStandalonePromiseActive(ctx)) return { kind: "externref" };
-        return resolveWasmType(ctx, inner, _depth + 1, _visited);
+        // (#2905/#3134) A `Promise<T>` VALUE slot (local/param/field/non-async
+        // return/vec element) lowers to externref on EVERY lane — it holds a
+        // real promise, not the unwrapped `T`. Unwrapping to `T` (f64) then
+        // `__unbox_number`'d a real promise externref → NaN; externref serves
+        // the legacy sync-fakery rep too (an async call compiled synchronously
+        // returns the unwrapped f64, which boxes at the coerce and unboxes /
+        // `Promise_resolve`-assimilates on use). Unifying the rep also fixes a
+        // `Promise<T>[]` element (frame spill guess now matches the stored
+        // promise → unblocks #2967 2c class-2). An async fn's OWN return
+        // pre-unwraps via `unwrapPromiseType` before this branch. externref is
+        // a leaf valtype (no DCE/funcIdx churn). Broad rep change → full-CI A/B.
+        return { kind: "externref" };
       }
       return { kind: "externref" }; // bare Promise without type arg
     }
@@ -13142,6 +12413,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     if (name && !ctx.structMap.has(name)) {
       name = ctx.classExprNameMap.get(name) ?? name;
     }
+    // (#3051 Slice 3, NARROWED after the PR-#2910 merge_group park) Accessor-
+    // bearing ANONYMOUS object types are NOT blanket-lowered to externref here:
+    // #2724's guard in ensureStructForType deliberately keeps getter-ONLY
+    // literal types registered as structs because the object-REST copy paths
+    // (`{...x} = { get v() {…} }`, for-await rest) steer by that registration
+    // (struct→externref→__extern_rest_object); unregistering routed them to the
+    // externref-rest path which never invokes the getter (regressed
+    // dstr/obj-rest-getter-abrupt-get-error in the merge_group re-validation).
+    // The host-object-representation fix for CLOSURE RETURNS lives at the two
+    // return-type resolution sites in closures.ts via
+    // `resolveWasmTypeForClosureReturn` instead.
     // Check named structs (interfaces, type aliases)
     if (name && name !== "__type" && name !== "__object" && ctx.structMap.has(name)) {
       // (#1366a) Externref-backed user classes (e.g. `class Sub extends Error`)
@@ -13196,6 +12478,52 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   }
 
   return mapTsTypeToWasm(tsType, ctx.checker, ctx.fast);
+}
+
+/**
+ * (#3051 Slice 3) True when the object type carries at least one property
+ * declared as an OBJECT-LITERAL get/set accessor (`{ get x() {…} }` /
+ * `{ set x(v) {…} }`). Such values are runtime-represented as HOST plain
+ * objects (see `compileObjectLiteralWithAccessors`, #1239). Class/interface
+ * accessors (declaration parent is not an ObjectLiteralExpression) do NOT
+ * qualify — those instances keep their struct representation.
+ */
+function typeHasObjLitAccessorProperty(tsType: ts.Type): boolean {
+  for (const p of tsType.getProperties()) {
+    const decls = p.getDeclarations?.() ?? p.declarations;
+    if (!decls) continue;
+    for (const d of decls) {
+      if (
+        (ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d)) &&
+        d.parent != null &&
+        ts.isObjectLiteralExpression(d.parent)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * (#3051 Slice 3, narrowed) Resolve a CLOSURE/CALLBACK return type, lowering
+ * accessor-bearing anonymous object-literal types to externref. The runtime
+ * value of `{ get index() {…} }` is a HOST plain object
+ * (`compileObjectLiteralWithAccessors`, #1239); typing the closure's wasm
+ * return as the checker's struct made the return-path coercion
+ * externref→struct null-drop on the failed `ref.test` (type-coercion.ts) —
+ * a `regexp.exec` override returning a poisoned `{ get index() { throw … } }`
+ * arrived at V8's @@replace protocol as `null` (= no match) and the getter
+ * never fired (the test262 `result-get-*-err` cluster). Scoped to RETURN-type
+ * resolution ONLY: blanket-lowering these types in `resolveWasmType` broke the
+ * #2724 object-REST steering (see the note in `resolveWasmType`).
+ */
+export function resolveWasmTypeForClosureReturn(ctx: CodegenContext, retType: ts.Type): ValType {
+  const symName = retType.getSymbol()?.name;
+  if ((symName === "__type" || symName === "__object") && typeHasObjLitAccessorProperty(retType)) {
+    return { kind: "externref" };
+  }
+  return resolveWasmType(ctx, retType);
 }
 
 /**
@@ -13573,7 +12901,18 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
         : [];
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
-    const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    // (#3024) STABLE handle (#1916 S3), not the legacy live-regime
+    // `numImportFuncs + functions.length`. This pre-mint runs during the
+    // DECLARATION SCAN (via the collectEmptyObjectWidening /
+    // collectGrowableObjectLiterals pre-passes' resolveWasmType), BEFORE the
+    // import collectors — a live index minted here goes stale the moment any
+    // collector prepends an import without a fixup, and `definedFuncAt` then
+    // fails to resolve it at literal-compile time, forking a duplicate method
+    // body while trampolines keep forwarding into the stale (import-range)
+    // index ("call[0] expected externref/f64, found …" — the Array.prototype
+    // S15.4.4.x A2 valueOf cluster). A stable handle is layout-independent:
+    // shift walkers skip it and resolution happens at emit.
+    const methodFuncIdx = mintDefinedFunc(ctx);
     ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
@@ -13583,7 +12922,7 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
       body: [],
       exported: false,
     };
-    ctx.mod.functions.push(methodFunc);
+    pushDefinedFunc(ctx, methodFuncIdx, methodFunc);
   }
 }
 
@@ -14350,8 +13689,8 @@ function collectExternFromDeclareVar(ctx: CodegenContext, decl: ts.VariableDecla
   // (#1103a) In standalone / nativeStrings mode, `Map` is served by the
   // WasmGC-native runtime (map-runtime.ts) intercepted at the call sites.
   // Skip registering it as an externClass from the lib `declare var Map`
-  // declaration — otherwise `registerExternClassImports` eagerly emits a
-  // `Map_new` host import the standalone module can't satisfy.
+  // declaration — otherwise the extern-class import registration eagerly
+  // emits a `Map_new` host import the standalone module can't satisfy.
   if (className === "Map" && ctx.nativeStrings) return;
   if (ctx.externClasses.has(className)) return;
 
@@ -14483,6 +13822,33 @@ function collectInterfaceMembers(
       if (info.className === "RegExp" && propName === "lastIndex" && !ctx.standalone && !ctx.wasi) {
         wasmType = { kind: "externref" };
       }
+      // (#3051 Slice 2) `RegExp.prototype.global` / `.unicode` are spec-readonly
+      // booleans, but test262's @@replace/@@split coercion tests redefine them as
+      // writable data properties (`Object.defineProperty(r,'global',{writable:true})`)
+      // and then assign arbitrary values (`r.global = Symbol.replace`, `= {}`,
+      // `= NaN`, …). §22.2.6.11/§22.2.6.14 read the flag back through
+      // `ToBoolean(? Get(rx, "global"|"unicode"))` — i.e. any value coerces at
+      // read time, it is NOT constrained to a boolean on write. Typing the extern
+      // property `boolean` makes the generated `RegExp_set_global(externref, i32)`
+      // setter eagerly ToNumber the assigned value: a Symbol RHS traps ("Cannot
+      // convert a Symbol value to a number") and an object RHS traps ("Cannot
+      // convert object to primitive value") at the wasm boundary, before the value
+      // is ever stored. Carry the slot as `externref` in host mode (mirroring the
+      // #2671 `lastIndex` treatment) so the raw value round-trips onto the native
+      // RegExp and the native @@replace/@@split protocol performs the spec
+      // ToBoolean itself; explicit `r.global` reads coerce externref→boolean at the
+      // use site (a boxed `false` unboxes correctly — see the Slice 2 controls).
+      // Standalone / WASI keep their native struct-field RegExp path (the
+      // `RegExp_*_global` extern import is never emitted there), so only host mode
+      // is retyped.
+      if (
+        info.className === "RegExp" &&
+        (propName === "global" || propName === "unicode") &&
+        !ctx.standalone &&
+        !ctx.wasi
+      ) {
+        wasmType = { kind: "externref" };
+      }
       const isReadonly = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword) ?? false;
       info.properties.set(propName, { type: wasmType, readonly: isReadonly });
     }
@@ -14529,41 +13895,6 @@ function collectMixinMembers(
           }
         }
       }
-    }
-  }
-}
-
-function registerExternClassImports(ctx: CodegenContext, info: ExternClassInfo): void {
-  // Constructor
-  const ctorTypeIdx = addFuncType(ctx, info.constructorParams, [{ kind: "externref" }]);
-  addImport(ctx, "env", `${info.importPrefix}_new`, {
-    kind: "func",
-    typeIdx: ctorTypeIdx,
-  });
-
-  // Methods
-  for (const [methodName, sig] of info.methods) {
-    const methodTypeIdx = addFuncType(ctx, sig.params, sig.results);
-    addImport(ctx, "env", `${info.importPrefix}_${methodName}`, {
-      kind: "func",
-      typeIdx: methodTypeIdx,
-    });
-  }
-
-  // Property getters and setters
-  for (const [propName, propInfo] of info.properties) {
-    const getterTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [propInfo.type]);
-    addImport(ctx, "env", `${info.importPrefix}_get_${propName}`, {
-      kind: "func",
-      typeIdx: getterTypeIdx,
-    });
-
-    if (!propInfo.readonly) {
-      const setterTypeIdx = addFuncType(ctx, [{ kind: "externref" }, propInfo.type], []);
-      addImport(ctx, "env", `${info.importPrefix}_set_${propName}`, {
-        kind: "func",
-        typeIdx: setterTypeIdx,
-      });
     }
   }
 }
@@ -15326,22 +14657,74 @@ export function collectEnumDeclarations(ctx: CodegenContext, sourceFile: ts.Sour
  * Used by BOTH the `var` hoister and the let/const declaration path so the slot
  * type is uniform (a `var` reuses its hoisted slot, so both sites MUST agree).
  *
- * IMPORTANT — trigger on the `void`-EXPRESSION INITIALIZER ONLY, not on a bare
- * "purely `undefined`/`void` declared type". A binding can be `undefined`-typed
- * for unrelated reasons (e.g. `const afterA = obj.a` reading an optional
- * `a?: number` after `delete obj.a`), and those MUST stay a numeric slot — the
- * delete / optional-property machinery encodes `undefined` as an f64 sNaN
+ * IMPORTANT — the `void`-EXPRESSION arm triggers on the INITIALIZER ONLY, not on
+ * a bare "purely `undefined`/`void` declared type". A binding can be
+ * `undefined`-typed for unrelated reasons (e.g. `const afterA = obj.a` reading an
+ * optional `a?: number` after `delete obj.a`), and those MUST stay a numeric slot
+ * — the delete / optional-property machinery encodes `undefined` as an f64 sNaN
  * sentinel and relies on the local being f64/i32 so `afterA === undefined`
  * detects the sentinel. Forcing those to externref boxes the sentinel via
  * `__box_number` and breaks the `=== undefined` check (regressed
  * delete-sentinel #1112). The `void 0` expression is the precise, narrow signal
  * for the acorn evolving-local idiom.
+ *
+ * (#3033) SECOND arm — a member read off a DYNAMIC (externref) receiver whose
+ * static type collapses to `undefined`. compiled-acorn's `pp$5.parseIdentNode`
+ * does `var ty = this.type` where `this` is the Parser fnctor instance
+ * (externref) but the checker — unable to resolve the untyped `this`'s shape —
+ * types `this.type` as pure `undefined`. `resolveWasmType(undefined)` is a
+ * numeric (i32) slot, so the RUNTIME value (a TokenType read dynamically through
+ * `__extern_get`, returned as externref) was truncated to the i32
+ * undefined-sentinel on store → `ty` read back `undefined`, and `x.var` (any
+ * `<expr>.<keyword>` property name) threw. The read goes through the dynamic
+ * host path (receiver externref) and returns externref, so the slot must be
+ * externref to hold it. Distinguished from the #1112 sentinel case by the
+ * receiver's wasm type: an optional field off a KNOWN struct receiver resolves
+ * to `ref $struct` (NOT externref), so this arm does not fire for it and the
+ * numeric sentinel is preserved. An externref slot holding a genuine runtime
+ * `undefined` still compares `=== undefined` (the `emitUndefined` singleton), so
+ * a dynamic read that really is undefined is unaffected.
  */
-export function varBindingNeedsExternrefForUndefined(decl: ts.VariableDeclaration | undefined): boolean {
+export function varBindingNeedsExternrefForUndefined(
+  decl: ts.VariableDeclaration | undefined,
+  ctx?: CodegenContext,
+): boolean {
   // `var x = (void 0)` / `var x = void <expr>` — strip parens to find the void.
   let init = decl?.initializer;
   while (init && ts.isParenthesizedExpression(init)) init = init.expression;
-  return init !== undefined && ts.isVoidExpression(init);
+  if (init === undefined) return false;
+  if (ts.isVoidExpression(init)) return true;
+  // (#3033) Dynamic-receiver member read whose static type is purely undefined.
+  if (ctx !== undefined && (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init))) {
+    const declType = ctx.checker.getTypeAtLocation(decl!);
+    const isPurelyUndefinedOrVoid = (declType.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0;
+    if (isPurelyUndefinedOrVoid && undefinedTypedMemberReadProducesExternref(ctx, init)) return true;
+  }
+  return false;
+}
+
+/**
+ * (#3033 Bug 2a/2b) Shared predicate: a property/element access whose STATIC
+ * type is purely `undefined`/`void` — the checker could not resolve the member
+ * (untyped `this` receiver in a prototype-function, heterogeneous shapes, …) —
+ * but whose RECEIVER produces an externref at runtime is a DYNAMIC member
+ * read: its runtime value is externref, NOT the numeric undefined-sentinel
+ * `resolveWasmType(undefined)` would give it. Recursive, so a CHAINED read
+ * (`this.type.keyword` — Bug 2b) is recognized: the receiver `this.type` is
+ * itself such a read. Used by BOTH the var/let slot typing
+ * (`varBindingNeedsExternrefForUndefined`, Bug 2a) and the property-access
+ * dynamic-receiver admission (`compilePropertyAccess` isExternObj, Bug 2b) so
+ * the two stay in lockstep — no parallel branch.
+ */
+export function undefinedTypedMemberReadProducesExternref(ctx: CodegenContext, expr: ts.Expression): boolean {
+  let e = expr;
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  if (!ts.isPropertyAccessExpression(e) && !ts.isElementAccessExpression(e)) return false;
+  const t = ctx.checker.getTypeAtLocation(e);
+  if ((t.flags & ~(ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return false;
+  const recvType = ctx.checker.getTypeAtLocation(e.expression);
+  if (resolveWasmType(ctx, recvType).kind === "externref") return true;
+  return undefinedTypedMemberReadProducesExternref(ctx, e.expression);
 }
 
 export function hoistVarDeclarations(
@@ -15496,7 +14879,7 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
       }
     }
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl)
+      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, ctx)
         ? { kind: "externref" as const }
         : resolveWasmType(ctx, varType);
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
@@ -15918,6 +15301,81 @@ function inferLetConstInitializerWasmType(
   return { kind: "ref_null", typeIdx: receiverType.typeIdx };
 }
 
+/**
+ * (#3123) When `varType` names a fnctor-subclass class (`class C extends F`,
+ * F a top-level plain function), return the compiled class name; else
+ * undefined. Class-expression synthetic names resolve through
+ * `classExprNameMap` like the method-call ladder does.
+ */
+function fnctorSubclassNameOfType(ctx: CodegenContext, varType: ts.Type): string | undefined {
+  let clsName = varType.getSymbol()?.name;
+  if (clsName !== undefined && !ctx.classSet.has(clsName)) {
+    clsName = ctx.classExprNameMap.get(clsName) ?? clsName;
+  }
+  if (clsName === undefined || !ctx.classSet.has(clsName)) return undefined;
+  return fnctorAncestorOfClass(ctx, clsName) !== undefined ? clsName : undefined;
+}
+
+/**
+ * (#3123) True when the let-binding `decl` (named `name`, declared as class
+ * `clsName`) is re-assigned somewhere in its containing FUNCTION with a RHS
+ * whose declared type is NOT that class — i.e. the slot can hold a foreign
+ * (usually host-object) value at runtime. Oracle-based (#1930): the RHS type
+ * name comes from `ctx.oracle.declaredNameOf`. Name-matched but scoped to the
+ * SAME function (nested function bodies are not descended), so an inner
+ * function's same-named binding cannot false-positive; same-function shadows
+ * are already excluded by the pre-hoist caller (`localMap.has(name)` skip).
+ */
+function bindingHasForeignReassignment(
+  ctx: CodegenContext,
+  decl: ts.VariableDeclaration,
+  name: string,
+  clsName: string,
+): boolean {
+  const declFunc = getContainingFunctionForTdz(decl);
+  const funcBody = declFunc && "body" in declFunc ? (declFunc as { body?: ts.Node }).body : undefined;
+  const scope = funcBody ?? decl.getSourceFile();
+  let foreign = false;
+  const visit = (node: ts.Node): void => {
+    if (foreign) return;
+    // Do not descend into nested functions — their own `name` bindings are a
+    // different variable (and a capture-reassignment of the outer binding is
+    // out of this analysis' scope; the static-dispatch skip must not widen on
+    // it because dynamic dispatch only covers the kind-export surface).
+    if (
+      node !== scope &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left) &&
+      node.left.text === name &&
+      node.left !== decl.name
+    ) {
+      let rhsName = ctx.oracle.declaredNameOf(node.right);
+      if (rhsName !== undefined && !ctx.classSet.has(rhsName)) {
+        rhsName = ctx.classExprNameMap.get(rhsName) ?? rhsName;
+      }
+      if (rhsName !== clsName) {
+        foreign = true;
+        return;
+      }
+    }
+    forEachChild(node, visit);
+  };
+  if (scope) forEachChild(scope, visit);
+  return foreign;
+}
+
 function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.Statement): void {
   if (ts.isVariableStatement(stmt)) {
     const list = stmt.declarationList;
@@ -16008,7 +15466,7 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
         if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
-        const wasmType: ValType =
+        let wasmType: ValType =
           initIsAccessorLiteral || initIsHostSpreadLiteral
             ? { kind: "externref" }
             : isI32Coerced
@@ -16016,6 +15474,29 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
               : isNullablePrimitiveType(varType)
                 ? { kind: "externref" }
                 : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
+        // (#3123) A let-binding declared as a FNCTOR-SUBCLASS class instance
+        // (`class C extends F`, F a top-level plain function) that is
+        // REASSIGNED with another static type can hold a HOST object at
+        // runtime (`iterator = iterator.drop(0)` — the Iterator-helper
+        // wrapper minted by F's live prototype methods). A `(ref $C)` slot
+        // would NULL that host value through the guarded cast — widen the
+        // slot to externref and record the name so the method-call ladder
+        // dispatches on it dynamically. Host lane only (standalone has no
+        // host objects to hold). Typed use sites still recover the struct
+        // through their own guarded casts, so a never-host value is
+        // unaffected beyond the extra cast.
+        if (
+          (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+          !ctx.standalone &&
+          !ctx.wasi &&
+          (list.flags & ts.NodeFlags.Let) !== 0
+        ) {
+          const fnctorCls = fnctorSubclassNameOfType(ctx, varType);
+          if (fnctorCls !== undefined && bindingHasForeignReassignment(ctx, decl, name, fnctorCls)) {
+            wasmType = { kind: "externref" };
+            (fctx.fnctorWidenedLocals ??= new Set()).add(name);
+          }
+        }
         const valueSlot = allocLocal(fctx, name, wasmType);
         // (#2814) Record the pre-hoisted slot for THIS declaration so
         // compileVariableStatement can reuse it when saveBlockScopedShadows later
@@ -16279,10 +15760,11 @@ export {
 } from "./registry/imports.js";
 export {
   addFuncType,
-  funcTypeEq,
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
+  getOrRegisterBoundFnType,
   getOrRegisterRefCellType,
+  getOrRegisterResizableAbType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";

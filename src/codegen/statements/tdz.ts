@@ -36,21 +36,6 @@ export function* collectPatternBindingNames(name: ts.BindingName): Iterable<stri
 }
 
 /**
- * #1452 — After a binding-pattern destructure completes, flip every
- * declared identifier's TDZ flag to "initialized". The dedicated
- * destructuring helpers already emit `emitLocalTdzInit` for the
- * struct-path object form, but the externref array fallback, the
- * vec/tuple-struct array forms, and the rest-element branches do not.
- * Walking the pattern once here is safer than peppering every
- * code path with individual calls.
- */
-export function emitTdzInitForBindingPattern(fctx: FunctionContext, pattern: ts.BindingName): void {
-  for (const n of collectPatternBindingNames(pattern)) {
-    emitLocalTdzInit(fctx, n);
-  }
-}
-
-/**
  * Emit instructions to set a TDZ flag global to 1 (initialized) for a module-level
  * let/const variable. No-op if the variable doesn't have a TDZ flag.
  */

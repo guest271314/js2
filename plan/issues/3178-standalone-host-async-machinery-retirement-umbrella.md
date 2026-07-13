@@ -1,0 +1,202 @@
+---
+id: 3178
+title: "UMBRELLA: retire the generator/async/Promise HOST machinery in standalone — the 4,467-leaky-pass (10.3 pt) family, measured slice map + shared-substrate design"
+status: ready
+sprint: current
+created: 2026-07-12
+updated: 2026-07-12
+priority: high
+horizon: xl
+feasibility: hard
+reasoning_effort: max
+task_type: architecture
+area: codegen, standalone
+language_feature: generators, async-generators, promises, async-functions
+goal: standalone-mode
+related: [1781, 2860, 3164, 3132, 3032, 2903, 2906, 2865, 2895, 1326, 2959, 2040]
+origin: "2026-07-12 architect (arch-standalone-family-plans): plan/log/standalone-gap-map.md finding — 4,456 leaky passes ride host-import shims, ~90% the generator/async-gen/Promise host machinery. This umbrella is the substrate spec + measured slice ranking the family builds on."
+---
+
+# #3178 — UMBRELLA: standalone host async-machinery retirement
+
+## The one-paragraph thesis
+
+The standalone lane's single largest lever (~10.3 pts host-free) is retiring
+the `env::__create_generator` / `__gen_*` / `__create_async_generator` /
+`Promise_*` / `__make_callback` / `__get_caught_exception` host-import family.
+**The native substrate already exists and is NOT the gap**: the microtask
+ring, the `$Promise` carrier, native `.then/.catch/.finally`, the combinators,
+thenable assimilation, `new Promise(inline executor)`, and the N-state
+generator resume machine are all live on current main (inventory below,
+grounded file:line). The gap is **admission coverage**: shapes that bail the
+native gates fall to the legacy eager-buffer / host-CPS lowerings, and THOSE
+drag the whole import bundle in. This umbrella is (a) the measured
+decomposition of the 4,467 leaky passes into slices, (b) the substrate design
+answers each slice depends on, and (c) the classification/ranking so the
+family can be staffed without re-deriving any of this.
+
+## Measured decomposition (fresh standalone baseline 2026-07-12, official scope)
+
+Aggregated from `.test262-cache/test262-standalone-current.jsonl`
+(official-scope subset; rows with `status=pass && imports.length>0`):
+
+| Cohort (by import combo) | leaky passes | Rides on |
+| --- | ---: | --- |
+| carries ANY `__gen_*`/`__create_*` generator machinery | **4,034** | #3164 (sync fn-exprs), #3132 (async gens), residual below |
+| — sync-only bundles (`__create_generator` = 1,739 total) | ~1,741 | **#3164** (fn expressions ≈ ALL of it — the dstr harness IIFE `var iter = function*(){…}();`) |
+| — async-gen bundles (`__create_async_generator` = 2,408) | ~2,408 | **#3132** S2–S4 (methods 1,725 files, yield\*, return) |
+| Promise/callback-only, NO gen machinery | **182** | this umbrella S4–S6 |
+| — for-await-of dstr via legacy async lowering (`Promise_resolve/reject/then2` + `__make_callback` + `__get_caught_exception`) | 90 | S4 |
+| — dynamic-import chains (`__dynamic_import` + then-arms) | 47 | deferred (#1089/#1512) |
+| — `__make_callback`-only (lazy Iterator helpers, TypedArray callbacks, DisposableStack, Function.prototype) | ~30 | S6 (#2903 sub-fronts 2b/4) |
+| — `Promise_new` non-inline executor / misc | ~15 | S5 |
+
+**Key correction to the gap map's Promise row**: the `Promise_then2/resolve/
+reject` ~1,500 column is NOT an independent Promise gap — probe-verified on
+current main, `Promise.resolve(1).then(v=>v).catch(e=>e)`,
+`Promise.all([...])`, `.allSettled`, `.finally` all compile with **zero env
+imports** under `--target standalone`. The Promise imports in the baseline
+co-occur with `__create_async_generator` in >90% of rows: they are the
+async-gen HOST fallback minting host promises. Retiring #3132 retires them.
+#2903's independent remainder is the 182-row cohort (re-grounded in #2903).
+
+`__get_caught_exception` (4,106 rows) is registered together with the eager
+generator bundle (`registerGeneratorHostImports`, `src/codegen/index.ts:11798`)
+and per-site by the HOST-lane async wrap (`src/codegen/expressions.ts:543`,
+`wrapAsyncCallInTryCatch` — the standalone arm at expressions.ts:516 already
+avoids it). It has **no independent existence**: it disappears exactly when
+the eager/host-CPS paths stop being emitted. Do not fix it directly.
+
+## Substrate inventory — what is ALREADY native (verified on main @ 6dcdf30135)
+
+Devs picking up any slice: these are the primitives you compose. Do NOT build
+parallel machinery.
+
+1. **Microtask/job queue** — `src/codegen/async-scheduler.ts` (#1326 1C-A):
+   funcref+externref ring (`__microtask_enqueue` / `__drain_microtasks` /
+   `__microtask_grow`), uniform job signature `$__mt_func_type
+   (externref, externref) -> externref`, WASI `_start` auto-drain, plus the
+   #2632 timer-heap/run-loop reactor. This IS the spec HostEnqueuePromiseJob.
+2. **`$Promise` carrier** — `getOrRegisterPromiseType` (async-scheduler.ts):
+   `{state i32 mut, value externref mut, callbacks (ref null $PromiseCallback) mut}`;
+   settle primitives `__promise_fulfill` / `__promise_reject` /
+   `__promise_resolve_value` (recursive thenable adoption, #2867 Gap 1);
+   executor settle-closures `ensurePromiseExecutorClosures` (#2959/#3125).
+3. **Native `.then/.catch/.finally`** — then-wrappers + `$PromiseCallback`
+   reaction list (async-scheduler.ts 1C-B), `.finally` per §27.2.5.3
+   (`ensurePromiseFinallyRuntime`, #2903). Bridge arms in
+   `src/codegen/expressions/calls.ts` (`emitStandaloneThenWithNativeFallback`).
+4. **Combinators** — `src/codegen/promise-combinators.ts`: native
+   `all/race/allSettled/any` over array-literal, array-typed, Set/Map, and
+   dynamic args (`__combinator_to_vec`), native `AggregateError` (#2867 Gap 4,
+   #2919, #2922, #3137).
+5. **Sync generator N-state resume machine** — `src/codegen/generators-native.ts`:
+   `buildNativeGeneratorPlan` (line 482) lowers loops/ifs, try/catch/finally
+   ACROSS yields (#3050 throw-routes + pending-completion), `yield*`
+   delegation (generator / vec / general-iterable, #2170/#2173), pattern
+   params (#2920), string/any yield carriers (#2171/#2864). Admission gate:
+   `isNativeGeneratorCandidate` (line 1850); host-import registration mirror:
+   `sourceNeedsGeneratorHostImports` (line 2066) — these two MUST stay in
+   lockstep (the single-source-of-truth discipline every slice must keep).
+6. **Async drive + async-gen frame** — `src/codegen/async-cps.ts`
+   (`analyzeAsyncGen`), `src/codegen/async-frame.ts`, #2906 multi-state CFG
+   resume + #2865 `$AsyncFrame` carrier + per-gen `__async_gen_next_<stem>`
+   drivers; #3132 S1 landed the `yield*`-array-literal unroll + the
+   ITER_KIND_ASYNCGEN consumer arm in `src/codegen/iterator-native.ts`.
+7. **Exception payload capture, host-free** — the native `__exn` tag
+   (`ensureExnTag`, `src/codegen/registry/imports.ts`) carries the thrown
+   value as an externref payload through `try`/`catch_all`; standalone catch
+   arms read it directly (the standalone arm of `wrapAsyncCallInTryCatch`,
+   expressions.ts:516–541, and the #3050 catch-param spill model,
+   generators-native.ts:759–781). This is the `__get_caught_exception`
+   replacement — already built.
+
+**Design answer to "can standalone reuse the #2906 N-state machine?": it
+already does.** The native sync-gen and async-gen paths ARE the #2906 machine;
+there is no second machine to build. Every slice below is an admission-gate
+widening or a consumer-arm fill on machines 5/6, or a producer-proof on
+machines 2/3.
+
+## Slice map (ranked by leaky-passes-retired; every slice = its own issue/PR)
+
+| # | Slice | Retires (leaky) | Owner issue | Class |
+| - | --- | ---: | --- | --- |
+| S1 | sync generator FUNCTION EXPRESSIONS native | ~1,741 | **#3164** (full impl plan written 2026-07-12 — do not duplicate) | fable-executable-now |
+| S2 | async-gen methods / yield\* / return native | ~2,408 (subsumes most of the Promise column) | **#3132** S2–S4 (in-progress, live dev — coordinate, don't fork) | in-flight (XL) |
+| S3 | capturing nested generators → capture slots in the state struct | small leaky (≤ ~60) but large FAIL/CE value + unblocks #3032 semantics | NEW child (allocate at staffing; design notes below) | **opus-owned design**, fable-executable after |
+| S4 | for-await-of dstr legacy async lowering → native drive | 90 | NEW child (notes below; overlaps #2602) | fable-executable after probe |
+| S5 | `new Promise(NON-inline executor)` + `class X extends Promise` producer | ~15 leaky + fail-bucket | #2903 (re-grounded plan there) | fable-executable-now |
+| S6 | lazy Iterator helpers (map/filter/take/drop/flatMap) + TypedArray callback methods | ~30 | #2903 sub-fronts 2b/4 (plan there) | fable-executable-now |
+| S7 | `__get_caught_exception` zero-registration assert + eager-buffer code deletion | 0 direct (accounting rides S1/S2) | fold into the LAST of S1/S2 to land | mechanical |
+
+Sequencing: S1 ∥ S2 ∥ S5/S6 are independent. S3 after S1 (same
+`isNativeGeneratorCandidate` seam; S1's fn-expr registration is the pattern S3
+extends). S7 last. S1+S2 alone retire ~4,000 of 4,467 — **the family's 90%.**
+
+### S3 design notes (capturing generators — the opus-review part)
+
+`generatorCapturesOuterScope` (generators-native.ts:2001) bails any generator
+nested in a function that reads an enclosing binding — and the test262 module
+wrapper puts tests inside `export function test(){}`, so wrapped tests with
+named generators touching test-scope vars are ALL eager (this is also #3032's
+root observation: the eager body runs at CREATION, violating §27.5.3.1
+EvaluateBody — a generator must suspend before any body statement runs).
+Design direction (needs opus review before staffing):
+
+- The compiler already has the mutable-capture representation: **ref cells**
+  (`struct (field $value (mut T))`) threaded by `src/codegen/closures.ts`.
+  Extend the native generator state struct with N extra immutable fields
+  holding the captured ref cells (captured-by-reference, so writes inside the
+  generator stay visible outside — the eager path got this via the host
+  buffer's by-value snapshot, which is itself subtly WRONG for post-creation
+  mutation; native cells fix that too). The factory
+  (`registerNativeGenerator` / the #3164 fn-expr variant) receives the cells
+  as extra args exactly like `compileArrowAsClosure` captures do.
+- Gate relaxation must move `generatorCapturesOuterScope` from "bail" to
+  "collect capture list" in BOTH `isNativeGeneratorCandidate` and
+  `sourceNeedsGeneratorHostImports` in the same commit (lockstep rule).
+- Read-only uses of module globals already work (not captures). The risk
+  surface is captured-binding read/write ordering across suspends — the
+  ref-cell indirection makes each access go through the cell, so suspends are
+  transparent.
+- Coordinate with **#3032** (in-progress, fable-tag5): #3032 makes the eager
+  path LAZY (semantics fix keeping the host path); S3 makes captures NATIVE
+  (leak fix). If S3 lands first, #3032's remaining scope shrinks to the
+  shapes S1+S3 still exclude. Whoever lands second re-measures.
+
+### S4 design notes (for-await-of dstr legacy async lowering)
+
+The 90 leaky files (`language/statements/for-await-of/async-func-dstr-*`) are
+async FUNCTIONS whose body shape (for-await + destructuring binding) bails the
+#2906 native drive and falls to a legacy lowering that emits `__make_callback`
+continuations + `Promise_resolve/reject/then2` + `__get_caught_exception`.
+Probe-verified on current main 2026-07-12: `for await (const x of [1,2,3])`,
+over a sync generator, and over `[Promise.resolve(1)]` are ALL already
+host-free — the bail is specifically the dstr BINDING form inside for-await
+(see also #2602: for-await assignment-rest write unimplemented). Fix
+direction: widen the async-drive admission the way #3132's consumer arm did —
+the dstr binding lowers through the existing sync `__iterator` +
+IteratorBindingInitialization path once the awaited step value is settled; no
+new machinery. Ground in `src/codegen/async-cps.ts` (the async-fn drive gate)
+before writing the child issue.
+
+## Validation (applies to every slice)
+
+- Leak probe: affected construct compiles standalone with ZERO family
+  `env::` imports AND `WebAssembly.instantiate(binary, {})` succeeds.
+- Construct-sampled corpus flip (leaky-pass → host-free pass), never
+  directory-sampled (the #2938 lesson).
+- `prove-emit-identity`: gc/host lane byte-identical; wasi lane unchanged
+  unless the slice targets it.
+- Full standalone lane runs ONLY in `merge_group` (standalone-highwater floor
+  #2097) — scoped-green is provisional; the floor is the decider.
+- Modules without the construct: byte-identical (carrier-gate discipline).
+
+## Acceptance (umbrella closes when)
+
+- `__create_generator`, `__create_async_generator`, `__make_callback`,
+  `__get_caught_exception` each appear in <100 official-scope leaky passes
+  (from 1,739 / 2,408 / 2,262 / 4,106).
+- host_free_pass ≥ 24,500 (from 20,885) — i.e. the family's ~90% banked.
+- `registerGeneratorHostImports` (the index.ts:11798 registration) is dead in
+  standalone compiles of the test262 corpus (S7 assert).

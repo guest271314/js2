@@ -23,7 +23,12 @@ import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
-import { collectBindingPatternNames, collectReferencedIdentifiers, emitCachedFuncClosureAccess } from "./closures.js";
+import {
+  collectBindingPatternNames,
+  collectReferencedIdentifiers,
+  emitCachedFuncClosureAccess,
+  functionBodyReferencesThis,
+} from "./closures.js";
 import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized own-locals oracle
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
@@ -58,6 +63,7 @@ import { isStandalonePromiseActive } from "./async-scheduler.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { emitNativeUriDecode, emitNativeUriEncode } from "./uri-encoding-native.js";
+import { emitNativeEscape, emitNativeUnescape } from "./escape-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   isNativeGeneratorCandidate,
@@ -106,6 +112,8 @@ interface UnifiedCollectorState {
   dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
+  // -- collectEscapeImports (#3063) — legacy global escape/unescape (§B.2.1/.2) --
+  escapeNeeded: Set<string>;
   // -- collectStringStaticImports --
   needsFromCharCode: boolean;
   needsFromCodePoint: boolean;
@@ -160,6 +168,21 @@ interface UnifiedCollectorState {
 
 const CONSOLE_METHODS_SET = new Set(["log", "warn", "error", "info", "debug"]);
 
+// (#2903) Method names whose CALL can mint a HOST promise in a standalone
+// module even while the native `$Promise` chain is active — the host-routed
+// combinators/instance methods (`__array_from_async` etc. imports). Matched on
+// ANY receiver (conservative: a false positive only preserves the pre-#2903
+// host fallback arm). Plain `Promise.all`/`race`/(#3137) `allSettled`/`any`
+// are NOT listed — those lower to the host-free native combinators
+// (#2919/#2867 Gap 4/#3137); `.finally` is NOT listed since it lowers to the
+// native §27.2.5.3 machinery on Promise/any receivers under the active lane
+// (#2903 sub-front — this un-flags every `.finally`-using module for the
+// then-bridge de-leak); only the subclass-receiver combinator form is flagged
+// (inline check at the scan site — exotic shapes that fall to the host path
+// lazily register their `Promise_*` import, which the bridge's funcMap
+// producer check catches).
+const HOST_PROMISE_SOURCE_METHOD_NAMES = new Set(["allKeyed", "allSettledKeyed", "fromAsync"]);
+
 /**
  * (#1700) Record TypedArray classifications for a user-exported function so
  * the JS-host `wrapExports` can marshal `Uint8Array` params/returns across
@@ -209,6 +232,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     parseNeeded: new Set(),
     dateParseHostNeeded: false,
     uriNeeded: new Set(),
+    escapeNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
     promiseNeeded: new Set(),
@@ -371,6 +395,11 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       // actually used. The 1-arg `number_toString` only handles default base 10.
       if (node.arguments.length > 0) {
         state.primitiveNeeded.add("number_toString_radix");
+        // (#3175) An `undefined` radix (§21.1.3.6 step 2) routes back to the
+        // 1-arg base-10 `number_toString` at the call site, so register it too
+        // — otherwise `(5).toString(undefined)` finds no emitted helper and the
+        // call site returns a null string ref.
+        state.primitiveNeeded.add("number_toString");
       } else {
         state.primitiveNeeded.add("number_toString");
       }
@@ -680,6 +709,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     ) {
       state.uriNeeded.add(name);
     }
+    // (#3063) Legacy `escape` / `unescape` (§B.2.1 / §B.2.2) — pure string
+    // transforms. JS-host mode routes to the native JS globals via an env host
+    // import (registered in the emit phase, gated to host mode so standalone
+    // never leaks an unsatisfiable import). A pure-Wasm standalone lowering is a
+    // follow-up (mirrors the uri-encoding-native.ts machinery).
+    if (name === "escape" || name === "unescape") {
+      state.escapeNeeded.add(name);
+    }
     if (name === "Number") {
       state.parseNeeded.add("parseFloat");
       // Under native strings (standalone/WASI) a `Number(string)` argument is a
@@ -830,14 +867,21 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // ── collectAsyncCpsImports (#1042) ──
   // Detect a CPS-eligible async function so the host imports the driver emits
   // (__make_callback / Promise_then2 / Promise_resolve) are registered upfront
-  // with STABLE funcMap indices. Mirrors the function-body.ts activation gate
-  // exactly (single tail-await canonical shape, no try-across-await, JS-host).
+  // with STABLE funcMap indices. Mirrors the activation gate exactly (single
+  // tail-await canonical shape, no try-across-await, JS-host).
+  //
+  // (#2957 phase 2) Widened to async ARROWS and FUNCTION EXPRESSIONS: those
+  // shapes now activate the CPS machine too (via `closures.ts`), so their host
+  // imports must likewise be pre-registered. If they were not, a module whose
+  // only async fns are arrows would reach `emitAsyncStateMachine` with the
+  // imports missing → it bails and the arrow silently falls back to the legacy
+  // sync pass-through. Method shapes remain phase 3.
   if (
     ASYNC_CPS_ENABLED &&
     (!state.asyncCpsFound || !state.asyncHostDriveFound) &&
     !ctx.wasi &&
     !ctx.standalone &&
-    ts.isFunctionDeclaration(node) &&
+    (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
     node.body !== undefined &&
     hasAsyncModifier(node)
   ) {
@@ -855,6 +899,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // its six imports (__make_callback / Promise_resolve / Promise_then2 /
     // Promise_new_pending / Promise_settle_resolve / Promise_settle_reject)
     // carry stable import indices.
+    //
+    // (#2967) Post-flip both predicates can be true for the same fn (host-drive
+    // claims the CPS shapes on declarations AND — since slice 2a — on lifted
+    // closures; only the shapes host-drive declines, e.g. concise arrow bodies
+    // and the pattern-param carve-out, still emit CPS). Registering both sets
+    // is the safe superset (the CPS trio is a subset of the host-drive six);
+    // the hazard-free direction — every emit path's imports pre-registered —
+    // holds for every routing outcome.
     if (!state.asyncHostDriveFound && asyncFnNeedsHostDrive(ctx, node, plan)) {
       state.asyncHostDriveFound = true;
     }
@@ -873,12 +925,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
       if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
         const inner = p.name.expression;
+        // (#1433) Symbol.dispose / asyncDispose computed methods.
         if (
           ts.isPropertyAccessExpression(inner) &&
           ts.isIdentifier(inner.expression) &&
           inner.expression.text === "Symbol" &&
           (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
         ) {
+          state.getterCallbackFound = true;
+          break;
+        }
+        // (#3048) A non-plain-literal computed method key routes through the
+        // host plain-object method arms in literals.ts — the well-known-`Symbol`
+        // arm (`{ [Symbol.iterator]() {} }`) and the runtime-key arm
+        // (`{ [ID(2)]() {} }`, `{ [k]() {} }`) — both of which install the method
+        // value via the `__make_getter_callback` bridge. Only a plain
+        // numeric/string-literal key (`{ [1]() {} }`, `{ ["x"]() {} }`) resolves
+        // to a static method name and takes the struct/string path (no bridge),
+        // so it needs no registration. The pre-pass previously registered the
+        // bridge only for the `dispose`/`asyncDispose` arm above, so every other
+        // well-known-symbol / runtime computed method missed it → hard CE
+        // "Missing __make_getter_callback import" (#1027 resurgence). Host/GC
+        // only: standalone/WASI compile the method as a host-free closure (#2194)
+        // and must not declare the unsatisfiable `env::` bridge import.
+        const isPlainLiteralKey = ts.isNumericLiteral(inner) || ts.isStringLiteralLike(inner);
+        if (!isPlainLiteralKey && !ctx.standalone && !ctx.wasi) {
           state.getterCallbackFound = true;
           break;
         }
@@ -909,6 +980,27 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
             }
           }
         }
+      }
+    }
+  }
+  // ── getterCallbackFound: JSON.parse(text, reviver) reviver that reads `this` (#3046) ──
+  // §25.5.1.1 InternalizeJSONProperty invokes the reviver with the holder as
+  // `this`. A reviver that touches `this` must route through the
+  // `this`-forwarding `__make_getter_callback` bridge (see
+  // `compileArrowFunction` in closures.ts). Register the import here so the
+  // needsThis emit at the call site has it available.
+  if (!state.getterCallbackFound && ts.isCallExpression(node)) {
+    const callee = node.expression;
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "JSON" &&
+      callee.name.text === "parse" &&
+      node.arguments.length >= 2
+    ) {
+      const reviver = node.arguments[1]!;
+      if ((ts.isFunctionExpression(reviver) || ts.isArrowFunction(reviver)) && functionBodyReferencesThis(reviver)) {
+        state.getterCallbackFound = true;
       }
     }
   }
@@ -990,6 +1082,93 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
     if (!state.generatorFound && ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
       state.generatorFound = true;
+    }
+  }
+
+  // (#2980) Flag any async generator for the widened-standalone Promise-lane
+  // fallback (see `moduleHasAsyncGen` in context/types.ts). Pre-body so a
+  // `Promise.reject` INSIDE the gen sees it.
+  if (
+    !ctx.moduleHasAsyncGen &&
+    (node as ts.Node & { asteriskToken?: ts.Node }).asteriskToken !== undefined &&
+    (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) &&
+    node.body !== undefined &&
+    hasAsyncModifier(node)
+  ) {
+    ctx.moduleHasAsyncGen = true;
+  }
+
+  // (#2903) Flag any construct that can mint a HOST promise in a standalone
+  // module while the native `$Promise` chain is active: dynamic `import()`,
+  // host-routed combinators (`allKeyed`/`allSettledKeyed`; subclass-receiver
+  // `all`/`race`/`allSettled`/`any`), `Array.fromAsync`, and (below, separate
+  // block) `class X extends Promise`. The `.then`/`.catch` receiver bridge keys
+  // its miss arm on this (see `moduleHasHostPromiseSource` in
+  // context/types.ts): no producer in the module ⇒ the host fallback arm is
+  // provably dead ⇒ it is replaced by a native TypeError, dropping the
+  // `Promise_then*`/`__make_callback` leak. Conservative by design — a false
+  // positive merely keeps the pre-#2903 host arm (module stays leaky, exactly
+  // as before); only a false NEGATIVE could change behaviour, so names match
+  // on ANY receiver where the lowering can be host-routed. Pre-body (same
+  // discipline as `moduleHasAsyncGen` above) so a textually-later producer is
+  // seen before any `.then` bridge compiles. gc/host + wasi are untouched
+  // (standalone-only setter; the consumer re-checks the target too).
+  if (
+    ctx.standalone === true &&
+    ctx.wasi !== true &&
+    ctx.moduleHasHostPromiseSource !== true &&
+    ts.isCallExpression(node)
+  ) {
+    if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      ctx.moduleHasHostPromiseSource = true;
+    } else {
+      let calleeName: string | undefined;
+      let recvIsPromiseIdent = false;
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        calleeName = node.expression.name.text;
+        recvIsPromiseIdent =
+          ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "Promise";
+      } else if (
+        ts.isElementAccessExpression(node.expression) &&
+        ts.isStringLiteralLike(node.expression.argumentExpression)
+      ) {
+        calleeName = node.expression.argumentExpression.text;
+      }
+      if (
+        calleeName !== undefined &&
+        (HOST_PROMISE_SOURCE_METHOD_NAMES.has(calleeName) ||
+          // (#3137) native-combinator names: only the subclass-receiver form
+          // (`MyP.all(...)`) is host-routed; plain `Promise.<m>(...)` is native.
+          ((calleeName === "all" || calleeName === "race" || calleeName === "allSettled" || calleeName === "any") &&
+            !recvIsPromiseIdent))
+      ) {
+        ctx.moduleHasHostPromiseSource = true;
+      }
+    }
+  }
+
+  // (#2903 finally sub-front) A `class X extends Promise` in the module is a
+  // host-promise producer in its own right: subclass construction and the
+  // inherited statics (`X.resolve()`/`X.reject()`) route through host imports
+  // (`__new_Promise` + the symbol-derived static-method import), so their
+  // results are HOST promises that a native then/finally bridge miss arm must
+  // keep the host fallback for. This was previously masked for the
+  // subclass-`finally` tests by the (now-removed) `.finally` syntactic flag —
+  // the subclass shape needs its own flag, keyed on the heritage clause
+  // (pre-body, so a textually-later class declaration is still seen).
+  if (
+    ctx.standalone === true &&
+    ctx.wasi !== true &&
+    ctx.moduleHasHostPromiseSource !== true &&
+    (ts.isClassDeclaration(node) || ts.isClassExpression(node))
+  ) {
+    for (const clause of node.heritageClauses ?? []) {
+      if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
+      for (const typeRef of clause.types) {
+        if (ts.isIdentifier(typeRef.expression) && typeRef.expression.text === "Promise") {
+          ctx.moduleHasHostPromiseSource = true;
+        }
+      }
     }
   }
 
@@ -1430,6 +1609,29 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     }
   }
 
+  // (#3063 / #3064) Legacy `escape` / `unescape` (§B.2.1.1 / §B.2.1.2).
+  //   • JS-host mode: register an `(externref) -> externref` env host import
+  //     delegating to the native JS `escape` / `unescape` (runtime.ts). The
+  //     generic call-site routing (calls.ts `funcMap.get(name)`) dispatches it
+  //     and ToString-coerces the argument, exactly like the URI globals above.
+  //   • Standalone / WASI (#3064): there is no host, so emit the pure-Wasm
+  //     `__escape` / `__unescape` helpers (registered as DEFINED funcs; the
+  //     batched late-import shift keeps their funcMap index correct as later
+  //     imports register). The call site (calls.ts) routes each name through
+  //     its native helper.
+  // A user-declared `escape` / `unescape` already sits in funcMap → the `has`
+  // guard skips it in both lanes.
+  for (const name of state.escapeNeeded) {
+    if (ctx.funcMap.has(name)) continue;
+    if (ctx.standalone || ctx.wasi) {
+      if (name === "escape") emitNativeEscape(ctx);
+      else emitNativeUnescape(ctx);
+      continue;
+    }
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    addImport(ctx, "env", name, { kind: "func", typeIdx });
+  }
+
   // ── collectStringStaticImports finalize ──
   if (state.needsFromCharCode) {
     if (ctx.nativeStrings) {
@@ -1477,7 +1679,12 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     // import). Skip the unsatisfiable `Promise_all`/`Promise_race` pre-registration
     // here; the host path (generic iterables / subclass receivers) still
     // lazily `ensureLateImport`s it at the call site when actually needed.
-    if (isStandalonePromiseActive(ctx) && (method === "all" || method === "race")) continue;
+    // (#3137) `allSettled`/`any` are native on the same machinery now — same skip.
+    if (
+      isStandalonePromiseActive(ctx) &&
+      (method === "all" || method === "race" || method === "allSettled" || method === "any")
+    )
+      continue;
     const importName = `Promise_${method}`;
     if (!ctx.funcMap.has(importName)) {
       const isAggregator = method === "all" || method === "race" || method === "allSettled" || method === "any";
@@ -2347,6 +2554,24 @@ export function collectEmptyObjectWidening(
             markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
           }
 
+          // (#2992 S4, standalone) `delete varName.prop` / `delete varName[k]`
+          // is an `$Object`-hash consumer too: a widened closed-struct FIELD
+          // cannot represent a deleted property — the struct-delete arm
+          // (typeof-delete.ts) writes a type-shaped SENTINEL (f64 → NaN,
+          // ref → null) into the fixed slot, and a statically-f64 read makes
+          // `o.k === undefined` CONST-FOLD to false, so the read can never
+          // observe the deletion (the issue's headline nominal-struct repro;
+          // also the pre-existing `delete-sentinel` string-field equivalence
+          // failure). Poison the widening so the var stays a `$Object`, where
+          // `__delete_property` tombstones give correct delete → read / `in` /
+          // hasOwnProperty semantics. Standalone-gated: the host lane's
+          // sidecar + live-mirror handles struct deletes (byte-inert).
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneDeleteTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
           // this receiver used a *dynamic* (non-inline-literal) descriptor, the
           // struct-widening fast path is unsound — the dynamic define is applied
@@ -2729,6 +2954,34 @@ function isAccessorDescriptor(descArg: ts.Expression): boolean {
  * matching the existing widening pre-pass (aliasing is a shared, documented
  * limitation — see the issue's `## Deferred`).
  */
+/**
+ * (#2992 S4, standalone-only caller) Poison `varName` when it is the receiver
+ * of any `delete varName.prop` / `delete varName[<expr>]` in the scanned
+ * statements. A widened closed struct cannot drop a field, so the delete arm's
+ * sentinel write (NaN / null) lies to every later read (`o.k === undefined`
+ * const-folds false on an f64 field). Keeping the var a `$Object` routes the
+ * delete through the `__delete_property` tombstone machinery, which slice 1
+ * (#2872) already proved correct in every lane. Parenthesized targets
+ * (`delete (o.k)`) are unwrapped like the module-init collector does.
+ */
+function markStandaloneDeleteTargets(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (ts.isDeleteExpression(n)) {
+      let target: ts.Expression = n.expression;
+      while (ts.isParenthesizedExpression(target)) target = target.expression;
+      if (
+        (ts.isPropertyAccessExpression(target) || ts.isElementAccessExpression(target)) &&
+        ts.isIdentifier(target.expression) &&
+        target.expression.text === varName
+      ) {
+        poisonSet.add(varName);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
 function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
   const isVarRef = (n: ts.Node): boolean => ts.isIdentifier(n) && n.text === varName;
 
@@ -4357,12 +4610,30 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       // here so the inner CallExpression is recognised and the statement
       // reaches `__module_init`.
       let expr: ts.Expression = stmt.expression;
-      while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+      // (#2992) `void <expr>` evaluates its operand for side effects and
+      // discards the result — in statement position it is transparent, so
+      // unwrap it like parentheses (`void (delete o.k)` must still delete).
+      while (ts.isParenthesizedExpression(expr) || ts.isVoidExpression(expr)) {
+        expr = expr.expression;
+      }
       if (ts.isNewExpression(expr) || ts.isCallExpression(expr)) {
         ctx.moduleInitStatements.push(stmt);
         continue;
       }
       if (ts.isPrefixUnaryExpression(expr) || ts.isPostfixUnaryExpression(expr)) {
+        ctx.moduleInitStatements.push(stmt);
+        continue;
+      }
+      // (#2992) Top-level `delete o.k` / `delete o["k"]` — a DeleteExpression
+      // is its OWN node kind (NOT a PrefixUnaryExpression), so it matched no
+      // case here and was silently dropped from `__module_init`: the property
+      // survived, every later read observed the stale value, and `"k" in o`
+      // stayed true. Delete INSIDE a function always worked — only the
+      // top-level collection dropped it. This was the mechanism behind the
+      // #2992 "delete-tombstone read survival" headline repro. Affects ALL
+      // lanes (gc/standalone/wasi) identically; programs without a top-level
+      // delete statement are byte-identical.
+      if (ts.isDeleteExpression(expr)) {
         ctx.moduleInitStatements.push(stmt);
         continue;
       }
@@ -4422,21 +4693,79 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // write from inside a function already worked; only the top-level
         // collection dropped it. Scoped narrowly:
         //   - DIRECT `F.<name> = …` only (bare-identifier receiver);
-        //     `F.prototype = …` / `F.prototype.m = …` chains stay excluded —
-        //     those are consumed by the compile-time fnctor-prototype lift,
-        //     and re-running them at init would double-apply.
+        //     `F.prototype.m = …` chains stay excluded (non-identifier
+        //     receiver — the generic check below still drops them).
+        //   - (#3049 Layer 1 / #3123) DIRECT `F.prototype = …` is now ALSO
+        //     kept for host/GC. The old exclusion claimed the compile-time
+        //     fnctor-prototype lift consumes it, but
+        //     `tryCompileFnctorPrototypeAssign` opens with
+        //     `if (!ctx.standalone) return undefined` — the lift is
+        //     STANDALONE-ONLY, so in host mode nothing consumed the statement
+        //     and it was silently elided. `F.prototype` reads then fell back
+        //     to the auto-vivified #1712 sidecar object (non-null but
+        //     empty), dropping the assigned prototype object and its whole
+        //     chain. This elision is what kept the test262-runner harness
+        //     shim `Iterator.prototype = getPrototypeOf(getPrototypeOf(
+        //     [][Symbol.iterator]()))` from ever running, so `class C
+        //     extends Iterator` instances could not reach the ES2025
+        //     Iterator-helper prototype (#3123). No double-apply is possible
+        //     in host mode; standalone keeps its own #2660 S2 arm above and
+        //     stays byte-identical.
         //   - Host/GC lanes only: standalone's write-arm for fnctor statics
         //     is separate work (its prototype case has its own #2660 S2 keep
         //     above); standalone codegen stays byte-identical.
-        if (
-          !ctx.standalone &&
-          ts.isPropertyAccessExpression(expr.left) &&
-          ts.isIdentifier(expr.left.expression) &&
-          expr.left.name.text !== "prototype" &&
-          ctx.topLevelFunctionNames.has(expr.left.expression.text)
-        ) {
-          ctx.moduleInitStatements.push(stmt);
-          continue;
+        //   - The receiver is unwrapped through parens / `as`-casts /
+        //     non-null assertions (the harness shim writes
+        //     `(Iterator as any).prototype = …`; the cast must not hide the
+        //     top-level-function receiver — same unwrap
+        //     getAssignmentRootIdentifier applies).
+        if (!ctx.standalone && ts.isPropertyAccessExpression(expr.left)) {
+          let receiver: ts.Expression = expr.left.expression;
+          while (
+            ts.isParenthesizedExpression(receiver) ||
+            ts.isAsExpression(receiver) ||
+            ts.isNonNullExpression(receiver) ||
+            ts.isTypeAssertionExpression(receiver)
+          ) {
+            receiver = receiver.expression;
+          }
+          if (ts.isIdentifier(receiver) && ctx.topLevelFunctionNames.has(receiver.text)) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
+          // (#2623 P-7b) `Promise.<prop> = …` — a top-level static patch on the
+          // BUILTIN Promise (the test262 observable-resolve shape
+          // `Promise.resolve = function(){…}`, `all/race invoke-resolve.js`).
+          // `Promise` is neither a module global nor a top-level function, so
+          // the generic check below dropped the statement — the patch silently
+          // never existed at runtime (the exact #2671 `Test262Error.thrower`
+          // elision mechanism). Keep it in `__module_init` so the ordinary
+          // property-write arm runs: the write routes through `__extern_set`
+          // onto the `declared_global`-resolved Promise. In the single-realm
+          // CI lane (no vm sandbox) that IS `globalThis.Promise` — the same
+          // object the combinator capability `C` (`_resolveCtor`, runtime.ts)
+          // passes to V8, so `Get(C,"resolve")` observes the patch; the CI
+          // worker's #1220 static snapshot/restore un-patches it after each
+          // test. In the LOCAL sandboxed runner the write lands on the
+          // sandbox Promise (inert for the host-realm capability lane; the
+          // `["Promise","resolve"]` SENTINEL_KEYS entry discards the dirty
+          // sandbox) — the local lane deliberately does NOT chase realm
+          // unification (P-7b design decision, see the issue file). Host/GC
+          // lane + `Promise` receiver only — a blanket builtin-receiver keep
+          // flips patches on every builtin at once and is separate, measured
+          // work. Shadowed user bindings named `Promise` are module globals /
+          // functions and are caught by the arms above/below, never reaching
+          // this keep.
+          if (
+            ts.isIdentifier(receiver) &&
+            receiver.text === "Promise" &&
+            !ctx.moduleGlobals.has("Promise") &&
+            !ctx.topLevelFunctionNames.has("Promise") &&
+            !ctx.classSet.has("Promise")
+          ) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
         }
         const targetName = getAssignmentRootIdentifier(expr.left);
         if (targetName && ctx.moduleGlobals.has(targetName)) {
@@ -4683,23 +5012,29 @@ export function compileDeclarations(
   // that is already global (a false-positive defer only churns codegen order).
   function classDeclCapturesNames(decl: ts.ClassDeclaration, names: ReadonlySet<string>): boolean {
     if (names.size === 0) return false;
-    // (#2818 standalone follow-up) NEVER defer a class that has a base class
-    // (`extends …`). A derived class routes its constructor through a
-    // `super(...)` call; the deferred, block-recompiled path lowers that
-    // super-constructor invocation + any spread/getter in the arguments
-    // *correctly in the WasmGC (host) lane* but produces a **desynced** result
-    // in the standalone lane (the promoted-global read of a captured `let`
-    // resolves to a stale/empty value through the super/spread machinery). The
-    // *eager* path — which is exactly how `origin/main` compiled these — is
-    // correct in the standalone lane, so we keep every derived class eager.
-    // This regressed 6 standalone test262 files (all `class X extends Iterator`
-    // / `extends Parent` capturers: the `Iterator.prototype.{map,flatMap,take,
-    // drop,filter}` `return-is-forwarded*` tests + `super/call-spread-obj-
-    // getter-init`). Base-less capturers (the genuine #2818 target — a plain
-    // `class C { m(){ return s; } }` reading a block-`let`) still defer and are
-    // fixed; they have no super-constructor path and lower identically in both
-    // lanes.
-    if (decl.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) {
+    // (#2818 standalone follow-up) In the STANDALONE/WASI lane, NEVER defer a
+    // class that has a base class (`extends …`). A derived class routes its
+    // constructor through a `super(...)` call; the deferred, block-recompiled
+    // path lowers that super-constructor invocation + any spread/getter in the
+    // arguments *correctly in the WasmGC (host) lane* but produces a
+    // **desynced** result in the standalone lane (the promoted-global read of
+    // a captured `let` resolves to a stale/empty value through the super/
+    // spread machinery). The *eager* path — which is exactly how `origin/main`
+    // compiled these — is correct in the standalone lane, so standalone keeps
+    // every derived class eager. This had regressed 6 standalone test262 files
+    // (all `class X extends Iterator` / `extends Parent` capturers: the
+    // `Iterator.prototype.{map,flatMap,take,drop,filter}`
+    // `return-is-forwarded*` tests + `super/call-spread-obj-getter-init`).
+    //
+    // (#3123) The HOST lane takes the opposite branch: an EAGER capturing
+    // derived class compiles before the block-`let` initialises, so
+    // `promoteAccessorCapturesToGlobals` never fires and the method body's
+    // capture read/write lowers to a silent no-op (`f64.const NaN; drop` —
+    // verified via WAT on the `class TestIterator extends Iterator {
+    // return() { ++returnCount; } }`-in-`try` shape of the Iterator-helper
+    // `return-is-forwarded` files). The deferred path is documented correct
+    // for host above, so host defers derived capturers like base-less ones.
+    if ((ctx.standalone || ctx.wasi) && decl.heritageClauses?.some((h) => h.token === ts.SyntaxKind.ExtendsKeyword)) {
       return false;
     }
     const wouldPromote = (name: string): boolean => {
@@ -4799,7 +5134,24 @@ export function compileDeclarations(
         for (const decl of stmt.declarationList.declarations) {
           if (ts.isIdentifier(decl.name) && decl.initializer && ts.isClassExpression(decl.initializer)) {
             if (insideFunction) {
-              ctx.deferredClassBodies.add(decl.name.text);
+              // (#3045 Bug 2) Defer the class-expression BODY compilation to the
+              // in-scope variable path so its constructor/method bodies can
+              // capture the enclosing function scope — call enclosing functions
+              // and read/write enclosing locals — exactly as a nested class
+              // DECLARATION does (deferred just above, compiled in-scope by
+              // `compileNestedClassDeclaration`). Key the deferral by the
+              // SYNTHETIC name the class was collected under (`anonClassExprNames`)
+              // — the name its ctor/method funcs live under and that
+              // `compileClassExpression` resolves — NOT the binding name (which
+              // is a dead duplicate registration, #1394). The in-scope compile
+              // runs in `compileVariableStatement`. Without this, the body was
+              // compiled eagerly at module scope (in `compileAnonymousClassBodies
+              // InNode` below) BEFORE the enclosing function's nested functions
+              // were registered and BEFORE its captured locals were promoted to
+              // globals → enclosing calls returned garbage and enclosing writes
+              // were dropped.
+              const synth = ctx.anonClassExprNames.get(decl.initializer);
+              if (synth !== undefined) ctx.deferredClassBodies.add(synth);
             } else {
               try {
                 compileClassBodies(ctx, decl.initializer, funcByName, decl.name.text);
@@ -4888,6 +5240,13 @@ export function compileDeclarations(
     const syntheticName = ctx.anonClassExprNames.get(classExpr);
     if (syntheticName) {
       compiledAnonClasses.add(classExpr);
+      // (#3045 Bug 2) A class-expression body deferred to the in-scope variable
+      // path (see the VariableStatement branch in `compileClassesFromStatements`)
+      // must NOT be eagerly compiled here at module scope — its ctor/method
+      // bodies are compiled in `compileVariableStatement`, where the enclosing
+      // function scope is live. It is already marked handled (added to
+      // `compiledAnonClasses` above) so it is never eager-compiled; skip.
+      if (ctx.deferredClassBodies.has(syntheticName)) return;
       try {
         compileClassBodies(ctx, classExpr, funcByName, syntheticName);
       } catch (e) {

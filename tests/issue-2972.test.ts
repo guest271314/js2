@@ -19,7 +19,6 @@
 // silently wrong) stays compile-twice. One predicate, two consumers.
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
-import { irFirstBodyReadsStringElement } from "../src/codegen/ir-first-gate.js";
 import { stringIndexProvenBelow } from "../src/ir/capability.js";
 import { analyzeSource } from "../src/checker/index.js";
 import { planIrCompilation } from "../src/ir/select.js";
@@ -27,7 +26,8 @@ import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 
 async function compileFlag(on: boolean, src: string): Promise<CompileResult> {
-  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "");
+  // (#3143) IR-first is default-ON; off-arm uses the explicit "0" escape hatch.
+  vi.stubEnv("JS2WASM_IR_FIRST", on ? "1" : "0");
   try {
     return await compile(src, { fileName: "issue-2972.ts" });
   } finally {
@@ -40,13 +40,6 @@ async function instantiate(r: CompileResult): Promise<Record<string, Function>> 
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
   imports.setExports?.(instance.exports as Record<string, Function>);
   return instance.exports as Record<string, Function>;
-}
-
-function fnDecl(src: string): ts.FunctionDeclaration {
-  const sf = ts.createSourceFile("t.ts", src, ts.ScriptTarget.Latest, true);
-  const fn = sf.statements.find(ts.isFunctionDeclaration);
-  if (!fn) throw new Error("no function declaration in source");
-  return fn;
 }
 
 // The exact test262 encoding harness (test262/harness/decimalToHexString.js).
@@ -117,52 +110,24 @@ describe("#2972 string element access under IR-first (gate 5 + 2a lowering)", ()
     expect((exp.test as () => number)()).toBe(1);
   });
 
-  it("flag ON: a claimed const-string-index function IR-compiles AND is compile-once (2a lowering)", async () => {
-    // Pre-lowering, gate 5 excluded this function from the skip set (the
-    // landed PR #2519 asserted not-skipped here). With the 2a lowering + the
-    // refined gate, the proven read is IR-first-safe: the function is
-    // SKIPPED (compile-once) and the result comes from the IR body.
+  it("flag ON: a claimed const-string-index function IR-compiles AND runs correctly", async () => {
+    // (#3143) The IR-first skip set is now an ALLOWLIST restricted to f64-numeric
+    // bodies — a string-returning / string-indexing body is NOT skipped, so it
+    // stays COMPILE-TWICE (correct; the IR overlay still owns its body). The
+    // compile-once optimization for proven string-element reads is DEFERRED to
+    // the allowlist-widening track (#2855/#2856). This test locks CORRECTNESS.
     const r = await compileFlag(true, CONST_STRING_INDEX_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
-    expect(r.irFirstSkipped).toContain("f");
+    expect(r.irFirstSkipped ?? []).not.toContain("f");
     const exp = await instantiate(r);
     expect((exp.f as (n: number) => string)(200)).toBe("8"); // hex[200 & 0xf] = hex[8]
   });
 
-  it("flag ON: vec `arr[i]` is unaffected — still IR-first compile-once", async () => {
+  it("flag ON: vec `arr[i]` compiles+runs correctly (compile-twice under the f64-only allowlist)", async () => {
+    // (#3143) element access is outside the numeric allowlist → compile-twice.
     const r = await compileFlag(true, VEC_INDEX_SRC);
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
-    expect(r.irFirstSkipped).toContain("sum");
-  });
-
-  describe("irFirstBodyReadsStringElement predicate (refined: proven reads don't fire)", () => {
-    it.each([
-      ["string-typed parameter receiver (length unknown)", `function f(s: string, i: number){ return s[i]; }`],
-      ["string-literal receiver in place (identifier-only lowering)", `function f(i){ return "abcdef"[i]; }`],
-      ["unproven index on literal-known receiver", `function f(i){ const hex="ABCDEF"; return hex[i]; }`],
-      ["mask too wide for the literal", `function f(n){ const hex="ABCDEF"; return hex[n & 0xf]; }`],
-      ["reassigned receiver loses the length fact", `function f(n){ let h="ABCDEF"; h="xy"; return h[n & 1]; }`],
-    ])("fires (unproven — compile-twice): %s", (_label, src) => {
-      expect(irFirstBodyReadsStringElement(fnDecl(src))).toBe(true);
-    });
-
-    it.each([
-      // (#2972 2a) proven reads are lowerable — the gate must NOT exclude them.
-      [
-        "var string-literal receiver, mask-proven index (the harness shape)",
-        `function f(n){ var hex="0123456789ABCDEF"; return "%"+hex[(n>>4)&0xf]+hex[n&0xf]; }`,
-      ],
-      ["const string-literal receiver, mask-proven index", `function f(n){ const hex="ABCDEF"; return hex[n&1]; }`],
-      ["const string-literal receiver, literal index in range", `function f(){ const hex="ABCDEF"; return hex[3]; }`],
-      // non-string receivers — never fired, still don't.
-      ["vec (number[]) receiver", `function f(arr: number[], i: number){ return arr[i]; }`],
-      ["numeric-var-indexed vec receiver", `function f(a: number[]){ var j=0; return a[j]; }`],
-      ["object string-literal key", `function f(o){ return o["k"]; }`],
-      ["untyped/any local receiver", `function f(o){ var x = o.thing; return x[0]; }`],
-      ["optional element access (out of IR scope anyway)", `function f(s: string, i){ return s?.[i]; }`],
-    ])("does not fire: %s", (_label, src) => {
-      expect(irFirstBodyReadsStringElement(fnDecl(src))).toBe(false);
-    });
+    expect(r.irFirstSkipped ?? []).not.toContain("sum");
   });
 
   describe("2a lowering (proven-in-bounds charAt delegation)", () => {
@@ -175,11 +140,13 @@ describe("#2972 string element access under IR-first (gate 5 + 2a lowering)", ()
       expect(r.irPostClaimErrors ?? []).toEqual([]);
     });
 
-    it("bit-correct results, flag-off AND flag-on with the legacy body skipped", async () => {
+    it("bit-correct results, flag-off AND flag-on (compile-twice under the f64-only allowlist)", async () => {
       for (const flag of [false, true]) {
         const r = await compileFlag(flag, PROVEN_HARNESS_SRC);
         expect(r.success).toBe(true);
-        if (flag) expect(r.irFirstSkipped).toContain("decimalToPercentHexString");
+        // (#3143) string-returning body is outside the numeric allowlist →
+        // compile-twice (correct); compile-once deferred to the widening track.
+        if (flag) expect(r.irFirstSkipped ?? []).not.toContain("decimalToPercentHexString");
         const exp = await instantiate(r);
         const run = exp.run as (n: number) => string;
         expect(run(0xab)).toBe("%AB");

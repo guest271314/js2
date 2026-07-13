@@ -50,16 +50,18 @@ export function test(): number {
   return f(3, 3.0) + f("x", "x") + f(1, 2);
 }`;
 
-// The combined program's RESULT differs by lane because of a PRE-EXISTING (not
-// E3-introduced) standalone classifier gap, verified byte-identical on
-// origin/main: on the JS-host lane `3 === 3.0` is true (== true(1), === true(2)
-// → 3), but the standalone numeric-tag classifier reports `3 === 3.0` FALSE (==
-// true(1), != true(4), !== true(8) → 13) — a known deferred-fix item
-// (#1987/#2040 family). E3 is a byte-neutral dispatch extraction, so each lane's
-// established value is pinned here as a regression guard, NOT "corrected".
-//   host:       f(3,3.0)=3  + f("x","x")=3 + f(1,2)=12 = 18
-//   standalone: f(3,3.0)=13 + f("x","x")=3 + f(1,2)=12 = 28
-const combinedExpected = { host: 18, standalone: 28 } as const;
+// The combined program's RESULT was historically lane-split by a standalone
+// classifier gap: `3 === 3.0` answered FALSE standalone (== true(1), != true(4),
+// !== true(8) → 13; the #1987/#2040 family), so standalone pinned 28 while host
+// pinned the spec-correct 18. (#3169) FIXED: the gap was the #3037 read-carrier
+// firing for an equality whose entry decision predated a mid-operand
+// `$AnyValue` registration — one operand reached the comparison as a
+// `ref $AnyValue` carrier, the other as a bare externref, and the mixed pair
+// fell to struct-identity (`3 === 3.0` false). Gating the carrier on the LIVE
+// `ctx.activeAnyEqDispatchExpr` marker keeps both operands on the same rep, so
+// both lanes now agree on the spec value:
+//   f(3,3.0)=3 + f("x","x")=3 + f(1,2)=12 = 18
+const combinedExpected = { host: 18, standalone: 18 } as const;
 
 describe("#1917 E3 — emitStrictEq / emitLooseEq (any/any equality dispatch)", () => {
   for (const standalone of [false, true]) {

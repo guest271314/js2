@@ -1258,6 +1258,16 @@ jobs:
           # #1954 — scoped PR runs: restrict the baseline to the scope or
           # every out-of-scope baseline pass reads as a pass→absent regression.
           TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
+          # #3202 — the #3189 uncatchable-trap ratchet's per-category tolerance
+          # (diff-test262.ts reads TRAP_RATCHET_TOLERANCE; default 0 = strict).
+          # Sourced from a repo variable so it can be tightened back to 0 without
+          # a PR once the CI-sharded-only +4 oob on the 4 unsupported-BigInt
+          # `TypedArray.prototype.set` tests is resolved. Set to 4 during the
+          # 2026-07-12 queue-wedge incident: main HEAD is verifiably 58 (baseline
+          # source c660e830 → main HEAD has only doc commits; fresh baseline=58),
+          # so the +4 is a speculative-merge/CI-flaky classification, NOT a main
+          # regression — this valve is the ratchet's own designed unwedge.
+          TRAP_RATCHET_TOLERANCE: ${{ vars.TRAP_RATCHET_TOLERANCE || '0' }}
         run: |
           BASELINE="benchmarks/results/test262-current.jsonl"
           if [ ! -f "$BASELINE" ]; then
@@ -1840,6 +1850,16 @@ jobs:
           # baseline commit.
           node scripts/check-coercion-sites.mjs --update || \
             echo "WARN: coercion-site baseline update failed (non-fatal)"
+          # #3131 — LOC-budget baseline (also a pure source measure). PRs no
+          # longer commit bumps at all (the per-PR whole-tree bump made every
+          # open PR merge-conflict on scripts/loc-budget-baseline.json after
+          # every main advance — the churn that held the #2835 stack); this
+          # post-merge refresh is the SOLE writer. The PR gate itself is fully
+          # change-scoped against git (#3131), so the committed file only
+          # serves the --all audit and the no-git fallback. --update skips the
+          # write when only the date would change. Non-fatal.
+          node scripts/check-loc-budget.mjs --update || \
+            echo "WARN: loc-budget baseline update failed (non-fatal)"
           # Re-derive the landing-page feature-support badges (#2665). The
           # source of truth is now website/public/feature-examples.json (the
           # canonical per-feature aggregation written by build-data.js — it
@@ -1863,6 +1883,8 @@ jobs:
             # #2108 — coercion-site drift baseline, refreshed just above. Staged
             # so the new floor lands atomically with the merged source.
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — LOC-budget baseline, refreshed just above (sole writer).
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             # #2097 — the standalone high-water mark (raised just above when
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.
@@ -1992,6 +2014,33 @@ jobs:
             # commit. The [skip ci] trailer prevents the push from re-triggering
             # the shard matrix (#1156).
             reapply_promote_files
+            # (#3115) STALE-CHECKOUT GUARD. The coercion-site baseline is the ONE
+            # promote file derived from the SOURCE TREE (a pure src/codegen/**
+            # grep) rather than from this run's test262 report. The `--update`
+            # above (and the snapshot re-applied by reapply_promote_files) computed
+            # it against THIS job's checkout (github.sha, "T"). But the re-anchor
+            # `git checkout -f -B _promote_tmp deploykey/main` just replaced the
+            # working tree with main's CURRENT tip ("T+k"), which may include a PR
+            # that merged after T and changed the coercion-site count. Banking the
+            # T-snapshot value over the T+k source commits an internally
+            # inconsistent pair (source count != committed baseline) and turns the
+            # REQUIRED check:coercion-sites gate RED on main, wedging the whole
+            # merge queue (the 2026-07-09 property-access.ts 16->17 incident: a
+            # promote for a pre-#2812 SHA clobbered the reviewed 17 back to 16).
+            # RECOMPUTE it against the re-anchored tree so the banked baseline is
+            # correct-by-construction for the exact tree being pushed. No-op when
+            # main is stable (T == T+k); self-heals a drifted baseline otherwise.
+            # Mirrors refresh-baseline.yml, which already regenerates its source-
+            # derived docs INSIDE the loop after re-anchor. Non-fatal — a transient
+            # grep failure must not strand the summary commit.
+            node scripts/check-coercion-sites.mjs --update || \
+              echo "WARN: coercion-site baseline recompute on re-anchored tip failed (non-fatal)"
+            git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
+            # #3131 — same stale-checkout guard for the LOC-budget baseline
+            # (also a pure source measure; main is its sole writer now).
+            node scripts/check-loc-budget.mjs --update || \
+              echo "WARN: loc-budget baseline recompute on re-anchored tip failed (non-fatal)"
+            git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
             if git diff --cached --quiet; then
               echo "Baseline already current on main (no delta after re-anchor) — nothing to push."
               PUSHED=1

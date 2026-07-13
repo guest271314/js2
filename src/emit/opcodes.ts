@@ -126,6 +126,7 @@ export const OP = {
   i64_extend_i32_u: 0xad,
   i64_trunc_f64_s: 0xb0,
   f64_convert_i64_s: 0xb9,
+  f64_convert_i64_u: 0xba, // (#3173) DataView getBigUint64 — unsigned i64 → f64
   f64_convert_i32_s: 0xb7,
   f64_convert_i32_u: 0xb8,
   // reinterpret (bit-cast) conversions

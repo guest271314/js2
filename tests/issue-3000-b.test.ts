@@ -93,18 +93,19 @@ describe("#3000-B — IR accessor selection", () => {
     expect(reasons.get("S_get_count")).toBe("class-method");
   });
 
-  it("defers an accessor on an `extends` subclass to class-method (Phase E)", () => {
+  it("claims an accessor on an `extends`-of-local-class subclass (#3000-E landed Phase E)", () => {
     const sel = selection(`
       class Base { #n: number; constructor(n: number) { this.#n = n; } get n(): number { return this.#n; } }
       class Sub extends Base { #m: number; constructor(n: number, m: number) { super(n); this.#m = m; } get m(): number { return this.#m; } }
     `);
     const claimed = new Set(sel.classMembers ?? []);
-    // Flat Base getter is claimed; the subclass getter is deferred.
+    // #3000-E: the parent (`Base`) is a local user class, so the subclass getter
+    // is now CLAIMED alongside the flat Base getter (was deferred pre-#3000-E).
     expect(claimed.has("Base_get_n")).toBe(true);
-    expect(claimed.has("Sub_get_m")).toBe(false);
+    expect(claimed.has("Sub_get_m")).toBe(true);
     const reasons = new Map<string, string>();
     for (const fb of sel.fallbacks ?? []) reasons.set(fb.name, fb.reason);
-    expect(reasons.get("Sub_get_m")).toBe("class-method");
+    expect(reasons.get("Sub_get_m")).toBeUndefined();
   });
 });
 

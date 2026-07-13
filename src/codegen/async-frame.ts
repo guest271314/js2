@@ -39,12 +39,23 @@ import { forEachChild, ts } from "../ts-api.js";
 import type { AsyncCfgPlan, AsyncCfgState, AsyncCpsPlan, AsyncResumePoint } from "./async-cps.js";
 import {
   ASYNC_CPS_ENABLED,
+  FORAWAIT_ITER_SPILL,
+  analyzeAsyncBody,
   asyncFnNeedsCps,
   awaitedExprIsPromiseCombinator,
+  forAwaitAsyncNeedsDrive,
+  forAwaitNeedsDrive,
+  asyncGenOwnLocalDecls,
+  forAwaitSpillInfo,
+  isAwaitFreeAsyncGenBody,
+  isBoundedAsyncGenBody,
+  isEmitOperand,
   loopAsyncSpillInfo,
   planAsyncCfg,
+  planAsyncGenCfg,
   planLinearAwaits,
 } from "./async-cps.js";
+import { ensureNativeGeneratorResultType } from "./generators-native.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
 import {
   type AsyncDriveRuntime,
@@ -53,6 +64,7 @@ import {
   PROMISE_STATE_REJECTED,
   ensureAsyncDriveRuntime,
   getOrRegisterPromiseType,
+  isStandalonePromiseActive,
 } from "./async-scheduler.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -62,6 +74,8 @@ import {
   MODE_FIELD,
   MODE_THROW,
   PARAM_FIELD_OFFSET,
+  RESULT_DONE_FIELD,
+  RESULT_VALUE_FIELD,
   SENT_FIELD,
   STATE_FIELD,
   defaultSpillInstr,
@@ -71,7 +85,7 @@ import {
 } from "./frame-core.js";
 import { ensureI32Condition, resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getOrRegisterRefCellType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement } from "./shared.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 
@@ -158,13 +172,21 @@ export function resolveHostAsyncImports(ctx: CodegenContext): HostAsyncImports |
  * `Promise_new_pending`/`Promise_settle_*`) instead of the native `$Promise`
  * callback list. One lowering engine, two settle primitives.
  *
- * **Deliberately disjoint from {@link asyncFnNeedsCps}**: every shape the
- * proven single-tail-await CPS lane accepts today keeps taking that lane
- * (byte-stable), so this predicate claims ONLY shapes that today fall through
- * to the legacy synchronous fakery and produce wrong values under genuine
- * suspension (measured 2026-07-02: multi-await → null, spill-across-await →
- * null, try/finally-across-await → null, rejected 2nd await → uncaught wasm
- * exception). Additive by construction: `false` ⇒ output unchanged.
+ * **(#2967 slice 1 — engine convergence)** This predicate now claims EVERY
+ * linear shape `planLinearAwaits` can drive, including the single-tail-await
+ * population the CPS lane (`asyncFnNeedsCps`) used to own exclusively — the
+ * #1042 `!asyncFnNeedsCps` disjointness exclusion is dropped. Single-await is
+ * the N=1 case of the N-state machine, so one engine drives both.
+ *
+ * (#2967 slice 2 status) The two slice-1 carve-outs are now migrated:
+ * closures were admitted in slice 2a (`planAsyncClosureActivation`, with the
+ * #2873 park-fix hazard gate), and binding-pattern params in slice 2b-2 —
+ * their prologue-derived locals ride the frame as live-initialized spill
+ * fields (see `emitAsyncFrameStateMachine`). The only remaining CPS re-lanes
+ * are hazard DECLINES (cell-boxed spills / cell-boxed derived params), not
+ * population carve-outs. Pre-#2967 host-drive shapes (multi-await,
+ * try/finally-across-await) are unaffected — for them `asyncFnNeedsCps` was
+ * already false.
  */
 export function asyncFnNeedsHostDrive(
   ctx: CodegenContext,
@@ -176,8 +198,20 @@ export function asyncFnNeedsHostDrive(
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → legacy sync path
-  // The single-tail-await CPS lane owns its shapes — never re-route them.
-  if (asyncFnNeedsCps(fn, plan)) return false;
+  // (#2967 slice 2b-2) Binding-pattern params are DRIVEN: the entry fn's
+  // destructuring prologue has already derived the bound locals by the time
+  // the activation emits (maybeActivateAsync / the closure body emit both run
+  // AFTER the param prologue), so `emitAsyncFrameStateMachine` captures them
+  // into the frame as LIVE-INITIALIZED spill fields (initialized from the
+  // entry locals at struct.new, restored on every resume, stored back at
+  // every suspend — which also preserves the CPS lane's
+  // mutation-before-the-await semantics). Rest params never needed a
+  // carve-out at all: an identifier rest param IS a raw wasm param (the
+  // caller builds the vec — ctx.funcRestParams), captured by name like any
+  // other param. (#2967 phase 3a) A derived binding that a nested
+  // function-like captures mutably is FORCE-BOXED into a cell-typed frame
+  // field (buildAsyncFrameInfo `spillCellInfo`) — no pattern-shape decline
+  // remains.
   const linear = planLinearAwaits(fn, plan);
   if (linear === null) return false;
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
@@ -227,6 +261,22 @@ export interface AsyncFrameInfo {
   spillTypes: ValType[];
   /** First struct field index where spills start. FrameLayout. */
   spillFieldOffset: number;
+  /**
+   * (#2967 slice 2b-2) Spill index → ENTRY-fn local index for pattern-DERIVED
+   * param bindings. Only meaningful inside the activating fctx: at frame
+   * struct.new these spill fields are initialized from the listed live locals
+   * (post-destructuring-prologue values) instead of `defaultSpillInstr`.
+   */
+  derivedSpillInit?: Map<number, number>;
+  /**
+   * (#2967 phase 3a) Spill index → ref-cell metadata for FORCE-BOXED class-1
+   * hazardous spills (nested-mutable-captured locals / derived params). The
+   * field (and `spillTypes[i]`) is the CELL ref type; `valType` is the boxed
+   * value type. Entry creates the cell at struct.new; the resume prologue
+   * registers the name in `boxedCaptures` so all reads/writes/inits and the
+   * closures.ts capture aliasing flow through the cell.
+   */
+  spillCellInfo?: Map<number, { refCellTypeIdx: number; valType: ValType }>;
   /** Field index of the result `$Promise` the async fn returns / settles. */
   resultPromiseFieldIdx: number;
   /**
@@ -256,6 +306,31 @@ export interface AsyncFrameInfo {
   stepFulfillFuncIdx?: number;
   /** `__async_step_reject_f<name>(caps, value) -> externref` funcIdx — emitter slice. */
   stepRejectFuncIdx?: number;
+  /**
+   * (#2906 slice 3d-i) `true` when this frame drives an async GENERATOR producer:
+   * the resume machine is built from {@link planAsyncGenCfg} (not `planAsyncCfg`)
+   * and the `settleYield`/`settleDone` terminators fulfil the re-minted
+   * `next()`-promise with an IteratorResult instead of the async fn's raw value.
+   */
+  asyncGen?: boolean;
+  /** (#2906 slice 3d-i) `{value: externref, done: i32}` IteratorResult struct typeIdx (async-gen only). */
+  asyncGenResultTypeIdx?: number;
+  /**
+   * (#2865) Capture-cell metadata of a NESTED producer (lifted with captures
+   * as leading params — nested-declarations.ts). The frame captures the cells
+   * as param fields; the resume body must deref reads/writes through them, so
+   * `ensureAsyncResumeFunction` copies this onto the resume FunctionContext.
+   */
+  boxedCaptures?: Map<string, { refCellTypeIdx: number; valType: ValType }>;
+  /** (#2865) Threaded from the producer fctx (nested `this`-referencing body). */
+  readsCurrentThis?: boolean;
+  /**
+   * (#2865) The `__self` capture-struct layout of a lifted CLOSURE body
+   * (closures.ts model: captures live in the `__self` struct, materialized
+   * into named locals by a body prologue). The resume fn re-runs that
+   * materialization from the frame-captured `__self` param field.
+   */
+  selfCaptureLayout?: FunctionContext["selfCaptureLayout"];
 }
 
 /**
@@ -292,6 +367,7 @@ export function buildAsyncFrameInfo(
   paramTypes: ValType[],
   promiseTypeIdx: number,
   hostImports?: HostAsyncImports,
+  derivedParams?: DerivedParamCapture[],
 ): AsyncFrameInfo {
   const functionName = asyncFnName(decl);
 
@@ -314,7 +390,72 @@ export function buildAsyncFrameInfo(
   }
 
   const spillFieldOffset = PARAM_FIELD_OFFSET + paramTypes.length;
-  const { spillNames, spillTypes } = computeAsyncSpills(ctx, decl, plan, paramNames);
+  // (#2967 slice 2b-2) Pattern-DERIVED param bindings ride the frame as
+  // LIVE-INITIALIZED spill fields: excluded from the liveness-computed spill
+  // set (whose entries the resume fn expects a segment lead to initialize —
+  // a derived binding has no lead statement, and its declared-type GUESS
+  // would be an externref default anyway), then appended with their ACTUAL
+  // entry-local ValTypes. `derivedSpillInit` maps their spill indices to the
+  // entry locals so `emitAsyncFrameStateMachine` initializes the fields with
+  // the post-prologue values at struct.new instead of inert defaults. As
+  // ordinary (mutable) spill fields they are restored on every resume AND
+  // stored back at every suspend, so a mutation before an await survives it —
+  // the same observable semantics the CPS continuation snapshot gave them.
+  const derived = derivedParams ?? [];
+  const { spillNames, spillTypes } = computeAsyncSpills(
+    ctx,
+    decl,
+    plan,
+    derived.length === 0 ? paramNames : paramNames.concat(derived.map((d) => d.name)),
+  );
+  const derivedSpillInit = new Map<number, number>();
+  for (const d of derived) {
+    derivedSpillInit.set(spillNames.length, d.entryLocalIdx);
+    spillNames.push(d.name);
+    spillTypes.push(d.type);
+  }
+
+  // (#2967 phase 3a) Cell-aware fields — FORCE-BOX class-1 hazardous spills.
+  // A spill name that a NESTED function-like captures mutably gets cell-boxed
+  // by body compile (closures.ts), which used to invalidate the frame layout
+  // (the #2873 class-1 decline). Instead of predicting closures.ts's decision,
+  // we make it: the frame field is typed `(ref null $__ref_cell_<T>)`, the
+  // ENTRY fn creates the cell at struct.new (a live cell for a derived param,
+  // a default-valued one for a body local), and the resume prologue binds the
+  // NAME to the restored cell + registers it in `boxedCaptures` — so the
+  // declaration-init (#1177 boxedForInitStore), reads/writes (identifiers/
+  // assignment/unary-updates), and nested-closure creation (the closures.ts
+  // `alreadyBoxed` aliasing branch) ALL flow through existing machinery, and
+  // `storeSpills` stores the cell ref back into a matching field. Cell
+  // IDENTITY survives suspends (the same heap cell is restored), so a nested
+  // closure and post-await states observe each other's writes. Force-boxing
+  // is deliberately an over-approximation: boxing a local closures.ts would
+  // not have boxed just adds an indirection — still correct — so the
+  // predicate need not mirror closures.ts exactly. Body locals require a
+  // defaultable value type (the entry cell needs `defaultSpillInstr`);
+  // derived params are live-initialized, so any value type boxes. Async
+  // GENERATOR frames are untouched (every own local spills there; the yield
+  // machine has its own discipline).
+  const spillCellInfo = new Map<number, { refCellTypeIdx: number; valType: ValType }>();
+  if (decl.asteriskToken === undefined && decl.body !== undefined && spillNames.length > 0) {
+    const { referencedInNested, assigned } = collectNestedRefsAndAssigns(decl.body);
+    if (referencedInNested.size > 0 && assigned.size > 0) {
+      const declByName = collectVarDeclsByName(decl);
+      const derivedNames = new Set(derived.map((d) => d.name));
+      for (let i = 0; i < spillNames.length; i++) {
+        const name = spillNames[i]!;
+        if (!referencedInNested.has(name) || !assigned.has(name)) continue;
+        const isDerived = derivedNames.has(name);
+        if (!declByName.has(name) && !isDerived) continue;
+        const valType = spillTypes[i]!;
+        if (!isDerived && !isSpillSafeType(valType)) continue; // no inert cell default
+        const refCellTypeIdx = getOrRegisterRefCellType(ctx, valType);
+        spillCellInfo.set(i, { refCellTypeIdx, valType });
+        spillTypes[i] = { kind: "ref_null", typeIdx: refCellTypeIdx };
+      }
+    }
+  }
+
   for (let i = 0; i < spillNames.length; i++) {
     stateFields.push({
       name: `spill_${spillNames[i]}`,
@@ -356,6 +497,8 @@ export function buildAsyncFrameInfo(
     spillNames,
     spillTypes,
     spillFieldOffset,
+    derivedSpillInit: derivedSpillInit.size > 0 ? derivedSpillInit : undefined,
+    spillCellInfo: spillCellInfo.size > 0 ? spillCellInfo : undefined,
     resultPromiseFieldIdx,
     promiseTypeIdx,
     host: hostImports !== undefined,
@@ -423,7 +566,20 @@ function bindingLiveAcrossLaterAwait(name: string, k: number, plan: AsyncCpsPlan
  */
 export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
-  if (plan.awaitPoints.length === 0) return false;
+  if (plan.awaitPoints.length === 0) {
+    // (#2906 slice 3b) `for await`-only body: no `ts.AwaitExpression`, but a
+    // `for await` genuinely suspends per element. Eligible when it is the
+    // bounded for-await shape and every widened spill local is spill-safe.
+    if (plan.forAwaitPoints.length === 0) return false;
+    // (#2906 slice 3b) boxed-array element sources OR (#2906 slice 3d-ii) a
+    // host-free async-generator source (`for await (const x of g())`). Both drive
+    // on the SAME for-await frame layout (own-locals + iterator spill), so the
+    // shared `computeForAwaitSpills` + spill-safe gate applies to either lane.
+    if (!forAwaitNeedsDrive(ctx, fn, plan) && !forAwaitAsyncNeedsDrive(ctx, fn, plan)) return false;
+    const fa = computeForAwaitSpills(ctx, fn, plan);
+    if (fa === null) return false;
+    return fa.spillTypes.every(isSpillSafeType);
+  }
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved promise
   const linear = planLinearAwaits(fn, plan);
@@ -489,6 +645,36 @@ function computeLoopSpills(
 }
 
 /**
+ * (#2906 slice 3b) The spill layout for a `for await` drive: every loop own-local
+ * ({@link forAwaitSpillInfo}, resolved to its declared ValType, defaulting to
+ * externref) PLUS the synthetic async-iterator carrier local (externref), which
+ * is created once in the entry state and must survive every per-element suspend.
+ * Returns `null` when the body is not the bounded for-await shape.
+ */
+function computeForAwaitSpills(
+  ctx: CodegenContext,
+  decl: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { spillNames: string[]; spillTypes: ValType[] } | null {
+  const info = forAwaitSpillInfo(decl, plan);
+  if (info === null) return null;
+  const declByName = collectVarDeclsByName(decl);
+  const spillNames: string[] = [];
+  const spillTypes: ValType[] = [];
+  for (const name of info.names) {
+    const declNode = declByName.get(name);
+    const resolved = declNode ? resolveSpillLocalValType(ctx, declNode) : null;
+    spillNames.push(name);
+    spillTypes.push(resolved ?? { kind: "externref" });
+  }
+  // The persisted async-iterator (`it`), reloaded on every resume, stored on
+  // every suspend. Must be LAST — the emitter looks it up by this reserved name.
+  spillNames.push(FORAWAIT_ITER_SPILL);
+  spillTypes.push({ kind: "externref" });
+  return { spillNames, spillTypes };
+}
+
+/**
  * The body locals that are live across ANY await and so must be spilled into the
  * frame (the multi-await generalization of the generator's `bodySpills`).
  *
@@ -511,11 +697,28 @@ function computeAsyncSpills(
   plan: AsyncCpsPlan,
   paramNames: string[],
 ): { spillNames: string[]; spillTypes: ValType[] } {
+  // (#2865) Async GENERATOR (`async function*` — the only asterisked shape that
+  // reaches the async frame): EVERY yield is a suspend point (the resume fn
+  // returns and re-enters on the next `next()` kick), so every own identifier
+  // local is conservatively treated as live-across-suspend and spilled — the
+  // same widened rule the 3a loop machine uses. Params live in param fields.
+  if (decl.asteriskToken !== undefined) {
+    const spillNames: string[] = [];
+    const spillTypes: ValType[] = [];
+    for (const [name, node] of asyncGenOwnLocalDecls(decl)) {
+      spillNames.push(name);
+      spillTypes.push(resolveSpillLocalValType(ctx, node) ?? { kind: "externref" });
+    }
+    return { spillNames, spillTypes };
+  }
   const linear = planLinearAwaits(decl, plan);
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
-    // own-locals). Returns empty for any non-loop non-linear body.
-    return computeLoopSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] };
+    // own-locals). (#2906 slice 3b) for-await drive: loop own-locals + the
+    // synthetic async-iterator carrier local. Returns empty for any other body.
+    return (
+      computeLoopSpills(ctx, decl, plan) ?? computeForAwaitSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] }
+    );
   }
   const paramSet = new Set(paramNames);
 
@@ -580,6 +783,120 @@ function isNestedScope(node: ts.Node): boolean {
 }
 
 /**
+ * (#2967 slice 2b-2 / 2a park fix shared analysis) Conservative syntactic
+ * capture/assignment survey of an async body, mirroring the closures.ts
+ * cell-boxing trigger (`writtenInClosure ∪ writtenInOuter`):
+ *   - `referencedInNested`: names referenced anywhere inside a nested
+ *     function-like (capture candidates);
+ *   - `assigned`: names assigned anywhere in the body, incl. inside nested
+ *     closures.
+ * A name in BOTH sets is cell-boxed at the nested closure's creation site
+ * (localMap rebind to a `(ref null $cell)` local) — the class-1 frame-layout
+ * hazard for anything the frame spills or re-materializes by declared type.
+ */
+function collectNestedRefsAndAssigns(body: ts.Node): {
+  referencedInNested: Set<string>;
+  assigned: Set<string>;
+} {
+  const referencedInNested = new Set<string>();
+  const assigned = new Set<string>();
+
+  const noteAssignment = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(node.left)
+    ) {
+      assigned.add(node.left.text);
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand)
+    ) {
+      assigned.add(node.operand.text);
+    }
+  };
+
+  const collectNestedRefs = (node: ts.Node): void => {
+    noteAssignment(node);
+    if (ts.isIdentifier(node)) {
+      // Skip pure property-name positions (`a.b`'s `b`, `{ b: 1 }`'s `b`).
+      const p = node.parent;
+      const isPropName =
+        p !== undefined &&
+        ((ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isPropertyAssignment(p) && p.name === node));
+      if (!isPropName) referencedInNested.add(node.text);
+      return;
+    }
+    forEachChild(node, collectNestedRefs);
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (isNestedScope(node)) {
+      forEachChild(node, collectNestedRefs);
+      return;
+    }
+    noteAssignment(node);
+    forEachChild(node, walk);
+  };
+  forEachChild(body, walk);
+  return { referencedInNested, assigned };
+}
+
+/**
+ * (#2967 slice 2b-2) Every identifier bound by a binding-PATTERN parameter of
+ * `fn` (recursing through nested patterns; includes rest ELEMENTS inside a
+ * pattern like `[a, ...rest]`). These are the names the entry fn's
+ * destructuring prologue derives into locals — the frame must capture them for
+ * the resume fn to see them. Identifier params (incl. an identifier REST
+ * param, whose vec the CALLER builds) are raw wasm params and are NOT listed.
+ */
+function collectPatternParamBindingNames(fn: ts.FunctionLikeDeclaration): string[] {
+  const out: string[] = [];
+  const walkPattern = (pattern: ts.BindingPattern): void => {
+    for (const el of pattern.elements) {
+      if (!ts.isBindingElement(el)) continue; // OmittedExpression (array holes)
+      if (ts.isIdentifier(el.name)) out.push(el.name.text);
+      else walkPattern(el.name);
+    }
+  };
+  for (const p of fn.parameters) {
+    if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) walkPattern(p.name);
+  }
+  return out;
+}
+
+/**
+ * (#2967 slice 2b-2) Resolve the pattern-derived param bindings of `decl`
+ * against the ACTIVATING FunctionContext — must be called AFTER the param
+ * destructuring prologue has run (both activation entry points are), so each
+ * derived name maps to a live entry local whose ValType is the ACTUAL local
+ * rep (no TS-resolved guess → no rep-divergence hazard). Names the prologue
+ * did not materialize are skipped (they stay exactly as broken/absent as on
+ * the legacy path — never worse).
+ */
+export interface DerivedParamCapture {
+  name: string;
+  type: ValType;
+  /** Local index in the ACTIVATING (entry) fctx — used only at frame struct.new. */
+  entryLocalIdx: number;
+}
+
+function collectDerivedPatternParams(decl: ts.FunctionLikeDeclaration, fctx: FunctionContext): DerivedParamCapture[] {
+  const out: DerivedParamCapture[] = [];
+  for (const name of collectPatternParamBindingNames(decl)) {
+    const idx = fctx.localMap.get(name);
+    if (idx === undefined) continue;
+    const type = idx < fctx.params.length ? fctx.params[idx]!.type : fctx.locals[idx - fctx.params.length]?.type;
+    if (type === undefined) continue;
+    out.push({ name, type, entryLocalIdx: idx });
+  }
+  return out;
+}
+
+/**
  * Defensive check of the {@link AsyncCfgPlan} emitter contract (see the
  * contract block in async-cps.ts). Returns a human-readable violation, or
  * `null` when the plan is emittable. Cheap (O(states)); run once per machine so
@@ -594,6 +911,8 @@ function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
     if (st.id !== i) return `state ids not dense (states[${i}].id === ${st.id})`;
     const t = st.terminator;
     if (t.kind === "suspend" && !inRange(t.resumeState)) return `suspend.resumeState ${t.resumeState} out of range`;
+    if (t.kind === "settleYield" && !inRange(t.resumeState))
+      return `settleYield.resumeState ${t.resumeState} out of range`;
     if (t.kind === "goto" && !inRange(t.target)) return `goto.target ${t.target} out of range`;
     if (t.kind === "condGoto" && (!inRange(t.whenTrue) || !inRange(t.whenFalse))) {
       return `condGoto targets ${t.whenTrue}/${t.whenFalse} out of range`;
@@ -661,7 +980,17 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // into the loop CFG (head condGoto + body suspends + back-edge goto). The host
   // settle backend keeps the linear-only shape (loops there suspend on every
   // await — an N-round follow-up).
-  const cfg = planAsyncCfg(info.decl, plan, { allowLoops: !info.host });
+  // (#2906 slice 3d-i) An async GENERATOR builds its CFG from the yield-aware
+  // `planAsyncGenCfg` (settleYield/settleDone terminators); every other async fn
+  // uses the linear/while/for-await `planAsyncCfg`.
+  // (#3120) The implicit §27.6.3.8 yield-operand await is classified ONLY on
+  // the native-`$Promise` CARRIER lane — the same predicate the admission gate
+  // (`isAsyncGenDriveCandidate`) keyed the body's shape check on, so gate and
+  // planner always see the same segment split. Type queries go through
+  // `ctx.oracle` (the #1930 boundary), not the raw checker.
+  const cfg = info.asyncGen
+    ? planAsyncGenCfg(info.decl, isStandalonePromiseActive(ctx) ? { oracle: ctx.oracle } : null)
+    : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;
@@ -777,6 +1106,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     continueStack: [],
     labelMap: new Map(),
     savedBodies: [],
+    // (#2865) A NESTED producer captures outer locals as ref cells (leading
+    // params of the lifted fn, spilled into frame param fields). The resume
+    // body compiles the same identifiers, so it needs the same cell-deref
+    // routing the lifted body had.
+    boxedCaptures: info.boxedCaptures,
+    readsCurrentThis: info.readsCurrentThis,
   };
   const frameLocal = 0;
 
@@ -793,6 +1128,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   }
   // Load spills from the frame into locals (overwritten by a segment's lead on
   // first entry into its owning state; restored from the frame on resume).
+  // (#2967 phase 3a) A force-boxed spill restores the CELL ref and registers
+  // the name in `boxedCaptures`, so declaration-inits (#1177
+  // boxedForInitStore), reads/writes, and nested-closure capture aliasing all
+  // route through the cell. Clone the (outer-shared) capture map before
+  // adding resume-local entries so the activating fctx is not polluted.
+  if (info.spillCellInfo !== undefined) {
+    resumeFctx.boxedCaptures = new Map(resumeFctx.boxedCaptures ?? []);
+  }
   for (let i = 0; i < info.spillNames.length; i++) {
     const idx = allocLocal(resumeFctx, info.spillNames[i]!, info.spillTypes[i]!);
     resumeFctx.body.push({ op: "local.get", index: frameLocal });
@@ -802,6 +1145,41 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       fieldIdx: info.spillFieldOffset + i,
     });
     resumeFctx.body.push({ op: "local.set", index: idx });
+    const cell = info.spillCellInfo?.get(i);
+    if (cell !== undefined) {
+      (resumeFctx.boxedCaptures ??= new Map()).set(info.spillNames[i]!, {
+        refCellTypeIdx: cell.refCellTypeIdx,
+        valType: cell.valType,
+      });
+    }
+  }
+  // (#2865) A lifted-CLOSURE body (arrow / fn-expr) keeps its captures in the
+  // `__self` struct — closures.ts materializes each into a NAMED local in the
+  // lifted body's prologue, and every identifier/call site in the body resolves
+  // them via localMap (cells deref through `boxedCaptures`). This resume fn
+  // compiles the SAME body statements, so re-run that materialization from the
+  // frame-captured `__self` param field. Without it, capture resolution falls
+  // back to STALE outer-scope local indices (the capture-arg push in calls.ts
+  // uses `localMap.get(name) ?? cap.outerLocalIdx`) — a guaranteed miscompile.
+  if (info.selfCaptureLayout) {
+    const layout = info.selfCaptureLayout;
+    const selfIdx = resumeFctx.localMap.get(layout.selfParamName);
+    if (selfIdx !== undefined) {
+      let selfForCaptures = selfIdx;
+      if (layout.castToTypeIdx !== null) {
+        const castLocal = allocLocal(resumeFctx, "__self_cast", { kind: "ref", typeIdx: layout.castToTypeIdx });
+        resumeFctx.body.push({ op: "local.get", index: selfIdx });
+        resumeFctx.body.push({ op: "ref.cast", typeIdx: layout.castToTypeIdx } as Instr);
+        resumeFctx.body.push({ op: "local.set", index: castLocal });
+        selfForCaptures = castLocal;
+      }
+      for (const entry of layout.entries) {
+        const idx = allocLocal(resumeFctx, entry.name, entry.localType);
+        resumeFctx.body.push({ op: "local.get", index: selfForCaptures });
+        resumeFctx.body.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: entry.fieldIdx } as Instr);
+        resumeFctx.body.push({ op: "local.set", index: idx });
+      }
+    }
   }
   // Load the result promise into a local; wire the `return` settle hook. Both
   // backends settle through `call <fulfill>(promise, value) -> value; drop` —
@@ -833,14 +1211,28 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // and the spilled/reloaded value share one local. A binding used only within
   // its own continuation gets a fresh delivery-only local. Typed via
   // `resumeBindingValType` (== the spill field type for the spilled ones).
-  const bindingLocal = new Map<string, { local: number; type: ValType }>();
+  // (#2967 phase 3a) A FORCE-BOXED spilled binding's slot holds the ref CELL;
+  // record the cell metadata so `emitDeliver` writes the settled value THROUGH
+  // it (struct.set field 0) instead of clobbering the cell local.
+  const cellBySpillName = new Map<string, { refCellTypeIdx: number; valType: ValType }>();
+  if (info.spillCellInfo !== undefined) {
+    for (const [i, cell] of info.spillCellInfo) cellBySpillName.set(info.spillNames[i]!, cell);
+  }
+  const bindingLocal = new Map<
+    string,
+    { local: number; type: ValType; cell?: { refCellTypeIdx: number; valType: ValType } }
+  >();
   for (const st of cfg.states) {
     const rb = st.resumeFrom?.binding;
     if (!rb) continue;
     const t = resumeBindingValType(ctx, rb);
     const existing = resumeFctx.localMap.get(rb.name);
     const local = existing !== undefined ? existing : allocLocal(resumeFctx, rb.name, t);
-    bindingLocal.set(rb.name, { local, type: t });
+    bindingLocal.set(rb.name, {
+      local,
+      type: t,
+      cell: existing !== undefined ? cellBySpillName.get(rb.name) : undefined,
+    });
   }
 
   // Transient locals reused across every state arm (only one await is processed
@@ -863,6 +1255,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   const reasonLocal = allocLocal(resumeFctx, "__async_reason", {
     kind: "externref",
   });
+  // (#2906 slice 3d-i) The yielded value slot for `settleYield` (async gen only).
+  const yieldValLocal = info.asyncGen ? allocLocal(resumeFctx, "__async_gen_yield", { kind: "externref" }) : -1;
 
   // (#2906 Gap 3 → slice 3) Handler regions. `inSrcTryLocal` (an i32
   // resume-local) records the id of the handler region control is currently in
@@ -909,14 +1303,29 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     } as Instr);
     if (rp.binding) {
       const bl = bindingLocal.get(rp.binding.name)!;
-      out.push({ op: "local.get", index: frameLocal });
-      out.push({
-        op: "struct.get",
-        typeIdx: info.stateTypeIdx,
-        fieldIdx: SENT_FIELD,
-      });
-      coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
-      out.push({ op: "local.set", index: bl.local });
+      if (bl.cell !== undefined) {
+        // (#2967 phase 3a) Force-boxed binding: `bl.local` holds the ref CELL
+        // (a nested closure aliases the same cell) — deliver the settled value
+        // THROUGH it so the closure observes it and the cell ref stays intact.
+        out.push({ op: "local.get", index: bl.local });
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({
+          op: "struct.get",
+          typeIdx: info.stateTypeIdx,
+          fieldIdx: SENT_FIELD,
+        });
+        coerceType(ctx, resumeFctx, { kind: "externref" }, bl.cell.valType);
+        out.push({ op: "struct.set", typeIdx: bl.cell.refCellTypeIdx, fieldIdx: 0 } as Instr);
+      } else {
+        out.push({ op: "local.get", index: frameLocal });
+        out.push({
+          op: "struct.get",
+          typeIdx: info.stateTypeIdx,
+          fieldIdx: SENT_FIELD,
+        });
+        coerceType(ctx, resumeFctx, { kind: "externref" }, bl.type);
+        out.push({ op: "local.set", index: bl.local });
+      }
     }
   };
 
@@ -943,6 +1352,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       let curHandler = 0;
       if (hasHandlers) out.push(...setHandler(0));
       if (st.resumeFrom) emitDeliver(out, st.resumeFrom);
+      // (#3228) Destructuring for-await head: bind the settled element carrier
+      // into the head's pattern AFTER delivery, BEFORE the leads read the bound
+      // names. `undefined` (no hook) for every other plan and identifier heads.
+      if (st.postDeliverEmit) st.postDeliverEmit(ctx, resumeFctx);
 
       // Compile the lead, toggling the region local at each boundary so a throw
       // in an in-region statement (or the terminator's own evaluation) runs the
@@ -956,6 +1369,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         compileStatement(ctx, resumeFctx, stmt);
       }
 
+      // (#2906 slice 3b) State-level injected step — the for-await planner uses
+      // it for `it = GetAsyncIterator(source)` (entry) and `{done,value} =
+      // it.next()` (loop head). Emitted after the lead, before the terminator;
+      // leaves the stack balanced. `undefined` (no hook) for every other plan.
+      if (st.emit) st.emit(ctx, resumeFctx);
+
       const term = st.terminator;
       switch (term.kind) {
         case "suspend": {
@@ -963,7 +1382,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             curHandler = term.handler;
             out.push(...setHandler(curHandler));
           }
-          const awaitedType = compileExpression(ctx, resumeFctx, term.awaited);
+          // (#2906 slice 3b) The awaited operand is a `ts.Expression`
+          // (linear/while) or an injected emit hook (for-await, whose element
+          // value lives in a wasm local, not AST).
+          const awaitedType = isEmitOperand(term.awaited)
+            ? term.awaited.emit(ctx, resumeFctx)
+            : compileExpression(ctx, resumeFctx, term.awaited);
           if (awaitedType !== null && awaitedType !== undefined) {
             coerceType(ctx, resumeFctx, awaitedType as ValType, {
               kind: "externref",
@@ -1160,7 +1584,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             curHandler = term.handler;
             out.push(...setHandler(curHandler));
           }
-          const condType = compileExpression(ctx, resumeFctx, term.cond);
+          // (#2906 slice 3b) condition is a `ts.Expression` (while/if) or an
+          // emit hook pushing the i32 `done` flag (for-await loop head).
+          const condType = isEmitOperand(term.cond)
+            ? term.cond.emit(ctx, resumeFctx)
+            : compileExpression(ctx, resumeFctx, term.cond);
           ensureI32Condition(resumeFctx, condType, ctx);
           out.push({
             op: "if",
@@ -1198,6 +1626,60 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           // lead already settles via the `asyncDriveReturn` hook and returns.)
           out.push({ op: "local.get", index: resultPromiseLocal });
           out.push({ op: "ref.null.extern" } as Instr);
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          out.push({ op: "return" });
+          break;
+        }
+        case "settleYield": {
+          // (#2906 slice 3d-i) `yield E`: fulfil the current `next()`-promise
+          // (`frame.result_promise`, re-minted per next() — already loaded into
+          // `resultPromiseLocal` at resume-fn entry) with an IteratorResult
+          // `{value: E, done: false}`, set STATE=resumeState, spill, and `return`.
+          // No reaction is registered (a yield does not await); the consumer's
+          // next `next()` kick re-dispatches at `resumeState`.
+          const resultTypeIdx = info.asyncGenResultTypeIdx!;
+          // Compute the yielded value (externref) into `yieldValLocal`.
+          if (term.fromSent) {
+            // `yield await P` — the awaited value delivered into SENT_FIELD.
+            out.push({ op: "local.get", index: frameLocal });
+            out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr);
+          } else if (term.value === null) {
+            out.push({ op: "ref.null.extern" } as Instr); // `yield;` → undefined
+          } else {
+            const vt = isEmitOperand(term.value)
+              ? term.value.emit(ctx, resumeFctx)
+              : compileExpression(ctx, resumeFctx, term.value);
+            if (vt !== null && vt !== undefined) {
+              coerceType(ctx, resumeFctx, vt as ValType, { kind: "externref" });
+            } else {
+              out.push({ op: "ref.null.extern" } as Instr);
+            }
+          }
+          out.push({ op: "local.set", index: yieldValLocal });
+          // result_promise.fulfil( IteratorResult{value: yieldVal, done: 0} )
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "local.get", index: yieldValLocal });
+          out.push({ op: "i32.const", value: 0 }); // done = false
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
+          out.push({ op: "extern.convert_any" } as Instr);
+          out.push({ op: "call", funcIdx: settleFulfillIdx });
+          out.push({ op: "drop" });
+          // Suspend: STATE=resumeState, persist spills, return (await the next kick).
+          out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.resumeState));
+          out.push(...storeSpills(info, resumeFctx, frameLocal));
+          out.push({ op: "return" });
+          break;
+        }
+        case "settleDone": {
+          // (#2906 slice 3d-i) Async-gen body end — fulfil the current
+          // `next()`-promise with `{value: undefined, done: true}`.
+          const resultTypeIdx = info.asyncGenResultTypeIdx!;
+          out.push({ op: "local.get", index: resultPromiseLocal });
+          out.push({ op: "ref.null.extern" } as Instr); // value = undefined
+          out.push({ op: "i32.const", value: 1 }); // done = true
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
+          out.push({ op: "extern.convert_any" } as Instr);
           out.push({ op: "call", funcIdx: settleFulfillIdx });
           out.push({ op: "drop" });
           out.push({ op: "return" });
@@ -1435,7 +1917,19 @@ export function emitAsyncFrameStateMachine(
   const promiseTypeIdx = host ? -1 : getOrRegisterPromiseType(ctx);
   const paramNames = fctx.params.map((p) => p.name);
   const paramTypes = fctx.params.map((p) => p.type);
-  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports);
+  // (#2967 slice 2b-2) Both activation entry points run AFTER the param
+  // destructuring prologue, so every pattern-derived binding is a live entry
+  // local here — capture them into the frame as live-initialized spill fields
+  // (see buildAsyncFrameInfo). Empty for identifier-only params (byte-inert).
+  const derivedParams = collectDerivedPatternParams(decl, fctx);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx, hostImports, derivedParams);
+  // (#2865) A CLOSURE consumer (arrow / fn-expr, #2957 phase 2) may capture
+  // outer locals as ref cells (leading params of the lifted fn). The cells ride
+  // into frame param fields like ordinary params; the resume body must deref
+  // reads/writes through them, so thread the cell metadata onto the resume fctx.
+  info.boxedCaptures = fctx.boxedCaptures;
+  info.readsCurrentThis = fctx.readsCurrentThis;
+  info.selfCaptureLayout = fctx.selfCaptureLayout;
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
     reportError(ctx, decl, "internal: async-frame resume function unavailable (#2895 slice 1)");
@@ -1470,7 +1964,29 @@ export function emitAsyncFrameStateMachine(
     fctx.body.push({ op: "local.get", index: i });
   }
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    // (#2967 slice 2b-2) A pattern-derived param spill field starts LIVE (the
+    // entry prologue's post-destructure value from its entry local); all other
+    // spill fields start inert and are initialized by their owning segment's
+    // lead statements in the resume fn.
+    // (#2967 phase 3a) A force-boxed (class-1 hazardous) spill field holds a
+    // REF CELL, created HERE exactly once so its identity survives every
+    // suspend/resume round-trip (a live cell for a derived param; a
+    // default-valued one for a body local, whose declaration then writes the
+    // real init through the cell — variables.ts boxedForInitStore).
+    const derivedInitLocal = info.derivedSpillInit?.get(i);
+    const cell = info.spillCellInfo?.get(i);
+    if (cell !== undefined) {
+      if (derivedInitLocal !== undefined) {
+        fctx.body.push({ op: "local.get", index: derivedInitLocal });
+      } else {
+        fctx.body.push(defaultSpillInstr(cell.valType));
+      }
+      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx } as Instr);
+    } else if (derivedInitLocal !== undefined) {
+      fctx.body.push({ op: "local.get", index: derivedInitLocal });
+    } else {
+      fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    }
   }
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
@@ -1496,4 +2012,306 @@ export function emitAsyncFrameStateMachine(
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
   if (!host) fctx.body.push({ op: "extern.convert_any" } as Instr);
   fctx.body.push({ op: "return" });
+}
+
+// ── async-generator PRODUCER core (#2906 slice 3d-i) ─────────────────────────
+
+/**
+ * Is `decl` a bounded async generator drivable host-free on the async-frame CFG
+ * machine? True only on a host-free target (`standalone`/`wasi`) for an async
+ * `function*` whose body is the bounded shape {@link isBoundedAsyncGenBody}
+ * accepts (a flat sequence of `yield <E>` / `yield await <P>` statements). The
+ * call-site routing (`function-body.ts`) uses this to intercept the async gen
+ * BEFORE the #680 native-generator gate; everything else stays on the legacy gen
+ * path (correct-or-legacy, the #2367 graveyard rule).
+ */
+export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  // (#2865) Params must be plain identifiers: a binding-PATTERN param
+  // (`f([...x] = v)`) destructures into derived LOCALS of the lifted fn's
+  // prologue, which the fresh resume FunctionContext never sees — the body's
+  // reads then mis-resolve (observed: invalid wasm, a null-repaired call arg).
+  // A rest param builds a derived array local the same way. Identifier params
+  // WITH defaults are fine (the default is applied to the param local before
+  // the frame captures it). Correct-or-legacy.
+  for (const p of decl.parameters) {
+    if (!ts.isIdentifier(p.name) || p.dotDotDotToken !== undefined) return false;
+  }
+  // (#2865) Stem-collision guard: a SECOND same-named gen (different scope)
+  // would share the first's `__async_gen_next_<stem>` helper — typed for the
+  // FIRST frame struct — and trap on `ref.cast`. Correct-or-legacy: reject it.
+  const registered = ctx.asyncGenProducers?.get(sanitizeTypeName(asyncFnName(decl)));
+  if (registered !== undefined && registered.decl !== decl) return false;
+  // (#2865) Own body locals become frame spills — every spill field must have a
+  // spill-safe type (an inert `struct.new` default), or the layout is invalid.
+  const spillsSafe = (): boolean => {
+    for (const node of asyncGenOwnLocalDecls(decl).values()) {
+      if (!isSpillSafeType(resolveSpillLocalValType(ctx, node) ?? { kind: "externref" })) return false;
+    }
+    return true;
+  };
+  // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`, wasi
+  // today): the full bounded shape, awaited yields included — the awaited
+  // operand lowers to a native `$Promise` the suspend arm can assimilate.
+  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl) && spillsSafe();
+  // (#2865) `--target standalone` with the carrier gate still OFF (#2980):
+  // drive the producer host-free ONLY for await-free bodies. With the carrier
+  // off an awaited operand does not lower to a native `$Promise`, so
+  // `yield await P` would deliver the un-awaited promise object (wrong value)
+  // — those bodies keep the legacy path (correct-or-legacy, #680 CE) until the
+  // measured carrier widen. An await-free body is carrier-independent: every
+  // promise the machine touches is minted by `__async_gen_next_<name>` itself.
+  // (#3120: a Promise-typed plain `yield P` deliberately stays PLAIN — and
+  // driven, byte-identically — on this lane; its implicit-await value gap is
+  // the carrier widen's to close. See ImplicitYieldAwaitMode in async-cps.ts.)
+  if (isAsyncDriveActive(ctx)) return isAwaitFreeAsyncGenBody(decl) && spillsSafe();
+  return false;
+}
+
+/**
+ * (#2865) Standalone carrier-off analogue of {@link asyncFnNeedsDrive},
+ * restricted to the ONE shape that is carrier-independent: a bounded
+ * `for await (const x of g())` CONSUMER over a host-free async generator.
+ * Every suspension in that machine awaits a promise MINTED by the producer's
+ * own `__async_gen_next_<name>` driver (always a native `$Promise`, regardless
+ * of the carrier gate), so it drives correctly under `--target standalone`
+ * while plain awaits / Promise statics stay on the legacy path pending the
+ * #2980 carrier-widen decision. The 3b boxed-ARRAY for-await variant
+ * (`forAwaitNeedsDrive`) is deliberately NOT accepted here — its per-element
+ * `Await(value)` operands are host-backed promises under the un-widened
+ * carrier, which the suspend arm would mis-classify as settled plain values.
+ */
+export function asyncGenConsumerNeedsDrive(
+  ctx: CodegenContext,
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  if (plan.awaitPoints.length !== 0) return false; // bare awaits are carrier-dependent
+  if (plan.forAwaitPoints.length === 0) return false;
+  if (!forAwaitAsyncNeedsDrive(ctx, fn, plan)) return false;
+  const fa = computeForAwaitSpills(ctx, fn, plan);
+  if (fa === null) return false;
+  return fa.spillTypes.every(isSpillSafeType);
+}
+
+/**
+ * (#2906 slice 3d-i) Emit an async-generator PRODUCER: `g()` builds a resumable
+ * `$AsyncFrame` (the generator carrier — a bare externref, NO prototype methods)
+ * and returns it WITHOUT running any body code (async generators are lazy: the
+ * body starts on the first `next()`). The re-entrant driver is the per-gen
+ * `__async_gen_next_<name>(frame) -> Promise<IteratorResult>` helper, which mints
+ * a FRESH pending result promise, stores it into the frame's `result_promise`
+ * field, kicks the resume machine (runs to the next `yield`/`await`-suspend), and
+ * returns that promise. `yield` settles it `{value, done:false}` and suspends;
+ * body-end settles `{value:undefined, done:true}`. Native drive lane only.
+ *
+ * The frame externref + `__async_gen_next_<name>` + the reader probes are the
+ * substrate 3d-ii (the `for await (x of g())` consumer) builds on.
+ */
+export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, decl: ts.FunctionLikeDeclaration): void {
+  const rt = ensureAsyncDriveRuntime(ctx);
+  const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+  const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
+
+  const plan = analyzeAsyncBody(ctx, decl);
+  const paramNames = fctx.params.map((p) => p.name);
+  const paramTypes = fctx.params.map((p) => p.type);
+  const info = buildAsyncFrameInfo(ctx, decl, plan, paramNames, paramTypes, promiseTypeIdx);
+  info.asyncGen = true;
+  info.asyncGenResultTypeIdx = resultTypeIdx;
+  // (#2865) Nested producers: thread the lifted fn's capture-cell metadata so
+  // the resume body derefs captured reads/writes through the cells.
+  info.boxedCaptures = fctx.boxedCaptures;
+  info.readsCurrentThis = fctx.readsCurrentThis;
+  info.selfCaptureLayout = fctx.selfCaptureLayout;
+
+  const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
+  if (resumeFuncIdx < 0) {
+    reportError(ctx, decl, "internal: async-generator resume function unavailable (#2906 slice 3d-i)");
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return;
+  }
+
+  // Per-gen re-entrant next() driver + the generic reader probes (once/module).
+  emitAsyncGenNextHelper(ctx, info, promiseTypeIdx);
+  ensureAsyncGenReaderProbes(ctx, promiseTypeIdx, resultTypeIdx);
+
+  // (#2865) Register the producer so (a) the `.next()` runtime dispatch chain
+  // (calls.ts) can ref.test this frame type → its next helper, and (b) the
+  // stem-collision guard in `isAsyncGenDriveCandidate` rejects a SECOND,
+  // different gen with the same sanitized name (it would otherwise silently
+  // share this helper — typed for THIS frame — and trap on `ref.cast`).
+  const stem = sanitizeTypeName(info.functionName);
+  if (!ctx.asyncGenProducers) ctx.asyncGenProducers = new Map();
+  if (!ctx.asyncGenProducers.has(stem)) {
+    ctx.asyncGenProducers.set(stem, {
+      stateTypeIdx: info.stateTypeIdx,
+      nextHelperName: `__async_gen_next_${stem}`,
+      decl,
+    });
+  }
+
+  // Build the frame WITHOUT kicking (lazy): state=0, sent/mode/abrupt/error inert,
+  // params, [no spills — bounded shape], result_promise = fresh pending.
+  fctx.body.push({ op: "i32.const", value: 0 }); // state
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // sent
+  fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // abrupt
+  fctx.body.push({ op: "ref.null.extern" } as Instr); // error
+  for (let i = 0; i < info.paramTypes.length; i++) {
+    fctx.body.push({ op: "local.get", index: i });
+  }
+  for (let i = 0; i < info.spillNames.length; i++) {
+    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+  }
+  // result_promise: fresh pending $Promise (overwritten by the first next()).
+  fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
+
+  // Return the frame as the async-gen object (externref carrier).
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "return" });
+  // Keep `rt` referenced (scheduler must be registered before the readers run).
+  void rt;
+}
+
+/**
+ * (#2906 slice 3d-i) Build + export the per-gen re-entrant driver
+ * `__async_gen_next_<name>(frame externref) -> Promise externref`: cast the
+ * carrier back to the typed frame, mint a fresh pending result promise, store it
+ * into `frame.result_promise`, kick the resume machine once, and return the
+ * promise. Exported so a direct-drive harness (the 3d-i self-proof) can advance
+ * the generator without the for-await consumer (3d-ii).
+ */
+function emitAsyncGenNextHelper(ctx: CodegenContext, info: AsyncFrameInfo, promiseTypeIdx: number): void {
+  const stem = sanitizeTypeName(info.functionName);
+  const name = `__async_gen_next_${stem}`;
+  if (ctx.funcMap.has(name)) return;
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], `${name}_type`);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(name, funcIdx);
+  // Re-read the resume funcIdx by name — emitting the resume body may have added
+  // late imports that shifted defined indices (the shifter patches funcMap).
+  const resumeIdx = ctx.funcMap.get(`__async_resume_f${stem}`) ?? info.resumeFuncIdx!;
+  const frameRef: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
+  const promiseRef: ValType = { kind: "ref", typeIdx: promiseTypeIdx };
+  const fLocal = 1; // param 0 = carrier externref
+  const pLocal = 2;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: info.stateTypeIdx } as Instr,
+    { op: "local.set", index: fLocal },
+    // fresh pending result promise
+    { op: "i32.const", value: PROMISE_STATE_PENDING },
+    { op: "ref.null.extern" } as Instr,
+    { op: "ref.null.extern" } as Instr,
+    { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+    { op: "local.set", index: pLocal },
+    // frame.result_promise = p
+    { op: "local.get", index: fLocal },
+    { op: "local.get", index: pLocal },
+    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx } as Instr,
+    // kick the resume machine
+    { op: "local.get", index: fLocal },
+    { op: "call", funcIdx: resumeIdx },
+    // return p (as externref)
+    { op: "local.get", index: pLocal },
+    { op: "extern.convert_any" } as Instr,
+  ];
+  pushDefinedFunc(ctx, funcIdx, {
+    name,
+    typeIdx,
+    locals: [
+      { name: "$f", type: frameRef },
+      { name: "$p", type: promiseRef },
+    ],
+    body,
+    exported: false,
+  });
+  ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#2906 slice 3d-i) Register + export the generic async-gen reader probes ONCE
+ * per module, letting a host-free direct-drive harness inspect a settled
+ * `next()`-promise's IteratorResult:
+ *   `__async_gen_p_state(p) -> i32`     — the promise state (0/1/2).
+ *   `__async_gen_result_done(p) -> i32` — the settled IteratorResult's `done`.
+ *   `__async_gen_result_value(p) -> f64`— the IteratorResult's numeric `value`.
+ * Both readers assume the promise is FULFILLED (drive + `__drain_microtasks`
+ * first, then check the state).
+ */
+function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number, resultTypeIdx: number): void {
+  if (ctx.funcMap.has("__async_gen_p_state")) return;
+
+  const register = (
+    name: string,
+    result: ValType,
+    body: Instr[],
+    locals: { name: string; type: ValType }[] = [],
+  ): void => {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [result], `${name}_type`);
+    const funcIdx = mintDefinedFunc(ctx);
+    ctx.funcMap.set(name, funcIdx);
+    pushDefinedFunc(ctx, funcIdx, { name, typeIdx, locals, body, exported: false });
+    ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+  };
+
+  // promise → state (i32).
+  register("__async_gen_p_state", { kind: "i32" }, [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr, // state
+  ]);
+
+  // promise → (promise.value as IteratorResult).done (i32).
+  register("__async_gen_result_done", { kind: "i32" }, [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult, boxed)
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr,
+  ]);
+
+  // promise → ToNumber((promise.value as IteratorResult).value) (f64). The
+  // externref→f64 unbox is routed through the single coercion engine
+  // (`coerceType`, #2108) rather than naming `__unbox_number` directly, so this
+  // probe adds no hand-rolled coercion vocabulary outside the engine.
+  const vfctx: FunctionContext = {
+    name: "__async_gen_result_value",
+    params: [{ name: "p", type: { kind: "externref" } }],
+    locals: [],
+    localMap: new Map([["p", 0]]),
+    returnType: { kind: "f64" },
+    body: [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult)
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr, // element (boxed number)
+    ],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+  const savedFunc = ctx.currentFunc;
+  ctx.currentFunc = vfctx;
+  try {
+    coerceType(ctx, vfctx, { kind: "externref" }, { kind: "f64" });
+  } finally {
+    ctx.currentFunc = savedFunc;
+  }
+  register("__async_gen_result_value", { kind: "f64" }, vfctx.body, vfctx.locals);
 }

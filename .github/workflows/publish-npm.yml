@@ -57,14 +57,15 @@ jobs:
           fi
           echo "Tag and package versions match ($version) — proceeding to publish."
 
+  # Three independent publish targets, each gated ONLY on verify-version so a
+  # not-yet-configured registry can't block the others (e.g. a missing js2wasm
+  # trusted publisher must not skip the JSR publish). The shared gate: on a tag
+  # push, require verify-version to have passed; on workflow_dispatch it is
+  # skipped (no version tag), so `always() && result != failure/cancelled` lets
+  # a skipped dependency through while still blocking on a real failure.
   publish-npm:
-    name: npm publish (@loopdive/js2 + js2wasm proxy)
+    name: npm publish (@loopdive/js2)
     runs-on: ubuntu-latest
-    # On a tag push, gate on verify-version (it must succeed). On
-    # workflow_dispatch, verify-version is skipped (no version tag to check), so
-    # allow the job to proceed: a `needs:` on a skipped job would otherwise skip
-    # this one too. !failure() && !cancelled() lets a skipped dependency through
-    # while still blocking on a verify-version failure.
     needs: verify-version
     if: |
       always() &&
@@ -106,28 +107,77 @@ jobs:
         if: github.event_name == 'push' || inputs.dry-run == 'false'
         run: npm publish --provenance --access public
 
-      # DISABLED: the unscoped js2wasm proxy is unpublished, has no trusted
-      # publisher, and pins @loopdive/js2 at a stale 0.52.0. Re-enable (and add
-      # its own trusted publisher + a dep bump) once you want `npm install
-      # js2wasm` to resolve. See loopdive/js2#389.
-      - name: Publish js2wasm proxy
-        if: false
-        working-directory: packages/js2wasm
-        run: npm publish --provenance --access public
-
-  publish-jsr:
-    name: JSR publish (@loopdive/js2)
+  # The unscoped js2wasm proxy re-exports @loopdive/js2 for discoverability
+  # (`npm install js2wasm`). It ships static committed files (index.js, cli.js,
+  # index.d.ts) — no build step needed. Its package.json version tracks the
+  # canonical package in lockstep (scripts/release.mjs) and its dependency pins
+  # the matching @loopdive/js2 version. Runs as its OWN job so a missing trusted
+  # publisher can't red the canonical or JSR publishes.
+  # Requires an npm trusted publisher configured for the `js2wasm` package (same
+  # GitHub OIDC provider as @loopdive/js2). See loopdive/js2#389.
+  publish-npm-proxy:
+    name: npm publish (js2wasm proxy)
     runs-on: ubuntu-latest
-    needs: publish-npm
-    # DISABLED: JSR publishing needs its own OIDC link (jsr.io ↔ this repo) set
-    # up separately. Re-enable once the JSR package + GitHub link are configured.
-    if: false
+    needs: verify-version
+    if: |
+      always() &&
+      needs.verify-version.result != 'failure' &&
+      needs.verify-version.result != 'cancelled'
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v6
         with:
           node-version: 20
+          registry-url: "https://registry.npmjs.org"
 
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 20 ships npm 10.x.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Pack js2wasm proxy (dry-run preview)
+        working-directory: packages/js2wasm
+        run: npm pack --dry-run
+
+      - name: Publish js2wasm proxy
+        if: github.event_name == 'push' || inputs.dry-run == 'false'
+        working-directory: packages/js2wasm
+        run: npm publish --provenance --access public
+
+  publish-jsr:
+    name: JSR publish (@loopdive/js2)
+    runs-on: ubuntu-latest
+    # Independent of the npm jobs — JSR is a separate registry and must publish
+    # even if an npm trusted publisher isn't configured yet. Tokenless OIDC:
+    # jsr publish authenticates via the workflow's id-token (id-token: write is
+    # granted at the workflow level). Requires the JSR package `@loopdive/js2`
+    # to exist and be linked to this GitHub repo on jsr.io (Settings → link a
+    # GitHub repository) so OIDC publishing is authorized. jsr.json carries the
+    # version (kept in lockstep with the npm packages by scripts/release.mjs).
+    needs: verify-version
+    if: |
+      always() &&
+      needs.verify-version.result != 'failure' &&
+      needs.verify-version.result != 'cancelled' &&
+      (github.event_name == 'push' || inputs.dry-run == 'false')
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: "pnpm"
+
+      # `jsr publish` runs `deno publish --unstable-byonm` (bring-your-own-node-
+      # modules), which type-resolves the published source (src/**/*.ts). That
+      # source imports `typescript` (src/ts-api.ts), so node_modules must exist
+      # or Deno fails with "Could not find typescript in a node_modules folder".
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # --allow-slow-types: the exported API has many inferred types; JSR's
+      # slow-type check would otherwise reject the publish.
       - name: Publish to JSR
-        run: npx jsr publish --allow-dirty
+        run: npx jsr publish --allow-slow-types

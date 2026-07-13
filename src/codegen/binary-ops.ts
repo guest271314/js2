@@ -14,7 +14,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -39,13 +39,57 @@ import { emitNativeParseNumber } from "./parse-number-native.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
-import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
+import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts, VOID_RESULT } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
 import { compileStringBinaryOp, emitHoistedCharCodeAtRead, matchHoistedCharRead } from "./string-ops.js";
 import { emitAnyEqFromExternTemps, emitLooseEq, emitStrictEq } from "./coercion-engine.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
 // ── Binary operations ─────────────────────────────────────────────────
+
+/**
+ * (#2712 I1) Binary operators whose result is ALWAYS a JS boolean: relational
+ * (`<` `>` `<=` `>=`), equality (`==` `===` `!=` `!==`), `in`, `instanceof`.
+ * Their `compileBinaryExpression` result is a bare `{kind:"i32"}` today (only
+ * literals #2795 + declared storage brand); branding it at the single dispatch
+ * chokepoint (`brandBooleanBinaryResult`, called from expressions.ts) makes the
+ * boolean brand TOTAL for computed predicates so downstream boxing (Set/Map
+ * keys, property keys, Object.values) reifies a boolean, not the number 1/0.
+ * Arithmetic/bitwise/logical (`&&`/`||` return the operand type) are deliberately
+ * excluded — branding a number as boolean would be a bug.
+ */
+const BOOLEAN_PRODUCING_BINARY_OPS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.InKeyword,
+  ts.SyntaxKind.InstanceOfKeyword,
+]);
+
+/**
+ * (#2712 I1) Brand a comparison/equality/relational/`in`/`instanceof` result as
+ * a boolean. No-op for a non-boolean operator, a null/VOID result, or an already
+ * -branded / non-i32 result. Idempotent + structurally inert (the brand still
+ * matches every `.kind === "i32"` check). Called at the single dispatch site in
+ * expressions.ts so all boolean-producing binary results are branded uniformly.
+ */
+export function brandBooleanBinaryResult(op: ts.SyntaxKind, result: InnerResult): InnerResult {
+  if (
+    result !== null &&
+    result !== VOID_RESULT &&
+    result.kind === "i32" &&
+    result.boolean !== true &&
+    BOOLEAN_PRODUCING_BINARY_OPS.has(op)
+  ) {
+    return { ...result, boolean: true };
+  }
+  return result;
+}
 
 /**
  * (#2741) `key in rval` throws a TypeError when `Type(rval)` is not Object
@@ -1090,8 +1134,26 @@ export function compileBinaryExpression(
         op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
       // Only dispatch through AnyValue for + (string concat possible) and equality
       if (isPlusOp || isEqualityOp) {
-        const anyDispatch = compileAnyBinaryDispatch(ctx, fctx, expr, op);
-        if (anyDispatch !== null) return anyDispatch;
+        // (#3169) Record the ACTIVE any-equality dispatch expr so the #3037
+        // read-carrier (`maybeWrapAnyReadEqualityCarrier`) fires ONLY for
+        // operands whose enclosing equality really routes through
+        // `__any_strict_eq`. Without this, an operand compile that lazily
+        // registers `$AnyValue` as a SIDE EFFECT (e.g. the #3169 standalone
+        // dynamic-index read pulling in the `__unbox_number` union native)
+        // flips `ctx.anyValueTypeIdx` ≥ 0 mid-expression: this entry gate saw
+        // −1 (no dispatch), but the carrier's own guard then saw ≥ 0 and
+        // wrapped the read into a `ref $AnyValue` that the already-chosen
+        // externref equality path compares by struct identity → value-equal
+        // operands spuriously `!==` (the `obj[idx] !== val` -c-ii family).
+        // Save/restore (not clear) so nested equalities keep their own marker.
+        const prevAnyEqExpr = ctx.activeAnyEqDispatchExpr;
+        if (isEqualityOp) ctx.activeAnyEqDispatchExpr = expr;
+        try {
+          const anyDispatch = compileAnyBinaryDispatch(ctx, fctx, expr, op);
+          if (anyDispatch !== null) return anyDispatch;
+        } finally {
+          ctx.activeAnyEqDispatchExpr = prevAnyEqExpr;
+        }
       }
       // For strictly numeric ops, fall through to compile with numeric hint
     }
@@ -1844,6 +1906,33 @@ export function compileBinaryExpression(
   // not bitwise, so it would re-derive f64). Without this the whole pure chain
   // collapses back to the f64 round-trip the predicate was meant to eliminate.
   const useI32PureEmit = arithI32WithToInt32Wrap || bitwiseI32;
+  // (#3024) An identifier operand's local slot type can be PROMOTED to externref
+  // *mid-expression* — e.g. `x * eval("var x = 2;")`, where the direct-eval body
+  // redeclares `x`, forcing its slot from f64 to the dynamic externref
+  // representation (the re-declaration re-type in statements/variables.ts, whose
+  // `wasmType` resolves to externref because the inlined eval body is a foreign
+  // `ts.createSourceFile` node the checker cannot type). That promotion happens
+  // when the OTHER operand (the eval call) compiles — AFTER this identifier was
+  // already emitted as a raw `local.get` of the then-f64 slot with no unbox. The
+  // stale read now loads an externref, so a following `f64.mul`/`f64.sub`/… fails
+  // Wasm validation ("expected fN, found externref"). Snapshot each identifier
+  // operand's slot kind BEFORE compiling so a genuine mid-expression
+  // primitive→externref flip can be recognised below. (A slot that was ALREADY
+  // externref and that `compileIdentifier` unboxed to f64 keeps the same slot
+  // before/after, so it is left untouched — no double-unbox.)
+  const identSlotKind = (e: ts.Expression): ValType["kind"] | undefined => {
+    if (!ts.isIdentifier(e)) return undefined;
+    const idx = fctx.localMap.get(e.text);
+    if (idx === undefined) return undefined;
+    const entry = idx < fctx.params.length ? fctx.params[idx] : fctx.locals[idx - fctx.params.length];
+    const t =
+      entry && typeof entry === "object" && "type" in entry
+        ? (entry as { type: ValType }).type
+        : (entry as ValType | undefined);
+    return t?.kind;
+  };
+  const leftSlotBefore = identSlotKind(expr.left);
+  const rightSlotBefore = identSlotKind(expr.right);
   let leftType: ValType | null;
   let rightType: ValType | null;
   if (useI32PureEmit) {
@@ -1854,6 +1943,29 @@ export function compileBinaryExpression(
   } else {
     leftType = compileExpression(ctx, fctx, expr.left, numericHint);
     rightType = compileExpression(ctx, fctx, expr.right, numericHint);
+    // (#3024) If an identifier operand's slot flipped from a concrete primitive
+    // to externref while (or after) it was compiled, its emitted value is a raw
+    // externref `local.get` with no unbox, yet the reported operand type stayed
+    // primitive. Re-label it externref so the numeric externref-unbox path
+    // (~line 2255 below) inserts the `externref → f64` coercion. Guarded on an
+    // actual primitive→externref flip, so ordinary operands are byte-inert.
+    const isPrimKind = (k: ValType["kind"] | undefined): boolean => k === "f64" || k === "i32" || k === "i64";
+    if (
+      leftType &&
+      isPrimKind(leftType.kind) &&
+      isPrimKind(leftSlotBefore) &&
+      identSlotKind(expr.left) === "externref"
+    ) {
+      leftType = { kind: "externref" };
+    }
+    if (
+      rightType &&
+      isPrimKind(rightType.kind) &&
+      isPrimKind(rightSlotBefore) &&
+      identSlotKind(expr.right) === "externref"
+    ) {
+      rightType = { kind: "externref" };
+    }
   }
 
   if (!leftType || !rightType) return null;
@@ -1884,6 +1996,34 @@ export function compileBinaryExpression(
       const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
       if (isStrictEq || isStrictNeq) {
         if (leftIsRef && rightIsRef) {
+          // (#3037 CS1b(ii)) When BOTH operands are the tagged `$AnyValue` box (in
+          // standalone), raw `ref.eq` is the WRONG strict-eq: `$AnyValue` is a
+          // discriminated union, so two boxes of the same logical value have
+          // distinct struct identity but must compare by TAG (a tag-3 number by
+          // value, a tag-5 string by content, a tag-6 object by `refval` identity).
+          // This pair reaches here only when binary-ops' line-1086 any-dispatch was
+          // skipped because `anyValueTypeIdx` was still unregistered at the binary
+          // expression's entry, yet an operand later became `$AnyValue` (the CS1b
+          // element/member-read carrier registers the type lazily). Route to the
+          // tag-aware `__any_strict_eq` so `const a: any = [5,5]; a[0] === a[1]`
+          // (and the string analogue) stay correct. Non-`$AnyValue` ref pairs
+          // (class instances, nominal structs) keep genuine `ref.eq` identity.
+          const bothAnyValue =
+            ctx.standalone &&
+            ctx.anyValueTypeIdx >= 0 &&
+            leftType.kind === "ref" &&
+            rightType.kind === "ref" &&
+            leftType.typeIdx === ctx.anyValueTypeIdx &&
+            rightType.typeIdx === ctx.anyValueTypeIdx;
+          if (bothAnyValue) {
+            ensureAnyHelpers(ctx);
+            const strictEqIdx = ctx.funcMap.get("__any_strict_eq");
+            if (strictEqIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: strictEqIdx });
+              if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
+              return { kind: "i32" };
+            }
+          }
           fctx.body.push({ op: "ref.eq" });
           if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
           return { kind: "i32" };
@@ -1969,6 +2109,70 @@ export function compileBinaryExpression(
             releaseTempLocal(fctx, tmpRightAny);
             if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
             return { kind: "i32" };
+          }
+        }
+        // (#3154 / task #90) Mixed `(ref $AnyValue)` vs externref/primitive
+        // strict equality — VALUE-compare via the tag-aware engine, not box
+        // identity. A dynamic element/member read in standalone lowers to
+        // `__any_from_extern_honest` → `(ref $AnyValue)` (the #3037 CS1b reader
+        // carrier); compared against an `any` PARAM (still a raw externref) or
+        // a static primitive, the identity bridge below `ref.eq`'d the CARRIER
+        // BOX against the raw value — unconditionally false, so
+        // `a[0] === s` failed for the SAME interned symbol, equal strings,
+        // etc. (probe-pinned: WAT shows `ref.eq($AnyValue, $Symbol)`). Route
+        // instead through the SAME pair the both-$AnyValue arm above uses:
+        // classify the non-carrier side honestly (`__any_from_extern_honest` —
+        // the classifier the reader itself used, so tags agree) and call the
+        // keystone `__any_strict_eq` (§7.2.16: numbers by f64.eq — NaN≠NaN,
+        // +0===-0 —, strings by content, objects/symbols by refval identity,
+        // cross-tag identity reconciliation for same-ref different-rep).
+        // A primitive non-ref side is first boxed to externref by its STATIC
+        // brand (symbol → `__box_symbol` interned carrier, boolean →
+        // `__box_boolean`, number → `__box_number`) so the classifier sees an
+        // honest box. Gated on standalone/wasi + a statically-`$AnyValue`
+        // non-null ref side; every other pairing keeps the legacy bridge
+        // byte-identical.
+        if (ctx.standalone === true || ctx.wasi === true) {
+          const refSideType = leftIsRef ? leftType : rightType;
+          const refSideIsAnyValue =
+            ctx.anyValueTypeIdx >= 0 && refSideType.kind === "ref" && refSideType.typeIdx === ctx.anyValueTypeIdx;
+          const otherTsTypeAV = leftIsRef ? rightTsType : leftTsType;
+          const otherBoxableAV = otherType.kind === "externref" || otherType.kind === "i32" || otherType.kind === "f64";
+          if (refSideIsAnyValue && otherBoxableAV) {
+            const honestFromExternIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+            ensureAnyHelpers(ctx);
+            const strictEqIdxAV = ctx.funcMap.get("__any_strict_eq");
+            if (honestFromExternIdx !== undefined && strictEqIdxAV !== undefined) {
+              // Brand a primitive other-side by its static TS type so the box
+              // preserves the JS tag (the #2785 type-aware-box rule).
+              const brandedOther: ValType =
+                otherType.kind === "i32" && (otherTsTypeAV.flags & ts.TypeFlags.ESSymbolLike) !== 0
+                  ? { kind: "i32", symbol: true }
+                  : otherType.kind === "i32" && isBooleanType(otherTsTypeAV)
+                    ? { kind: "i32", boolean: true }
+                    : otherType;
+              // Stack: [left, right] (right on top).
+              if (leftIsRef) {
+                // Right is the non-carrier side: box (if primitive) + classify in place.
+                if (otherType.kind !== "externref") {
+                  coerceType(ctx, fctx, brandedOther, { kind: "externref" });
+                }
+                fctx.body.push({ op: "call", funcIdx: honestFromExternIdx });
+              } else {
+                // Left is the non-carrier side: save right ($AnyValue), box+classify left, restore.
+                const tmpRightAV = allocTempLocal(fctx, rightType);
+                fctx.body.push({ op: "local.set", index: tmpRightAV });
+                if (otherType.kind !== "externref") {
+                  coerceType(ctx, fctx, brandedOther, { kind: "externref" });
+                }
+                fctx.body.push({ op: "call", funcIdx: honestFromExternIdx });
+                fctx.body.push({ op: "local.get", index: tmpRightAV });
+                releaseTempLocal(fctx, tmpRightAV);
+              }
+              fctx.body.push({ op: "call", funcIdx: strictEqIdxAV });
+              if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
+              return { kind: "i32" };
+            }
           }
         }
         if (otherType.kind === "externref") {
@@ -2341,7 +2545,7 @@ export function compileBinaryExpression(
       // passes a boolean into an `any` param and compares it with `===`/`!==`
       // against a `boolean` literal (#2605). Boxing booleans as booleans makes the
       // "both typeof boolean → unbox i32, compare" arm fire correctly.
-      const boxOperandToExternref = (operandType: ValType, isBoolOperand: boolean): void => {
+      const boxOperandToExternref = (operandType: ValType, isBoolOperand: boolean, isSymbolOperand: boolean): void => {
         if (operandType.kind === "externref") return;
         if (operandType.kind === "i32" && isBoolOperand) {
           // addUnionImports (already called above) installs __box_boolean.
@@ -2351,15 +2555,29 @@ export function compileBinaryExpression(
             return;
           }
         }
+        // (#3154 / task #90) A SYMBOL operand is an i32 HANDLE, not a number —
+        // the brand-blind fallthrough boxed it via `f64.convert_i32_s` +
+        // `__box_number`, so `boxedSymbolElem === symIdentifier` compared a
+        // `$Symbol` carrier against a boxed NUMBER (the id) and returned
+        // false. Route through the branded i32→externref arm, which resolves
+        // `__box_symbol` (the id-interned `$Symbol` carrier in standalone/
+        // WASI — #2866 slice 3 — so `ref.eq` in the identity arm holds for
+        // same-id boxings).
+        if (operandType.kind === "i32" && isSymbolOperand) {
+          coerceType(ctx, fctx, { kind: "i32", symbol: true }, { kind: "externref" });
+          return;
+        }
         coerceType(ctx, fctx, operandType, { kind: "externref" });
       };
 
       // Coerce both operands to externref temps (right is on top of stack).
+      const leftIsSymbolStatic = (leftTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0;
+      const rightIsSymbolStatic = (rightTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0;
       const rTmp = allocTempLocal(fctx, { kind: "externref" });
-      boxOperandToExternref(rightType, rightIsBool);
+      boxOperandToExternref(rightType, rightIsBool, rightIsSymbolStatic);
       fctx.body.push({ op: "local.set", index: rTmp });
       const lTmp = allocTempLocal(fctx, { kind: "externref" });
-      boxOperandToExternref(leftType, leftIsBool);
+      boxOperandToExternref(leftType, leftIsBool, leftIsSymbolStatic);
       fctx.body.push({ op: "local.set", index: lTmp });
 
       // (#1910 R1) §7.2.13 steps 11-12 — reduce an Object operand to a primitive
@@ -2817,13 +3035,23 @@ export function compileBinaryExpression(
     // false — boolean operands keep the existing (correct) lowering, and a
     // boolean `any` compared to a boolean falls through to it.
     if (isStrict && !noJsHost && !leftIsString && !rightIsString && !leftIsBool && !rightIsBool) {
+      // (#3154 / task #90) Brand a statically-SYMBOL i32 operand so the
+      // externref box preserves the JS tag: the brand-blind
+      // `coerceType(i32 → externref)` fallthrough boxed a symbol HANDLE via
+      // `__box_number`, so the host strict-eq compared a real symbol against a
+      // boxed number id and was always false (`anyElem === moduleScopedSymbol`
+      // failed). With the brand, `coerceType` routes through `__box_symbol`
+      // (host symbol cache → identity-stable JS symbol), and JS `===` answers
+      // symbol identity.
+      const brandSymbolIfStatic = (t: ValType, tsType: ts.Type): ValType =>
+        t.kind === "i32" && (tsType.flags & ts.TypeFlags.ESSymbolLike) !== 0 ? { kind: "i32", symbol: true } : t;
       if (rightType.kind !== "externref") {
-        coerceType(ctx, fctx, rightType, { kind: "externref" });
+        coerceType(ctx, fctx, brandSymbolIfStatic(rightType, rightTsType), { kind: "externref" });
       }
       if (leftType.kind !== "externref") {
         const tmpR = allocTempLocal(fctx, { kind: "externref" });
         fctx.body.push({ op: "local.set", index: tmpR });
-        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        coerceType(ctx, fctx, brandSymbolIfStatic(leftType, leftTsType), { kind: "externref" });
         fctx.body.push({ op: "local.get", index: tmpR });
         releaseTempLocal(fctx, tmpR);
       }

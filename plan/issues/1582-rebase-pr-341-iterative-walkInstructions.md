@@ -1,9 +1,18 @@
 ---
 id: 1582
 title: "Rebase PR #341 — refactor: iterative walkInstructions (250 commits behind)"
-status: ready
+status: wont-fix
+completed: 2026-07-12
 created: 2026-05-22
-updated: 2026-05-22
+updated: 2026-07-12
+# 2026-07-12 (#3182 groom): closed as superseded. Both halves of PR #341's
+# value landed by other routes: (1) walkInstructions is ALREADY iterative on
+# main (src/codegen/walk-instructions.ts:23-39 — explicit frame stack, O(1)
+# JS call depth); (2) the `as unknown as Instr` elimination shipped via #1095
+# (per CLAUDE.md), and the remaining cast debt (129 double-casts + 13,359
+# single `as Instr`, measured 2026-07-12) is owned by the #3107 codemod,
+# which does a fresh mechanical pass instead of a hopeless 250+-commit
+# rebase. Rebasing PR #341 has no residual value.
 priority: medium
 feasibility: hard
 reasoning_effort: high

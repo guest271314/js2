@@ -1,9 +1,13 @@
 ---
 id: 805
 title: "Extract assignment/destructuring from expressions.ts → assignments.ts"
-status: ready
+status: done
+completed: 2026-07-12
 created: 2026-03-26
-updated: 2026-04-28
+updated: 2026-07-12
+# 2026-07-12 (#3182 groom): closed as landed — the extraction happened via the
+# expressions/ split: compileAssignment + the assignment/destructuring cluster
+# now live in src/codegen/expressions/assignment.ts (7,471 LOC).
 priority: medium
 feasibility: easy
 reasoning_effort: medium

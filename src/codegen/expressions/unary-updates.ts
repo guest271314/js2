@@ -25,6 +25,9 @@ import {
 import {
   emitAlternateStructSetDispatch,
   emitBoundsGuardedArraySet,
+  emitCapturedBoxGlobalRead,
+  emitCapturedBoxGlobalWrite,
+  getCapturedBoxGlobal,
   resolveInheritedStaticProp,
 } from "../property-access.js";
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for inc/dec
@@ -855,6 +858,29 @@ function compileMemberIncDec(
         const numType = ctx.fast && elemType.kind === "i32" ? ("i32" as const) : ("f64" as const);
         const op = numType === "i32" ? i32Op : f64Op;
 
+        // (#3024) A non-fast i32 element is read raw (the coerce above skips
+        // i32) but the arithmetic below runs in f64 — widen the read so the
+        // local.tee/f64.add sequence sees an f64, not an i32 (invalid Wasm).
+        if (elemType.kind === "i32" && numType === "f64") {
+          fctx.body.push({ op: "f64.convert_i32_s" });
+        }
+
+        // (#3024) The write-back below stores `newTmp` (an f64/i32 NUMERIC
+        // local) straight into the element array. When the element rep is not
+        // that numeric kind (externref elements — `arguments[i]++`, `any[]`
+        // increments — or i64/packed reps), the raw store is INVALID Wasm
+        // (`array.set expected externref, found local.get of type f64`).
+        // Route the new value through coerceType into a properly-typed local
+        // and store THAT. Byte-inert when elemType already matches numType.
+        const makeStoreLocal = (newTmp: number): number => {
+          if (elemType.kind === numType) return newTmp;
+          const storeTmp = allocLocal(fctx, `__incdec_store_${fctx.locals.length}`, elemType);
+          fctx.body.push({ op: "local.get", index: newTmp });
+          coerceType(ctx, fctx, { kind: numType }, elemType);
+          fctx.body.push({ op: "local.set", index: storeTmp });
+          return storeTmp;
+        };
+
         if (mode === "postfix") {
           const oldTmp = allocLocal(fctx, `__incdec_old_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.tee", index: oldTmp });
@@ -867,7 +893,7 @@ function compileMemberIncDec(
           const newTmp = allocLocal(fctx, `__incdec_new_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.set", index: newTmp });
           // Store: arr.data[idx] = new (bounds-guarded)
-          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, newTmp, arrayTypeIdx);
+          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, makeStoreLocal(newTmp), arrayTypeIdx);
           fctx.body.push({ op: "local.get", index: oldTmp });
           return { kind: numType };
         } else {
@@ -880,7 +906,7 @@ function compileMemberIncDec(
           const newTmp = allocLocal(fctx, `__incdec_new_${fctx.locals.length}`, { kind: numType });
           fctx.body.push({ op: "local.set", index: newTmp });
           // Store: arr.data[idx] = new (bounds-guarded)
-          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, newTmp, arrayTypeIdx);
+          emitBoundsGuardedArraySet(fctx, objTmp, typeIdx, idxTmp, makeStoreLocal(newTmp), arrayTypeIdx);
           fctx.body.push({ op: "local.get", index: newTmp });
           return { kind: numType };
         }
@@ -909,6 +935,39 @@ function compileMemberIncDec(
  * Caller must have already established that `expr.operator` is either
  * `PlusPlusToken` or `MinusMinusToken`.
  */
+/**
+ * (#3039) `++x` / `--x` / `x++` / `x--` on a BOXED captured global — a
+ * transitively-captured mutable var an accessor/method body updates. Reads and
+ * writes THROUGH the ref cell (never the raw box global). Numeric-only: the
+ * cell value is promoted to f64, incremented, coerced back to the cell type.
+ * Returns f64 (prefix → new value, postfix → old value), matching the module /
+ * captured-global inc/dec sites.
+ */
+function emitCapturedBoxGlobalIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  entry: { globalIdx: number; refCellTypeIdx: number; valType: ValType },
+  arithOp: "f64.add" | "f64.sub",
+  isPrefix: boolean,
+): ValType {
+  // Read the current cell value and promote to f64.
+  emitCapturedBoxGlobalRead(ctx, fctx, entry);
+  if (entry.valType.kind !== "f64") coerceType(ctx, fctx, entry.valType, { kind: "f64" });
+  const oldF64 = allocLocal(fctx, `__box_ginc_old_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: oldF64 });
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: arithOp });
+  const newF64 = allocLocal(fctx, `__box_ginc_new_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: newF64 });
+  // Coerce the new f64 back to the cell type and write it through the box.
+  if (entry.valType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, entry.valType);
+  const newVal = allocLocal(fctx, `__box_ginc_val_${fctx.locals.length}`, entry.valType);
+  fctx.body.push({ op: "local.set", index: newVal });
+  emitCapturedBoxGlobalWrite(fctx, entry, newVal);
+  fctx.body.push({ op: "local.get", index: isPrefix ? newF64 : oldF64 });
+  return { kind: "f64" };
+}
+
 function compilePrefixUpdate(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -928,6 +987,11 @@ function compilePrefixUpdate(
         return { kind: "f64" };
       }
       if (ts.isIdentifier(ppOperand)) {
+        if (fctx.localMap.get(ppOperand.text) === undefined) {
+          // (#3039) ++x on a boxed captured global — update through the cell.
+          const ppBox = getCapturedBoxGlobal(ctx, ppOperand.text);
+          if (ppBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, ppBox, "f64.add", true);
+        }
         const idx = fctx.localMap.get(ppOperand.text);
         if (idx !== undefined) {
           const boxedPP = fctx.boxedCaptures?.get(ppOperand.text);
@@ -1139,6 +1203,11 @@ function compilePrefixUpdate(
         return { kind: "f64" };
       }
       if (ts.isIdentifier(mmOperand)) {
+        if (fctx.localMap.get(mmOperand.text) === undefined) {
+          // (#3039) --x on a boxed captured global — update through the cell.
+          const mmBox = getCapturedBoxGlobal(ctx, mmOperand.text);
+          if (mmBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, mmBox, "f64.sub", true);
+        }
         const idx = fctx.localMap.get(mmOperand.text);
         if (idx !== undefined) {
           const boxed = fctx.boxedCaptures?.get(mmOperand.text);
@@ -1372,6 +1441,10 @@ function compilePostfixUnary(
     }
     const idx = fctx.localMap.get(postOperand.text);
     if (idx === undefined) {
+      // (#3039) x++/x-- on a boxed captured global — update through the cell,
+      // returning the OLD numeric value (postfix semantics).
+      const postBox = getCapturedBoxGlobal(ctx, postOperand.text);
+      if (postBox !== undefined) return emitCapturedBoxGlobalIncDec(ctx, fctx, postBox, arithOp, false);
       // Check module globals for postfix ++/--
       const postModIdx = ctx.moduleGlobals.get(postOperand.text);
       if (postModIdx !== undefined) {
@@ -1589,220 +1662,6 @@ function compilePostfixUnary(
   }
 
   reportError(ctx, expr, "Unsupported postfix unary target");
-  return null;
-}
-
-// ── Prefix/postfix increment helpers for property/element access ────
-
-/**
- * ++obj.prop / --obj.prop: get field, increment, set field, return NEW value
- */
-function compilePrefixIncrementProperty(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  target: ts.PropertyAccessExpression,
-  isIncrement: boolean,
-): ValType | null {
-  const objType = ctx.checker.getTypeAtLocation(target.expression);
-  const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
-  const typeName = resolveStructName(ctx, objType);
-  if (!typeName) {
-    reportError(ctx, target, `Cannot resolve struct for prefix increment on property: ${propName}`);
-    return null;
-  }
-  const structTypeIdx = ctx.structMap.get(typeName);
-  const fields = ctx.structFields.get(typeName);
-  if (structTypeIdx === undefined || !fields) {
-    reportError(ctx, target, `Unknown struct type for prefix increment: ${typeName}`);
-    return null;
-  }
-  const fieldIdx = fields.findIndex((f) => f.name === propName);
-  if (fieldIdx === -1) {
-    // Unknown field — gracefully emit NaN (reading undefined property in numeric context)
-    reportSilentFallback(ctx, "const-fallback", "unary-updates:prefix-incr-property-unknown-field", target);
-    fctx.body.push({ op: "f64.const", value: NaN });
-    return { kind: "f64" };
-  }
-
-  // Compile object ref and save it (we need it twice: once to get, once to set)
-  const objResult = compileExpression(ctx, fctx, target.expression);
-  if (!objResult) return null;
-  const objLocal = allocLocal(fctx, `__inc_obj_${fctx.locals.length}`, objResult);
-  fctx.body.push({ op: "local.set", index: objLocal });
-
-  // Get current field value
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
-
-  // Coerce to f64 if needed
-  const fieldType = fields[fieldIdx]!.type;
-  if (fieldType.kind !== "f64") {
-    coerceType(ctx, fctx, fieldType, { kind: "f64" });
-  }
-
-  // Increment/decrement
-  fctx.body.push({ op: "f64.const", value: 1 });
-  fctx.body.push({ op: isIncrement ? "f64.add" : "f64.sub" });
-
-  // Save new value
-  const newVal = allocLocal(fctx, `__inc_new_${fctx.locals.length}`, {
-    kind: "f64",
-  });
-  fctx.body.push({ op: "local.set", index: newVal });
-
-  // Set field: obj, newValue -> struct.set
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: newVal });
-  if (fieldType.kind !== "f64") {
-    coerceType(ctx, fctx, { kind: "f64" }, fieldType);
-  }
-  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-
-  // Return new value (prefix returns the new value)
-  fctx.body.push({ op: "local.get", index: newVal });
-  return { kind: "f64" };
-}
-
-/**
- * ++arr[i] / --arr[i]: get element, increment, set element, return NEW value
- */
-function compilePrefixIncrementElement(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  target: ts.ElementAccessExpression,
-  isIncrement: boolean,
-): ValType | null {
-  // (#2709) `++super[super()]` is a SuperProperty UPDATE; reference resolution
-  // runs GetThisBinding() FIRST (§13.3.7.1 step 2), throwing ReferenceError before
-  // the inner super() (in the key) is evaluated. Emit that throw and stop so the
-  // inner super() never runs. No-op for every other shape.
-  if (
-    target.expression.kind === ts.SyntaxKind.SuperKeyword &&
-    emitSuperUninitializedThisGuard(ctx, fctx, target.argumentExpression)
-  ) {
-    return { kind: "f64" };
-  }
-
-  // #2045 C.8: linear-backed Uint8Array element update — read-modify-write the
-  // linear memory directly (the GC path below requires a ref array and throws on
-  // a (ptr,len) buffer). Prefix → new value. Falls through for any other target.
-  const linU8 = tryEmitLinearU8ElementUpdate(ctx, fctx, target, isIncrement, /* isPrefix */ true);
-  if (linU8 !== null) return linU8;
-
-  const arrType = compileExpression(ctx, fctx, target.expression);
-  if (!arrType || (arrType.kind !== "ref" && arrType.kind !== "ref_null")) {
-    reportError(ctx, target, "Prefix increment on non-array element access");
-    return null;
-  }
-  const typeIdx = (arrType as { typeIdx: number }).typeIdx;
-  const typeDef = ctx.mod.types[typeIdx];
-
-  // String-literal bracket access on struct: ++obj["prop"]
-  if (typeDef?.kind === "struct" && ts.isStringLiteral(target.argumentExpression)) {
-    const propName = target.argumentExpression.text;
-    const fieldIdx = typeDef.fields.findIndex((f: { name: string }) => f.name === propName);
-    if (fieldIdx !== -1) {
-      const objLocal = allocLocal(fctx, `__inc_obj_${fctx.locals.length}`, arrType);
-      fctx.body.push({ op: "local.set", index: objLocal });
-
-      fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx });
-      const fieldType = typeDef.fields[fieldIdx]!.type;
-      if (fieldType.kind !== "f64") coerceType(ctx, fctx, fieldType, { kind: "f64" });
-      fctx.body.push({ op: "f64.const", value: 1 });
-      fctx.body.push({ op: isIncrement ? "f64.add" : "f64.sub" });
-      const newVal = allocLocal(fctx, `__inc_new_${fctx.locals.length}`, {
-        kind: "f64",
-      });
-      fctx.body.push({ op: "local.set", index: newVal });
-      fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "local.get", index: newVal });
-      if (fieldType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, fieldType);
-      fctx.body.push({ op: "struct.set", typeIdx, fieldIdx });
-      fctx.body.push({ op: "local.get", index: newVal });
-      return { kind: "f64" };
-    }
-  }
-
-  // Vec struct (array wrapped in {length, data})
-  const isVecStruct =
-    typeDef?.kind === "struct" &&
-    typeDef.fields.length === 2 &&
-    typeDef.fields[0]?.name === "length" &&
-    typeDef.fields[1]?.name === "data";
-  if (isVecStruct) {
-    const arrTypeIdx = getArrTypeIdxFromVec(ctx, typeIdx);
-    const arrDef = ctx.mod.types[arrTypeIdx];
-    if (!arrDef || arrDef.kind !== "array") {
-      reportError(ctx, target, "Prefix increment: vec data is not array");
-      return null;
-    }
-    const vecLocal = allocLocal(fctx, `__inc_vec_${fctx.locals.length}`, arrType);
-    fctx.body.push({ op: "local.set", index: vecLocal });
-    const idxResult = compileExpression(ctx, fctx, target.argumentExpression, {
-      kind: "f64",
-    });
-    if (!idxResult) return null;
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-    const idxLocal = allocLocal(fctx, `__inc_idx_${fctx.locals.length}`, {
-      kind: "i32",
-    });
-    fctx.body.push({ op: "local.set", index: idxLocal });
-
-    const elemType = arrDef.element;
-
-    // Bounds check: if idx < array.len, do read-modify-write; else produce NaN
-    fctx.body.push({ op: "local.get", index: idxLocal });
-    fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // data field
-    fctx.body.push({ op: "array.len" });
-    fctx.body.push({ op: "i32.lt_u" } as Instr);
-
-    // Build the in-bounds branch: read, modify, write, return new value
-    const thenInstrs: Instr[] = [];
-    thenInstrs.push({ op: "local.get", index: vecLocal } as Instr);
-    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
-    thenInstrs.push({ op: "local.get", index: idxLocal } as Instr);
-    thenInstrs.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
-    if (elemType.kind !== "f64") {
-      const savedBody = fctx.body;
-      fctx.body = thenInstrs as any;
-      coerceType(ctx, fctx, elemType, { kind: "f64" });
-      fctx.body = savedBody;
-    }
-    thenInstrs.push({ op: "f64.const", value: 1 } as Instr);
-    thenInstrs.push({ op: isIncrement ? "f64.add" : "f64.sub" } as Instr);
-    const newVal = allocLocal(fctx, `__inc_new_${fctx.locals.length}`, {
-      kind: "f64",
-    });
-    thenInstrs.push({ op: "local.tee", index: newVal } as Instr);
-    // Coerce back for array.set if needed
-    if (elemType.kind !== "f64") {
-      const savedBody = fctx.body;
-      fctx.body = thenInstrs as any;
-      coerceType(ctx, fctx, { kind: "f64" }, elemType);
-      fctx.body = savedBody;
-    }
-    const coercedNewVal = allocLocal(fctx, `__inc_cval_${fctx.locals.length}`, elemType);
-    thenInstrs.push({ op: "local.set", index: coercedNewVal } as Instr);
-    thenInstrs.push({ op: "local.get", index: vecLocal } as Instr);
-    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
-    thenInstrs.push({ op: "local.get", index: idxLocal } as Instr);
-    thenInstrs.push({ op: "local.get", index: coercedNewVal } as Instr);
-    thenInstrs.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
-    thenInstrs.push({ op: "local.get", index: newVal } as Instr);
-
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "val" as const, type: { kind: "f64" as const } },
-      then: thenInstrs,
-      else: [{ op: "f64.const", value: NaN } as Instr],
-    } as Instr);
-
-    return { kind: "f64" };
-  }
-
-  reportError(ctx, target, "Unsupported prefix increment element access target");
   return null;
 }
 

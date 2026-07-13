@@ -11,12 +11,24 @@ import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion }
 import { emitCoercedLocalSet, noJsHost } from "../expressions/helpers.js";
 import { emitUndefined } from "../expressions/late-imports.js";
 import { needsTdzFlag, resolveWasmType, varBindingNeedsExternrefForUndefined } from "../index.js";
-import { objectLiteralSpreadTakesHostPath, resolveComputedKeyExpression } from "../literals.js";
+import {
+  objectLiteralIsStandaloneAnyObjectCarrier,
+  objectLiteralSpreadTakesHostPath,
+  resolveComputedKeyExpression,
+} from "../literals.js";
+import { ensureObjectRuntime } from "../object-runtime.js"; // (#3037 CS1a) $Object type idx for any-object carrier
 import { localGlobalIdx } from "../registry/imports.js";
-import { getOrRegisterArrayType, getOrRegisterSubviewType, getOrRegisterVecType } from "../registry/types.js";
+import {
+  getOrRegisterArrayType,
+  getOrRegisterSubviewType,
+  getOrRegisterTaViewType,
+  getOrRegisterVecType,
+} from "../registry/types.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
 import { emitGuardedRefCast } from "../type-coercion.js";
+import { emitLazyClassObjectGet } from "../expressions/extern.js";
 import { compileArrayDestructuring, compileObjectDestructuring } from "./destructuring.js";
+import { compileNestedClassDeclaration } from "./nested-declarations.js";
 import { emitLocalTdzInit, emitTdzInit } from "./tdz.js";
 import { ensureNativeStringHelpers } from "../native-strings.js";
 import { compileStringBuilderInit } from "../string-builder.js";
@@ -120,7 +132,7 @@ function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.V
   // only — a bare `undefined`-typed binding (e.g. an optional-property read) must
   // stay numeric for the delete/undefined f64-sentinel machinery (#1112). See
   // `varBindingNeedsExternrefForUndefined`.
-  if (varBindingNeedsExternrefForUndefined(decl)) return { kind: "externref" };
+  if (varBindingNeedsExternrefForUndefined(decl, ctx)) return { kind: "externref" };
   return resolveWasmType(ctx, type);
 }
 
@@ -312,6 +324,61 @@ function inferSubarraySubviewType(
   const elemKind = recvName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
   if (elemKind === undefined || elemKind === recvName) return null;
   return { kind: "ref_null", typeIdx: getOrRegisterSubviewType(ctx, elemKind) };
+}
+
+const TA_VIEW_CTOR_NAMES = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+]);
+
+/**
+ * (#3054 B1) A `const a = new <TA>(buffer)` binding in standalone/WASI mode holds
+ * a shared-backing `$__ta_view` that refs the ArrayBuffer's vec (not a copy), so
+ * sibling views / DataViews observe each other's writes. Resolve the binding's
+ * local type to that view HERE — at the variable-declaration site — so the local
+ * carries the `struct.new $__ta_view` the ctor emits, and element access on `a`
+ * picks the byte-decoding view lowering at compile time (rather than the native
+ * vec type `resolveWasmType(Uint8Array)` would return, which would route
+ * `a[i]`/`a[i]=v` through the plain-vec path and drop the aliasing). This MUST
+ * mirror the ctor's own gating (`emitTaViewConstruct` / `emitTaViewConstructWindowed`
+ * in `new-super.ts`): a non-numeric buffer arg (ArrayBuffer/SharedArrayBuffer/
+ * DataView), host-free lane. (#3054 B2) The multi-arg windowed form
+ * `new TA(buf, byteOffset[, length])` also resolves to a `$__ta_view` (with the
+ * byteOffset field populated), so 1..3 args are accepted here.
+ */
+function inferTaViewType(ctx: CodegenContext, initializer: ts.Expression | undefined): ValType | null {
+  if (!initializer) return null;
+  const unwrapped = stripInferenceWrapper(initializer);
+  if (!ts.isNewExpression(unwrapped) || !ts.isIdentifier(unwrapped.expression)) return null;
+  const viewName = unwrapped.expression.text;
+  if (!TA_VIEW_CTOR_NAMES.has(viewName)) return null;
+  const args = unwrapped.arguments;
+  // Buffer-backed view: single buffer arg (offset-0, B1) or windowed
+  // `new TA(buf, byteOffset[, length])` (B2). A numeric first arg is the
+  // count-ctor (native vec), not a view — leave it on the current path.
+  if (!args || args.length < 1 || args.length > 3 || ts.isNumericLiteral(args[0]!)) return null;
+  // (#1930) Query the type-oracle boundary, not the raw checker.
+  const argSymName = ctx.oracle.builtinReceiverOf(args[0]!);
+  // (#3097) JS-host lane: a buffer-arg TA construction routes through the host
+  // construct bridge (`emitHostTaBufferConstruct`, new-super.ts) and yields a
+  // REAL host TypedArray externref. The local must be externref so reads route
+  // through the extern paths — coercing to the native vec type would ref.cast
+  // trap. MUST stay in lock-step with `hostTaBufferArgSymName` (new-super.ts):
+  // DataView buffer args are excluded there (array-like per §23.2.5.1) and
+  // stay on the legacy path here too.
+  if (!noJsHost(ctx)) {
+    if (argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer") return { kind: "externref" };
+    return null;
+  }
+  if (argSymName !== "ArrayBuffer" && argSymName !== "SharedArrayBuffer" && argSymName !== "DataView") return null;
+  return { kind: "ref_null", typeIdx: getOrRegisterTaViewType(ctx, viewName) };
 }
 
 function nullishLiteralKind(expr: ts.Expression): "null" | "undefined" | null {
@@ -633,16 +700,77 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       continue;
     }
 
-    // Class expression: const C = class { ... } — skip, already handled as class declaration
-    if (decl.initializer && ts.isClassExpression(decl.initializer)) {
-      continue;
-    }
-
-    // For arrow/function expression initializers, compile the expression first
-    // to get the actual closure struct ref type (resolveWasmType returns externref
-    // for function types, but closures need ref $struct)
-    if (decl.initializer && (ts.isArrowFunction(decl.initializer) || ts.isFunctionExpression(decl.initializer))) {
-      const actualType = compileExpression(ctx, fctx, decl.initializer);
+    // For arrow/function expression AND class-expression initializers, compile
+    // the expression first to get the actual closure struct ref type
+    // (resolveWasmType returns externref for function types, but closures need
+    // ref $struct).
+    //
+    // (#3045) Class expressions (`const C = class { ... }`) MUST also flow
+    // through here. The class BODY is lowered like a declaration, but the
+    // BINDING must still hold the constructor-object VALUE — otherwise the
+    // (pre-hoisted, instance-struct-typed) local `$C` is never stored, so
+    // reading `C` as an rvalue (passing it to a function, `Reflect.has(C, k)`,
+    // `Object.prototype.hasOwnProperty.call(C, k)`, …) reads an uninitialized
+    // null local → `extern.convert_any` on null → a host `Reflect.has called on
+    // non-object` / `Cannot convert undefined or null to object` trap. Compiling
+    // the class expression here yields the constructor value (a closure struct →
+    // externref, via emitClassCtorValue), and this branch re-types the
+    // pre-hoisted slot to that closure type before storing — exactly as for
+    // arrow/function-expression bindings. `new C()` is unaffected (it resolves
+    // the class statically via classSet, not through the binding value).
+    if (
+      decl.initializer &&
+      (ts.isArrowFunction(decl.initializer) ||
+        ts.isFunctionExpression(decl.initializer) ||
+        ts.isClassExpression(decl.initializer))
+    ) {
+      // (#3045 Bug 2) A class expression nested in a function had its BODY
+      // deferred to this in-scope path (declarations.ts). Compile its
+      // constructor/method bodies NOW, with the enclosing function scope
+      // (`fctx`) live and its nested functions already registered — BEFORE
+      // materializing the binding value below. `compileNestedClassDeclaration`
+      // runs `promoteAccessorCapturesToGlobals` for each member (enclosing-local
+      // reads/writes route through module globals) then `compileClassBodies`
+      // (enclosing-function calls resolve to real direct calls). This is the
+      // exact path a nested class DECLARATION takes. Run it FIRST so a module
+      // global added by promotion shifts the enclosing body emitted before this
+      // statement — the #779a index-shift guard registers `fctx` on the shift
+      // stacks inside `compileClassBodies`, exactly as the declaration path
+      // relies on; the binding materialization that follows reads the same
+      // class singleton, unaffected by the ordering.
+      if (ts.isClassExpression(decl.initializer)) {
+        const deferredSynth = ctx.anonClassExprNames.get(decl.initializer);
+        if (deferredSynth !== undefined && ctx.deferredClassBodies.has(deferredSynth)) {
+          compileNestedClassDeclaration(ctx, fctx, decl.initializer, deferredSynth);
+        }
+      }
+      // (#3045 identity) Materialize a class-expression BINDING as the class's
+      // canonical `__class_<Name>` singleton (identity-stable externref) rather
+      // than the ctor-CLOSURE `compileClassExpression` emits. This is what makes
+      // `const cls = class C {}` satisfy `new cls().m() === cls` and
+      // `inst.constructor === cls`: the binding, the inner class name (`C` via
+      // identifiers.ts), `instance.constructor`, and `C.staticProp` all resolve
+      // to the ONE singleton. Scope is deliberately the BINDING ONLY — every
+      // other class-expression-as-value context (a `new Proxy(class {}, {})`
+      // target, a call argument, an inline `(class {}).f`) keeps
+      // `compileClassExpression`'s callable ctor-closure, which the Proxy /
+      // Function.prototype.toString host path needs (a struct singleton is not
+      // callable → `proxy-class` broke when this was applied globally). Falls
+      // back to `compileExpression` for a class with no singleton (externref-
+      // backed builtin subclass) or an unresolved synthetic name.
+      let actualType: ValType | null;
+      const clsSynth = ts.isClassExpression(decl.initializer)
+        ? ctx.anonClassExprNames.get(decl.initializer)
+        : undefined;
+      if (
+        clsSynth !== undefined &&
+        ctx.classObjectGlobals?.has(clsSynth) &&
+        emitLazyClassObjectGet(ctx, fctx, clsSynth)
+      ) {
+        actualType = { kind: "externref" };
+      } else {
+        actualType = compileExpression(ctx, fctx, decl.initializer);
+      }
       const closureType = actualType ?? { kind: "externref" as const };
 
       // If this is a module-level variable, also store in the module global
@@ -865,6 +993,8 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
     const standaloneRegExpMatchArrayType = inferStandaloneRegExpMatchArrayType(ctx, decl.initializer);
     const subarraySubviewType = inferSubarraySubviewType(ctx, fctx, decl.initializer);
+    // (#3054 B1) `new <TA>(buffer)` → shared-backing `$__ta_view` local type.
+    const taViewType = inferTaViewType(ctx, decl.initializer);
     // (#2615) `new Proxy(...)` initializer — the slot must be externref so reads
     // route through `__extern_get` (the Proxy MOP), not a static `struct.get`.
     // NARROWED (#2615 regression fix): only when the Proxy variable stays local
@@ -877,39 +1007,71 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       isProxyConstruction(decl.initializer) &&
       ts.isIdentifier(decl.name) &&
       !proxyResultEscapesToCall(decl, decl.name.text);
+    // (#3037 CS1a) A spread-free, data-only object literal produced into an
+    // `any`/`unknown`/`object` context (standalone) is built as an open `$Object`
+    // and normally lands in an externref local — where at `===` it boxes tag-5
+    // and loses `ref.eq` identity (`const o: any = {z:1}; o === o` → 0). Slot the
+    // local as a raw `ref $Object` instead: the store coerces the object externref
+    // to the ref (`any.convert_extern` + guarded `ref.cast $Object`), `===` then
+    // boxes it **tag-6** via `boxToAny`'s `ref` arm (`__any_box_ref`, identity in
+    // `refval` → the tag-6 same-tag `ref.eq` arm answers identity), and dynamic
+    // `any`-typed member reads coerce the ref back to externref (`extern.convert_
+    // any`) for `__extern_get`. This is the same lockstep discipline
+    // `objectLiteralSpreadTakesHostPath` uses for its externref locals, and does
+    // NOT touch the `===` operand seam (−299) or the generic externref boxing arm
+    // (−788). Excludes growable literals (out-of-shape writes need the externref
+    // dictionary carrier); accessor/spread/computed-key literals are already
+    // excluded by the predicate. `objectTypeIdx` is fetched via the idempotent
+    // `ensureObjectRuntime` (the literal compile forces it anyway).
+    const initIsAnyObjectCarrier =
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      !(ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) &&
+      objectLiteralIsStandaloneAnyObjectCarrier(ctx, decl.initializer);
+    const anyObjectCarrierTypeIdx = initIsAnyObjectCarrier ? ensureObjectRuntime(ctx).objectTypeIdx : -1;
     const wasmType: ValType =
-      initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
+      // (#3123) A widened fnctor-subclass binding (pre-hoist recorded it in
+      // `fnctorWidenedLocals` — reassigned with a foreign/host value) must
+      // keep its externref slot even when the block-scoped shadow machinery
+      // re-allocates here (the pre-hoisted slot reuse below is gated on
+      // plain-fn capture and does not fire for uncaptured bindings).
+      fctx.fnctorWidenedLocals?.has(name)
         ? { kind: "externref" as const }
-        : isI32CoercedLocal
-          ? { kind: "i32" }
-          : isI32SpecializedArray
-            ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
-            : widenedTypeIdx !== undefined
-              ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
-              : (subarraySubviewType ??
-                inferredVecType ??
-                standaloneRegExpMatchArrayType ??
-                (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
-                  ? { kind: "externref" as const }
-                  : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
-                    ? { kind: "externref" as const }
-                    : // (#2615) `new Proxy(target, handler)` returns a host/native
-                      // Proxy externref. The checker types it as the TARGET's
-                      // struct (ProxyConstructor returns T), so the default slot
-                      // would `ref.test` the Proxy against that struct, fail, null
-                      // it, and trap every read via a direct `struct.get`. Force an
-                      // externref local so reads route through `__extern_get` (the
-                      // only path that runs the Proxy MOP / trap). Both modes emit
-                      // a Proxy externref, so this is mode-agnostic.
-                      initIsProxy
+        : initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
+          ? { kind: "externref" as const }
+          : initIsAnyObjectCarrier && anyObjectCarrierTypeIdx >= 0
+            ? { kind: "ref_null" as const, typeIdx: anyObjectCarrierTypeIdx }
+            : isI32CoercedLocal
+              ? { kind: "i32" }
+              : isI32SpecializedArray
+                ? { kind: "ref_null" as const, typeIdx: getOrRegisterVecType(ctx, "i32", { kind: "i32" }) }
+                : widenedTypeIdx !== undefined
+                  ? { kind: "ref_null" as const, typeIdx: widenedTypeIdx }
+                  : (taViewType ??
+                    subarraySubviewType ??
+                    inferredVecType ??
+                    standaloneRegExpMatchArrayType ??
+                    (decl.initializer && isStringMethodReturningHostArray(ctx, decl.initializer)
                       ? { kind: "externref" as const }
-                      : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
-                        // returns a host bound-function externref in JS-host mode;
-                        // force an externref local so the value isn't ref.cast to
-                        // the target's closure struct (which traps → null binding).
-                        decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                      : decl.initializer && isPromiseHostCall(ctx, decl.initializer)
                         ? { kind: "externref" as const }
-                        : localTypeForDeclaration(ctx, varType, decl)));
+                        : // (#2615) `new Proxy(target, handler)` returns a host/native
+                          // Proxy externref. The checker types it as the TARGET's
+                          // struct (ProxyConstructor returns T), so the default slot
+                          // would `ref.test` the Proxy against that struct, fail, null
+                          // it, and trap every read via a direct `struct.get`. Force an
+                          // externref local so reads route through `__extern_get` (the
+                          // only path that runs the Proxy MOP / trap). Both modes emit
+                          // a Proxy externref, so this is mode-agnostic.
+                          initIsProxy
+                          ? { kind: "externref" as const }
+                          : // (#1337) `fn.bind(...)` / `Function.prototype.bind.call(...)`
+                            // returns a host bound-function externref in JS-host mode;
+                            // force an externref local so the value isn't ref.cast to
+                            // the target's closure struct (which traps → null binding).
+                            decl.initializer && !ctx.standalone && !noJsHost(ctx) && isBindHostCall(decl.initializer)
+                            ? { kind: "externref" as const }
+                            : localTypeForDeclaration(ctx, varType, decl)));
 
     // (#2814) Bug C: re-align a block-scoped let/const with its OWN pre-hoisted
     // slot. `saveBlockScopedShadows` removed this name's localMap (and TDZ-flag)
@@ -999,6 +1161,27 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         ? existingIdx
         : allocLocal(fctx, name, wasmType);
 
+    // (#3037 CS1a) A let/const any-object-carrier reuses a slot the hoist pre-pass
+    // pre-allocated as externref (from `resolveWasmType(any)`), so the `wasmType`
+    // above (ref $Object) is bypassed. Retype the reused slot to the `$Object` ref
+    // so the value boxes tag-6 at `===` (identity) while reads coerce back to
+    // externref — the same fixup the initializer-driven ref upgrade (below) does,
+    // applied up front for the carrier. Skip closure-captured slots (a boxed /
+    // promoted-global capture threads the value through a cell/global of its own
+    // type; leave those externref — safe via S3a, only under-fixes).
+    if (
+      initIsAnyObjectCarrier &&
+      anyObjectCarrierTypeIdx >= 0 &&
+      localIdx >= fctx.params.length &&
+      !(fctx.boxedCaptures?.has(name) ?? false) &&
+      !ctx.capturedGlobals.has(name)
+    ) {
+      const carrierSlot = fctx.locals[localIdx - fctx.params.length];
+      if (carrierSlot && carrierSlot.type.kind === "externref") {
+        carrierSlot.type = { kind: "ref_null", typeIdx: anyObjectCarrierTypeIdx };
+      }
+    }
+
     // #1607: A block-scoped let/const that did NOT reuse a pre-hoisted slot
     // (because `saveBlockScopedShadows` removed its hoisted localMap/TDZ entry
     // on block entry) gets a fresh local with no TDZ flag. A self-referential
@@ -1067,6 +1250,24 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           // below treats externref as "primitive" and would refuse this narrowing.
           localSlot.type = wasmType;
         } else if (standaloneRegExpMatchArrayType !== null && existingIsExternref && newIsRef) {
+          localSlot.type = wasmType;
+        } else if (
+          taViewType?.kind === "externref" &&
+          existingIsRef &&
+          wasmType.kind === "externref" &&
+          !(fctx.boxedCaptures?.has(name) ?? false) &&
+          !ctx.capturedGlobals.has(name)
+        ) {
+          // (#3097) JS-host `new TA(buffer, ...)` — the value is a REAL host
+          // TypedArray externref (built via the host construct bridge), but the
+          // var was pre-hoisted as the native vec ref. Narrow the slot to
+          // externref so reads route through the extern paths; the vec-slot
+          // coercion would otherwise `ref.test`-fail and materialize a COPY
+          // (length preserved, aliasing lost). Safe for the same reason as the
+          // accessor-literal / Proxy arms: the hoist pass emits no init for
+          // ref-typed locals. Captured slots keep the vec type (the capture
+          // cell/global was typed at hoist time) and fall back to the
+          // guarded-materialize copy.
           localSlot.type = wasmType;
         } else if (!(existingIsRef && newIsPrimitive) && !(existingIsExternref && newIsRef)) {
           localSlot.type = wasmType;

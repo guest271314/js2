@@ -828,6 +828,18 @@ export function lowerIrFunctionBody<S>(
     }
     return dynTagScratchIdx;
   };
+  // (#3144) — i32 scratch local for multi-tag `class.instanceof` compares
+  // (the receiver's `__tag` is read once, compared against each compatible
+  // tag). Lazily allocated, one per function, reused across every
+  // `class.instanceof` in the body (same pattern as the scratch slots above).
+  let instanceofTagScratchIdx: number | null = null;
+  const ensureInstanceofTagScratch = (): number => {
+    if (instanceofTagScratchIdx === null) {
+      instanceofTagScratchIdx = func.params.length + locals.length;
+      locals.push({ name: "$instanceof_tag_scratch", type: { kind: "i32" } });
+    }
+    return instanceofTagScratchIdx;
+  };
 
   // #1126 Stage 3 — best-effort `typeOf` that returns null instead of
   // throwing. Used by the fast-path operand inspection in `case "binary"`
@@ -1383,6 +1395,105 @@ export function lowerIrFunctionBody<S>(
         emitter.pushRaw(out, { op: "i32.eq" });
         return;
       }
+      case "dyn.truthy": {
+        // #2949 S5.1 — ToBoolean on a boxed-any carrier. The operand MUST be
+        // dynamic (verifier enforces); the op sequence comes from the
+        // `IrDynamicLowering` handle, which routes to the CANONICAL
+        // `coercion-engine.emitToBoolean` (`__any_unbox_bool` gc /
+        // `__is_truthy` host) — one ToBoolean engine, byte-parity with the
+        // legacy condition path (June-audit D4). Result is i32, directly
+        // usable as an if / loop / ternary condValue.
+        const valueIrType = typeOf(instr.value);
+        if (valueIrType.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.truthy operand must be dynamic, got ${valueIrType.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.truthy (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.value, out);
+        for (const op of dyn.emitToBoolean()) emitter.pushRaw(out, op);
+        return;
+      }
+      case "dyn.to_number": {
+        // #2949 S5.3 — ToNumber on a boxed-any carrier → f64 (the numeric-
+        // abstract relational operand conversion). The operand MUST be dynamic
+        // (verifier enforces); the op sequence comes from the
+        // `IrDynamicLowering` handle, which routes to the CANONICAL per-backend
+        // ToNumber (`__any_to_f64` gc / `__unbox_number` host) — one ToNumber
+        // engine (June-audit D4). String×string lexicographic relational is
+        // DEFERRED (see the `dyn.to_number` node doc); this arm implements only
+        // the numeric path.
+        const valueIrType = typeOf(instr.value);
+        if (valueIrType.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.to_number operand must be dynamic, got ${valueIrType.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.to_number (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.value, out);
+        for (const op of dyn.emitToNumber()) emitter.pushRaw(out, op);
+        return;
+      }
+      case "dyn.eq": {
+        // #2949 S5.2 — strict/loose equality over two boxed-any carriers,
+        // routed through the CANONICAL `__any_strict_eq` / `__any_eq` helpers
+        // (June-audit D4). Both operands MUST be dynamic (verifier enforces);
+        // each is marshalled to the `(ref null $AnyValue)` eq-helper ABI by
+        // `emitEqOperand` (gc: identity; host: `__any_from_extern`) IMMEDIATELY
+        // after it is pushed, so no scratch local is needed. The tag-5
+        // classifier — incl. `NaN === NaN → false` — stays in the helper body.
+        const lt = typeOf(instr.lhs);
+        const rt = typeOf(instr.rhs);
+        if (lt.kind !== "dynamic" || rt.kind !== "dynamic") {
+          throw new Error(`ir/lower: dyn.eq operands must be dynamic, got ${lt.kind}/${rt.kind} (${func.name})`);
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.eq (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.lhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        emitValue(instr.rhs, out);
+        for (const op of dyn.emitEqOperand()) emitter.pushRaw(out, op);
+        const call = instr.loose ? dyn.emitLooseEq(instr.negate) : dyn.emitStrictEq(instr.negate);
+        for (const op of call) emitter.pushRaw(out, op);
+        return;
+      }
+      case "dyn.member_get": {
+        // #3053 U1 / #2949 S5.4 — dynamic member read `recv[key]` / `recv.name`
+        // through the unified reader primitive `__dyn_member_get(recv, key)`
+        // (#3053 U0). Both operands MUST be dynamic carriers (verifier +
+        // builder enforce); the handle emits a bare `[call __dyn_member_get]`
+        // and flips `ctx.usesDynMemberGet` so the finalize `ensureDynMemberGet`
+        // pass builds the helper. The result is the identity-preserving,
+        // tag-honest carrier — no externref↔$AnyValue impedance at the boundary
+        // (the helper closes the round-trip in its own frame).
+        const recvT = typeOf(instr.recv);
+        const keyT = typeOf(instr.key);
+        if (recvT.kind !== "dynamic" || keyT.kind !== "dynamic") {
+          throw new Error(
+            `ir/lower: dyn.member_get operands must be dynamic, got ${recvT.kind}/${keyT.kind} (${func.name})`,
+          );
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.member_get (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        emitValue(instr.recv, out);
+        emitValue(instr.key, out);
+        for (const op of dyn.emitMemberGet()) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
@@ -1601,6 +1712,18 @@ export function lowerIrFunctionBody<S>(
         });
         return;
       }
+      case "class.alloc": {
+        // #3000-C: allocate a fresh, default-initialised instance (no ctor
+        // call). Replays the resolver's precomputed default-field + tag +
+        // `struct.new` prefix — byte-identical to the legacy `<className>_new`
+        // allocation. Takes no operands.
+        const cl = resolver.resolveClass?.(instr.shape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.shape.className} (${func.name})`);
+        }
+        for (const op of cl.allocInstrs) emitter.pushRaw(out, op);
+        return;
+      }
       case "class.get": {
         const recvT = typeOf(instr.value);
         if (recvT.kind !== "class") {
@@ -1647,6 +1770,114 @@ export function lowerIrFunctionBody<S>(
         }
         // `this` first, then user args, then call $<className>_<methodName>.
         emitValue(instr.receiver, out);
+        for (const a of instr.args) emitValue(a, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
+        });
+        return;
+      }
+      case "class.super_init": {
+        // #3000-E: `super(args)` — run the PARENT's `<parent>_init` on the
+        // already-allocated `self`. Legacy `_init` signature is
+        // `(...ctorParams, self) -> (ref $struct)` (self LAST), so emit the user
+        // args first, then `self`, then call. The returned instance is discarded
+        // (super() is a statement) → drop.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
+        for (const a of instr.args) emitValue(a, out);
+        emitValue(instr.self, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.initFuncName }),
+        });
+        emitter.pushRaw(out, { op: "drop" });
+        return;
+      }
+      case "class.super_call": {
+        // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method
+        // slot (`<parent>_<method>`) with the subclass receiver first, then args.
+        // Resolving against `parentShape` (not the receiver's shape) bypasses any
+        // subclass override.
+        const cl = resolver.resolveClass?.(instr.parentShape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower super class ${instr.parentShape.className} (${func.name})`);
+        }
+        emitValue(instr.receiver, out);
+        for (const a of instr.args) emitValue(a, out);
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({
+            kind: "func",
+            name: cl.methodFuncName(instr.methodName),
+          }),
+        });
+        return;
+      }
+      case "class.instanceof": {
+        // (#3144) `value instanceof <target>` — read the receiver struct's
+        // hidden `__tag` (slot 0) and compare against the TARGET class's
+        // instanceof-compatible tag set (own + descendants), mirroring the
+        // legacy `compileInstanceOf` non-nullable-ref path. The IR class
+        // carrier is a non-null `(ref $Struct)`, so no null arm exists.
+        const recvT = typeOf(instr.value);
+        if (recvT.kind !== "class") {
+          throw new Error(`ir/lower: class.instanceof value must be class IrType, got ${recvT.kind} (${func.name})`);
+        }
+        const recvCl = resolver.resolveClass?.(recvT.shape);
+        if (!recvCl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${recvT.shape.className} (${func.name})`);
+        }
+        const targetCl = resolver.resolveClass?.(instr.targetShape);
+        if (!targetCl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.targetShape.className} (${func.name})`);
+        }
+        const tags = targetCl.instanceOfTags;
+        emitValue(instr.value, out);
+        if (tags.length === 0) {
+          // Tag-less target class — legacy parity: evaluate LHS, false.
+          emitter.pushRaw(out, { op: "drop" });
+          emitter.pushRaw(out, { op: "i32.const", value: 0 });
+          return;
+        }
+        emitter.pushRaw(out, {
+          op: "struct.get",
+          typeIdx: recvCl.structTypeIdx,
+          fieldIdx: recvCl.fieldIdx("__tag"),
+        });
+        if (tags.length === 1) {
+          emitter.pushRaw(out, { op: "i32.const", value: tags[0]! });
+          emitter.pushRaw(out, { op: "i32.eq" });
+          return;
+        }
+        // Multiple compatible tags: (tag == t0) || (tag == t1) || … via an
+        // i32 scratch local (same shape as legacy's multi-tag emission).
+        const scratch = ensureInstanceofTagScratch();
+        emitter.pushRaw(out, { op: "local.set", index: scratch });
+        emitter.pushRaw(out, { op: "local.get", index: scratch });
+        emitter.pushRaw(out, { op: "i32.const", value: tags[0]! });
+        emitter.pushRaw(out, { op: "i32.eq" });
+        for (let i = 1; i < tags.length; i++) {
+          emitter.pushRaw(out, { op: "local.get", index: scratch });
+          emitter.pushRaw(out, { op: "i32.const", value: tags[i]! });
+          emitter.pushRaw(out, { op: "i32.eq" });
+          emitter.pushRaw(out, { op: "i32.or" });
+        }
+        return;
+      }
+      case "class.static_call": {
+        // (#3144) `C.m(args)` — legacy statics take NO self param
+        // (class-bodies.ts: `methodParams = isStatic ? [] : [self]`), so
+        // emission is args then a direct call by collision-relocated key.
+        const cl = resolver.resolveClass?.(instr.shape);
+        if (!cl) {
+          throw new Error(`ir/lower: resolver cannot lower class ${instr.shape.className} (${func.name})`);
+        }
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
@@ -2810,8 +3041,29 @@ export function lowerIrFunctionBody<S>(
         // the same drive shape the value-producing `if` instr uses.
         const thenOps: S = emitter.newSink();
         const elseOps: S = emitter.newSink();
+        // #2856: the two arms are SEPARATE runtime paths, and the
+        // structurizer tail-duplicates a shared successor block into each arm
+        // (a converging mid-body `if` guard reaches its continuation from both
+        // the then-block's `br` and this `br_if`'s false edge — see
+        // `lowerStatementList`'s non-terminating-if rewrite in from-ast.ts).
+        // `materialized` tracks "this value's local has been assigned on the
+        // CURRENT path"; it is function-global. An intra-block multi-use value
+        // defined in the duplicated successor is lazily tee'd on first use, so
+        // the then-arm copy marks it materialized — then the else-arm copy sees
+        // it as already-materialized and reads a local the else path never set
+        // (a silent 0, or an "undefined SSA value" throw for a cross-block
+        // def). Snapshot at the branch and restore before the else arm (and
+        // after the `if`) so each path re-materializes its own locals. Values
+        // materialized BEFORE the branch (on `out`) stay live in both arms.
+        const preBranchMaterialized = new Set(materialized);
+        const restoreMaterialized = (): void => {
+          materialized.clear();
+          for (const v of preBranchMaterialized) materialized.add(v);
+        };
         emitBlockBody(thenBlock, thenOps);
+        restoreMaterialized();
         emitBlockBody(elseBlock, elseOps);
+        restoreMaterialized();
         const blockType: BlockType = { kind: "empty" };
         emitter.emitIf(blockType, thenOps, elseOps, out);
         return;
@@ -2904,7 +3156,13 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":
@@ -2941,12 +3199,23 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
     // Slice 4 (#1169d): class ops.
     case "class.new":
       return instr.args;
+    case "class.alloc":
+      // #3000-C: no SSA operands (default-initialised allocation).
+      return [];
     case "class.get":
       return [instr.value];
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
+      return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];

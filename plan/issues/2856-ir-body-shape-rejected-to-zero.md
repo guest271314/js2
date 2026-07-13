@@ -1,12 +1,12 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: blocked
-assignee:
+status: in-progress
+assignee: ttraenkler/opus-2856
 spec: banked
 sprint: current
 created: 2026-06-30
-updated: 2026-07-03
+updated: 2026-07-10
 priority: high
 horizon: l
 feasibility: hard
@@ -17,6 +17,8 @@ language_feature: compiler-internals
 goal: ir-full-coverage
 parent: 2855
 related: [1376, 1131, 2138, 2135, 2134]
+loc-budget-allow:
+  - src/ir/lower.ts
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
@@ -560,13 +562,13 @@ reduction is banked — the "reduction never happened" premise some dispatch not
 carried is stale). Fresh `JS2WASM_IR_SHAPE_DIAG=1 pnpm run check:ir-fallbacks -- --shape-diag`
 histogram of the current 25:
 
-| count | reject arm                                    | functions |
-| ----- | --------------------------------------------- | --------- |
-| 8 | `nontail-callstmt:CallExpression` | the 8 benchmark-harness `main`s (benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts) |
-| 4 | `unattributed-arm:helper-internal` | calendar `updFoot`, async `delay`, classes `Animal_new`/`Animal_speak` |
-| 3 | `body-unhandled-stmt:IfStatement` | algorithms `binarySearch`/`quicksort`/`joinNums` |
-| 2 | `vardecl-typenode:ArrayType` | benchmarks.ts + benchmarks/array.ts `bench_array` |
-| 1 each | `expr-unhandled:ArrowFunction` (helpers `addBenchCard`), `tail-unhandled:ExpressionStatement` (calendar `fdow`), `nontail-if-cond:BinaryExpression` (calendar `renderCal`), `nontail-unhandled-stmt:IfStatement` (calendar `onDay`), `nontail-assign-nonprop-lhs:BinaryExpression` (calendar `main`), `vardecl-init-expr:CallExpression` (algorithms `fibMemo`), `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` (algorithms `main`), `expr-binary-op-instanceof:BinaryExpression` (classes `main`) | — |
+| count  | reject arm                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | functions                                                                                                        |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 8      | `nontail-callstmt:CallExpression`                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | the 8 benchmark-harness `main`s (benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts) |
+| 4      | `unattributed-arm:helper-internal`                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | calendar `updFoot`, async `delay`, classes `Animal_new`/`Animal_speak`                                           |
+| 3      | `body-unhandled-stmt:IfStatement`                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | algorithms `binarySearch`/`quicksort`/`joinNums`                                                                 |
+| 2      | `vardecl-typenode:ArrayType`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | benchmarks.ts + benchmarks/array.ts `bench_array`                                                                |
+| 1 each | `expr-unhandled:ArrowFunction` (helpers `addBenchCard`), `tail-unhandled:ExpressionStatement` (calendar `fdow`), `nontail-if-cond:BinaryExpression` (calendar `renderCal`), `nontail-unhandled-stmt:IfStatement` (calendar `onDay`), `nontail-assign-nonprop-lhs:BinaryExpression` (calendar `main`), `vardecl-init-expr:CallExpression` (algorithms `fibMemo`), `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` (algorithms `main`), `expr-binary-op-instanceof:BinaryExpression` (classes `main`) | —                                                                                                                |
 
 ### The two structural blockers that make every "dev-sized arm" a dead end
 
@@ -574,8 +576,8 @@ histogram of the current 25:
 `call-graph-closure` fixpoint removes ANY shape-claimable function whose local
 caller OR callee is unclaimed. `buildLocalCallGraph` (`select.ts:2193-2198`) only
 creates edges for real `CallExpression`s with a local-decl callee — a function
-passed *by reference* (e.g. `addBenchCard(…, bench_fib)`) or called *inside a
-nested arrow* (`select.ts:2164` does not descend into nested function-likes) is
+passed _by reference_ (e.g. `addBenchCard(…, bench_fib)`) or called _inside a
+nested arrow_ (`select.ts:2164` does not descend into nested function-likes) is
 **not** an edge. Consequence: fixing a leaf statement/expression arm inside a
 function whose call-component root (`main`) stays unclaimed does not reduce the
 gated total — it **moves** the count from `body-shape-rejected` into
@@ -589,7 +591,7 @@ therefore genuinely **external**, landing in the `external-call` bucket.
 
 ### Empirical proof that the highest-value arm is net-zero
 
-Temporarily accepting *any* out-of-scope identifier in `isPhase1Expr` (the
+Temporarily accepting _any_ out-of-scope identifier in `isPhase1Expr` (the
 "top-level function passed as a `() => number` value" arm the 8 benchmark `main`s
 need) moved the gate to:
 
@@ -661,10 +663,10 @@ features in their own right and overlap #2858 (cross-module/`external-call`),
 1. Re-scope #2856 as a **tracking epic** under #2855, not an executable ticket.
 2. Cut capability sub-issues sized as whole-component slices, ordered by
    self-containment: **algorithms.ts** (pure-compute; `if`-in-body + element-store
-   + Map-global + arraylit-SSA) is the cleanest first real reduction (−5, all
-   contagion-internal to one file). The benchmark-harness cluster (−8) should be
-   sequenced **after** #2858's cross-module-call lowering, since it is a hard
-   dependency, not a dependent.
+   - Map-global + arraylit-SSA) is the cleanest first real reduction (−5, all
+     contagion-internal to one file). The benchmark-harness cluster (−8) should be
+     sequenced **after** #2858's cross-module-call lowering, since it is a hard
+     dependency, not a dependent.
 3. Do NOT dispatch the `ArrayType` / `if-in-body` / module-scope-binding arms as
    standalone dev tasks — each is provably net-zero-or-worse against the gate in
    isolation.
@@ -692,13 +694,13 @@ first).
 `binarySearch`, `quicksort`. `fibIter` already claims. The **five** functions
 that currently reject (verified `--shape-diag`), and the capability each needs:
 
-| function | reject arm (current main) | capability required |
-| --- | --- | --- |
-| `fibMemo` | `vardecl-init-expr:CallExpression` | **C3** module-scope `Map` global + `.get`/`.set` |
-| `binarySearch` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body (+ early-`return`-in-loop) |
-| `quicksort` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body **+ C2** element-store `arr[i]=e` |
-| `joinNums` | `body-unhandled-stmt:IfStatement` | **C1** if-in-body |
-| `main` | `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` | **C4** array-literal-under-C-loop SSA |
+| function       | reject arm (current main)                               | capability required                                 |
+| -------------- | ------------------------------------------------------- | --------------------------------------------------- |
+| `fibMemo`      | `vardecl-init-expr:CallExpression`                      | **C3** module-scope `Map` global + `.get`/`.set`    |
+| `binarySearch` | `body-unhandled-stmt:IfStatement`                       | **C1** if-in-body (+ early-`return`-in-loop)        |
+| `quicksort`    | `body-unhandled-stmt:IfStatement`                       | **C1** if-in-body **+ C2** element-store `arr[i]=e` |
+| `joinNums`     | `body-unhandled-stmt:IfStatement`                       | **C1** if-in-body                                   |
+| `main`         | `expr-arraylit-cloop-guard-1804:ArrayLiteralExpression` | **C4** array-literal-under-C-loop SSA               |
 
 ⚠ **Contagion (read `## ⚠ Sequencing constraint` above): all four capabilities
 must land in ONE PR.** The `call-graph-closure` fixpoint (`select.ts:492-518`)
@@ -786,7 +788,7 @@ from the working `for-of` vec path). `main` has both `const sorted = [1,3,…]`
   vec-identity fix). Once threaded, lift the guard for the threaded case.
 - If the SSA-threading fix is larger than this slice can absorb, an acceptable
   fallback that still claims `main`: hoist/represent the literal so it is not
-  read *through* the C-loop region — but the guard exists precisely because that
+  read _through_ the C-loop region — but the guard exists precisely because that
   is unsound in general, so **prefer the SSA-threading fix**; do not just delete
   the guard.
 
@@ -875,7 +877,7 @@ clean (host-gated arms defer → legacy, as designed).
   compile of the function — dual-compile model); (c) strict undefined-compare
   (`hit !== undefined`) → `__extern_is_undefined` on externref-shaped
   operands, constant-fold on never-undefined representations. LOOSE `==
-  undefined` stays legacy (null == undefined needs a null check). Host lane
+undefined` stays legacy (null == undefined needs a null check). Host lane
   only — standalone's native Map runtime is NOT wired; fibMemo correctly
   demotes there (the selector's Map-const set is empty outside the host
   lane, so no claim-then-fail).
@@ -914,7 +916,7 @@ clean (host-gated arms defer → legacy, as designed).
   store; mixed IR-writer/legacy-reader Map storage parity; try/finally
   early-return negative; whole-component e2e console equality; standalone/
   wasi cleanliness.
-- IR suite (`tests/ir-*`, issue-*-ir tests): per-file failure counts
+- IR suite (`tests/ir-*`, issue-\*-ir tests): per-file failure counts
   IDENTICAL to pristine main (the ~81 container-env failures are
   pre-existing; verified side-by-side) except `ir-scaffold`'s expected-claims
   list, updated for `withWhile` (legitimate capability growth).
@@ -938,17 +940,18 @@ benchmark-harness cluster AFTER #2858.
 #2952 slice 2 landed mid-flight with a CONVERGENT `if.stmt` design (identical
 node shape) plus `br.label` break/continue and a ctrlStack depth resolver.
 Reconciliation on this branch: upstream's `if.stmt` + `emitBufferAsStatements`
-+ ctrlStack machinery adopted wholesale (their arm pushes the plain CtrlFrames
-br.label depth-derivation needs; their `lowerIfBodyStatement` also upgrades
-the cond to truthiness via `coerceLoopCondToBool`); my duplicate `if.stmt`
-implementation deleted at every layer; `early.return` (mine alone) kept and
-now rides their emission helper. The #2856 zero-use side-effect fix collapsed
-from seven emission-loop sites into upstream's single `emitBufferAsStatements`
-(+ the remaining per-arm loops). Early-return barriers and #2952's `inLoop`
-threading coexist: break/continue may cross a try (br.label inlines crossed
-finallys) while early-return stays barred there. Verified post-merge:
-gate 18/9/5, cluster suite 18/18, #2952 suite 27/27, and a combined probe
-(`continue` + early `return` + `break` in one loop) claims with legacy parity.
+
+- ctrlStack machinery adopted wholesale (their arm pushes the plain CtrlFrames
+  br.label depth-derivation needs; their `lowerIfBodyStatement` also upgrades
+  the cond to truthiness via `coerceLoopCondToBool`); my duplicate `if.stmt`
+  implementation deleted at every layer; `early.return` (mine alone) kept and
+  now rides their emission helper. The #2856 zero-use side-effect fix collapsed
+  from seven emission-loop sites into upstream's single `emitBufferAsStatements`
+  (+ the remaining per-arm loops). Early-return barriers and #2952's `inLoop`
+  threading coexist: break/continue may cross a try (br.label inlines crossed
+  finallys) while early-return stays barred there. Verified post-merge:
+  gate 18/9/5, cluster suite 18/18, #2952 suite 27/27, and a combined probe
+  (`continue` + early `return` + `break` in one loop) claims with legacy parity.
 
 ### Post-slice regression caught by the equivalence sweep (fixed in-branch)
 
@@ -960,3 +963,146 @@ undefined/void/any/unknown; undefined-able static types demote to legacy
 (which tracks undefined-ness). Full `tests/equivalence/` sweep on the final
 tree matches the pristine-main baseline (all remaining failures pre-existing
 container-env issues, verified side-by-side).
+
+## Slice RESULTS — bench_array ×2 (2026-07-10, fable-2856): `number[]` annotation + `arr.push` + sibling-loop counters
+
+**Gate: `body-shape-rejected` 17 → 15 (−2); all other buckets unchanged;
+post-claim demotions ZERO.** Banked via `--update-on-decrease`. Grounded
+against `origin/main` @ d7a1feaa1c (post-#2858: `call-graph-closure` is 0 and
+the caller-direction demotion arm is gone, so leaf claims like `bench_array`
+are contagion-safe — the unclaimed `main`s no longer pin their callees).
+
+### What landed (three small capabilities, one PR)
+
+- **`number[]` type annotation** — `isPhase1TypeNode` accepts an
+  ArrayTypeNode with a NumberKeyword element; `lowerVarDecl` resolves it via
+  `resolveVecForElement(f64)` to the vec struct-ref IrType. That ref is the
+  hint an EMPTY literal initializer (`const arr: number[] = []`) needs to
+  type its `vec.new_fixed` (the machinery existed; only the hint threading
+  from an array annotation was missing). f64 element only — `string[]` /
+  `boolean[]` carriers are backend-dependent, deferred.
+- **`arr.push(v)`** (`lowerMethodCall` vec arm) — rides the C2
+  `__vec_elem_set_<vecTypeIdx>` helper: a store at index == length IS push
+  (null-guard, grow-on-capacity with doubling + copy, store, length update —
+  full legacy parity, pure WasmGC, dual-mode clean). Old length is read
+  BEFORE the store; expression position returns old + 1 (JS's new-length
+  result). Residuals that demote: multi-arg push, spread, non-f64/externref
+  element vecs, and NULLABLE receivers (`ref_null`, e.g. unnarrowed params —
+  `emitVecLen` struct-reads without a null guard, so those keep legacy's
+  runtime TypeError).
+- **Sibling `for (let i...)` loops** — the selector's flat scope set leaks
+  each for-init counter into the outer scope (so post-loop reads stay
+  claimable), which made a SECOND sibling `for (let i...)` a false
+  "duplicate" reject. from-ast scopes each for-init in its own `innerCx`
+  copy (`lowerForStatement`), so the shadow is build-safe. Fix: leaked names
+  are tracked (`forInitLeakedNames`, reset per function walk) and only
+  GENUINE outer bindings still reject — mirroring `lowerVarDecl`'s
+  redeclaration throw exactly (select↔build parity, #2138).
+
+### Verification record
+
+- `tests/issue-2856-vec-push.test.ts` (new, 9 tests): legacy/IR parity for
+  each capability, every positive claim proven via byte-diff
+  (anti-vacuity); grow path; expression-position push return value;
+  multi-arg-push clean demote; genuine-shadow negative; standalone + wasi
+  compile cleanliness (no host import — the helper is pure WasmGC).
+- bench_array e2e: IR-vs-legacy both return 49995000 (10k push + sum),
+  claimed (byte-diff), zero demotions.
+- `tests/ir-scaffold.test.ts` failure count IDENTICAL to pristine main at
+  d7a1feaa1c (2 pre-existing container-env failures, verified side-by-side);
+  `tests/ir-algorithms-cluster.test.ts` 18/18.
+
+### Remaining (13 after this slice, by cluster)
+
+benchmark-harness 8 `main`s + `addBenchCard` (first-class function values +
+arrow closure args + cross-module imported calls — the multi-capability
+program from Step-2), calendar 4 (module-scope MUTABLE bindings + DOM
+chains + if-shapes), classes.ts `main` (`instanceof`), async `delay`
+(Promise executor). Epic stays `blocked` on those capability programs.
+
+## from-ast overlay-bug fix — structurizer `materialized` leak (2026-07-13, opus-2856)
+
+Fixed the **from-ast overlay soundness bug** flagged from PRs #2966/#3203 (the
+`classify` "undefined SSA value" overlay) and #2972/#3204 (`Math.log(2.414)`
+returned `log(2)`; worked around with ternary-init `over`/`ea`/`fa` locals).
+
+### Root cause — a lower.ts structurizer bug, NOT a from-ast/select gap
+
+The from-ast IR is **correct**. `lowerStatementList`'s non-terminating mid-body
+`if (cond) { <side effect> } <rest>` rewrite (from-ast.ts ~811) builds a
+`br_if → thenBlock; thenBlock br→ contBlock; contBlock=<rest>` CFG. `contBlock`
+(the continuation holding `<rest>`) is reached from BOTH the then-block's `br`
+and the `br_if`'s false edge, so it is a **merge block**.
+
+The lowerer's structurizer (`emitBlockBody`, lower.ts ~2985) has no shared-merge
+emission — its `br`/`br_if` handlers **tail-duplicate** every successor inline.
+So `contBlock` is emitted once into the then-arm sink and again into the
+else-arm sink. An **intra-block multi-use** value defined in `contBlock` (e.g.
+`let t = f*f` used twice by `let t2 = t*t`) is materialized **lazily** via
+`local.tee` on first use, gated on the function-**global** `materialized` set.
+The then-arm copy tee'd `t` and added it to `materialized`; the else-arm copy
+then saw `t ∈ materialized` and emitted a bare `local.get` for a local the
+else runtime path **never set** → silent `0` (or an "undefined SSA value" throw
+when the leaked value is a cross-block def, the #3203 manifestation).
+
+Verified in the WAT: pre-fix the else arm read `local.get $t` without the
+preceding `f*f; local.tee $t` def; post-fix it recomputes it.
+
+Why prior probes mislocated it as "mis-scopes a let into the then-branch": the
+observable symptom (the trailing `let` "disappears" on the not-taken path) looks
+like scope folding, but the IR scope is right — it is the emitter that drops the
+def in the duplicated copy.
+
+### Fix (`src/ir/lower.ts`, br_if handler)
+
+The two arms are **separate runtime paths**. `materialized` means "this value's
+local is assigned on the CURRENT path". Snapshot it at the branch and restore to
+that snapshot before emitting each arm (and after the `if`), so each path
+re-materializes its own intra-block locals. Values materialized BEFORE the
+branch stay live in both arms (they are in the snapshot); cross-block values are
+re-emitted eagerly in each copy's instr loop as before. ~15 lines, localized to
+the one duplication site (the sole tail-dup origin is a `br_if` fork).
+
+### Scope note — this does NOT reduce the corpus `body-shape-rejected` count
+
+Grounding `JS2WASM_IR_SHAPE_DIAG=1 check:ir-fallbacks --shape-diag` @ main
+`7d4a48cfc0`: the 14 remaining `body-shape-rejected` are 8 benchmark-harness
+`main`s (`nontail-callstmt` — blocked BY #2858 cross-module calls + first-class
+function values), 2 helper-internal (`updFoot`/`delay`), and the calendar
+DOM/if arms — **none are the overlay-bug shape** (which was a CLAIMED-but-
+miscompiled correctness bug, not a selector rejection). So this fix banks **no
+bucket delta**; its value is **correctness + IR-first skip safety** (the −60k
+epic can only make IR-first the sole path once shapes like this lower correctly)
+and **removing the #3204 math workaround**.
+
+### Also landed — restored the natural `Math.log`/`Math.log2` guard form
+
+`src/stdlib/math.ts`: the `if (f > sqrt2) { f *= 0.5; e += 1; }` adjust is back
+in its natural mid-body-if form (the ternary `over`/`ea`/`fa` workaround is
+gone). **Bit-identical** to the ternary form — 8010 self-hosted-vs-self-hosted
+comparisons (dense magnitude sweep + specials), 0 mismatches; both claim/skip;
+the self-host driver is context-free so it lowers identically in host/standalone/
+wasi. `math-inline` (49) + `issue-2972` + `issue-3141` green.
+
+### Validation
+
+- `tests/issue-2856-if-guard-tail-dup.test.ts` (new, 4 tests): IR-vs-legacy
+  parity for the multi-use trailing-local shape, the exact Math.log
+  range-reduction shape, nested guards, and a single-use control — every
+  positive case asserts the function is IR-owned (`irFirstSkipped` contains it)
+  so a demote-to-legacy can't vacuously green it.
+- 111 IR-equivalence/gate tests green (`ir-if-else`, `ir-let-const`,
+  `ir-algorithms-cluster`, `issue-2856-vec-push`, `issue-3203`); `ir-scaffold`'s
+  2 failures are pre-existing container-env (verified side-by-side on base).
+- `tsc` clean; `check:ir-fallbacks` OK (`body-shape-rejected` 14→14, no change).
+- Broad-impact (structurizer + Math path) → validated on `merge_group`.
+
+### Follow-up (separate, deeper — NOT this PR)
+
+The #3203 `const b = call(); if (b …) …; use b twice` shape still fails a
+DIFFERENT pass — `inline-small`'s post-inline verify ("use of SSA value N before
+def") — a pre-existing bug (reproduces on base, unaffected by this fix) in the
+inliner's block-duplication path, not the emission structurizer. Same structural
+class (block duplication + a value live across copies) but in a different pass;
+tracked as a follow-up so this PR stays a focused, low-blast-radius correctness
+fix.

@@ -88,22 +88,6 @@ export function emitUndefinedSingleton(ctx: CodegenContext, fctx: FunctionContex
 }
 
 /**
- * (#2106 S1.0) Test whether the `ref $AnyValue` on top of the stack is the
- * `$undefined` singleton (tag === 1). Consumes the ref, leaves an i32. Returns
- * `false` (emitting nothing) when the singleton is unavailable. INERT until S1.1
- * routes the `=== undefined` / `typeof === "undefined"` consumers here.
- */
-export function emitIsUndefinedSingleton(ctx: CodegenContext, fctx: FunctionContext): boolean {
-  if (!(ctx.standalone || ctx.nativeStrings)) return false;
-  if (ctx.anyValueTypeIdx < 0) return false;
-  // tag === 1  (the operand is a `ref $AnyValue`; read field 0 and compare).
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.eq" } as Instr);
-  return true;
-}
-
-/**
  * (#2106 S1) Is the `undefinedSingleton` regime ACTIVE for this module?
  * True only when the flag is set AND we are in standalone/native-strings mode
  * (host mode has a real host `undefined` via `__get_undefined` and is never
@@ -375,17 +359,30 @@ export function isAnyValue(type: ValType, ctx: CodegenContext): boolean {
   );
 }
 
-export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefined {
+export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHonest?: boolean }): number | undefined {
   if (!(ctx.standalone || ctx.wasi)) return undefined;
   if (ctx.nativeBoxNumberTypeIdx < 0 || ctx.nativeBoxBooleanTypeIdx < 0) return undefined;
 
-  const existing = ctx.funcMap.get("__any_from_extern");
+  // (#3037 CS1b) The reader-carrier consumers need an ALWAYS-honest classifier
+  // (`$AnyString`→tag-5, `$BoxedNumber`→tag-3, `$BoxedBoolean`→tag-4,
+  // other-eq-castable GC ref→tag-6 identity) irrespective of the module-wide
+  // `honestAnyBoxing` flag (default OFF). It is emitted under a DISTINCT name
+  // (`__any_from_extern_honest`) so it never collides with, nor mutates, the
+  // flag-driven generic instance that the −788 chokepoint depends on. Honest
+  // classification requires the `$AnyString` type to be reserved; without it a
+  // genuine string would mis-classify tag-6, so refuse (the caller keeps the
+  // bare externref — safe, only under-fixes via S3a's cross-tag arm).
+  const forceHonest = opts?.forceHonest === true;
+  if (forceHonest && ctx.anyStrTypeIdx < 0) return undefined;
+  const helperName = forceHonest ? "__any_from_extern_honest" : "__any_from_extern";
+
+  const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
   ensureAnyValueType(ctx);
   const anyTypeIdx = ctx.anyValueTypeIdx;
   const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
-  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyRef], "__any_from_extern");
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyRef], helperName);
   const funcIdx = mintDefinedFunc(ctx);
   const EQ_HEAP_TYPE = -19;
 
@@ -399,7 +396,7 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   // in standalone/wasi; kept total). Honest additionally requires
   // `anyStrTypeIdx` — without the string test a genuine string would
   // mis-classify as tag-6 object, so fall back to the legacy arms instead.
-  const honest = ctx.honestAnyBoxing === true && ctx.anyStrTypeIdx >= 0;
+  const honest = (forceHonest || ctx.honestAnyBoxing === true) && ctx.anyStrTypeIdx >= 0;
   // (#2106 S1) Under the `undefinedSingleton` regime a NULL externref means JS
   // NULL (undefined is the non-null tag-1 singleton, recovered exactly by the
   // `ref.test $AnyValue` arm below) — so the null arm boxes tag-0. This is
@@ -531,14 +528,14 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefin
   ];
 
   pushDefinedFunc(ctx, funcIdx, {
-    name: "__any_from_extern",
+    name: helperName,
     typeIdx,
     locals: [{ name: "any", type: { kind: "anyref" } }],
     body,
     exported: false,
   });
-  ctx.funcMap.set("__any_from_extern", funcIdx);
-  ctx.anyHelpers.set("__any_from_extern", funcIdx);
+  ctx.funcMap.set(helperName, funcIdx);
+  ctx.anyHelpers.set(helperName, funcIdx);
   return funcIdx;
 }
 
@@ -609,6 +606,38 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
         },
       ],
     },
+    // (#3173) $BigInt-box arm: two DISTINCT bigint boxes with the same i64
+    // value are `===` (§7.2.15 step 1: both BigInt → BigInt::equal). The
+    // `__any_from_extern` classification below has no bigint tag — it folded
+    // bigint boxes into the object fallback, so `dv.getBigInt64(0) === 0n`
+    // (each side freshly boxed) compared by REFERENCE and was always false
+    // whenever this helper (not the inline `===` cascade, which has a
+    // typeof_bigint arm) served the comparison. Mixed bigint/number operands
+    // fall through — the classification keeps them unequal, matching
+    // `1n === 1` → false.
+    ...(ctx.nativeBigIntTypeIdx >= 0
+      ? ([
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
+          { op: "local.get", index: 3 },
+          { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: ctx.nativeBigIntTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBigIntTypeIdx, fieldIdx: 0 },
+              { op: "local.get", index: 3 },
+              { op: "ref.cast", typeIdx: ctx.nativeBigIntTypeIdx },
+              { op: "struct.get", typeIdx: ctx.nativeBigIntTypeIdx, fieldIdx: 0 },
+              { op: "i64.eq" },
+              { op: "return" },
+            ],
+          },
+        ] as Instr[])
+      : []),
     // Primitive comparison (numbers unified via f64.eq, strings by content,
     // booleans, null/undefined by tag) for everything the fast path didn't match.
     { op: "local.get", index: 0 },
@@ -1494,47 +1523,67 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                         { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 }, // externval
                         { op: "any.convert_extern" },
                         { op: "local.tee", index: 2 },
-                        { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                        // (#3135) tag-5 with a NULL externval is the generic
+                        // boxing (`boxToAny` #1888 tag-5 default) of a null
+                        // externref — the standalone carrier of `undefined`
+                        // crossing the open-any boundary. §7.1.4
+                        // ToNumber(undefined) = NaN. This matches the
+                        // plane-wide undefined bias already chosen for the
+                        // null externref: `__any_from_extern`'s nullAny is
+                        // {tag:1, f64val:NaN} and standalone `typeof` answers
+                        // "undefined" for it. (The null-vs-undefined collapse
+                        // itself is #2106 S1.) Reading f64val (0) here made
+                        // `undefined + 5` answer 5 through the numeric arm.
+                        { op: "ref.is_null" },
                         {
                           op: "if",
                           blockType: { kind: "val", type: { kind: "f64" } },
-                          then: [
+                          then: [{ op: "f64.const", value: NaN }],
+                          else: [
                             { op: "local.get", index: 2 },
-                            { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
-                            { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
-                          ],
-                          else:
-                            // (#2966) $BoxedBoolean recovery, symmetric with the
-                            // $BoxedNumber arm above: a boolean crossing the
-                            // open-any boundary is a tag-5 box whose externval is
-                            // the native `$BoxedBoolean` carrier. §7.1.4
-                            // ToNumber(true)=1 / ToNumber(false)=0 — reading the
-                            // box's f64val (always 0) made every dispatched
-                            // boolean numerically 0. Same gate style as #1888.
-                            ctx.nativeBoxBooleanTypeIdx >= 0
-                              ? ([
-                                  { op: "local.get", index: 2 },
-                                  { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
-                                  {
-                                    op: "if",
-                                    blockType: { kind: "val", type: { kind: "f64" } },
-                                    then: [
+                            { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: { kind: "f64" } },
+                              then: [
+                                { op: "local.get", index: 2 },
+                                { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                                { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                              ],
+                              else:
+                                // (#2966) $BoxedBoolean recovery, symmetric with the
+                                // $BoxedNumber arm above: a boolean crossing the
+                                // open-any boundary is a tag-5 box whose externval is
+                                // the native `$BoxedBoolean` carrier. §7.1.4
+                                // ToNumber(true)=1 / ToNumber(false)=0 — reading the
+                                // box's f64val (always 0) made every dispatched
+                                // boolean numerically 0. Same gate style as #1888.
+                                ctx.nativeBoxBooleanTypeIdx >= 0
+                                  ? ([
                                       { op: "local.get", index: 2 },
-                                      { op: "ref.cast", typeIdx: ctx.nativeBoxBooleanTypeIdx },
-                                      { op: "struct.get", typeIdx: ctx.nativeBoxBooleanTypeIdx, fieldIdx: 0 },
-                                      { op: "f64.convert_i32_s" },
-                                    ],
-                                    else: [
+                                      { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+                                      {
+                                        op: "if",
+                                        blockType: { kind: "val", type: { kind: "f64" } },
+                                        then: [
+                                          { op: "local.get", index: 2 },
+                                          { op: "ref.cast", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+                                          { op: "struct.get", typeIdx: ctx.nativeBoxBooleanTypeIdx, fieldIdx: 0 },
+                                          { op: "f64.convert_i32_s" },
+                                        ],
+                                        else: [
+                                          { op: "local.get", index: 0 },
+                                          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                                        ],
+                                      },
+                                    ] as Instr[])
+                                  : ([
                                       { op: "local.get", index: 0 },
                                       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
-                                    ],
-                                  },
-                                ] as Instr[])
-                              : ([
-                                  { op: "local.get", index: 0 },
-                                  { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
-                                ] as Instr[]),
-                        },
+                                    ] as Instr[]),
+                            },
+                          ],
+                        } as Instr,
                       ],
                       else: [
                         // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
@@ -1768,21 +1817,44 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         { op: "i32.or" } as Instr,
       ];
     }
-    // tag==5 → stringy iff field-4 is NOT a boxed number/boolean carrier.
+    // tag==5 → stringy iff field-4 is NOT a boxed number/boolean carrier AND
+    // NOT null. (#3135) The generic externref→AnyValue boxing (`boxToAny`'s
+    // deliberate #1888 tag-5 default) also wraps a NULL externref — the
+    // standalone carrier of `undefined`/`null` crossing the open-any
+    // closure-dispatch boundary — as a tag-5 "string" box with a null
+    // externval. Treating that as stringy sent `undefined + 5` down the
+    // concat arm: `opToAnyString` stringified the nullish box like a plain
+    // object, so the dispatched add answered "[object Object]5" (a silent
+    // wrong STRING result; pre-#3055 the broken any-equality masked it as a
+    // fake NaN pass — see tests/issue-1888-any-extern-roundtrip.test.ts).
+    // §13.15.3: ToPrimitive(undefined/null) is NOT a string, so a nullish
+    // carrier must take the NUMERIC arm regardless of the null-vs-undefined
+    // collapse (#2106). Genuine tag-5 strings always carry a non-null
+    // externval, so the guard is precise.
     const notBoxedPrimitive: Instr[] = [
       { op: "local.get", index: opIdx } as Instr,
       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
       { op: "any.convert_extern" } as Instr,
       { op: "local.tee", index: 4 } as Instr,
-      { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
-      ...(ctx.nativeBoxBooleanTypeIdx >= 0
-        ? ([
-            { op: "local.get", index: 4 },
-            { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
-            { op: "i32.or" },
-          ] as Instr[])
-        : []),
-      { op: "i32.eqz" } as Instr,
+      { op: "ref.is_null" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        // Null externval: a boxed nullish carrier — NOT a string.
+        then: [{ op: "i32.const", value: 0 }],
+        else: [
+          { op: "local.get", index: 4 } as Instr,
+          { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
+          ...(ctx.nativeBoxBooleanTypeIdx >= 0
+            ? ([
+                { op: "local.get", index: 4 },
+                { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+                { op: "i32.or" },
+              ] as Instr[])
+            : []),
+          { op: "i32.eqz" } as Instr,
+        ],
+      } as Instr,
     ];
     return [
       { op: "local.get", index: tagLocal } as Instr,
@@ -2286,14 +2358,73 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               { op: "return" },
             ],
           },
-          // if tagA != tagB → 0 (strict: no cross-type coercion)
+          // if tagA != tagB → 0 (strict: no cross-type coercion), EXCEPT the
+          // (#2175 V2-S3 — raw-anyref carrier) cross-representation identity case.
           { op: "local.get", index: 2 },
           { op: "local.get", index: 3 },
           { op: "i32.ne" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "i32.const", value: 0 }],
+            // (#2175 V2-S3) Reference-IDENTITY reconciliation, cross-representation
+            // ONLY. A GC object can reach `===` under TWO $AnyValue reps that point
+            // at the SAME reference: tag-6 `refval` (raw GC ref via `__any_box_ref`)
+            // vs tag-5 `externval` (the SAME ref externref-wrapped, e.g. a
+            // descriptor `.value` / array-element read boxed via `__any_box_string`).
+            // Those differ in TAG, so they land in THIS `tagA != tagB` arm — where
+            // the legacy answer was a flat `0`. Recover each operand's reference
+            // payload (refval if non-null, else `any.convert_extern(externval)`) to
+            // a common `eqref`; if both are `eq` refs and `ref.eq`-identical they are
+            // the identical object → 1, else 0. This lives ONLY in the different-tag
+            // branch: same-tag pairs keep their existing tag-specific arms untouched
+            // (an earlier revision ran this before the tag gate — for ALL tag pairs —
+            // and regressed same-tag identity, measured −7228 host-free; #2175).
+            // Cannot false-positive a primitive: distinct number/string/object boxes
+            // are distinct refs. GATED on standalone/wasi (native-GC-only; host mode
+            // uses host externrefs and answers identity correctly, byte-identical).
+            then:
+              ctx.standalone === true || ctx.wasi === true
+                ? (() => {
+                    const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type
+                    const recoverRefPayload = (opIdx: number, dstLocal: number): Instr[] => [
+                      { op: "local.get", index: opIdx } as Instr,
+                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 } as Instr, // refval (eqref)
+                      { op: "local.tee", index: dstLocal } as Instr,
+                      { op: "ref.is_null" } as Instr,
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: opIdx } as Instr,
+                          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr, // externval (externref)
+                          { op: "any.convert_extern" } as Instr,
+                          { op: "local.set", index: dstLocal } as Instr,
+                        ],
+                      } as Instr,
+                    ];
+                    return [
+                      ...recoverRefPayload(0, 4),
+                      ...recoverRefPayload(1, 5),
+                      { op: "local.get", index: 4 } as Instr,
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+                      { op: "local.get", index: 5 } as Instr,
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+                      { op: "i32.and" } as Instr,
+                      {
+                        op: "if",
+                        blockType: { kind: "val", type: { kind: "i32" } },
+                        then: [
+                          { op: "local.get", index: 4 } as Instr,
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+                          { op: "local.get", index: 5 } as Instr,
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+                          { op: "ref.eq" } as Instr,
+                        ],
+                        else: [{ op: "i32.const", value: 0 } as Instr],
+                      } as Instr,
+                    ];
+                  })()
+                : [{ op: "i32.const", value: 0 }],
             else: [
               // Same tag — compare by tag type
               { op: "local.get", index: 2 },

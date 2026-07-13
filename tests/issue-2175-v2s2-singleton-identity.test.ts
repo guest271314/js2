@@ -121,17 +121,18 @@ describe("#2175 V2-S2 — builtin-proto member values are identity-stable single
     ).toBe(1);
   });
 
-  it("V2-S3 boundary (characterization): gOPD(...).value === RegExp.prototype.exec is NOT YET 1", async () => {
-    // IMPORTANT — this is a CHARACTERIZATION guard, not a desired state. The
-    // descriptor stores the SAME singleton as the syntactic read, but the
-    // descriptor's `.value` reads back as an externref-wrapped `$Object`, and the
-    // standalone `===` lowering does not `ref.eq`-compare an externref-wrapped GC
-    // ref against a raw anyref (verified pre-existing: even `const o:any={z:1};
-    // const a:any[]=[o,o]; a[0]===a[1]` → 0). That is the C3 dynamic-reader /
-    // value-representation substrate, owned by V2-S3, NOT singleton unification.
-    // When V2-S3 makes the reader return a GC ref, this flips to 1 for free
-    // (the descriptor already carries the right singleton) — and THIS TEST WILL
-    // FAIL LOUDLY, which is the intended coupling: update it to `.toBe(1)` then.
+  it("V2-S3 (landed): gOPD(...).value === RegExp.prototype.exec is now 1 (raw-anyref carrier)", async () => {
+    // FLIPPED by V2-S3. The descriptor stores the SAME singleton as the
+    // syntactic read; the descriptor's `.value` still reads back as an
+    // externref-wrapped `$Object`, but the standalone `===` lowering
+    // (`__any_strict_eq`, any-helpers.ts) now carries a reference-IDENTITY
+    // reconciliation arm: it recovers each operand's reference payload (tag-6
+    // `refval`, else `any.convert_extern(tag-5 externval)`) to a common `eqref`
+    // and `ref.eq`-compares them, so an externref-wrapped GC ref and the raw GC
+    // ref for the SAME object compare `===` → 1. This is the C3 raw-anyref
+    // carrier; the same arm fixes the broad `const o:any={z:1}; [o,o]`
+    // array-identity #3027 class. Paired with the swap-guard below (distinct
+    // members stay `!==`), so `1` is genuine identity, not always-true.
     expect(
       await runStandalone(`
         export function test(): number {
@@ -140,6 +141,39 @@ describe("#2175 V2-S2 — builtin-proto member values are identity-stable single
           return (v === m) ? 1 : 0;
         }
       `),
+    ).toBe(1);
+  });
+
+  it("V2-S3 swap-guard: gOPD(...).value === a DIFFERENT member stays 0 (carrier discriminates)", async () => {
+    // Proves the raw-anyref carrier short-circuits on GENUINE identity only —
+    // the descriptor's `exec` value must NOT compare `===` to the `test`
+    // singleton. Guards the flip above against a vacuous always-1 carrier.
+    expect(
+      await runStandalone(`
+        export function test(): number {
+          const v: any = (Object.getOwnPropertyDescriptor(RegExp.prototype, "exec") as any).value;
+          const m: any = RegExp.prototype.test;
+          return (v === m) ? 1 : 0;
+        }
+      `),
     ).toBe(0);
+  });
+
+  it("V2-S3 array-identity: const o:any={z:1}; [o,o]; a[0]===a[1] is now 1 (#3027 class)", async () => {
+    // The broad round-trip-identity gap the carrier closes: two reads of the
+    // same object through the reader (array element get → externref-wrapped)
+    // now compare `===` → 1. Distinct objects still 0 (asserted inline).
+    expect(
+      await runStandalone(`
+        export function test(): number {
+          const o: any = { z: 1 };
+          const a: any[] = [o, o];
+          const same: number = (a[0] === a[1]) ? 1 : 0;
+          const b: any = { z: 1 };
+          const diff: number = (a[0] === b) ? 1 : 0;
+          return (same === 1 && diff === 0) ? 1 : 0;
+        }
+      `),
+    ).toBe(1);
   });
 });

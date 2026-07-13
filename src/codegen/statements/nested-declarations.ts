@@ -21,9 +21,11 @@ import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
 import {
+  bodyHasNewTryRegionAcrossYield,
   compileNativeGeneratorFunction,
   isNativeGeneratorCandidate,
   registerNativeGenerator,
+  type NativeGeneratorCaptureParam,
 } from "../generators-native.js";
 import { emitThrowReferenceError, emitThrowString, emitThrowTypeError, noJsHost } from "../expressions/helpers.js";
 import {
@@ -34,6 +36,7 @@ import {
   extractConstantDefault,
   resolveWasmType,
 } from "../index.js";
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "../async-frame.js"; // (#2865) nested async-gen producer
 import { ensureExnTag, nextModuleGlobalIdx } from "../registry/imports.js";
 import {
   addFuncType,
@@ -59,7 +62,7 @@ import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.j
  * must throw ReferenceError (e.g. `class x extends x {}`). Returns true if the
  * extends heritage clause contains an identifier equal to the class name.
  */
-function extendsReferencesClassName(decl: ts.ClassDeclaration, className: string): boolean {
+function extendsReferencesClassName(decl: ts.ClassDeclaration | ts.ClassExpression, className: string): boolean {
   if (!decl.heritageClauses) return false;
   for (const clause of decl.heritageClauses) {
     if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue;
@@ -83,15 +86,23 @@ function extendsReferencesClassName(decl: ts.ClassDeclaration, className: string
 export function compileNestedClassDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  decl: ts.ClassDeclaration,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  // (#3045 Bug 2) A class EXPRESSION nested in a function (`const C = class{…}`)
+  // is compiled in-scope through this same path, keyed by the synthetic name it
+  // was collected under during the collection phase. When set, `decl` is the
+  // `ts.ClassExpression` and `className` is that synthetic name — otherwise this
+  // is the legacy class-DECLARATION path and `className` is `decl.name.text`.
+  syntheticName?: string,
 ): void {
-  if (!decl.name) return;
-  const className = decl.name.text;
+  const className = syntheticName ?? decl.name?.text;
+  if (!className) return;
 
   // §15.7.1: the class name is in TDZ while its own `extends` clause is
-  // evaluated. `class x extends x {}` must throw ReferenceError (#1594B).
-  if (extendsReferencesClassName(decl, className)) {
-    emitThrowReferenceError(ctx, fctx, `Cannot access '${className}' before initialization`);
+  // evaluated. `class x extends x {}` must throw ReferenceError (#1594B). Only
+  // a NAMED class can self-reference in its own heritage (`decl.name` present);
+  // an anonymous class expression has no name to hit the TDZ.
+  if (decl.name && extendsReferencesClassName(decl, decl.name.text)) {
+    emitThrowReferenceError(ctx, fctx, `Cannot access '${decl.name.text}' before initialization`);
     return;
   }
 
@@ -107,9 +118,12 @@ export function compileNestedClassDeclaration(
   }
 
   try {
-    // Collect struct type, constructor, and method stubs (if not already done)
+    // Collect struct type, constructor, and method stubs (if not already done).
+    // A class EXPRESSION was already collected under its synthetic name in the
+    // collection phase, so `structMap.has(syntheticName)` is always true and this
+    // branch only runs for a genuine (un-collected) class declaration.
     if (!ctx.structMap.has(className)) {
-      collectClassDeclaration(ctx, decl);
+      collectClassDeclaration(ctx, decl, syntheticName);
     }
 
     // ES2015 14.5.14 step 21: class with static 'prototype' member must throw TypeError
@@ -145,7 +159,7 @@ export function compileNestedClassDeclaration(
     }
 
     // Compile constructor and method bodies
-    compileClassBodies(ctx, decl, funcByName);
+    compileClassBodies(ctx, decl, funcByName, syntheticName);
 
     // Mark as no longer deferred
     if (isDeferred) ctx.deferredClassBodies.delete(className);
@@ -157,6 +171,68 @@ export function compileNestedClassDeclaration(
 
 interface CompileNestedFunctionOptions {
   reuseReservedEntry?: WasmFunction;
+}
+
+/**
+ * (#3038) Cache of, per enclosing function/source body, the set of outer-scope
+ * variable names that are ASSIGNED inside SOME nested function/arrow/method
+ * within that body. Keyed by the enclosing body node so it's computed at most
+ * once per enclosing scope.
+ */
+const nestedFnMutatedNamesCache = new WeakMap<ts.Node, Set<string>>();
+
+/**
+ * (#3038) Collect the outer-scope names that are written inside a nested
+ * function scope of `enclosingBody`.
+ *
+ * Why this matters for CAPTURE representation: a variable written by a nested
+ * closure (a `function` decl, arrow, or object-literal method — e.g. an
+ * iterator's `return()` callback) is boxed into a shared ref-cell so the write
+ * propagates across the scope boundary. That boxing DISCONNECTS the variable
+ * from the plain outer local. A sibling nested FUNCTION DECLARATION that only
+ * READS the same variable was, historically, captured BY VALUE (a snapshot of
+ * the now-stale plain local) — so it never observed the writer's mutation.
+ * This is exactly the arrow path's `writtenInOuter` rule (closures.ts): a
+ * read-only capture of a variable mutated elsewhere in the enclosing scope must
+ * be captured BY REF (through the same cell). The nested-fn-decl path lacked
+ * it, which silently mis-compiled the for-await-of / async-generator
+ * iterator-close (`return()` → `doneCallCount`) test262 cluster and any
+ * two-sibling-closure shared-mutable-binding shape (verified sync too).
+ *
+ * `collectWrittenIdentifiers` already handles shadowing at each function
+ * boundary (a name re-declared as an own local of a deeper scope is excluded),
+ * so we only need to restrict collection to writes that occur strictly INSIDE
+ * a nested function scope. Top-level straight-line writes of the enclosing
+ * function stay unboxed — a by-value reader snapshots the live local at the
+ * direct call site, which is correct for those (a var written only in the
+ * enclosing straight-line body is never boxed).
+ */
+function collectNamesMutatedInNestedFunctions(enclosingBody: ts.Node): Set<string> {
+  const cached = nestedFnMutatedNamesCache.get(enclosingBody);
+  if (cached) return cached;
+  const out = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      // Every assignment inside this nested scope (to a name it does not itself
+      // declare) mutates an enclosing/outer binding. `collectWrittenIdentifiers`
+      // descends with per-boundary shadowing, so no further recursion is needed
+      // for this subtree.
+      collectWrittenIdentifiers(node, out);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(enclosingBody, visit);
+  nestedFnMutatedNamesCache.set(enclosingBody, out);
+  return out;
 }
 
 export function compileNestedFunctionDeclaration(
@@ -261,6 +337,39 @@ export function compileNestedFunctionDeclaration(
     collectWrittenIdentifiers(s, writtenInBody, ownLocals);
   }
 
+  // (#3038) Also detect captured variables that are mutated by a SIBLING nested
+  // scope (another `function` decl, arrow, or object-literal method) within the
+  // enclosing function — e.g. an iterator's `return()` callback doing
+  // `doneCallCount += 1`. Such a variable is boxed into a shared ref-cell by the
+  // writer's closure materialization; a read-only capture here MUST therefore be
+  // by-ref (through the same cell), not a stale by-value snapshot of the outer
+  // local. Mirrors the arrow path's `writtenInOuter` rule (closures.ts). Without
+  // it, the for-await-of / async-generator iterator-close cluster (and every
+  // two-sibling-closure shared-mutable-binding shape, sync included) read 0.
+  let mutatedInSiblingScope: Set<string> = writtenInBody;
+  {
+    let enclosing: ts.Node | undefined = stmt.parent;
+    while (
+      enclosing &&
+      !ts.isFunctionDeclaration(enclosing) &&
+      !ts.isFunctionExpression(enclosing) &&
+      !ts.isArrowFunction(enclosing) &&
+      !ts.isMethodDeclaration(enclosing) &&
+      !ts.isConstructorDeclaration(enclosing) &&
+      !ts.isGetAccessorDeclaration(enclosing) &&
+      !ts.isSetAccessorDeclaration(enclosing) &&
+      !ts.isSourceFile(enclosing)
+    ) {
+      enclosing = enclosing.parent;
+    }
+    const enclosingBody = enclosing
+      ? ts.isSourceFile(enclosing)
+        ? enclosing
+        : (enclosing as { body?: ts.Node }).body
+      : undefined;
+    if (enclosingBody) mutatedInSiblingScope = collectNamesMutatedInNestedFunctions(enclosingBody);
+  }
+
   const captures: {
     name: string;
     type: ValType;
@@ -360,7 +469,7 @@ export function compileNestedFunctionDeclaration(
     // (`localMap.get(cap.name) ?? cap.outerLocalIdx`) to be re-applied AND
     // the destructure-assign path to be box-aware. Both are out of scope
     // for this PR; the test is marked `.todo` until that follow-up lands.
-    const isMutable = writtenInBody.has(name);
+    const isMutable = writtenInBody.has(name) || mutatedInSiblingScope.has(name);
     // #2623 Slice A: detect a capture whose outer slot is already the canonical
     // ref cell (the outer scope boxed it). For such a name `type` above is the
     // cell ref type, so the generic mutable-capture path would re-box to a
@@ -530,6 +639,12 @@ export function compileNestedFunctionDeclaration(
     emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, 0);
 
     // Destructure parameters with binding patterns
+    // (#3024) Keep the param-default materialization body reachable for the
+    // nested-default field-pad patch (see function-body.ts / statements/
+    // destructuring.ts for the full rationale).
+    const pdBodyNC = liftedFctx.body;
+    const pdLiveNC = ctx.liveBodies.has(pdBodyNC);
+    if (!pdLiveNC) ctx.liveBodies.add(pdBodyNC);
     for (let pi = 0; pi < stmt.parameters.length; pi++) {
       const param = stmt.parameters[pi]!;
       if (ts.isObjectBindingPattern(param.name)) {
@@ -538,6 +653,7 @@ export function compileNestedFunctionDeclaration(
         destructureParamArray(ctx, liftedFctx, pi, param.name, paramTypes[pi]!);
       }
     }
+    if (!pdLiveNC) ctx.liveBodies.delete(pdBodyNC);
 
     // Set up `arguments` object if the function body references it.
     // (#2743) Unmapped when strict OR the parameter list is non-simple
@@ -559,6 +675,15 @@ export function compileNestedFunctionDeclaration(
       // Wasm-native generator factory (builds + returns the state struct), the
       // same body the top-level path emits. No host imports, no JS buffer.
       compileNativeGeneratorFunction(ctx, liftedFctx, stmt, nativeGenInfo);
+    } else if (isGenerator && isAsync && isAsyncGenDriveCandidate(ctx, stmt)) {
+      // (#2865) NESTED async-generator producer (the dominant test262 shape —
+      // the runner wraps every test body inside `export function test()`, so
+      // the gen declaration is nested). Same interception the top-level
+      // `function-body.ts` path applies BEFORE the buffer/#680 arm: build the
+      // lazy `$AsyncFrame` carrier + the per-gen `__async_gen_next_<name>`
+      // driver on the async-frame CFG machine. No captures in this branch, so
+      // the frame captures the declared params only.
+      emitAsyncGenerator(ctx, liftedFctx, stmt);
     } else if (isGenerator) {
       // Generator function: eagerly evaluate body, collect yields into a JS array,
       // then wrap it with __create_generator to return a Generator-like object.
@@ -611,6 +736,8 @@ export function compileNestedFunctionDeclaration(
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
+      // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+      if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
       const createGenIdx = ctx.funcMap.get(createGenName)!;
       liftedFctx.body.push({ op: "local.get", index: bufferLocal });
       liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -667,7 +794,63 @@ export function compileNestedFunctionDeclaration(
     }));
     const captureParamTypes: ValType[] = [...valueCaptureParamTypes, ...tdzFlagParamTypes];
     const allParamTypes = [...captureParamTypes, ...paramTypes];
-    const funcTypeIdx = addFuncType(ctx, allParamTypes, results, `${funcName}_type`);
+
+    // (#3050) CAPTURING nested `function*` whose body needs the try-region
+    // machinery (catch across yield / yielding finally — shapes the eager
+    // buffer PROVABLY cannot express, GeneratorPrototype/throw/try-*): lower it
+    // on the native state machine with the captures riding as leading synthetic
+    // params. Mutable captures are already `ref $cell` params here, so writes
+    // inside resume states propagate to the enclosing frame through the shared
+    // cell; the state struct stores the cells/values as ordinary `param_*`
+    // fields and the call site's existing `nestedFuncCaptures` prepend supplies
+    // them — no call-site changes. Scope bails (keep today's eager path):
+    //   - TDZ-flagged captures (flag-box plumbing not modeled in the resume fn);
+    //   - async generators;
+    //   - anything the plan builder rejects (isNativeGeneratorCandidate).
+    // Generators withOUT a new-region shape keep the eager path in BOTH lanes —
+    // this is deliberately try-region-scoped so working eager/shim generators
+    // are untouched (#2172's no-capture native path is also unchanged).
+    let capturingNativeGen: ReturnType<typeof registerNativeGenerator> = null;
+    if (
+      isGenerator &&
+      !isAsync &&
+      tdzFlaggedCaptures.length === 0 &&
+      bodyHasNewTryRegionAcrossYield(stmt) &&
+      isNativeGeneratorCandidate(ctx, stmt)
+    ) {
+      const leadingCaptures: NativeGeneratorCaptureParam[] = captures.map((c, i) => {
+        const t = valueCaptureParamTypes[i]!;
+        if (c.mutable && (t.kind === "ref" || t.kind === "ref_null")) {
+          return {
+            name: c.name,
+            boxed: {
+              refCellTypeIdx: t.typeIdx,
+              // #2623: an already-boxed outer slot IS the cell — deref to its
+              // inner value type; a freshly-minted cell derefs to the local's.
+              valType: c.alreadyBoxed ? (c.boxedValType ?? { kind: "f64" }) : c.type,
+            },
+          };
+        }
+        // Immutable capture whose outer slot is already the canonical cell:
+        // deref through it too (mirrors the lifted-body registration below).
+        const outerBoxed = fctx.boxedCaptures?.get(c.name);
+        if (outerBoxed && (c.type.kind === "ref" || c.type.kind === "ref_null")) {
+          return {
+            name: c.name,
+            boxed: { refCellTypeIdx: outerBoxed.refCellTypeIdx, valType: outerBoxed.valType },
+          };
+        }
+        return { name: c.name };
+      });
+      capturingNativeGen = registerNativeGenerator(ctx, stmt, funcName, allParamTypes, false, leadingCaptures);
+      if (capturingNativeGen) {
+        // The generator factory returns the state struct, not a JS Generator object.
+        returnType = { kind: "ref", typeIdx: capturingNativeGen.stateTypeIdx };
+      }
+    }
+    const liftedResults: ValType[] = capturingNativeGen && returnType ? [returnType] : results;
+
+    const funcTypeIdx = addFuncType(ctx, allParamTypes, liftedResults, `${funcName}_type`);
     const liftedFctx: FunctionContext = {
       name: funcName,
       params: [
@@ -800,7 +983,20 @@ export function compileNestedFunctionDeclaration(
         name: c.name,
         outerLocalIdx: c.localIdx,
         mutable: c.mutable,
-        valType: c.type,
+        // (#2623 / #2967 3a) A mutable capture whose outer slot is ALREADY the
+        // canonical ref cell registers its INNER value type, NOT the cell
+        // type: every call-site consumer derives the capture-param cell via
+        // `getOrRegisterRefCellType(valType)`, so registering the cell type
+        // would make them build a CELL-OF-CELL — mismatching the lifted fn's
+        // single-cell param (valueCaptureParamTypes threads `c.type`
+        // unchanged for alreadyBoxed) and casting the outer cell to the
+        // unrelated cell-of-cell type (an "illegal cast" trap; exposed by the
+        // async frame's force-boxed spill cells, latent for any
+        // boxed-before-declaration outer slot). `alreadyBoxed ⟺ a
+        // boxedCaptures entry exists` in the declaring fctx, so the call
+        // site's already-boxed branch passes the existing cell and its
+        // derived cell type now matches the lifted param exactly.
+        valType: c.mutable && c.alreadyBoxed ? (c.boxedValType ?? { kind: "f64" as const }) : c.type,
         hasTdzFlag: c.hasTdzFlag,
         outerTdzFlagIdx: c.tdzFlagIdx,
       })),
@@ -840,6 +1036,12 @@ export function compileNestedFunctionDeclaration(
     emitDefaultParamInit(ctx, liftedFctx, stmt, paramTypes, leadingParamCount);
 
     // Destructure parameters with binding patterns (offset by leading params)
+    // (#3024) Keep the param-default materialization body reachable for the
+    // nested-default field-pad patch (see function-body.ts / statements/
+    // destructuring.ts for the full rationale).
+    const pdBodyNC2 = liftedFctx.body;
+    const pdLiveNC2 = ctx.liveBodies.has(pdBodyNC2);
+    if (!pdLiveNC2) ctx.liveBodies.add(pdBodyNC2);
     for (let pi = 0; pi < stmt.parameters.length; pi++) {
       const param = stmt.parameters[pi]!;
       const paramIdx = leadingParamCount + pi;
@@ -849,6 +1051,7 @@ export function compileNestedFunctionDeclaration(
         destructureParamArray(ctx, liftedFctx, paramIdx, param.name, paramTypes[pi]!);
       }
     }
+    if (!pdLiveNC2) ctx.liveBodies.delete(pdBodyNC2);
 
     // Set up `arguments` object if the function body references it.
     // (#2743) Unmapped when strict OR the parameter list is non-simple
@@ -862,7 +1065,28 @@ export function compileNestedFunctionDeclaration(
       if (liftedFctx.mappedArgsInfo) ctx.mappedArgsInfoByFunc.set(stmt, liftedFctx.mappedArgsInfo);
     }
 
-    if (isGenerator) {
+    if (capturingNativeGen) {
+      // (#3050) Capturing nested SYNC `function*` with a try-region body — emit
+      // the Wasm-native generator factory. It reads EVERY wasm param (capture
+      // cells and values first, then user params — exactly this lifted
+      // function's param layout) into the state struct's `param_*` fields; the
+      // resume function rehydrates them and routes cell captures through
+      // `boxedCaptures` (see ensureNativeGeneratorResumeFunction). Disjoint
+      // from the #2865 async-gen arm below: `capturingNativeGen` is only
+      // registered for `!isAsync` declarations.
+      compileNativeGeneratorFunction(ctx, liftedFctx, stmt, capturingNativeGen);
+    } else if (isGenerator && isAsync && tdzFlaggedCaptures.length === 0 && isAsyncGenDriveCandidate(ctx, stmt)) {
+      // (#2865) NESTED async-generator producer WITH captures — the dominant
+      // real test262 shape (`var callCount = 0; async function* f() {
+      // callCount++; ... }` inside the runner's `test()` wrapper: callCount is
+      // a test() local, so the gen captures it as a mutable ref cell). The
+      // lifted fn's leading capture-cell params are captured into `$AsyncFrame`
+      // param fields like ordinary params; `emitAsyncGenerator` threads
+      // `liftedFctx.boxedCaptures` onto the resume fn so body reads/writes
+      // deref the cells. TDZ-flagged captures store PARAM indices in
+      // `boxedTdzFlags` (wrong in the resume fn's local layout) → legacy.
+      emitAsyncGenerator(ctx, liftedFctx, stmt);
+    } else if (isGenerator) {
       // Generator function: eagerly evaluate body, collect yields into a JS array,
       // then wrap it with __create_generator to return a Generator-like object.
       // The body is wrapped in try/catch so that exceptions thrown before any yields
@@ -914,6 +1138,8 @@ export function compileNestedFunctionDeclaration(
 
       // Return __create_generator or __create_async_generator depending on async flag
       const createGenName = isAsync ? "__create_async_generator" : "__create_generator";
+      // (#2865) Record legacy-buffer async gens so the .next() dispatch keeps a host miss arm.
+      if (createGenName === "__create_async_generator") ctx.asyncGenLegacyBufferEmitted = true;
       const createGenIdx = ctx.funcMap.get(createGenName)!;
       liftedFctx.body.push({ op: "local.get", index: bufferLocal });
       liftedFctx.body.push({ op: "local.get", index: pendingThrowLocal });
@@ -1789,28 +2015,6 @@ function appendDefaultReturn(fctx: FunctionContext, returnType: ValType | null):
   if (returnType.kind === "f64") fctx.body.push({ op: "f64.const", value: 0 });
   else if (returnType.kind === "i32") fctx.body.push({ op: "i32.const", value: 0 });
   else if (returnType.kind === "externref") fctx.body.push({ op: "ref.null.extern" });
-}
-
-function getLine(node: ts.Node): number {
-  try {
-    const sf = node.getSourceFile();
-    if (!sf) return 0;
-    const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
-    return line + 1;
-  } catch {
-    return 0;
-  }
-}
-
-function getCol(node: ts.Node): number {
-  try {
-    const sf = node.getSourceFile();
-    if (!sf) return 0;
-    const { character } = sf.getLineAndCharacterOfPosition(node.getStart());
-    return character + 1;
-  } catch {
-    return 0;
-  }
 }
 
 /**

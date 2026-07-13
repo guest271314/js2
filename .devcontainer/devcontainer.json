@@ -10,6 +10,7 @@
     }
   },
   "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--memory=16g", "--memory-swap=32g"],
+  "overrideCommand": false,
   "appPort": ["2222:2222", "7681:7681"],
   "customizations": {
     "vscode": {

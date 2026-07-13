@@ -10,17 +10,36 @@
  * All implementations use polynomial (minimax/Chebyshev) approximations
  * with arithmetic range reduction. Precision target: within 4 ULP of
  * IEEE 754 for the common range.
+ *
+ * #3141 — the derived family (sinh/cosh/tanh, asinh/acosh/atanh, cbrt,
+ * expm1, log1p) is SELF-HOSTED: written as ordinary TS source in
+ * `src/stdlib/math.ts` and compiled through the compiler's own IR
+ * pipeline (`stdlib-selfhost.ts`) instead of hand-emitted `Instr[]`.
+ * Only the precision-sensitive range-reduction cores (sin/cos/exp/log/
+ * atan + atan2/pow/log2/log10/tan/random) remain hand-written here.
  */
 import type { Instr, ValType } from "../ir/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
+import { emitSelfHostedMathFunc } from "./stdlib-selfhost.js"; // (#3141) self-hosted stdlib driver
+import {
+  SELF_HOSTED_MATH,
+  LOG_BUILTIN,
+  LOG2_BUILTIN,
+  REDUCE_TRIG_BUILTIN,
+  SIN_BUILTIN,
+  COS_BUILTIN,
+  ATAN_BUILTIN,
+  TAN_BUILTIN,
+  ASIN_BUILTIN,
+  ACOS_BUILTIN,
+} from "../stdlib/math.js"; // (#3141/#3204) TS-source builtin bodies
 
 // ─── Instruction shorthand helpers ──────────────────────────────────
 const f64c = (v: number): Instr => ({ op: "f64.const", value: v }) as Instr;
 const localGet = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
 const localSet = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-const localTee = (i: number): Instr => ({ op: "local.tee", index: i }) as Instr;
 const add: Instr = { op: "f64.add" } as Instr;
 const sub: Instr = { op: "f64.sub" } as Instr;
 const mul: Instr = { op: "f64.mul" } as Instr;
@@ -76,9 +95,7 @@ function blockLoop(body: Instr[]): Instr {
 
 // ─── Constants ──────────────────────────────────────────────────────
 const PI = Math.PI;
-const TWO_PI = 2 * PI;
 const HALF_PI = PI / 2;
-const INV_TWO_PI = 1 / TWO_PI;
 const LN2 = Math.LN2;
 const LOG2E = Math.LOG2E;
 const LOG10E = Math.LOG10E;
@@ -217,156 +234,21 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
 
   // ─── Phase 1: Core functions ──────────────────────────────────────
 
-  // Range reduction helper for sin/cos
+  // Range reduction helper for sin/cos — self-hosted (#3204 follow-up).
   if (needSinCos) {
-    // Reduces x to [-pi, pi] using Cody-Waite method
-    // Local 0=x(param), 1=n
-    addMathFunc({
-      name: "__math_reduce_trig",
-      params: f64Param,
-      results: f64Result,
-      locals: [{ name: "n", type: f64Type }],
-      body: [
-        // n = round(x / (2*pi))
-        localGet(0),
-        f64c(INV_TWO_PI),
-        mul,
-        f64c(0.5),
-        add,
-        ffloor,
-        localSet(1),
-        // r = x - n * 2*pi (two-step Cody-Waite for precision)
-        localGet(0),
-        localGet(1),
-        f64c(6.283185307179586),
-        mul,
-        sub,
-        localGet(1),
-        f64c(1.2246467991473532e-16),
-        mul,
-        sub,
-      ],
-    });
+    addedFuncs.set("__math_reduce_trig", emitSelfHostedMathFunc(ctx, REDUCE_TRIG_BUILTIN));
   }
 
   // ─── Math.sin ─────────────────────────────────────────────────────
+  // Self-hosted; calls __math_reduce_trig (registered just above).
   if (needed.has("sin") || needed.has("tan")) {
-    const reduceIdx = getFuncIdx("__math_reduce_trig");
-    // Local 0=x(param), 1=r, 2=r2
-    addMathFunc({
-      name: "Math_sin",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "r", type: f64Type },
-        { name: "r2", type: f64Type },
-      ],
-      body: [
-        // NaN → NaN
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        // |x| == Infinity → NaN
-        ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(NaN)]),
-        // x == 0 → x (preserves -0)
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-
-        // Range reduce to [-pi, pi]
-        localGet(0),
-        call(reduceIdx),
-        localSet(1),
-
-        // r2 = r*r
-        localGet(1),
-        localGet(1),
-        mul,
-        localSet(2),
-
-        // sin(r) via Horner form of Taylor series:
-        // r * (1 + r2*(-1/6 + r2*(1/120 + r2*(-1/5040 + r2*(1/362880 + r2*(-1/39916800 + r2/6227020800))))))
-        localGet(2),
-        f64c(1 / 6227020800),
-        mul,
-        f64c(-1 / 39916800),
-        add,
-        localGet(2),
-        mul,
-        f64c(1 / 362880),
-        add,
-        localGet(2),
-        mul,
-        f64c(-1 / 5040),
-        add,
-        localGet(2),
-        mul,
-        f64c(1 / 120),
-        add,
-        localGet(2),
-        mul,
-        f64c(-1 / 6),
-        add,
-        localGet(2),
-        mul,
-        f64c(1),
-        add,
-        localGet(1),
-        mul,
-      ],
-    });
+    addedFuncs.set("Math_sin", emitSelfHostedMathFunc(ctx, SIN_BUILTIN));
   }
 
   // ─── Math.cos ─────────────────────────────────────────────────────
+  // Self-hosted; calls __math_reduce_trig.
   if (needed.has("cos") || needed.has("tan")) {
-    const reduceIdx = getFuncIdx("__math_reduce_trig");
-    // Local 0=x(param), 1=r, 2=r2
-    addMathFunc({
-      name: "Math_cos",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "r", type: f64Type },
-        { name: "r2", type: f64Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(NaN)]),
-
-        // Range reduce
-        localGet(0),
-        call(reduceIdx),
-        localSet(1),
-        localGet(1),
-        localGet(1),
-        mul,
-        localSet(2),
-
-        // cos(r) via Horner:
-        // 1 + r2*(-1/2 + r2*(1/24 + r2*(-1/720 + r2*(1/40320 + r2*(-1/3628800 + r2/479001600)))))
-        localGet(2),
-        f64c(1 / 479001600),
-        mul,
-        f64c(-1 / 3628800),
-        add,
-        localGet(2),
-        mul,
-        f64c(1 / 40320),
-        add,
-        localGet(2),
-        mul,
-        f64c(-1 / 720),
-        add,
-        localGet(2),
-        mul,
-        f64c(1 / 24),
-        add,
-        localGet(2),
-        mul,
-        f64c(-1 / 2),
-        add,
-        localGet(2),
-        mul,
-        f64c(1),
-        add,
-      ],
-    });
+    addedFuncs.set("Math_cos", emitSelfHostedMathFunc(ctx, COS_BUILTIN));
   }
 
   // ─── Math.exp ─────────────────────────────────────────────────────
@@ -491,306 +373,31 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
   // ─── Math.log ─────────────────────────────────────────────────────
   // log(x) using range reduction to [0.5, 2) then atanh series
   if (needLog) {
-    // Locals: 0=x, 1=e, 2=f, 3=t, 4=t2
-    addMathFunc({
-      name: "Math_log",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "e", type: f64Type },
-        { name: "f", type: f64Type },
-        { name: "t", type: f64Type },
-        { name: "t2", type: f64Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), f64c(0), flt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(0), feq], [f64c(-Infinity)]),
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(0)]),
-
-        // e = 0, f = x
-        f64c(0),
-        localSet(1),
-        localGet(0),
-        localSet(2),
-
-        // While f >= 2, halve f and increment e
-        blockLoop([
-          localGet(2),
-          f64c(2),
-          flt,
-          { op: "br_if", depth: 1 } as Instr,
-          localGet(2),
-          f64c(0.5),
-          mul,
-          localSet(2),
-          localGet(1),
-          f64c(1),
-          add,
-          localSet(1),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        // While f < 0.5, double f and decrement e
-        blockLoop([
-          localGet(2),
-          f64c(0.5),
-          fge,
-          { op: "br_if", depth: 1 } as Instr,
-          localGet(2),
-          f64c(2),
-          mul,
-          localSet(2),
-          localGet(1),
-          f64c(1),
-          sub,
-          localSet(1),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        // Adjust to [sqrt(0.5), sqrt(2)]
-        localGet(2),
-        f64c(1.4142135623730951),
-        fgt,
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [localGet(2), f64c(0.5), mul, localSet(2), localGet(1), f64c(1), add, localSet(1)],
-        } as Instr,
-
-        // t = (f - 1) / (f + 1)
-        localGet(2),
-        f64c(1),
-        sub,
-        localGet(2),
-        f64c(1),
-        add,
-        div,
-        localSet(3),
-
-        // t2 = t * t
-        localGet(3),
-        localGet(3),
-        mul,
-        localSet(4),
-
-        // log(f) = 2*t*(1 + t2*(1/3 + t2*(1/5 + t2*(1/7 + t2*(1/9 + t2*(1/11 + t2/13))))))
-        localGet(4),
-        f64c(1.0 / 13),
-        mul,
-        f64c(1.0 / 11),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 9),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 7),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 5),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 3),
-        add,
-        localGet(4),
-        mul,
-        f64c(1),
-        add,
-        localGet(3),
-        mul,
-        f64c(2),
-        mul,
-
-        // result = e * ln2 + log(f)
-        localGet(1),
-        f64c(LN2),
-        mul,
-        add,
-      ],
-    });
+    addedFuncs.set("Math_log", emitSelfHostedMathFunc(ctx, LOG_BUILTIN));
   }
 
   // ─── Math.atan ────────────────────────────────────────────────────
+  // Self-hosted (#3204 follow-up). Leaf — no callees. The nested mid-body
+  // statement-if range reduction is the NATURAL form (works post-#2856/#2981).
   if (needAtan) {
-    // Locals: 0=x, 1=ax, 2=t, 3=t2, 4=offset
-    addMathFunc({
-      name: "Math_atan",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "ax", type: f64Type },
-        { name: "t", type: f64Type },
-        { name: "t2", type: f64Type },
-        { name: "offset", type: f64Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(HALF_PI)]),
-        ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(-HALF_PI)]),
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-
-        // ax = |x|
-        localGet(0),
-        fabs,
-        localSet(1),
-        f64c(0),
-        localSet(4),
-
-        // Range reduction:
-        // if ax > tan(67.5) = 2.414..., use atan(x) = pi/2 - atan(1/x)
-        // if ax > tan(22.5) = 0.414..., use atan(x) = pi/4 + atan((ax-1)/(ax+1))
-        localGet(1),
-        f64c(2.414213562373095),
-        fgt,
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [f64c(HALF_PI), localSet(4), f64c(1), localGet(1), div, neg, localSet(1)],
-          else: [
-            localGet(1),
-            f64c(0.414213562373095),
-            fgt,
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [f64c(PI / 4), localSet(4), localGet(1), f64c(1), sub, localGet(1), f64c(1), add, div, localSet(1)],
-            } as Instr,
-          ],
-        } as Instr,
-
-        // t = reduced argument (stored back in local 1)
-        localGet(1),
-        localTee(2),
-        localGet(2),
-        mul,
-        localSet(3),
-
-        // atan(t) polynomial (odd, Horner form):
-        // t*(1 + t2*(-1/3 + t2*(1/5 + t2*(-1/7 + t2*(1/9 + t2*(-1/11 + t2*(1/13 - t2/15)))))))
-        localGet(3),
-        f64c(-1.0 / 15),
-        mul,
-        f64c(1.0 / 13),
-        add,
-        localGet(3),
-        mul,
-        f64c(-1.0 / 11),
-        add,
-        localGet(3),
-        mul,
-        f64c(1.0 / 9),
-        add,
-        localGet(3),
-        mul,
-        f64c(-1.0 / 7),
-        add,
-        localGet(3),
-        mul,
-        f64c(1.0 / 5),
-        add,
-        localGet(3),
-        mul,
-        f64c(-1.0 / 3),
-        add,
-        localGet(3),
-        mul,
-        f64c(1),
-        add,
-        localGet(2),
-        mul,
-
-        // result = offset + poly
-        localGet(4),
-        add,
-
-        // Apply original sign
-        localGet(0),
-        copysign,
-      ],
-    });
+    addedFuncs.set("Math_atan", emitSelfHostedMathFunc(ctx, ATAN_BUILTIN));
   }
 
   // ─── Phase 2: Derived functions ───────────────────────────────────
 
-  // Math.tan = sin/cos
+  // Math.tan = sin/cos — self-hosted; calls Math_sin / Math_cos.
   if (needed.has("tan")) {
-    const sinIdx = getFuncIdx("Math_sin");
-    const cosIdx = getFuncIdx("Math_cos");
-    addMathFunc({
-      name: "Math_tan",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(NaN)]),
-        localGet(0),
-        call(sinIdx),
-        localGet(0),
-        call(cosIdx),
-        div,
-      ],
-    });
+    addedFuncs.set("Math_tan", emitSelfHostedMathFunc(ctx, TAN_BUILTIN));
   }
 
-  // Math.asin = atan(x / sqrt(1 - x*x))
+  // Math.asin = atan(x / sqrt(1 - x*x)) — self-hosted; calls Math_atan.
   if (needed.has("asin")) {
-    const atanIdx = getFuncIdx("Math_atan");
-    addMathFunc({
-      name: "Math_asin",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(1), fgt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(HALF_PI)]),
-        ...ifThenRet([localGet(0), f64c(-1), feq], [f64c(-HALF_PI)]),
-        // atan(x / sqrt(1 - x*x))
-        localGet(0),
-        f64c(1),
-        localGet(0),
-        localGet(0),
-        mul,
-        sub,
-        fsqrt,
-        div,
-        call(atanIdx),
-      ],
-    });
+    addedFuncs.set("Math_asin", emitSelfHostedMathFunc(ctx, ASIN_BUILTIN));
   }
 
-  // Math.acos = pi/2 - asin(x) = pi/2 - atan(x/sqrt(1-x*x))
+  // Math.acos = pi/2 - atan(x/sqrt(1-x*x)) — self-hosted; calls Math_atan.
   if (needed.has("acos")) {
-    const atanIdx = getFuncIdx("Math_atan");
-    addMathFunc({
-      name: "Math_acos",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(1), fgt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(0)]),
-        ...ifThenRet([localGet(0), f64c(-1), feq], [f64c(PI)]),
-        f64c(HALF_PI),
-        localGet(0),
-        f64c(1),
-        localGet(0),
-        localGet(0),
-        mul,
-        sub,
-        fsqrt,
-        div,
-        call(atanIdx),
-        sub,
-      ],
-    });
+    addedFuncs.set("Math_acos", emitSelfHostedMathFunc(ctx, ACOS_BUILTIN));
   }
 
   // Math.atan2(y, x)
@@ -808,135 +415,7 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
   // Math.log2(x) = e + log2(f), computed via range reduction (exact for powers of 2)
   // Locals: 0=x, 1=e, 2=f, 3=t, 4=t2
   if (needed.has("log2")) {
-    addMathFunc({
-      name: "Math_log2",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "e", type: f64Type },
-        { name: "f", type: f64Type },
-        { name: "t", type: f64Type },
-        { name: "t2", type: f64Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), f64c(0), flt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(0), feq], [f64c(-Infinity)]),
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(0)]),
-
-        // Range reduction: x = f * 2^e, f in [0.5, 2)
-        f64c(0),
-        localSet(1),
-        localGet(0),
-        localSet(2),
-
-        // While f >= 2, halve f and increment e
-        blockLoop([
-          localGet(2),
-          f64c(2),
-          flt,
-          { op: "br_if", depth: 1 } as Instr,
-          localGet(2),
-          f64c(0.5),
-          mul,
-          localSet(2),
-          localGet(1),
-          f64c(1),
-          add,
-          localSet(1),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        // While f < 0.5, double f and decrement e
-        blockLoop([
-          localGet(2),
-          f64c(0.5),
-          fge,
-          { op: "br_if", depth: 1 } as Instr,
-          localGet(2),
-          f64c(2),
-          mul,
-          localSet(2),
-          localGet(1),
-          f64c(1),
-          sub,
-          localSet(1),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        // Adjust to [sqrt(0.5), sqrt(2)]
-        localGet(2),
-        f64c(1.4142135623730951),
-        fgt,
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [localGet(2), f64c(0.5), mul, localSet(2), localGet(1), f64c(1), add, localSet(1)],
-        } as Instr,
-
-        // If f == 1, result is exactly e (avoids precision loss)
-        localGet(2),
-        f64c(1),
-        feq,
-        { op: "if", blockType: { kind: "empty" }, then: [localGet(1), ret] } as Instr,
-
-        // t = (f - 1) / (f + 1)
-        localGet(2),
-        f64c(1),
-        sub,
-        localGet(2),
-        f64c(1),
-        add,
-        div,
-        localSet(3),
-
-        // t2 = t * t
-        localGet(3),
-        localGet(3),
-        mul,
-        localSet(4),
-
-        // log(f) via atanh series = 2*t*(1 + t2*(1/3 + t2*(1/5 + t2*(1/7 + t2*(1/9 + t2*(1/11 + t2/13))))))
-        localGet(4),
-        f64c(1.0 / 13),
-        mul,
-        f64c(1.0 / 11),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 9),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 7),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 5),
-        add,
-        localGet(4),
-        mul,
-        f64c(1.0 / 3),
-        add,
-        localGet(4),
-        mul,
-        f64c(1),
-        add,
-        localGet(3),
-        mul,
-        f64c(2),
-        mul,
-
-        // log2(f) = log(f) * LOG2E
-        f64c(LOG2E),
-        mul,
-
-        // result = e + log2(f)
-        localGet(1),
-        add,
-      ],
-    });
+    addedFuncs.set("Math_log2", emitSelfHostedMathFunc(ctx, LOG2_BUILTIN));
   }
 
   // Math.log10(x) = log(x) * LOG10E, with integer rounding for exact powers of 10
@@ -993,322 +472,19 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     });
   }
 
-  // Math.sinh = (exp(x) - exp(-x)) / 2
-  if (needed.has("sinh")) {
-    const expIdx = getFuncIdx("Math_exp");
-    addMathFunc({
-      name: "Math_sinh",
-      params: f64Param,
-      results: f64Result,
-      locals: [{ name: "ep", type: f64Type }],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(-Infinity)]),
-        // §21.3.2.31: sinh(±0) = ±0 — return x to preserve sign of zero
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-        // (exp(x) - 1/exp(x)) / 2
-        localGet(0),
-        call(expIdx),
-        localTee(1),
-        f64c(1),
-        localGet(1),
-        div,
-        sub,
-        f64c(2),
-        div,
-      ],
-    });
-  }
-
-  // Math.cosh = (exp(x) + exp(-x)) / 2
-  if (needed.has("cosh")) {
-    const expIdx = getFuncIdx("Math_exp");
-    addMathFunc({
-      name: "Math_cosh",
-      params: f64Param,
-      results: f64Result,
-      locals: [{ name: "ep", type: f64Type }],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(Infinity)]),
-        localGet(0),
-        call(expIdx),
-        localTee(1),
-        f64c(1),
-        localGet(1),
-        div,
-        add,
-        f64c(2),
-        div,
-      ],
-    });
-  }
-
-  // Math.tanh
-  if (needed.has("tanh")) {
-    const expIdx = getFuncIdx("Math_exp");
-    addMathFunc({
-      name: "Math_tanh",
-      params: f64Param,
-      results: f64Result,
-      locals: [{ name: "e2x", type: f64Type }],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(20), fgt], [f64c(1)]),
-        ...ifThenRet([localGet(0), f64c(-20), flt], [f64c(-1)]),
-        // §21.3.2.34: tanh(±0) = ±0 — return x to preserve sign of zero
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-        // (exp(2x) - 1) / (exp(2x) + 1)
-        localGet(0),
-        f64c(2),
-        mul,
-        call(expIdx),
-        localTee(1),
-        f64c(1),
-        sub,
-        localGet(1),
-        f64c(1),
-        add,
-        div,
-      ],
-    });
-  }
-
-  // Math.asinh = log(x + sqrt(x*x + 1))
-  if (needed.has("asinh")) {
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_asinh",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(-Infinity)]),
-        // sign(x) * log(|x| + sqrt(x*x + 1))
-        localGet(0),
-        fabs,
-        localGet(0),
-        localGet(0),
-        mul,
-        f64c(1),
-        add,
-        fsqrt,
-        add,
-        call(logIdx),
-        localGet(0),
-        copysign,
-      ],
-    });
-  }
-
-  // Math.acosh = log(x + sqrt(x*x - 1))
-  if (needed.has("acosh")) {
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_acosh",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), f64c(1), flt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(0)]),
-        localGet(0),
-        localGet(0),
-        localGet(0),
-        mul,
-        f64c(1),
-        sub,
-        fsqrt,
-        add,
-        call(logIdx),
-      ],
-    });
-  }
-
-  // Math.atanh = 0.5 * log((1+x)/(1-x))
-  if (needed.has("atanh")) {
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_atanh",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), fabs, f64c(1), fgt], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(1), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-1), feq], [f64c(-Infinity)]),
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        // atanh(+/-0) = +/-0: return x to preserve sign of zero
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-        f64c(1),
-        localGet(0),
-        add,
-        f64c(1),
-        localGet(0),
-        sub,
-        div,
-        call(logIdx),
-        f64c(0.5),
-        mul,
-      ],
-    });
-  }
-
-  // Math.cbrt — cube root via Newton's method
-  if (needed.has("cbrt")) {
-    addMathFunc({
-      name: "Math_cbrt",
-      params: f64Param,
-      results: f64Result,
-      locals: [
-        { name: "guess", type: f64Type },
-        { name: "i", type: i32Type },
-      ],
-      body: [
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [localGet(0)]),
-
-        // Seed: copysign(sqrt(sqrt(|x|)), x)
-        localGet(0),
-        fabs,
-        fsqrt,
-        fsqrt,
-        localGet(0),
-        copysign,
-        localSet(1),
-
-        // 8 Newton iterations: guess = (2*guess + x/(guess*guess)) / 3
-        i32const(8),
-        localSet(2),
-        blockLoop([
-          localGet(2),
-          i32eqz,
-          { op: "br_if", depth: 1 } as Instr,
-          localGet(1),
-          f64c(2),
-          mul,
-          localGet(0),
-          localGet(1),
-          localGet(1),
-          mul,
-          div,
-          add,
-          f64c(3),
-          div,
-          localSet(1),
-          localGet(2),
-          i32const(1),
-          i32sub,
-          localSet(2),
-          { op: "br", depth: 0 } as Instr,
-        ]),
-
-        localGet(1),
-      ],
-    });
-  }
-
-  // Math.expm1 — exp(x) - 1, numerically stable for small x
-  if (needed.has("expm1")) {
-    const expIdx = getFuncIdx("Math_exp");
-    addMathFunc({
-      name: "Math_expm1",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(Infinity), feq], [f64c(Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-Infinity), feq], [f64c(-1)]),
-        // expm1(+/-0) = +/-0: return x to preserve sign of zero
-        ...ifThenRet([localGet(0), f64c(0), feq], [localGet(0)]),
-        // For small |x|, use Taylor series for precision
-        localGet(0),
-        fabs,
-        f64c(1e-5),
-        flt,
-        ifElse(
-          f64Type,
-          [
-            // x + x^2/2 + x^3/6 + x^4/24
-            localGet(0),
-            localGet(0),
-            localGet(0),
-            mul,
-            f64c(0.5),
-            mul,
-            add,
-            localGet(0),
-            localGet(0),
-            mul,
-            localGet(0),
-            mul,
-            f64c(1.0 / 6.0),
-            mul,
-            add,
-            localGet(0),
-            localGet(0),
-            mul,
-            localGet(0),
-            mul,
-            localGet(0),
-            mul,
-            f64c(1.0 / 24.0),
-            mul,
-            add,
-          ],
-          [localGet(0), call(expIdx), f64c(1), sub],
-        ),
-      ],
-    });
-  }
-
-  // Math.log1p — log(1 + x), numerically stable for small x
-  if (needed.has("log1p")) {
-    const logIdx = getFuncIdx("Math_log");
-    addMathFunc({
-      name: "Math_log1p",
-      params: f64Param,
-      results: f64Result,
-      locals: [],
-      body: [
-        ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-        ...ifThenRet([localGet(0), f64c(-1), feq], [f64c(-Infinity)]),
-        ...ifThenRet([localGet(0), f64c(-1), flt], [f64c(NaN)]),
-        // For small |x|, use Taylor series
-        localGet(0),
-        fabs,
-        f64c(1e-4),
-        flt,
-        ifElse(
-          f64Type,
-          [
-            // x - x^2/2 + x^3/3
-            localGet(0),
-            localGet(0),
-            localGet(0),
-            mul,
-            f64c(0.5),
-            mul,
-            sub,
-            localGet(0),
-            localGet(0),
-            mul,
-            localGet(0),
-            mul,
-            f64c(1.0 / 3.0),
-            mul,
-            add,
-          ],
-          [f64c(1), localGet(0), add, call(logIdx)],
-        ),
-      ],
-    });
+  // ─── Self-hosted subset (#3141) ───────────────────────────────────
+  // sinh/cosh/tanh, asinh/acosh/atanh, cbrt, expm1 and log1p are no
+  // longer hand-emitted `Instr[]`. Their bodies are ordinary TS source
+  // in `src/stdlib/math.ts`, compiled through the compiler's own IR
+  // pipeline (`stdlib-selfhost.ts`) and registered here, at the same
+  // point in the emission order the hand-written versions occupied.
+  // Phase-1 cores (Math_exp / Math_log) are already in ctx.funcMap, so
+  // the source-level sibling calls resolve. Numeric behavior is
+  // bit-identical (op-for-op mirrors — see src/stdlib/math.ts header).
+  for (const [method, builtin] of SELF_HOSTED_MATH) {
+    if (needed.has(method)) {
+      addedFuncs.set(builtin.name, emitSelfHostedMathFunc(ctx, builtin));
+    }
   }
 }
 

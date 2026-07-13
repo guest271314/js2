@@ -122,8 +122,11 @@ export interface WasmModule {
 /** TS-level kind hint for a single export parameter or result (#1700). */
 export type TypedArrayKind = "uint8array" | "typed-array" | "other";
 
+/** TS-level TypedArray classification of one export's params and result (#1700). */
 export interface ExportSignature {
+  /** Per-parameter TypedArray kind, positionally. */
   params: TypedArrayKind[];
+  /** TypedArray kind of the return value. */
   result: TypedArrayKind;
 }
 
@@ -253,6 +256,7 @@ type InstrBase =
   | { op: "i32.reinterpret_f32" }
   | { op: "f32.reinterpret_i32" }
   | { op: "f64.convert_i64_s" }
+  | { op: "f64.convert_i64_u" } // (#3173) DataView getBigUint64 — unsigned i64 → f64
   | { op: "f64.reinterpret_i64" }
   | { op: "f64.const"; value: number }
   | { op: "f32.const"; value: number }

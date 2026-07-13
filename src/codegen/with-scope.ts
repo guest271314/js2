@@ -164,23 +164,71 @@ export function compileWithBindingAssignment(
 
 export function compileWithStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WithStatement): void {
   const proof = proveObjectLiteralWithTarget(fctx, stmt.expression);
-  // (#2663 Slice 1) Tier-1 (static closed-shape) is the zero-overhead fast path;
-  // any non-proven target — `with(variable)`, `with(fn())`, etc. — falls to the
-  // Tier-2 dynamic-scope path (runtime HasBinding + Get) instead of being
-  // rejected at compile time.
-  if (!proof.ok || containsNestedFunctionBoundary(stmt.statement)) {
-    compileDynamicWithStatement(ctx, fctx, stmt);
+  // (#2663 Slice 1) Tier-1 (static closed-shape) is the zero-overhead fast path.
+  // A body with a nested function/class boundary is deferred (the closure can't
+  // capture the object environment yet) — route it to the dynamic path, which
+  // emits the matching diagnostic.
+  if (proof.ok && !containsNestedFunctionBoundary(stmt.statement)) {
+    const targetType = compileClosedObjectLiteralTarget(ctx, fctx, proof.expr);
+    finalizeStaticWithScope(ctx, fctx, stmt, targetType, proof.keys, proof.integrity, /* guardInheritedKeys */ true);
     return;
   }
 
-  const targetType = compileClosedObjectLiteralTarget(ctx, fctx, proof.expr);
+  // (#3025 W1) Tier-1 over a closed-struct-TYPED target — a bare variable whose
+  // static TS type `resolveStructName`s to a closed WasmGC struct (the dominant
+  // `var o = { ... }; with (o) { ... }` test262 pattern). Compile it into a
+  // struct-typed local and route field reads/writes to direct struct get/set,
+  // exactly as the object-literal path does. The Tier-2 dynamic path cannot see
+  // a struct's fields (a GC struct wrapped as an opaque externref is invisible to
+  // host `in`/get reflection), so without this every own-field read misses and
+  // resolves to a bare global → ReferenceError. Conservative gates (all →
+  // fall through to Tier-2, never a compile error): see `proveStructTypedWithTarget`.
+  if (!containsNestedFunctionBoundary(stmt.statement)) {
+    const structProof = proveStructTypedWithTarget(ctx, stmt);
+    if (structProof) {
+      const targetType = compileExpression(ctx, fctx, stmt.expression, undefined);
+      if (targetType && (targetType.kind === "ref" || targetType.kind === "ref_null")) {
+        finalizeStaticWithScope(ctx, fctx, stmt, targetType, new Set(), "plain", /* guardInheritedKeys */ false);
+        return;
+      }
+      // The proof said struct-typed but lowering did not yield a struct ref. The
+      // target is a side-effect-free identifier, so dropping it and re-routing to
+      // the dynamic path below re-evaluates it harmlessly (no double side effect).
+      if (targetType) fctx.body.push({ op: "drop" });
+    }
+  }
+
+  // Any non-proven target — `with(fn())`, host objects, `any`-typed, etc. —
+  // falls to the Tier-2 dynamic-scope path (runtime HasBinding + Get) rather than
+  // a compile-time rejection.
+  compileDynamicWithStatement(ctx, fctx, stmt);
+}
+
+/**
+ * (#1387 / #3025 W1) Shared tail for both Tier-1 static paths (object literal and
+ * closed-struct-typed variable). The target has already been compiled and its
+ * struct ref is on top of the stack (`targetType`). Sinks it into a fresh local,
+ * derives the struct field set, validates `requiredKeys`, and pushes a `static`
+ * `WithScope` so bare-identifier reads/writes inside the body route to direct
+ * struct get/set.
+ *
+ * `guardInheritedKeys` (object-literal path only): report a diagnostic when the
+ * body references an inherited `Object.prototype` key that is not an own field —
+ * the struct-typed path pre-clears this in its proof (falling through to Tier-2
+ * instead) so it passes `false`.
+ */
+function finalizeStaticWithScope(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.WithStatement,
+  targetType: ValType | null,
+  requiredKeys: Set<string>,
+  integrity: WithTargetIntegrity,
+  guardInheritedKeys: boolean,
+): void {
   if (!targetType || (targetType.kind !== "ref" && targetType.kind !== "ref_null")) {
     if (targetType) fctx.body.push({ op: "drop" });
-    // Degenerate: proof said closed-literal but lowering didn't yield a struct.
-    // The target was already (partially) compiled here, so re-routing to the
-    // dynamic path would double-evaluate it — keep the diagnostic for this rare
-    // internal case. (The common non-proven targets never reach here; they took
-    // the Tier-2 path above before any target compilation.)
+    // Degenerate: proof said closed shape but lowering didn't yield a struct.
     reportWithStatementDiagnostic(ctx, stmt, "target did not lower to a WasmGC struct with a closed shape");
     return;
   }
@@ -197,7 +245,7 @@ export function compileWithStatement(ctx: CodegenContext, fctx: FunctionContext,
   }
 
   const targetKeys = new Set(fields.map((f) => f.name));
-  for (const key of proof.keys) {
+  for (const key of requiredKeys) {
     if (!targetKeys.has(key)) {
       reportWithStatementDiagnostic(ctx, stmt, `compiled target struct is missing literal key "${key}"`);
       return;
@@ -205,18 +253,20 @@ export function compileWithStatement(ctx: CodegenContext, fctx: FunctionContext,
   }
 
   const blockedNames = collectBodyDeclaredNames(stmt.statement);
-  const referencedNames = collectBodyReferencedNames(stmt.statement);
-  for (const name of referencedNames) {
-    if (!blockedNames.has(name) && !proof.keys.has(name) && OBJECT_PROTOTYPE_KEYS.has(name)) {
-      reportWithStatementDiagnostic(
-        ctx,
-        stmt,
-        `body references inherited Object.prototype key "${name}", which this static slice cannot route as an own field`,
-      );
-      return;
+  if (guardInheritedKeys) {
+    const referencedNames = collectBodyReferencedNames(stmt.statement);
+    for (const name of referencedNames) {
+      if (!blockedNames.has(name) && !requiredKeys.has(name) && OBJECT_PROTOTYPE_KEYS.has(name)) {
+        reportWithStatementDiagnostic(
+          ctx,
+          stmt,
+          `body references inherited Object.prototype key "${name}", which this static slice cannot route as an own field`,
+        );
+        return;
+      }
     }
   }
-  const scopeFields = proof.integrity === "frozen" ? fields.map((field) => ({ ...field, mutable: false })) : fields;
+  const scopeFields = integrity === "frozen" ? fields.map((field) => ({ ...field, mutable: false })) : fields;
   const scope = { kind: "static" as const, localIdx, structTypeIdx, fields: scopeFields, blockedNames };
   (fctx.withScopes ??= []).push(scope);
   try {
@@ -224,6 +274,101 @@ export function compileWithStatement(ctx: CodegenContext, fctx: FunctionContext,
   } finally {
     fctx.withScopes?.pop();
   }
+}
+
+/**
+ * (#3025 W1) Prove a NON-literal `with` target whose static TS type resolves to a
+ * closed WasmGC struct is safe to route through the zero-overhead Tier-1 static
+ * path. Returns the resolved struct type name on success, or `null` to fall
+ * through to the Tier-2 dynamic path. Every rejection is a fall-through, NEVER a
+ * compile error — a wrong static claim is a soundness bug; a fall-through is only
+ * a coverage/perf loss (Tier-2 is the semantic backstop).
+ *
+ * Conservative gates:
+ *   (0) only a bare identifier target (`with (o)`) — side-effect-free, so a
+ *       post-compile fall-through cannot double-evaluate a side effect, and it is
+ *       the overwhelming test262 pattern. Call/member targets defer to Tier-2.
+ *   (c) `any` / `unknown` / `null` / `undefined` / `void` / union / intersection
+ *       types — the runtime shape is not a single provable struct.
+ *   The type must `resolveStructName` to a struct with a known, non-empty field
+ *       set (a closed shape).
+ *   (a)/(b) a body-referenced name that is NOT a struct field but which the
+ *       object actually carries — an inherited `Object.prototype` key, or an own
+ *       member the struct lowering dropped (method/accessor) — the static scope
+ *       can't see it, so defer to Tier-2 (which consults own+proto via HasBinding).
+ */
+function proveStructTypedWithTarget(ctx: CodegenContext, stmt: ts.WithStatement): { typeName: string } | null {
+  // Gate (0): bare identifier only (unwrap parentheses).
+  let ident: ts.Expression = stmt.expression;
+  while (ts.isParenthesizedExpression(ident)) ident = ident.expression;
+  if (!ts.isIdentifier(ident)) return null;
+  // `undefined` is an identifier syntactically but never a struct target.
+  if (ident.text === "undefined") return null;
+
+  // Resolve the identifier's type via its SYMBOL's declaration, not its use
+  // site. Inside a `with` body the TS checker widens every identifier to `any`
+  // (dynamic scope it cannot model), so the use-site type of a nested `with (b)`
+  // target is `any` and would reject it. The declaration type is immune to that
+  // widening and is exactly the struct the WasmGC local carries. This is
+  // name/binding resolution — explicitly OUT of the oracle's scope (#1930 D3) —
+  // so it uses a local `checker` alias rather than the ratcheted checker field.
+  const { checker } = ctx;
+  const symbol = checker.getSymbolAtLocation(ident);
+  const decl = symbol?.valueDeclaration;
+  if (!symbol || !decl) return null;
+  const tsType = checker.getTypeOfSymbolAtLocation(symbol, decl);
+  // Gate (c): non-single-object shapes.
+  if (
+    tsType.flags &
+    (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)
+  ) {
+    return null;
+  }
+  if ((tsType as ts.Type).isUnionOrIntersection?.()) return null;
+
+  // Resolve to a closed struct WITHOUT forcing registration. A variable that the
+  // compiler already lowered to a WasmGC struct resolves here; a variable that
+  // was demoted to an externref-backed dynamic `$Object` (e.g. because the
+  // program mutates it with a computed/Symbol-keyed write such as
+  // `env[Symbol.unscopables] = …`) resolves to `undefined` and MUST stay on the
+  // Tier-2 dynamic path, whose host reflection honours @@unscopables and the full
+  // Object Environment Record semantics. Force-registering a struct for such a
+  // demoted object would wrongly route it through the static path (regressing the
+  // #2663 @@unscopables gates).
+  const typeName = resolveStructName(ctx, tsType);
+  if (!typeName) return null;
+  const fields = ctx.structFields.get(typeName);
+  if (!fields || fields.length === 0) return null;
+  const fieldNames = new Set(fields.map((f) => f.name));
+
+  // A `@@unscopables` member means name-resolution depends on the runtime
+  // blocklist (§9.1.1.2.1) — only the dynamic HasBinding gate applies it. The
+  // literal case surfaces as a struct field; the runtime case
+  // (`o[Symbol.unscopables] = …`) surfaces as a dynamic-key element write below.
+  if (fieldNames.has("@@unscopables")) return null;
+
+  // Gate (b): a computed/Symbol-keyed element WRITE to the target variable
+  // anywhere in scope (`env[Symbol.unscopables] = …`, `o[k] = v`) can add an own
+  // property the static struct view does not model — including a runtime
+  // @@unscopables blocklist. The struct scope cannot see it, so defer to Tier-2.
+  if (targetReceivesDynamicElementWrite(ident)) return null;
+
+  // `delete name` inside a `with` body has cascade / configurability semantics
+  // (§8.5.2 DeleteBinding, §13.5.1.2) that only the Tier-2 dynamic path
+  // implements; the static struct scope cannot express "absent name ⇒ false" or
+  // the outer-scope cascade. Defer any body containing a bare-identifier delete.
+  if (bodyContainsIdentifierDelete(stmt.statement)) return null;
+
+  // Gates (a)/(b): a body-referenced name the static struct scope cannot route
+  // but the object actually binds ⇒ defer to Tier-2.
+  const blockedNames = collectBodyDeclaredNames(stmt.statement);
+  const referencedNames = collectBodyReferencedNames(stmt.statement);
+  for (const name of referencedNames) {
+    if (blockedNames.has(name) || fieldNames.has(name)) continue;
+    if (OBJECT_PROTOTYPE_KEYS.has(name)) return null; // inherited Object.prototype key (gate a)
+    if (checker.getPropertyOfType(tsType, name)) return null; // own member dropped by lowering (gate b)
+  }
+  return { typeName };
 }
 
 /**
@@ -675,6 +820,83 @@ function staticPropertyName(name: ts.PropertyName): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * (#3025 W1) True if the identifier `ident` is, anywhere in its enclosing
+ * function/module scope, the object of an element-access WRITE with a
+ * computed/non-literal key (`env[Symbol.unscopables] = …`, `o[k] = v`, `o[k]++`).
+ * Such a write can add an own property the static closed-struct view does not
+ * model (notably a runtime @@unscopables blocklist), so the `with` target must
+ * stay on the Tier-2 dynamic path. Element-access READS and string/numeric
+ * literal-keyed writes (which map to known fields) do not count.
+ */
+function targetReceivesDynamicElementWrite(ident: ts.Identifier): boolean {
+  const name = ident.text;
+  // Walk up to the nearest enclosing function-like body / source file.
+  let scope: ts.Node = ident;
+  while (scope.parent && !ts.isSourceFile(scope) && !isFunctionOrClassBoundary(scope)) {
+    scope = scope.parent;
+  }
+  let found = false;
+  const isDynamicKey = (arg: ts.Expression | undefined): boolean =>
+    !!arg && !ts.isStringLiteralLike(arg) && !ts.isNumericLiteral(arg);
+  const isWritePosition = (ea: ts.ElementAccessExpression): boolean => {
+    const p = ea.parent;
+    if (!p) return false;
+    if (ts.isBinaryExpression(p) && p.left === ea) {
+      const op = p.operatorToken.kind;
+      return (
+        op === ts.SyntaxKind.EqualsToken ||
+        (op >= ts.SyntaxKind.FirstCompoundAssignment && op <= ts.SyntaxKind.LastCompoundAssignment)
+      );
+    }
+    if (ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) {
+      return p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken;
+    }
+    if (ts.isDeleteExpression(p)) return true;
+    return false;
+  };
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isElementAccessExpression(node)) {
+      let obj: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(obj)) obj = obj.expression;
+      if (ts.isIdentifier(obj) && obj.text === name && isDynamicKey(node.argumentExpression) && isWritePosition(node)) {
+        found = true;
+        return;
+      }
+    }
+    forEachChild(node, walk);
+  };
+  walk(scope);
+  return found;
+}
+
+/**
+ * (#3025 W1) True if the `with` body contains a `delete <Identifier>` on a bare
+ * identifier (which could resolve to a with-binding). `delete obj.prop` (member
+ * delete) is unaffected and does not count. Used to keep such bodies on the
+ * Tier-2 dynamic path, which implements the DeleteBinding cascade / configurability
+ * semantics the static struct scope cannot.
+ */
+function bodyContainsIdentifierDelete(stmt: ts.Statement): boolean {
+  let found = false;
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    if (node !== stmt && isFunctionOrClassBoundary(node)) return;
+    if (ts.isDeleteExpression(node)) {
+      let operand: ts.Expression = node.expression;
+      while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+      if (ts.isIdentifier(operand)) {
+        found = true;
+        return;
+      }
+    }
+    forEachChild(node, walk);
+  };
+  walk(stmt);
+  return found;
 }
 
 function containsNestedFunctionBoundary(stmt: ts.Statement): boolean {

@@ -35,9 +35,9 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { ensureBuiltinFnMetaType } from "./builtin-fn-meta.js";
-import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { buildThrowJsErrorInstrs, emitThrowTypeError } from "./js-errors.js"; // (#2984) refusal-body fallback
 import { allocLocal } from "./context/locals.js";
 
 // ── Brand space (shared with #2101 — MUST stay coherent) ──────────────────────
@@ -176,12 +176,6 @@ export function getBuiltinBrand(ctx: CodegenContext, name: string): number | und
 //   4 $memberCsv (mut externref) own member-name CSV (native string)
 //   5 $name      (mut externref) the proto's brand/[[class]] name string
 const NATIVE_PROTO_STRUCT_NAME = "__NativeProto";
-export const NATIVE_PROTO_FIELD_BRAND = 0;
-export const NATIVE_PROTO_FIELD_IS_CLASS = 1;
-export const NATIVE_PROTO_FIELD_CTOR = 2;
-export const NATIVE_PROTO_FIELD_PARENT = 3;
-export const NATIVE_PROTO_FIELD_MEMBER_CSV = 4;
-export const NATIVE_PROTO_FIELD_NAME = 5;
 
 /**
  * Register the single `$NativeProto` struct type once and stash its idx on
@@ -414,6 +408,30 @@ export function ensureStandaloneNativeMethodClosure(
   brand: number,
   member: string,
   kind: "method" | "getter",
+  opts?: {
+    /**
+     * (#2984 Phase 2) When the glue's `emitMemberBody` REFUSES (returns null —
+     * no native body wired yet), mint the closure anyway with a catchable-
+     * TypeError body (the #2193/#2651 degrade-to-catchable pattern) instead of
+     * returning null. This reifies the member as a first-class function VALUE
+     * (correct `.name`/`.length` meta, identity-stable singleton) so gOPD
+     * descriptor synthesis and plain `<Builtin>.prototype.<member>` value
+     * reads resolve for un-wired members (Date/Object/Number/Boolean/Function/
+     * Error proto methods, …); INVOKING the value throws the catchable error.
+     *
+     * STRICTLY opt-in, and applied to `"method"` kind only. Callers that
+     * dispatch a real CALL through the closure body — most importantly
+     * `emitReflectiveNativeProtoClosureCall`, the route behind
+     * `Object.prototype.hasOwnProperty.call(o, k)` — must NOT set this: they
+     * rely on the null return to fall through to their working legacy
+     * lowering, and a throwing body would regress them (measured: the
+     * hasOwnProperty.call / propertyIsEnumerable.call harness idioms pass
+     * today via that fall-through). The refusal probe below runs BEFORE the
+     * funcMap cache lookup, so a fallback-minted closure never leaks to a
+     * caller that did not opt in.
+     */
+    refusalBodyFallback?: boolean;
+  },
 ): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
   const glue = getNativeProtoBuiltinGlue(ctx, brand);
   if (!glue) return null;
@@ -438,8 +456,15 @@ export function ensureStandaloneNativeMethodClosure(
   if (!wrapperProbe) return null;
   const selfType: ValType = { kind: "ref", typeIdx: wrapperProbe.structTypeIdx };
   const bodyFctx = makeNativeClosureFctx(`__probe_${brand}_${member}`, selfType, userParams, null);
-  const resultType = glue.emitMemberBody(ctx, bodyFctx, member, kind);
-  if (resultType === null) return null;
+  const probedResult = glue.emitMemberBody(ctx, bodyFctx, member, kind);
+  // (#2984 Phase 2) Refusal + opted-in fallback (methods only): keep going with
+  // a uniform externref result; the committed emission below swaps the refused
+  // body for a catchable-TypeError throw. Every non-opted-in caller keeps the
+  // exact null-return contract (this check precedes the funcMap lookup, so a
+  // fallback-minted closure is never returned to a caller that didn't opt in).
+  const useRefusalBody = probedResult === null && opts?.refusalBodyFallback === true && kind === "method";
+  if (probedResult === null && !useRefusalBody) return null;
+  const resultType: ValType = probedResult ?? { kind: "externref" };
 
   const resultTypes = [resultType];
   const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, resultTypes);
@@ -453,8 +478,22 @@ export function ensureStandaloneNativeMethodClosure(
     // only computed the result type; this is the committed emission.)
     const finalSelf: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
     const closureFctx = makeNativeClosureFctx(funcName, finalSelf, userParams, resultType);
-    const committedResult = glue.emitMemberBody(ctx, closureFctx, member, kind);
-    if (committedResult === null) return null;
+    if (useRefusalBody) {
+      // (#2984 Phase 2) Degrade-to-catchable body: a real TypeError instance +
+      // `throw` via emitThrowTypeError — the EXACT helper the wired glue
+      // refusals use (`emitProtoMemberBodyRefusal`, `emitArrayProtoMemberBody`
+      // non-slice arms), proven catchable through the closure-call path. The
+      // body ends in `throw`, so it validates against the declared externref
+      // result (unreachable tail).
+      emitThrowTypeError(
+        ctx,
+        closureFctx,
+        `${glue.name}.prototype.${member} is not yet implemented in --target standalone`,
+      );
+    } else {
+      const committedResult = glue.emitMemberBody(ctx, closureFctx, member, kind);
+      if (committedResult === null) return null;
+    }
 
     funcIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, funcIdx, {
@@ -516,14 +555,13 @@ export function ensureStandaloneNativeMethodClosure(
  * never a `ref.cast` trap (#2100 M2 / §22.2.6.4.1 step 2).
  */
 export function emitBrandCheckTypeError(ctx: CodegenContext, body: Instr[], message: string): void {
-  emitWasiErrorConstructor(ctx, "TypeError", 1);
-  addStringConstantGlobal(ctx, message);
-  for (const instr of stringConstantExternrefInstrs(ctx, message)) body.push(instr);
-  const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
-  if (newTypeErrorIdx !== undefined) {
-    body.push({ op: "call", funcIdx: newTypeErrorIdx } as Instr);
+  // (#3191) Unified onto the shared builder. `forceInModuleCtor` reproduces the
+  // former behavior EXACTLY — always emit the in-module `__new_TypeError` (via
+  // `emitWasiErrorConstructor` + `funcMap`) regardless of `noJsHost`, so host-
+  // mode codegen for these brand checks is unchanged. Sinks into the raw `body`.
+  for (const instr of buildThrowJsErrorInstrs(ctx, "TypeError", message, { forceInModuleCtor: true })) {
+    body.push(instr);
   }
-  body.push({ op: "throw", tagIdx: ensureExnTag(ctx) } as Instr);
 }
 
 /** The `eq` abstract heap type, signed-LEB128 -19 (= 0x6d). `ref.test`/`ref.cast`

@@ -51,20 +51,20 @@ This project develops in the open with an agentic workflow. You can use it too.
 
 If you have [Claude Code](https://docs.claude.com/claude-code), you can contribute at agent speed:
 
-1. Browse `plan/issues/sprints/` — each issue file is a real implementation spec with root-cause analysis, spec citations, and target files already identified. The `status:` frontmatter field tracks state (`ready`, `in-progress`, `blocked`, `done`).
+1. Browse `plan/issues/` — issue files are flat (`plan/issues/<id>-<slug>.md`); each is a real implementation spec with root-cause analysis, spec citations, and target files already identified. The `status:` frontmatter field tracks state (`ready`, `in-progress`, `blocked`, `done`).
 2. Claim one in your fork (update the `status` frontmatter or just start working).
-3. Spawn a developer agent pointed at the issue. It will read `.claude/agents/developer.md` for role, apply `.claude/hooks/pre-git-commit.sh` safety checks (`Checklist completed.` required in commit messages), push a branch, and open a PR against this repo.
+3. Spawn a developer agent pointed at the issue. It will read `.claude/agents/developer.md` for role, apply `.claude/hooks/pre-git-commit.sh` safety checks (a `✓` checkmark required in commit messages), push a branch, and open a PR against this repo.
 4. Human review + merge as usual.
 
 You do **not** need agents to contribute. Regular PRs from any contributor are welcome via the standard flow below. The agent path is a force multiplier, not a requirement.
 
 **Where to find issues:**
 
-- `plan/issues/sprints/<N>/*.md` — active issues organized by sprint. Filter by frontmatter `status: ready` to find unblocked items.
+- `plan/issues/*.md` — issues are flat; filter by frontmatter `status: ready` to find unblocked items. (`plan/issues/sprints/<N>.md` are the frozen per-sprint retrospective docs, not issue files.)
 - `plan/issues/backlog/` — longer-term items that need more investigation first.
 - `plan/issues/wont-fix/` — decided against implementing (for context only).
 - `plan/log/dependency-graph.md` — current priorities and what's blocked on what.
-- [The dashboard](https://js2wasm.loopdive.com/dashboard/) provides a filtered UI view of ready-to-pick issues.
+- [The dashboard](https://js2.loopdive.com/dashboard/) provides a filtered UI view of ready-to-pick issues.
 
 **Protected paths** (changes to these go through CODEOWNERS review):
 

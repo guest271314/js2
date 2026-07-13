@@ -33,6 +33,32 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
+// #3189 — the four UNCATCHABLE Wasm-trap error categories. A trap aborts the
+// whole test file and escapes `try`/`catch` (documented in #3179 — a trap
+// inside `assert.throws` poisons every test whose body shares the pattern), so
+// the "crash-free (traps → 0)" goal (plan/goals/goal-graph.md) treats them as
+// strictly worse than an ordinary assertion fail. These strings are assigned by
+// `classifyError` (tests/test262-runner.ts) and are stable in the jsonl.
+export const TRAP_ERROR_CATEGORIES = ["null_deref", "illegal_cast", "oob", "unreachable"] as const;
+export type TrapCategory = (typeof TRAP_ERROR_CATEGORIES)[number];
+
+// #3086 — drift tolerance for a DELIBERATE oracle re-baseline (forward-bump
+// auto-rebase or ORACLE_REBASE=1). A pure re-baseline has ~0 improvements, so
+// the strict net<0 / ratio<10% gate is structurally inapplicable: ANY residual
+// regression makes net negative and the ratio ∞. The intended reclassification
+// (e.g. #2940/#3086 vacuity) is already excused from `regressionsWasmChange`;
+// what remains is main-side DRIFT the re-baseline cannot avoid (the baseline the
+// merge_group diffs against lags main HEAD by the promote-serialization window).
+// In rebase mode we therefore replace net/ratio with a bounded drift tolerance
+// PLUS the unchanged per-bucket (50) concentration check. The coarse safety nets
+// stay fully in force: the #1668 catastrophic guard (host, threshold 200) and
+// the #1897 standalone guard (tolerance 15) both parse "Regressions with
+// wasm-hash change" from this same output and are NOT affected by this exit-code
+// path. Set to 25 — comfortably above realistic single-window host drift, ~8×
+// below the catastrophic threshold, so a genuine concentrated break still trips
+// (bucket-50) or overflows (25) while ordinary drift self-lands the re-baseline.
+export const ORACLE_REBASE_DRIFT_TOLERANCE = 25;
+
 /**
  * Group regressed test files into path buckets (first
  * `REGRESSION_BUCKET_PATH_DEPTH` segments) and return them sorted by count
@@ -78,6 +104,97 @@ export function evaluateRegressionThresholds(opts: {
     }
   }
   return failures;
+}
+
+/** Minimal row shape the trap ratchet needs (a subset of `TestResult`). */
+type TrapRatchetRow = { status: string; error_category?: string; wasm_sha?: string | null };
+
+export interface TrapCategoryGrowth {
+  /** Human-readable GATE-FAIL reasons (empty ⇒ within ratchet). */
+  failures: string[];
+  /** baseline population per trap category. */
+  baseCounts: Record<TrapCategory, number>;
+  /** candidate population per trap category (noise-filtered). */
+  newCounts: Record<TrapCategory, number>;
+  /** files that newly entered each trap category (weren't trapping there in baseline). */
+  newlyTrapping: Record<TrapCategory, string[]>;
+}
+
+/**
+ * #3189 — trap-category GROWTH ratchet. For each of the four uncatchable-trap
+ * categories, compare the candidate's population against the baseline's. **Any
+ * growth in any trap category is a gate failure**, independent of `net_per_test`
+ * — so a PR that fixes 60 assertion-fails while introducing 12 new illegal-casts
+ * (net-positive, so it clears the existing net/ratio gate) is still blocked. The
+ * "crash-free (traps → 0)" goal is a strict ratchet: the trap population may
+ * only shrink or hold. Decreases auto-bank because the committed baseline jsonl
+ * is re-seeded by `promote-baseline` on every push to main (#1528) — no separate
+ * baseline file, so there is no per-PR baseline-bump merge conflict (#3131).
+ *
+ * Pure (no I/O) so the unit test drives it with fixture maps, mirroring
+ * `evaluateRegressionThresholds` (#1943).
+ *
+ * Noise discipline: a trap category is a STATIC miscompile signal — a
+ * byte-identical binary (same `wasm_sha`) cannot newly trap — so a candidate row
+ * whose wasm hash is unchanged from a baseline row of the same file is excluded
+ * as CI runner noise, exactly like the `net_per_test` gate's `wasmUnchanged`
+ * filter (#1222). This prevents a flaky pass→trap flip on an identical binary
+ * from tripping the ratchet.
+ */
+export function evaluateTrapCategoryGrowth(
+  baseline: Map<string, TrapRatchetRow>,
+  newer: Map<string, TrapRatchetRow>,
+  /**
+   * Per-category growth tolerance (default 0 — strict ratchet). An operational
+   * safety valve wired to `TRAP_RATCHET_TOLERANCE` in the CLI, mirroring
+   * `STANDALONE_REGRESSION_TOLERANCE`: if the ratchet ever proves brittle
+   * against baseline drift it can be loosened without a code change, rather than
+   * wedging the merge queue. Growth fails only when it EXCEEDS the tolerance.
+   */
+  tolerancePerCategory = 0,
+): TrapCategoryGrowth {
+  const zero = () => Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, 0])) as Record<TrapCategory, number>;
+  const baseCounts = zero();
+  const newCounts = zero();
+  const newlyTrapping = Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, [] as string[]])) as Record<
+    TrapCategory,
+    string[]
+  >;
+
+  const isTrap = (cat: string | undefined): cat is TrapCategory =>
+    !!cat && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(cat);
+
+  for (const row of baseline.values()) {
+    if (isTrap(row.error_category)) baseCounts[row.error_category]++;
+  }
+
+  for (const [file, row] of newer) {
+    if (!isTrap(row.error_category)) continue;
+    const base = baseline.get(file);
+    // Wasm-identical noise: a trap can't appear on a byte-identical binary, so a
+    // same-`wasm_sha` flip is runner noise — don't let it inflate the count.
+    if (base && base.wasm_sha && row.wasm_sha && base.wasm_sha === row.wasm_sha) continue;
+    newCounts[row.error_category]++;
+    // "newly trapping HERE" = this file was not already in THIS trap category.
+    if (!base || base.error_category !== row.error_category) {
+      newlyTrapping[row.error_category].push(file);
+    }
+  }
+
+  const failures: string[] = [];
+  for (const cat of TRAP_ERROR_CATEGORIES) {
+    if (newCounts[cat] - baseCounts[cat] > tolerancePerCategory) {
+      const grew = newCounts[cat] - baseCounts[cat];
+      const sample = newlyTrapping[cat].slice().sort().slice(0, 10);
+      const more =
+        newlyTrapping[cat].length > sample.length ? ` (+${newlyTrapping[cat].length - sample.length} more)` : "";
+      failures.push(
+        `trap category "${cat}" grew ${baseCounts[cat]} → ${newCounts[cat]} (+${grew}) — uncatchable-trap ratchet (#3189). ` +
+          `Newly trapping: ${sample.join(", ")}${more}`,
+      );
+    }
+  }
+  return { failures, baseCounts, newCounts, newlyTrapping };
 }
 
 interface TestResult {
@@ -382,6 +499,25 @@ async function run(
   // and trips the gate on oracle change, not code change. Refuse such a diff
   // unless ORACLE_REBASE=1 — which is how the oracle-flip PR re-seeds the
   // baseline at the new version (promote-baseline picks it up on merge).
+  //
+  // #3086 — FORWARD-MONOTONIC AUTO-REBASE (the self-land key). A cross-version
+  // diff otherwise hard-refuses (exit 2) unless ORACLE_REBASE=1. But
+  // `merge_group` runs the BASE-branch (main) workflow YAML, which never sets
+  // that env var — so a naive oracle bump would exit 2 in the merged-tree diff,
+  // fail the required guard step (which does `exit $diff_exit`), and — worse —
+  // the push-to-main promote-baseline (`needs: merge-report`) would ALSO refuse,
+  // permanently wedging the queue (the refusal blocks the very promote that
+  // would re-seed the baseline at the new version). This is the untested hole
+  // #3003 documented (the oracle was never actually bumped before). Fix: a
+  // FORWARD bump (newOracle > baseOracle) is ALWAYS a deliberate re-baseline —
+  // the oracle is a hand-edited, append-only integer, never accidentally raised
+  // — so the merged-tree script treats it as an implicit rebase and PROCEEDS
+  // (loud warning, exit 0) regardless of which YAML runs. This self-lands like
+  // #3004's default-on excusal. A BACKWARD / equal-but-shouldn't diff is left to
+  // the explicit env flag (a backward skew IS the accidental case to catch).
+  // The guards keep their teeth: in rebase mode the diff still counts genuine
+  // (non-excused, non-vacuous) regressions, so a real codegen break in the same
+  // PR still trips; only the intended oracle-skew flips are excused.
   const oracleRebase = process.env.ORACLE_REBASE === "1";
   const baseOracle = baselineLoaded.oracleVersion;
   const newOracle = newerLoaded.oracleVersion;
@@ -406,20 +542,25 @@ async function run(
   // recorded oracle to conflict with, so we fall back to the legacy behaviour
   // and only emit an informational note.
   if (baseOracle !== undefined && newOracle !== undefined && baseOracle !== newOracle) {
-    if (!oracleRebase) {
+    // #3086: a FORWARD monotonic bump auto-rebases (see the block comment
+    // above); a backward skew still requires the explicit env flag.
+    const forwardBump = typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle;
+    const rebaseEffective = oracleRebase || forwardBump;
+    if (!rebaseEffective) {
       console.error(
         `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
           `  baseline oracle = ${fmtOracle(baseOracle)}, new oracle = ${fmtOracle(newOracle)}.\n` +
-          `  These rows were produced by different verdict logic, so the diff would read\n` +
-          `  oracle skew as regressions. To intentionally re-seed the baseline at the new\n` +
-          `  oracle version (e.g. the #1945 flip PR), re-run with ORACLE_REBASE=1.\n`,
+          `  The new side is an OLDER oracle than the baseline — that is the accidental\n` +
+          `  skew case (stale code vs a newer baseline), not a deliberate forward re-seed.\n` +
+          `  If this backward comparison is intentional, re-run with ORACLE_REBASE=1.\n`,
       );
       process.exit(2);
     }
     console.log(
-      `ORACLE_REBASE=1 — comparing across oracle versions ` +
-        `(baseline ${fmtOracle(baseOracle)} → new ${fmtOracle(newOracle)}). ` +
-        `Regression numbers below mix oracle skew with code changes; use only to re-seed.`,
+      `${forwardBump && !oracleRebase ? "ORACLE forward-bump auto-rebase (#3086)" : "ORACLE_REBASE=1"} — ` +
+        `comparing across oracle versions (baseline ${fmtOracle(baseOracle)} → new ${fmtOracle(newOracle)}). ` +
+        `This is a deliberate re-baseline: oracle-skew flips (e.g. #2940/#3086 vacuity) are excused, ` +
+        `but genuine non-vacuous regressions below still count. promote-baseline re-seeds at the new version.`,
     );
   } else if (baseOracle === undefined || newOracle === undefined) {
     console.log(
@@ -864,25 +1005,78 @@ async function run(
   // regressionsWasmChange. Gate: improvements.length - regressionsWasmChange < 0.
   const netPerTest = improvements.length - regressionsWasmChange;
   let gateFailed = false;
-  if (netPerTest < 0) {
-    console.log(
-      `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
-    );
+
+  // #3189 — uncatchable-trap GROWTH ratchet. Applies in BOTH the normal and the
+  // oracle-rebase branches: a genuinely new trap is a real regression regardless
+  // of net_per_test or an oracle re-baseline (the four trap categories are not
+  // touched by any oracle reclassification, so they stay comparable across a
+  // forward bump). A trap escapes try/catch and poisons the whole file, so the
+  // crash-free goal forbids ANY growth. Decreases auto-bank via promote-baseline.
+  const trapTolerance = Number.parseInt(process.env.TRAP_RATCHET_TOLERANCE ?? "0", 10) || 0;
+  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, trapTolerance);
+  console.log(
+    `=== Trap categories (baseline → candidate): ` +
+      TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +
+      ` (#3189 ratchet) ===`,
+  );
+  for (const reason of trapGrowth.failures) {
+    console.log(`=== GATE FAIL: ${reason} ===`);
     gateFailed = true;
   }
 
-  // #1943 — enforce the documented ratio (10%) and per-bucket (50) thresholds
-  // that previously lived only in the dev-self-merge skill text. Same
-  // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
-  // compile_timeout flaps and byte-identical flips never trip these either.
-  const thresholdFailures = evaluateRegressionThresholds({
-    improvements: improvements.length,
-    regressionsWasmChange,
-    regressedFiles: noiseFiltered.map((r) => r.file),
-  });
-  for (const reason of thresholdFailures) {
-    console.log(`=== GATE FAIL: ${reason} ===`);
-    gateFailed = true;
+  // #3086 — is this a deliberate oracle RE-BASELINE? (forward-monotonic bump
+  // auto-rebase, or ORACLE_REBASE=1). Same condition the oracle guard above used
+  // to PROCEED across versions; both `baseOracle`/`newOracle` are in scope here.
+  const rebaseMode =
+    oracleRebase || (typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle);
+
+  if (rebaseMode) {
+    // A pure re-baseline has ~0 improvements → net/ratio are inapplicable (see
+    // ORACLE_REBASE_DRIFT_TOLERANCE). The intended reclassification is already
+    // excused from regressionsWasmChange; the residual is main drift. Gate on a
+    // bounded drift tolerance + the unchanged per-bucket concentration check; the
+    // #1668 / #1897 guards remain the coarse safety nets (they read the printed
+    // "Regressions with wasm-hash change" line, not this exit code).
+    if (regressionsWasmChange > ORACLE_REBASE_DRIFT_TOLERANCE) {
+      console.log(
+        `=== GATE FAIL: re-baseline residual ${regressionsWasmChange} non-excused wasm-change regressions exceeds drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE} (#3086) ===`,
+      );
+      gateFailed = true;
+    }
+    for (const { bucket, count } of bucketRegressions(noiseFiltered.map((r) => r.file))) {
+      if (count > REGRESSION_BUCKET_LIMIT) {
+        console.log(
+          `=== GATE FAIL: bucket "${bucket}" has ${count} regressions, exceeds the ${REGRESSION_BUCKET_LIMIT}-test limit (re-baseline concentration check) ===`,
+        );
+        gateFailed = true;
+      }
+    }
+    if (!gateFailed) {
+      console.log(
+        `=== Re-baseline gate (#3086): ${regressionsWasmChange} residual non-excused wasm-change regression(s) within drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE}; net/ratio skipped (0-improvement re-baseline). #1668 (200) + #1897 (15) guards remain in force. ===`,
+      );
+    }
+  } else {
+    if (netPerTest < 0) {
+      console.log(
+        `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
+      );
+      gateFailed = true;
+    }
+
+    // #1943 — enforce the documented ratio (10%) and per-bucket (50) thresholds
+    // that previously lived only in the dev-self-merge skill text. Same
+    // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
+    // compile_timeout flaps and byte-identical flips never trip these either.
+    const thresholdFailures = evaluateRegressionThresholds({
+      improvements: improvements.length,
+      regressionsWasmChange,
+      regressedFiles: noiseFiltered.map((r) => r.file),
+    });
+    for (const reason of thresholdFailures) {
+      console.log(`=== GATE FAIL: ${reason} ===`);
+      gateFailed = true;
+    }
   }
 
   if (gateFailed) {

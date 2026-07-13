@@ -598,6 +598,81 @@ function verifyBlock(
           }
         }
       }
+      // #2949 S5.1 — dyn.truthy is ToBoolean on the boxed-any carrier: the
+      // operand MUST be dynamic (a concrete scalar has an inline ToBoolean
+      // and must not route through the carrier helper). Result is i32,
+      // already enforced structurally by the loop/if condValue rules.
+      if (instr.kind === "dyn.truthy") {
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.truthy operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+      // #2949 S5.3 — dyn.to_number is ToNumber on the boxed-any carrier → f64:
+      // the operand MUST be dynamic (a concrete numeric operand converts to f64
+      // inline and must not route through the carrier ToNumber helper). Result
+      // is f64, consumed by the numeric-abstract relational compare.
+      if (instr.kind === "dyn.to_number") {
+        const operandIr = operandIrType(func, block, instr.value, localDefs);
+        if (operandIr && operandIr.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.to_number operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+      // #2949 S5.2 — dyn.eq compares TWO boxed-any carriers via the canonical
+      // `__any_strict_eq`/`__any_eq` helpers (which take `(ref null $AnyValue,
+      // ref null $AnyValue)`). BOTH operands MUST be dynamic — the producer
+      // boxes any concrete operand into the carrier before this node, so a
+      // non-dynamic operand here is a producer bug (a concrete-vs-concrete
+      // `===` has an inline `i32.eq`/`f64.eq` and must never route through the
+      // carrier helper). Result is i32, satisfying downstream condValue rules.
+      if (instr.kind === "dyn.eq") {
+        for (const operand of [instr.lhs, instr.rhs]) {
+          const operandIr = operandIrType(func, block, operand, localDefs);
+          if (operandIr && operandIr.kind !== "dynamic") {
+            errors.push({
+              message: `dyn.eq operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+      }
+      // #3053 U1 / #2949 S5.4 — dyn.member_get reads a member off a boxed-any
+      // receiver via `__dyn_member_get(recv, key)`, which takes and returns the
+      // carrier. BOTH operands MUST be dynamic (the producer boxes the receiver
+      // and the property key into the carrier first) and the RESULT must be
+      // dynamic (the honest-boxed read value) — anything else is a producer bug
+      // that would mis-shape the reader ABI.
+      if (instr.kind === "dyn.member_get") {
+        for (const [label, operand] of [
+          ["recv", instr.recv],
+          ["key", instr.key],
+        ] as const) {
+          const operandIr = operandIrType(func, block, operand, localDefs);
+          if (operandIr && operandIr.kind !== "dynamic") {
+            errors.push({
+              message: `dyn.member_get ${label} must be a dynamic IrType, got ${operandIr.kind} (#3053 U1)`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+        if (instr.resultType === null || instr.resultType.kind !== "dynamic") {
+          errors.push({
+            message: `dyn.member_get result must be a dynamic IrType, got ${instr.resultType?.kind ?? "null"} (#3053 U1)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
 
       if (instr.result !== null) {
         if (defs.has(instr.result)) {
@@ -679,7 +754,13 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     case "box":
     case "unbox":
     case "tag.test":
+    case "dyn.truthy":
+    case "dyn.to_number":
       return [instr.value];
+    case "dyn.eq":
+      return [instr.lhs, instr.rhs];
+    case "dyn.member_get":
+      return [instr.recv, instr.key];
     case "string.const":
       return [];
     case "string.concat":
@@ -712,12 +793,23 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
     // Slice 4 (#1169d): class ops.
     case "class.new":
       return instr.args;
+    case "class.alloc":
+      // #3000-C: fresh default-initialised allocation — no SSA operands.
+      return [];
+    case "class.super_init":
+      return [...instr.args, instr.self];
+    case "class.super_call":
+      return [instr.receiver, ...instr.args];
     case "class.get":
       return [instr.value];
     case "class.set":
       return [instr.value, instr.newValue];
     case "class.call":
       return [instr.receiver, ...instr.args];
+    case "class.instanceof":
+      return [instr.value];
+    case "class.static_call":
+      return instr.args;
     // Slice 6 (#1169e): slot / vec / for-of ops.
     case "slot.read":
       return [];
@@ -1023,6 +1115,8 @@ function binopOperandKind(op: import("./nodes.js").IrBinop): ValType["kind"] | n
 function unopResultKind(op: import("./nodes.js").IrUnop): ValType["kind"] | null {
   switch (op) {
     case "f64.neg":
+    // (#3168) boolean → f64 ToNumber for unary `+`/`-`.
+    case "f64.convert_i32_s":
       return "f64";
     case "i32.eqz":
     case "ref.is_null":
@@ -1041,6 +1135,8 @@ function unopOperandKind(op: import("./nodes.js").IrUnop): ValType["kind"] | nul
     case "i32.trunc_sat_f64_s":
       return "f64";
     case "i32.eqz":
+    // (#3168) the boolean-ToNumber conversion consumes the i32 0/1.
+    case "f64.convert_i32_s":
       return "i32";
     // ref.is_null takes a ref/externref/funcref — not a fixed scalar; skip.
     default:

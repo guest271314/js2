@@ -39,12 +39,25 @@
 import type { Instr, ValType } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { noJsHost } from "./expressions/helpers.js";
+import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
-import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import {
+  addFuncType,
+  getOrRegisterResizableAbType,
+  getOrRegisterTaCtorType,
+  getOrRegisterTaDynViewType,
+  getOrRegisterTaViewType,
+  getTaViewName,
+  TA_CTOR_BYTES,
+  TA_CTOR_KINDS,
+  taCtorKindOf,
+} from "./registry/types.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#2872) __ta_dyn_fill minting
+import { ensureObjectRuntime } from "./object-runtime.js"; // (#2872) $Object array-like construct arm
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
+import { coerceType } from "./type-coercion.js";
 
 /** DataView accessor descriptor parsed from a method name like "getUint32". */
 interface DvAccessor {
@@ -53,8 +66,17 @@ interface DvAccessor {
   bytes: number;
   /** Signed integer read (Int8/Int16/Int32) — sign-extend on read. */
   signed: boolean;
-  /** Float element (Float32/Float64) — reinterpret bits. */
+  /** Float element (Float32/Float64/Float16) — reinterpret bits. */
   float: boolean;
+  /** (#3173) Float16 element (ES2025) — 2-byte half-precision codec. */
+  f16?: boolean;
+  /**
+   * (#3173) 8-byte INTEGER element (getBigInt64/getBigUint64/setBigInt64/
+   * setBigUint64). BigInt values carry the compiler's numeric (f64)
+   * representation (#1349), so the codec converts through i64 — exact for
+   * |v| < 2^53, which covers the conformance corpus's small-literal rows.
+   */
+  int64?: boolean;
 }
 
 const DV_ACCESSORS: Record<string, DvAccessor> = {
@@ -64,16 +86,22 @@ const DV_ACCESSORS: Record<string, DvAccessor> = {
   getUint16: { kind: "get", bytes: 2, signed: false, float: false },
   getInt32: { kind: "get", bytes: 4, signed: true, float: false },
   getUint32: { kind: "get", bytes: 4, signed: false, float: false },
+  getFloat16: { kind: "get", bytes: 2, signed: false, float: true, f16: true },
   getFloat32: { kind: "get", bytes: 4, signed: false, float: true },
   getFloat64: { kind: "get", bytes: 8, signed: false, float: true },
+  getBigInt64: { kind: "get", bytes: 8, signed: true, float: false, int64: true },
+  getBigUint64: { kind: "get", bytes: 8, signed: false, float: false, int64: true },
   setInt8: { kind: "set", bytes: 1, signed: true, float: false },
   setUint8: { kind: "set", bytes: 1, signed: false, float: false },
   setInt16: { kind: "set", bytes: 2, signed: true, float: false },
   setUint16: { kind: "set", bytes: 2, signed: false, float: false },
   setInt32: { kind: "set", bytes: 4, signed: true, float: false },
   setUint32: { kind: "set", bytes: 4, signed: false, float: false },
+  setFloat16: { kind: "set", bytes: 2, signed: false, float: true, f16: true },
   setFloat32: { kind: "set", bytes: 4, signed: false, float: true },
   setFloat64: { kind: "set", bytes: 8, signed: false, float: true },
+  setBigInt64: { kind: "set", bytes: 8, signed: true, float: false, int64: true },
+  setBigUint64: { kind: "set", bytes: 8, signed: false, float: false, int64: true },
 };
 
 export function isDataViewAccessor(name: string): boolean {
@@ -220,6 +248,149 @@ export function emitArrayBufferSlice(
 }
 
 /**
+ * (#3054 C) `rab.resize(newByteLength)` in no-JS-host mode, per §25.1.6.
+ * `resize` exists only on a resizable buffer (a `$__resizable_ab` instance):
+ *   1. If the receiver is NOT a `$__resizable_ab` (a fixed buffer / anything
+ *      else) → TypeError (§25.1.6.1 step 3, IsFixedLengthArrayBuffer).
+ *   2. newByteLength = ToIndex(arg); if `newByteLength > maxByteLength` (or < 0)
+ *      → RangeError (step 6).
+ *   3. Reallocate: `array.new_default $__arr_i32_byte` of size `newByteLength`,
+ *      `array.copy` `min(oldLen, newLen)` bytes from the old data, then
+ *      `struct.set field1` (swap `data` in place on the SAME struct) and
+ *      `struct.set field0` (new byteLength). Views hold the vec-struct ref, so
+ *      they observe the swap → length-tracking-on-resize is free (Phase A A.1).
+ * Returns undefined (`resize` is a void method) — the caller drops nothing.
+ */
+export function emitArrayBufferResize(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: import("../ts-api.js").ts.Expression,
+  args: readonly import("../ts-api.js").ts.Expression[],
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const rabTypeIdx = getOrRegisterResizableAbType(ctx);
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }));
+  if (arrTypeIdx < 0) return null;
+
+  // Recover the receiver as anyref, then require it to be a $__resizable_ab.
+  const recvType = compileExpr(receiver);
+  if (recvType?.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  } else if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    return null;
+  }
+  const anyLocal = allocLocal(fctx, `__rabz_any_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // TypeError on a non-resizable receiver (IsFixedLengthArrayBuffer).
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  {
+    const msg = "TypeError: ArrayBuffer.prototype.resize called on non-resizable buffer";
+    addStringConstantGlobal(ctx, msg);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      else: [],
+    } as Instr);
+  }
+
+  // rab = ref.cast $__resizable_ab (the checked receiver).
+  const rabLocal = allocLocal(fctx, `__rabz_rab_${fctx.locals.length}`, { kind: "ref", typeIdx: rabTypeIdx });
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: rabTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: rabLocal } as Instr);
+
+  // newLen = ToIndex(arg): NaN→0, truncate toward zero.
+  const newLenF64 = allocLocal(fctx, `__rabz_nl_f64_${fctx.locals.length}`, { kind: "f64" });
+  if (args.length >= 1) {
+    compileExpr(args[0]!, { kind: "f64" });
+  } else {
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  // NaN → 0
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: newLenF64 } as Instr],
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  const newLen = allocLocal(fctx, `__rabz_nl_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: newLen } as Instr);
+
+  // RangeError if newLen < 0 OR newLen > maxByteLength (field 2).
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "i32.gt_s" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  {
+    const msg = "RangeError: ArrayBuffer.prototype.resize length exceeds maxByteLength";
+    addStringConstantGlobal(ctx, msg);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      else: [],
+    } as Instr);
+  }
+
+  // oldLen = min(rab.length, newLen) — bytes to preserve.
+  const oldLen = allocLocal(fctx, `__rabz_ol_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: oldLen } as Instr);
+  const copyLen = allocLocal(fctx, `__rabz_cl_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "local.set", index: copyLen } as Instr);
+
+  // newArr = new i8[newLen]; array.copy newArr[0..copyLen) ← rab.data[0..copyLen).
+  const newArr = allocLocal(fctx, `__rabz_na_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: newArr } as Instr);
+  // array.copy dst dstIdx src srcIdx len
+  fctx.body.push({ op: "local.get", index: newArr } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: copyLen } as Instr);
+  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+
+  // struct.set field1 = newArr; struct.set field0 = newLen (same struct → views observe).
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: newArr } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
+
+  return null;
+}
+
+/**
  * Normalize an index in-place per spec §25.1.5.3:
  *   if (idx < 0) idx = max(srcLen + idx, 0);
  *   else         idx = min(idx, srcLen);
@@ -329,6 +500,17 @@ function recoverDvBacking(
   // `byteLength` field for a windowed view; the backing array's `array.len` for
   // a bare offset-0 view). Used by the §24.2.1.1 bounds check. Pass -1 to skip.
   viewLenLocal = -1,
+  // (#3173) Optional spec-semantics extensions:
+  //   `brandThrow`  — instructions to run for a NON-`$__dv_window` receiver
+  //                   (the §24.3.1.1/2 [[DataView]] brand-check TypeError).
+  //                   Standalone DataViews are ALWAYS `$__dv_window`-wrapped
+  //                   (new-super.ts), so a bare vec receiver is an ArrayBuffer
+  //                   (or worse) and must throw, not alias an offset-0 view.
+  //                   When absent, the legacy both-shapes recovery is kept.
+  //   `bufVecLocal` — `(ref null $__vec_i32_byte)` local that receives the
+  //                   view's backing BUFFER STRUCT (window `buf` field / the
+  //                   bare vec itself) for the detached-buffer check.
+  opts?: { brandThrow?: Instr[]; bufVecLocal?: number },
 ): boolean {
   const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
   // Normalize the receiver to an anyref-castable `(ref any)` on the stack.
@@ -365,21 +547,43 @@ function recoverDvBacking(
       { op: "local.set", index: viewLenLocal } as Instr,
     );
   }
-  const vecBranch: Instr[] = [
-    // bare vec: arr = .data ; base = 0
-    { op: "local.get", index: anyLocal } as Instr,
-    { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: arrLocal } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: baseLocal } as Instr,
-  ];
-  if (viewLenLocal >= 0) {
+  if (opts?.bufVecLocal !== undefined) {
+    // bufVec = (cast $__dv_window).buf — for the detached-buffer check.
+    winBranch.push(
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: opts.bufVecLocal } as Instr,
+    );
+  }
+  // (#3173) Brand mode: a non-window receiver has no [[DataView]] internal
+  // slot — throw the catchable TypeError instead of aliasing a bare vec.
+  // A non-vec receiver would previously TRAP on the `ref.cast` below; the
+  // brand throw covers that too (never a trap, §22.2.6.4.1-step-2 rule).
+  const vecBranch: Instr[] = opts?.brandThrow
+    ? [...opts.brandThrow]
+    : [
+        // bare vec: arr = .data ; base = 0
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.set", index: arrLocal } as Instr,
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "local.set", index: baseLocal } as Instr,
+      ];
+  if (!opts?.brandThrow && viewLenLocal >= 0) {
     // viewLen = array.len(arr)  (offset-0 view spans the whole backing buffer)
     vecBranch.push(
       { op: "local.get", index: arrLocal } as Instr,
       { op: "array.len" } as Instr,
       { op: "local.set", index: viewLenLocal } as Instr,
+    );
+  }
+  if (!opts?.brandThrow && opts?.bufVecLocal !== undefined) {
+    vecBranch.push(
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+      { op: "local.set", index: opts.bufVecLocal } as Instr,
     );
   }
   fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
@@ -421,14 +625,440 @@ const DV_RANGE_MESSAGE = "RangeError: Offset is outside the bounds of the DataVi
  * accessor body and flushes shifts.
  */
 function emitDataViewRangeError(ctx: CodegenContext): Instr[] {
-  if (noJsHost(ctx)) emitWasiErrorConstructor(ctx, "RangeError", 1);
-  addStringConstantGlobal(ctx, DV_RANGE_MESSAGE);
-  const ctorIdx = ensureLateImport(ctx, "__new_RangeError", [{ kind: "externref" }], [{ kind: "externref" }]);
-  const tagIdx = ensureExnTag(ctx);
-  const instrs: Instr[] = [...stringConstantExternrefInstrs(ctx, DV_RANGE_MESSAGE)];
-  if (ctorIdx !== undefined) instrs.push({ op: "call", funcIdx: ctorIdx } as Instr);
-  instrs.push({ op: "throw", tagIdx } as Instr);
-  return instrs;
+  // (#3191) Unified onto the shared builder. No `flush` opt: the caller
+  // pre-builds this template BEFORE emitting the body and flushes shifts itself
+  // (funcIdx-capture ordering, see the doc above) — exactly the former behavior.
+  return buildThrowJsErrorInstrs(ctx, "RangeError", DV_RANGE_MESSAGE);
+}
+
+/** §24.3.1.1/§24.3.1.2 step 2 — receiver has no [[DataView]] internal slot. */
+const DV_BRAND_MESSAGE = "TypeError: Method DataView.prototype called on incompatible receiver";
+/** §24.3.1.1 GetViewValue step 5 / SetViewValue step 6 — detached buffer. */
+const DV_DETACHED_MESSAGE = "TypeError: Cannot perform operation on a detached ArrayBuffer";
+/** §7.1.13 ToBigInt(undefined) — the setBig{Int,Uint}64 missing-value throw. */
+const DV_TOBIGINT_UNDEFINED_MESSAGE = "TypeError: Cannot convert undefined to a BigInt";
+
+/**
+ * (#3173) Build a catchable-TypeError throw template (a real TypeError instance
+ * via `__new_TypeError` + `throw $exc`) for the DataView brand / detached-buffer
+ * checks. Same function-push ordering rule as {@link emitDataViewRangeError}:
+ * MUST be built (and shifts flushed) BEFORE any later funcIdx is captured.
+ */
+function dvTypeErrorThrow(ctx: CodegenContext, message: string): Instr[] {
+  // (#3191) Unified onto the shared builder — caller-flush ordering (see above).
+  return buildThrowJsErrorInstrs(ctx, "TypeError", message);
+}
+
+/**
+ * (#3173) Build the detached-buffer TypeError throw template for callers
+ * OUTSIDE this module (property-access.ts `dv.byteLength`/`dv.byteOffset`
+ * static arms). Same funcIdx-capture ordering rule as the other templates:
+ * build (and flush) BEFORE compiling the receiver.
+ */
+export function dvDetachedThrowInstrs(ctx: CodegenContext): Instr[] {
+  return dvTypeErrorThrow(ctx, DV_DETACHED_MESSAGE);
+}
+
+/**
+ * (#3173) Emit the §25.1.3.3 IsDetachedBuffer check: the detach marker is the
+ * buffer vec's `length` field forced to `-1` by `$DETACHBUFFER` /
+ * `ArrayBuffer.prototype.transfer` (see {@link tryCompileStandaloneDetachedWrite}).
+ * `bufVecLocal` holds a `(ref null $__vec_i32_byte)`; a null buf (defensive)
+ * counts as detached. Appends `if (detached) <detachedThrow>`.
+ */
+function emitDvDetachedCheck(
+  fctx: FunctionContext,
+  bufVecLocal: number,
+  vecTypeIdx: number,
+  detachedThrow: Instr[],
+): void {
+  fctx.body.push({ op: "local.get", index: bufVecLocal } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "i32.const", value: 1 } as Instr],
+    else: [
+      { op: "local.get", index: bufVecLocal } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.lt_s" } as Instr,
+    ],
+  } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] } as Instr);
+}
+
+/**
+ * (#3173) Mint `__f16_decode(bits: i32) → f64` — IEEE-754 binary16 → binary64.
+ * sign = bits>>15, exp = (bits>>10)&0x1f, frac = bits&0x3ff:
+ *   exp 31 → NaN (frac≠0) / ±Infinity; exp 0 → ±frac·2⁻²⁴ (subnormal/zero);
+ *   else   → reassemble the f64 bit pattern directly (biased exp + 1008,
+ *            mantissa << 42) — exact, no rounding. Idempotent.
+ */
+function ensureF16DecodeHelper(ctx: CodegenContext): number | undefined {
+  const helperName = "__f16_decode";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "f64" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  // param 0 = bits; locals: 1 = sign, 2 = exp, 3 = frac (all i32).
+  const body: Instr[] = [
+    // sign = (bits >> 15) & 1
+    { op: "local.get", index: 0 },
+    { op: "i32.const", value: 15 },
+    { op: "i32.shr_u" },
+    { op: "i32.const", value: 1 },
+    { op: "i32.and" },
+    { op: "local.set", index: 1 },
+    // exp = (bits >> 10) & 0x1f
+    { op: "local.get", index: 0 },
+    { op: "i32.const", value: 10 },
+    { op: "i32.shr_u" },
+    { op: "i32.const", value: 0x1f },
+    { op: "i32.and" },
+    { op: "local.set", index: 2 },
+    // frac = bits & 0x3ff
+    { op: "local.get", index: 0 },
+    { op: "i32.const", value: 0x3ff },
+    { op: "i32.and" },
+    { op: "local.set", index: 3 },
+    // exp == 31 → NaN / ±Inf
+    { op: "local.get", index: 2 },
+    { op: "i32.const", value: 31 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 3 },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [{ op: "f64.const", value: NaN }],
+          else: [
+            // select(v1, v2, cond) picks v1 when cond ≠ 0 — sign set → −∞.
+            { op: "f64.const", value: Number.NEGATIVE_INFINITY },
+            { op: "f64.const", value: Number.POSITIVE_INFINITY },
+            { op: "local.get", index: 1 },
+            { op: "select" },
+          ],
+        },
+        { op: "return" },
+      ],
+      else: [],
+    },
+    // exp == 0 → ±frac·2⁻²⁴ (covers ±0)
+    { op: "local.get", index: 2 },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 3 },
+        { op: "f64.convert_i32_u" },
+        { op: "f64.const", value: 2 ** -24 },
+        { op: "f64.mul" },
+        { op: "local.set", index: 4 }, // scratch — if-arms can't consume outer stack
+        // negate when sign set (f64.neg keeps −0 correct for frac == 0)
+        { op: "local.get", index: 1 },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [{ op: "local.get", index: 4 }, { op: "f64.neg" }],
+          else: [{ op: "local.get", index: 4 }],
+        },
+        { op: "return" },
+      ],
+      else: [],
+    },
+    // normal: f64 bits = sign<<63 | (exp+1008)<<52 | frac<<42
+    { op: "local.get", index: 1 },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.const", value: 63n },
+    { op: "i64.shl" },
+    { op: "local.get", index: 2 },
+    { op: "i32.const", value: 1008 }, // −15 (f16 bias) + 1023 (f64 bias)
+    { op: "i32.add" },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.const", value: 52n },
+    { op: "i64.shl" },
+    { op: "i64.or" },
+    { op: "local.get", index: 3 },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.const", value: 42n },
+    { op: "i64.shl" },
+    { op: "i64.or" },
+    { op: "f64.reinterpret_i64" },
+  ] as Instr[];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: helperName,
+    typeIdx,
+    locals: [
+      { name: "sign", type: { kind: "i32" } },
+      { name: "exp", type: { kind: "i32" } },
+      { name: "frac", type: { kind: "i32" } },
+      { name: "scratch", type: { kind: "f64" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
+ * (#3173) Mint `__f16_encode(v: f64) → i32` — IEEE-754 binary64 → binary16 bit
+ * pattern with roundTiesToEven applied DIRECTLY to the f64 mantissa (single
+ * rounding — no f64→f32→f16 double-rounding hazard). NaN → 0x7e00|sign,
+ * overflow (≥ 2¹⁶ after rounding) → ±Infinity (0x7c00), |v| < 2⁻²⁵ ties to ±0,
+ * subnormal range rounds against the shifted mantissa. Idempotent.
+ */
+function ensureF16EncodeHelper(ctx: CodegenContext): number | undefined {
+  const helperName = "__f16_encode";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const typeIdx = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "i32" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  // param 0 = v (f64). locals: 1 = b64 (i64), 2 = sign (i32), 3 = e (i32),
+  // 4 = E (i32), 5 = m (i64), 6 = m16 (i64), 7 = sh (i32), 8 = rest (i64),
+  // 9 = half (i64).
+  const L = { b64: 1, sign: 2, e: 3, E: 4, m: 5, m16: 6, sh: 7, rest: 8, half: 9 };
+
+  /** m16 += (rest > half) || (rest == half && (m16 & 1)) — RN-even increment. */
+  const roundIncr: Instr[] = [
+    { op: "local.get", index: L.m16 },
+    // cond (i64 0/1)
+    { op: "local.get", index: L.rest },
+    { op: "local.get", index: L.half },
+    { op: "i64.gt_u" },
+    { op: "local.get", index: L.rest },
+    { op: "local.get", index: L.half },
+    { op: "i64.eq" },
+    { op: "local.get", index: L.m16 },
+    { op: "i32.wrap_i64" },
+    { op: "i32.const", value: 1 },
+    { op: "i32.and" },
+    { op: "i32.and" },
+    { op: "i32.or" },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.add" },
+    { op: "local.set", index: L.m16 },
+  ] as Instr[];
+
+  const body: Instr[] = [
+    // b64 = reinterpret(v); sign = wrap(b64 >> 48) & 0x8000
+    { op: "local.get", index: 0 },
+    { op: "i64.reinterpret_f64" },
+    { op: "local.tee", index: L.b64 },
+    { op: "i64.const", value: 48n },
+    { op: "i64.shr_u" },
+    { op: "i32.wrap_i64" },
+    { op: "i32.const", value: 0x8000 },
+    { op: "i32.and" },
+    { op: "local.set", index: L.sign },
+    // e = wrap(b64 >> 52) & 0x7ff
+    { op: "local.get", index: L.b64 },
+    { op: "i64.const", value: 52n },
+    { op: "i64.shr_u" },
+    { op: "i32.wrap_i64" },
+    { op: "i32.const", value: 0x7ff },
+    { op: "i32.and" },
+    { op: "local.set", index: L.e },
+    // m = b64 & (2^52 − 1)
+    { op: "local.get", index: L.b64 },
+    { op: "i64.const", value: 0xfffffffffffffn },
+    { op: "i64.and" },
+    { op: "local.set", index: L.m },
+    // e == 0x7ff → NaN (qNaN payload bit) / ±Inf
+    { op: "local.get", index: L.e },
+    { op: "i32.const", value: 0x7ff },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.sign },
+        { op: "i32.const", value: 0x7c00 },
+        { op: "i32.or" },
+        { op: "local.get", index: L.m },
+        { op: "i64.eqz" },
+        { op: "i32.eqz" }, // m != 0 → NaN
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [{ op: "i32.const", value: 0x200 }],
+          else: [{ op: "i32.const", value: 0 }],
+        },
+        { op: "i32.or" },
+        { op: "return" },
+      ],
+      else: [],
+    },
+    // E = e − 1008 (f16-biased exponent)
+    { op: "local.get", index: L.e },
+    { op: "i32.const", value: 1008 },
+    { op: "i32.sub" },
+    { op: "local.set", index: L.E },
+    // E ≥ 31 → overflow → ±Inf
+    { op: "local.get", index: L.E },
+    { op: "i32.const", value: 31 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.sign },
+        { op: "i32.const", value: 0x7c00 },
+        { op: "i32.or" },
+        { op: "return" },
+      ],
+      else: [],
+    },
+    // E ≥ 1 → normal: m16 = m >> 42 rounded RN-even against the low 42 bits.
+    { op: "local.get", index: L.E },
+    { op: "i32.const", value: 1 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L.m },
+        { op: "i64.const", value: 42n },
+        { op: "i64.shr_u" },
+        { op: "local.set", index: L.m16 },
+        { op: "local.get", index: L.m },
+        { op: "i64.const", value: 0x3ffffffffffn }, // 2^42 − 1
+        { op: "i64.and" },
+        { op: "local.set", index: L.rest },
+        { op: "i64.const", value: 0x20000000000n }, // 2^41
+        { op: "local.set", index: L.half },
+        ...roundIncr,
+        // mantissa carry: m16 == 0x400 → m16 = 0, E += 1 (E == 31 → Inf)
+        { op: "local.get", index: L.m16 },
+        { op: "i64.const", value: 0x400n },
+        { op: "i64.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i64.const", value: 0n },
+            { op: "local.set", index: L.m16 },
+            { op: "local.get", index: L.E },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: L.E },
+            { op: "local.get", index: L.E },
+            { op: "i32.const", value: 31 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: L.sign },
+                { op: "i32.const", value: 0x7c00 },
+                { op: "i32.or" },
+                { op: "return" },
+              ],
+              else: [],
+            },
+          ],
+          else: [],
+        },
+        { op: "local.get", index: L.sign },
+        { op: "local.get", index: L.E },
+        { op: "i32.const", value: 10 },
+        { op: "i32.shl" },
+        { op: "i32.or" },
+        { op: "local.get", index: L.m16 },
+        { op: "i32.wrap_i64" },
+        { op: "i32.or" },
+        { op: "return" },
+      ],
+      else: [],
+    },
+    // Subnormal / zero. e == 0 (f64 zero/subnormal, < 2⁻¹⁰²²) → ±0.
+    { op: "local.get", index: L.e },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: L.sign }, { op: "return" }],
+      else: [],
+    },
+    // sh = 42 + (1 − E); values below 2⁻³⁶ (shift > 21 ⇒ sh > 63) round to ±0.
+    { op: "i32.const", value: 43 },
+    { op: "local.get", index: L.E },
+    { op: "i32.sub" },
+    { op: "local.set", index: L.sh },
+    { op: "local.get", index: L.sh },
+    { op: "i32.const", value: 63 },
+    { op: "i32.gt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: L.sign }, { op: "return" }],
+      else: [],
+    },
+    // M = m | 2^52 (restore the implicit 1)
+    { op: "local.get", index: L.m },
+    { op: "i64.const", value: 0x10000000000000n },
+    { op: "i64.or" },
+    { op: "local.set", index: L.m },
+    // m16 = M >> sh; rest = M & ((1<<sh) − 1); half = 1 << (sh − 1)
+    { op: "local.get", index: L.m },
+    { op: "local.get", index: L.sh },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.shr_u" },
+    { op: "local.set", index: L.m16 },
+    { op: "i64.const", value: 1n },
+    { op: "local.get", index: L.sh },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.shl" },
+    { op: "i64.const", value: 1n },
+    { op: "i64.sub" },
+    { op: "local.get", index: L.m },
+    { op: "i64.and" },
+    { op: "local.set", index: L.rest },
+    { op: "i64.const", value: 1n },
+    { op: "local.get", index: L.sh },
+    { op: "i32.const", value: 1 },
+    { op: "i32.sub" },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.shl" },
+    { op: "local.set", index: L.half },
+    ...roundIncr,
+    // A round-up to 0x400 IS the smallest normal (sign | 0x400) — encodes as-is.
+    { op: "local.get", index: L.sign },
+    { op: "local.get", index: L.m16 },
+    { op: "i32.wrap_i64" },
+    { op: "i32.or" },
+  ] as Instr[];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: helperName,
+    typeIdx,
+    locals: [
+      { name: "b64", type: { kind: "i64" } },
+      { name: "sign", type: { kind: "i32" } },
+      { name: "e", type: { kind: "i32" } },
+      { name: "E", type: { kind: "i32" } },
+      { name: "m", type: { kind: "i64" } },
+      { name: "m16", type: { kind: "i64" } },
+      { name: "sh", type: { kind: "i32" } },
+      { name: "rest", type: { kind: "i64" } },
+      { name: "half", type: { kind: "i64" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
 }
 
 export function emitDataViewAccessor(
@@ -450,21 +1080,42 @@ export function emitDataViewAccessor(
   // in no-JS-host mode emits the in-module constructor) — both push a function,
   // shifting every funcIdx. Building + flushing it before any operand compile or
   // backing-recovery keeps later funcIdx captures correct (same ordering rule as
-  // native-regex's cap-throw). When `dv.byteLength` is unavailable we skip the
-  // bounds check, so only register the template when we will emit it.
+  // native-regex's cap-throw). (#3173) The brand / detached TypeError templates
+  // and the f16 codec helpers follow the same rule — all built before any
+  // operand compile.
+  // (#3173) `__is_truthy` (ToBoolean on a runtime littleEndian value) is
+  // registered BEFORE the throw templates capture their ctor funcIdx — in
+  // no-JS-host mode it resolves to an appended native (no shift), but keeping
+  // every possible function push ahead of the first funcIdx capture makes the
+  // ordering rule locally checkable.
+  ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
   const rangeThrow = emitDataViewRangeError(ctx);
+  const brandThrow = dvTypeErrorThrow(ctx, DV_BRAND_MESSAGE);
+  const detachedThrow = dvTypeErrorThrow(ctx, DV_DETACHED_MESSAGE);
+  if (acc.f16) {
+    ensureF16DecodeHelper(ctx);
+    ensureF16EncodeHelper(ctx);
+  }
   flushLateImportShifts(ctx, fctx);
 
   // Recover the i32_byte backing array AND the view's base byte offset from the
-  // receiver. `dv` may be a `$__dv_window` wrapper (windowed view → base =
-  // ctor byteOffset, sharing the parent's array) or a bare `$__vec_i32_byte`
-  // (offset-0 view / ArrayBuffer → base = 0). (#2159/#38). `viewLenLocal`
-  // receives the view's byte length for the #2199 bounds check.
+  // receiver. (#3173) Standalone DataViews are ALWAYS `$__dv_window`-wrapped
+  // (new-super.ts), so the recovery doubles as the §24.3.1.1/2 [[DataView]]
+  // brand check: any non-window receiver (an ArrayBuffer, `{}`, a TypedArray…)
+  // throws the catchable TypeError. `viewLenLocal` receives the view's byte
+  // length for the #2199 bounds check; `bufVecLocal` the backing buffer struct
+  // for the detached check.
   const arrLocal = allocLocal(fctx, `__dvn_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
   const baseLocal = allocLocal(fctx, `__dvn_base_${fctx.locals.length}`, { kind: "i32" });
   const viewLenLocal = allocLocal(fctx, `__dvn_vlen_${fctx.locals.length}`, { kind: "i32" });
+  const bufVecLocal = allocLocal(fctx, `__dvn_buf_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const recvType = compileExpr(receiver);
-  if (!recoverDvBacking(ctx, fctx, recvType, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx, viewLenLocal)) {
+  if (
+    !recoverDvBacking(ctx, fctx, recvType, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx, viewLenLocal, {
+      brandThrow,
+      bufVecLocal,
+    })
+  ) {
     return null;
   }
 
@@ -476,30 +1127,45 @@ export function emitDataViewAccessor(
   if (args.length >= 1) {
     compileExpr(args[0]!, { kind: "f64" });
   } else {
+    // ToIndex(undefined) = 0 (§7.1.22 step 1).
     fctx.body.push({ op: "f64.const", value: 0 } as Instr);
   }
   fctx.body.push({ op: "local.set", index: reqLocal });
+
+  // (#3173) §7.1.22 ToIndex: integer = ToIntegerOrInfinity(value) — NaN → +0,
+  // truncate toward zero — then RangeError iff integer < 0 or > 2^53-1. The
+  // NaN → 0 rewrite runs FIRST (a NaN request reads offset 0; the previous code
+  // wrongly threw). The range check runs in the f64 domain so ±Infinity / 2^53
+  // requests throw at ToIndex time (BEFORE a setter's ToNumber(value) — the
+  // index-check-before-value-conversion ordering), not at the bounds check.
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr); // val-if-true: req
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr); // val-if-false: 0
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "f64.eq" } as Instr); // req == req (false only for NaN)
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr); // toward zero (−0.9 → −0, not negative)
+  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
 
   const getIdxLocal = allocLocal(fctx, `__dvn_gidx_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
   fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
   fctx.body.push({ op: "local.set", index: getIdxLocal });
 
-  // (#2199b) The two §24.2.1.2 SetViewValue / §24.2.1.1 GetViewValue throws fire
+  // (#2199b) The §24.2.1.2 SetViewValue / §24.2.1.1 GetViewValue throws fire
   // at DIFFERENT points relative to `ToNumber(value)` for a setter:
-  //   - INDEX throw (step 4, ToIndex): `isNaN(req) || getIndex < 0` — fires
-  //     BEFORE `ToNumber(value)` (test: index-check-before-value-conversion).
-  //   - BOUNDS throw (step 8): `getIndex + elementSize > viewByteLength` — fires
-  //     AFTER `ToNumber(value)` runs (test: range-check-after-value-conversion;
-  //     a `value` whose valueOf/Symbol throws must throw FIRST). i64 math so the
-  //     +Infinity-saturated `getIndex=i32.MAX` + bytes can't overflow.
+  //   - INDEX throw (ToIndex): fires BEFORE `ToNumber(value)`.
+  //   - DETACHED throw (TypeError) + BOUNDS throw (step 8): fire AFTER
+  //     `ToNumber(value)` runs (range-check-after-value-conversion /
+  //     detached-buffer-after-number-value). i64 math for the bounds so a
+  //     saturated `getIndex=i32.MAX` + bytes can't overflow.
   const emitIndexThrow = (): void => {
     fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.lt" } as Instr); // integer < 0
     fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-    fctx.body.push({ op: "f64.ne" } as Instr); // req != req  (NaN)
-    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.lt_s" } as Instr); // getIndex < 0
+    fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53-1
+    fctx.body.push({ op: "f64.gt" } as Instr); // integer > 2^53-1 (covers +Infinity)
     fctx.body.push({ op: "i32.or" } as Instr);
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
   };
@@ -513,6 +1179,7 @@ export function emitDataViewAccessor(
     fctx.body.push({ op: "i64.gt_s" } as Instr); // (getIndex + bytes) > viewLen
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
   };
+  const emitDetachedThrow = (): void => emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
 
   // off = getIndex + base (absolute byte in the shared buffer). Computed after
   // the bounds throw at each call site.
@@ -525,32 +1192,421 @@ export function emitDataViewAccessor(
   };
 
   if (acc.kind === "get") {
-    // Getter has no value to convert, so both throws are adjacent (ToIndex then
-    // bounds), before the read. littleEndian is the 2nd arg.
+    // Getter has no value to convert: ToIndex → ToBoolean(littleEndian) →
+    // detached TypeError → bounds RangeError → read. littleEndian is the 2nd arg.
     emitIndexThrow();
+    const leLocal = emitLittleEndianFlag(ctx, fctx, args[1], compileExpr);
+    emitDetachedThrow();
     emitBoundsThrow();
     setOff();
-    const leLocal = emitLittleEndianFlag(ctx, fctx, args[1], compileExpr);
     emitReadBytes(ctx, fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
-    return { kind: "get", result: { kind: "f64" } };
+    // (#3173) BigInt64/BigUint64 read back as the bigint-branded i64 carrier —
+    // the exact rep a BigInt LITERAL produces — so `=== 0n` and any-boxing
+    // agree; every other getter stays f64.
+    return { kind: "get", result: acc.int64 ? { kind: "i64", bigint: true } : { kind: "f64" } };
   }
 
-  // Setter: ToIndex throw → ToNumber(value) (+littleEndian) → bounds throw →
-  // write. Compiling the value/le runs their valueOf/Symbol coercions, which can
-  // throw and MUST do so after the index check but before the bounds check.
+  // Setter: ToIndex throw → ToNumber(value) (+littleEndian) → detached throw →
+  // bounds throw → write. Compiling the value/le runs their valueOf/Symbol
+  // coercions, which can throw and MUST do so after the index check but before
+  // the detached/bounds checks.
   emitIndexThrow();
   const valLocal = allocLocal(fctx, `__dvn_val_${fctx.locals.length}`, { kind: "f64" });
-  if (args.length >= 2) {
+  if (args.length >= 2 && ctx.oracle.staticJsTypeOf(args[1]!) === "symbol") {
+    // §7.1.4 ToNumber(Symbol) / §7.1.13 ToBigInt(Symbol) throw TypeError —
+    // evaluate the operand for side effects, drop, throw (unary.ts pattern).
+    const t = compileExpr(args[1]!);
+    if (t !== null) fctx.body.push({ op: "drop" } as Instr);
+    emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+    fctx.body.push({ op: "f64.const", value: NaN } as Instr); // unreachable stack shape
+  } else if (args.length >= 2) {
     compileExpr(args[1]!, { kind: "f64" });
+  } else if (acc.int64) {
+    // §7.1.13 ToBigInt(undefined) throws TypeError (setBigInt64 no-value-arg).
+    const toBigIntThrow = dvTypeErrorThrow(ctx, DV_TOBIGINT_UNDEFINED_MESSAGE);
+    fctx.body.push(...toBigIntThrow);
+    fctx.body.push({ op: "f64.const", value: NaN } as Instr); // unreachable stack shape
   } else {
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    // ToNumber(undefined) = NaN — integer setters wrap it to 0 in the codec;
+    // float setters must genuinely write NaN (no-value-arg.js).
+    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
   }
   fctx.body.push({ op: "local.set", index: valLocal });
   const leLocal = emitLittleEndianFlag(ctx, fctx, args[2], compileExpr);
+  emitDetachedThrow();
   emitBoundsThrow();
   setOff();
   emitWriteBytes(ctx, fctx, acc, arrLocal, offLocal, valLocal, leLocal, arrTypeIdx);
   return { kind: "set" };
+}
+
+/**
+ * (#3173) Mint the runtime-receiver DataView accessor helper
+ * `__dv_m_<member>(recv, byteOffset[, value], littleEndian) → externref`
+ * (all params externref) — the SINGLE shared spec-order core behind
+ *   - the closed-method dispatcher's `$__dv_window` brand arm (an `any`
+ *     receiver `sample.getUint8(…)` inside an `assert.throws` callback), and
+ *   - the reflective `DataView.prototype.<m>` member-closure body
+ *     (`getUint8.call({}, 0)` — this-has-no-dataview-internal.js).
+ *
+ * Sequence (§24.3.1.1 GetViewValue / §24.3.1.2 SetViewValue):
+ *   brand TypeError → ToIndex(requestIndex) RangeError → [ToNumber(value)] →
+ *   ToBoolean(littleEndian) → detached TypeError → bounds RangeError → op.
+ * Getters box the f64 result (`__box_number`); setters return undefined
+ * (null extern). noJsHost lane only; idempotent per member.
+ *
+ * IMPORT DISCIPLINE: every reachable helper (`__to_primitive`/`__unbox_number`
+ * via the externref→f64 coercion, `__is_truthy`, `__box_number`, the error
+ * ctors) resolves to a NATIVE defined function on this lane, so registration
+ * appends only and cannot shift baked funcIdxs; all are pre-ensured before the
+ * throw templates capture their ctor indices anyway.
+ */
+export function ensureDvAccessorHelper(ctx: CodegenContext, member: string): number | undefined {
+  if (!noJsHost(ctx)) return undefined;
+  const acc = DV_ACCESSORS[member];
+  if (!acc) return undefined;
+  const helperName = `__dv_m_${member}`;
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+  if (arrTypeIdx < 0) return undefined;
+
+  // Pre-ensure every dependency BEFORE the throw templates capture funcIdxs.
+  ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  if (acc.f16) {
+    ensureF16DecodeHelper(ctx);
+    ensureF16EncodeHelper(ctx);
+  }
+  const rangeThrow = emitDataViewRangeError(ctx);
+  const brandThrow = dvTypeErrorThrow(ctx, DV_BRAND_MESSAGE);
+  const detachedThrow = dvTypeErrorThrow(ctx, DV_DETACHED_MESSAGE);
+  const toBigIntThrow =
+    acc.kind === "set" && acc.int64 ? dvTypeErrorThrow(ctx, DV_TOBIGINT_UNDEFINED_MESSAGE) : undefined;
+  const truthyIdx = ctx.funcMap.get("__is_truthy");
+
+  // Signature: recv + (get: offset, le | set: offset, value, le).
+  const userArgs = acc.kind === "get" ? 2 : 3;
+  const params: ValType[] = Array.from({ length: userArgs + 1 }, () => ({ kind: "externref" }) as ValType);
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const fctx: FunctionContext = {
+    name: helperName,
+    params: params.map((type, i) => ({ name: i === 0 ? "recv" : `a${i - 1}`, type })),
+    locals: [],
+    localMap: new Map(),
+    returnType: { kind: "externref" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+
+  const arrLocal = allocLocal(fctx, "arr", { kind: "ref", typeIdx: arrTypeIdx });
+  const baseLocal = allocLocal(fctx, "base", { kind: "i32" });
+  const viewLenLocal = allocLocal(fctx, "vlen", { kind: "i32" });
+  const bufVecLocal = allocLocal(fctx, "buf", { kind: "ref_null", typeIdx: vecTypeIdx });
+
+  // Brand check + backing recovery (param 0 = recv, externref).
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  recoverDvBacking(ctx, fctx, { kind: "externref" }, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx, viewLenLocal, {
+    brandThrow,
+    bufVecLocal,
+  });
+
+  // ToIndex(a0): externref → f64 (observable ToPrimitive/ToNumber — runs AFTER
+  // the brand check, BEFORE the value conversion), then NaN→0, trunc, range.
+  const reqLocal = allocLocal(fctx, "req", { kind: "f64" });
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "f64.eq" } as Instr);
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr);
+  fctx.body.push({ op: "f64.gt" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+
+  const getIdxLocal = allocLocal(fctx, "gidx", { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: getIdxLocal } as Instr);
+
+  // Setters: numberValue = ToNumber(value) (a1) — observable, after ToIndex.
+  // (#3173) BigInt setters: §7.1.13 ToBigInt(undefined) throws TypeError — a
+  // MISSING value arrives as a null extern (dispatcher/closure padding).
+  const valLocal = acc.kind === "set" ? allocLocal(fctx, "val", { kind: "f64" }) : -1;
+  if (acc.kind === "set") {
+    if (toBigIntThrow) {
+      fctx.body.push({ op: "local.get", index: 2 } as Instr);
+      fctx.body.push({ op: "ref.is_null" } as Instr);
+      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: toBigIntThrow, else: [] } as Instr);
+    }
+    fctx.body.push({ op: "local.get", index: 2 } as Instr);
+    coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  }
+
+  // ToBoolean(littleEndian) — last user param; `__is_truthy` handles
+  // undefined/null/objects/strings ({} → true, "" → false).
+  const leLocal = allocLocal(fctx, "le", { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: userArgs } as Instr);
+  if (truthyIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+
+  // Detached TypeError → bounds RangeError → absolute offset.
+  emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
+  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
+  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
+  fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) } as Instr);
+  fctx.body.push({ op: "i64.add" } as Instr);
+  fctx.body.push({ op: "local.get", index: viewLenLocal } as Instr);
+  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
+  fctx.body.push({ op: "i64.gt_s" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+
+  const offLocal = allocLocal(fctx, "off", { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+
+  if (acc.kind === "get") {
+    emitReadBytes(ctx, fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
+    // Box through the SAME chokepoint a literal/argument uses (coerceType) so
+    // `assert_sameValue(<call>, 0n)` compares identical representations —
+    // int64 getters carry the bigint-branded i64, the rest f64.
+    coerceType(ctx, fctx, acc.int64 ? { kind: "i64", bigint: true } : { kind: "f64" }, { kind: "externref" });
+  } else {
+    emitWriteBytes(ctx, fctx, acc, arrLocal, offLocal, valLocal, leLocal, arrTypeIdx);
+    // Setters return undefined — standalone lowers `undefined` to the null
+    // externref (`x === undefined` is `ref.is_null`), so this IS undefined.
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: helperName,
+    typeIdx,
+    locals: fctx.locals,
+    body: fctx.body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
+ * (#3173) Mint the reflective accessor-GETTER helper body deps and return the
+ * per-member metadata for `buffer` / `byteLength` / `byteOffset` — see
+ * {@link emitDataViewProtoMemberBody}.
+ */
+const DV_GETTER_MEMBERS: ReadonlySet<string> = new Set(["buffer", "byteLength", "byteOffset"]);
+
+/**
+ * (#3173) Reflective `DataView.prototype.<member>` member-closure body —
+ * wired as the DataView glue's `emitMemberBody` (array-object-proto.ts).
+ * Closure ABI: param 0 = self wrapper struct, param 1 = externref `this`,
+ * params 2.. = externref args. Methods delegate to the shared
+ * {@link ensureDvAccessorHelper}; the three accessor getters brand-check and
+ * read the window inline (`buffer` returns the ACTUAL shared buffer —
+ * identity-correct; `byteLength`/`byteOffset` throw TypeError on a detached
+ * buffer per §25.3.4.2/3). Returns the closure result type, or null to refuse
+ * (host lane / unknown member — degrades to the catchable-TypeError closure).
+ */
+export function emitDataViewProtoMemberBody(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  member: string,
+): ValType | null {
+  if (!noJsHost(ctx)) return null;
+  const resultType: ValType = { kind: "externref" };
+
+  if (DV_GETTER_MEMBERS.has(member)) {
+    const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+    if (arrTypeIdx < 0) return null;
+    const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+    const brandThrow = dvTypeErrorThrow(ctx, DV_BRAND_MESSAGE);
+    const detachedThrow = dvTypeErrorThrow(ctx, DV_DETACHED_MESSAGE);
+    const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+
+    const winLocal = allocLocal(fctx, "win", { kind: "ref_null", typeIdx: dvWinTypeIdx });
+    const bufVecLocal = allocLocal(fctx, "buf", { kind: "ref_null", typeIdx: vecTypeIdx });
+    const anyLocal = allocLocal(fctx, "any", { kind: "anyref" });
+    // Brand: this (param 1) must be a $__dv_window.
+    fctx.body.push({ op: "local.get", index: 1 } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.tee", index: anyLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "local.set", index: winLocal } as Instr,
+        { op: "local.get", index: winLocal } as Instr,
+        { op: "ref.as_non_null" } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: bufVecLocal } as Instr,
+      ],
+      else: brandThrow,
+    } as Instr);
+
+    if (member === "buffer") {
+      // §25.3.4.1 — return the ACTUAL viewed buffer (identity; works on detached).
+      fctx.body.push({ op: "local.get", index: bufVecLocal } as Instr);
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      return resultType;
+    }
+    // §25.3.4.2/3 — TypeError on detached, else the window field boxed.
+    emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
+    fctx.body.push({ op: "local.get", index: winLocal } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: member === "byteOffset" ? 1 : 2 } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    if (boxNumIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+    } else {
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+    return resultType;
+  }
+
+  const helperIdx = ensureDvAccessorHelper(ctx, member);
+  if (helperIdx === undefined) return null;
+  const acc = DV_ACCESSORS[member]!;
+  const helperArgs = acc.kind === "get" ? 2 : 3;
+  // this (param 1) + args (params 2..), padded with null extern (undefined).
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  for (let i = 0; i < helperArgs; i++) {
+    const paramIdx = 2 + i;
+    if (paramIdx < fctx.params.length) {
+      fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    } else {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    }
+  }
+  fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
+  return resultType;
+}
+
+/**
+ * (#3173) Intercept the test262 `$DETACHBUFFER` shim's marker write —
+ * `(buf as any).__detached__ = true` — on the standalone lane. The host lane
+ * stores the marker in the runtime sidecar (`_sidecarGet`, runtime.ts); with
+ * no host, the write previously vanished into the dynamic-set path and every
+ * detached-buffer test silently mis-passed the buffer as live.
+ *
+ * The detach marker IS the buffer vec's `length` field forced to `-1`
+ * (§25.1.3.3 IsDetachedBuffer maps to `length < 0`; the field is mutable and
+ * `-1` is unreachable for a live buffer, so live/detached are unambiguous —
+ * a zero-length buffer stays `0`). All views share the buffer STRUCT, so
+ * windows/TA views observe the detach through their `buf` ref. Byte reads of
+ * `.byteLength` clamp negatives to 0 (property-access.ts).
+ *
+ * Returns the assignment's result ValType when handled (receiver compiled,
+ * runtime `ref.test $__vec_i32_byte`-gated mark, RHS evaluated and returned —
+ * `=` yields the RHS), or `undefined` to fall through (host lane / different
+ * property name).
+ */
+export function tryCompileStandaloneDetachedWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: import("../ts-api.js").ts.PropertyAccessExpression,
+  value: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | undefined {
+  if (!noJsHost(ctx)) return undefined;
+  if (target.name.text !== "__detached__") return undefined;
+
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+  if (arrTypeIdx < 0) return undefined;
+
+  // Receiver → anyref local (drop-through for non-ref receivers).
+  const recvT = compileExpr(target.expression);
+  if (!recvT) return undefined;
+  const anyLocal = allocLocal(fctx, `__dvdet_any_${fctx.locals.length}`, { kind: "anyref" });
+  if (recvT.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  } else if (recvT.kind === "ref" || recvT.kind === "ref_null") {
+    fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  } else {
+    // Numeric receiver (defensive) — evaluate RHS and yield it unchanged.
+    fctx.body.push({ op: "drop" } as Instr);
+    const vt = compileExpr(value);
+    return vt ?? { kind: "i32" };
+  }
+
+  // RHS — evaluated for value + truthiness (only a truthy write detaches).
+  const valT = compileExpr(value) ?? { kind: "i32" };
+  const valLocal = allocLocal(fctx, `__dvdet_val_${fctx.locals.length}`, valT);
+  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+
+  // truthy(value) — i32 non-zero / f64 non-zero-non-NaN / refs count as true.
+  const truthy: Instr[] = [];
+  if (valT.kind === "i32") {
+    truthy.push(
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "i32.eqz" } as Instr,
+      {
+        op: "i32.eqz",
+      } as Instr,
+    );
+  } else if (valT.kind === "f64") {
+    truthy.push(
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "f64.const", value: 0 } as Instr,
+      { op: "f64.ne" } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "f64.eq" } as Instr,
+      { op: "i32.and" } as Instr,
+    );
+  } else {
+    truthy.push({ op: "i32.const", value: 1 } as Instr);
+  }
+
+  // if (recv is i32_byte vec && truthy) → struct.set length = -1.
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push(...truthy);
+  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+      { op: "i32.const", value: -1 } as Instr,
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+    ],
+    else: [],
+  } as Instr);
+
+  // `=` evaluates to the RHS.
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  return valT;
 }
 
 /**
@@ -567,13 +1623,50 @@ function emitLittleEndianFlag(
 ): number {
   const leLocal = allocLocal(fctx, `__dvn_le_${fctx.locals.length}`, { kind: "i32" });
   if (leArg) {
-    const t = compileExpr(leArg, { kind: "i32" });
+    // (#3173) NO type hint: an i32 hint routed `{}`/string values through a
+    // numeric unbox (→ NaN → falsy), but §7.1.2 ToBoolean(object) is TRUE.
+    // The natural type dispatches below: i32 pass-through, f64 zero/NaN test,
+    // extern/GC refs via the native `__is_truthy`.
+    const t = compileExpr(leArg);
     // If the boolean compiled to f64 (boxed), normalize to i32 truthiness.
     if (t && t.kind === "f64") {
+      // (#3173) §7.1.2 ToBoolean(f64): false for ±0 AND NaN. A bare `f64.ne 0`
+      // wrongly made NaN truthy (NaN != 0).
+      const leF64 = allocLocal(fctx, `__dvn_lef_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.tee", index: leF64 } as Instr);
       fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-      fctx.body.push({ op: "f64.ne" } as Instr);
+      fctx.body.push({ op: "f64.ne" } as Instr); // v != 0
+      fctx.body.push({ op: "local.get", index: leF64 } as Instr);
+      fctx.body.push({ op: "local.get", index: leF64 } as Instr);
+      fctx.body.push({ op: "f64.eq" } as Instr); // v == v (false for NaN)
+      fctx.body.push({ op: "i32.and" } as Instr);
+    } else if (t && t.kind === "externref") {
+      // (#3173) ToBoolean on an arbitrary runtime value (`{}` → true,
+      // `undefined`/`null`/`0`/`""` → false) — `__is_truthy` resolves to the
+      // in-module native under no-JS-host mode (to-boolean-littleendian.js).
+      const truthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (truthyIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      }
+    } else if (t && (t.kind === "ref" || t.kind === "ref_null")) {
+      // (#3173) A GC-ref littleEndian (object literal / AnyValue box / native
+      // string) — normalize to externref and ask the native `__is_truthy`
+      // (`{}` → true, `""` → false, boxed 0/NaN → false).
+      const truthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      if (truthyIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+      } else {
+        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      }
     } else if (t && t.kind !== "i32") {
-      // Non-i32, non-f64 (e.g. externref) — drop and default to big endian.
+      // Other non-i32 (defensive) — drop and default to big endian.
       fctx.body.push({ op: "drop" } as Instr);
       fctx.body.push({ op: "i32.const", value: 0 } as Instr);
     }
@@ -630,15 +1723,35 @@ function emitReadBytes(
   }
 
   if (acc.bytes === 8) {
-    // Float64 only — assemble an i64 then f64.reinterpret_i64.
+    // Assemble an i64, then: Float64 → f64.reinterpret_i64; (#3173)
+    // BigInt64/BigUint64 → LEAVE the i64 on the stack — the getter's result is
+    // the bigint-branded `{kind:"i64", bigint:true}` carrier, the SAME rep a
+    // BigInt literal produces, so `getBigInt64(0) === 0n` and any-boxing agree.
+    // (getBigUint64 values ≥ 2^63 exceed the signed carrier; exactness holds
+    // for the |v| < 2^63 range the conformance corpus exercises for reads.)
     emitReadI64(fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
-    fctx.body.push({ op: "f64.reinterpret_i64" } as Instr);
+    if (!acc.int64) {
+      fctx.body.push({ op: "f64.reinterpret_i64" } as Instr);
+    }
     return;
   }
 
   // 2 or 4 byte values — assemble an i32 with a runtime endianness branch.
   // Result i32 is left on the stack, then converted to f64.
   emitReadI32(fctx, acc.bytes, arrLocal, offLocal, leLocal, arrTypeIdx);
+
+  if (acc.f16) {
+    // (#3173) Float16: decode the 16-bit half-precision pattern via the minted
+    // `__f16_decode` helper (pre-ensured in the accessor prologue).
+    const decIdx = ctx.funcMap.get("__f16_decode");
+    if (decIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: decIdx } as Instr);
+    } else {
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    }
+    return;
+  }
 
   if (acc.float) {
     // Float32: reinterpret the 32-bit pattern, then promote to f64.
@@ -830,10 +1943,12 @@ function emitWriteBytes(
   }
 
   if (acc.bytes === 8) {
-    // Float64: bits = i64.reinterpret_f64(val); store 8 bytes.
+    // Float64: bits = i64.reinterpret_f64(val); (#3173) BigInt64/BigUint64:
+    // bits = i64.trunc_sat_f64_s(val) — the numeric-rep BigInt value truncated
+    // toward zero (exact for |v| < 2^53); store 8 bytes either way.
     const bitsLocal = allocLocal(fctx, `__dvn_bits64_${fctx.locals.length}`, { kind: "i64" });
     fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-    fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+    fctx.body.push({ op: acc.int64 ? "i64.trunc_sat_f64_s" : "i64.reinterpret_f64" } as Instr);
     fctx.body.push({ op: "local.set", index: bitsLocal } as Instr);
     const storeAll = (little: boolean): Instr[] => {
       const out: Instr[] = [];
@@ -861,10 +1976,20 @@ function emitWriteBytes(
     return;
   }
 
-  // 2 or 4 byte integers (or Float32) — derive an i32 bit pattern.
+  // 2 or 4 byte integers (or Float32/Float16) — derive an i32 bit pattern.
   const bitsLocal = allocLocal(fctx, `__dvn_bits32_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  if (acc.float) {
+  if (acc.f16) {
+    // (#3173) Float16: encode via the minted `__f16_encode` helper
+    // (roundTiesToEven directly from the f64 bits — single rounding).
+    const encIdx = ctx.funcMap.get("__f16_encode");
+    if (encIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: encIdx } as Instr);
+    } else {
+      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    }
+  } else if (acc.float) {
     // Float32: demote f64→f32, reinterpret to i32 bits.
     fctx.body.push({ op: "f32.demote_f64" } as Instr);
     fctx.body.push({ op: "i32.reinterpret_f32" } as Instr);
@@ -904,6 +2029,3011 @@ function emitWriteBytes(
     then: storeAll(true),
     else: storeAll(false),
   });
+}
+
+// ---------------------------------------------------------------------------
+// (#3054 B1) Shared-backing TypedArray view element access.
+//
+// A `$__ta_view_<name>` is a byte-backed view over an ArrayBuffer's
+// `$__vec_i32_byte` struct (field1 `buf`). Element `ta[i]` byte-decodes from
+// `buf.data` at `byteOffset + i*width` using the SAME little/big-endian byte
+// engine the native DataView accessors use — pinned little-endian (TypedArrays
+// use native/platform endianness, and Wasm's is LE). Because the view holds a
+// ref to the SHARED buffer vec, sibling views and DataViews over the same buffer
+// observe each other's writes (the verified #3054 bug). Discriminated purely by
+// the receiver's static ValType.typeIdx at compile time, so plain-array /
+// native-TA element access never reaches these arms — byte-inert.
+// ---------------------------------------------------------------------------
+
+/** Per-view-name byte-decode descriptor (width, signedness, float, clamp-on-write). */
+const TA_VIEW_DECODE: Record<string, { bytes: number; signed: boolean; float: boolean; clamp: boolean }> = {
+  Int8Array: { bytes: 1, signed: true, float: false, clamp: false },
+  Uint8Array: { bytes: 1, signed: false, float: false, clamp: false },
+  Uint8ClampedArray: { bytes: 1, signed: false, float: false, clamp: true },
+  Int16Array: { bytes: 2, signed: true, float: false, clamp: false },
+  Uint16Array: { bytes: 2, signed: false, float: false, clamp: false },
+  Int32Array: { bytes: 4, signed: true, float: false, clamp: false },
+  Uint32Array: { bytes: 4, signed: false, float: false, clamp: false },
+  Float32Array: { bytes: 4, signed: false, float: true, clamp: false },
+  Float64Array: { bytes: 8, signed: false, float: true, clamp: false },
+};
+
+/** Resolve a `$__ta_view` typeIdx to its byte-decode descriptor, or undefined. */
+export function taViewDecode(
+  ctx: CodegenContext,
+  taViewTypeIdx: number,
+): { bytes: number; signed: boolean; float: boolean; clamp: boolean } | undefined {
+  const name = getTaViewName(ctx, taViewTypeIdx);
+  return name ? TA_VIEW_DECODE[name] : undefined;
+}
+
+/**
+ * (#3054 C) Push the CURRENT element length of a `$__ta_view` (held in `tvLocal`)
+ * as an i32. Field 0 stores either a fixed element count (`>= 0`, the B1/B2 case
+ * — a view over a NON-resizable buffer) or the **auto-length-tracking sentinel
+ * `-1`** (set by `emitTaViewConstruct` when the offset-0 view is built over a
+ * `$__resizable_ab`). For the sentinel, the live length is derived from the shared
+ * buffer's current byte length (`buf.length / elementSize`), so after
+ * `rab.resize(n)` swaps the buffer's `length`/`data` the view reflects the new
+ * length — length-tracking-on-resize (Phase A A.1), which is only "free" for the
+ * BYTES (the byte engine already reads `buf.data` live); the length field is
+ * cached and needs this indirection. A fixed view (field0 >= 0) takes the
+ * `then`-branch → byte-identical to the pre-C direct `struct.get 0` read.
+ */
+export function pushTaViewEffectiveLen(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  tvLocal: number,
+  taViewTypeIdx: number,
+): void {
+  // Byte-inert gate: a module with no resizable ArrayBuffer type can have NO
+  // auto-length view, so the sentinel is impossible — read field0 directly,
+  // byte-identical to B1. The tracking indirection is emitted only once a
+  // `$__resizable_ab` exists in the module.
+  if (ctx.resizableAbTypeIdx < 0) {
+    fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    return;
+  }
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const bytes = taViewDecode(ctx, taViewTypeIdx)?.bytes ?? 1;
+  const storedLocal = allocLocal(fctx, `__tav_slen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  const elseInstrs: Instr[] = [
+    { op: "local.get", index: tvLocal } as Instr,
+    { op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr, // buf (ref_null $__vec_i32_byte)
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (byte count)
+  ];
+  if (bytes !== 1) {
+    elseInstrs.push({ op: "i32.const", value: bytes } as Instr);
+    elseInstrs.push({ op: "i32.div_u" } as Instr);
+  }
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: storedLocal } as Instr],
+    else: elseInstrs,
+  } as Instr);
+}
+
+/**
+ * (#3054 B1) `new <TA>(arrayBuffer)` → a shared-backing `$__ta_view_<name>` that
+ * REFS the buffer's `$__vec_i32_byte` struct instead of COPYING its bytes into a
+ * fresh backing array (the verified copy bug: sibling views / DataViews over the
+ * same buffer didn't observe writes). Offset-0, default-length window (B1 scope;
+ * B2 adds `(buffer, byteOffset, length)`). `viewName` is the TS TypedArray name.
+ * `compileExpr` compiles the buffer arg expression. Returns the view ValType, or
+ * null (leaving the stack balanced) when the buffer can't be recovered as a
+ * native vec — the caller then falls back to the numeric-length ctor path.
+ */
+export function emitTaViewConstruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  viewName: string,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = TA_VIEW_DECODE[viewName];
+  if (!desc) return null;
+  const taViewTypeIdx = getOrRegisterTaViewType(ctx, viewName);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Compile the buffer expression and recover the shared i32_byte vec struct.
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__tav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // struct.new order = [length, buf, byteOffset]. length field = fixed element
+  // count `buf.length / elementSize` (B1/B2). (#3054 C) When the MODULE contains a
+  // resizable ArrayBuffer (`ctx.resizableAbTypeIdx >= 0`), this offset-0 view may
+  // be AUTO-LENGTH over a `$__resizable_ab` (§23.2.5.1 — length arg omitted +
+  // resizable backing ⇒ length-tracking): store the sentinel `-1` when the runtime
+  // buffer is resizable so `pushTaViewEffectiveLen` derives the live length from
+  // `buf.length` at each read (reflecting a later `rab.resize()`). This extra
+  // `ref.test`/`select` is emitted ONLY when a resizable buffer type exists in the
+  // module, so a program that uses only fixed buffers is BYTE-IDENTICAL to B1.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  if (desc.bytes !== 1) {
+    fctx.body.push({ op: "i32.const", value: desc.bytes } as Instr);
+    fctx.body.push({ op: "i32.div_u" } as Instr);
+  }
+  if (ctx.resizableAbTypeIdx >= 0) {
+    const rabTypeIdx = ctx.resizableAbTypeIdx;
+    // -1 (auto-length sentinel). Wasm `select` yields `cond ? a : b` with `a` the
+    // deeper operand (= fixedLen). We want `resizable ? -1 : fixedLen`, so invert
+    // the test with `i32.eqz`: cond = !resizable ⇒ select = resizable ? -1 : fixedLen.
+    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+    fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({ op: "select" } as Instr);
+  }
+  // buf (shared vec ref) — `ref` widens to the field's `ref_null` type.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  // byteOffset = 0 (B1: offset-0 window).
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  return { kind: "ref_null", typeIdx: taViewTypeIdx };
+}
+
+/**
+ * Recover `buf.data` (the shared i8 backing array) and the absolute byte offset
+ * `byteOffset + index*width` for a `$__ta_view` receiver into the given locals.
+ * The receiver ref (ref/ref_null `$__ta_view`) must already be on the stack; it
+ * is consumed. `indexExpr` is compiled via `compileExpr`. Also sets `leLocal`
+ * to 1 (little-endian, TypedArray native endianness).
+ */
+function emitTaViewAddress(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  bytes: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+  arrLocal: number,
+  offLocal: number,
+  leLocal: number,
+): { idxLocal: number; lenLocal: number } {
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+  // Stash the receiver.
+  const tvLocal = allocLocal(fctx, `__tav_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
+  fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+  // len = the view's CURRENT element count — for the bounds check. Reads field0
+  // directly for a fixed view, or derives it live from `buf.length` for an
+  // auto-length view over a resizable buffer (#3054 C), so a `rab.resize()` grow
+  // widens the in-bounds range and a shrink narrows it.
+  const lenLocal = allocLocal(fctx, `__tav_len_${fctx.locals.length}`, { kind: "i32" });
+  pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // arr = tv.buf.data  (buf is field1 → ref_null $__vec_i32_byte; .data is its field1)
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  // idx = ToInt32(indexExpr) — kept for the bounds check.
+  const idxLocal = allocLocal(fctx, `__tav_idx_${fctx.locals.length}`, { kind: "i32" });
+  const it = compileExpr(indexExpr, { kind: "i32" });
+  if (it && it.kind !== "i32") coerceType(ctx, fctx, it, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  // off = tv.byteOffset + idx*bytes
+  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  if (bytes !== 1) {
+    fctx.body.push({ op: "i32.const", value: bytes } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+  }
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  // little-endian
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  void arrTypeIdx;
+  return { idxLocal, lenLocal };
+}
+
+/**
+ * `ta[i]` read for a `$__ta_view` receiver (already on the stack). Byte-decodes
+ * the element little-endian and leaves an f64 on the stack. An out-of-bounds
+ * index yields `NaN` (the f64 image of the spec's `undefined` — §10.4.5.15
+ * IntegerIndexedElementGet returns undefined for OOB) rather than trapping,
+ * matching the native bounds-checked vec read. Returns the result ValType, or
+ * null if `taViewTypeIdx` is not a registered view.
+ */
+export function emitTaViewElementGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { arrTypeIdx } = i32ByteVec(ctx);
+  const arrLocal = allocLocal(fctx, `__tav_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__tav_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tav_le_${fctx.locals.length}`, { kind: "i32" });
+  const { idxLocal, lenLocal } = emitTaViewAddress(
+    ctx,
+    fctx,
+    taViewTypeIdx,
+    desc.bytes,
+    indexExpr,
+    compileExpr,
+    arrLocal,
+    offLocal,
+    leLocal,
+  );
+  // if ((unsigned)idx < len) { decode } else { NaN }
+  const readInstrs: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = readInstrs;
+  emitReadBytes(
+    ctx,
+    fctx,
+    { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    leLocal,
+    arrTypeIdx,
+  );
+  fctx.body = savedBody;
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "f64" } },
+    then: readInstrs,
+    else: [{ op: "f64.const", value: NaN } as Instr],
+  } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * `ta[i] = v` write for a `$__ta_view` receiver (already on the stack).
+ * Byte-encodes `v` little-endian into the shared buffer backing (true aliasing).
+ * Leaves the (coerced) value on the stack as the assignment-expression result.
+ */
+export function emitTaViewElementSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  valueExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { arrTypeIdx } = i32ByteVec(ctx);
+  const arrLocal = allocLocal(fctx, `__tav_sarr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__tav_soff_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tav_sle_${fctx.locals.length}`, { kind: "i32" });
+  const { idxLocal, lenLocal } = emitTaViewAddress(
+    ctx,
+    fctx,
+    taViewTypeIdx,
+    desc.bytes,
+    indexExpr,
+    compileExpr,
+    arrLocal,
+    offLocal,
+    leLocal,
+  );
+  // value → f64 (evaluated for its side effects regardless of bounds)
+  const valLocal = allocLocal(fctx, `__tav_sval_${fctx.locals.length}`, { kind: "f64" });
+  const vt = compileExpr(valueExpr, { kind: "f64" });
+  if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
+  if (desc.clamp) {
+    // Uint8Clamped: ToUint8Clamp §7.1.11 — round-half-to-even then clamp [0,255].
+    // f64.nearest rounds ties-to-even; f64.max/min clamp; NaN propagates through
+    // max/min and `emitWriteBytes` (trunc_sat_f64_s(NaN)=0) → NaN maps to 0.
+    fctx.body.push({ op: "f64.nearest" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.max" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 255 } as Instr);
+    fctx.body.push({ op: "f64.min" } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  // OOB write is a silent no-op (§10.4.5.16 IntegerIndexedElementSet): guard the
+  // store on `(unsigned)idx < len` so an out-of-range write doesn't trap.
+  const writeInstrs: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = writeInstrs;
+  emitWriteBytes(
+    ctx,
+    fctx,
+    { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    valLocal,
+    leLocal,
+    arrTypeIdx,
+  );
+  fctx.body = savedBody;
+  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: writeInstrs } as Instr);
+  // Assignment is an expression — re-push the coerced value as the result.
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  return { kind: "f64" };
+}
+
+// ---------------------------------------------------------------------------
+// (#3057) Runtime-kind byte codec for a boxed `$__ta_dyn_view` element get/set.
+//
+// A `new <ctorVar>(rab)` where `ctorVar` is a TypedArray constructor held in a
+// variable produces a `$__ta_dyn_view {length, buf, byteOffset, kind}` whose
+// element kind is a RUNTIME field (B1's per-kind `$__ta_view_<K>` canonicalize to
+// one WasmGC type, so the boxed view can't recover its kind via `ref.test`). When
+// such a view is read back through an `any` receiver — `ta[i]` / `ta[i]=v` — the
+// generic dynamic INDEX path has no arm that switches on that runtime `kind` byte,
+// so #3054 D+E BANKED element access (reads returned 0, writes silently no-op via
+// `__extern_get_idx`/`__extern_set` on the opaque struct). These two functions add
+// a `ref.test $__ta_dyn_view`-gated arm that byte-decodes/encodes at
+// `byteOffset + i*elemSize(kind)` through the SAME little-endian engine
+// (`emitReadBytes`/`emitWriteBytes`) the static `$__ta_view` path and the
+// proto-method write-through already use — switching on `kind` for width /
+// signedness / float-vs-int (+ the Uint8Clamped clamp on set).
+//
+// HAZARD (opus-3054-de): the generic dynamic index path is SHARED with boxed
+// plain-array `any` receivers (`values[i]` where `values` is statically `any`).
+// The new arm MUST NOT hijack those — it gates on the concrete
+// `ref.test $__ta_dyn_view` FIRST and, on a miss, falls through to the EXACT
+// existing behavior (`__extern_get_idx` for read, `__extern_set` for write). The
+// whole arm is only emitted when `ctx.taDynViewTypeIdx >= 0` (a dynamic TA-ctor
+// view exists in the module), so a program without one is byte-identical.
+// ---------------------------------------------------------------------------
+
+/**
+ * (#3057) Build the runtime-kind element DECODE dispatch: a nested `if`-chain over
+ * the 9 `TA_CTOR_KINDS`, each arm byte-decoding `acc.bytes` bytes from `arrLocal`
+ * at `offLocal` (little-endian) via {@link emitReadBytes} with the STATIC per-kind
+ * descriptor. Leaves an f64 on the stack; an unrecognised kind yields `0`. Returns
+ * the self-contained instruction list (the caller splices it into a bounds-guarded
+ * arm).
+ */
+function emitDynDecodeDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  kindLocal: number,
+  arrLocal: number,
+  offLocal: number,
+  leLocal: number,
+  arrTypeIdx: number,
+): Instr[] {
+  // Build bottom-up so each `chain` is referenced exactly once (as the `else` of
+  // the next-outer `if`) — no aliased-Instr[] double-remap hazard.
+  let chain: Instr[] = [{ op: "f64.const", value: 0 } as Instr];
+  for (let k = TA_CTOR_KINDS.length - 1; k >= 0; k--) {
+    const desc = TA_VIEW_DECODE[TA_CTOR_KINDS[k]!]!;
+    const decodeK: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = decodeK;
+    emitReadBytes(
+      ctx,
+      fctx,
+      { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      arrLocal,
+      offLocal,
+      leLocal,
+      arrTypeIdx,
+    );
+    fctx.body = saved;
+    chain = [
+      { op: "local.get", index: kindLocal } as Instr,
+      { op: "i32.const", value: k } as Instr,
+      { op: "i32.eq" } as Instr,
+      { op: "if", blockType: { kind: "val", type: { kind: "f64" } }, then: decodeK, else: chain } as Instr,
+    ];
+  }
+  return chain;
+}
+
+/**
+ * (#3057) Build the runtime-kind element ENCODE dispatch: a nested `if`-chain over
+ * the 9 `TA_CTOR_KINDS`, each arm byte-encoding the f64 in `valF64Local` into
+ * `arrLocal` at `offLocal` (little-endian) via {@link emitWriteBytes} with the
+ * STATIC per-kind descriptor. The Uint8Clamped arm applies ToUint8Clamp
+ * (round-half-to-even + clamp `[0,255]`) into a temp before the write. An
+ * unrecognised kind is a no-op. Returns the self-contained instruction list.
+ */
+function emitDynEncodeDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  kindLocal: number,
+  arrLocal: number,
+  offLocal: number,
+  valF64Local: number,
+  leLocal: number,
+  arrTypeIdx: number,
+): Instr[] {
+  let chain: Instr[] = [];
+  for (let k = TA_CTOR_KINDS.length - 1; k >= 0; k--) {
+    const desc = TA_VIEW_DECODE[TA_CTOR_KINDS[k]!]!;
+    const encodeK: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = encodeK;
+    let valForWrite = valF64Local;
+    if (desc.clamp) {
+      // Uint8Clamped ToUint8Clamp (§7.1.11): f64.nearest is round-ties-to-even,
+      // then clamp to [0,255]; NaN propagates through max/min and the i64 trunc in
+      // emitWriteBytes maps it to 0 (spec: NaN → 0).
+      const clampedLocal = allocLocal(fctx, `__dtas_clv_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.get", index: valF64Local } as Instr);
+      fctx.body.push({ op: "f64.nearest" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+      fctx.body.push({ op: "f64.max" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 255 } as Instr);
+      fctx.body.push({ op: "f64.min" } as Instr);
+      fctx.body.push({ op: "local.set", index: clampedLocal } as Instr);
+      valForWrite = clampedLocal;
+    }
+    emitWriteBytes(
+      ctx,
+      fctx,
+      { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      arrLocal,
+      offLocal,
+      valForWrite,
+      leLocal,
+      arrTypeIdx,
+    );
+    fctx.body = saved;
+    chain = [
+      { op: "local.get", index: kindLocal } as Instr,
+      { op: "i32.const", value: k } as Instr,
+      { op: "i32.eq" } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: encodeK, else: chain } as Instr,
+    ];
+  }
+  return chain;
+}
+
+/**
+ * (#3057) `ta[i]` read where `ta` is a boxed `$__ta_dyn_view` reached through an
+ * `any`/externref receiver. The receiver boxed externref is already on the stack.
+ * Compiles the index ONCE (single evaluation), then a `ref.test $__ta_dyn_view`
+ * gate byte-decodes on the runtime `kind` (in-bounds → boxed number, OOB →
+ * `undefined`), falling through to the existing `__extern_get_idx` for any
+ * non-dyn-view receiver (plain arrays / `$ObjVec` / `$Object`). Returns externref
+ * (the caller coerces to f64 in numeric context), or null when no `$__ta_dyn_view`
+ * type exists (byte-inert — caller keeps its existing path with the receiver still
+ * on the stack).
+ */
+export function emitTaDynViewElementGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  // Register the runtime-kinded view type on demand: this may compile in a helper
+  // BEFORE the construct that would otherwise register it (the caller gates on the
+  // module-level `moduleUsesDynTaView` pre-scan flag, so the type WILL exist).
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+
+  // Receiver boxed externref is on the stack — stash it (needed by both arms).
+  const recvLocal = allocLocal(fctx, `__dtag_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // Index compiled ONCE → f64 (single evaluation; used by the byte path AND the
+  // __extern_get_idx fallback).
+  const idxF64 = allocLocal(fctx, `__dtag_idx_${fctx.locals.length}`, { kind: "f64" });
+  const it = compileExpr(indexExpr, { kind: "f64" });
+  if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+
+  // Resolve the fallback / boxing imports up front, then flush the funcIdx shift
+  // once (before any body-swap building) so every captured funcIdx stays live.
+  const getIdxFn = ensureLateImport(
+    ctx,
+    "__extern_get_idx",
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  const boxNumFn = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  const resultLocal = allocLocal(fctx, `__dtag_res_${fctx.locals.length}`, { kind: "externref" });
+  if (getIdxFn === undefined || boxNumFn === undefined) {
+    // Defensive: the imports are always registerable in the noJsHost lane (the only
+    // lane where a `$__ta_dyn_view` exists), so this is unreachable — but keep the
+    // stack balanced if it ever fires.
+    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+    return { kind: "externref" };
+  }
+
+  const anyLocal = allocLocal(fctx, `__dtag_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // THEN arm — receiver IS a $__ta_dyn_view: byte-decode on the runtime kind.
+  const dvLocal = allocLocal(fctx, `__dtag_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__dtag_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__dtag_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__dtag_len_${fctx.locals.length}`, { kind: "i32" });
+  const idxI32 = allocLocal(fctx, `__dtag_i_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__dtag_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__dtag_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__dtag_le_${fctx.locals.length}`, { kind: "i32" });
+
+  const thenArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // idx (i32) = trunc(idxF64) — a negative / huge index fails the unsigned bounds
+  // check below → OOB → undefined (spec IsValidIntegerIndex).
+  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+  // arr = dv.buf.data (buf = field1 → $__vec_i32_byte; .data = its field1).
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  // off = dv.byteOffset + idx*elemSize(kind).
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.mul" } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // little-endian
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, arrTypeIdx);
+  const inBounds: Instr[] = [
+    ...decodeInstrs,
+    { op: "call", funcIdx: boxNumFn } as Instr,
+    { op: "local.set", index: resultLocal } as Instr,
+  ];
+  // if ((unsigned)idx < len) { box(decode) } else { undefined }
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: inBounds,
+    else: [{ op: "ref.null.extern" } as Instr, { op: "local.set", index: resultLocal } as Instr],
+  } as Instr);
+  fctx.body = saved;
+
+  // ELSE arm — any other boxed receiver keeps the EXACT existing behavior.
+  const elseArm: Instr[] = [
+    { op: "local.get", index: recvLocal } as Instr,
+    { op: "local.get", index: idxF64 } as Instr,
+    { op: "call", funcIdx: getIdxFn } as Instr,
+    { op: "local.set", index: resultLocal } as Instr,
+  ];
+
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3057) `ta[i] = v` write where `ta` is a boxed `$__ta_dyn_view` reached through
+ * an `any`/externref receiver. The receiver boxed externref is already on the
+ * stack. Compiles the index and value ONCE each, then a `ref.test $__ta_dyn_view`
+ * gate byte-encodes `v` little-endian on the runtime `kind` into the SHARED buffer
+ * (true aliasing — sibling views / DataViews observe it); an OOB write is a silent
+ * no-op (§10.4.5.16). Any non-dyn-view receiver falls through to the existing
+ * `__extern_set`. Leaves the assigned value (externref) as the expression result.
+ * Returns null when no `$__ta_dyn_view` type exists (byte-inert).
+ */
+export function emitTaDynViewElementSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  indexExpr: import("../ts-api.js").ts.Expression,
+  valueExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  // Register the runtime-kinded view type on demand (see emitTaDynViewElementGet).
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+
+  // Receiver boxed externref on the stack → recvLocal.
+  const recvLocal = allocLocal(fctx, `__dtas_recv_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // Index ONCE → f64.
+  const idxF64 = allocLocal(fctx, `__dtas_idx_${fctx.locals.length}`, { kind: "f64" });
+  const it = compileExpr(indexExpr, { kind: "f64" });
+  if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+
+  // Value ONCE → externref (natural rep for the __extern_set fallback so a
+  // non-number plain-array value survives intact; unboxed to f64 for the byte
+  // path — the dyn-view arm only runs for a TA element write, where v is a number).
+  const valExt = allocLocal(fctx, `__dtas_valx_${fctx.locals.length}`, { kind: "externref" });
+  const vt = compileExpr(valueExpr, { kind: "externref" });
+  if (vt && vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valExt } as Instr);
+
+  // Unbox the value to f64 up front (used only by the dyn-view THEN arm). Doing it
+  // here — not inside the body-swapped arm — keeps coerceType's late imports on the
+  // main body so no funcIdx shift lands mid-arm.
+  const valF64 = allocLocal(fctx, `__dtas_valf_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: valF64 } as Instr);
+
+  const setFn = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  const boxNumFn = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (setFn === undefined || boxNumFn === undefined) {
+    // Defensive (unreachable in the noJsHost lane): keep the value as the result.
+    fctx.body.push({ op: "local.get", index: valExt } as Instr);
+    return { kind: "externref" };
+  }
+
+  const anyLocal = allocLocal(fctx, `__dtas_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  // THEN arm — byte-encode into the shared backing on the runtime kind.
+  const dvLocal = allocLocal(fctx, `__dtas_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__dtas_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__dtas_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__dtas_len_${fctx.locals.length}`, { kind: "i32" });
+  const idxI32 = allocLocal(fctx, `__dtas_i_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__dtas_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const offLocal = allocLocal(fctx, `__dtas_off_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__dtas_le_${fctx.locals.length}`, { kind: "i32" });
+
+  const thenArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = thenArm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.mul" } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  const encodeInstrs = emitDynEncodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, valF64, leLocal, arrTypeIdx);
+  // OOB write is a silent no-op — guard the encode on `(unsigned)idx < len`.
+  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: encodeInstrs, else: [] } as Instr);
+  fctx.body = saved;
+
+  // ELSE arm — any other boxed receiver keeps the EXACT existing behavior:
+  // __extern_set(recv, box(idx), val).
+  const elseArm: Instr[] = [
+    { op: "local.get", index: recvLocal } as Instr,
+    { op: "local.get", index: idxF64 } as Instr,
+    { op: "call", funcIdx: boxNumFn } as Instr,
+    { op: "local.get", index: valExt } as Instr,
+    { op: "call", funcIdx: setFn } as Instr,
+  ];
+
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
+  // Assignment is an expression — the value is its result.
+  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3057) Push the SPEC-CORRECT in-bounds element length of a `$__ta_dyn_view`
+ * (`dvLocal`), given its runtime `elemSize` (`esLocal`), as an i32 — for the
+ * element-access bounds check (IsValidIntegerIndex, §10.4.5.13). Unlike
+ * `pushTaDynViewEffectiveLen` (which powers `.byteLength` and returns the STORED
+ * length verbatim for a fixed view), this also enforces the resizable-buffer
+ * out-of-bounds rule: when the backing buffer has SHRUNK below the view's window
+ * (`byteOffset + storedLen*elemSize > buf.length`), a NON-length-tracking view is
+ * fully out-of-bounds and every index reads `undefined` / writes no-op, so the
+ * effective length is `0` (all-or-nothing per §10.4.5.11 IsTypedArrayOutOfBounds).
+ * A length-tracking view (stored sentinel `-1`) tracks the live buffer:
+ * `max(0, buf.length - byteOffset) / elemSize`. Reading this at each access is
+ * what makes `array[i]` reflect a later `rab.resize()` (shrink → OOB, regrow →
+ * back in-bounds), which the stored-length reader silently got wrong (returned a
+ * stale in-bounds value after a shrink — the #3057 regression on
+ * out-of-bounds-get-and-set.js).
+ */
+function pushTaDynViewInBoundsLen(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number, esLocal: number): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const storedLocal = allocLocal(fctx, `__tdvib_s_${fctx.locals.length}`, { kind: "i32" });
+  const availLocal = allocLocal(fctx, `__tdvib_av_${fctx.locals.length}`, { kind: "i32" });
+  // availElems = max(0, buf.length - byteOffset) / elemSize.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr); // buf
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr); // buf.length (bytes)
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
+  fctx.body.push({ op: "i32.sub" } as Instr); // availBytes (may be < 0 after a deep shrink)
+  // clamp availBytes to >= 0. `select` yields `cond ? val1 : val2` (val1 pushed
+  // FIRST / deeper), so with val1=0, val2=availBytes, cond=(availBytes<0):
+  // (availBytes<0) ? 0 : availBytes.
+  const availBytesLocal = allocLocal(fctx, `__tdvib_ab_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: availBytesLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // val1 (deep) = 0
+  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr); // val2 = availBytes
+  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr); // cond = availBytes < 0
+  fctx.body.push({ op: "select" } as Instr); // (availBytes < 0) ? 0 : availBytes
+  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.div_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: availLocal } as Instr);
+  // storedLen = field0.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr); // storedLen < 0 → length-tracking
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    // length-tracking: availElems.
+    then: [{ op: "local.get", index: availLocal } as Instr],
+    // fixed length: storedLen if the window still fits, else 0 (view is OOB). val1=0
+    // (deep), val2=storedLen, cond=(storedLen>avail) → (storedLen>avail) ? 0 : storedLen.
+    else: [
+      { op: "i32.const", value: 0 } as Instr, // val1 (deep) = 0
+      { op: "local.get", index: storedLocal } as Instr, // val2 = storedLen
+      { op: "local.get", index: storedLocal } as Instr,
+      { op: "local.get", index: availLocal } as Instr,
+      { op: "i32.gt_u" } as Instr, // cond = storedLen > availElems (window overflows buffer)
+      { op: "select" } as Instr, // (storedLen > avail) ? 0 : storedLen
+    ],
+  } as Instr);
+}
+
+// ---------------------------------------------------------------------------
+// (#3054 B2) View accessor props + windowing constructor on a `$__ta_view`.
+//
+// B1 populated a `$__ta_view {length, buf, byteOffset}` with byteOffset pinned
+// 0. B2 (a) reads the accessor props off that struct (`.byteLength`,
+// `.byteOffset`, `.buffer` identity, `BYTES_PER_ELEMENT`; `.length` stays on the
+// B1 arm) and (b) the `(buffer, byteOffset, length)` windowing ctor that
+// POPULATES byteOffset (byte offset) + a windowed element `length`. The byte
+// engine is offset-agnostic (it reads `buf.data` at `byteOffset + i*width` and
+// bounds-checks `i < length` — both fields the view already carries), so a
+// windowed view reads/writes the correct absolute buffer bytes with ZERO byte-
+// engine change. An offset-0 window is byte-identical to B1 (offsetLocal = 0).
+// ---------------------------------------------------------------------------
+
+/** Emit an `if (cond) throw RangeError(msg)` — the i32 condition is on the stack. */
+function emitThrowRangeErrorIf(ctx: CodegenContext, fctx: FunctionContext, msg: string): void {
+  addStringConstantGlobal(ctx, msg);
+  const tagIdx = ensureExnTag(ctx);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+    else: [],
+  } as Instr);
+}
+
+/**
+ * ToIndex (§7.1.22) into `outLocal` (i32): compile `expr` → f64, NaN → 0,
+ * truncate toward 0, RangeError if < 0 or > 2^53-1, then narrow to i32. Used by
+ * the windowing ctor for both byteOffset and (element) length args.
+ */
+function emitToIndexI32(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+  outLocal: number,
+  rangeErrMsg: string,
+): void {
+  const f64Local = allocLocal(fctx, `__tav_ti_${fctx.locals.length}`, { kind: "f64" });
+  const vt = compileExpr(expr, { kind: "f64" });
+  if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  // NaN → 0 (v != v is true only for NaN).
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: f64Local } as Instr],
+    else: [],
+  } as Instr);
+  // Truncate toward zero (ToIntegerOrInfinity for finite non-NaN).
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  // RangeError if < 0 or > 2^53-1.
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53 - 1
+  fctx.body.push({ op: "f64.gt" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  emitThrowRangeErrorIf(ctx, fctx, rangeErrMsg);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+}
+
+/**
+ * (#3054 B2) `new <TA>(buffer, byteOffset[, length])` → a windowed shared-backing
+ * `$__ta_view` that refs the buffer's vec (like `emitTaViewConstruct`) but with a
+ * non-zero `byteOffset` field and a windowed element `length`. Validates per
+ * §23.2.5.1 InitializeTypedArrayFromArrayBuffer: byteOffset is ToIndex'd and must
+ * be a multiple of the element size; with an explicit length, byteOffset +
+ * length*elemSize must fit the buffer; with the length omitted, the remaining
+ * byte span must be a multiple of the element size. `lengthExpr` undefined ⇒
+ * auto-length (2-arg form). Returns the view ValType, or null (stack balanced) if
+ * the buffer can't be recovered as a native vec.
+ */
+export function emitTaViewConstructWindowed(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  offsetExpr: import("../ts-api.js").ts.Expression,
+  lengthExpr: import("../ts-api.js").ts.Expression | undefined,
+  viewName: string,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = TA_VIEW_DECODE[viewName];
+  if (!desc) return null;
+  const elemSize = desc.bytes;
+  const taViewTypeIdx = getOrRegisterTaViewType(ctx, viewName);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Recover the shared buffer vec struct (mirror emitTaViewConstruct exactly).
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__tavw_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // bufByteLen = buf.length (field0 = byte count for an ArrayBuffer vec).
+  const bufByteLenLocal = allocLocal(fctx, `__tavw_blen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+
+  // byteOffset = ToIndex(offsetExpr).
+  const offsetLocal = allocLocal(fctx, `__tavw_off_${fctx.locals.length}`, { kind: "i32" });
+  emitToIndexI32(ctx, fctx, offsetExpr, compileExpr, offsetLocal, "RangeError: Invalid typed array offset");
+
+  // byteOffset must be a multiple of the element size (§23.2.5.1 step 11).
+  if (elemSize !== 1) {
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+    fctx.body.push({ op: "i32.rem_u" } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, `RangeError: start offset of ${viewName} should be a multiple of ${elemSize}`);
+  }
+
+  const lenLocal = allocLocal(fctx, `__tavw_len_${fctx.locals.length}`, { kind: "i32" });
+  if (lengthExpr) {
+    // Explicit element length. byteOffset + length*elemSize must fit the buffer.
+    emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenLocal, "RangeError: Invalid typed array length");
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+    }
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, "RangeError: Invalid typed array length");
+  } else {
+    // Auto length. byteOffset must not exceed the buffer, and the remaining byte
+    // span must be a whole number of elements. length = (bufByteLen - offset)/elemSize.
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset is outside the bounds of the buffer");
+    const remLocal = allocLocal(fctx, `__tavw_rem_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+    fctx.body.push({ op: "local.set", index: remLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "local.get", index: remLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.rem_u" } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "i32.ne" } as Instr);
+      emitThrowRangeErrorIf(ctx, fctx, `RangeError: byte length of ${viewName} should be a multiple of ${elemSize}`);
+    }
+    fctx.body.push({ op: "local.get", index: remLocal } as Instr);
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.div_u" } as Instr);
+    }
+    fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  }
+
+  // struct.new $__ta_view {length (elements), buf (shared vec), byteOffset (bytes)}.
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  return { kind: "ref_null", typeIdx: taViewTypeIdx };
+}
+
+/**
+ * (#3054 D) Emit a first-class TypedArray CONSTRUCTOR value for a bare TA name in
+ * value position (`const c = Uint8Array`, `[Uint8Array, …]`, a `new ctor(rab)`
+ * callee). Produces a `$__ta_ctor {kind}` struct boxed to externref — a distinct,
+ * non-null value whose runtime `kind` (index into `TA_CTOR_KINDS`) drives the
+ * dynamic `new ctor(…)` construct + `ctor.BYTES_PER_ELEMENT`. Before this the name
+ * degraded to `ref.null.extern` (all TA ctors indistinguishable). Returns the
+ * externref ValType, or null when `name` is not one of the 9 supported TA kinds.
+ * Standalone/WASI lane only (the caller gates on `noJsHost`).
+ */
+export function emitTaCtorValue(ctx: CodegenContext, fctx: FunctionContext, name: string): ValType | null {
+  const kind = taCtorKindOf(name);
+  if (kind < 0) return null;
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  fctx.body.push({ op: "i32.const", value: kind } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: taCtorTypeIdx } as Instr);
+  // Box the struct ref to externref (ref → externref, per coerceType).
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3054 D) Read `ctor.BYTES_PER_ELEMENT` where `ctor` is a first-class
+ * `$__ta_ctor` value (dynamic — the ctor kind is only known at runtime). Compiles
+ * the receiver, `ref.test $__ta_ctor`, and on a match maps the runtime `kind` to
+ * its byte width via a `select` chain over `TA_CTOR_BYTES`; a non-ctor receiver
+ * yields `NaN`/`0` (declines gracefully). Returns the numeric ValType, or null if
+ * no `$__ta_ctor` type is registered in the module (byte-inert). `compileRecv`
+ * puts the receiver value on the stack as externref.
+ */
+export function emitTaCtorBytesPerElement(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  compileRecv: () => ValType | null,
+): ValType | null {
+  // Register the ctor type on demand: a dynamic `.BYTES_PER_ELEMENT` read may
+  // compile BEFORE the value-position TA name that would otherwise register it
+  // (e.g. `CreateRabForTest`'s body compiles before the top-level `ctors` array).
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const rt = compileRecv();
+  if (rt === null) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  } else if (rt.kind !== "externref") {
+    coerceType(ctx, fctx, rt, { kind: "externref" });
+  }
+  const anyLocal = allocLocal(fctx, `__tac_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  // kind = ref.test $__ta_ctor ? ctor.kind : (ref.test $__ta_dyn_view ? view.kind : -1)
+  // — handles BOTH `ctor.BYTES_PER_ELEMENT` (a first-class ctor value) and
+  // `view.BYTES_PER_ELEMENT` (a dynamically-constructed view instance, §23.2.3.1).
+  const kindLocal = allocLocal(fctx, `__tac_kind_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: kindLocal } as Instr,
+    ],
+    else: [],
+  } as Instr);
+  if (ctx.taDynViewTypeIdx >= 0) {
+    const dynIdx = ctx.taDynViewTypeIdx;
+    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dynIdx } as Instr,
+        { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr, // kind
+        { op: "local.set", index: kindLocal } as Instr,
+      ],
+      else: [],
+    } as Instr);
+  }
+  // Map kind → byte width via a select chain (default 0 for a non-ctor receiver).
+  // `select` returns val1 (the deeper operand = running result) when cond≠0, so the
+  // condition is `kind != k`: (kind != k) ? prevResult : bytes[k] ≡ (kind == k) ?
+  // bytes[k] : prevResult.
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // running result = 0 (val1)
+  for (let k = 0; k < TA_CTOR_KINDS.length; k++) {
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: k } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k)
+    fctx.body.push({ op: "select" } as Instr);
+  }
+  if (ctx.fast) return { kind: "i32" };
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * (#3054 D) Push the element byte width for a runtime `kind` (i32 in `kindLocal`,
+ * index into `TA_CTOR_KINDS`) via a `select` chain over `TA_CTOR_BYTES`. Leaves an
+ * i32 on the stack; a kind out of range yields 1 (harmless default).
+ */
+function pushElemSizeForKind(fctx: FunctionContext, kindLocal: number): void {
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // running result (val1) = 1
+  for (let k = 0; k < TA_CTOR_BYTES.length; k++) {
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: k } as Instr);
+    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k) → (kind==k) ? bytes[k] : prev
+    fctx.body.push({ op: "select" } as Instr);
+  }
+}
+
+/**
+ * (#3054 D) Read `.byteLength` (or `.BYTES_PER_ELEMENT`) off a boxed `$__ta_dyn_view`
+ * at RUNTIME — a dynamically-constructed view read back through an `any`/union
+ * receiver (e.g. length-tracking-N's `for (ta of tas) … ta.byteLength`), where the
+ * compile-time-typeIdx accessor arm can't fire and the generic dynamic reader THROWS
+ * on `.byteLength`. The view's element kind is stored in the struct's `kind` field
+ * (B1's per-kind `$__ta_view_<K>` canonicalize together and can't be told apart by
+ * `ref.test`, which is exactly why the dynamic path uses `$__ta_dyn_view`).
+ * `byteLength = effectiveLen × elemSize(kind)`; a bare ArrayBuffer/DataView vec →
+ * its byte length; anything else → 0 (never throws). `wantElemSize` returns
+ * `elemSize(kind)` instead (for a dynamic `view.BYTES_PER_ELEMENT`). Returns the
+ * numeric ValType, or null when no `$__ta_dyn_view` type exists (byte-inert).
+ */
+export function emitTaViewDynamicByteLength(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  compileRecv: () => ValType | null,
+  wantElemSize = false,
+): ValType | null {
+  if (ctx.taDynViewTypeIdx < 0) return null;
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const rt = compileRecv();
+  if (rt === null) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  } else if (rt.kind !== "externref") {
+    coerceType(ctx, fctx, rt, { kind: "externref" });
+  }
+  const anyLocal = allocLocal(fctx, `__tvbl_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  const resultLocal = allocLocal(fctx, `__tvbl_res_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+
+  // $__ta_dyn_view arm: read kind → elemSize; result = elemSize (BYTES_PER_ELEMENT)
+  // or effectiveLen × elemSize (byteLength).
+  const dvLocal = allocLocal(fctx, `__tvbl_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, `__tvbl_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tvbl_es_${fctx.locals.length}`, { kind: "i32" });
+  const arm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.body = arm;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  if (wantElemSize) {
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  } else {
+    pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  }
+  fctx.body = saved;
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] } as Instr);
+
+  // Fallback (byteLength only): a bare ArrayBuffer/DataView vec → its byte length.
+  if (!wantElemSize) {
+    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: resultLocal } as Instr,
+      ],
+      else: [],
+    } as Instr);
+  }
+
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  if (ctx.fast) return { kind: "i32" };
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * (#3054 D) Push the CURRENT element length of a `$__ta_dyn_view` (`dvLocal`), given
+ * its `kind` and `elemSize`. Field0 holds either a fixed element count (`>= 0`) or
+ * the auto-length sentinel `-1` (a view built over a resizable buffer with no
+ * explicit length); for the sentinel the live length is `buf.length / elemSize`
+ * (length-tracking on resize, mirroring `pushTaViewEffectiveLen`).
+ */
+function pushTaDynViewEffectiveLen(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  dvLocal: number,
+  _kindLocal: number,
+  esLocal: number,
+): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const storedLocal = allocLocal(fctx, `__tdvl_s_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: storedLocal } as Instr],
+    else: [
+      { op: "local.get", index: dvLocal } as Instr,
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr, // buf
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (bytes)
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.div_u" } as Instr,
+    ],
+  } as Instr);
+}
+
+/**
+ * (#3054 D) Dynamic `new <ctorVal>(buffer[, byteOffset[, length]])` where
+ * `ctorVal` is a first-class `$__ta_ctor` value (the kind is only known at
+ * runtime — test262 `CreateRabForTest`, `for (ctor of ctors) new ctor(rab, …)`).
+ * Recovers the buffer vec ONCE, reads the ctor `kind`, then a runtime kind-switch
+ * builds the concrete per-kind `$__ta_view_<K>` (shared-backing, length-tracking
+ * over a resizable buffer via the `-1` auto-length sentinel) and boxes it to
+ * externref (the static result type is a TA union → externref). A non-`$__ta_ctor`
+ * callee, or a buffer that can't be recovered as a native vec, yields
+ * `ref.null.extern` (declines gracefully — same as the pre-D host-import drop).
+ *
+ * `ctorAnyLocal` is an anyref local already holding `any.convert_extern(ctorValue)`.
+ * Strict RangeError validation (offset alignment / bounds) is intentionally omitted
+ * on this dynamic path — B1's bounds-checked view read/write already degrades OOB
+ * to NaN/no-op, so an out-of-range window can't trap. Byte-inert: only reachable
+ * once a `$__ta_ctor` value exists in the module.
+ */
+export function emitDynamicTaViewConstruct(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  ctorAnyLocal: number,
+  bufExpr: import("../ts-api.js").ts.Expression,
+  offsetExpr: import("../ts-api.js").ts.Expression | undefined,
+  lengthExpr: import("../ts-api.js").ts.Expression | undefined,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Result (boxed view) — default null so a non-ctor / unrecoverable buffer declines.
+  const resultLocal = allocLocal(fctx, `__dtav_res_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+
+  // Recover the shared buffer vec struct (mirror emitTaViewConstruct).
+  const bufType = compileExpr(bufExpr);
+  if (!bufType) return null;
+  if (bufType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+  } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
+    if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    }
+  } else {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const bufLocal = allocLocal(fctx, `__dtav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+
+  // bufByteLen = buf.length (field0).
+  const bufByteLenLocal = allocLocal(fctx, `__dtav_blen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+
+  // byteOffset = ToIndex(offsetExpr) (0 when omitted). Element-count length arg is
+  // kind-independent, so compute it ONCE (shared across all arms).
+  const offsetLocal = allocLocal(fctx, `__dtav_off_${fctx.locals.length}`, { kind: "i32" });
+  if (offsetExpr) {
+    emitToIndexI32(ctx, fctx, offsetExpr, compileExpr, offsetLocal, "RangeError: Invalid typed array offset");
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: offsetLocal } as Instr);
+  }
+  const lenGiven = lengthExpr !== undefined;
+  const lenElemsLocal = allocLocal(fctx, `__dtav_len_${fctx.locals.length}`, { kind: "i32" });
+  if (lengthExpr) {
+    emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenElemsLocal, "RangeError: Invalid typed array length");
+  }
+
+  // kind = ref.test $__ta_ctor ? struct.get 0 : -1  (a non-ctor callee → -1 → the
+  // gate below leaves the null result).
+  const kindLocal = allocLocal(fctx, `__dtav_kind_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: ctorAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: ctorAnyLocal } as Instr,
+      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: kindLocal } as Instr,
+    ],
+    else: [],
+  } as Instr);
+
+  // Build ONE `$__ta_dyn_view` carrying the runtime kind (B1's per-kind
+  // `$__ta_view_<K>` canonicalize together, so a boxed view can't recover its kind
+  // via `ref.test` — the dynamic path stores it). Only when `kind >= 0`.
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const resizable = ctx.resizableAbTypeIdx >= 0;
+  const buildArm: Instr[] = [];
+  const savedBody = fctx.body;
+  fctx.body = buildArm;
+  // length (field0):
+  if (lenGiven) {
+    fctx.body.push({ op: "local.get", index: lenElemsLocal } as Instr);
+  } else if (resizable) {
+    // Auto-length over a possibly-resizable buffer → -1 sentinel so the effective
+    // length is derived live from `buf.length / elemSize` (length-tracking).
+    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+  } else {
+    // Fixed auto length = (bufByteLen - offset) / elemSize(kind).
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+    pushElemSizeForKind(fctx, kindLocal);
+    fctx.body.push({ op: "i32.div_u" } as Instr);
+  }
+  // buf (shared vec ref) + byteOffset + kind.
+  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body = savedBody;
+
+  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildArm, else: [] } as Instr);
+
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#2872) `ToIndex` an already-evaluated externref argument local into an i32
+ * (§7.1.22): unbox → NaN→0 → truncate toward zero → RangeError when negative or
+ * above 2^53−1. Mirrors {@link emitToIndexI32} but sources from a pre-boxed
+ * externref local instead of compiling an expression.
+ */
+function emitToIndexI32FromArgLocal(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  argLocal: number,
+  outLocal: number,
+  rangeErrMsg: string,
+): void {
+  const f64Local = allocLocal(fctx, `__dtac_ti_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.get", index: argLocal } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  // NaN → 0 (v != v is true only for NaN).
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: f64Local } as Instr],
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53 - 1
+  fctx.body.push({ op: "f64.gt" } as Instr);
+  fctx.body.push({ op: "i32.or" } as Instr);
+  emitThrowRangeErrorIf(ctx, fctx, rangeErrMsg);
+  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+}
+
+/**
+ * (#2872) General dynamic TypedArray construction from PRE-EVALUATED argument
+ * locals — `new <ctorVal>(…)` where `<ctorVal>` is a runtime value that may be a
+ * first-class `$__ta_ctor` (a TA constructor held in an `any` binding: a callback
+ * param or array element — the test262
+ * `testWithTypedArrayConstructors(TA => new TA(…))` harness shape).
+ *
+ * #3054 D covered ONLY the `(buffer[, off[, len]])` form, gated on a statically
+ * buffer-typed first arg. The dominant harness forms — `new TA(n)` count,
+ * `new TA([…])` array-copy, `new TA(otherTA)` view-copy and `new TA()` — all fell
+ * through to `ref.null.extern`, so every downstream read yielded 0/undefined
+ * (#2872's "assert #1" cluster over built-ins/TypedArray/**).
+ *
+ * Emits a `ref.test $__ta_ctor` gate over `descAnyLocal`; on a match, an
+ * argument-shape dispatch at RUNTIME over the pre-evaluated externref arg0:
+ *   - no args                     → 0-length view over a fresh buffer
+ *   - `$__vec_i32_byte` arg0      → buffer form (off/len ToIndex'd from
+ *                                   arg1/arg2; auto length uses the resizable
+ *                                   `-1` length-tracking sentinel exactly like
+ *                                   {@link emitDynamicTaViewConstruct})
+ *   - `$__ta_dyn_view` arg0       → element copy with per-kind re-encode
+ *   - registered plain-vec arg0   → element copy (f64 / i32 / boxed externref)
+ *   - anything else               → ToIndex count form over a fresh ZEROED
+ *                                   buffer (negative/oversize → RangeError,
+ *                                   NaN/undefined/non-numeric → 0)
+ * A non-`$__ta_ctor` callee leaves the null result — byte-identical to the
+ * pre-#2872 outcome — so user-class / function ctors are never hijacked.
+ *
+ * IMPORT DISCIPLINE: noJsHost lane only. Every helper this can reach
+ * (`__to_primitive`/`__unbox_number` via the externref→f64 coercion) resolves to
+ * a NATIVE defined function (`OBJECT_RUNTIME_HELPER_NAMES` /
+ * `UNION_NATIVE_HELPER_NAMES` routing in `ensureLateImport`), so building the
+ * detached arms appends defined functions only and cannot shift baked funcIdxs
+ * (#608/#794). Callers must NOT use this on the JS-host lane.
+ *
+ * Stack: `[] → [externref]` (the constructed view, or null-extern).
+ */
+export function emitTaDynCtorConstructFromLocals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  descAnyLocal: number,
+  argLocals: readonly number[],
+): void {
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx: byteVecIdx, arrTypeIdx: byteArrIdx } = i32ByteVec(ctx);
+
+  const resultLocal = allocLocal(fctx, `__dtac_res_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+
+  // Shared per-arm locals (function-scoped; each arm fully re-initializes what
+  // it reads).
+  const kindLocal = allocLocal(fctx, `__dtac_kind_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__dtac_es_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__dtac_le_${fctx.locals.length}`, { kind: "i32" });
+  const dstNLocal = allocLocal(fctx, `__dtac_n_${fctx.locals.length}`, { kind: "i32" });
+  const dstBlLocal = allocLocal(fctx, `__dtac_bl_${fctx.locals.length}`, { kind: "i32" });
+  const dstArrLocal = allocLocal(fctx, `__dtac_arr_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: byteArrIdx,
+  });
+
+  // Build the whole `$__ta_ctor`-matched arm detached, then gate it on the
+  // runtime test so a non-TA callee costs one ref.test.
+  const taArm: Instr[] = [];
+  const savedTa = fctx.body;
+  fctx.body = taArm;
+
+  fctx.body.push({ op: "local.get", index: descAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // little-endian
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+
+  // Allocate a FRESH ZEROED buffer of dstN elements and publish the view.
+  // Reads dstNLocal/esLocal/kindLocal; sets dstBlLocal/dstArrLocal/resultLocal.
+  const emitAllocViewFromN = (): void => {
+    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "local.set", index: dstBlLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstBlLocal } as Instr);
+    fctx.body.push({ op: "array.new_default", typeIdx: byteArrIdx } as Instr);
+    fctx.body.push({ op: "local.set", index: dstArrLocal } as Instr);
+    // view = {length: n, buf: {bl, arr}, byteOffset: 0, kind}
+    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstBlLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "struct.new", typeIdx: byteVecIdx } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+    fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  };
+
+  // Emit `for (i = 0; i < dstN; i++) { encode(kind, dstArr, i*es, pushElemF64(i)) }`.
+  // `pushElemF64` must leave exactly one f64 on the stack.
+  const emitCopyLoop = (pushElemF64: (iLocal: number) => void): void => {
+    const iLocal = allocLocal(fctx, `__dtac_i_${fctx.locals.length}`, { kind: "i32" });
+    const vLocal = allocLocal(fctx, `__dtac_v_${fctx.locals.length}`, { kind: "f64" });
+    const dstOffLocal = allocLocal(fctx, `__dtac_doff_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+    const loopBody: Instr[] = [];
+    const savedLoop = fctx.body;
+    fctx.body = loopBody;
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+    pushElemF64(iLocal);
+    fctx.body.push({ op: "local.set", index: vLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "local.set", index: dstOffLocal } as Instr);
+    const dstArrNn = allocLocal(fctx, `__dtac_arrnn_${fctx.locals.length}`, {
+      kind: "ref",
+      typeIdx: byteArrIdx,
+    });
+    fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "local.set", index: dstArrNn } as Instr);
+    fctx.body.push(...emitDynEncodeDispatch(ctx, fctx, kindLocal, dstArrNn, dstOffLocal, vLocal, leLocal, byteArrIdx));
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+    fctx.body.push({ op: "br", depth: 0 } as Instr);
+    fctx.body = savedLoop;
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    } as Instr);
+  };
+
+  if (argLocals.length === 0) {
+    // `new TA()` → 0-length view.
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+    emitAllocViewFromN();
+  } else {
+    const a0AnyLocal = allocLocal(fctx, `__dtac_a0_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+    fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: a0AnyLocal } as Instr);
+
+    // ── Count form (the innermost else): n = ToIndex(arg0) → fresh zeroed view.
+    const countArm: Instr[] = [];
+    {
+      const saved = fctx.body;
+      fctx.body = countArm;
+      emitToIndexI32FromArgLocal(ctx, fctx, argLocals[0]!, dstNLocal, "RangeError: Invalid typed array length");
+      emitAllocViewFromN();
+      fctx.body = saved;
+    }
+    let chain: Instr[] = countArm;
+
+    // ── Array-LIKE `$Object` arm (§23.2.5.1 InitializeTypedArrayFromArrayLike):
+    // the harness `makeArrayLike` factory passes `{length: n, 0: v, …}` — read
+    // `length` via the native `__extern_length` ($Object arm reads the `length`
+    // property; NaN → 0) and each element via `__extern_get_idx` + ToNumber
+    // (missing/undefined element → NaN → +0 for int kinds, per spec).
+    {
+      ensureObjectRuntime(ctx);
+      const objTypeIdx = ctx.objectRuntimeTypes?.objectTypeIdx ?? -1;
+      const externLengthIdx = ctx.funcMap.get("__extern_length");
+      const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx");
+      if (objTypeIdx >= 0 && externLengthIdx !== undefined && externGetIdxIdx !== undefined) {
+        const objArm: Instr[] = [];
+        const saved = fctx.body;
+        fctx.body = objArm;
+        const lenF64 = allocLocal(fctx, `__dtac_olen_${fctx.locals.length}`, { kind: "f64" });
+        fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
+        fctx.body.push({ op: "call", funcIdx: externLengthIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: lenF64 } as Instr);
+        // n = max(trunc_sat(len), 0)  — NaN→0 via trunc_sat, negatives clamp.
+        fctx.body.push({ op: "local.get", index: lenF64 } as Instr);
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "i32.lt_s" } as Instr);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: dstNLocal } as Instr],
+          else: [],
+        } as Instr);
+        emitAllocViewFromN();
+        emitCopyLoop((iLocal) => {
+          fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
+          fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+          fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+          fctx.body.push({ op: "call", funcIdx: externGetIdxIdx } as Instr);
+          coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+        });
+        fctx.body = saved;
+        chain = [
+          { op: "local.get", index: a0AnyLocal } as Instr,
+          { op: "ref.test", typeIdx: objTypeIdx } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: objArm, else: chain } as Instr,
+        ];
+      }
+    }
+
+    // ── Plain-vec copy arms: one per registered numeric-capable carrier.
+    // Skip `i32_byte` (the ArrayBuffer arm below owns it) and non-numeric
+    // carriers (`ref_*` struct-elem vecs).
+    for (const [carrierKey, vIdx] of Array.from(ctx.vecTypeMap.entries())) {
+      if (carrierKey !== "f64" && carrierKey !== "i32" && carrierKey !== "externref") continue;
+      const srcArrIdx = getArrTypeIdxFromVec(ctx, vIdx);
+      if (srcArrIdx < 0) continue;
+      const srcArrDef = ctx.mod.types[srcArrIdx];
+      if (!srcArrDef || srcArrDef.kind !== "array") continue;
+      const elemType = srcArrDef.element;
+      const vecArm: Instr[] = [];
+      const saved = fctx.body;
+      fctx.body = vecArm;
+      const srcVecLocal = allocLocal(fctx, `__dtac_sv_${fctx.locals.length}`, { kind: "ref", typeIdx: vIdx });
+      const srcDataLocal = allocLocal(fctx, `__dtac_sd_${fctx.locals.length}`, { kind: "ref", typeIdx: srcArrIdx });
+      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: srcVecLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 1 } as Instr);
+      fctx.body.push({ op: "local.set", index: srcDataLocal } as Instr);
+      emitAllocViewFromN();
+      emitCopyLoop((iLocal) => {
+        fctx.body.push({ op: "local.get", index: srcDataLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+        fctx.body.push({ op: "array.get", typeIdx: srcArrIdx } as Instr);
+        if (elemType.kind === "i32") {
+          fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        } else if (elemType.kind === "externref") {
+          coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+        }
+      });
+      fctx.body = saved;
+      chain = [
+        { op: "local.get", index: a0AnyLocal } as Instr,
+        { op: "ref.test", typeIdx: vIdx } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: vecArm, else: chain } as Instr,
+      ];
+    }
+
+    // ── `$__ta_dyn_view` copy arm: re-encode element-by-element on both kinds.
+    {
+      const dvArm: Instr[] = [];
+      const saved = fctx.body;
+      fctx.body = dvArm;
+      const srcDvLocal = allocLocal(fctx, `__dtac_sdv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
+      const srcKindLocal = allocLocal(fctx, `__dtac_sk_${fctx.locals.length}`, { kind: "i32" });
+      const srcEsLocal = allocLocal(fctx, `__dtac_ses_${fctx.locals.length}`, { kind: "i32" });
+      const srcOffLocal = allocLocal(fctx, `__dtac_soff_${fctx.locals.length}`, { kind: "i32" });
+      const srcArrLocal = allocLocal(fctx, `__dtac_sarr_${fctx.locals.length}`, { kind: "ref", typeIdx: byteArrIdx });
+      const srcBoLocal = allocLocal(fctx, `__dtac_sbo_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: srcDvLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+      fctx.body.push({ op: "local.set", index: srcKindLocal } as Instr);
+      pushElemSizeForKind(fctx, srcKindLocal);
+      fctx.body.push({ op: "local.set", index: srcEsLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: srcDvLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+      fctx.body.push({ op: "local.set", index: srcBoLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: srcDvLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
+      fctx.body.push({ op: "local.set", index: srcArrLocal } as Instr);
+      pushTaDynViewInBoundsLen(ctx, fctx, srcDvLocal, srcEsLocal);
+      fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+      emitAllocViewFromN();
+      emitCopyLoop((iLocal) => {
+        // srcOff = srcByteOffset + i*srcEs
+        fctx.body.push({ op: "local.get", index: srcBoLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: srcEsLocal } as Instr);
+        fctx.body.push({ op: "i32.mul" } as Instr);
+        fctx.body.push({ op: "i32.add" } as Instr);
+        fctx.body.push({ op: "local.set", index: srcOffLocal } as Instr);
+        fctx.body.push(
+          ...emitDynDecodeDispatch(ctx, fctx, srcKindLocal, srcArrLocal, srcOffLocal, leLocal, byteArrIdx),
+        );
+      });
+      fctx.body = saved;
+      chain = [
+        { op: "local.get", index: a0AnyLocal } as Instr,
+        { op: "ref.test", typeIdx: dynIdx } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: dvArm, else: chain } as Instr,
+      ];
+    }
+
+    // ── ArrayBuffer arm (outermost test): shared-backing view over the byte vec
+    // (`$__resizable_ab` is a subtype, so resizable buffers match too).
+    {
+      const bufArm: Instr[] = [];
+      const saved = fctx.body;
+      fctx.body = bufArm;
+      const bufLocal = allocLocal(fctx, `__dtac_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: byteVecIdx });
+      const bufBlLocal = allocLocal(fctx, `__dtac_bbl_${fctx.locals.length}`, { kind: "i32" });
+      const offLocal = allocLocal(fctx, `__dtac_off_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: byteVecIdx } as Instr);
+      fctx.body.push({ op: "local.tee", index: bufLocal } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: bufBlLocal } as Instr);
+      if (argLocals.length >= 2) {
+        emitToIndexI32FromArgLocal(ctx, fctx, argLocals[1]!, offLocal, "RangeError: Invalid typed array offset");
+      } else {
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+      }
+      // Clamp off to the buffer byte length so the fixed auto-length subtraction
+      // below can't wrap negative.
+      fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bufBlLocal } as Instr);
+      fctx.body.push({ op: "i32.gt_u" } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: bufBlLocal } as Instr, { op: "local.set", index: offLocal } as Instr],
+        else: [],
+      } as Instr);
+      if (argLocals.length >= 3) {
+        emitToIndexI32FromArgLocal(ctx, fctx, argLocals[2]!, dstNLocal, "RangeError: Invalid typed array length");
+      } else if (ctx.resizableAbTypeIdx >= 0) {
+        // Auto-length over a possibly-resizable buffer → -1 length-tracking
+        // sentinel (mirrors emitDynamicTaViewConstruct).
+        fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+      } else {
+        fctx.body.push({ op: "local.get", index: bufBlLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+        fctx.body.push({ op: "i32.sub" } as Instr);
+        fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+        fctx.body.push({ op: "i32.div_u" } as Instr);
+        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+      }
+      // view = {n, sharedBuf, off, kind}
+      fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+      fctx.body = saved;
+      chain = [
+        { op: "local.get", index: a0AnyLocal } as Instr,
+        { op: "ref.test", typeIdx: byteVecIdx } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: bufArm, else: chain } as Instr,
+      ];
+    }
+
+    for (const instr of chain) fctx.body.push(instr);
+  }
+
+  fctx.body = savedTa;
+
+  fctx.body.push({ op: "local.get", index: descAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: taArm, else: [] } as Instr);
+  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+}
+
+/**
+ * (#2872) Mint the native `__ta_dyn_fill(recv, value, start, end, argc) →
+ * externref` helper — `%TypedArray%.prototype.fill` (§23.2.3.8) over a
+ * `$__ta_dyn_view` receiver (a dynamically-constructed TA view reached through
+ * an `any` receiver — the `testWithTypedArrayConstructors(TA => new
+ * TA(…).fill(…))` harness shape). Before this, an `any`-receiver `.fill` fell
+ * to the open-`$Object` dispatcher arm, silently returned `undefined`, and
+ * mutated nothing.
+ *
+ * Semantics: value is ToNumber'd (observable coercion order: value → start →
+ * end), start/end are ToIntegerOrInfinity'd relative indices clamped to
+ * `[0, len]` (in-bounds len — resizable-aware), an explicit `undefined` end
+ * (normalized via `__nullish_to_null` when present) behaves as absent (= len),
+ * and every element in `[start, end)` is byte-encoded on the view's RUNTIME
+ * kind (Uint8Clamped clamp included) into the SHARED buffer at
+ * `byteOffset + i*elemSize`. Returns `recv` itself, so `ta.fill(…) === ta`
+ * holds (the identity the `return-this.js` tests assert).
+ *
+ * noJsHost lane only; every dependency resolves to a native defined function
+ * (no imports → the minted stable handle never shifts). Idempotent via funcMap.
+ */
+export function ensureTaDynFillHelper(ctx: CodegenContext): number | undefined {
+  if (!noJsHost(ctx)) return undefined;
+  const helperName = "__ta_dyn_fill";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx: byteVecIdx, arrTypeIdx: byteArrIdx } = i32ByteVec(ctx);
+  const nullishToNullIdx = ctx.funcMap.get("__nullish_to_null");
+
+  const params: ValType[] = [
+    { kind: "externref" }, // recv (guaranteed $__ta_dyn_view by the caller's ref.test)
+    { kind: "externref" }, // value
+    { kind: "externref" }, // start
+    { kind: "externref" }, // end
+    { kind: "i32" }, // argc (call-site arity, so absent args are distinguishable)
+  ];
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const fctx: FunctionContext = {
+    name: helperName,
+    params: [
+      { name: "recv", type: { kind: "externref" } },
+      { name: "value", type: { kind: "externref" } },
+      { name: "start", type: { kind: "externref" } },
+      { name: "end", type: { kind: "externref" } },
+      { name: "argc", type: { kind: "i32" } },
+    ],
+    locals: [],
+    localMap: new Map(),
+    returnType: { kind: "externref" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+
+  const dvLocal = allocLocal(fctx, "dv", { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, "kind", { kind: "i32" });
+  const esLocal = allocLocal(fctx, "es", { kind: "i32" });
+  const lenLocal = allocLocal(fctx, "len", { kind: "i32" });
+  const lenF64Local = allocLocal(fctx, "lenf", { kind: "f64" });
+  const vF64Local = allocLocal(fctx, "v", { kind: "f64" });
+  const idxF64Local = allocLocal(fctx, "idxf", { kind: "f64" });
+  const sLocal = allocLocal(fctx, "s", { kind: "i32" });
+  const eLocal = allocLocal(fctx, "e", { kind: "i32" });
+  const arrLocal = allocLocal(fctx, "arr", { kind: "ref", typeIdx: byteArrIdx });
+  const boLocal = allocLocal(fctx, "bo", { kind: "i32" });
+  const leLocal = allocLocal(fctx, "le", { kind: "i32" });
+  const iLocal = allocLocal(fctx, "i", { kind: "i32" });
+  const offLocal = allocLocal(fctx, "off", { kind: "i32" });
+
+  // dv = ref.cast $__ta_dyn_view(any.convert_extern(recv))
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: lenF64Local } as Instr);
+
+  // v = ToNumber(value) — observable coercion, in spec order (value first).
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: vF64Local } as Instr);
+
+  // ToIntegerOrInfinity an externref param into idxF64 (NaN→0, trunc toward 0),
+  // then resolve the RELATIVE index against len into `outLocal` (i32):
+  // idx < 0 ? max(len+idx, 0) : min(idx, len).
+  const emitRelativeIndex = (paramIdx: number, outLocal: number): void => {
+    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "f64.ne" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: idxF64Local } as Instr],
+      else: [],
+    } as Instr);
+    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "f64.trunc" } as Instr);
+    fctx.body.push({ op: "local.set", index: idxF64Local } as Instr);
+    // relative resolve (all in f64, then trunc_sat to i32)
+    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.lt" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: lenF64Local } as Instr,
+        { op: "local.get", index: idxF64Local } as Instr,
+        { op: "f64.add" } as Instr,
+        { op: "f64.const", value: 0 } as Instr,
+        { op: "f64.max" } as Instr,
+        { op: "local.set", index: idxF64Local } as Instr,
+      ],
+      else: [
+        { op: "local.get", index: idxF64Local } as Instr,
+        { op: "local.get", index: lenF64Local } as Instr,
+        { op: "f64.min" } as Instr,
+        { op: "local.set", index: idxF64Local } as Instr,
+      ],
+    } as Instr);
+    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+  };
+
+  // start: argc >= 2 ? relative(start) : 0.
+  fctx.body.push({ op: "local.get", index: 4 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  {
+    const startArm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = startArm;
+    emitRelativeIndex(2, sLocal);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: startArm,
+      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sLocal } as Instr],
+    } as Instr);
+  }
+
+  // end: (argc >= 3 && end is not undefined/null) ? relative(end) : len.
+  // `__nullish_to_null` (when present) normalizes the #2106 $undefined
+  // singleton to null so an EXPLICIT `fill(v, s, undefined)` takes the
+  // spec's "end is undefined → len" default.
+  fctx.body.push({ op: "local.get", index: 4 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 3 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: 3 } as Instr);
+  if (nullishToNullIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: nullishToNullIdx } as Instr);
+  }
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "i32.and" } as Instr);
+  {
+    const endArm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = endArm;
+    emitRelativeIndex(3, eLocal);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: endArm,
+      else: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: eLocal } as Instr],
+    } as Instr);
+  }
+
+  // arr = dv.buf.data ; bo = dv.byteOffset ; le = 1.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+
+  // for (i = s; i < e; i++) encode(kind, arr, bo + i*es, v).
+  fctx.body.push({ op: "local.get", index: sLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  {
+    const loopBody: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = loopBody;
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: eLocal } as Instr);
+    fctx.body.push({ op: "i32.ge_s" } as Instr);
+    fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+    fctx.body.push({ op: "local.get", index: boLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+    fctx.body.push(...emitDynEncodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, vF64Local, leLocal, byteArrIdx));
+    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+    fctx.body.push({ op: "br", depth: 0 } as Instr);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    } as Instr);
+  }
+
+  // return recv (the view itself — `ta.fill(…) === ta`).
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: helperName,
+    typeIdx,
+    locals: fctx.locals,
+    body: fctx.body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
+ * (#2872 slice 2) Shared preamble for a `$__ta_dyn_view`-receiver method helper:
+ * casts `recv` (param 0) to the dyn-view struct, reads its runtime kind → elem
+ * size, and computes the in-bounds ELEMENT length (resizable-aware). Leaves the
+ * results in the passed locals; pushes nothing net. Byte-move methods
+ * (copyWithin/reverse) need only these — no per-element decode/encode.
+ */
+function pushTaDynMethodPreamble(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  dynIdx: number,
+  dvLocal: number,
+  kindLocal: number,
+  esLocal: number,
+  lenLocal: number,
+): void {
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+}
+
+/**
+ * (#2872 slice 2) Resolve a relative index param (externref → ToIntegerOrInfinity
+ * → relative-to-`len`, clamped `[0, len]`) into `outLocal` (i32). Standalone
+ * clone of the closure in `ensureTaDynFillHelper` — kept independent so the fill
+ * helper's emitted bytes are untouched. `idxF64Scratch` / `lenF64` are caller
+ * locals; `lenF64` must already hold `f64(len)`.
+ */
+function pushTaDynRelativeIndex(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  paramIdx: number,
+  outLocal: number,
+  idxF64Scratch: number,
+  lenF64: number,
+): void {
+  fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: idxF64Scratch } as Instr);
+  // NaN → 0
+  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: idxF64Scratch } as Instr],
+    else: [],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "f64.trunc" } as Instr);
+  fctx.body.push({ op: "local.set", index: idxF64Scratch } as Instr);
+  // idx < 0 ? max(len+idx, 0) : min(idx, len)
+  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: lenF64 } as Instr,
+      { op: "local.get", index: idxF64Scratch } as Instr,
+      { op: "f64.add" } as Instr,
+      { op: "f64.const", value: 0 } as Instr,
+      { op: "f64.max" } as Instr,
+      { op: "local.set", index: idxF64Scratch } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: idxF64Scratch } as Instr,
+      { op: "local.get", index: lenF64 } as Instr,
+      { op: "f64.min" } as Instr,
+      { op: "local.set", index: idxF64Scratch } as Instr,
+    ],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+}
+
+function makeTaDynHelperFctx(helperName: string, params: { name: string; type: ValType }[]): FunctionContext {
+  return {
+    name: helperName,
+    params,
+    locals: [],
+    localMap: new Map(),
+    returnType: { kind: "externref" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+}
+
+/**
+ * (#2872 slice 2) Mint `__ta_dyn_copywithin(recv, target, start, end, argc) →
+ * externref` — `%TypedArray%.prototype.copyWithin` (§23.2.3.5) over a
+ * `$__ta_dyn_view` receiver. A pure in-buffer byte move: `to`/`from`/`final` are
+ * relative indices clamped to `[0, len]`, `count = min(final - from, len - to)`,
+ * and (when `count > 0`) `count * elemSize` bytes are `array.copy`'d from
+ * `byteOffset + from*es` to `byteOffset + to*es`. `array.copy` is memmove-correct
+ * for overlapping ranges within the same array (Wasm GC spec), so no direction
+ * split is needed. Returns `recv` (`ta.copyWithin(…) === ta`). No element
+ * decode/encode — the raw bytes move verbatim. noJsHost lane only; idempotent.
+ */
+export function ensureTaDynCopyWithinHelper(ctx: CodegenContext): number | undefined {
+  if (!noJsHost(ctx)) return undefined;
+  const helperName = "__ta_dyn_copywithin";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx: byteVecIdx, arrTypeIdx: byteArrIdx } = i32ByteVec(ctx);
+
+  const params: ValType[] = [
+    { kind: "externref" }, // recv (guaranteed $__ta_dyn_view by the caller ref.test)
+    { kind: "externref" }, // target
+    { kind: "externref" }, // start
+    { kind: "externref" }, // end
+    { kind: "i32" }, // argc
+  ];
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const fctx = makeTaDynHelperFctx(helperName, [
+    { name: "recv", type: { kind: "externref" } },
+    { name: "target", type: { kind: "externref" } },
+    { name: "start", type: { kind: "externref" } },
+    { name: "end", type: { kind: "externref" } },
+    { name: "argc", type: { kind: "i32" } },
+  ]);
+
+  const dvLocal = allocLocal(fctx, "dv", { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, "kind", { kind: "i32" });
+  const esLocal = allocLocal(fctx, "es", { kind: "i32" });
+  const lenLocal = allocLocal(fctx, "len", { kind: "i32" });
+  const lenF64Local = allocLocal(fctx, "lenf", { kind: "f64" });
+  const idxF64Local = allocLocal(fctx, "idxf", { kind: "f64" });
+  const toLocal = allocLocal(fctx, "to", { kind: "i32" });
+  const fromLocal = allocLocal(fctx, "from", { kind: "i32" });
+  const finalLocal = allocLocal(fctx, "final", { kind: "i32" });
+  const countLocal = allocLocal(fctx, "count", { kind: "i32" });
+  const arrLocal = allocLocal(fctx, "arr", { kind: "ref", typeIdx: byteArrIdx });
+  const boLocal = allocLocal(fctx, "bo", { kind: "i32" });
+  const nullishToNullIdx = ctx.funcMap.get("__nullish_to_null");
+
+  pushTaDynMethodPreamble(ctx, fctx, dynIdx, dvLocal, kindLocal, esLocal, lenLocal);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: lenF64Local } as Instr);
+
+  // to = argc >= 1 ? relative(target) : 0.
+  fctx.body.push({ op: "local.get", index: 4 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  {
+    const arm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = arm;
+    pushTaDynRelativeIndex(ctx, fctx, 1, toLocal, idxF64Local, lenF64Local);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: arm,
+      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: toLocal } as Instr],
+    } as Instr);
+  }
+  // from = argc >= 2 ? relative(start) : 0.
+  fctx.body.push({ op: "local.get", index: 4 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  {
+    const arm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = arm;
+    pushTaDynRelativeIndex(ctx, fctx, 2, fromLocal, idxF64Local, lenF64Local);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: arm,
+      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: fromLocal } as Instr],
+    } as Instr);
+  }
+  // final = (argc >= 3 && end not undefined/null) ? relative(end) : len.
+  fctx.body.push({ op: "local.get", index: 4 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 3 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: 3 } as Instr);
+  if (nullishToNullIdx !== undefined) fctx.body.push({ op: "call", funcIdx: nullishToNullIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "i32.and" } as Instr);
+  {
+    const arm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = arm;
+    pushTaDynRelativeIndex(ctx, fctx, 3, finalLocal, idxF64Local, lenF64Local);
+    fctx.body = saved;
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: arm,
+      else: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: finalLocal } as Instr],
+    } as Instr);
+  }
+  // count = min(final - from, len - to).
+  fctx.body.push({ op: "local.get", index: finalLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: fromLocal } as Instr);
+  fctx.body.push({ op: "i32.sub" } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: toLocal } as Instr);
+  fctx.body.push({ op: "i32.sub" } as Instr);
+  // min: select (a<b)?a:b
+  {
+    const aLocal = allocLocal(fctx, "cwa", { kind: "i32" });
+    const bLocal = allocLocal(fctx, "cwb", { kind: "i32" });
+    fctx.body.push({ op: "local.set", index: bLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: aLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: aLocal } as Instr); // val1 (a)
+    fctx.body.push({ op: "local.get", index: bLocal } as Instr); // val2 (b)
+    fctx.body.push({ op: "local.get", index: aLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr); // cond a<b
+    fctx.body.push({ op: "select" } as Instr); // a<b ? a : b
+    fctx.body.push({ op: "local.set", index: countLocal } as Instr);
+  }
+
+  // arr = dv.buf.data ; bo = dv.byteOffset.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
+
+  // if (count > 0) array.copy arr (bo+to*es) arr (bo+from*es) (count*es).
+  {
+    const copyArm: Instr[] = [
+      { op: "local.get", index: arrLocal } as Instr, // dst
+      { op: "local.get", index: boLocal } as Instr, // dstIdx = bo + to*es
+      { op: "local.get", index: toLocal } as Instr,
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.mul" } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.get", index: arrLocal } as Instr, // src
+      { op: "local.get", index: boLocal } as Instr, // srcIdx = bo + from*es
+      { op: "local.get", index: fromLocal } as Instr,
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.mul" } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.get", index: countLocal } as Instr, // len = count*es
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.mul" } as Instr,
+      { op: "array.copy", dstTypeIdx: byteArrIdx, srcTypeIdx: byteArrIdx } as Instr,
+    ];
+    fctx.body.push({ op: "local.get", index: countLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: copyArm, else: [] } as Instr);
+  }
+
+  // return recv.
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  pushDefinedFunc(ctx, funcIdx, { name: helperName, typeIdx, locals: fctx.locals, body: fctx.body, exported: false });
+  return funcIdx;
+}
+
+/**
+ * (#2872 slice 2) Mint `__ta_dyn_reverse(recv, _v1, _v2, _v3, argc) →
+ * externref` — `%TypedArray%.prototype.reverse` (§23.2.3.21) over a
+ * `$__ta_dyn_view` receiver. In-place element swap: for `i` in
+ * `[0, floor(len/2))` swap the `elemSize`-byte blocks at `i` and `len-1-i`
+ * (byte-by-byte through a scratch), so it is element-kind-agnostic (raw byte
+ * swap). Takes-no-args, but carries the SAME `(recv, v1, v2, v3, argc)`
+ * signature as fill/copyWithin (the trailing three externref slots are unused)
+ * so the calls.ts dispatcher two-arm handles all three uniformly. Returns
+ * `recv` (`ta.reverse() === ta`). noJsHost lane only; idempotent.
+ */
+export function ensureTaDynReverseHelper(ctx: CodegenContext): number | undefined {
+  if (!noJsHost(ctx)) return undefined;
+  const helperName = "__ta_dyn_reverse";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  const dynIdx = getOrRegisterTaDynViewType(ctx);
+  const { vecTypeIdx: byteVecIdx, arrTypeIdx: byteArrIdx } = i32ByteVec(ctx);
+
+  const params: ValType[] = [
+    { kind: "externref" }, // recv
+    { kind: "externref" }, // unused (arg0)
+    { kind: "externref" }, // unused (arg1)
+    { kind: "externref" }, // unused (arg2)
+    { kind: "i32" }, // argc
+  ];
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const fctx = makeTaDynHelperFctx(helperName, [
+    { name: "recv", type: { kind: "externref" } },
+    { name: "v1", type: { kind: "externref" } },
+    { name: "v2", type: { kind: "externref" } },
+    { name: "v3", type: { kind: "externref" } },
+    { name: "argc", type: { kind: "i32" } },
+  ]);
+
+  const dvLocal = allocLocal(fctx, "dv", { kind: "ref", typeIdx: dynIdx });
+  const kindLocal = allocLocal(fctx, "kind", { kind: "i32" });
+  const esLocal = allocLocal(fctx, "es", { kind: "i32" });
+  const lenLocal = allocLocal(fctx, "len", { kind: "i32" });
+  const arrLocal = allocLocal(fctx, "arr", { kind: "ref", typeIdx: byteArrIdx });
+  const boLocal = allocLocal(fctx, "bo", { kind: "i32" });
+  const iLocal = allocLocal(fctx, "i", { kind: "i32" });
+  const jLocal = allocLocal(fctx, "j", { kind: "i32" });
+  const halfLocal = allocLocal(fctx, "half", { kind: "i32" });
+  const bLocal = allocLocal(fctx, "b", { kind: "i32" });
+  const loOffLocal = allocLocal(fctx, "looff", { kind: "i32" });
+  const hiOffLocal = allocLocal(fctx, "hioff", { kind: "i32" });
+  const tmpLocal = allocLocal(fctx, "tmp", { kind: "i32" });
+
+  pushTaDynMethodPreamble(ctx, fctx, dynIdx, dvLocal, kindLocal, esLocal, lenLocal);
+  // arr = dv.buf.data ; bo = dv.byteOffset.
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
+  // half = len / 2 ; i = 0.
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
+  fctx.body.push({ op: "i32.div_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: halfLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+
+  // outer: for (i=0; i<half; i++) { j = len-1-i; loOff = bo+i*es; hiOff = bo+j*es;
+  //   for (b=0; b<es; b++) { tmp=arr[loOff+b]; arr[loOff+b]=arr[hiOff+b]; arr[hiOff+b]=tmp; } }
+  {
+    const innerBody: Instr[] = [];
+    {
+      const saved = fctx.body;
+      fctx.body = innerBody;
+      // b >= es → break inner
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+      fctx.body.push({ op: "i32.ge_s" } as Instr);
+      fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+      // tmp = arr[loOff+b]
+      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: loOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpLocal } as Instr);
+      // arr[loOff+b] = arr[hiOff+b]
+      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: loOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: hiOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx } as Instr);
+      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx } as Instr);
+      // arr[hiOff+b] = tmp
+      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: hiOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.get", index: tmpLocal } as Instr);
+      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx } as Instr);
+      // b++
+      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.set", index: bLocal } as Instr);
+      fctx.body.push({ op: "br", depth: 0 } as Instr);
+      fctx.body = saved;
+    }
+    const outerBody: Instr[] = [];
+    {
+      const saved = fctx.body;
+      fctx.body = outerBody;
+      // i >= half → break outer
+      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: halfLocal } as Instr);
+      fctx.body.push({ op: "i32.ge_s" } as Instr);
+      fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+      // j = len-1-i
+      fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+      fctx.body.push({ op: "i32.sub" } as Instr);
+      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+      fctx.body.push({ op: "i32.sub" } as Instr);
+      fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+      // loOff = bo + i*es ; hiOff = bo + j*es
+      fctx.body.push({ op: "local.get", index: boLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.set", index: loOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: boLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: jLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.set", index: hiOffLocal } as Instr);
+      // b = 0 ; inner loop
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: bLocal } as Instr);
+      fctx.body.push({
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: innerBody } as Instr],
+      } as Instr);
+      // i++
+      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+      fctx.body.push({ op: "i32.add" } as Instr);
+      fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+      fctx.body.push({ op: "br", depth: 0 } as Instr);
+      fctx.body = saved;
+    }
+    fctx.body.push({
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: outerBody } as Instr],
+    } as Instr);
+  }
+
+  // return recv.
+  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  pushDefinedFunc(ctx, funcIdx, { name: helperName, typeIdx, locals: fctx.locals, body: fctx.body, exported: false });
+  return funcIdx;
+}
+
+/**
+ * (#3054 B2) Read an accessor prop off a `$__ta_view` receiver:
+ *   `.byteLength`   = length (field0, element count) × elementSize
+ *   `.byteOffset`   = byteOffset (field2)
+ *   `.buffer`       = the SHARED buffer vec (field1) itself — object IDENTITY, so
+ *                     `a.buffer === b.buffer` for sibling views is `ref.eq`-true
+ *   `BYTES_PER_ELEMENT` = the per-view element size (constant)
+ * `.length` is intentionally NOT handled here — the B1 local-type `.length` arm
+ * (property-access.ts) already reads field0. `receiverExpr` is the view receiver
+ * (compiled via `compileExpr`). Returns the result ValType, or null (declining).
+ */
+export function emitTaViewAccessor(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  propName: string,
+  receiverExpr: import("../ts-api.js").ts.Expression,
+  compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
+): ValType | null {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  if (!desc) return null;
+  const { vecTypeIdx } = i32ByteVec(ctx);
+  const elemSize = desc.bytes;
+
+  // BYTES_PER_ELEMENT is a compile-time constant — drop the (side-effecting) recv.
+  if (propName === "BYTES_PER_ELEMENT") {
+    const rt = compileExpr(receiverExpr);
+    if (rt !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: elemSize } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+
+  // Compile the receiver (the $__ta_view ref) onto the stack.
+  const rt = compileExpr(receiverExpr);
+  if (rt?.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: taViewTypeIdx } as Instr);
+  }
+
+  if (propName === "buffer") {
+    // Object identity: return the shared buffer vec (field1) directly.
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
+  }
+  if (propName === "byteLength") {
+    // (#3054 C) Effective element count × elementSize. When a resizable buffer
+    // type exists in the module, stash the receiver + derive the live length so a
+    // resize is tracked; otherwise read field0 directly (BYTE-IDENTICAL to B2 —
+    // no extra local, receiver stays on the stack).
+    if (ctx.resizableAbTypeIdx >= 0) {
+      const tvLocal = allocLocal(fctx, `__tav_bl_recv_${fctx.locals.length}`, {
+        kind: "ref_null",
+        typeIdx: taViewTypeIdx,
+      });
+      fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+      pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
+    } else {
+      fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    }
+    if (elemSize !== 1) {
+      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
+      fctx.body.push({ op: "i32.mul" } as Instr);
+    }
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+  if (propName === "byteOffset") {
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+  // Unknown prop — leave the stack balanced and decline.
+  fctx.body.push({ op: "drop" } as Instr);
+  return null;
+}
+
+/**
+ * (#3054 B1, Option A) Materialize a `$__ta_view` into a fresh NATIVE
+ * `$__vec_<elem>` by byte-decoding every element little-endian, so consumers that
+ * expect a native typed-vec receiver (the shared array-method dispatch, which
+ * `ref.cast`s the receiver to the native vec type) work on a view without
+ * trapping. The view ref must already be on the stack; a `(ref null
+ * nativeVecTypeIdx)` is left on the stack. This is a de-aliasing COPY — writes by
+ * a mutating method (`.fill`/`.set`) land in the copy, NOT back in the buffer (B1
+ * never claimed proto-method write-through; B3 will teach the methods to operate
+ * on the view directly). `nativeVecTypeIdx` is the element-typed vec
+ * `resolveArrayInfo` picked for the receiver's TS type, and drives the element
+ * coercion (integer vecs truncate the decoded f64; f64 vecs keep it).
+ */
+export function emitTaViewToVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  nativeVecTypeIdx: number,
+): void {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  const nativeArrTypeIdx = getArrTypeIdxFromVec(ctx, nativeVecTypeIdx);
+  const nativeArrDef = ctx.mod.types[nativeArrTypeIdx];
+  if (!desc || nativeArrTypeIdx < 0 || !nativeArrDef || nativeArrDef.kind !== "array") {
+    // Shouldn't happen for a registered view; leave the view ref as-is (a later
+    // ref.cast will surface the mismatch rather than silently miscompiling).
+    return;
+  }
+  const nativeElemKind = nativeArrDef.element.kind;
+  const { arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+
+  // view (on stack) → local
+  const vLocal = allocLocal(fctx, `__tav_mv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
+  fctx.body.push({ op: "local.set", index: vLocal } as Instr);
+  // len = EFFECTIVE element count, not raw field0. (#3054 C×B3) An auto-length
+  // view over a resizable buffer stores a -1 sentinel in field0 (C); reading it
+  // raw would de-view -1 elements (empty native copy) and B3's write-back would
+  // then iterate the same -1 and lose every write. pushTaViewEffectiveLen
+  // resolves the sentinel to the live count (buf.length / elemSize) and is
+  // byte-inert-gated: a module with no resizable AB (resizableAbTypeIdx < 0)
+  // emits the identical raw field0 read. emitTaViewWriteBack MUST use the same
+  // length so native-copy-len == write-back-len.
+  const lenLocal = allocLocal(fctx, `__tav_mlen_${fctx.locals.length}`, { kind: "i32" });
+  pushTaViewEffectiveLen(ctx, fctx, vLocal, taViewTypeIdx);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // arr = view.buf.data ; base = view.byteOffset ; le = 1
+  const arrLocal = allocLocal(fctx, `__tav_marr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  const { vecTypeIdx: bufVecTypeIdx } = i32ByteVec(ctx);
+  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  const baseLocal = allocLocal(fctx, `__tav_mbase_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  const leLocal = allocLocal(fctx, `__tav_mle_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  // nativeArr = array.new_default(len)
+  const nArrLocal = allocLocal(fctx, `__tav_mnarr_${fctx.locals.length}`, { kind: "ref", typeIdx: nativeArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: nativeArrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  // for (i = 0; i < len; i++) nativeArr[i] = coerce(decode(base + i*width))
+  const iLocal = allocLocal(fctx, `__tav_mi_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tav_moff_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  const isIntArr = nativeElemKind === "i8" || nativeElemKind === "i16" || nativeElemKind === "i32";
+  const decodeInstrs: Instr[] = [];
+  // offLocal = base + i*width
+  decodeInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (desc.bytes !== 1) {
+    decodeInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
+    decodeInstrs.push({ op: "i32.mul" } as Instr);
+  }
+  decodeInstrs.push({ op: "i32.add" } as Instr);
+  decodeInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // nativeArr[i] = <decoded>
+  decodeInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  // NOTE: emitReadBytes pushes an f64 directly onto fctx.body; capture it by
+  // temporarily swapping the body so the read lands inside decodeInstrs.
+  const savedBody = fctx.body;
+  fctx.body = decodeInstrs;
+  emitReadBytes(
+    ctx,
+    fctx,
+    { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    arrLocal,
+    offLocal,
+    leLocal,
+    bufArrTypeIdx,
+  );
+  fctx.body = savedBody;
+  if (isIntArr) decodeInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  decodeInstrs.push({ op: "array.set", typeIdx: nativeArrTypeIdx } as Instr);
+  // i++
+  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  decodeInstrs.push({ op: "i32.add" } as Instr);
+  decodeInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...decodeInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+  // struct.new nativeVec(len, nativeArr)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: nativeVecTypeIdx } as Instr);
+}
+
+/**
+ * (#3054 B3) WRITE-THROUGH — the reverse of {@link emitTaViewToVec}. After a
+ * mutating TypedArray prototype method (`.fill` / `.set` / `.sort` /
+ * `.copyWithin` / `.reverse`) has run on the DE-VIEWED native `$__vec_<elem>`
+ * copy (`matLocalIdx`), byte-encode every (possibly-mutated) element back into
+ * the view's SHARED buffer (`view.buf.data`) at `byteOffset + i*width`,
+ * little-endian — so the mutation is observable through the underlying buffer
+ * and every sibling view / DataView over it (per §23.2/§25 IntegerIndexed
+ * element semantics).
+ *
+ * WHY a write-back copy, not method-rewrites: B1's Option-A de-view is a
+ * de-ALIASING copy — writes by a mutating method landed in the copy and were
+ * LOST (never reached the buffer). Rewriting each TA method to operate directly
+ * on the view would touch the whole array-method dispatch (high floor risk). The
+ * write-back confines B3 to the already-de-viewed path: the copy round-trips
+ * back into the buffer, restoring shared-backing semantics with a bounded,
+ * additive change.
+ *
+ * Bit-exact round trip: the value read out of the native copy is the exact
+ * numeric value the method computed (sort permutes, fill sets a constant, set
+ * writes new values, copyWithin/reverse move existing ones — all already coerced
+ * to the view's element domain). It is read with the native vec's element opcode
+ * (signedness per the TA kind = `desc.signed`) and re-encoded through the SAME
+ * {@link emitWriteBytes} engine {@link emitTaViewElementSet} uses, so encode ∘
+ * decode is identity. `viewLocalIdx` holds the `$__ta_view` ref (the receiver
+ * identifier's ORIGINAL local, saved before the de-view rebind) — reading
+ * `view.byteOffset` (field2, B2-populated) makes windowed views write to the
+ * correct absolute bytes. Read-only methods MUST NOT call this (the caller gates
+ * on the mutating-method set).
+ */
+export function emitTaViewWriteBack(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  taViewTypeIdx: number,
+  viewLocalIdx: number,
+  matLocalIdx: number,
+  nativeVecTypeIdx: number,
+): void {
+  const desc = taViewDecode(ctx, taViewTypeIdx);
+  const nativeArrTypeIdx = getArrTypeIdxFromVec(ctx, nativeVecTypeIdx);
+  const nativeArrDef = ctx.mod.types[nativeArrTypeIdx];
+  if (!desc || nativeArrTypeIdx < 0 || !nativeArrDef || nativeArrDef.kind !== "array") {
+    // Shouldn't happen for a registered view + resolved native vec. Skipping the
+    // write-back merely reverts to B1's lost-write behaviour (correctness-safe),
+    // never a miscompile.
+    return;
+  }
+  const nativeElemKind = nativeArrDef.element.kind;
+  const { vecTypeIdx: bufVecTypeIdx, arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+
+  // len = EFFECTIVE element count == the native copy length produced by
+  // emitTaViewToVec (which uses the SAME pushTaViewEffectiveLen). (#3054 C×B3)
+  // For an auto-length view over a resizable buffer field0 is a -1 sentinel (C)
+  // and must be resolved to the live count; byte-inert-gated so a non-resizable
+  // module reads raw field0, identical to B3's original bytes.
+  const lenLocal = allocLocal(fctx, `__tav_wblen_${fctx.locals.length}`, { kind: "i32" });
+  pushTaViewEffectiveLen(ctx, fctx, viewLocalIdx, taViewTypeIdx);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // bufArr = view.buf.data  (buf field1 → $__vec_i32_byte; .data is its field1).
+  const bufArrLocal = allocLocal(fctx, `__tav_wbarr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufArrLocal } as Instr);
+  // base = view.byteOffset (field2) — non-zero for a windowed view (B2).
+  const baseLocal = allocLocal(fctx, `__tav_wbbase_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  // matArr = matLocal.data (native vec field1).
+  const matArrLocal = allocLocal(fctx, `__tav_wbmarr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: nativeArrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: matLocalIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: nativeVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: matArrLocal } as Instr);
+  const leLocal = allocLocal(fctx, `__tav_wble_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+
+  const iLocal = allocLocal(fctx, `__tav_wbi_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tav_wboff_${fctx.locals.length}`, { kind: "i32" });
+  const valLocal = allocLocal(fctx, `__tav_wbval_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+
+  const stepInstrs: Instr[] = [];
+  // off = base + i*width
+  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (desc.bytes !== 1) {
+    stepInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
+    stepInstrs.push({ op: "i32.mul" } as Instr);
+  }
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // val = f64(matArr[i]) — read the native element with the TA kind's signedness.
+  stepInstrs.push({ op: "local.get", index: matArrLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  if (nativeElemKind === "f64") {
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+  } else if (nativeElemKind === "f32") {
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: "f64.promote_f32" } as Instr);
+  } else if (nativeElemKind === "i8" || nativeElemKind === "i16") {
+    // PACKED int element (i8/i16): `array.get_s`/`array.get_u` sign/zero-extend
+    // the sub-word storage per the view's signedness, then convert to f64.
+    stepInstrs.push({ op: desc.signed ? "array.get_s" : "array.get_u", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+  } else {
+    // NON-packed i32 element (Int32/Uint32 `i32_elem`): `array.get_s`/`_u` are
+    // illegal on a full-width type — read with plain `array.get`, then apply the
+    // signedness at the f64 convert. Uint32 needs `convert_i32_u` so a high-bit-
+    // set i32 image maps to the >2^31 double.
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+  }
+  stepInstrs.push({ op: "local.set", index: valLocal } as Instr);
+  // bufArr[off .. off+width] = encode(val)  — same LE engine as element set.
+  // emitWriteBytes pushes onto fctx.body, so redirect it into stepInstrs.
+  const savedBody = fctx.body;
+  fctx.body = stepInstrs;
+  emitWriteBytes(
+    ctx,
+    fctx,
+    { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+    bufArrLocal,
+    offLocal,
+    valLocal,
+    leLocal,
+    bufArrTypeIdx,
+  );
+  fctx.body = savedBody;
+  // i++
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...stepInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+}
+
+/**
+ * (#3058) ValidateTypedArray (§10.4.5.11 IsTypedArrayOutOfBounds, §23.2.3.* step 1)
+ * for a boxed `$__ta_dyn_view` reached through an `any` receiver: throw a TypeError
+ * when the view is out-of-bounds over its (resizable) backing buffer. A
+ * NON-length-tracking (fixed) view — stored length field0 ≥ 0 — is OOB when its
+ * window no longer fits the buffer (`byteOffset + storedLen*elemSize(kind) >
+ * buf.byteLength`, e.g. after `rab.resize(smaller)`). A length-tracking view (field0
+ * sentinel `-1`) tracks the live buffer and is OOB only when its byteOffset itself
+ * exceeds the buffer. Emitted at the TOP of every dyn-view proto-method arm (#3058
+ * Bucket A) so the interleaved `assert.throws(TypeError, () => ta.<m>())` cases in
+ * every `prototype/<m>/resizable-buffer.js` file pass. `dvLocal` holds the
+ * `(ref $__ta_dyn_view)`.
+ * Leaves the stack unchanged (throws or falls through).
+ */
+export function emitTaDynViewValidate(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number): void {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  if (dynIdx < 0) return;
+  const { vecTypeIdx: bufVecTypeIdx } = i32ByteVec(ctx);
+  const kindLocal = allocLocal(fctx, `__tdvv_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tdvv_es_${fctx.locals.length}`, { kind: "i32" });
+  const storedLocal = allocLocal(fctx, `__tdvv_s_${fctx.locals.length}`, { kind: "i32" });
+  const bufLenLocal = allocLocal(fctx, `__tdvv_bl_${fctx.locals.length}`, { kind: "i32" });
+  const byteOffLocal = allocLocal(fctx, `__tdvv_bo_${fctx.locals.length}`, { kind: "i32" });
+  // kind → elemSize
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  // storedLen = field0
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: storedLocal } as Instr);
+  // bufLen = dv.buf.byteLength (buf field1 → $__vec_i32_byte; .length = field0)
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: bufLenLocal } as Instr);
+  // byteOffset = field2
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: byteOffLocal } as Instr);
+  // oob = storedLen >= 0 ? (byteOffset + storedLen*elemSize > bufLen)
+  //                      : (byteOffset > bufLen)
+  fctx.body.push({ op: "local.get", index: storedLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: byteOffLocal } as Instr,
+      { op: "local.get", index: storedLocal } as Instr,
+      { op: "local.get", index: esLocal } as Instr,
+      { op: "i32.mul" } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.get", index: bufLenLocal } as Instr,
+      { op: "i32.gt_s" } as Instr,
+    ],
+    else: [
+      { op: "local.get", index: byteOffLocal } as Instr,
+      { op: "local.get", index: bufLenLocal } as Instr,
+      { op: "i32.gt_s" } as Instr,
+    ],
+  } as Instr);
+  // if (oob) throw TypeError. emitThrowTypeError pushes onto fctx.body → capture it
+  // into a then-arm buffer via a body-swap. Keep the outer body registered on
+  // fctx.savedBodies for the swap so any late-import shift the throw triggers
+  // (WASI TypeError constructor) patches the outer funcIdxs too.
+  const throwArm: Instr[] = [];
+  const saved = fctx.body;
+  fctx.savedBodies.push(saved);
+  fctx.body = throwArm;
+  emitThrowTypeError(ctx, fctx, "TypeError: attempting to access out-of-bounds TypedArray");
+  fctx.body = saved;
+  fctx.savedBodies.pop();
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm, else: [] } as Instr);
+}
+
+/**
+ * (#3058) Materialize a boxed `$__ta_dyn_view` (runtime element `kind`) into a fresh
+ * native `$__vec_f64` by byte-decoding every in-bounds element little-endian on the
+ * runtime kind (the #3057 {@link emitDynDecodeDispatch} engine). Widening every kind
+ * to f64 lets the read-side array-method impls (`at`/`indexOf`/`includes`/`join`/
+ * `find*`/`every`/`some`/`forEach`/`reduce*`/`toLocaleString`) run over the copy
+ * through the EXISTING f64-vec dispatch — the caller rebinds the receiver identifier
+ * to this vec and re-enters `compileArrayMethodCall` (#3058 two-arm). `dvLocal` holds
+ * the `(ref $__ta_dyn_view)`; the caller has already run {@link emitTaDynViewValidate}
+ * (OOB → TypeError), so the effective length used here is the live in-bounds element
+ * count ({@link pushTaDynViewEffectiveLen}, resolving the auto-length `-1` sentinel).
+ * Leaves a `(ref $__vec_f64)` on the stack and returns its typeIdx.
+ */
+export function emitTaDynViewToVec(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number): number {
+  const dynIdx = ctx.taDynViewTypeIdx;
+  const { vecTypeIdx: bufVecTypeIdx, arrTypeIdx: bufArrTypeIdx } = i32ByteVec(ctx);
+  const f64VecIdx = getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+  const f64ArrIdx = getArrTypeIdxFromVec(ctx, f64VecIdx);
+
+  const kindLocal = allocLocal(fctx, `__tdtv_k_${fctx.locals.length}`, { kind: "i32" });
+  const esLocal = allocLocal(fctx, `__tdtv_es_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__tdtv_len_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__tdtv_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
+  const baseLocal = allocLocal(fctx, `__tdtv_base_${fctx.locals.length}`, { kind: "i32" });
+  const leLocal = allocLocal(fctx, `__tdtv_le_${fctx.locals.length}`, { kind: "i32" });
+  const nArrLocal = allocLocal(fctx, `__tdtv_narr_${fctx.locals.length}`, { kind: "ref", typeIdx: f64ArrIdx });
+  const iLocal = allocLocal(fctx, `__tdtv_i_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__tdtv_off_${fctx.locals.length}`, { kind: "i32" });
+
+  // kind → elemSize
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
+  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  pushElemSizeForKind(fctx, kindLocal);
+  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  // len = effective (live, in-bounds) element count.
+  pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // arr = dv.buf.data ; base = dv.byteOffset ; le = 1
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
+  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  // nArr = array.new_default(len)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: f64ArrIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  // for (i=0; i<len; i++) nArr[i] = decode(base + i*elemSize)
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, bufArrTypeIdx);
+  const stepInstrs: Instr[] = [];
+  // off = base + i*elemSize (runtime elemSize)
+  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: esLocal } as Instr);
+  stepInstrs.push({ op: "i32.mul" } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  // nArr[i] = <decode(off) → f64>
+  stepInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push(...decodeInstrs);
+  stepInstrs.push({ op: "array.set", typeIdx: f64ArrIdx } as Instr);
+  // i++
+  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
+  stepInstrs.push({ op: "i32.add" } as Instr);
+  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
+  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    ...stepInstrs,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+  // struct.new $__vec_f64(len, nArr)
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: f64VecIdx } as Instr);
+  return f64VecIdx;
 }
 
 /**
@@ -1000,4 +5130,158 @@ export function emitDataViewToWriteScratch(
   } as Instr);
 
   return lenLocal;
+}
+
+/**
+ * (#3058) Resizable-ArrayBuffer helper exports for the JS-host runtime.
+ *
+ * The JS-host lane lowers `new ArrayBuffer(n, {maxByteLength})` to the same
+ * `$__resizable_ab` WasmGC subtype the standalone lane uses (#3054 C), but the
+ * host-lane method/getter dispatch happens in the JS runtime
+ * (`__extern_method_call` / `__extern_get`), which cannot touch WasmGC struct
+ * fields directly. Two exports bridge that:
+ *
+ *   __ab_max_len(externref) -> f64   — maxByteLength (field 2) for a
+ *       `$__resizable_ab` instance; -1 for a fixed buffer / any other value.
+ *       The -1 sentinel doubles as the `resizable` discriminator.
+ *   __rab_resize(externref, i32) -> i32 — the §25.1.6.4 resize core: realloc
+ *       the backing i8 array to newLen, copy min(oldLen, newLen) bytes, swap
+ *       `data` + `length` IN PLACE on the same struct (views/DataView fallback
+ *       observe the swap through `__dv_byte_len`). Status: 0 ok · 1 receiver
+ *       not resizable (TypeError) · 2 newLen out of range (RangeError). The
+ *       runtime arm pre-validates per spec order and maps statuses to host
+ *       error types; the in-function checks are a defensive backstop.
+ *
+ * Host lane only: standalone/WASI resize compiles to the inline native emitter
+ * (`emitArrayBufferResize`) and has no JS runtime to call exports — the gate
+ * keeps the standalone lane byte-identical. Modules that never construct a
+ * resizable buffer (`ctx.resizableAbTypeIdx < 0`) are byte-identical too.
+ */
+export function emitResizableAbExports(ctx: CodegenContext): void {
+  if (ctx.wasi || ctx.standalone) return; // JS-host lane only (see doc comment)
+  const rabTypeIdx = ctx.resizableAbTypeIdx;
+  if (rabTypeIdx < 0) return;
+  const mod = ctx.mod;
+  const byteVecTypeIdx = ctx.vecTypeMap.get("i32_byte");
+  if (byteVecTypeIdx === undefined) return;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, byteVecTypeIdx);
+  if (arrTypeIdx < 0) return;
+
+  // __ab_max_len(externref) -> f64
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }], "$__ab_max_len_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: rabTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 } as Instr,
+          { op: "ref.cast", typeIdx: rabTypeIdx },
+          { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
+          { op: "f64.convert_i32_s" } as Instr,
+          { op: "return" } as Instr,
+        ],
+        else: [],
+      },
+      { op: "f64.const", value: -1 } as Instr,
+    ];
+    mod.functions.push({
+      name: "__ab_max_len",
+      typeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__ab_max_len", desc: { kind: "func", index: funcIdx } });
+  }
+
+  // __rab_resize(externref, i32) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "i32" }], "$__rab_resize_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    // locals: 2 = anyref scratch, 3 = (ref null $__resizable_ab), 4 = (ref null
+    // $__arr_i32_byte) new backing, 5 = i32 copyLen.
+    const body: Instr[] = [
+      // if receiver is not a $__resizable_ab → status 1 (TypeError in the runtime arm)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: rabTypeIdx },
+      { op: "i32.eqz" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+        else: [],
+      },
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: rabTypeIdx },
+      { op: "local.set", index: 3 },
+      // if newLen < 0 || newLen > maxByteLength (field 2) → status 2 (RangeError)
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.lt_s" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
+      { op: "i32.gt_s" } as Instr,
+      { op: "i32.or" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 2 } as Instr, { op: "return" } as Instr],
+        else: [],
+      },
+      // copyLen = min(oldLen = field 0, newLen)
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "local.get", index: 1 },
+      { op: "i32.lt_s" } as Instr,
+      { op: "select" } as Instr,
+      { op: "local.set", index: 5 },
+      // newArr = array.new_default $__arr_i32_byte (newLen)
+      { op: "local.get", index: 1 },
+      { op: "array.new_default", typeIdx: arrTypeIdx },
+      { op: "local.set", index: 4 },
+      // array.copy newArr[0..copyLen) ← rab.data[0..copyLen)
+      { op: "local.get", index: 4 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 },
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: 5 },
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+      // swap data + length IN PLACE (same struct → views observe the resize)
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 4 },
+      { op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 1 },
+      { op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: 0 } as Instr,
+    ];
+    mod.functions.push({
+      name: "__rab_resize",
+      typeIdx,
+      locals: [
+        { name: "__any", type: { kind: "anyref" } },
+        { name: "__rab", type: { kind: "ref_null", typeIdx: rabTypeIdx } },
+        { name: "__newarr", type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+        { name: "__copylen", type: { kind: "i32" } },
+      ],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__rab_resize", desc: { kind: "func", index: funcIdx } });
+  }
 }
