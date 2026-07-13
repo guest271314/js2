@@ -4,7 +4,9 @@ title: "codegen: invalid Wasm binary emission residual — default (JS-host) lan
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-11
+updated: 2026-07-13
+assignee: ttraenkler/opus-3024
+status_note: slice 5 in-progress (opus-3024)
 priority: high
 horizon: m
 feasibility: medium
