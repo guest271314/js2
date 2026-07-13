@@ -12,7 +12,7 @@ area: codegen
 es_edition: multi
 language_feature: for-in
 goal: core-semantics
-sprint: current
+sprint: 71
 horizon: m
 related: [3179, 3162, 3176]
 origin: "2026-07-12 Fable codebase audit (plan/log/2026-07-12-fable-codebase-audit.md, §F3); documented but un-filed in #3179's own ablation notes"

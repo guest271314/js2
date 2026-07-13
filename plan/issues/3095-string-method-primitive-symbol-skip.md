@@ -4,7 +4,7 @@ title: "String.prototype.{match,search,replace,replaceAll,split} must not access
 status: done
 completed: 2026-07-08
 created: 2026-07-08
-updated: 2026-07-08
+updated: 2026-07-13
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -12,7 +12,7 @@ task_type: bugfix
 area: runtime
 language_feature: string-symbol-dispatch
 goal: spec-completeness
-sprint: current
+sprint: 71
 horizon: s
 related: [1443, 1439]
 ---

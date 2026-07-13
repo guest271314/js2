@@ -4,7 +4,7 @@ title: "Standalone $Object dot-member-set drops closures: o.f = function(){} is 
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3100s4
-sprint: current
+sprint: 71
 model: fable
 created: 2026-07-09
 priority: high

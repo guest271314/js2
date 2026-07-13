@@ -2,7 +2,7 @@
 id: 3241
 title: "Native object-rest CopyDataProperties for for-of/for-await loop-var rest (standalone)"
 status: done
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

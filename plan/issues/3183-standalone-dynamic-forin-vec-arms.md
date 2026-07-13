@@ -13,7 +13,7 @@ es_edition: multi
 language_feature: for-in
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: m
 related: [3179, 3176, 3173, 3169, 2860]
 origin: "Split out of #3179 during root-cause diagnosis (2026-07-12). #3179's PR fixed the illegal-cast trap face (emitArrayForIn); this issue is the remaining any-typed-receiver face."

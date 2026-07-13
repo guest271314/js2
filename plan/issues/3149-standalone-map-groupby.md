@@ -3,7 +3,7 @@ id: 3149
 title: "standalone: Map.groupBy (12 __get_builtin CEs)"
 status: done
 completed: 2026-07-11
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 feasibility: medium

@@ -14,7 +14,7 @@ language_feature: object-wrapper, tojobject
 es_edition: ES2015
 test262_category: built-ins/Object
 goal: conformance
-sprint: current
+sprint: 71
 horizon: s
 created: 2026-07-09
 related: [1129, 1110]

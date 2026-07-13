@@ -11,7 +11,7 @@ task_type: bug
 area: codegen, runtime
 language_feature: array-from
 goal: standalone
-sprint: current
+sprint: 71
 horizon: m
 related: [3140, 2169c, 2586, 2872, 2860, 3098]
 umbrella: 2860

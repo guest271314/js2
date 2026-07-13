@@ -2,7 +2,7 @@
 id: 3088
 title: "test262-runner: non-BigInt testWithTypedArrayConstructors shim passes 1 arg but the real harness passes 2 (constructor + boundArgFactory) — 2-param callbacks stay vacuous via the #1837 over-arity-void skip"
 status: done
-sprint: current
+sprint: 71
 model: opus
 priority: medium
 horizon: s

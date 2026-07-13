@@ -11,7 +11,7 @@ task_type: fix
 area: codegen, runtime
 language_feature: async
 goal: standalone-mode
-sprint: current
+sprint: 71
 parent: 2980
 related: [2980, 2906, 2895, 2959, 2671, 3036]
 ---

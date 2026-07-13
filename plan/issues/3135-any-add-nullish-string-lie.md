@@ -3,7 +3,7 @@ id: 3135
 title: "standalone `undefined + x` through open-any dispatch answers '[object Object]x' — tag-5 string-lie boxing of the null externref in `__any_add` (task-82 de-vacuification)"
 status: done
 assignee: ttraenkler/fable-17th
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: medium

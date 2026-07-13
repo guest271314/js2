@@ -4,9 +4,9 @@ title: "IR: lower string relational operators (< > <= >=) — #3143 flip-track p
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/fable-eqfix
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 horizon: m
 feasibility: medium

@@ -14,7 +14,7 @@ language_feature: date
 goal: standalone
 umbrella: 2860
 parent: 3174
-sprint: current
+sprint: 71
 horizon: m
 related: [2860, 3174, 2875, 2979]
 loc-budget-allow:

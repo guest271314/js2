@@ -3,9 +3,9 @@ id: 3070
 title: "Add Open Graph + Twitter Card meta tags and a social-preview image to the landing page"
 status: done
 assignee: ttraenkler/agent-a675d0c61c8025856
-sprint: current
+sprint: 71
 created: 2026-07-06
-updated: 2026-07-06
+updated: 2026-07-13
 completed: 2026-07-06
 priority: medium
 horizon: s

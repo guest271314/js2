@@ -3,7 +3,7 @@ id: 3228
 title: "standalone: for-await-of with a DESTRUCTURING binding over an ARRAY source falls to the legacy host-CPS lowering (24 leaky passes) — widen the native async-iterator DRIVE admission"
 status: done
 completed: 2026-07-13
-sprint: current
+sprint: 71
 assignee: ttraenkler/opus-gapmap
 created: 2026-07-13
 updated: 2026-07-13

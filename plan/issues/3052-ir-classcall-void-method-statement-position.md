@@ -4,9 +4,9 @@ title: "IR `class.call`: void instance method in statement position"
 status: done
 assignee: opus-classcall
 completed: 2026-07-05
-sprint: current
+sprint: 71
 created: 2026-07-05
-updated: 2026-07-05
+updated: 2026-07-13
 priority: medium
 horizon: s
 feasibility: medium

@@ -3,9 +3,9 @@ id: 3072
 title: "Fix <t262-donut> layout: orbit labels too high (desktop), glow clipped (mobile), legend centering"
 status: done
 assignee: ttraenkler/donut-layout
-sprint: current
+sprint: 71
 created: 2026-07-06
-updated: 2026-07-06
+updated: 2026-07-13
 completed: 2026-07-06
 priority: medium
 horizon: s

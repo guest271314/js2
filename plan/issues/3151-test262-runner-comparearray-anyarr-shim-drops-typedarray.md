@@ -4,7 +4,7 @@ title: "test262 runner: compareArray/assert_compareArray shims typed `any[]` dro
 status: done
 completed: 2026-07-11
 assignee: ttraenkler/fable-sub1
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: medium

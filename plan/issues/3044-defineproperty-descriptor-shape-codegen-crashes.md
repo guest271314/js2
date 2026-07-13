@@ -3,7 +3,7 @@ id: 3044
 title: "Object.defineProperty: compiler crashes on specific descriptor test shapes (invalid Wasm / illegal cast / op.endsWith / ctors-not-defined)"
 status: done
 completed: 2026-07-05
-sprint: current
+sprint: 71
 priority: high
 horizon: s
 feasibility: medium

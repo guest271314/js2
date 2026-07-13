@@ -2,7 +2,7 @@
 id: 3042
 title: "Object.defineProperty: attribute round-trip fidelity (writable/enumerable/configurable not faithfully stored + reported)"
 status: done
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: medium

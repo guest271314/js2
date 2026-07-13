@@ -2,7 +2,7 @@
 id: 3096
 title: "Free variables referenced only in a parameter-default initializer are not captured by arrow/function-expression closures"
 status: done
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 feasibility: medium

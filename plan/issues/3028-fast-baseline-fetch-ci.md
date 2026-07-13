@@ -2,7 +2,7 @@
 id: 3028
 title: "deploy-pages/ci baseline fetch: plain depth-1 clone of js2wasm-baselines pulls ~500 MB runs/ tree — 3-14 min per run"
 status: done
-sprint: current
+sprint: 71
 priority: high
 horizon: s
 feasibility: easy

@@ -4,9 +4,9 @@ title: "Standalone: native Promise.allSettled / Promise.any combinators — clea
 status: done
 completed: 2026-07-11
 assignee: ttraenkler/fable-harvest1
-sprint: current
+sprint: 71
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-13
 priority: high
 horizon: l
 feasibility: hard

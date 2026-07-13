@@ -2,9 +2,9 @@
 id: 3023
 title: "iterator protocol: synthesized-iterator .next callability + for-of/for-await abrupt-completion residual (~508 default-lane fails)"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-03
-updated: 2026-07-04
+updated: 2026-07-13
 completed: 2026-07-04
 priority: high
 horizon: m

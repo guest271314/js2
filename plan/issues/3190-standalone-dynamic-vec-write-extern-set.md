@@ -13,7 +13,7 @@ es_edition: multi
 language_feature: member-assignment
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: l
 related: [3183, 3179, 3169, 2186, 2860]
 origin: "Found while implementing #3183 (the READ-side fix). #3183 made an any-typed vec enumerate for-in and answer string-key reads; this is the remaining WRITE face."

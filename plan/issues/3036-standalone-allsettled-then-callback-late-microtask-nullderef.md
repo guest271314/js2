@@ -12,7 +12,7 @@ task_type: bug
 area: codegen, runtime
 language_feature: async
 goal: standalone-mode
-sprint: current
+sprint: 71
 related: [3035, 2980, 2867]
 ---
 

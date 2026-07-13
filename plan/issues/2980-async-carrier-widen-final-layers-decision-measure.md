@@ -17,7 +17,7 @@ completed: 2026-07-10
 # pairing (bot-park-held) + stakeholder sign-off. See the 07-10 section below.
 # Claim released; the flip is an S slice once both gates clear.
 created: 2026-07-02
-updated: 2026-07-05
+updated: 2026-07-13
 priority: high
 horizon: l
 feasibility: hard
@@ -27,7 +27,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: async
 goal: standalone-mode
-sprint: current
+sprint: 71
 parent: 2895
 depends_on: [2906, 2922]
 related: [2867, 2919, 2865, 1373b]

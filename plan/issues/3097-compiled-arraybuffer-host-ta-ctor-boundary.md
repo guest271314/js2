@@ -4,7 +4,7 @@ title: "codegen/runtime: compiled ArrayBuffer vec struct does not marshal to a h
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3097
-sprint: current
+sprint: 71
 priority: medium
 horizon: l
 feasibility: hard

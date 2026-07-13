@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-number-resid
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: medium
 task_type: refactor
@@ -13,7 +13,7 @@ area: codegen
 es_edition: n/a
 language_feature: error-throw
 goal: maintainability
-sprint: current
+sprint: 71
 horizon: m
 umbrella: 3182
 related: [3175, 3173, 3171, 3029, 3102]

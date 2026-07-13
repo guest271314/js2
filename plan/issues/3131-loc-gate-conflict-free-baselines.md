@@ -3,9 +3,9 @@ id: 3131
 title: "loc-budget/coercion-sites gates: end the per-PR baseline-bump merge-conflict churn"
 status: done
 assignee: ttraenkler/fable-locfix
-sprint: current
+sprint: 71
 created: 2026-07-10
-updated: 2026-07-10
+updated: 2026-07-13
 completed: 2026-07-10
 priority: high
 horizon: m

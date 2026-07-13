@@ -3,7 +3,7 @@ id: 3048
 title: "codegen: 'Missing __make_getter_callback import' CE on object-literal getters / computed-property methods (#1027 resurgence, ~22 files)"
 status: done
 completed: 2026-07-05
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: medium

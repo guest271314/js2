@@ -2,7 +2,7 @@
 id: 3046
 title: "JSON.parse reviver: `this` is not bound to the holder object (Object.defineProperty(this,…) in a reviver throws called-on-non-object)"
 status: done
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 feasibility: medium

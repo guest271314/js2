@@ -3,7 +3,7 @@ id: 3063
 title: "codegen: implement legacy global escape() / unescape() (§B.2.1/.2) — JS-host lowering"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 feasibility: easy

@@ -3,7 +3,7 @@ id: 3084
 title: "RegExp @@match/@@replace/@@split eager lastIndex coercion during protocol violates §22.2.6.8 (fires valueOf on non-empty match)"
 status: done
 assignee: ttraenkler/fable-3084
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

@@ -4,9 +4,9 @@ title: "Standalone async scheduler: for-await over a sync iterator yielding reje
 status: done
 assignee: ttraenkler/fable-2978
 depends_on: []
-sprint: current
+sprint: 71
 created: 2026-07-02
-updated: 2026-07-10
+updated: 2026-07-13
 completed: 2026-07-10
 priority: high
 feasibility: hard

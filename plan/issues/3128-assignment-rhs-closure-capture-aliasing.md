@@ -4,9 +4,9 @@ title: "Assignment lost when the RHS contains a closure capturing the assigned v
 status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-3128 (rescued by ttraenkler/fable-18th)
-sprint: current
+sprint: 71
 created: 2026-07-10
-updated: 2026-07-10
+updated: 2026-07-13
 priority: medium
 horizon: s
 feasibility: medium

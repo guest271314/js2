@@ -4,7 +4,7 @@ slug: standalone-buffer-family-proto-getter-gopd-brandcheck
 title: "Standalone: gOPD on un-wired buffer-family proto getters returns undefined → `.get` traps (brand-check cluster)"
 status: done
 assignee: opus-tabrand
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

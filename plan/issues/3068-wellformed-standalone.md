@@ -3,7 +3,7 @@ id: 3068
 title: "codegen: pure-Wasm String.prototype.isWellFormed / toWellFormed (§22.1.3) — standalone/WASI lowering"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: easy

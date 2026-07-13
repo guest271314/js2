@@ -4,7 +4,7 @@ title: "Typed ref-element array HOFs (find/filter/every/…): admit native closu
 status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-3098r
-sprint: current
+sprint: 71
 model: fable
 created: 2026-07-10
 priority: high

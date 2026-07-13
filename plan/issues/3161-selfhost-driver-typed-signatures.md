@@ -3,9 +3,9 @@ id: 3161
 title: "Self-hosted stdlib driver: generalized typed-signature emit path (Precursor B/C — unblocks array-methods + object-runtime families)"
 status: done
 assignee: ttraenkler/fable-senior2
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 completed: 2026-07-12
 priority: high
 horizon: s

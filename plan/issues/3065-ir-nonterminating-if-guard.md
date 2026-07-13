@@ -3,9 +3,9 @@ id: 3065
 title: "IR: claim non-terminating `if (cond) <stmt>;` guard at non-void body position (select↔builder parity, follow-on #1979)"
 status: done
 assignee: ttraenkler/sendev-irbucket
-sprint: current
+sprint: 71
 created: 2026-07-06
-updated: 2026-07-06
+updated: 2026-07-13
 completed: 2026-07-06
 priority: medium
 horizon: s

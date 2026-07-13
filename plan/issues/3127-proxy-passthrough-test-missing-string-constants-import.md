@@ -2,7 +2,7 @@
 id: 3127
 title: "proxy-passthrough.test.ts broken on main (missing string_constants import) — masked a REAL bug: trap-absent Proxy get on a WasmGC-struct target reads undefined"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-10
 completed: 2026-07-10
 priority: medium

@@ -11,7 +11,7 @@ area: codegen
 es_edition: multi
 language_feature: array-methods
 goal: builtin-methods
-sprint: current
+sprint: 71
 horizon: m
 related: [3185, 3201, 3215, 2001]
 loc-budget-allow: [src/codegen/array-methods.ts, src/codegen/statements/loops.ts]

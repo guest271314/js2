@@ -4,7 +4,7 @@ title: "default lane: Array.prototype fold/predicate generics (reduce/reduceRigh
 status: done
 completed: 2026-07-12
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: hard
 task_type: bug
@@ -12,7 +12,7 @@ area: codegen
 es_edition: multi
 language_feature: array-methods
 goal: builtin-methods
-sprint: current
+sprint: 71
 horizon: m
 umbrella: 3185
 related: [3185, 3169, 3180, 3015, 3170]

@@ -3,9 +3,9 @@ id: 3079
 title: "claim-issue.mjs --allocate hangs/times out under load — O(N) git cat-file per reservation + unbounded gh scan"
 status: done
 completed: 2026-07-07
-sprint: current
+sprint: 71
 created: 2026-07-07
-updated: 2026-07-07
+updated: 2026-07-13
 priority: high
 horizon: s
 feasibility: medium

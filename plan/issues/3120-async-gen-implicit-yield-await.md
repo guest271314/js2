@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-3120
 pr: 2841
-sprint: current
+sprint: 71
 model: fable
 created: 2026-07-09
 priority: medium

@@ -3,7 +3,7 @@ id: 3060
 title: "Object.hasOwn(structLiteral, key) returns false in host mode — __object_hasOwn host import skips wasm-struct marshalling (~24 default-lane fails)"
 status: done
 created: 2026-07-06
-updated: 2026-07-06
+updated: 2026-07-13
 completed: 2026-07-06
 priority: medium
 feasibility: medium
@@ -13,7 +13,7 @@ area: runtime
 language_feature: object-hasown
 es_edition: 2022
 goal: spec-completeness
-sprint: current
+sprint: 71
 horizon: s
 test262_category: built-ins/Object/hasOwn
 test262_fail: 24

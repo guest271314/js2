@@ -4,9 +4,9 @@ title: "IR: class-member residual — private fields, accessors, inheritance/sup
 status: done
 assignee: opus-3000e-impl
 completed: 2026-07-05
-sprint: current
+sprint: 71
 created: 2026-07-02
-updated: 2026-07-05
+updated: 2026-07-13
 priority: medium
 horizon: xl
 feasibility: hard

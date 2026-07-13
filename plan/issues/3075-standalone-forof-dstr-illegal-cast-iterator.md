@@ -2,7 +2,7 @@
 id: 3075
 title: "standalone: for-of / for-await-of destructuring throws 'illegal cast [in __iterator]' (residual after #1323)"
 status: done
-sprint: current
+sprint: 71
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +12,7 @@ language_feature: iterator-protocol, for-of, for-await-of, destructuring
 goal: standalone-mode
 related: [1781, 1323, 1454, 1347, 1471]
 created: 2026-07-06
-updated: 2026-07-10
+updated: 2026-07-13
 completed: 2026-07-10
 assignee: ttraenkler/fable-3075
 origin: "2026-07-06 /harvest-errors run against standalone current.jsonl (6.7.2026)."

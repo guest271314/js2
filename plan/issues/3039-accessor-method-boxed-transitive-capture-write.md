@@ -2,9 +2,9 @@
 id: 3039
 title: "object/class methods & accessors can't read/write a BOXED transitively-captured outer variable (emit garbage)"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-04
-updated: 2026-07-05
+updated: 2026-07-13
 completed: 2026-07-05
 assignee: ttraenkler/dev-3036
 priority: high

@@ -4,12 +4,12 @@ title: "compiled-acorn THROWS parsing its OWN source — two bisected constructs
 status: done
 completed: 2026-07-04
 assignee: ttraenkler/fable-2853
-sprint: current
+sprint: 71
 priority: low
 horizon: m
 feasibility: hard
 created: 2026-06-30
-updated: 2026-07-04
+updated: 2026-07-13
 task_type: bugfix
 area: codegen, runtime
 language_feature: regexp, tokenizer

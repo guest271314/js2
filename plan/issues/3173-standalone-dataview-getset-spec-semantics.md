@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-dataview
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: hard
 task_type: bug
@@ -14,7 +14,7 @@ es_edition: multi
 language_feature: dataview
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: l
 related: [2860, 3062, 3054, 3058, 2872]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"

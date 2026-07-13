@@ -4,7 +4,7 @@ title: "class C extends F (plain fnctor with runtime-assigned .prototype): insta
 status: done
 completed: 2026-07-11
 assignee: ttraenkler/fable-reconcile
-sprint: current
+sprint: 71
 priority: medium
 horizon: l
 feasibility: hard

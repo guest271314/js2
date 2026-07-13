@@ -2,7 +2,7 @@
 id: 3085
 title: "Host mode: Symbol.prototype.toString / String(symbol) drop the symbol id"
 status: done
-sprint: current
+sprint: 71
 priority: medium
 assignee: ttraenkler/dev-B2
 created: 2026-07-07

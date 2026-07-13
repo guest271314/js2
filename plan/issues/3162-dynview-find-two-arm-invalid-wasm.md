@@ -4,7 +4,7 @@ title: "[SOUNDNESS] dyn-view find/findIndex through the #3058 two-arm emits INVA
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-find-wasm
-sprint: current
+sprint: 71
 created: 2026-07-12
 priority: high
 task_type: bug

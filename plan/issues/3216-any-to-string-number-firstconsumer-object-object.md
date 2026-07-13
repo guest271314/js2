@@ -13,7 +13,7 @@ task_type: bugfix
 area: codegen
 language_feature: string-coercion
 goal: standalone
-sprint: current
+sprint: 71
 horizon: m
 related: [2875, 2860, 2979, 1961]
 umbrella: 2860

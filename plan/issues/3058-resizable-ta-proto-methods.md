@@ -10,10 +10,10 @@ reasoning_effort: max
 task_type: feature
 area: codegen
 language_feature: typed-array, resizable-arraybuffer, dynamic-index
-sprint: current
+sprint: 71
 horizon: l
 created: 2026-07-05
-updated: 2026-07-09
+updated: 2026-07-13
 assignee: ttraenkler/fable-3058
 es_edition: ES2024
 test262_category: built-ins/TypedArray

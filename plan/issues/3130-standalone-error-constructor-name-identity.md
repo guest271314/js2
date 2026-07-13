@@ -3,9 +3,9 @@ id: 3130
 title: "Standalone: native Error objects lack `.constructor` / `.name` — blocks resolve-settled-*-self acceptance"
 status: done
 assignee: ttraenkler/fable-3130
-sprint: current
+sprint: 71
 created: 2026-07-10
-updated: 2026-07-10
+updated: 2026-07-13
 completed: 2026-07-10
 priority: medium
 horizon: s

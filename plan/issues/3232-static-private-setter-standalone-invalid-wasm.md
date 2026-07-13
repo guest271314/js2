@@ -2,7 +2,7 @@
 id: 3232
 title: "standalone: static private ACCESSOR setter emits invalid Wasm (C_setPrivateReference — call[0] ref-type mismatch) — 10 compile_error→pass"
 status: done
-sprint: current
+sprint: 71
 assignee: ttraenkler/opus-privref
 created: 2026-07-13
 updated: 2026-07-13

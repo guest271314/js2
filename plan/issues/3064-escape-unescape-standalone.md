@@ -3,7 +3,7 @@ id: 3064
 title: "codegen: pure-Wasm escape() / unescape() (§B.2.1.1/.2) — standalone/WASI lowering"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: easy

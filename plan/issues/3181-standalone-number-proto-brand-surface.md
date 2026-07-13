@@ -7,7 +7,7 @@ loc-budget-allow:
   - src/codegen/array-object-proto.ts
 assignee: ttraenkler/dev-number-resid
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: medium
 feasibility: hard
 task_type: bug
@@ -16,7 +16,7 @@ es_edition: multi
 language_feature: number
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: m
 related: [2860, 3175, 3171, 3174, 2896]
 origin: "residual clusters split off from #3175 (PR #2933) after the +46 dominant-bucket close"

@@ -4,7 +4,7 @@ title: "Array-literal lowering in an `any` context adopts a lossy NaN-f64 repres
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/fable-eqfix
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: hard

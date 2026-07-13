@@ -14,7 +14,7 @@ es_edition: es5
 language_feature: string-methods
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: s
 loc-budget-allow:
   - src/codegen/array-object-proto.ts
