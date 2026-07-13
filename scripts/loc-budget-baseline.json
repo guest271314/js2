@@ -1,12 +1,12 @@
 {
   "generated": "2026-07-13",
   "threshold": 1500,
-  "totalCeiling": 406868,
+  "totalCeiling": 406757,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
     "src/codegen/any-helpers.ts": 2720,
-    "src/codegen/array-methods.ts": 9816,
+    "src/codegen/array-methods.ts": 9876,
     "src/codegen/array-object-proto.ts": 2153,
     "src/codegen/async-cps.ts": 2384,
     "src/codegen/async-frame.ts": 2313,
