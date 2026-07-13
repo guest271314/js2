@@ -11,6 +11,9 @@ feasibility: hard
 goal: standalone-mode
 umbrella: 1781
 related: [56, 3053, 1536, 2902]
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/class-bodies.ts
 ---
 
 ## Problem
