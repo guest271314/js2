@@ -1463,11 +1463,13 @@ const STANDALONE_TA_SCALAR_HOFS: ReadonlySet<string> = new Set([
 
 /**
  * (#2903 R4b) The PACKED-INTEGER typed-array views whose `map`/`filter` are
- * routed to the native `__ta_map_*`/`__ta_filter_*` typed-RESULT helper. Excludes
- * `Uint8ClampedArray` (shares the `i8_byte` carrier but needs round-half-to-even
- * clamping, not truncation — follow-up) and the float views (`Float32Array`/
- * `Float64Array` use the `f64` carrier and already `map`/`filter` correctly
- * through the existing array-HOF path — byte-identical, left untouched).
+ * routed to the native `__ta_map_*`/`__ta_filter_*` typed-RESULT helper (STORE
+ * via width-truncation). `Uint8ClampedArray` (#2903 R4c) is handled alongside
+ * these but routes to the `clamp` helper variant (round-half-to-even store) — it
+ * is NOT in this set because it shares the `i8_byte` carrier and would collide.
+ * The float views (`Float32Array`/`Float64Array`) use the `f64` carrier and
+ * already `map`/`filter` correctly through the existing array-HOF path
+ * (byte-identical, left untouched).
  */
 const STANDALONE_TA_MAPFILTER_PACKED_VIEWS: ReadonlySet<string> = new Set([
   "Int8Array",
@@ -12530,8 +12532,10 @@ function compileCallExpression(
     // helper allocates a fresh same-kind packed `$__vec_<kind>` carrier and
     // drives the callback host-free via `__apply_closure`. Returns the vec ref
     // directly so the statically-typed result binding (`const b: Uint8Array =
-    // a.map(...)`) matches and reads element-correctly. Uint8Clamped + float
-    // views + `any`-held receivers are excluded (see the view set / R4b note).
+    // a.map(...)`) matches and reads element-correctly. `Uint8ClampedArray`
+    // (#2903 R4c) routes here too but through the `clamp` helper variant
+    // (round-half-to-even store). Float views + `any`-held receivers are still
+    // excluded (see the view set / the R4b/R4c notes).
     if (
       ctx.standalone &&
       (propAccess.name.text === "map" || propAccess.name.text === "filter") &&
@@ -12539,11 +12543,15 @@ function compileCallExpression(
       !expr.arguments.some((a) => ts.isSpreadElement(a))
     ) {
       const viewName = receiverType.getSymbol?.()?.getName?.();
-      if (viewName !== undefined && STANDALONE_TA_MAPFILTER_PACKED_VIEWS.has(viewName)) {
+      // (#2903 R4c) `Uint8ClampedArray` shares the `i8_byte` carrier but stores
+      // via ToUint8Clamp (round-half-to-even), not the width-truncation the other
+      // integer views use → a DISTINCT clamp helper (`clamp` flag below).
+      const isClamped = viewName === "Uint8ClampedArray";
+      if (viewName !== undefined && (STANDALONE_TA_MAPFILTER_PACKED_VIEWS.has(viewName) || isClamped)) {
         const methodName = propAccess.name.text as "map" | "filter";
         const storage = typedArrayVecStorage(ctx, viewName);
         const vecTypeIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
-        const helperIdx = ensureTaMapFilterHelper(ctx, methodName, vecTypeIdx);
+        const helperIdx = ensureTaMapFilterHelper(ctx, methodName, vecTypeIdx, isClamped);
         if (helperIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
           // Receiver → externref.
