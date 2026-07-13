@@ -30,6 +30,9 @@ loc-budget-allow:
   - src/codegen/expressions.ts
   - src/codegen/index.ts
   - src/codegen/iterator-native.ts
+  - src/codegen/closures.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/array-methods.ts
 coercion-sites-allow:
   - src/codegen/iter-hof-native.ts
   - src/codegen/iter-lazy-native.ts
