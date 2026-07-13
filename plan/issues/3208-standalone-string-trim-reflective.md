@@ -16,7 +16,8 @@ goal: standalone
 umbrella: 2860
 sprint: current
 horizon: s
-loc-budget-allow: 120
+loc-budget-allow:
+  - src/codegen/array-object-proto.ts
 related: [2860, 2875, 2885]
 origin: "opus-standalone harvest of #2860 honest-gap lane diff (2026-07-13): String.prototype.trim family sub-slice of #2875, independent of #2885 descriptor core."
 ---
