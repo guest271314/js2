@@ -7,6 +7,7 @@ import type { Instr, ValType } from "../ir/types.js";
  * and native string method calls.
  */
 import { ts } from "../ts-api.js";
+import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
 import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { compileAndEmitToString, emitToString, registerStringHelperEmitters } from "./coercion-engine.js";
@@ -24,6 +25,7 @@ import {
   stringConstantExternrefInstrs,
   tryCompileNativeVecConcatOperand,
 } from "./native-strings.js";
+import { emitBrandCheckTypeError } from "./native-proto.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   emitStandaloneRegExpToStringFromExpr,
@@ -347,6 +349,99 @@ function emitArgAsNativeString(ctx: CodegenContext, fctx: FunctionContext, value
     // Engine declined (unexpected shape) — fall through to the legacy coercion.
   }
   compileExpression(ctx, fctx, value, nativeStringType(ctx));
+}
+
+/**
+ * (#3254) The reachable-set members of a receiver's TS type — the union
+ * constituents, or `[t]` for a non-union. Used to decide whether a borrowed
+ * `String.prototype.<m>.call(this)` receiver could be `null`/`undefined` (and so
+ * needs the §22.1.3 `RequireObjectCoercible` runtime throw) vs is definitely a
+ * coercible primitive/object (ToString directly).
+ */
+function receiverTypeCouldBeNullish(t: ts.Type): boolean {
+  const F = ts.TypeFlags;
+  const NULLISH = F.Null | F.Undefined | F.Void | F.Any | F.Unknown;
+  const members = t.isUnion() ? t.types : [t];
+  return members.some((m) => (m.flags & NULLISH) !== 0);
+}
+
+/**
+ * (#3254) Coerce a **borrowed** `String.prototype.<m>.call(thisArg, …)` receiver
+ * to a native `ref $AnyString`, implementing the §22.1.3 method preamble
+ * `? RequireObjectCoercible(this)` then `S = ? ToString(this)`:
+ *
+ *   - `null` / `undefined` (static, or the runtime `$undefined` singleton / a
+ *     null externref) → **throw TypeError** (RequireObjectCoercible). This is
+ *     what the ~76 `assert.throws(TypeError, …)` trim-family tests assert, and
+ *     the shared this-coercion site feeds EVERY `STANDALONE_STR_PROTO_METHODS`
+ *     entry (charAt / indexOf / slice / toUpperCase / …), so the fix generalises
+ *     beyond trim.
+ *   - everything else → `ToString(this)` via the type-aware native coercion
+ *     engine ({@link emitArgAsNativeString} / {@link compileNativeConcatOperand}):
+ *     boolean → `"true"`/`"false"`, number → its decimal form, object → its own
+ *     `toString()` (OrdinaryToPrimitive, hint string, which may itself throw),
+ *     string → passthrough.
+ *
+ * Root cause it fixes: the standalone borrowed-method dispatch (calls.ts) used
+ * to synthesise `recv.<m>()` and lean on `compileNativeStringMethodCall`'s
+ * default `emitReceiver`, which only handled a string-typed / object-struct
+ * receiver — a boolean/number `this` fell through to the `$__any_to_string`
+ * `"[object Object]"` terminal, and `undefined` (the non-null tag-1 singleton)
+ * silently coerced instead of throwing. The reflective closure body
+ * (`emitStringTrimMemberBody`) already did ROC+ToString, but the `.call()` fast
+ * path bypasses it.
+ *
+ * Standalone / WASI only (the caller is `ctx.standalone`-gated). Leaves exactly
+ * one `ref $AnyString` on the stack.
+ */
+export function emitBorrowedStringReceiverToString(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverArg: ts.Expression,
+  method: string,
+): ValType | null {
+  const roMsg = `String.prototype.${method} called on null or undefined`;
+  const tsType = valueExprTsType(ctx, receiverArg);
+
+  // Definitely-coercible receiver (boolean / number / string / object / bigint —
+  // never null|undefined|any|unknown) → ToString directly, no ROC guard needed.
+  if (!receiverTypeCouldBeNullish(tsType)) {
+    emitArgAsNativeString(ctx, fctx, receiverArg);
+    return nativeStringType(ctx);
+  }
+
+  // Receiver could be null/undefined (static `null`/`undefined`, or a dynamic
+  // `any`/nullish-union) → evaluate ONCE to an externref, RequireObjectCoercible
+  // (throw on null OR the `$undefined` singleton), then ToString via the pure
+  // in-module `$__any_to_string` dispatcher (host-free; handles boxed
+  // string/number/boolean and objects).
+  const recvExtern = allocLocal(fctx, `__borrow_this_${fctx.locals.length}`, { kind: "externref" });
+  const rt = compileExpression(ctx, fctx, receiverArg, { kind: "externref" });
+  if (rt && rt.kind !== "externref") {
+    coerceType(ctx, fctx, rt, { kind: "externref" });
+  }
+  fctx.body.push({ op: "local.set", index: recvExtern });
+
+  // nullish = ref.is_null(recv)  [∨ isUndefinedSingleton(recv) when the regime
+  // is active — undefined is then a NON-null tag-1 box that ref.is_null misses].
+  fctx.body.push({ op: "local.get", index: recvExtern });
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  if (undefinedSingletonActive(ctx)) {
+    const scratchAny = allocLocal(fctx, `__borrow_this_any_${fctx.locals.length}`, { kind: "anyref" });
+    if (emitIsUndefinedSingletonExternAt(ctx, fctx, recvExtern, scratchAny)) {
+      fctx.body.push({ op: "i32.or" });
+    }
+  }
+  const throwInstrs: Instr[] = [];
+  emitBrandCheckTypeError(ctx, throwInstrs, roMsg);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs } as Instr);
+
+  // S = ToString(this)
+  fctx.body.push({ op: "local.get", index: recvExtern });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+  return nativeStringType(ctx);
 }
 
 // ── String operations ─────────────────────────────────────────────────
