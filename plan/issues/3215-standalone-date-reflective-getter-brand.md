@@ -17,7 +17,10 @@ parent: 3174
 sprint: current
 horizon: m
 related: [2860, 3174, 2875, 2979]
-loc-budget-allow: src/codegen/expressions/builtins.ts
+loc-budget-allow:
+  - src/codegen/expressions/builtins.ts
+  - src/codegen/array-object-proto.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3215 — standalone reflective Date prototype getter: brand check + native body
