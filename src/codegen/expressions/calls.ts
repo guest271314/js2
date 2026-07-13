@@ -162,6 +162,8 @@ import {
   ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   emitArrayIteratorPrototypeSingleton,
+  emitGeneratorFunctionPrototypeSingleton,
+  emitFunctionPrototypeObjectSingleton,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
 import {
@@ -7974,6 +7976,15 @@ function compileCallExpression(
           }
         }
         if (isGen) {
+          // (#3236 S1) Standalone sync generators route
+          // `Object.getPrototypeOf(genFn)` to the native `%Generator%`
+          // (= %GeneratorFunction.prototype%) singleton — host-free — instead of
+          // leaking `__get_generator_function_prototype`. Async generators keep
+          // the host import.
+          if (!isAsyncGen && (ctx.standalone || ctx.wasi)) {
+            const t = emitGeneratorFunctionPrototypeSingleton(ctx, fctx);
+            if (t) return t;
+          }
           const helperName = isAsyncGen
             ? "__get_async_generator_function_prototype"
             : "__get_generator_function_prototype";
@@ -8004,6 +8015,26 @@ function compileCallExpression(
       ) {
         const ctorType = emitTypedArrayIntrinsicCtorObject(ctx, fctx);
         if (ctorType) return ctorType;
+      }
+
+      // (#3236 S1) `Object.getPrototypeOf(<ordinary function>)` → the native
+      // `%Function.prototype%` `$Object` singleton (§20.2.3) in standalone. This
+      // is the SAME singleton that `%Generator%`'s `[[Prototype]]` links to, so
+      // `getPrototypeOf(getPrototypeOf(genFn)) === getPrototypeOf(ordinaryFn)`
+      // (prototype-relation-to-function.js) holds by identity. Keyed on a
+      // SYNTACTIC top-level function identifier (not a local binding, not a
+      // generator — those are handled above), so it cannot mis-map a non-function
+      // value. Without it the native `__getPrototypeOf` returns null for the
+      // opaque function closure. Host/gc keeps the `__getPrototypeOf` import path.
+      if (
+        (ctx.standalone || ctx.wasi) &&
+        ts.isIdentifier(arg0) &&
+        !fctx.localMap.has(arg0.text) &&
+        ctx.topLevelFunctionNames.has(arg0.text) &&
+        !ctx.generatorFunctions.has(arg0.text)
+      ) {
+        const fpType = emitFunctionPrototypeObjectSingleton(ctx, fctx);
+        if (fpType) return fpType;
       }
 
       const argTsType = ctx.checker.getTypeAtLocation(arg0);

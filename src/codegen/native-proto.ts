@@ -138,7 +138,18 @@ const BUILTIN_BRAND_TABLE: Readonly<Record<string, number>> = {
   // (`toString` member; constructor/name/message data props via the meta-fold).
   SuppressedError: BUILTIN_BRAND_BASE + 43,
 
-  // Next free slot: BUILTIN_BRAND_BASE + 44 (append only).
+  // ── #3236 S1: %GeneratorPrototype% (sync generator instance proto) ─────────
+  // Not a global-constructor `.prototype` like the others — it is the intrinsic
+  // %GeneratorPrototype% reached via `genFn.prototype` / `getPrototypeOf(genFn)
+  // .prototype`. Reusing the native-proto glue gives its `next`/`return`/`throw`
+  // members descriptor-carrying (§17 {w:T,e:F,c:T}) brand-checked callable
+  // closure values for free (host-free). Invoking a member on a non-Generator
+  // `this` degrades to the shared catchable TypeError (GeneratorValidate,
+  // §27.5.1.2) — every GeneratorPrototype value-call test passes a non-generator
+  // `this` and expects exactly that.
+  GeneratorPrototype: BUILTIN_BRAND_BASE + 44,
+
+  // Next free slot: BUILTIN_BRAND_BASE + 45 (append only).
 };
 
 /**

@@ -110,6 +110,7 @@ import {
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
   emitNativeGlobalThisObject,
+  emitGeneratorPrototypeSingleton,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -4864,6 +4865,13 @@ export function compilePropertyAccess(
         !!decl &&
         (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) &&
         decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      // (#3236 S1) Standalone sync generators route `genFn.prototype` to the
+      // native `%GeneratorPrototype%` singleton (host-free) instead of leaking
+      // `__get_generator_prototype`. Async generators keep the host import.
+      if (!isAsyncGen && (ctx.standalone || ctx.wasi)) {
+        const t = emitGeneratorPrototypeSingleton(ctx, fctx);
+        if (t) return t;
+      }
       const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
       const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
@@ -4972,6 +4980,13 @@ export function compilePropertyAccess(
       const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
       if (decl && (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl))) {
         isAsyncGen = decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) === true;
+      }
+      // (#3236 S1) Standalone sync generators route `genFn.prototype` to the
+      // native `%GeneratorPrototype%` singleton (host-free) instead of leaking
+      // `__get_generator_prototype`. Async generators keep the host import.
+      if (!isAsyncGen && (ctx.standalone || ctx.wasi)) {
+        const t = emitGeneratorPrototypeSingleton(ctx, fctx);
+        if (t) return t;
       }
       const helperName = isAsyncGen ? "__get_async_generator_prototype" : "__get_generator_prototype";
       const helperIdx = ensureLateImport(ctx, helperName, [], [{ kind: "externref" }]);
