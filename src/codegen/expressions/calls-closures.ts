@@ -8,16 +8,16 @@
  * - tryExternClassMethodOnAny — resolve method call on any-typed receiver via extern classes
  */
 import { ts } from "../../ts-api.js";
-import { isVoidType } from "../../checker/type-mapper.js";
+import { isVoidType, isPromiseType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
-import { getOrCreateFuncRefWrapperTypes } from "../closures.js";
+import { getFuncRefWrapperRootTypeIdx, getOrCreateFuncRefWrapperTypes } from "../closures.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
-import { emitNullCheckThrow } from "../property-access.js";
+import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
-import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
-import { emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
+import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
+import { defaultValueInstrs, emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
 import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitClosureCallArgcExtras, emitResetArgcExtras, emitWrapperDynamicMethodCall } from "./calls.js";
@@ -82,6 +82,213 @@ function getUserFunctionMemberNames(sf: ts.SourceFile): Set<string> {
   visit(sf);
   _userFunctionMemberNamesCache.set(sf, names);
   return names;
+}
+
+/**
+ * (#3205) A single funcref-type dispatch candidate for a callable property /
+ * element call: the concrete closure struct type, its lifted funcref type, and
+ * the wasm return type that funcref yields.
+ */
+type FuncCandidate = { funcTypeIdx: number; structTypeIdx: number; returnType: ValType | null };
+
+/**
+ * (#3205) Build the funcref-type candidate set for a callable-property dispatch.
+ *
+ * A closure stored in an object field / array element may have a DIFFERENT
+ * actual signature than the field's DECLARED type — a covariant return
+ * (`() => number` stored in a `() => void` field) or an activated async closure
+ * (its result was rewritten to externref/Promise). Every no-capture wrapper
+ * struct is a layout-identical `(struct (field funcref))`, but
+ * `getOrCreateFuncRefWrapperTypes` chains each later signature `sub final` under
+ * the module's FIRST wrapper (the chain root). WasmGC isorecursive
+ * canonicalization keys on (fields, supertype, finality), so the siblings do NOT
+ * merge: a `ref.cast` of the value to the DECLARED wrapper (and of its funcref
+ * to the declared funcref type) nulls out whenever the value's actual wrapper
+ * differs, and `call_ref` then traps on the null funcref ("dereferencing a null
+ * pointer"). This scans the registered closures of the SAME param arity/types
+ * whose funcref type differs, so the dispatch can discriminate on the funcref's
+ * exact (true-signature) type instead. Mirrors the calls.ts callable-param fix
+ * (#2873).
+ */
+function buildClosureFuncCandidates(
+  ctx: CodegenContext,
+  declared: FuncCandidate,
+  sigParamCount: number,
+  sigParamWasmTypes: ValType[],
+): FuncCandidate[] {
+  const funcCandidates: FuncCandidate[] = [declared];
+  const seen = new Set<number>([declared.funcTypeIdx]);
+
+  // (#3205) Speculatively admit the externref-return and void-return variants
+  // even when no such closure is registered yet — the stored closure may be
+  // compiled AFTER this dispatch site (a forward reference: `class C { fn: () =>
+  // void } … new C(asyncOrValueReturningClosure)`, wrapped only when the `new`
+  // site compiles). An ACTIVATED ASYNC closure's result is rewritten to
+  // externref (the Promise), and a covariant object/string return is externref
+  // too, so the externref variant is the one the corpus async/asyncTest cluster
+  // needs. Mirrors calls.ts `tryAltFuncType` (#1131/#2873). `getOrCreateFunc-
+  // RefWrapperTypes` is signature-cached, so a later value site reuses the same
+  // funcTypeIdx the dispatch discriminates on.
+  const tryAlt = (retTypes: ValType[]): void => {
+    const alt = getOrCreateFuncRefWrapperTypes(ctx, sigParamWasmTypes, retTypes);
+    if (alt && !seen.has(alt.closureInfo.funcTypeIdx)) {
+      seen.add(alt.closureInfo.funcTypeIdx);
+      funcCandidates.push({
+        funcTypeIdx: alt.closureInfo.funcTypeIdx,
+        structTypeIdx: alt.closureInfo.structTypeIdx,
+        returnType: alt.closureInfo.returnType,
+      });
+    }
+  };
+  // externref (async Promise / covariant object|string), void, and the numeric
+  // returns (covariant `() => number`→f64, `() => boolean`→i32 discarded into a
+  // `() => void` field) — the return kinds a covariant/forward-referenced stored
+  // closure plausibly has. Ref-returning closures are caught by the scan below
+  // when registered before this site (backward reference).
+  const declaredKind = declared.returnType?.kind;
+  if (declaredKind !== "externref") tryAlt([{ kind: "externref" }]);
+  if (declared.returnType !== null) tryAlt([]);
+  if (declaredKind !== "f64") tryAlt([{ kind: "f64" }]);
+  if (declaredKind !== "i32") tryAlt([{ kind: "i32" }]);
+
+  for (const [, info] of ctx.closureInfoByTypeIdx) {
+    if (info.paramTypes.length !== sigParamCount) continue;
+    if (seen.has(info.funcTypeIdx)) continue;
+    let paramsMatch = true;
+    for (let pi = 0; pi < sigParamCount; pi++) {
+      if (!valTypesMatch(info.paramTypes[pi]!, sigParamWasmTypes[pi]!)) {
+        paramsMatch = false;
+        break;
+      }
+    }
+    if (paramsMatch) {
+      seen.add(info.funcTypeIdx);
+      funcCandidates.push({
+        funcTypeIdx: info.funcTypeIdx,
+        structTypeIdx: info.structTypeIdx,
+        returnType: info.returnType,
+      });
+    }
+  }
+  return funcCandidates;
+}
+
+/**
+ * (#3205) Compile a callable-property/element call's arguments into locals so a
+ * multi-arm funcref dispatch can re-push them in each candidate arm. Clamps to
+ * the declared param count (excess args evaluated for side effects then
+ * dropped) and pads missing args with defaults — matching the single-candidate
+ * arg handling in the callers, but persisted to locals.
+ */
+function collectPropertyCallArgLocals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  paramTypes: ValType[],
+): number[] {
+  const argLocals: number[] = [];
+  const paramCount = paramTypes.length;
+  for (let i = 0; i < Math.min(expr.arguments.length, paramCount); i++) {
+    compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes[i]);
+    const al = allocLocal(fctx, `__cparg_${fctx.locals.length}`, paramTypes[i]!);
+    fctx.body.push({ op: "local.set", index: al });
+    argLocals.push(al);
+  }
+  // Excess args: evaluate for side effects, drop.
+  for (let i = paramCount; i < expr.arguments.length; i++) {
+    const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
+    if (extraType !== null) fctx.body.push({ op: "drop" });
+  }
+  // Pad missing args with defaults.
+  for (let i = expr.arguments.length; i < paramCount; i++) {
+    const pt = paramTypes[i]!;
+    pushDefaultValue(fctx, pt, ctx);
+    const al = allocLocal(fctx, `__cparg_${fctx.locals.length}`, pt);
+    fctx.body.push({ op: "local.set", index: al });
+    argLocals.push(al);
+  }
+  return argLocals;
+}
+
+/**
+ * (#3205) Emit the order-independent multi-arm funcref dispatch for a callable
+ * property/element call. `closureLocal` holds the field/element value already
+ * cast to the wrapper ROOT (`(ref null rootIdx)` — the guaranteed supertype of
+ * every wrapper struct) and already null-checked; `argLocals` hold the
+ * coerced+padded arguments. The funcref is fetched off the root's field 0
+ * (valid for a closure of ANY wrapper subtype), then dispatched on its exact
+ * type: each arm re-casts self to that candidate's struct and coerces the
+ * return to `expectedReturn`. When no candidate's funcref matches, a TypeError
+ * is thrown (the callee was not a closure of any admitted signature). Mirrors
+ * the calls.ts callable-param multi-funcref dispatch (#1131 / #2873).
+ */
+function emitRootFuncrefDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  closureLocal: number,
+  rootIdx: number,
+  funcCandidates: FuncCandidate[],
+  argLocals: number[],
+  expectedReturn: ValType | null,
+): void {
+  // Fetch the funcref off the ROOT (field 0 is the root's own field, present on
+  // every wrapper subtype), then dispatch on its exact type.
+  fctx.body.push({ op: "local.get", index: closureLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: rootIdx, fieldIdx: 0 });
+  const funcrefLocal = allocLocal(fctx, `__cpfrd_${fctx.locals.length}`, { kind: "funcref" } as ValType);
+  fctx.body.push({ op: "local.set", index: funcrefLocal });
+
+  const retBlockType =
+    expectedReturn === null ? ({ kind: "empty" } as const) : ({ kind: "val", type: expectedReturn } as const);
+  const numericKind = (t: ValType): boolean => t.kind === "i32" || t.kind === "f64" || t.kind === "i64";
+
+  // Build the dispatch chain bottom-up; innermost else = throw TypeError.
+  let funcDispatch: Instr[] = typeErrorThrowInstrs(ctx);
+  for (const fc of [...funcCandidates].reverse()) {
+    const fcCallBody: Instr[] = [];
+    // Self: root-typed local downcast to this candidate's struct. The arm only
+    // runs when its funcref `ref.test` matched, and a closure's struct is always
+    // its funcref-signature's wrapper (or a capture subtype of it), so the
+    // downcast succeeds exactly on the live arm — and yields the non-null self
+    // that `call_ref` requires.
+    fcCallBody.push({ op: "local.get", index: closureLocal });
+    fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx });
+    for (const al of argLocals) fcCallBody.push({ op: "local.get", index: al });
+    fcCallBody.push({ op: "local.get", index: funcrefLocal });
+    fcCallBody.push({ op: "ref.cast", typeIdx: fc.funcTypeIdx });
+    fcCallBody.push({ op: "call_ref", typeIdx: fc.funcTypeIdx });
+
+    // Coerce the arm's return to the block's declared result type. Only the arm
+    // whose funcref matches at runtime runs; the others are type-validity
+    // padding, so the coercion MUST be import-free (a late import would shift
+    // indices and corrupt already-baked ref.func operands — the #2174 hazard).
+    const matchedDispatch = expectedReturn !== null && fc.returnType !== null;
+    if (expectedReturn === null && fc.returnType !== null) {
+      fcCallBody.push({ op: "drop" });
+    } else if (expectedReturn !== null && fc.returnType === null) {
+      fcCallBody.push(...defaultValueInstrs(expectedReturn));
+    } else if (
+      matchedDispatch &&
+      !valTypesMatch(fc.returnType!, expectedReturn!) &&
+      numericKind(expectedReturn!) &&
+      numericKind(fc.returnType!)
+    ) {
+      const saved = fctx.body;
+      fctx.body = fcCallBody;
+      coerceType(ctx, fctx, fc.returnType!, expectedReturn!);
+      fctx.body = saved;
+    } else if (matchedDispatch && !valTypesMatch(fc.returnType!, expectedReturn!)) {
+      fcCallBody.push({ op: "drop" });
+      fcCallBody.push(...defaultValueInstrs(expectedReturn!));
+    }
+
+    funcDispatch = [
+      { op: "local.get", index: funcrefLocal },
+      { op: "ref.test", typeIdx: fc.funcTypeIdx },
+      { op: "if", blockType: retBlockType, then: fcCallBody, else: funcDispatch } as Instr,
+    ];
+  }
+  fctx.body.push(...funcDispatch);
 }
 
 /** Compile a call to a closure variable: closureVar(args...) */
@@ -684,59 +891,109 @@ export function compileCallablePropertyCall(
     if (wrapperTypes) {
       const { structTypeIdx: wrapperStructIdx, closureInfo: matchedClosureInfo } = wrapperTypes;
 
+      // (#3205) Candidate set: the declared wrapper + every same-arity closure
+      // whose funcref type differs (covariant return / activated async closure).
+      // A byte-neutral read of ctx.closureInfoByTypeIdx (no emission).
+      const funcCandidates = buildClosureFuncCandidates(
+        ctx,
+        {
+          funcTypeIdx: matchedClosureInfo.funcTypeIdx,
+          structTypeIdx: wrapperStructIdx,
+          returnType: matchedClosureInfo.returnType,
+        },
+        sigParamCount,
+        sigParamWasmTypes,
+      );
+
       // Compile receiver (normalized to the struct type, #1734), get field value.
       compileGuardedReceiver();
       fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
-      // Convert externref -> closure struct ref (guarded to avoid illegal cast)
-      const closureRefType: ValType = {
-        kind: "ref_null",
-        typeIdx: wrapperStructIdx,
-      };
-      const closureLocal = allocLocal(fctx, `__cprop_ext_${fctx.locals.length}`, closureRefType);
-      fctx.body.push({ op: "any.convert_extern" });
-      emitGuardedRefCast(fctx, wrapperStructIdx);
-      fctx.body.push({ op: "local.set", index: closureLocal });
+      if (funcCandidates.length <= 1) {
+        // ── Single-candidate path (byte-identical to pre-#3205) ──
+        // The only closure of this arity in the module is the declared
+        // signature, so the value can only be it (or a capture subtype), and the
+        // declared-wrapper cast + single funcref cast are safe.
+        // Convert externref -> closure struct ref (guarded to avoid illegal cast)
+        const closureRefType: ValType = {
+          kind: "ref_null",
+          typeIdx: wrapperStructIdx,
+        };
+        const closureLocal = allocLocal(fctx, `__cprop_ext_${fctx.locals.length}`, closureRefType);
+        fctx.body.push({ op: "any.convert_extern" });
+        emitGuardedRefCast(fctx, wrapperStructIdx);
+        fctx.body.push({ op: "local.set", index: closureLocal });
 
-      // Push closure ref as first arg (self param) — null-check → TypeError (#728)
-      fctx.body.push({ op: "local.get", index: closureLocal });
-      emitNullCheckThrow(ctx, fctx, closureRefType);
+        // Push closure ref as first arg (self param) — null-check → TypeError (#728)
+        fctx.body.push({ op: "local.get", index: closureLocal });
+        emitNullCheckThrow(ctx, fctx, closureRefType);
 
-      // Push call arguments (only up to declared param count)
-      {
-        const wpParamCount = matchedClosureInfo.paramTypes.length;
-        for (let i = 0; i < Math.min(expr.arguments.length, wpParamCount); i++) {
-          compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
-        }
-        for (let i = wpParamCount; i < expr.arguments.length; i++) {
-          const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extraType !== null) {
-            fctx.body.push({ op: "drop" });
+        // Push call arguments (only up to declared param count)
+        {
+          const wpParamCount = matchedClosureInfo.paramTypes.length;
+          for (let i = 0; i < Math.min(expr.arguments.length, wpParamCount); i++) {
+            compileExpression(ctx, fctx, expr.arguments[i]!, matchedClosureInfo.paramTypes[i]);
+          }
+          for (let i = wpParamCount; i < expr.arguments.length; i++) {
+            const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
+            if (extraType !== null) {
+              fctx.body.push({ op: "drop" });
+            }
           }
         }
-      }
-      // Pad missing arguments
-      for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
-        pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
+        // Pad missing arguments
+        for (let i = expr.arguments.length; i < matchedClosureInfo.paramTypes.length; i++) {
+          pushDefaultValue(fctx, matchedClosureInfo.paramTypes[i]!, ctx);
+        }
+
+        // Get funcref from closure struct and call_ref — null-check → TypeError (#728)
+        fctx.body.push({ op: "local.get", index: closureLocal });
+        emitNullCheckThrow(ctx, fctx, closureRefType);
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: wrapperStructIdx,
+          fieldIdx: 0,
+        });
+        // Guard funcref cast to avoid illegal cast (#778)
+        emitGuardedFuncRefCast(fctx, matchedClosureInfo.funcTypeIdx);
+        emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedClosureInfo.funcTypeIdx });
+        fctx.body.push({
+          op: "call_ref",
+          typeIdx: matchedClosureInfo.funcTypeIdx,
+        });
+
+        return matchedClosureInfo.returnType ?? VOID_RESULT;
       }
 
-      // Get funcref from closure struct and call_ref — null-check → TypeError (#728)
+      // ── (#3205) Multi-candidate order-independent dispatch ──
+      // The value's actual wrapper may be a different `sub final` sibling than
+      // the declared wrapper (covariant return, activated async closure). Cast to
+      // the wrapper ROOT (supertype of every wrapper), fetch the funcref off the
+      // root, and dispatch on its exact type. When the field's declared return is
+      // Promise<T> but a stored async closure yields the raw Promise (externref),
+      // widen the dispatch result to externref so the Promise flows through
+      // intact (mirrors calls.ts #2174).
+      const calleeIsAsync = isPromiseType(sigRetType);
+      const expectedReturn: ValType | null = calleeIsAsync ? { kind: "externref" } : matchedClosureInfo.returnType;
+      const rootIdx = getFuncRefWrapperRootTypeIdx(ctx) ?? wrapperStructIdx;
+      const rootRefType: ValType = { kind: "ref_null", typeIdx: rootIdx };
+      const closureLocal = allocLocal(fctx, `__cprop_ext_${fctx.locals.length}`, rootRefType);
+      fctx.body.push({ op: "any.convert_extern" });
+      emitGuardedRefCast(fctx, rootIdx);
+      fctx.body.push({ op: "local.set", index: closureLocal });
+
+      // Null-check self while the guarded-cast backup is still the raw externref
+      // (compiling args below overwrites __lastGuardedCastBackup). The value is
+      // re-pushed per dispatch arm, so drop the on-stack copy this leaves.
       fctx.body.push({ op: "local.get", index: closureLocal });
-      emitNullCheckThrow(ctx, fctx, closureRefType);
-      fctx.body.push({
-        op: "struct.get",
-        typeIdx: wrapperStructIdx,
-        fieldIdx: 0,
-      });
-      // Guard funcref cast to avoid illegal cast (#778)
-      emitGuardedFuncRefCast(fctx, matchedClosureInfo.funcTypeIdx);
-      emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedClosureInfo.funcTypeIdx });
-      fctx.body.push({
-        op: "call_ref",
-        typeIdx: matchedClosureInfo.funcTypeIdx,
-      });
+      emitNullCheckThrow(ctx, fctx, rootRefType);
+      fctx.body.push({ op: "drop" });
 
-      return matchedClosureInfo.returnType ?? VOID_RESULT;
+      // Save args to locals so each dispatch arm can re-push them.
+      const argLocals = collectPropertyCallArgLocals(ctx, fctx, expr, matchedClosureInfo.paramTypes);
+
+      emitRootFuncrefDispatch(ctx, fctx, closureLocal, rootIdx, funcCandidates, argLocals, expectedReturn);
+      return expectedReturn ?? VOID_RESULT;
     }
   }
 
@@ -875,6 +1132,17 @@ export function compileCallableElementAccessCall(
   if (!wrapperTypes) return undefined;
   const { structTypeIdx: wrapperStructIdx, closureInfo } = wrapperTypes;
 
+  // (#3205) Candidate set: the declared wrapper + covariant/async variants (the
+  // stored element may return a value discarded into a `() => void` element
+  // type, or be an activated async closure whose result was rewritten to
+  // externref). See buildClosureFuncCandidates + compileCallablePropertyCall.
+  const funcCandidates = buildClosureFuncCandidates(
+    ctx,
+    { funcTypeIdx: closureInfo.funcTypeIdx, structTypeIdx: wrapperStructIdx, returnType: closureInfo.returnType },
+    sigParamCount,
+    sigParamWasmTypes,
+  );
+
   // 3. Compile elemAccess to push the element value. For an `Mw[]` (vec of
   //    callables) the element will be externref (boxed __fn_wrap). For a
   //    structurally-typed `(Mw, Mw)` tuple it may already be a closure
@@ -882,53 +1150,80 @@ export function compileCallableElementAccessCall(
   //    so we never get here.
   const elemResult = compileExpression(ctx, fctx, elemAccess);
   if (!elemResult) return undefined;
-
-  // 4. Coerce to closure-struct ref (mirror calls-closures.ts:507-519)
-  const closureRefType: ValType = { kind: "ref_null", typeIdx: wrapperStructIdx };
-  const closureLocal = allocLocal(fctx, `__cea_${fctx.locals.length}`, closureRefType);
-  if (elemResult.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" });
-    emitGuardedRefCast(fctx, wrapperStructIdx);
-  } else if (elemResult.kind === "ref" || elemResult.kind === "ref_null") {
-    // Already a struct ref — guard cast if the shape differs from the
-    // wrapper we resolved by signature.
-    if ((elemResult as { typeIdx: number }).typeIdx !== wrapperStructIdx) {
-      emitGuardedRefCast(fctx, wrapperStructIdx);
-    }
-  } else {
+  if (elemResult.kind !== "externref" && elemResult.kind !== "ref" && elemResult.kind !== "ref_null") {
     // Primitive element type with call signatures shouldn't happen — bail
     // to the historical fallback which drops everything for side effects.
+    // (The value pushed above is consumed by the fallback's own path.)
     return undefined;
   }
+
+  if (funcCandidates.length <= 1) {
+    // ── Single-candidate path (byte-identical to pre-#3205) ──
+    // 4. Coerce to closure-struct ref (mirror calls-closures.ts:507-519)
+    const closureRefType: ValType = { kind: "ref_null", typeIdx: wrapperStructIdx };
+    const closureLocal = allocLocal(fctx, `__cea_${fctx.locals.length}`, closureRefType);
+    if (elemResult.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" });
+      emitGuardedRefCast(fctx, wrapperStructIdx);
+    } else {
+      // Already a struct ref — guard cast if the shape differs from the
+      // wrapper we resolved by signature.
+      if ((elemResult as { typeIdx: number }).typeIdx !== wrapperStructIdx) {
+        emitGuardedRefCast(fctx, wrapperStructIdx);
+      }
+    }
+    fctx.body.push({ op: "local.set", index: closureLocal });
+
+    // 5. Push self (closureRef) as first lifted-fn arg, null-check throw
+    fctx.body.push({ op: "local.get", index: closureLocal });
+    emitNullCheckThrow(ctx, fctx, closureRefType);
+
+    // 6. Compile call args (clamped/padded — copy lines 462-478 of
+    //    compileCallablePropertyCall)
+    const cpParamCount = closureInfo.paramTypes.length;
+    for (let i = 0; i < Math.min(expr.arguments.length, cpParamCount); i++) {
+      compileExpression(ctx, fctx, expr.arguments[i]!, closureInfo.paramTypes[i]);
+    }
+    for (let i = cpParamCount; i < expr.arguments.length; i++) {
+      const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
+      if (extraType !== null) fctx.body.push({ op: "drop" });
+    }
+    for (let i = expr.arguments.length; i < cpParamCount; i++) {
+      pushDefaultValue(fctx, closureInfo.paramTypes[i]!, ctx);
+    }
+
+    // 7. Extract funcref + call_ref (mirror lines 543-557)
+    fctx.body.push({ op: "local.get", index: closureLocal });
+    emitNullCheckThrow(ctx, fctx, closureRefType);
+    fctx.body.push({ op: "struct.get", typeIdx: wrapperStructIdx, fieldIdx: 0 });
+    emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
+    emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
+    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
+
+    return closureInfo.returnType ?? VOID_RESULT;
+  }
+
+  // ── (#3205) Multi-candidate order-independent dispatch ──
+  const calleeIsAsync = isPromiseType(sigRetType);
+  const expectedReturn: ValType | null = calleeIsAsync ? { kind: "externref" } : closureInfo.returnType;
+  const rootIdx = getFuncRefWrapperRootTypeIdx(ctx) ?? wrapperStructIdx;
+  const rootRefType: ValType = { kind: "ref_null", typeIdx: rootIdx };
+  const closureLocal = allocLocal(fctx, `__cea_${fctx.locals.length}`, rootRefType);
+  if (elemResult.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" });
+  }
+  emitGuardedRefCast(fctx, rootIdx);
   fctx.body.push({ op: "local.set", index: closureLocal });
 
-  // 5. Push self (closureRef) as first lifted-fn arg, null-check throw
+  // Null-check self while the guarded-cast backup is still the element value
+  // (arg compilation below overwrites __lastGuardedCastBackup); re-pushed per arm.
   fctx.body.push({ op: "local.get", index: closureLocal });
-  emitNullCheckThrow(ctx, fctx, closureRefType);
+  emitNullCheckThrow(ctx, fctx, rootRefType);
+  fctx.body.push({ op: "drop" });
 
-  // 6. Compile call args (clamped/padded — copy lines 462-478 of
-  //    compileCallablePropertyCall)
-  const cpParamCount = closureInfo.paramTypes.length;
-  for (let i = 0; i < Math.min(expr.arguments.length, cpParamCount); i++) {
-    compileExpression(ctx, fctx, expr.arguments[i]!, closureInfo.paramTypes[i]);
-  }
-  for (let i = cpParamCount; i < expr.arguments.length; i++) {
-    const extraType = compileExpression(ctx, fctx, expr.arguments[i]!);
-    if (extraType !== null) fctx.body.push({ op: "drop" });
-  }
-  for (let i = expr.arguments.length; i < cpParamCount; i++) {
-    pushDefaultValue(fctx, closureInfo.paramTypes[i]!, ctx);
-  }
-
-  // 7. Extract funcref + call_ref (mirror lines 543-557)
-  fctx.body.push({ op: "local.get", index: closureLocal });
-  emitNullCheckThrow(ctx, fctx, closureRefType);
-  fctx.body.push({ op: "struct.get", typeIdx: wrapperStructIdx, fieldIdx: 0 });
-  emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
-  emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
-  fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
-
-  return closureInfo.returnType ?? VOID_RESULT;
+  const argLocals = collectPropertyCallArgLocals(ctx, fctx, expr, closureInfo.paramTypes);
+  emitRootFuncrefDispatch(ctx, fctx, closureLocal, rootIdx, funcCandidates, argLocals, expectedReturn);
+  return expectedReturn ?? VOID_RESULT;
 }
 
 /**
