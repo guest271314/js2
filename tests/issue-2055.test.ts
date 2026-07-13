@@ -1,20 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
+import { compileAndRunImportObject as compileAndRun } from "./helpers/compile.js";
 
 // #2055 — a relational comparison where one operand is an i32-promoted loop var
 // used to force the i32 numeric hint onto the *other* operand, truncating a
 // fractional f64 (e.g. `i < 2.5` became `i < 2`) via i32.trunc_sat_f64_s. The
 // fix only takes the i32 fast path when BOTH operands are provably i32-pure;
 // otherwise the i32 local is promoted to f64 and an f64 compare is emitted.
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
-    true,
-  );
-  const { instance } = await WebAssembly.instantiate(result.binary, result.importObject!);
-  return instance.exports as Record<string, Function>;
-}
 
 describe("#2055 relational i32 hint must not truncate a fractional f64 operand", () => {
   it("if (i < 2.5) with i32 loop var", async () => {
