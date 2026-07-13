@@ -9291,6 +9291,151 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
 }
 
 /**
+ * (#3223) Native standalone/WASI `__extern_rest_object(obj, excl) -> externref`
+ * — the host-free implementation of object-rest destructuring's
+ * CopyDataProperties (ES §14.7.4). Under `--target standalone`/`wasi` there is
+ * no JS runtime to satisfy the `env.__extern_rest_object` host import, so
+ * `{a, ...rest} = o` otherwise fails to instantiate host-free (a leaky pass).
+ *
+ * Signature differs from the host import ONLY in the second argument's shape:
+ * the host import takes a comma-joined excluded-keys STRING; this native helper
+ * takes an **exclusion object** `excl` (a plain `$Object` whose OWN keys are the
+ * excluded property names), built at the call site
+ * (`destructuring-params.ts`). Membership is therefore delegated to
+ * `__extern_get(excl, key)` — the proven open-object hash-map lookup — so there
+ * is NO runtime string tokenising, NO delimiter false-match, and NO trap-prone
+ * `$AnyString`/`$NativeString` cast in this body. The helper stays 100% in
+ * externref land, mirroring `ensureObjectGroupBy`.
+ *
+ *   out = OrdinaryObjectCreate(null)                 // __new_plain_object
+ *   if obj is null: return out                       // defensive; the source is
+ *                                                    // already RequireObjectCoercible-guarded upstream
+ *   keys = __object_keys(obj)                        // OWN-ENUMERABLE string keys, insertion order
+ *   for i in 0 .. __extern_length(keys):
+ *     key = __extern_get_idx(keys, i)
+ *     if __extern_get(excl, key) is nullish:         // key NOT excluded
+ *       __extern_set(out, key, __extern_get(obj, key))   // [[Get]] — invokes own getters, matches host
+ *   return out
+ *
+ * Registered lazily (append-only defined func — no funcidx shift of the
+ * in-flight function; all deps are object-runtime defined funcs already present
+ * once `ensureObjectRuntime` has run). Returns the `__extern_rest_object`
+ * funcIdx. Idempotent.
+ */
+export function ensureExternRestObject(ctx: CodegenContext): number {
+  ensureObjectRuntime(ctx);
+  const existing = ctx.funcMap.get("__extern_rest_object");
+  if (existing !== undefined) return existing;
+
+  const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+  const objectKeysIdx = ctx.funcMap.get("__object_keys")!;
+  const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+  const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+  const externGetIdx = ctx.funcMap.get("__extern_get")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  // Membership against the exclusion object is a BOOLEAN presence test
+  // (`__extern_has` — the native `in`-operator predicate). This deliberately
+  // does NOT go through `__extern_get`'s value/miss channel, which is ambiguous
+  // under the #2106 S1 regime (an absent key reads back as the non-null
+  // undefined SINGLETON, not null, so a `ref.is_null` probe would wrongly drop
+  // every non-excluded key). `__extern_has` returns i32 1/0 with no ambiguity.
+  const externHasIdx = ctx.funcMap.get("__extern_has")!;
+
+  // params: 0=obj 1=excl
+  // locals: 2=out 3=keys 4=len(f64) 5=i(i32) 6=key
+  const body: Instr[] = [
+    { op: "call", funcIdx: newPlainObjectIdx },
+    { op: "local.set", index: 2 },
+    // Defensive: a null source yields an empty rest object (matches the host
+    // `if (obj == null) return {}`). Upstream RequireObjectCoercible already
+    // throws for null/undefined sources, so this is belt-and-suspenders.
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 2 } as Instr, { op: "return" } as Instr],
+    } as Instr,
+    // keys = __object_keys(obj)
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: objectKeysIdx },
+    { op: "local.set", index: 3 },
+    // len = __extern_length(keys)
+    { op: "local.get", index: 3 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "local.set", index: 4 },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 5 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if f64(i) >= len → break
+            { op: "local.get", index: 5 },
+            { op: "f64.convert_i32_s" },
+            { op: "local.get", index: 4 },
+            { op: "f64.ge" },
+            { op: "br_if", depth: 1 },
+            // key = __extern_get_idx(keys, f64(i))
+            { op: "local.get", index: 3 },
+            { op: "local.get", index: 5 },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: externGetIdxIdx },
+            { op: "local.set", index: 6 },
+            // if key is NOT in excl (i.e. NOT excluded) → out[key] = __extern_get(obj, key)
+            { op: "local.get", index: 1 },
+            { op: "local.get", index: 6 },
+            { op: "call", funcIdx: externHasIdx },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 2 } as Instr,
+                { op: "local.get", index: 6 } as Instr,
+                { op: "local.get", index: 0 } as Instr,
+                { op: "local.get", index: 6 } as Instr,
+                { op: "call", funcIdx: externGetIdx } as Instr,
+                { op: "call", funcIdx: externSetIdx } as Instr,
+              ],
+            } as Instr,
+            // i++
+            { op: "local.get", index: 5 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 5 },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: 2 },
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__extern_rest_object", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__extern_rest_object",
+    typeIdx,
+    locals: [
+      { name: "out", type: { kind: "externref" } },
+      { name: "keys", type: { kind: "externref" } },
+      { name: "len", type: { kind: "f64" } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "key", type: { kind: "externref" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
  * (#1888 Slice 1) Reserve the `__apply_closure(externref fn, externref recv,
  * externref args) -> externref` arity-bridge funcIdx with a placeholder
  * `unreachable` body, registered in `funcMap`. The real body (an arity switch
@@ -10051,12 +10196,32 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   if (!types) return;
 
   // Enumerate concrete `__vec_<elemKind>` carriers (NOT $ObjVec — it keeps its
-  // own dedicated arm — and NOT the non-array `_byte` carriers). Dedup by
-  // typeIdx; sort for deterministic emission.
+  // own dedicated arm). Dedup by typeIdx; sort for deterministic emission.
+  //
+  // (#2903 R4) The packed TypedArray ELEMENT carriers — `i8_byte`
+  // (Int8/Uint8/Uint8Clamped), `i16_byte` (Int16/Uint16), `i32_elem`
+  // (Int32/Uint32) — ARE included here so an `any`-held / dynamically-dispatched
+  // typed array reads its elements through `__extern_get_idx` (the single
+  // chokepoint the native array-HOF loop `__hof_*`, `a[i]`, indexOf, includes
+  // and for-in all read through). Without this, those carriers fell to the null
+  // fallback → the HOF loop saw `undefined` at every index and returned wrong
+  // results host-free (findIndex→-1, reduce→0). The ArrayBuffer/DataView BYTE
+  // buffer `i32_byte` stays excluded (it is a raw byte store, not a JS-array-
+  // indexable element carrier). SIGNEDNESS BOUNDARY: `i8_byte`/`i16_byte` are
+  // read UNSIGNED (`array.get_u`) — correct for Uint8/Uint8Clamped/Uint16 (the
+  // common case + the storage's documented default read, dataview-native.ts),
+  // but a negative Int8/Int16 element reads as its unsigned bit-pattern. The
+  // shared carrier type (index.ts TYPED_ARRAY_PACKED_STORAGE — Int8Array and
+  // Uint8Array both map to `i8_byte`/kind `i8`) loses the constructor's
+  // signedness, so this generic read cannot recover it (every consumer routing
+  // through here — static or dynamic — reads unsigned). Those Int8/16 reads were
+  // already fully broken (null) here, so this is not a regression; recovering
+  // sub-i32 signed reads needs a per-signedness carrier type (deferred).
+  const excludedByteVecElemKinds = new Set(["i32_byte"]);
   const seen = new Set<number>();
   const carriers: { typeIdx: number; arrTypeIdx: number; elemType: ValType }[] = [];
   for (const [elemKind, vecTypeIdx] of ctx.vecTypeMap.entries()) {
-    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    if (excludedByteVecElemKinds.has(elemKind)) continue;
     if (seen.has(vecTypeIdx)) continue;
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     if (arrTypeIdx < 0) continue;
@@ -10072,10 +10237,28 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   // double-remap hazard). The singleton instrs carry no funcIdx/typeIdx, so
   // splicing them at FINALIZE cannot desync any index-shift walk.
   const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  // (#2903 R4) Packed sub-i32 element carriers (`i8`/`i16`) need an UNSIGNED
+  // packed load (`array.get_u`) — plain `array.get` is invalid on a packed
+  // array — then f64-box the zero-extended i32 (0..255 / 0..65535, always
+  // positive so `f64.convert_i32_s` == `_u`). Non-packed carriers keep the
+  // generic `array.get` + `boxVecElementToExternref`. Returns null for a kind
+  // with no boxing (leave that carrier to the null fallback).
+  const boxNumIdx = ctx.funcMap.get("__box_number");
+  const packedElemReadBox = (elemType: ValType): { getOp: string; boxOps: Instr[] } | null => {
+    if ((elemType.kind === "i8" || elemType.kind === "i16") && boxNumIdx !== undefined) {
+      return {
+        getOp: "array.get_u",
+        boxOps: [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+      };
+    }
+    const generic = boxVecElementToExternref(ctx, elemType);
+    return generic === null ? null : { getOp: "array.get", boxOps: generic };
+  };
   const vecArms: Instr[] = [];
   for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
-    const boxOps = boxVecElementToExternref(ctx, elemType);
-    if (boxOps === null) continue; // unsupported element kind — leave to null fallback
+    const readBox = packedElemReadBox(elemType);
+    if (readBox === null) continue; // unsupported element kind — leave to null fallback
+    const { getOp, boxOps } = readBox;
     vecArms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
       op: "if",
       blockType: { kind: "empty" },
@@ -10107,7 +10290,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
         { op: "ref.cast", typeIdx },
         { op: "struct.get", typeIdx, fieldIdx: 1 },
         { op: "local.get", index: 4 },
-        { op: "array.get", typeIdx: arrTypeIdx },
+        { op: getOp, typeIdx: arrTypeIdx } as Instr,
         ...boxOps,
         { op: "return" },
       ],
