@@ -17,6 +17,8 @@ language_feature: compiler-internals
 goal: ir-full-coverage
 parent: 2855
 related: [1376, 1131, 2138, 2135, 2134]
+loc-budget-allow:
+  - src/ir/lower.ts
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
@@ -1017,3 +1019,90 @@ arrow closure args + cross-module imported calls — the multi-capability
 program from Step-2), calendar 4 (module-scope MUTABLE bindings + DOM
 chains + if-shapes), classes.ts `main` (`instanceof`), async `delay`
 (Promise executor). Epic stays `blocked` on those capability programs.
+
+## from-ast overlay-bug fix — structurizer `materialized` leak (2026-07-13, opus-2856)
+
+Fixed the **from-ast overlay soundness bug** flagged from PRs #2966/#3203 (the
+`classify` "undefined SSA value" overlay) and #2972/#3204 (`Math.log(2.414)`
+returned `log(2)`; worked around with ternary-init `over`/`ea`/`fa` locals).
+
+### Root cause — a lower.ts structurizer bug, NOT a from-ast/select gap
+
+The from-ast IR is **correct**. `lowerStatementList`'s non-terminating mid-body
+`if (cond) { <side effect> } <rest>` rewrite (from-ast.ts ~811) builds a
+`br_if → thenBlock; thenBlock br→ contBlock; contBlock=<rest>` CFG. `contBlock`
+(the continuation holding `<rest>`) is reached from BOTH the then-block's `br`
+and the `br_if`'s false edge, so it is a **merge block**.
+
+The lowerer's structurizer (`emitBlockBody`, lower.ts ~2985) has no shared-merge
+emission — its `br`/`br_if` handlers **tail-duplicate** every successor inline.
+So `contBlock` is emitted once into the then-arm sink and again into the
+else-arm sink. An **intra-block multi-use** value defined in `contBlock` (e.g.
+`let t = f*f` used twice by `let t2 = t*t`) is materialized **lazily** via
+`local.tee` on first use, gated on the function-**global** `materialized` set.
+The then-arm copy tee'd `t` and added it to `materialized`; the else-arm copy
+then saw `t ∈ materialized` and emitted a bare `local.get` for a local the
+else runtime path **never set** → silent `0` (or an "undefined SSA value" throw
+when the leaked value is a cross-block def, the #3203 manifestation).
+
+Verified in the WAT: pre-fix the else arm read `local.get $t` without the
+preceding `f*f; local.tee $t` def; post-fix it recomputes it.
+
+Why prior probes mislocated it as "mis-scopes a let into the then-branch": the
+observable symptom (the trailing `let` "disappears" on the not-taken path) looks
+like scope folding, but the IR scope is right — it is the emitter that drops the
+def in the duplicated copy.
+
+### Fix (`src/ir/lower.ts`, br_if handler)
+
+The two arms are **separate runtime paths**. `materialized` means "this value's
+local is assigned on the CURRENT path". Snapshot it at the branch and restore to
+that snapshot before emitting each arm (and after the `if`), so each path
+re-materializes its own intra-block locals. Values materialized BEFORE the
+branch stay live in both arms (they are in the snapshot); cross-block values are
+re-emitted eagerly in each copy's instr loop as before. ~15 lines, localized to
+the one duplication site (the sole tail-dup origin is a `br_if` fork).
+
+### Scope note — this does NOT reduce the corpus `body-shape-rejected` count
+
+Grounding `JS2WASM_IR_SHAPE_DIAG=1 check:ir-fallbacks --shape-diag` @ main
+`7d4a48cfc0`: the 14 remaining `body-shape-rejected` are 8 benchmark-harness
+`main`s (`nontail-callstmt` — blocked BY #2858 cross-module calls + first-class
+function values), 2 helper-internal (`updFoot`/`delay`), and the calendar
+DOM/if arms — **none are the overlay-bug shape** (which was a CLAIMED-but-
+miscompiled correctness bug, not a selector rejection). So this fix banks **no
+bucket delta**; its value is **correctness + IR-first skip safety** (the −60k
+epic can only make IR-first the sole path once shapes like this lower correctly)
+and **removing the #3204 math workaround**.
+
+### Also landed — restored the natural `Math.log`/`Math.log2` guard form
+
+`src/stdlib/math.ts`: the `if (f > sqrt2) { f *= 0.5; e += 1; }` adjust is back
+in its natural mid-body-if form (the ternary `over`/`ea`/`fa` workaround is
+gone). **Bit-identical** to the ternary form — 8010 self-hosted-vs-self-hosted
+comparisons (dense magnitude sweep + specials), 0 mismatches; both claim/skip;
+the self-host driver is context-free so it lowers identically in host/standalone/
+wasi. `math-inline` (49) + `issue-2972` + `issue-3141` green.
+
+### Validation
+
+- `tests/issue-2856-if-guard-tail-dup.test.ts` (new, 4 tests): IR-vs-legacy
+  parity for the multi-use trailing-local shape, the exact Math.log
+  range-reduction shape, nested guards, and a single-use control — every
+  positive case asserts the function is IR-owned (`irFirstSkipped` contains it)
+  so a demote-to-legacy can't vacuously green it.
+- 111 IR-equivalence/gate tests green (`ir-if-else`, `ir-let-const`,
+  `ir-algorithms-cluster`, `issue-2856-vec-push`, `issue-3203`); `ir-scaffold`'s
+  2 failures are pre-existing container-env (verified side-by-side on base).
+- `tsc` clean; `check:ir-fallbacks` OK (`body-shape-rejected` 14→14, no change).
+- Broad-impact (structurizer + Math path) → validated on `merge_group`.
+
+### Follow-up (separate, deeper — NOT this PR)
+
+The #3203 `const b = call(); if (b …) …; use b twice` shape still fails a
+DIFFERENT pass — `inline-small`'s post-inline verify ("use of SSA value N before
+def") — a pre-existing bug (reproduces on base, unaffected by this fix) in the
+inliner's block-duplication path, not the emission structurizer. Same structural
+class (block duplication + a value live across copies) but in a different pass;
+tracked as a follow-up so this PR stays a focused, low-blast-radius correctness
+fix.
