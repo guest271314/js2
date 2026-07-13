@@ -15,6 +15,11 @@ sprint: current
 horizon: l
 related: [830, 1433, 1695, 2861, 2860, 3132]
 umbrella: 2860
+loc-budget-allow:
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/property-access.ts
+  - src/codegen/closures.ts
+  - src/codegen/index.ts
 ---
 
 # Standalone: native DisposableStack (sync) — WasmGC class
