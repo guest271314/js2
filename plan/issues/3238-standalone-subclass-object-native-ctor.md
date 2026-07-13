@@ -1,8 +1,9 @@
 ---
 id: 3238
 title: "Standalone: native constructor for `class extends Object` (drop __new_Object host leak)"
-status: in-progress
+status: done
 assignee: opus-leak2
+completed: 2026-07-13
 sprint: current
 priority: high
 horizon: m
