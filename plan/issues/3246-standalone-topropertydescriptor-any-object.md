@@ -10,6 +10,8 @@ goal: standalone-mode
 umbrella: 1781
 assignee: ttraenkler/opus-leak3
 completed: 2026-07-13
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 ## Problem
