@@ -44,48 +44,15 @@ import {
 } from "../stdlib/math.js"; // (#3141/#3204/#3233/#3226) TS-source builtin bodies
 
 // ─── Instruction shorthand helpers ──────────────────────────────────
+// Only `Math.random` remains hand-emitted (WASI `random_get` host import —
+// not a dialect gap); every other Math core is self-hosted TS source in
+// `src/stdlib/math.ts`. These are the few shorthands its body still needs.
 const f64c = (v: number): Instr => ({ op: "f64.const", value: v }) as Instr;
-const localGet = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-const localSet = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-const add: Instr = { op: "f64.add" } as Instr;
-const sub: Instr = { op: "f64.sub" } as Instr;
 const mul: Instr = { op: "f64.mul" } as Instr;
-const div: Instr = { op: "f64.div" } as Instr;
-const fabs: Instr = { op: "f64.abs" } as Instr;
-const ffloor: Instr = { op: "f64.floor" } as Instr;
-const feq: Instr = { op: "f64.eq" } as Instr;
-const fne: Instr = { op: "f64.ne" } as Instr;
-const flt: Instr = { op: "f64.lt" } as Instr;
-const fgt: Instr = { op: "f64.gt" } as Instr;
-const fge: Instr = { op: "f64.ge" } as Instr;
-const ret: Instr = { op: "return" } as Instr;
-const copysign: Instr = { op: "f64.copysign" } as Instr;
 const i32const = (v: number): Instr => ({ op: "i32.const", value: v }) as Instr;
-
-function ifThenRet(cond: Instr[], result: Instr[]): Instr[] {
-  return [...cond, { op: "if", blockType: { kind: "empty" }, then: [...result, ret] } as Instr];
-}
-
-function ifElse(type: ValType, thenBody: Instr[], elseBody: Instr[]): Instr {
-  return {
-    op: "if",
-    blockType: { kind: "val", type },
-    then: thenBody,
-    else: elseBody,
-  } as Instr;
-}
-
-function call(funcIdx: number): Instr {
-  return { op: "call", funcIdx } as Instr;
-}
-
-// ─── Constants ──────────────────────────────────────────────────────
-const PI = Math.PI;
-const HALF_PI = PI / 2;
 
 // ─── Type aliases ───────────────────────────────────────────────────
 const f64Type: ValType = { kind: "f64" };
-const f64Param: ValType[] = [f64Type];
 const f64Result: ValType[] = [f64Type];
 
 type MathFuncDef = {
@@ -117,14 +84,6 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     ctx.funcMap.set(def.name, funcIdx);
     addedFuncs.set(def.name, funcIdx);
     return funcIdx;
-  }
-
-  function getFuncIdx(name: string): number {
-    const idx = addedFuncs.get(name);
-    if (idx === undefined) {
-      throw new Error(`Math helper ${name} not yet added but referenced`);
-    }
-    return idx;
   }
 
   // ─── Math.random ──────────────────────────────────────────────────
