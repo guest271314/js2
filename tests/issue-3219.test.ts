@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-// #3215 — standalone reflective Date.prototype.<getter>.call:
+// #3219 — standalone reflective Date.prototype.<getter>.call:
 //   - [[DateValue]]-brand check: a non-Date receiver throws TypeError
 //     (§21.4.4 thisTimeValue step 2), matching the test262
 //     Date/prototype/*/this-value-non-date.js + this-value-non-object.js rows;
@@ -23,7 +23,7 @@ async function runStandalone(src: string): Promise<unknown> {
   return (instance.exports as { test(): unknown }).test();
 }
 
-describe("#3215 standalone reflective Date.prototype getter", () => {
+describe("#3219 standalone reflective Date.prototype getter", () => {
   it("brand: getter .call on a non-Date receiver throws TypeError; on a Date runs native", async () => {
     const result = await runStandalone(`
       const getTime = Date.prototype.getTime;

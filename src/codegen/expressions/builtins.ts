@@ -1376,7 +1376,7 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
 }
 
 /**
- * (#3215) Shared zero-arg Date getter arithmetic, keyed on an i64 timestamp
+ * (#3219) Shared zero-arg Date getter arithmetic, keyed on an i64 timestamp
  * local (`tsLocal`) rather than the Date ref, so BOTH the direct-call kernel
  * (`compileDateMethodCall`) and the reflective closure body
  * (`emitDateProtoMemberBody`) share ONE copy — no duplicated Date kernel
@@ -1625,7 +1625,7 @@ export function emitDateZeroArgGetterFromTsLocal(
 }
 
 /**
- * (#3215) Native reflective body for a `Date.prototype.<getter>` closure value
+ * (#3219) Native reflective body for a `Date.prototype.<getter>` closure value
  * under `--target standalone`. `this` is closure-param 1 (externref); the
  * closure ABI is `(self, this, …args)` and every zero-arg getter ignores args.
  *
@@ -2611,13 +2611,13 @@ function compileDateMethodCall(
   fctx.body.push({ op: "local.set", index: tsLocalShared } as Instr);
   // Stack: []
 
-  // (#3215) The zero-arg time-of-day + calendar getters now live in the shared
+  // (#3219) The zero-arg time-of-day + calendar getters now live in the shared
   // `emitDateZeroArgGetterFromTsLocal` helper (reused by the reflective closure
   // body). It reads `tsLocalShared` and returns f64 for a getter, or undefined
   // (emitting nothing) for the string formatters below.
   const zeroArgGetter = emitDateZeroArgGetterFromTsLocal(ctx, fctx, methodName, tsLocalShared);
   if (zeroArgGetter) return zeroArgGetter;
-  // (#3215 byte-identity) The formatter arms below historically ran only after
+  // (#3219 byte-identity) The formatter arms below historically ran only after
   // the calendar-getter section had (incidentally) ensured the civil helper.
   // The shared helper returns before ensuring it for non-getters, so re-assert
   // it here to keep the direct-path formatter emission byte-identical.

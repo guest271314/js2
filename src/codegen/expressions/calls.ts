@@ -1212,7 +1212,7 @@ function tryEmitNativeProtoReflectiveCall(
     brand = ensureStringNativeProtoGlue(ctx); // (#2875)
   else if (ifaceName === "DataView")
     brand = ensureDataViewNativeProtoGlue(ctx); // (#3173)
-  else if (ifaceName === "Date") brand = ensureDateNativeProtoGlue(ctx); // (#3215)
+  else if (ifaceName === "Date") brand = ensureDateNativeProtoGlue(ctx); // (#3219)
   if (brand === undefined) return undefined;
 
   const glue = getNativeProtoBuiltinGlue(ctx, brand);

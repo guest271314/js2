@@ -1,5 +1,5 @@
 ---
-id: 3215
+id: 3219
 title: "standalone: reflective Date.prototype.<getter>.call brand check + host-free native body (getters slice of #3174)"
 status: done
 completed: 2026-07-13
@@ -23,7 +23,7 @@ loc-budget-allow:
   - src/codegen/expressions/calls.ts
 ---
 
-# #3215 — standalone reflective Date prototype getter: brand check + native body
+# #3219 — standalone reflective Date prototype getter: brand check + native body
 
 ## Problem
 
