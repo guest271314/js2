@@ -13,6 +13,9 @@ language_feature: closures, callbacks, iterator-helpers, standalone
 goal: host-independence
 assignee: ttraenkler/opus-leak
 related: [2940, 3098, 3016, 2903]
+loc-budget-allow:
+  - src/codegen/closures.ts
+  - src/codegen/declarations.ts
 origin: "2026-07-13 standalone sole-import leak ranking (opus-leak). test262-standalone-current.jsonl @ 13.7.2026 11:39; 25 sole-`__make_callback` leaky-pass entries + ~2.3k multi-import de-leaks."
 ---
 
