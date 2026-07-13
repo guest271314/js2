@@ -55,7 +55,11 @@ import type { StringBuilderPresizeInfo } from "./string-builder.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitWasiErrorConstructor, getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
-import { emitStandaloneObjectConstructor } from "./object-runtime.js"; // (#3238) native `class Sub extends Object`
+import {
+  emitStandaloneObjectConstructor, // (#3238) native `class Sub extends Object`
+  emitStandaloneVecBuiltinConstructor, // (#3239) native `class Sub extends <TypedArray|SharedArrayBuffer>`
+  STANDALONE_VEC_BUILTIN_PARENTS,
+} from "./object-runtime.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   cacheParamDefaultArgc,
@@ -1776,6 +1780,12 @@ function compileClassBodiesInner(
           // subclass proto/brand fixups below re-point [[Prototype]].
           emitStandaloneObjectConstructor(ctx, implicitForwarderArity);
           funcIdx = ctx.funcMap.get(importName);
+        } else if ((ctx.wasi || ctx.standalone) && STANDALONE_VEC_BUILTIN_PARENTS.has(parentName)) {
+          // (#3239) `class Sub extends <TypedArray | SharedArrayBuffer>` — native
+          // empty-vec parent, dropping the `env::__new_<Parent>` host import.
+          // Identity-only (instanceof is statically resolved); see the helper.
+          emitStandaloneVecBuiltinConstructor(ctx, importName, implicitForwarderArity);
+          funcIdx = ctx.funcMap.get(importName);
         } else {
           funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
           flushLateImportShifts(ctx, fctx);
@@ -2961,6 +2971,13 @@ export function compileSuperCall(
       // native fresh plain object, no `env::__new_Object` leak. Arg side
       // effects are still evaluated below and passed as (ignored) params.
       emitStandaloneObjectConstructor(ctx, forwardArity);
+      funcIdx = ctx.funcMap.get(importName);
+    } else if ((ctx.wasi || ctx.standalone) && STANDALONE_VEC_BUILTIN_PARENTS.has(builtinParent)) {
+      // (#3239) Explicit `super(...)` in a `class Sub extends <TypedArray |
+      // SharedArrayBuffer>` ctor — native empty-vec parent, no
+      // `env::__new_<Parent>` leak. Arg side effects are still evaluated below
+      // and passed as (ignored) params.
+      emitStandaloneVecBuiltinConstructor(ctx, importName, forwardArity);
       funcIdx = ctx.funcMap.get(importName);
     } else {
       funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
