@@ -4,7 +4,7 @@ title: "codegen: dynamic `new TA(...)` on an any-typed constructor value fails o
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3087
-sprint: current
+sprint: 71
 model: opus
 priority: high
 horizon: l

@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-collections-brand
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 # (#3102) God-file growth allowance for THIS change-set: the implementation
 # lives in the NEW subsystem module collections-es2025.ts; the residual
 # growth is unavoidable wiring — getOrInsert(Computed) in the Map/WeakMap
@@ -31,7 +31,7 @@ es_edition: multi
 language_feature: collections
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: m
 related: [2860, 3171, 3149]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"

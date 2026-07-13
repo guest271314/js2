@@ -3,7 +3,7 @@ id: 3204
 title: "Self-host Math.log + Math.log2 cores (bloat −LOC, scale-up slice)"
 status: done
 assignee: ttraenkler/opus-sendev
-sprint: current
+sprint: 71
 created: 2026-07-13
 updated: 2026-07-13
 completed: 2026-07-13

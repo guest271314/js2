@@ -3,9 +3,9 @@ id: 3138
 title: "host lane: function-scope fnctor instances never register the instance→ctor link — inherited descriptor/property reads miss (#3022 prototype-chain cluster, ~160 fails)"
 status: done
 assignee: ttraenkler/fable-harvest2
-sprint: current
+sprint: 71
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-13
 completed: 2026-07-11
 priority: high
 horizon: l

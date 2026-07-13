@@ -4,14 +4,14 @@ title: "compiled-acorn THROWS validating regex literals with character classes `
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-3051c
-sprint: current
+sprint: 71
 priority: low
 horizon: m
 feasibility: hard
 loc-budget-allow:
   - src/codegen/expressions/assignment.ts
 created: 2026-06-29
-updated: 2026-07-12
+updated: 2026-07-13
 task_type: bugfix
 area: codegen, runtime
 language_feature: regexp

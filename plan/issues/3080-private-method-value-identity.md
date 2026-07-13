@@ -4,7 +4,7 @@ title: "private-method value identity: `this.#m === (()=>this)().#m` is false fo
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-identity
-sprint: current
+sprint: 71
 priority: low
 horizon: m
 feasibility: hard

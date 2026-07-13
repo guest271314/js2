@@ -2,9 +2,9 @@
 id: 3165
 title: "Standalone: arguments object stored into any[] loses indexed elements on readback (length survives, r0[0] → 0) — ~186 tests"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 completed: 2026-07-12
 assignee: sendev-3164
 priority: high

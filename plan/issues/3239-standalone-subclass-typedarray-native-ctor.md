@@ -4,7 +4,7 @@ title: "Standalone: native constructor for `class extends TypedArray|SharedArray
 status: done
 assignee: opus-subclass2
 completed: 2026-07-13
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

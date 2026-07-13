@@ -4,7 +4,7 @@ title: "standalone: String.raw (22 __get_builtin CEs)"
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/fable-close
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: medium

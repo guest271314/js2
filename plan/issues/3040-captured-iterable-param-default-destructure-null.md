@@ -4,9 +4,9 @@ title: "array-destructured parameter with a CAPTURED custom-iterable default thr
 status: done
 assignee: ttraenkler/dev-3040
 completed: 2026-07-06
-sprint: current
+sprint: 71
 created: 2026-07-05
-updated: 2026-07-06
+updated: 2026-07-13
 priority: high
 horizon: l
 feasibility: hard

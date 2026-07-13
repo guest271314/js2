@@ -3,9 +3,9 @@ id: 3026
 title: "negative_test_fail: residual early-error / static-semantics gaps (~79 default-lane, 64 unenforced SyntaxErrors)"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 created: 2026-07-03
-updated: 2026-07-06
+updated: 2026-07-13
 status_note: "DONE — bounded parser/static-semantics early-error lane complete (slices 1–8). Residual triage 2026-07-06 (see final section) re-ran all 55 `negative_test_fail` entries still in the fetched baseline (run 20260705) through the live runner on current main: 49/55 already PASS (stale baseline — slice 1–8 work + adjacent early-error landings fixed them; the fetched baseline just hadn't refreshed). Only 6 genuinely fail, and NONE is a parse-time early-error point-fix — all deferred-class (eval / module+top-level-await / `using` explicit-resource-management / runtime strict-PutValue / restricted-global runtime SyntaxError). Acceptance criterion (`negative_test_fail` materially below 79) met: 79 → 6 real. Residuals handed to their feature owners; closing the bounded lane."
 priority: medium
 horizon: s

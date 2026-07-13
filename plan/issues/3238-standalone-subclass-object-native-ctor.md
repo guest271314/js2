@@ -4,7 +4,7 @@ title: "Standalone: native constructor for `class extends Object` (drop __new_Ob
 status: done
 assignee: opus-leak2
 completed: 2026-07-13
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

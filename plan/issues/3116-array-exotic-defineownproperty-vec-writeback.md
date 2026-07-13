@@ -2,10 +2,10 @@
 id: 3116
 title: "Array exotic [[DefineOwnProperty]]: defineProperty(ies) element/length writes invisible to vec reads (§10.4.2 unimplemented on the runtime lanes)"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-09
 completed: 2026-07-09
-updated: 2026-07-09
+updated: 2026-07-13
 priority: high
 horizon: m
 feasibility: hard

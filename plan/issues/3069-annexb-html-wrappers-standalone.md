@@ -3,7 +3,7 @@ id: 3069
 title: "codegen: pure-Wasm Annex B §B.2.2 HTML string-wrapper methods — standalone/WASI lowering"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: easy

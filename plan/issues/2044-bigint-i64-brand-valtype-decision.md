@@ -4,9 +4,9 @@ title: "architect decision: BigInt value representation — i64-bigint-brand Val
 status: done
 completed: 2026-07-03
 # was blocked_by: [2167] (fable-model gate) — resolved; decision ratified below
-sprint: current
+sprint: 71
 created: 2026-06-10
-updated: 2026-07-03
+updated: 2026-07-13
 priority: high
 feasibility: hard
 reasoning_effort: max

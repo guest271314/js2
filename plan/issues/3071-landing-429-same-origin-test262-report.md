@@ -2,7 +2,7 @@
 id: 3071
 title: "Landing page hammers rate-limited raw.githubusercontent for test262 baseline (429) — prefer same-origin"
 status: done
-sprint: current
+sprint: 71
 priority: high
 horizon: s
 assignee: ttraenkler/agent-afc849ea5d2483a25

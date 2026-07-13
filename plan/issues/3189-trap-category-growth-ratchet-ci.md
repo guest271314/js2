@@ -10,7 +10,7 @@ feasibility: medium
 task_type: chore
 area: test-infra
 goal: crash-free
-sprint: current
+sprint: 71
 horizon: s
 related: [3179, 3186, 3162, 2855, 3102]
 origin: "2026-07-12 Fable codebase audit (plan/log/2026-07-12-fable-codebase-audit.md, minor findings)"

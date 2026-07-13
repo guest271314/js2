@@ -4,7 +4,7 @@ title: "standalone: Iterator.zip / zipKeyed / concat / from (~99 __get_builtin C
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/fable-dev-3146
-sprint: current
+sprint: 71
 priority: high
 horizon: l
 feasibility: hard

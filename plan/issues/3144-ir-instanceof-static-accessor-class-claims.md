@@ -4,9 +4,9 @@ title: "IR: instanceof + static method calls + accessor get/set on local classes
 status: done
 assignee: ttraenkler/fable-irfb
 completed: 2026-07-11
-sprint: current
+sprint: 71
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-13
 priority: high
 horizon: m
 feasibility: medium

@@ -4,7 +4,7 @@ title: "Standalone: any-boxed homogeneous reference-element array reads elements
 status: done
 assignee: opus-anycontainer
 completed: 2026-07-13
-sprint: current
+sprint: 71
 priority: high
 feasibility: hard
 reasoning_effort: high

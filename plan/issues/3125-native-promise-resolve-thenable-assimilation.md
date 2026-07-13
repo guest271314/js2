@@ -4,9 +4,9 @@ title: "Native Promise resolve must assimilate user thenables / poisoned then / 
 status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-thenable
-sprint: current
+sprint: 71
 created: 2026-07-10
-updated: 2026-07-10
+updated: 2026-07-13
 priority: high
 horizon: m
 feasibility: hard

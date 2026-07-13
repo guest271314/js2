@@ -3,9 +3,9 @@ id: 3027
 title: "standalone: \\$Object dynamic-object-property reader residual — null/undefined property access on unmodeled shapes (~1,552 host-free fails)"
 status: done
 assignee: ttraenkler/dev-3027
-sprint: current
+sprint: 71
 created: 2026-07-03
-updated: 2026-07-05
+updated: 2026-07-13
 completed: 2026-07-05
 priority: high
 horizon: l

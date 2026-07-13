@@ -4,7 +4,7 @@ title: "Object.defineProperty: ValidateAndApplyPropertyDescriptor illegal-transi
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3022
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

@@ -2,7 +2,7 @@
 id: 3246
 title: "standalone ToPropertyDescriptor rejects non-$Object descriptors (function/array/wrapper) as \"unsupported shape\""
 status: done
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: hard

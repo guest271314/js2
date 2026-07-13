@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-collections-brand
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: hard
 task_type: bug
@@ -14,7 +14,7 @@ es_edition: 2015
 language_feature: collections
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 71
 horizon: m
 related: [2860, 3172, 2893, 2916]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"

@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-find-wasm
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: medium
 task_type: refactor
@@ -13,7 +13,7 @@ area: runtime
 es_edition: n/a
 language_feature: iterable-drain
 goal: maintainability
-sprint: current
+sprint: 71
 horizon: s
 umbrella: 3182
 related: [1849, 928, 3029, 3102]

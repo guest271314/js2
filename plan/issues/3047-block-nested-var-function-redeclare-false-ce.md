@@ -4,7 +4,7 @@ title: "false CE — `var x; function x(){}` same-name coexistence inside a bloc
 status: done
 assignee: ttraenkler/dev-3047
 completed: 2026-07-05
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 feasibility: medium

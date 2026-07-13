@@ -5,13 +5,13 @@ status: done
 completed: 2026-07-11
 assignee: ttraenkler/fable-harvest3
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-13
 priority: high
 task_type: bug
 area: codegen, runtime
 language_feature: function-bind
 goal: standalone
-sprint: current
+sprint: 71
 horizon: m
 related: [2872, 2860, 2876, 3016]
 umbrella: 2860

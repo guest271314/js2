@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3050
 pr: 2807
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: hard

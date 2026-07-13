@@ -4,7 +4,7 @@ title: "IR: inline-small tail-duplication trips post-inline verify (use of SSA v
 status: done
 completed: 2026-07-13
 assignee: ttraenkler/opus-2856
-sprint: current
+sprint: 71
 created: 2026-07-13
 updated: 2026-07-13
 priority: medium

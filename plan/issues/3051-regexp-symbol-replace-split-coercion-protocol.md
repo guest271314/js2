@@ -4,7 +4,7 @@ title: "RegExp.prototype[@@replace] / [@@split] coercion protocol: ToString/ToIn
 status: done
 completed: 2026-07-12
 assignee: ttraenkler/dev-3051c
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: hard

@@ -3,7 +3,7 @@ id: 3061
 title: "codegen: ArrayBuffer.byteLength / byteOffset return NaN in JS-host mode (native accessor gated to standalone only)"
 status: done
 completed: 2026-07-06
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 feasibility: easy

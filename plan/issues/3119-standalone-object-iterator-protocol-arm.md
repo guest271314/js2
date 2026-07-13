@@ -4,7 +4,7 @@ title: "Standalone plain-$Object @@iterator protocol arm in the native __iterato
 status: done
 completed: 2026-07-09
 assignee: ttraenkler/fable-3119
-sprint: current
+sprint: 71
 model: fable
 created: 2026-07-09
 priority: medium

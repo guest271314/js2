@@ -4,7 +4,7 @@ title: Native standalone WeakRef — retire WeakRef_new / WeakRef_deref host imp
 status: done
 completed: 2026-07-13
 assignee: opus-weakcoll
-sprint: current
+sprint: 71
 priority: high
 horizon: m
 goal: standalone-mode

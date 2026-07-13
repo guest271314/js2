@@ -4,7 +4,7 @@ title: "standalone: native closed-shape struct field enumeration — Object.keys
 status: done
 assignee: ttraenkler/opus-c1
 completed: 2026-07-13
-sprint: current
+sprint: 71
 model: opus
 created: 2026-07-13
 priority: high

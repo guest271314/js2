@@ -3,7 +3,7 @@ id: 3235
 title: "standalone: spurious `env::__make_callback` import leak — coarse callbackFound scan declares an unsatisfiable host import that is never called"
 status: done
 completed: 2026-07-13
-sprint: current
+sprint: 71
 priority: high
 feasibility: medium
 reasoning_effort: max

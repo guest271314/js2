@@ -6,9 +6,9 @@ completed: 2026-07-09
 assignee: ttraenkler/fable-3058
 # was blocked_on the architect ValType-registration decision — RESOLVED 2026-07-03,
 # see ## Architect Decision below: NO {kind:"bool"}; brand ratified, made total at producers
-sprint: current
+sprint: 71
 created: 2026-06-26
-updated: 2026-07-03
+updated: 2026-07-13
 priority: high
 feasibility: hard
 reasoning_effort: max

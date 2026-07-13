@@ -3,9 +3,9 @@ id: 3160
 title: "Self-hosted stdlib: object-runtime slice 1 — getOwnPropertyDescriptors + fromEntries via our own IR pipeline"
 status: done
 assignee: ttraenkler/fable-senior2
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 completed: 2026-07-12
 priority: high
 horizon: m

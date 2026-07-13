@@ -4,9 +4,9 @@ title: "IR post-claim divergence meter — empirical census of the #3143 IR-firs
 status: done
 assignee: ttraenkler/fable-irfb
 completed: 2026-07-12
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 horizon: s
 feasibility: easy

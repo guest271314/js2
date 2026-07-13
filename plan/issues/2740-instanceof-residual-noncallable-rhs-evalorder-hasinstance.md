@@ -2,9 +2,9 @@
 id: 2740
 title: "[UMBRELLA] instanceof residual after #2702 — 5 deep gaps, split into #2763/#2764/#2765"
 status: done
-sprint: current
+sprint: 71
 created: 2026-06-27
-updated: 2026-07-12
+updated: 2026-07-13
 completed: 2026-07-12
 assignee: ttraenkler/agent-a30d0acc00d3c78c5
 priority: medium

@@ -10,7 +10,7 @@ feasibility: easy
 task_type: chore
 area: test-infra
 goal: process
-sprint: current
+sprint: 71
 horizon: s
 related: [3024, 3003, 3086, 1595]
 origin: "2026-07-12 Fable codebase audit (plan/log/2026-07-12-fable-codebase-audit.md, §F4)"

@@ -5,13 +5,13 @@ status: done
 completed: 2026-07-11
 assignee: ttraenkler/fable-senior
 created: 2026-07-02
-updated: 2026-07-11
+updated: 2026-07-13
 priority: medium
 horizon: l
 feasibility: hard
 reasoning_effort: max
 goal: async-model
-sprint: current
+sprint: 71
 parent: 1042
 depends_on: [1042, 3134]
 related: [2906, 2957, 1373b, 3134]

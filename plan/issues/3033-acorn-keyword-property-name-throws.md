@@ -7,7 +7,7 @@ assignee: ttraenkler/dev-b2b-memberread
 loc-budget-allow:
   - src/codegen/index.ts
   - src/codegen/property-access.ts
-sprint: current
+sprint: 71
 priority: low
 horizon: m
 feasibility: hard

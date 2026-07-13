@@ -2,7 +2,7 @@
 id: 3143
 title: "Flip IR-first (JS2WASM_IR_FIRST) to default — clears gate G1 of the legacy-frontend retirement"
 status: done
-sprint: current
+sprint: 71
 assignee: ttraenkler/sendev-3143flip
 created: 2026-07-11
 updated: 2026-07-13

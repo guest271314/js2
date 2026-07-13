@@ -4,7 +4,7 @@ title: "Standalone .constructor on plain-object/array receivers reads undefined 
 status: done
 completed: 2026-07-10
 assignee: ttraenkler/fable-12th
-sprint: current
+sprint: 71
 created: 2026-07-10
 priority: medium
 horizon: m

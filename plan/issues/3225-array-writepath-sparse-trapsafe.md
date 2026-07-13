@@ -13,7 +13,7 @@ area: codegen
 es_edition: multi
 language_feature: array-methods
 goal: builtin-methods
-sprint: current
+sprint: 71
 horizon: m
 umbrella: 3185
 parent: 3201

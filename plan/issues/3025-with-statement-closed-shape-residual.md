@@ -2,9 +2,9 @@
 id: 3025
 title: "with statement: closed object-literal shape residual (~167 default-lane fails, CE leaks into unrelated with-adjacent tests)"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-03
-updated: 2026-07-05
+updated: 2026-07-13
 completed: 2026-07-05
 priority: medium
 horizon: s

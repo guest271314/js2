@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 goal: standalone
 related: [2978, 2980]
-sprint: current
+sprint: 71
 horizon: m
 ---
 

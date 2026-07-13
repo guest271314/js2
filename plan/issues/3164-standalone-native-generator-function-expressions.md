@@ -2,9 +2,9 @@
 id: 3164
 title: "Standalone: native lowering for generator FUNCTION EXPRESSIONS (anonymous/IIFE/var-assigned) — retires ~1,700 sync __create_generator leaky passes"
 status: done
-sprint: current
+sprint: 71
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 completed: 2026-07-12
 assignee: sendev-3164
 priority: high

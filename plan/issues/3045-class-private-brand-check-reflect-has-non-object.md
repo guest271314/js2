@@ -3,7 +3,7 @@ id: 3045
 title: "class private-element brand check emits Reflect.has on a non-object receiver (private methods/generators/static-private)"
 status: done
 assignee: ttraenkler/dev-3045
-sprint: current
+sprint: 71
 priority: medium
 horizon: m
 feasibility: hard

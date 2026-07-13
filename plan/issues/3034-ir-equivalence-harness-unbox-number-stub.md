@@ -4,7 +4,7 @@ title: "IR-equivalence vitest harness stubs env imports non-callable (__unbox_nu
 status: done
 completed: 2026-07-04
 assignee: ttraenkler/opus-2161b1
-sprint: current
+sprint: 71
 created: 2026-07-04
 priority: medium
 feasibility: easy

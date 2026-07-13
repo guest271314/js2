@@ -2,9 +2,9 @@
 id: 2858
 title: "IR: drive call-graph-closure fallback bucket to zero (derivative of body-shape + class-method)"
 status: done
-sprint: current
+sprint: 71
 created: 2026-06-30
-updated: 2026-07-05
+updated: 2026-07-13
 completed: 2026-07-05
 assignee: ttraenkler/opus-2858
 priority: high

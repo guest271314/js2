@@ -3,9 +3,9 @@ id: 3139
 title: "host lane: Array generics over fnctor-instance array-likes — first-match extern mis-bind (Uint8ClampedArray_*) + extern index/length handlers not prototype-inclusive"
 status: done
 assignee: ttraenkler/fable-harvest2
-sprint: current
+sprint: 71
 created: 2026-07-11
-updated: 2026-07-11
+updated: 2026-07-13
 completed: 2026-07-11
 priority: high
 horizon: l

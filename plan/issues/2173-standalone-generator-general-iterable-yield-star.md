@@ -5,9 +5,9 @@ status: done
 completed: 2026-07-04
 assignee: ttraenkler/dev-selfserve-1
 blocked_by: []
-sprint: current
+sprint: 71
 created: 2026-06-16
-updated: 2026-07-04
+updated: 2026-07-13
 priority: medium
 feasibility: hard
 reasoning_effort: high

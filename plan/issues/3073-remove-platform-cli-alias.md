@@ -2,7 +2,7 @@
 id: 3073
 title: remove deprecated --platform CLI alias (#2736 follow-up)
 status: done
-sprint: current
+sprint: 71
 priority: medium
 horizon: s
 assignee: ttraenkler/agent-dev

@@ -4,14 +4,14 @@ title: Standalone destructuring lane must honor throwing accessor getters / user
 status: done
 assignee: ttraenkler/fable-3040
 completed: 2026-07-10
-sprint: current
+sprint: 71
 model: fable
 priority: medium
 horizon: m
 feasibility: hard
 blocks: [3040]
 created: 2026-07-07
-updated: 2026-07-10
+updated: 2026-07-13
 ---
 
 # Standalone destructuring must invoke throwing accessor getters / user `@@iterator`
