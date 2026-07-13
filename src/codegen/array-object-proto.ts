@@ -32,6 +32,7 @@ import {
 } from "./native-proto.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { emitDataViewProtoMemberBody } from "./dataview-native.js"; // (#3173) reflective DataView member bodies
+import { emitDateProtoMemberBody } from "./expressions/builtins.js"; // (#3215) reflective Date getter bodies
 import { allocLocal } from "./context/locals.js";
 import { emitThisReceiverGuardConvert } from "./property-access.js";
 import { compileArraySliceFromVecLocal } from "./array-methods.js";
@@ -1483,7 +1484,11 @@ function makeGlue(
         ? emitArrayProtoMemberBody(c, fctx, member)
         : name === "String"
           ? emitStringProtoMemberBody(c, fctx, member)
-          : emitProtoMemberBodyRefusal(c, fctx, name, member),
+          : // (#3215) Date reflective getter bodies (getters return a real body,
+            // setters/formatters return null → fall through to the legacy path).
+            name === "Date"
+            ? emitDateProtoMemberBody(c, fctx, member)
+            : emitProtoMemberBodyRefusal(c, fctx, name, member),
   };
 }
 
