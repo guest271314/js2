@@ -28,8 +28,10 @@ import {
   registerNativeProtoBuiltin,
   emitBrandCheckTypeError,
   emitLazyNativeProtoGet,
+  ensureStandaloneNativeMethodClosure,
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { emitDataViewProtoMemberBody } from "./dataview-native.js"; // (#3173) reflective DataView member bodies
 import { emitDateProtoMemberBody } from "./expressions/builtins.js"; // (#3219) reflective Date getter bodies
@@ -1762,6 +1764,26 @@ export function ensureFunctionNativeProtoGlue(ctx: CodegenContext): number | und
   return brand;
 }
 
+/**
+ * (#3236 S1) Register `%GeneratorPrototype%` glue (idempotent) and return its
+ * brand. Members `next`/`return`/`throw` resolve as descriptor-carrying (§17
+ * {w:T,e:F,c:T}) brand-checked callable closure values through the shared
+ * native-proto reflective machinery; invoking one on a non-Generator `this`
+ * degrades to the shared catchable TypeError (`emitProtoMemberBodyRefusal`),
+ * which is exactly what every GeneratorPrototype value-call test expects.
+ */
+export function ensureGeneratorPrototypeNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "GeneratorPrototype");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    // `name: "Generator"` drives the refusal message ("Generator.prototype.<m>
+    // …"); the member CSV is the three §27.5.1 methods. next/return/throw are
+    // each arity 1 (spec length 1) via makeGlue's default.
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Generator", ["next", "return", "throw"]));
+  }
+  return brand;
+}
+
 /** Register `Symbol.prototype` glue (idempotent) and return its brand. (S7) */
 export function ensureSymbolNativeProtoGlue(ctx: CodegenContext): number | undefined {
   const brand = getBuiltinBrand(ctx, "Symbol");
@@ -2084,6 +2106,222 @@ export function emitTypedArrayIntrinsicCtorObject(ctx: CodegenContext, fctx: Fun
       fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
     } else {
       ok = false;
+    }
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
+  }
+  if (!ok) return null;
+
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3236 S1) Native standalone `%Function.prototype%` as a plain `$Object`
+ * singleton (distinct from the `Function` `$NativeProto` glue used for
+ * `Function.prototype.<method>` VALUE reads). This is the proto-CHAIN target:
+ * the object `Object.getPrototypeOf` must return for an ordinary function AND
+ * the `[[Prototype]]` of `%Generator%` (§20.2.3 / §27.3.3.2). It must be a
+ * `$Object` so the native `__getPrototypeOf` `$proto`-walk returns it and its
+ * identity is stable across every reader (`getProtoOf(f) === getProtoOf(
+ * getProtoOf(g))`). Built with `__object_create(null)` — its own `[[Prototype]]`
+ * (%Object.prototype%) is not exercised by any Slice-1 test. Standalone/WASI
+ * only; returns the externref ValType or `null` if the `$Object` runtime is
+ * unavailable.
+ */
+export function emitFunctionPrototypeObjectSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureObjectRuntime(ctx);
+  const createIdx = ctx.funcMap.get("__object_create");
+  if (createIdx === undefined) return null;
+
+  const globalName = "__native_function_prototype_obj";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  // Lazy init: `if (g == null) g = __object_create(null);` then read it. The
+  // init body nests directly inside the `if` (part of `fctx.body`), so any late-
+  // import funcIdx shift walks it naturally.
+  const initBody: Instr[] = [
+    { op: "ref.null.extern" } as Instr, // proto = null → OrdinaryObjectCreate
+    { op: "call", funcIdx: createIdx } as Instr,
+    { op: "global.set", index: globalIdx } as Instr,
+  ];
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3236 S1) Native standalone `%GeneratorPrototype%` value — the object reached
+ * by `genFn.prototype` and `getPrototypeOf(genFn).prototype` (§27.5.1).
+ *
+ * A lazily-cached `$Object` singleton (NOT a `$NativeProto`): the test binds it
+ * to an `any`-typed variable (`var GP = Object.getPrototypeOf(g).prototype`) and
+ * then does the RUNTIME dynamic reads `GP.next`, `Object.getOwnPropertyDescriptor
+ * (GP,"next")`, `GP.next.call(x)`. Those reflective `$Object` reads only resolve
+ * REAL own data properties — the `$NativeProto` member CSV is only consulted by
+ * the compile-time `<Builtin>.prototype.<member>` syntactic path — so each of
+ * `next`/`return`/`throw` is installed as a genuine own data property (§17
+ * {w:T,e:F,c:T}) whose VALUE is the identity-stable brand-checked native-method
+ * closure from the shared factory. Invoking one on a non-Generator `this` throws
+ * the factory's catchable TypeError (`refusalBodyFallback`) — exactly what every
+ * GeneratorPrototype value-call test (`this-val-not-{object,generator}`) expects.
+ * Leaves the GP externref on the stack; returns its ValType or `null` on
+ * unavailable runtime.
+ */
+export function emitGeneratorPrototypeSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  const brand = ensureGeneratorPrototypeNativeProtoGlue(ctx);
+  if (brand === undefined) return null;
+
+  ensureObjectRuntime(ctx);
+  const newObjectIdx = ctx.funcMap.get("__new_plain_object");
+  const defineIdx = ctx.funcMap.get("__defineProperty_value");
+  if (newObjectIdx === undefined || defineIdx === undefined) return null;
+
+  const globalName = "__native_generator_prototype_obj";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const objLocal = allocLocal(fctx, `__gen_proto_obj_${fctx.locals.length}`, { kind: "externref" });
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx } as Instr,
+    { op: "local.set", index: objLocal } as Instr,
+  ];
+
+  // (#2182 pattern) `savedBody` is detached during the swap; register it in
+  // `liveBodies` so a late-import funcidx shift walks the baked `ref.func`s.
+  const savedBody = fctx.body;
+  fctx.body = initBody;
+  ctx.liveBodies.add(savedBody);
+  let ok = true;
+  try {
+    // §17 method descriptor attributes: writable:true, enumerable:false,
+    // configurable:true → `__defineProperty_value` flags bit0|bit2 = 5.
+    const METHOD_FLAGS = 0x01 | 0x04;
+    for (const member of ["next", "return", "throw"] as const) {
+      const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, "method", {
+        refusalBodyFallback: true,
+      });
+      if (!closure) {
+        ok = false;
+        break;
+      }
+      // GP.<member> = <identity-stable brand-checked method closure value>
+      fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+      addStringConstantGlobal(ctx, member);
+      for (const instr of stringConstantExternrefInstrs(ctx, member)) fctx.body.push(instr);
+      for (const instr of pushBuiltinFnSingletonValueInstrs(ctx, closure)) fctx.body.push(instr);
+      fctx.body.push({ op: "extern.convert_any" } as Instr); // closure ref → externref value
+      fctx.body.push({ op: "f64.const", value: METHOD_FLAGS } as Instr);
+      fctx.body.push({ op: "call", funcIdx: defineIdx } as Instr);
+      fctx.body.push({ op: "drop" } as Instr); // helper returns the target; discard
+    }
+    if (ok) {
+      fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+      fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+    }
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
+  }
+  if (!ok) return null;
+
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3236 S1) Native standalone `%Generator%` (= `%GeneratorFunction.prototype%`,
+ * §27.3.3) value — the object `getPrototypeOf(genFn)` must return. A lazily-cached
+ * `$Object` singleton whose:
+ *   - `[[Prototype]]` (`$proto`) is `%Function.prototype%` (so
+ *     `getPrototypeOf(getPrototypeOf(genFn)) === getPrototypeOf(ordinaryFn)`,
+ *     §27.3.3.2 — the `prototype-relation-to-function.js` identity), built via
+ *     `__object_create(%Function.prototype%)`, and
+ *   - own `prototype` data property is `%GeneratorPrototype%` (§27.3.3.3), so
+ *     `getPrototypeOf(genFn).prototype` reaches GP for the GeneratorPrototype
+ *     descriptor / this-val tests.
+ * Modelled on `emitTypedArrayIntrinsicCtorObject` (the `$Object`-with-a-native-
+ * proto-`prototype` shape). Standalone/WASI only. Leaves the `%Generator%`
+ * externref on the stack; returns its ValType or `null` on unavailable runtime.
+ */
+export function emitGeneratorFunctionPrototypeSingleton(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  const brand = ensureGeneratorPrototypeNativeProtoGlue(ctx);
+  if (brand === undefined) return null;
+
+  ensureObjectRuntime(ctx);
+  const createIdx = ctx.funcMap.get("__object_create");
+  const setIdx = ctx.funcMap.get("__extern_set");
+  if (createIdx === undefined || setIdx === undefined) return null;
+
+  const globalName = "__native_generator_function_prototype";
+  let globalIdx = ctx.builtinObjectGlobals.get(globalName);
+  if (globalIdx === undefined) {
+    globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: globalName,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.builtinObjectGlobals.set(globalName, globalIdx);
+  }
+
+  const objLocal = allocLocal(fctx, `__genfn_proto_obj_${fctx.locals.length}`, { kind: "externref" });
+  const initBody: Instr[] = [];
+
+  // (#2182 pattern) `savedBody` is detached during the swap; register it in
+  // `liveBodies` so any late-import funcidx shift still walks it.
+  const savedBody = fctx.body;
+  fctx.body = initBody;
+  ctx.liveBodies.add(savedBody);
+  let ok = true;
+  try {
+    // G = __object_create(%Function.prototype%)  — sets $proto for the relation
+    // identity. FP materialization (its own lazy-global guard) nests here.
+    if (emitFunctionPrototypeObjectSingleton(ctx, fctx) === null) {
+      ok = false;
+    } else {
+      fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: objLocal } as Instr);
+      // G.prototype = %GeneratorPrototype%
+      fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+      addStringConstantGlobal(ctx, "prototype");
+      for (const instr of stringConstantExternrefInstrs(ctx, "prototype")) fctx.body.push(instr);
+      if (emitGeneratorPrototypeSingleton(ctx, fctx) !== null) {
+        fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: objLocal } as Instr);
+        fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+      } else {
+        ok = false;
+      }
     }
   } finally {
     fctx.body = savedBody;

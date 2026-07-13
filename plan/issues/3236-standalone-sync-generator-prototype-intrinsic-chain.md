@@ -11,7 +11,7 @@ area: codegen
 language_feature: generators, intrinsics, prototype-chain, standalone
 goal: host-independence
 umbrella: 1781
-assignee: ttraenkler/opus-leak
+assignee: ttraenkler/opus-genproto
 related: [3235, 1516, 1639, 3013, 2901]
 origin: "2026-07-13 standalone sole-import leak ranking (opus-leak), #2 bounded cluster after #3235. 13 sole leaks: 8 __get_generator_function_prototype + 2 __get_generator_prototype + 3 combined."
 ---
@@ -89,3 +89,64 @@ gen() (instance) ─proto──▶ %GeneratorPrototype%  (default-proto.js, even
 - `GeneratorPrototype.next/return/throw` present with `{w:T,e:F,c:T}` and throw
   TypeError on non-object `this`.
 - NET ≥ 0 on the merge_group standalone floor.
+
+## Implementation Notes (Slice 1 — opus-genproto, this PR)
+
+### What shipped (host-free, +4 host_free_pass)
+
+The native intrinsic chain + the 3 call-site rewires, standalone-gated
+(`ctx.standalone || ctx.wasi`), host lane byte-identical (every edit is behind
+that gate; the new emitter functions are only reachable from gated sites).
+Verified host-free (`env` import section empty) + semantically correct via a
+compile→instantiate→run probe:
+
+- **`prototype-relation-to-function.js`** — `getPrototypeOf(getPrototypeOf(g))
+  === getPrototypeOf(f)` returns `true`, no host imports.
+- **`GeneratorPrototype/{next,return,throw}/property-descriptor.js`** —
+  `Object.getOwnPropertyDescriptor(GP,'next')` reports `{writable:true,
+  enumerable:false, configurable:true}` and `typeof GP.next === 'function'`.
+
+### Design (WHY, not just WHAT)
+
+Three `$Object`-family singletons, linked by `$proto`, NOT `$NativeProto`:
+
+- **`%Function.prototype%`** (`emitFunctionPrototypeObjectSingleton`) — a plain
+  `$Object` via `__object_create(null)`. It MUST be a `$Object` (not the
+  `Function` `$NativeProto` glue) so the native `__getPrototypeOf` `$proto`-walk
+  returns it, and its identity is stable across every reader.
+- **`%Generator%`** (`emitGeneratorFunctionPrototypeSingleton`) — a `$Object`
+  via `__object_create(%Function.prototype%)` (sets `$proto` for the relation
+  identity, §27.3.3.2) with an own `prototype` data prop = `%GeneratorPrototype%`
+  (§27.3.3.3, via `__extern_set`). Modelled on `emitTypedArrayIntrinsicCtorObject`.
+- **`%GeneratorPrototype%`** (`emitGeneratorPrototypeSingleton`) — a `$Object`
+  (via `__new_plain_object`) with `next`/`return`/`throw` installed as REAL own
+  data properties (`__defineProperty_value`, §17 flags `{w:T,e:F,c:T}`) whose
+  values are the identity-stable brand-checked native-method closures from the
+  shared factory (`ensureStandaloneNativeMethodClosure` +
+  `pushBuiltinFnSingletonValueInstrs`), under a new `GeneratorPrototype` brand +
+  `makeGlue` registration (`ensureGeneratorPrototypeNativeProtoGlue`).
+
+**Key design correction (root cause):** GP could NOT be a bare `$NativeProto`
+(the first attempt). The tests bind GP to an `any` variable and do RUNTIME
+dynamic reads (`GP.next`, `getOwnPropertyDescriptor(GP,'next')`, `GP.next(...)`).
+The `$NativeProto` member CSV is consulted ONLY by the compile-time
+`<Builtin>.prototype.<member>` syntactic path — the reflective `$Object` readers
+resolve only real own data properties. So GP is a `$Object` carrying the closure
+values as genuine data props. Direct invocation `GP.next()` correctly throws a
+catchable `TypeError` (verified); the `refusalBodyFallback` body is the Slice-1
+GeneratorValidate stand-in (every value-call test passes a non-generator `this`).
+
+### Deferred to Slice 1b (immediate follow-up — this-val group)
+
+`GeneratorPrototype/{next,return,throw}/this-val-not-{object,generator}.js` use
+`GP.next.call(undefined)`. `Function.prototype.call` on a **dynamically-read**
+native-method-closure externref is not wired to invoke the closure —
+`GP.next.call` resolves as a plain property read → `undefined` (verified: DIRECT
+`GP.next()` throws TypeError, but `.call` does not). These were leaky-passes
+(carried the `__get_generator_prototype` host import), never `host_free_pass`, so
+per the #2879 carrier-migration accounting the merge_group **host_free_pass floor
+is not breached** (unchanged for them; +4 elsewhere); raw `pass` dips for the
+this-val group until the `.call`-on-native-method-closure invocation path lands.
+Slice 1b: route `<value>.call(thisArg)` where `<value>` is a
+`nativeProtoReceiverClosureStructTypes` closure to the closure invocation (thread
+`thisArg` → param 1), mirroring the direct-call dispatch that already works.
