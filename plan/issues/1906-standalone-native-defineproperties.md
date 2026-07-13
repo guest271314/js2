@@ -90,3 +90,16 @@ guard: the `js2wasm-baselines` JSONL baseline main SHA
 itself reported `improvements=24`, `wasm-change regressions=0`, `net=24`. This
 is an infrastructure blocker tracked by #1668, not a scoped #1906 implementation
 or local validation failure.
+
+## Harvest note — residual (2026-07-13, /harvest-errors)
+
+Standalone baseline run `20260713-085257` (gitHash `bb27494f`) still shows
+**79 records** emitting the exact string
+`TypeError: Object.defineProperties unsupported descriptor shape in standalone
+mode (#1906)`, plus ~180 more failing with `Property description must be an
+object` in the same standalone `Object.defineProperties` path. #1906 landed the
+common-case native path, but a residual descriptor-shape family (accessor
+descriptors / mixed data+accessor / non-object entries) is still refused in
+`--target standalone`. Not a full regression of the landed work, but the fix is
+incomplete for these shapes — consider a scoped follow-up if the 79-record
+bucket is worth clearing (goal: host-independence, umbrella #1781).
