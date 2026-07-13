@@ -39,7 +39,7 @@ import { ts } from "../ts-api.js";
 import type { Instr, ValType, StructTypeDef, ArrayTypeDef } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getOrRegisterErrorStructType } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
@@ -47,6 +47,9 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts, VOID_RESULT } from "./shared.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
@@ -389,6 +392,16 @@ export function reserveDisposableStackDisposeDriver(ctx: CodegenContext): number
   const existing = ctx.funcMap.get(DISPOSE_DRIVER);
   if (existing !== undefined) return existing;
   ensureDisposableStackTypes(ctx);
+  // (#3234) SuppressedError multi-error aggregation: the dispose driver wraps a
+  // second+ disposer throw into a native `$Error_struct` (SuppressedError tag)
+  // whose `error`/`suppressed` fields live on the `$props` open-object backing.
+  // Ensure the object runtime (`__new_plain_object`/`__extern_set`), the
+  // `$Error_struct` type, and the interned key/name strings NOW (compile time) so
+  // the finalize-time `fillDisposableStackDisposeDriver` can resolve them (adding
+  // them at finalize is unsafe — object-runtime registration runs during compile).
+  ensureObjectRuntime(ctx);
+  getOrRegisterErrorStructType(ctx);
+  for (const s of ["error", "suppressed", "SuppressedError", ""]) addStringConstantGlobal(ctx, s);
   const typeIdx = addFuncType(ctx, [EXTERNREF], []);
   const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(DISPOSE_DRIVER, funcIdx);
@@ -431,18 +444,36 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   // order: 2560 < 2621), so a `use()` module has it. Resolve by name.
   const callFnMethod0 = ctx.funcMap.get("__call_fn_method_0");
 
+  // (#3234) SuppressedError aggregation dependencies (pre-registered at reserve).
+  const exnTag = ensureExnTag(ctx);
+  const errStructIdx = getOrRegisterErrorStructType(ctx);
+  const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set");
+  const canAggregate = newPlainObjIdx !== undefined && externSetIdx !== undefined;
+
   const STACK = 0,
     DS = 0 + 1,
     ENTRIES = 2,
     I = 3,
     ENTRY = 4,
-    KIND = 5;
+    KIND = 5,
+    // (#3234) aggregation slots: PENDING = accumulated completion error, HASPENDING
+    // its presence flag (`throw null`/`throw undefined` are still throws), CUR the
+    // just-caught error, PROPS the SuppressedError `$props` scratch.
+    PENDING = 6,
+    HASPENDING = 7,
+    CUR = 8,
+    PROPS = 9;
   driverFn.locals = [
     { name: "__ds", type: stackRefNull(ctx) },
     { name: "__entries", type: { kind: "ref_null", typeIdx: t.entriesTypeIdx } },
     { name: "__i", type: I32 },
     { name: "__entry", type: { kind: "ref_null", typeIdx: t.entryTypeIdx } },
     { name: "__kind", type: I32 },
+    { name: "__pending", type: EXTERNREF },
+    { name: "__haspending", type: I32 },
+    { name: "__cur", type: EXTERNREF },
+    { name: "__props", type: EXTERNREF },
   ];
 
   const body: Instr[] = [];
@@ -513,19 +544,76 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   const deferCall: Instr[] =
     callFn0 !== undefined ? [...entryCb(), { op: "call", funcIdx: callFn0 } as Instr, { op: "drop" } as Instr] : [];
   // if kind == USE → useCall; else if kind == ADOPT → adoptCall; else deferCall.
-  dispatch.push({ op: "local.get", index: KIND } as Instr);
-  dispatch.push({ op: "i32.const", value: ENTRY_KIND_USE } as Instr);
-  dispatch.push({ op: "i32.eq" } as Instr);
+  const invokeSwitch: Instr[] = [
+    { op: "local.get", index: KIND } as Instr,
+    { op: "i32.const", value: ENTRY_KIND_USE } as Instr,
+    { op: "i32.eq" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: useCall,
+      else: [
+        { op: "local.get", index: KIND } as Instr,
+        { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
+        { op: "i32.eq" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: adoptCall, else: deferCall } as Instr,
+      ],
+    } as Instr,
+  ];
+  // (#3234) Run EVERY disposer even if a prior threw (§ DisposeResources). Wrap the
+  // invocation in try/catch on the module exception tag ($exn carries the thrown
+  // externref); Wasm traps are not catchable and there is no JS host to raise a
+  // foreign exception standalone, so a single-tag catch is complete (no catch_all).
+  // On the FIRST caught error: pending = err. On each SUBSEQUENT: pending =
+  // SuppressedError{ error: newer, suppressed: prior } (LIFO nesting).
+  const buildSuppressedError: Instr[] = canAggregate
+    ? [
+        // props = __new_plain_object(); props.error = cur; props.suppressed = pending
+        { op: "call", funcIdx: newPlainObjIdx! } as Instr,
+        { op: "local.set", index: PROPS } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        ...stringConstantExternrefInstrs(ctx, "error"),
+        { op: "local.get", index: CUR } as Instr,
+        { op: "call", funcIdx: externSetIdx! } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        ...stringConstantExternrefInstrs(ctx, "suppressed"),
+        { op: "local.get", index: PENDING } as Instr,
+        { op: "call", funcIdx: externSetIdx! } as Instr,
+        // pending = struct.new $Error_struct{ tag, message "", name, stack null, userClassId -1, props }
+        { op: "i32.const", value: BUILTIN_TYPE_TAGS.SuppressedError } as Instr,
+        ...stringConstantExternrefInstrs(ctx, ""),
+        ...stringConstantExternrefInstrs(ctx, "SuppressedError"),
+        { op: "ref.null.extern" } as Instr,
+        { op: "i32.const", value: -1 } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        { op: "struct.new", typeIdx: errStructIdx } as Instr,
+        { op: "extern.convert_any" } as Instr,
+        { op: "local.set", index: PENDING } as Instr,
+      ]
+    : // Object runtime unavailable (should not happen — reserved at compile time):
+      // degrade to last-error-wins so the module stays valid Wasm.
+      [{ op: "local.get", index: CUR } as Instr, { op: "local.set", index: PENDING } as Instr];
+  const catchHandler: Instr[] = [
+    { op: "local.set", index: CUR } as Instr,
+    { op: "local.get", index: HASPENDING } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: buildSuppressedError,
+      else: [
+        { op: "local.get", index: CUR } as Instr,
+        { op: "local.set", index: PENDING } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "local.set", index: HASPENDING } as Instr,
+      ],
+    } as Instr,
+  ];
   dispatch.push({
-    op: "if",
+    op: "try",
     blockType: { kind: "empty" },
-    then: useCall,
-    else: [
-      { op: "local.get", index: KIND } as Instr,
-      { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
-      { op: "i32.eq" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: adoptCall, else: deferCall } as Instr,
-    ],
+    body: invokeSwitch,
+    catches: [{ tagIdx: exnTag, body: catchHandler }],
+    catchAll: undefined,
   } as Instr);
   loopBody.push({ op: "if", blockType: { kind: "empty" }, then: dispatch, else: [] } as Instr);
   // i = i - 1; continue
@@ -540,6 +628,16 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
     op: "block",
     blockType: { kind: "empty" },
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // (#3234) After all disposers ran: if any error was accumulated, rethrow the
+  // final completion (the outermost SuppressedError, or the single error as-is).
+  body.push({ op: "local.get", index: HASPENDING } as Instr);
+  body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "local.get", index: PENDING } as Instr, { op: "throw", tagIdx: exnTag } as Instr],
+    else: [],
   } as Instr);
 
   driverFn.body = body;
