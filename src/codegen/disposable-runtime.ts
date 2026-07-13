@@ -42,8 +42,6 @@ import { allocLocal } from "./context/locals.js";
 import { addFuncType, getOrRegisterErrorStructType } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
-import { addStringConstantGlobal } from "./registry/imports.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts, VOID_RESULT } from "./shared.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
