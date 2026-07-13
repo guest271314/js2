@@ -508,3 +508,28 @@ Math = 3. The ~1,958 newly-honest fails redistributed across general
 assertion_fail categories (language/expressions 2,317, language/statements
 1,927, Array 1,487, Object 1,358), not into a numeric-precision or
 specific-builtin bucket. No numeric-cluster issue warranted.
+
+## 2026-07-13 /harvest-errors run (both lanes)
+
+Data: baselines run 20260713-085257 (gitHash bb27494f, 32,990 pass / 43,106),
+harvested after syncing /workspace to upstream/main. Top `#NNNN` citations map
+to existing issues — default: #2940 (vacuous detector, 1690), #1387/#1472 (67
+each); standalone: #1472 Proxy (714), #2940 (581), #2928 eval (550, backlog),
+#1906 (79), #1387 (67), #2046 Reflect (in-progress). Long-tail `assertion_fail`
+spread across mature areas (Array/prototype, class, TypedArray,
+Object.defineProperty) under existing goals — no new crash cluster. Actions:
+
+- [#3227](../3227-default-lane-async-harness-callback-vacuous.md) — **NEW.**
+  Default-lane **async-completion** harness callbacks never execute → **1,690
+  vacuous fails** (largest default cluster), dominated by for-await-of (383),
+  dynamic-import (234), Promise combinators (218), annexB/eval (168), async
+  class methods (180). Distinct from #3074 (TypedArray harness-vacuous, **done**
+  — cleared from top buckets), from #2903 (standalone `__make_callback` host
+  leak), and from oracle-infra #3086/#3001. Dropped-async-continuation bug in
+  the JS-host lane; residual after #2939/#2940 closed.
+- **#1906 residual note** (issue is `done`) — 79 standalone records still emit
+  `Object.defineProperties unsupported descriptor shape in standalone mode
+  (#1906)` + ~180 `Property description must be an object`. Accessor/mixed
+  descriptor shapes still refused; incomplete-fix flag, follow-up optional.
+- **negative_test_fail** (55/lane, 40 = "early SyntaxError not detected"):
+  covered by existing spec-gap early-error issues (#1315/#1435); no new issue.
