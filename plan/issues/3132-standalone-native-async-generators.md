@@ -22,6 +22,9 @@ loc-budget-allow:
   - src/codegen/expressions.ts
   - src/codegen/async-frame.ts
   - src/codegen/expressions/calls.ts
+  - src/codegen/declarations.ts
+  - src/codegen/context/types.ts
+  - src/codegen/async-scheduler.ts
 origin: "FABLE task 30 — env::__create_async_generator touches ~2,800 leaky-passes (largest unowned chunk of the standalone-vs-host gap)."
 ---
 
