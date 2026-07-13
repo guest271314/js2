@@ -36,6 +36,7 @@ loc-budget-allow:
 coercion-sites-allow:
   - src/codegen/iter-hof-native.ts
   - src/codegen/iter-lazy-native.ts
+  - src/codegen/ta-hof-map-filter.ts
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
