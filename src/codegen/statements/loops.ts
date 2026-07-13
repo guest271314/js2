@@ -17,7 +17,11 @@ import { reportError, reportErrorNoNode } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext, HoistedCharRead } from "../context/types.js";
-import { emitExternrefDestructureGuard, emitObjectPatternRestFromVec } from "../destructuring-params.js";
+import {
+  emitExternrefDestructureGuard,
+  emitObjectPatternRestFromVec,
+  emitStandaloneObjectRest,
+} from "../destructuring-params.js";
 import {
   emitAssignToTarget,
   findUnresolvableInArrayPattern,
@@ -57,6 +61,7 @@ import {
   compileExpression,
   compileStatement,
   emitBoundsCheckedArrayGet,
+  materializeStructAsObject,
   valTypesMatch,
 } from "../shared.js";
 import {
@@ -1459,6 +1464,32 @@ export function compileForOfDestructuring(
               if (ts.isIdentifier(pn)) excludedKeys.push(pn.text);
               else if (ts.isStringLiteral(pn)) excludedKeys.push(pn.text);
               else if (ts.isNumericLiteral(pn)) excludedKeys.push(pn.text);
+            }
+            // (#3241) Standalone/WASI: route to the DEFINED native
+            // __extern_rest_object (exclusion-OBJECT signature) instead of the
+            // `env.__extern_rest_object` host import — which leaks an env::
+            // import AND is silently miscompiled if the native func is already
+            // registered (the CSV-string 2nd arg is not an exclusion object, so
+            // no key gets excluded). Host/gc lane below is byte-identical.
+            if (ctx.standalone || ctx.wasi) {
+              // The loop element is a CLOSED-shape struct; reify it into an open
+              // `$Object` (#3222 C1) so `__object_keys` enumeration sees the
+              // fields — a bare `extern.convert_any` would yield an EMPTY rest.
+              emitStandaloneObjectRest(
+                ctx,
+                fctx,
+                () => {
+                  fctx.body.push({ op: "local.get", index: elemLocal });
+                  if (elemType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+                  if (!materializeStructAsObject(ctx, fctx, structTypeIdx, { skipInternalFields: true })) {
+                    // Declined — struct ref still on stack; reinterpret as-is.
+                    fctx.body.push({ op: "extern.convert_any" } as Instr);
+                  }
+                },
+                excludedKeys,
+                restIdx,
+              );
+              continue;
             }
             let restObjIdx = ctx.funcMap.get("__extern_rest_object");
             if (restObjIdx === undefined) {

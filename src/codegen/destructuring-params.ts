@@ -52,6 +52,62 @@ import {
 } from "./statements/destructuring.js";
 
 /**
+ * (#3241) Emit the host-free object-rest CopyDataProperties (ES §14.7.4) for
+ * `--target standalone`/`wasi`, storing the fresh rest `$Object` into `restIdx`.
+ *
+ * Shared by every object-rest binding site (function-param rest, for-of/-await
+ * loop-var rest, assignment-target rest) so they all route to the DEFINED native
+ * `__extern_rest_object` (#3223) instead of the `env.__extern_rest_object` host
+ * import — which both LEAKS an env:: import (breaking zero-import instantiation)
+ * and, worse, is SILENTLY MISCOMPILED when the native func is already registered
+ * by another rest site: the host-import call sites pass a comma-joined excluded
+ * STRING, but the native helper takes an EXCLUSION OBJECT, so its
+ * `__extern_has(excl, key)` membership probe reports "absent" for the string and
+ * NO key is excluded (the rest object wrongly keeps the destructured keys).
+ *
+ * This helper builds the exclusion object (own keys = excluded property names;
+ * value is the key itself — only presence matters), then invokes `emitSource`,
+ * which MUST leave an **open-`$Object` externref** for the source on the stack
+ * (`__object_keys` walks only the open-`$Object` hash — a CLOSED-shape struct
+ * reinterpreted via `extern.convert_any` is invisible to it and yields an EMPTY
+ * rest, #3222 C1; struct sources must be reified via `materializeStructAsObject`
+ * inside `emitSource`). Returns `false` (caller keeps its host/gc path) if a
+ * dependency is unexpectedly missing. The host/gc lanes are untouched — this is
+ * gated on `ctx.standalone || ctx.wasi` at each call site.
+ */
+export function emitStandaloneObjectRest(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  emitSource: () => void,
+  excludedKeys: string[],
+  restIdx: number,
+): boolean {
+  const restObjIdx = ensureExternRestObject(ctx);
+  const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set");
+  if (restObjIdx === undefined || newPlainObjIdx === undefined || externSetIdx === undefined) return false;
+  const exclLocal = allocLocal(fctx, `__rest_excl_${fctx.locals.length}`, { kind: "externref" });
+  // excl = OrdinaryObjectCreate(null)
+  fctx.body.push({ op: "call", funcIdx: newPlainObjIdx });
+  fctx.body.push({ op: "local.set", index: exclLocal });
+  // for each excluded key: __extern_set(excl, key, key) — the value only needs
+  // to be non-null so the helper's membership probe (__extern_has) reports
+  // "present"; reuse the key's own externref as a cheap sentinel.
+  for (const key of excludedKeys) {
+    fctx.body.push({ op: "local.get", index: exclLocal });
+    for (const instr of stringConstantExternrefInstrs(ctx, key)) fctx.body.push(instr);
+    for (const instr of stringConstantExternrefInstrs(ctx, key)) fctx.body.push(instr);
+    fctx.body.push({ op: "call", funcIdx: externSetIdx });
+  }
+  // rest = __extern_rest_object(source, excl)
+  emitSource();
+  fctx.body.push({ op: "local.get", index: exclLocal });
+  fctx.body.push({ op: "call", funcIdx: restObjIdx });
+  fctx.body.push({ op: "local.set", index: restIdx });
+  return true;
+}
+
+/**
  * #2032 — resolve the static property key for an object binding element.
  *
  * For a plain identifier or string/numeric literal property name the key is
@@ -545,29 +601,17 @@ export function destructureParamObjectExternref(
       // and no delimiter false-match. The host/gc branch below is byte-identical
       // to the prior behaviour.
       if (ctx.standalone || ctx.wasi) {
-        const restObjIdx = ensureExternRestObject(ctx);
+        // The param is an externref (already an open `$Object` at runtime), so
+        // no `materializeStructAsObject` reification is needed here.
+        const ok = emitStandaloneObjectRest(
+          ctx,
+          fctx,
+          () => fctx.body.push({ op: "local.get", index: paramIdx }),
+          excludedKeys,
+          restIdx,
+        );
         getIdx = ctx.funcMap.get("__extern_get");
-        const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
-        const externSetIdx = ctx.funcMap.get("__extern_set");
-        if (restObjIdx === undefined || newPlainObjIdx === undefined || externSetIdx === undefined) continue;
-        const exclLocal = allocLocal(fctx, `__rest_excl_${fctx.locals.length}`, { kind: "externref" });
-        // excl = OrdinaryObjectCreate(null)
-        fctx.body.push({ op: "call", funcIdx: newPlainObjIdx });
-        fctx.body.push({ op: "local.set", index: exclLocal });
-        // for each excluded key: __extern_set(excl, key, key) — the value only
-        // needs to be non-null so the helper's membership probe (__extern_get)
-        // reports "present"; reuse the key's own externref as a cheap sentinel.
-        for (const key of excludedKeys) {
-          fctx.body.push({ op: "local.get", index: exclLocal });
-          for (const instr of stringConstantExternrefInstrs(ctx, key)) fctx.body.push(instr);
-          for (const instr of stringConstantExternrefInstrs(ctx, key)) fctx.body.push(instr);
-          fctx.body.push({ op: "call", funcIdx: externSetIdx });
-        }
-        // rest = __extern_rest_object(obj, excl)
-        fctx.body.push({ op: "local.get", index: paramIdx });
-        fctx.body.push({ op: "local.get", index: exclLocal });
-        fctx.body.push({ op: "call", funcIdx: restObjIdx });
-        fctx.body.push({ op: "local.set", index: restIdx });
+        if (!ok) continue;
         if (isDecl) emitLocalTdzInit(fctx, restName);
         continue;
       }
