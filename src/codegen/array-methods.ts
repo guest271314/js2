@@ -4771,6 +4771,29 @@ function compileArrayIncludes(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
+  // (#3201) A sparse array (logical `.length` set beyond the physical WasmGC
+  // backing) has `lenTmp` (field 0) > `array.len(dataTmp)`. The scan loop below
+  // reads `data[i]` with a raw `array.get`, which TRAPS ("array element access
+  // out of bounds") once `i` passes the backing length. Per §23.1.3.16 those
+  // beyond-backing indices are absent holes read (via Get, not HasProperty) as
+  // `undefined` — so clamp the PHYSICAL scan to the backing length (bounded,
+  // never iterating a possibly-huge logical `.length`); the beyond-backing
+  // `undefined` holes are handled by the O(1) post-loop check below. Dense
+  // (non-sparse) vecs keep `effLen == lenTmp` (backing capacity ≥ length ⇒ min
+  // is the length), so the clamp is a runtime no-op there.
+  const effLenTmp = allocLocal(fctx, `__arr_inc_efflen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: lenTmp } as Instr],
+    else: [{ op: "local.get", index: dataTmp } as Instr, { op: "array.len" } as Instr],
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: effLenTmp });
+
   compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
@@ -4920,7 +4943,7 @@ function compileArrayIncludes(
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
+    { op: "local.get", index: effLenTmp }, // (#3201) clamp physical scan to backing
     { op: "i32.ge_s" },
     { op: "br_if", depth: 1 },
 
@@ -8626,6 +8649,28 @@ function compileArraySort(
  * both returning i32 sign. Returns the (in-place sorted) vec, or `null` if the
  * required helpers are unavailable (caller falls back to the numeric Timsort).
  */
+/**
+ * (#3201) In-place clamp of a sort's length local to the physical WasmGC
+ * backing: `lenLocal = min(lenLocal, array.len(dataLocal))`. A sparse array
+ * (logical `.length` set beyond the backing) would otherwise trap on the
+ * out-of-bounds `array.get`/`array.set` in the sort loop; per §23.1.3.30 the
+ * beyond-backing indices are holes that sort to the end, so sorting only the
+ * defined physical prefix is spec-correct. No-op for dense arrays.
+ */
+function emitSortLenBackingClamp(fctx: FunctionContext, lenLocal: number, dataLocal: number): void {
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: lenLocal } as Instr],
+    else: [{ op: "local.get", index: dataLocal } as Instr, { op: "array.len" } as Instr],
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+}
+
 function compileArrayDefaultToStringSort(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -8693,6 +8738,14 @@ function compileArrayDefaultToStringSort(
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // (#3201) Clamp the sort length to the physical WasmGC backing so a sparse
+  // array (logical `.length` set beyond the backing) does not TRAP on the
+  // out-of-bounds `array.get`/`array.set` below. Per §23.1.3.30 the absent
+  // beyond-backing indices are holes that sort to the END, so sorting only the
+  // physical defined prefix and leaving the holes in place is spec-correct.
+  // Dense vecs keep `lenTmp` (backing ≥ length ⇒ runtime no-op).
+  emitSortLenBackingClamp(fctx, lenTmp, dataTmp);
 
   const getOp: Instr["op"] =
     elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
@@ -8878,6 +8931,11 @@ function tryCompileComparatorSort(
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // (#3201) Clamp the comparator sort length to the physical backing so a sparse
+  // receiver does not trap on the out-of-bounds element access below. Holes sort
+  // to the end (§23.1.3.30); no-op for dense arrays.
+  emitSortLenBackingClamp(fctx, lenTmp, dataTmp);
 
   const getOp: Instr["op"] =
     elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
