@@ -29,6 +29,7 @@ import { ensureIterStepScratchGlobal, ensureNativeIteratorRuntime } from "../ite
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
+import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
 import {
   ensureObjVecBuilders,
@@ -1454,6 +1455,23 @@ const STANDALONE_TA_SCALAR_HOFS: ReadonlySet<string> = new Set([
   "every",
   "reduce",
   "reduceRight",
+]);
+
+/**
+ * (#2903 R4b) The PACKED-INTEGER typed-array views whose `map`/`filter` are
+ * routed to the native `__ta_map_*`/`__ta_filter_*` typed-RESULT helper. Excludes
+ * `Uint8ClampedArray` (shares the `i8_byte` carrier but needs round-half-to-even
+ * clamping, not truncation — follow-up) and the float views (`Float32Array`/
+ * `Float64Array` use the `f64` carrier and already `map`/`filter` correctly
+ * through the existing array-HOF path — byte-identical, left untouched).
+ */
+const STANDALONE_TA_MAPFILTER_PACKED_VIEWS: ReadonlySet<string> = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
 ]);
 
 /**
@@ -12431,6 +12449,58 @@ function compileCallExpression(
             );
           }
           return VOID_RESULT;
+        }
+      }
+    }
+
+    // (#2903 R4b) Standalone DIRECT-carrier packed-integer typed-array
+    // `map`/`filter` → the native `__ta_map_*`/`__ta_filter_*` typed-RESULT
+    // helper, BEFORE the array-methods.ts path (whose standalone packed-carrier
+    // arm is the same `__make_callback` no-op stub the R4 scalar HOFs hit). The
+    // helper allocates a fresh same-kind packed `$__vec_<kind>` carrier and
+    // drives the callback host-free via `__apply_closure`. Returns the vec ref
+    // directly so the statically-typed result binding (`const b: Uint8Array =
+    // a.map(...)`) matches and reads element-correctly. Uint8Clamped + float
+    // views + `any`-held receivers are excluded (see the view set / R4b note).
+    if (
+      ctx.standalone &&
+      (propAccess.name.text === "map" || propAccess.name.text === "filter") &&
+      expr.arguments.length >= 1 &&
+      !expr.arguments.some((a) => ts.isSpreadElement(a))
+    ) {
+      const viewName = receiverType.getSymbol?.()?.getName?.();
+      if (viewName !== undefined && STANDALONE_TA_MAPFILTER_PACKED_VIEWS.has(viewName)) {
+        const methodName = propAccess.name.text as "map" | "filter";
+        const storage = typedArrayVecStorage(ctx, viewName);
+        const vecTypeIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
+        const helperIdx = ensureTaMapFilterHelper(ctx, methodName, vecTypeIdx);
+        if (helperIdx !== undefined) {
+          flushLateImportShifts(ctx, fctx);
+          // Receiver → externref.
+          const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvT && recvT.kind !== "externref") coerceType(ctx, fctx, recvT, { kind: "externref" });
+          else if (recvT === null) fctx.body.push({ op: "ref.null.extern" });
+          // Callback (arg0) → WasmGC closure struct (not __make_callback).
+          const cbArg = expr.arguments[0]!;
+          if (ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)) {
+            const at = compileArrowAsClosure(ctx, fctx, cbArg);
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+          } else {
+            const at = compileExpression(ctx, fctx, cbArg, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+          }
+          // thisArg (arg1) → externref, or undefined-sentinel null.
+          if (expr.arguments.length >= 2) {
+            const tt = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
+            if (tt && tt.kind !== "externref") coerceType(ctx, fctx, tt, { kind: "externref" });
+            else if (tt === null) fctx.body.push({ op: "ref.null.extern" });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: helperIdx });
+          return { kind: "ref", typeIdx: vecTypeIdx };
         }
       }
     }
