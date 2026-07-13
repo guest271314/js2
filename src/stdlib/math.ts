@@ -194,14 +194,16 @@ export function Math_log1p(x: number): number {
  * `-1 / 0` (the dialect forbids the `Infinity` identifier; `0 / 0` is NaN);
  * the `x === +Infinity` arm is the `x > MAX_VALUE` test (negatives and NaN
  * already returned). The hand version's `if (f > sqrt2) { f *= 0.5; e += 1; }`
- * adjust is expressed with ternary-initialized locals (`over`/`ea`/`fa`)
- * rather than a mid-body statement-if: from-ast currently mis-scopes the `let`
- * declarations that FOLLOW a non-returning statement-if into its then-branch
- * (so they are skipped when the branch is not taken — a real from-ast
- * limitation, flagged for #2856); the ternary form is bit-identical and stays
- * in the proven decl-only tail subset. Registered as an EARLY core (before its
- * hand-emitted callers pow/log10/asinh/acosh/atanh), not in the leaf
- * `SELF_HOSTED_MATH` map. (#3204)
+ * adjust is now expressed as the natural mid-body statement-if it mirrors:
+ * the from-ast overlay bug that mis-scoped the `let` declarations FOLLOWING a
+ * non-returning statement-if into its then-branch was root-caused and fixed in
+ * #2856 (a lower.ts structurizer soundness bug — a tail-duplicated
+ * continuation block leaked the `materialized` local set across the two `if`
+ * arms, so the else-path read an unset local). The natural form is
+ * bit-identical to the previous ternary workaround (`over`/`ea`/`fa`), verified
+ * across a dense magnitude sweep + specials. Registered as an EARLY core
+ * (before its hand-emitted callers pow/log10/asinh/acosh/atanh), not in the
+ * leaf `SELF_HOSTED_MATH` map. (#3204, #2856)
  */
 const LOG_SOURCE = `
 export function Math_log(x: number): number {
@@ -214,13 +216,11 @@ export function Math_log(x: number): number {
   let f: number = x;
   while (f >= 2) { f = f * 0.5; e = e + 1; }
   while (f < 0.5) { f = f * 2; e = e - 1; }
-  let over: number = f > 1.4142135623730951 ? 1 : 0;
-  let ea: number = e + over;
-  let fa: number = over === 1 ? f * 0.5 : f;
-  let t: number = (fa - 1) / (fa + 1);
+  if (f > 1.4142135623730951) { f = f * 0.5; e = e + 1; }
+  let t: number = (f - 1) / (f + 1);
   let t2: number = t * t;
   let p: number = ((((((t2 * (1 / 13) + 1 / 11) * t2 + 1 / 9) * t2 + 1 / 7) * t2 + 1 / 5) * t2 + 1 / 3) * t2 + 1) * t * 2;
-  return p + ea * 0.6931471805599453;
+  return p + e * 0.6931471805599453;
 }
 `;
 
@@ -242,13 +242,11 @@ export function Math_log2(x: number): number {
   let f: number = x;
   while (f >= 2) { f = f * 0.5; e = e + 1; }
   while (f < 0.5) { f = f * 2; e = e - 1; }
-  let over: number = f > 1.4142135623730951 ? 1 : 0;
-  let ea: number = e + over;
-  let fa: number = over === 1 ? f * 0.5 : f;
-  let t: number = (fa - 1) / (fa + 1);
+  if (f > 1.4142135623730951) { f = f * 0.5; e = e + 1; }
+  let t: number = (f - 1) / (f + 1);
   let t2: number = t * t;
   let p: number = ((((((t2 * (1 / 13) + 1 / 11) * t2 + 1 / 9) * t2 + 1 / 7) * t2 + 1 / 5) * t2 + 1 / 3) * t2 + 1) * t * 2;
-  return p * 1.4426950408889634 + ea;
+  return p * 1.4426950408889634 + e;
 }
 `;
 
