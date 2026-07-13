@@ -1,12 +1,13 @@
 ---
 id: 3223
 title: "Standalone: native `__extern_rest_object` — object-rest `{a, ...rest}` leaks env host import (leaky→host-free de-leak, ~234–417 test262 files)"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-substrate
 sprint: current
 model: opus
 created: 2026-07-13
 updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 horizon: m
 feasibility: hard
