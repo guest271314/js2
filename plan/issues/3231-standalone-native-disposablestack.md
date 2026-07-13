@@ -139,14 +139,52 @@ calling `__call_fn_0`/`__call_fn_1` (funcIdx resolved from `mod.exports` — the
 `__call_fn_N` exports are NOT in `funcMap`, unlike `__call_fn_method_N`). Host lane
 proven byte-identical. 11 local tests green; no Map-native / #2029 regression.
 
-**Phase 1b / follow-ups** (all fall through to the existing host path → NET-neutral
-in standalone, not regressions):
-- `use()` — dynamic `value[Symbol.dispose]` lookup + callable validation (reuse the
-  `using`-statement native disposer read). ~14 flips.
-- SuppressedError aggregation for multi-error disposal (try/catch per disposer,
-  chain into a native SuppressedError). 7 tests.
+## Landed (Phase 1b)
+
+**`use(value)` — native dynamic `[Symbol.dispose]` lookup.** `DisposableStack.
+prototype.use` is now host-free in standalone/nativeStrings. Implementation
+(`src/codegen/disposable-runtime.ts` `compileNativeDisposableStackUse` +
+`ensureDisposableStackCheckActive`, plus a third dispatch arm in
+`fillDisposableStackDisposeDriver`; wired in `expressions/extern.ts`):
+
+- Spec order: RequireInternalSlot + disposed-throw (ReferenceError) FIRST — even
+  for `use(null)`/`use(undefined)` on a disposed stack — via the new
+  `__disposablestack_check_active` helper; then null/undefined value → passthrough
+  (no resource added); else `GetMethod(value, @@dispose)`.
+- The method is read ONCE at `use()` time via `__extern_get(value,
+  __box_symbol(13))` over the native `$Object` substrate (the same substrate the
+  object-literal writer stores `[Symbol.dispose]` methods into — `literals.ts`).
+  A non-object receiver / missing / null / undefined method → TypeError (the
+  spec's two distinct TypeError sources collapse to one observable result).
+- Stored as `ENTRY_KIND_USE` (kind 2); the dispose loop invokes
+  `__call_fn_method_0(value, method)` so the disposer's `this` binds to the used
+  value. Interleaves correctly with defer/adopt in LIFO order.
+- Nullish detection is regime-independent (`ref.is_null` ∨ `__extern_is_undefined`)
+  because `__extern_is_nullish` exists only under the undefined-singleton regime.
+- Host lane byte-identical (gc/host `use()` still emits `DisposableStack_use`).
+  9 new local tests; no #2029/#2861/#1433/#1695 regression.
+
+## Phase 1b follow-ups (still host-fallthrough / NET-neutral — not regressions)
+
+- **SuppressedError multi-error aggregation** (7 tests) — the dispose loop must run
+  every disposer even when a prior threw, chaining into a native `SuppressedError`
+  (`.error`/`.suppressed` with object identity + nesting). Needs: `SuppressedError`
+  in `BUILTIN_TYPE_TAGS` (+ Error parent) so `instanceof SuppressedError` resolves
+  (today it hits the degenerate "unknown class → false" arm); a native
+  `__new_SuppressedError` ctor storing error+suppressed (via the `$Error_struct`
+  `$props` sidecar for identity); and try/catch (`op: "try"`, `js-errors` `$exc`
+  tag) per disposer in `fillDisposableStackDisposeDriver` with reverse-accumulation.
+  Self-contained but multi-file; deferred to keep this PR to the `use()` slice.
+- **`returns-value` / identity tests** are blocked by a PRE-EXISTING object-identity
+  gap, NOT by `use()`: `x === r` returns `false` for ANY object carrying a
+  symbol-keyed member in standalone (`{a:1}` identity works; `{[Symbol.dispose](){}}`
+  does not — verified on this base). `use()` returns the correct value; the `===`
+  substrate is the blocker (tag-5/tag-6 boxing family). Separate value-rep issue.
 - **defer-in-a-loop closures** — a loop-body arrow passed to `defer` does not run at
-  dispose (a loop-scoped-closure storage limitation, not the entry array — proven:
-  5 explicit defers past the initial capacity work; a `for`-loop of 3 does not).
+  dispose. Root-caused to a GENERAL mutable-capture-in-loop closure bug, NOT
+  disposable-specific: an array of loop-created closures that write an outer
+  captured variable also loses the writes (`Array<()=>void>` pushed in a `for`
+  loop, invoked later, returns 0). Explicit defers past capacity work. Needs its
+  own issue against the closure-capture substrate — out of scope here.
 - `AsyncDisposableStack` (`disposeAsync` → Promise) — Phase 2, gated on #3132.
 - `stack[Symbol.dispose]()` element-access call (vs `.dispose()`).
