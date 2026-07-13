@@ -182,3 +182,46 @@ splice** are now trap-safe. Still open (documented above, need fresh dispatches
 - **huge sparse-index WRITES** (`arr[2**32-2] = v`) — write-path rework.
 - **`Array.prototype`-mutation `illegal cast`** — harness-entangled (reproduces
   only through the full test262 preamble); needs preamble bisection.
+
+## Progress — sparse-array sort/includes trap-safety landed (opus-3201b, 2026-07-13)
+
+Third trap-first slice, following the indexOf/lastIndexOf read-clamp (#2968)
+and the slice/concat structural-copy clamp (#2970). On a SPARSE array (logical
+`.length` set beyond the physical WasmGC backing) both methods read/write
+`data[i]` past `array.len(data)` and TRAP ("array element access out of
+bounds"), aborting the whole test262 program.
+
+- **sort** — all three sort lowerings read to the LOGICAL length: the default
+  numeric Timsort (`__timsort_<k>` thunk in `timsort.ts`), the default ToString
+  insertion sort (`compileArrayDefaultToStringSort`), and the comparator
+  insertion sort (`tryCompileComparatorSort`). Added `emitSortLenBackingClamp`
+  (a shared `len = min(len, array.len(data))` helper in `array-methods.ts`) at
+  each site; the Timsort thunk got the same clamp inline (it has no fctx). Per
+  §23.1.3.30 SortIndexedProperties the beyond-backing indices are holes that
+  sort to the END, so sorting only the physical defined prefix and leaving the
+  holes in place is spec-correct AND trap-free.
+- **includes** — the SameValueZero scan bound is clamped to the physical backing
+  (`effLen = min(len, array.len(data))`, mirroring the merged indexOf clamp).
+  A beyond-backing hole reads as `undefined` (§23.1.3.16 Get), which can never
+  SameValueZero-match a number/string search value, so the loop-clamp is
+  spec-correct for the numeric/string element arrays that actually hit the trap.
+  (The task-flagged `includes(undefined)` beyond-backing sub-case only concerns
+  externref/`any[]` element arrays — and there the length-setter GROWS the
+  backing rather than leaving a beyond-backing gap, so there is no trap and no
+  clamp divergence to fix; a structural post-loop `undefined` check was
+  prototyped and REMOVED as dead code on realistic inputs. Standalone
+  externref-element includes remains separately broken by the `$Object`
+  native-string value-read substrate gap — out of scope here.)
+
+Dense arrays are behaviourally unchanged (backing capacity ≥ length ⇒ the clamp
+is a runtime no-op). Dedicated tests: `tests/issue-3201-sort-includes.test.ts`
+(11/11, standalone lane). Zero array-suite regressions — the pre-existing
+`issue-2036` S6 "refuse-loudly" fails, `array-capacity` `string_constants`
+host-import fails, and `array-oob-bounds-check > destructuring shorter array`
+fail are all present on clean `origin/main` (verified by swapping in the
+origin/main compiler).
+
+Still open in this family (documented above, left `ready`): huge sparse-index
+WRITES (trap on the densely-growing-backing write path), the harness-entangled
+`Array.prototype`-mutation `illegal cast` cluster, revoked-Proxy casts
+(deferred, #1355/#1472), and `splice`/`pop` sparse reads.
