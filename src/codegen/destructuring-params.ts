@@ -369,6 +369,26 @@ function boxToExternref(ctx: CodegenContext, elemKey: string, srcElemType?: ValT
   if (srcElemType && (srcElemType.kind === "externref" || srcElemType.kind === "ref_extern")) {
     return [];
   }
+  // (#3024) Packed sub-i32 element carriers (`i8`/`i16` — Int8/Uint8/Uint8Clamped,
+  // Int16/Uint16 typed-array backing, and the resizable-ArrayBuffer byte store).
+  // Their READ side is a packed `array.get_u` (see the caller) which zero-extends
+  // to an i32 in 0..255 / 0..65535 — always non-negative, so `f64.convert_i32_s`
+  // == `_u` — then f64-box via `__box_number`. Without this branch a packed carrier
+  // fell to the `ref`-type `extern.convert_any` default below, which on an i32
+  // operand is invalid Wasm (whole module fails validation). Mirrors the R4
+  // dynamic-dispatch chokepoint (`object-runtime.ts` `packedElemReadBox`). The
+  // shared carrier type loses the constructor's signedness, so this generic read
+  // is unsigned (a negative Int8/Int16 reads its unsigned bit-pattern) — the same
+  // documented limitation as the R4 read; recovering it needs a per-signedness
+  // carrier type (deferred).
+  if (srcElemType && (srcElemType.kind === "i8" || srcElemType.kind === "i16")) {
+    addUnionImports(ctx);
+    const boxIdx = ctx.funcMap.get("__box_number");
+    if (boxIdx !== undefined) {
+      return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr];
+    }
+    return [{ op: "drop" } as Instr, { op: "ref.null.extern" }];
+  }
   if (elemKey === "externref") {
     // Already externref, just pass through
     return [];
@@ -1520,7 +1540,19 @@ export function destructureParamArray(
                   { op: "local.get", index: cvtTmp } as Instr,
                   { op: "struct.get", typeIdx: vecIdx, fieldIdx: 1 } as Instr, // src data
                   { op: "local.get", index: idxTmp } as Instr,
-                  { op: "array.get", typeIdx: srcArrTypeIdx } as Instr,
+                  // (#3024) Packed i8/i16 backing arrays (typed-array / resizable-
+                  // ArrayBuffer byte stores) are STORAGE-only: a plain `array.get`
+                  // is invalid Wasm ("has packed type … use array.get_s/_u"). Read
+                  // packed carriers unsigned-extended (`array.get_u`); `boxToExternref`
+                  // then f64-boxes the zero-extended i32. Non-packed carriers keep the
+                  // byte-identical plain `array.get`.
+                  {
+                    op:
+                      srcElemType && (srcElemType.kind === "i8" || srcElemType.kind === "i16")
+                        ? "array.get_u"
+                        : "array.get",
+                    typeIdx: srcArrTypeIdx,
+                  } as Instr,
                   // Box primitive types before storing as externref
                   ...boxToExternref(ctx, key, srcElemType),
                   { op: "array.set", typeIdx: extArrTypeIdx } as Instr,

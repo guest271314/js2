@@ -1370,7 +1370,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   ctx.liveBodies.delete(condInstrs);
 }
 
-function compileForOfDestructuring(
+export function compileForOfDestructuring(
   ctx: CodegenContext,
   fctx: FunctionContext,
   pattern: ts.ObjectBindingPattern | ts.ArrayBindingPattern,
