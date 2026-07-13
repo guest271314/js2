@@ -5862,6 +5862,29 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureAnyValueType(ctx);
   const anyValueTypeIdx = ctx.anyValueTypeIdx;
 
+  // (#3216) Register the native `number_toString` BEFORE any funcIdx below is
+  // captured, so `__any_to_string`'s number arms (the tag-2/tag-3 dispatch arms
+  // AND the residual boxed-`$__box_number_struct` arm) bake the REAL conversion
+  // rather than the "[object Object]" fallback. Root cause: when
+  // `ensureAnyToStringHelper` is the FIRST consumer of number stringification in
+  // a module — e.g. a reflective `String.prototype.<m>.call(<number|boolean>)`
+  // body's `ToString(this)` is the first `__any_to_string` caller — the lazily-
+  // registered `number_toString` did not yet exist, so `numToStrIdx` below was
+  // `undefined` and every `numberArm(...)` captured the literal "[object Object]".
+  // The helper is cached, so the WHOLE module then stringified boxed primitives
+  // wrong (`String.prototype.charAt.call(12345, 2)` read `"[object Object]"[2]`
+  // instead of `"12345"[2]`). Other consumers (array `join`, `String(x)`,
+  // template literals) pulled `number_toString` in first, which is why they
+  // worked and masked this ordering hazard. Idempotent + append-only DEFINED
+  // function (no import → the #1448 late-import shift risk it can trigger via
+  // string constants happens HERE, before the `errToStrIdx`/`numToStrIdx`
+  // captures below, so those stay consistent). Native-strings-gated so host/gc
+  // lanes stay byte-identical (there `number_toString` is host-provided/absent
+  // and the numberArm keeps its prior fallback).
+  if (ctx.nativeStrings && !ctx.funcMap.has("number_toString")) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+  }
+
   // (#2962) Emit the §20.5.3.4 `__error_to_string` helper BEFORE this
   // function's own index is baked (it appends a function — no import, so no
   // index shift for anything already emitted). `undefined` in JS-host mode
