@@ -377,7 +377,41 @@ sequencing lives in umbrella **#3178**.
 
 What remains HERE, ranked, each a bounded PR:
 
-### R1 — `new Promise(NON-inline executor)` (fable-executable-now, S)
+### R1 — `new Promise(NON-inline executor)` — LANDED (opus-r3, 2026-07-13)
+
+**PR:** `issue-2903-r1-promise-executor`. Retires the `Promise_new` +
+`__make_callback` + `Promise_then` leak for a value/param-held executor.
+
+**The lowering** (`emitStandalonePromiseFromExecutorValue`, promise-executor.ts;
+wired in new-super.ts between the inline path and the host fallthrough): when the
+executor arg is NOT a syntactic inline arrow/function-expression (so the inline
+`ClosureInfo`-based `call_ref` path declines), invoke the runtime closure value
+through the open-`any` bridge `__apply_closure(exec, undefined, [resolve,
+reject])` (arity-clamps per #2939). Allocates the pending `$Promise`, builds the
+two capturing settle closures via the shared `ensurePromiseExecutorClosures`,
+runs the executor synchronously inside a try/catch (throw-before-settle →
+`reject`), returns the `$Promise`. Does NOT set `moduleHasHostPromiseSource`, so
+the then-bridge de-leak applies. Standalone/WASI only; gc/host lane keeps
+`Promise_new` byte-unchanged (verified).
+
+**Proofs** (`tests/issue-2903-r1.test.ts`, 7): const-held + PARAM-held executor
+resolve (11, 13), reject routing (4), executor-throw→reject (8), single-param
+executor (7) — all host-free (`env` imports `[]`, bare `{}` instantiate); inline
+path unchanged (42); gc lane keeps `Promise_new`. issue-1326 + issue-2903
+(25 tests) green.
+
+**Boundary (documented, separate follow-up — NOT an R1 regression)**: the
+cross-function shape `function make(ex){ return new Promise(ex); }` consumed via
+a `.then` in a DIFFERENT function delivers the wrong value (NaN / fulfilled-not-
+rejected) — the promise is created in one function and the `make(...)` call is
+async-call-WRAPPED (`isAsyncCallExpression`/`wrapAsyncCallInTryCatch`), whose
+adoption of the returned native `$Promise` is the gap. This is the
+async-call-wrap machinery, not the executor lowering; on main this shape LEAKED
+(un-instantiable host-free) so there is no standalone `host_free_pass`
+regression — it moves from leaky-fail to host-free-fail. The in-scope executor
+cases (the R1 core) are fully correct.
+
+--- (original R1 plan below) ---
 
 Probe: `function make(ex){ return new Promise(ex); } make((res)=>res(42))`
 leaks `Promise_new + __make_callback + Promise_then`.
@@ -429,11 +463,53 @@ passes + the `Iterator/prototype/{map,filter,take,drop,flatMap}` fail
 directories (~250 files; tree currently 92/373 post-sub-front-2). Follow the
 iter-hof-native.ts reserve-then-fill discipline (#1719) exactly.
 
-### R4 — TypedArray callback methods (sub-front 4, fable-executable-now, S)
+### R4 — TypedArray callback methods (sub-front 4)
 
 `Uint8ClampedArray_find + __make_callback` style leaks (~5 rows) + fail rows.
 Native %TypedArray% HOF bodies invoking via `call_ref` — same pattern as the
 vec HOF arm; ground in `closed-method-dispatch.ts` + the #2651 family.
+
+#### R4 grounding (opus-r3, 2026-07-13) — bigger than "S", dispatch-selection
+
+Measured on current main (`--target standalone`). The premise "add native
+%TypedArray% HOF bodies" is directionally right but R4 is **not a bounded
+carrier-admission add** — it is a **dispatch-SELECTION** issue in the
+`%TypedArray%.prototype` proto glue:
+
+- `(u8 as any).forEach(cb)` / `.find(cb)` — the callback **never drives**:
+  `find` returns `0` (should find the element), `forEach` leaves a captured var
+  at `0`, `filter` returns the **receiver unchanged** (length passthrough, not
+  the filtered result). NOT a capture-writeback issue — `find` has no capture
+  and still fails.
+- **Plain `any` arrays work** (`[1,2,3] as any`.forEach/find → correct via the
+  #3098 native `__hof_*` arm). **`Array.from(u8)` then `.find` works.** So the
+  native HOF machinery is fine; the typed-array value doesn't reach it.
+- Carriers are `$__vec_i8_byte` / `$__subview_i8_byte` — **both
+  `$__vec_base`-subtyped** (so `ref.test $__vec_base` in the #3098 arm SHOULD
+  match) — and `__extern_get_idx` / `__extern_length` on the typed `any`
+  **read correctly** (`b[0]` = 5, `.length` = 3). So neither the carrier test
+  nor the element reads are the gap.
+- The break is that a typed-array-typed receiver's `.forEach`/`.find` (even
+  cast to `any`) routes to the `%TypedArray%.prototype` **proto glue**
+  (`array-object-proto.ts`, the `emitProtoMemberBodyRefusal` family — filter/
+  find/forEach/map are in its member sets at lines ~335-346) which degrades to a
+  refusal/identity stub instead of the generic `__call_m_*` / `__hof_*` path —
+  exactly the same shape as the Iterator/Promise proto-refusal root cause in the
+  TL;DR. `filter` returning the receiver is the identity-stub signature.
+- **Separately**, the STATICALLY-typed `a.forEach(cb)` (no `as any`) leaks
+  `env.__make_callback` — a second, distinct routing bug on the typed path.
+
+**Fix shape for whoever picks R4 up**: implement the native
+`%TypedArray%.prototype` HOF bodies (find/findIndex/findLast*/forEach/some/
+every/reduce/reduceRight — scalar/undefined returns) in the proto glue, driving
+via the already-working `__extern_get_idx`/`__extern_length` + `__apply_closure`
+(mirror `__hof_*` / the eager `__iter_hof_*` bodies), and route the typed
+callback path there instead of the refusal stub / `__make_callback`. `map`/
+`filter` need typed-RESULT construction (a new typed vec with element-width
+wrapping per #2593) — split as **R4b**. Note: WAT symbolic-name grep is
+unreliable for confirming the runtime call target (numeric `call N` encoding,
+per the TL;DR trap) — use runtime instrumentation or read the proto-glue member
+routing directly.
 
 ### NOT this issue (re-affirmed)
 
