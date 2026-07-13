@@ -41,6 +41,13 @@ export interface StdlibMathBuiltin {
   readonly callees: readonly string[];
   /** Ordinary TS source, IR-claimable subset (see header). */
   readonly source: string;
+  /**
+   * Number of `(f64) -> f64` positional params (default 1). `2` is used by
+   * `pow(base, exp)` — still pure f64, just binary, so it flows through the
+   * generalized #3161 typed path with `paramTypes: [F64, F64]`. Callees
+   * remain unary `(f64) -> f64`.
+   */
+  readonly arity?: 1 | 2;
 }
 
 /**
@@ -412,13 +419,153 @@ export const ASIN_BUILTIN: StdlibMathBuiltin = { name: "Math_asin", callees: ["M
 export const ACOS_BUILTIN: StdlibMathBuiltin = { name: "Math_acos", callees: ["Math_atan"], source: ACOS_SOURCE };
 
 /**
+ * Math.exp — Cody-style reduction `x = n·ln2 + r`, `|r| ≤ ln2/2`, then
+ * `exp(r)` by an order-7 Taylor Horner and `2^n` by repeated SQUARING of the
+ * non-negative integer `ni = |n|`. #3226 established this needs NO IEEE
+ * exponent-field extraction / `reinterpret` — the hand body's `ni & 1` /
+ * `ni >>> 1` are just parity + halve of a small non-negative integer, exactly
+ * `ni - Math.floor(ni/2)*2` and `Math.floor(ni/2)` in pure f64 (bit-identical
+ * for a non-negative integer). ±Infinity / overflow / underflow specials
+ * mirror the hand ladder: `x == +Inf` → `x`; `x == -Inf` / `x < -745` → 0;
+ * `x > 709.7` → `1 / 0` (= +Inf; the dialect forbids the `Infinity` identifier).
+ * LOG2E = 1.4426950408889634, LN2 = 0.6931471805599453.
+ */
+const EXP_SOURCE = `
+export function Math_exp(x: number): number {
+  if (x !== x) return x;
+  if (x > 1.7976931348623157e308) return x;
+  if (x < -1.7976931348623157e308) return 0;
+  if (x > 709.7) return 1 / 0;
+  if (x < -745) return 0;
+  let n: number = Math.floor(x * 1.4426950408889634 + 0.5);
+  let r: number = x - n * 0.6931471805599453;
+  let expR: number = ((((((r * (1 / 5040) + 1 / 720) * r + 1 / 120) * r + 1 / 24) * r + 1 / 6) * r + 1 / 2) * r + 1) * r + 1;
+  let ni: number = Math.abs(n);
+  let pow2: number = 1;
+  let base: number = 2;
+  while (ni > 0) {
+    let half: number = Math.floor(ni / 2);
+    if (ni - half * 2 === 1) { pow2 = pow2 * base; }
+    base = base * base;
+    ni = half;
+  }
+  if (n < 0) { pow2 = 1 / pow2; }
+  return expR * pow2;
+}
+`;
+
+/**
+ * Math.log10 = `log(x) · LOG10E` with a round-to-nearest-integer correction
+ * for exact powers of 10. #3226: the hand body's `f64.nearest` is AVOIDABLE —
+ * the correction is gated by `|result - round| < 1e-12`, and within that guard
+ * `Math.floor(result + 0.5)` (Math.floor is whitelisted) is bit-identical to
+ * `f64.nearest` (the round-half-to-even tie at `x.5` is ~0.5 from any integer,
+ * so it never enters the guard; both paths return the raw `result` there).
+ * One sign-of-zero fix-up: `f64.nearest` preserves the sign of a near-zero
+ * input (nearest(-4.3e-13) = -0) whereas `Math.floor(result + 0.5)` yields +0,
+ * so when the rounded value is 0 the sign is restored from `result`
+ * (`result < 0 ? -0 : 0`) — needed for `log10` of values just below 1.
+ * LOG10E = 0.4342944819032518. Domain/specials fall out of `Math_log`'s own
+ * ladder (log(≤0)/NaN/±Inf) then flow through the guard unchanged.
+ */
+const LOG10_SOURCE = `
+export function Math_log10(x: number): number {
+  let result: number = Math_log(x) * 0.4342944819032518;
+  let rounded: number = Math.floor(result + 0.5);
+  if (Math.abs(result - rounded) < 1e-12) {
+    if (rounded === 0) return result < 0 ? -0 : 0;
+    return rounded;
+  }
+  return result;
+}
+`;
+
+/**
+ * Math.pow(b, e) — binary, pure f64 (#3226: NOT a dialect gap). Mirrors the
+ * hand `Instr[]` body's special-case ladder op-for-op, then two shared cores:
+ *   - integer-exponent fast path (`trunc(e)===e && |e| < 2^31`): exact
+ *     exponentiation-by-SQUARING, the f64 encoding of the hand i32 loop
+ *     (`powN & 1` → `powN - Math.floor(powN/2)*2 === 1`, `powN >>> 1` →
+ *     `Math.floor(powN/2)`) — bit-identical for the non-negative integer counter;
+ *   - general path `Math_exp(e * Math_log(|b|/b))` — calls the SAME self-hosted
+ *     exp/log, so bit-identical to the hand version (which shares those cores).
+ * `i32.and` boolean combines become `&&`; `-0` results use a `-0` literal
+ * (survives the IR path) or `b` itself (which is -0 in the neg-zero-base arm);
+ * `±Infinity` via `1 / 0` / `-1 / 0`; NaN-out via `0 / 0`. §21.3.2.26 corner
+ * `pow(±1, ±Infinity) → NaN` is preserved (checked before the base==1 arm).
+ */
+const POW_SOURCE = `
+export function Math_pow(b: number, e: number): number {
+  if (e === 0) return 1;
+  if (b !== b) return b;
+  if (e !== e) return e;
+  if (Math.abs(b) === 1 && Math.abs(e) > 1.7976931348623157e308) return 0 / 0;
+  if (b === 1) return 1;
+  if (e === 1) return b;
+  if (e === -1) return 1 / b;
+  if (e === 0.5) return Math.sqrt(b);
+  if (e === 2) return b * b;
+  if (b === 0) {
+    if (1 / b < 0 && e === Math.trunc(e) && Math.floor(Math.trunc(e) / 2) * 2 !== Math.trunc(e)) {
+      if (e > 0) return b;
+      return 1 / b;
+    }
+    if (e > 0) return 0;
+    return 1 / 0;
+  }
+  if (b > 1.7976931348623157e308) {
+    if (e > 0) return 1 / 0;
+    return 0;
+  }
+  if (b < -1.7976931348623157e308) {
+    if (e === Math.trunc(e) && Math.floor(Math.trunc(e) / 2) * 2 !== Math.trunc(e)) {
+      if (e > 0) return -1 / 0;
+      return -0;
+    }
+    if (e > 0) return 1 / 0;
+    return 0;
+  }
+  if (e === Math.trunc(e) && Math.abs(e) < 2147483648) {
+    let powRes: number = 1;
+    let powBase: number = b;
+    let powN: number = Math.abs(e);
+    while (powN > 0) {
+      let half: number = Math.floor(powN / 2);
+      if (powN - half * 2 === 1) { powRes = powRes * powBase; }
+      powBase = powBase * powBase;
+      powN = half;
+    }
+    if (e < 0) { powRes = 1 / powRes; }
+    return powRes;
+  }
+  if (b < 0) {
+    if (e !== Math.trunc(e)) return 0 / 0;
+    let res: number = Math_exp(e * Math_log(Math.abs(b)));
+    if (Math.floor(Math.trunc(e) / 2) * 2 !== Math.trunc(e)) return -res;
+    return res;
+  }
+  return Math_exp(e * Math_log(b));
+}
+`;
+
+export const EXP_BUILTIN: StdlibMathBuiltin = { name: "Math_exp", callees: [], source: EXP_SOURCE };
+export const LOG10_BUILTIN: StdlibMathBuiltin = { name: "Math_log10", callees: ["Math_log"], source: LOG10_SOURCE };
+export const POW_BUILTIN: StdlibMathBuiltin = {
+  name: "Math_pow",
+  callees: ["Math_exp", "Math_log"],
+  source: POW_SOURCE,
+  arity: 2,
+};
+
+/**
  * The self-hosted subset of the Math family, keyed by `Math.<method>`
- * name. Remaining hand-emitted cores (exp, atan2, pow, log10, random) are
- * the ones with real dialect gaps (exp: i32 2^n squaring; pow: i32
- * exp-by-squaring; log10: `f64.nearest`; random: RNG import; atan2: 2-arg
- * quadrant ladder) — converting them needs the intrinsics groundwork
- * (#3204 follow-up). `log`/`log2` and the trig cores (reduce_trig,
- * sin/cos/tan, atan/asin/acos) moved to EARLY cores above.
+ * name. `exp`/`log10`/`pow` (#3226) and `atan2` (#3233) are self-hosted as
+ * EARLY cores above — #3226 established none of them needs new dialect
+ * intrinsics (the presumed i32-bit-op / reinterpret / `f64.nearest` gaps are
+ * all avoidable in pure f64; see the per-source docs). The ONLY remaining
+ * hand-emitted Math core is `random` — a host RNG import, not a dialect gap.
+ * `log`/`log2` and the trig cores (reduce_trig, sin/cos/tan, atan/asin/acos)
+ * are EARLY cores too.
  */
 export const SELF_HOSTED_MATH: ReadonlyMap<string, StdlibMathBuiltin> = new Map([
   ["cbrt", { name: "Math_cbrt", callees: [], source: CBRT_SOURCE }],
