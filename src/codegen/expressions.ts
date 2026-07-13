@@ -443,11 +443,37 @@ function wrapAsyncReturn(ctx: CodegenContext, fctx: FunctionContext, resultType:
     const valueLocal = allocTempLocal(fctx, { kind: "externref" });
     const promiseTypeIdx = getOrRegisterPromiseType(ctx);
     fctx.body.push({ op: "local.set", index: valueLocal });
-    fctx.body.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
+    // (#3220) PromiseResolve idempotence (§25.6.4.5.1 / §27.2.4.7): a value that
+    // is ALREADY a native `$Promise` must pass through UNCHANGED, not be
+    // re-wrapped in a SECOND `$Promise`. The unconditional fulfilled-mint below
+    // double-wrapped a callee that already returns a native `$Promise` on the
+    // carrier lane — e.g. a plain `function mk(): Promise<number>` whose result
+    // is consumed as a thenable (`yield mk()`, `const pv = mk(); yield pv`,
+    // `mk().then(...)`). `isAsyncCallExpression` classifies such a call as an
+    // "async call" via its `Promise<T>` return type (#1151), so it reaches this
+    // wrap even though the raw `$Promise` is already on the stack; the second
+    // `$Promise{FULFILLED, <innerPromise>, null}` made a later `ref.test
+    // $Promise` (the await/yield suspend arm) adopt the OUTER wrapper and
+    // deliver the inner promise OBJECT raw → NaN (`calleeIsDriveLowered` only
+    // skips the wrap for drive-lowered async *declarations*, not a plain
+    // `$Promise`-returning fn). A runtime `ref.test $Promise` guard makes the
+    // wrap idempotent: an existing `$Promise` passes through; a raw value takes
+    // the unchanged fulfilled-mint (byte-identical to pre-#3220 in that arm).
     fctx.body.push({ op: "local.get", index: valueLocal });
-    fctx.body.push({ op: "ref.null.extern" });
-    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
-    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [{ op: "local.get", index: valueLocal }],
+      else: [
+        { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+        { op: "local.get", index: valueLocal },
+        { op: "ref.null.extern" },
+        { op: "struct.new", typeIdx: promiseTypeIdx },
+        { op: "extern.convert_any" },
+      ],
+    });
     releaseTempLocal(fctx, valueLocal);
     return { kind: "externref" };
   }
