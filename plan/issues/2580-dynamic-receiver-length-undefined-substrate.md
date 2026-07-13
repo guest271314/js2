@@ -2386,3 +2386,100 @@ result. Issue stays `in-progress`.
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — hard value-rep substrate. M3 B-protoextend (inherited Object.prototype index read in generic array-method dispatch) landed. The bulk lever — generic Array.prototype.{reduce,filter,map,...}.call on an Array-LIKE object reading obj.length + obj[i] with HasProperty-skip (~993 fails) — remains. Stays in-progress.
+
+---
+
+# M1-core `.length`-on-any RE-MEASURE + #2040-unblock GO/NO-GO (2026-07-13, opus-2580, max-reasoning) — VERDICT: NO-GO, substrate-blocked; the #2040 unblock premise is mis-attributed
+
+> Rescued the stranded M1-core lever per the "measure-first, don't repeat #1868/#1894 M1a"
+> brief. Reproduced per-process on CURRENT main (`94614517d7`), both modes, fresh
+> `WebAssembly.instantiate` (the in-process/parallel runner traps avoided). Two decisive
+> findings: (1) the narrow `.length`-on-any fix is STILL substrate-blocked — WAT-bisected
+> to a static-numeric-typing + missing-`$undefined`-singleton entanglement, not the host-only
+> entanglement M1a saw; (2) the task's premise that this lever unblocks **#2040 (~1,750)** is
+> **incorrect** — #2040's own current diagnosis blocks its slices on DIFFERENT substrates
+> (#2106 S1 undefined-singleton, #3053 carrier reader, #3032/#3132 generator), and the narrow
+> `.length` symptom is the orthogonal ~12-row `S15.4.4.*_A2` cluster. NO code landed.
+
+## What reproduces on current main (standalone, per-process)
+
+| probe | standalone | want | verdict |
+| --- | --- | --- | --- |
+| `const o:any={}; o.length===undefined` | **0** | 1 | narrow #2580 symptom REPRODUCES |
+| `const o:any={}; typeof o.length==="undefined"` | **0** | 1 | reproduces |
+| `o.join=Array.prototype.join; o.length===undefined` (S15.4.4 A2 shape) | **0** | 1 | reproduces |
+| `const a:any=[1,2,3]; a.length` | 3 | 3 | hot path OK |
+| `const a:number[]=[1,2,3]; a.length` | 3 | 3 | typed hot path OK |
+| `typeof null==="undefined"` | **1** | 0 | null/undefined CONFLATION (#2106 S1) reproduces |
+| `(null as any)===(undefined as any)` | **1** | 0 | conflation reproduces |
+| `[null][0]===undefined` | **1** | 0 | conflation reproduces |
+
+## WAT root cause (bisected, standalone) — why the narrow fix is substrate-blocked
+
+`(o.length===undefined)?1:0` for `const o:any={}` lowers to:
+
+```
+call 77               ;; __new_plain_object → o IS an $Object (standalone)
+... ref.test (ref 6)  ;; is o a vec? no →
+call 112              ;; __extern_length(o) → f64 = 0 for a plain object (null-guard default)
+i32.trunc_sat_f64_s ; f64.convert_i32_s ; drop   ;; the .length numeric result is DROPPED
+i32.const 0           ;; === undefined is CONST-FOLDED to false (LHS is statically number)
+```
+
+`.length`-on-any is lowered to an **always-numeric** path (`__extern_length` → 0 for a
+plain object). The compiler therefore statically types the result `number`, so
+`x === undefined` const-folds to `false`. To return `undefined` for an absent `.length`
+you must simultaneously:
+
+1. **Break the static-numeric typing** of `.length`-on-any (make it externref/`any`) — but
+   that is the hot path: `for(;i<a.length;)` / `a.length` arithmetic on `any`-typed arrays
+   (probe row 4 correctly returns 3 today). This is the exact #1868/#1894 M1a hot-path eject
+   (−13, closures/rest-bindings) restated. The M1a FINAL VERDICT already proved there is **no
+   `ref.test`/`ref.is_null`/`__extern_has` predicate** that surgically separates a genuine
+   plain `{}` from a wrapped builtin/closure/rest-binding at the bare-externref level — the
+   distinction lives in the boxed `$AnyValue` tag (a tag-aware reader's job, = #3053).
+2. **Have a distinct `$undefined`** to represent "absent" — standalone conflates
+   `null`/`undefined` (probe rows 6-8). `__extern_get`'s missing-key return is `ref.null.extern`
+   (object-runtime.ts:856), so even routing `.length`→`__extern_get(o,"length")` yields `null`,
+   not a distinct `undefined`. That IS **#2106 S1** — whose partial producer/consumer flip
+   (PR #2025) breached the standalone floor **−1245** and was reverted; "there is NO narrow
+   floor-saving fix" (2106 s1_note). It must land as the full atomic ~40-site sweep.
+
+Both preconditions are exactly the parked substrate this issue's "Why this is substrate, not a
+point-fix" section named. There is no bounded standalone escape, and `#3053`'s
+`__dyn_member_get` spec **already explicitly absorbs "the `.length`/vec-index/closure/
+null-receiver dispatch"** (3053 lines 116/165/192/214) — i.e. the correct home for this fix is
+#3053 + #2106, both in-progress, NOT a standalone point-fix here.
+
+## The #2040-unblock premise is mis-attributed (the important correction)
+
+The brief framed #2580-narrow as the LIVE blocker for **#2040 (~1,750)**. #2040's OWN current
+diagnosis (its `## RE-GROUND` 2026-07-12 + `## Slice status` 2026-07-13) says otherwise:
+
+- **A1 rest-identity (382, the headline)** → blocked on the **tag-5 `===` classifier**
+  (#2580 M2 / #3032 / #3053); the two prior landings **ejected −162**. "Do NOT re-attempt."
+- **Slice 1 lazy defaults (198)** → blocked on the **undefined-singleton (#2106 S1)** — the
+  null/undefined conflation (probe rows 6-8), because a present `null` is indistinguishable
+  from missing → the default fires spuriously.
+- **Slices 3/4 (115+48)** → the **generator state machine** (#3164 done, #3132).
+
+None of #2040's blocking slices is the narrow `.length`-on-any symptom. The narrow symptom is
+the orthogonal `S15.4.4.*_A2` cluster (~12 rows per the scoping doc), and even that needs the
+#983d generic-method piece to flip. So a landed narrow `.length` fix would move **~0** #2040
+rows. #2040 unblocks via **#2106 S1 (undefined-singleton) + #3053 (carrier reader) + #3032/#3132
+(generator)** — all in-progress.
+
+## Recommendation (re-sequence, do not staff a standalone `.length` point-fix)
+
+1. **Fold the narrow `.length`-on-any → undefined fix into #3053** (its `__dyn_member_get`
+   already claims the `.length` dispatch) **on top of #2106 S1** (the `$undefined` singleton
+   that lets "absent" be distinct from `null`/numeric). Neither exists yet; the fix is a
+   consumer of both.
+2. **Re-dispatch #2040 against its real substrates** (#2106 S1, #3053, #3032/#3132), NOT
+   against #2580-narrow.
+3. Keep #2580 `in-progress` as the substrate-tracking umbrella; its narrow M1-core symptom is
+   subsumed by #3053+#2106.
+
+NO source changed — this is a measured GO/NO-GO deliverable (the pre-authorized "substrate-
+blocked, needs #2106 S1 first" outcome). Per-process harness lived in `.tmp/` (gitignored).
+Claim released; issue stays `in-progress`.

@@ -1,9 +1,10 @@
 ---
 id: 3170
 title: "standalone: Array.prototype.indexOf/lastIndexOf/includes — method-as-value + array-like receivers (125 gap tests)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-3170
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 feasibility: hard
 task_type: bug
@@ -60,3 +61,87 @@ lastIndexOf 54, includes 8; measured 2026-07-12 lane-baseline diff, method in
     `var f = Array.prototype.indexOf;` used via `.call` must run host-free.
 - Zero host-mode regressions; zero standalone high-water regressions.
 - One PR, one method family — no drive-by fixes to other Array methods.
+
+## Verify-first findings (2026-07-13, opus-3170)
+
+**The "125 gap / ≥90 flips" headline is OBSOLETE.** #3169 (array-like receiver
+ladder for the callback HOFs) landed the SAME day this was groomed and
+pre-closed ~83 of the 125. Process-isolated (`runTest262File`) branch-vs-main
+measurement of all three dirs on current `main` gives the REAL residual:
+
+| dir | host-pass | std-pass | gap |
+| --- | --- | --- | --- |
+| indexOf | 110 | 94 | **16** |
+| lastIndexOf | 106 | 85 | **21** |
+| includes | 17 | 12 | **5** |
+| **total** | | | **42** |
+
+(An earlier shared-process loop under-counted this to 16 via cross-test state
+contamination — the per-dir numbers above are each measured in an isolated
+process, per the measurement-integrity mandate.)
+
+### Residual-42 bucket breakdown (all verified by direct compile+run)
+
+1. **Exotic host-object receivers (~10)** — `Array.prototype.indexOf.call(o, …)`
+   where `o` is `new Date` / `new RegExp` / `new String` / `new SyntaxError`
+   with `.length` + `[k]` added. `__extern_length` answers 0 for these host
+   brands → `-1`. Needs host-object dynamic-property length/index reads
+   (broad, not bounded).
+2. **Primitive receivers (~11)** — `.call(true, …)` / `.call(5, …)` /
+   `.call("abc", …)`. Reflective closure body (`emitArrayProtoMemberBody`,
+   array-object-proto.ts) still refuses everything but `slice` (the "is not yet
+   callable as a value" signature). Needs ToObject(primitive) + prototype-chain
+   reads (`Boolean.prototype[1]` …) — very hard.
+3. **ToNumber of an object-valued `length`/`fromIndex` (~6)** — `-3-19/-3-20`
+   (object `length` with `toString`/`valueOf`), `lastIndexOf/-5-21` (object
+   `fromIndex`). Needs `__to_primitive`→ToNumber wired into the closed-struct
+   `__extern_length` arm / the fromIndex path, WITH spec side-effect ordering
+   (`-3-21`) and abrupt-throw (`-3-22`). No single ToNumber-of-externref helper
+   exists today; medium complexity + touches a broadly-used helper.
+4. **Real-array heterogeneous null/undefined (~4: `-9-4/-9-6`, `-8-4/-8-6`)** —
+   `[…,null,…,undefined,…].indexOf(undefined)`. BLOCKED by value-rep substrate:
+   `null` and `undefined` both store as `ref.null.extern`, so
+   `__extern_strict_eq(null, undefined) === true` and the information needed to
+   distinguish them is already lost at storage. Not fixable in this lane without
+   the undefined-singleton substrate work.
+5. **`includes` return-abrupt getters (4)** — `includes.call({get length(){throw}}, …)`
+   inside `assert_throws`. "illegal cast in `__closure`" — accessor-getter
+   invocation from `__extern_length` (broad).
+6. **CE crash (2: `-9-a-14`, `-8-a-14`)** — `Cannot create property
+   'declaredType' on number '1'` (prototype-delete pattern). Compiler crash.
+7. **Object-identity / `new Array` gap rows (`-9-5`, `-8-5`)** — direct
+   compile+run of these returns the CORRECT value (`ref.eq` preserves object
+   identity even in heterogeneous `new Array(...)`); the corpus rows fail for a
+   HARNESS/vacuity reason, not indexOf logic.
+
+### What this PR does (the bounded, safe slice actually landed)
+
+**`fromIndex` for the standalone `$__vec_base` search arm** (indexOf /
+lastIndexOf / includes), in `closed-method-dispatch.ts`. The #2583 arm
+linear-scanned the WHOLE array and IGNORED the 2nd arg, so `a.indexOf(x, n)` /
+`a.lastIndexOf(x, n)` / `a.includes(x, n)` over an any-array returned the
+no-fromIndex answer (verified wrong: `[10,20,30,20].indexOf(20,2)` → `1`;
+`[10,20,30].includes(10,1)` → `true`). The fix computes the scan START from
+`ToIntegerOrInfinity(fromIndex)` with the §23.1.3.14/.20/.15 clamp. Active only
+for arity ≥ 2 search dispatchers; arity-1 is byte-identical (emit-identity
+safe). +21 non-vacuous unit assertions (`tests/issue-3170-fromindex.test.ts`).
+
+### Genuine-vs-vacuous yield (measured, process-isolated)
+
+- **0 net test262 delta, 0 regressions.** Branch gaps == main gaps
+  (indexOf 16 / lastIndexOf 21 / includes 5 — identical file sets).
+- The fromIndex fix is a **genuine correctness fix with ZERO corpus yield**
+  because the corpus's fromIndex tests (`using-fromindex.js`, the `-5-*` series,
+  …) are **VACUOUS standalone passes** — they already count as `pass` despite
+  the pre-fix wrong answers. Flagged separately per the measurement mandate; the
+  correctness win converts to genuine flips once the honest-vacuity oracle
+  (#3086) removes the masking. The +21 direct compile+run assertions are the
+  non-vacuous proof (fail on main, pass on branch).
+
+### Recommendation (for PO re-scope)
+
+`#3170` cannot meet its `≥90` acceptance as scoped. Suggest splitting the
+residual 42 into targeted follow-ups by bucket above — several (4 substrate,
+1 primitive-receiver, 2 exotic-host-receiver) depend on infrastructure outside
+this method family and are NOT bounded single-PR work. Buckets 3 (ToNumber-of-
+object) and 5 (includes abrupt getters) are the next most tractable.
