@@ -1461,15 +1461,16 @@ export function tryExternClassMethodOnAny(
     return true;
   };
 
-  // (#3237 Slice 1) Native `DisposableStack` dispatch on an `any` receiver.
+  // (#3237 Slice 1/2) Native `DisposableStack` dispatch on an `any` receiver.
   // Reaching here means every ambiguity/user-member refusal above already
   // passed, so if `DisposableStack` is a registered extern class declaring this
   // method the first-match loop below WOULD bind it to the `DisposableStack_*`
   // HOST import (unsatisfiable standalone → module fails to instantiate before
   // dispose runs). In `nativeStrings` mode, run a `ref.test $DisposableStack`
   // runtime dispatch to the native driver instead (miss → clean TypeError, never
-  // the import). Gated inside the helper to Slice-1 `dispose`; other methods fall
-  // through to the loop unchanged. Host lane (`!nativeStrings`) is untouched.
+  // the import). The helper handles `dispose` (Slice 1) + `defer`/`adopt`/`use`
+  // (Slice 2); other methods fall through to the loop unchanged. Host lane
+  // (`!nativeStrings`) is untouched.
   if (ctx.nativeStrings && ctx.externClasses.get("DisposableStack")?.methods.has(methodName)) {
     const dsAny = tryCompileNativeDisposableStackAnyMethodCall(ctx, fctx, propAccess, expr, methodName);
     if (dsAny !== undefined) return dsAny;

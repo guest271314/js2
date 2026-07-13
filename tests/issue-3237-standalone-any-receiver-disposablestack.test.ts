@@ -130,4 +130,128 @@ describe("#3237 slice 1 — any-receiver DisposableStack dispose/disposed", () =
       ),
     ).toBe(1);
   });
+
+  it("dispose() in value position === undefined (undefined singleton, not raw null)", async () => {
+    // returns-undefined.js: the value handed back must compare `=== undefined`.
+    expect(
+      await runStandalone(
+        `export function f(): number { let s: any = new DisposableStack(); let u = s.dispose(); return (u === undefined) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+});
+
+// #3237 Slice 2 — the callback methods `defer(cb)` / `adopt(value, cb)` /
+// `use(value)` on an `any` receiver. Before this slice these first-match-bound the
+// `DisposableStack_defer` / `_adopt` / `_use` HOST imports (unsatisfiable
+// standalone → module fails to instantiate before dispose runs) — the residual
+// leak of the dispose/defer cluster the #3234 SuppressedError aggregation was a
+// prerequisite for. Slice 2 routes them through the native append/use substrate
+// guarded by `ref.test $DisposableStack` (miss → clean TypeError, never the
+// import; the `defer`/`adopt` callbacks compile as native closures via #3235).
+
+describe("#3237 slice 2 — any-receiver DisposableStack defer/adopt/use", () => {
+  it("defer(cb) on an any receiver runs its callback at dispose (LIFO), host-free", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let log = 0;
+           let s: any = new DisposableStack();
+           s.defer(() => { log = log * 10 + 1; });
+           s.defer(() => { log = log * 10 + 2; });
+           s.dispose();
+           return log; }`,
+      ),
+    ).toBe(21); // LIFO: the second-deferred callback runs first
+  });
+
+  it("defer() in value position returns undefined (=== undefined)", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { let s: any = new DisposableStack(); let u = s.defer(() => {}); s.dispose(); return (u === undefined) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("adopt(value, cb) on an any receiver returns the value and disposes it, host-free", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let seen = 0;
+           let s: any = new DisposableStack();
+           let ret = s.adopt(7, (v: number) => { seen = v; });
+           s.dispose();
+           return ret * 100 + seen; }`,
+      ),
+    ).toBe(707); // ret === 7 (value returned); callback saw value 7 at dispose
+  });
+
+  it("use(value) on an any receiver runs value[Symbol.dispose]() at dispose, host-free", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let d = 0;
+           let s: any = new DisposableStack();
+           let res: any = { [Symbol.dispose]() { d = 1; } };
+           s.use(res);
+           s.dispose();
+           return d; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("use(null) on an any receiver returns the value and adds no resource (no throw)", async () => {
+    // allows-null-value.js / returns-value.js: null/undefined value → return value.
+    expect(
+      await runStandalone(
+        `export function f(): number { let s: any = new DisposableStack(); let u = s.use(null); s.dispose(); return (u === null) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("defer disposers run in reverse order after use + adopt (dispose cluster shape)", async () => {
+    // disposes-resources-in-reverse-order.js shape across all three registrars.
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let log = 0;
+           let s: any = new DisposableStack();
+           s.defer(() => { log = log * 10 + 1; });
+           s.adopt(0, () => { log = log * 10 + 2; });
+           let res: any = { [Symbol.dispose]() { log = log * 10 + 3; } };
+           s.use(res);
+           s.dispose();
+           return log; }`,
+      ),
+    ).toBe(321); // LIFO: use(3) first, then adopt(2), then defer(1)
+  });
+
+  // ── Regression guards: the fix must NOT hijack non-DisposableStack receivers ──
+
+  it("a user object's own defer() on an any receiver still routes to the closed-struct method", async () => {
+    // The #3033 user-function-member refusal fires before the any-receiver native
+    // dispatch, so a user object with its own `defer` keeps the #2151 path.
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let d = new DisposableStack(); d.dispose();
+           let o: any = { defer() { return 9; } };
+           return o.defer(); }`,
+      ),
+    ).toBe(9);
+  });
+
+  it("the typed (nominal) defer/adopt/use path is unchanged", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number {
+           let log = 0;
+           const s = new DisposableStack();
+           s.defer(() => { log = log * 10 + 1; });
+           s.adopt(0, () => { log = log * 10 + 2; });
+           s.dispose();
+           return log; }`,
+      ),
+    ).toBe(21);
+  });
 });
