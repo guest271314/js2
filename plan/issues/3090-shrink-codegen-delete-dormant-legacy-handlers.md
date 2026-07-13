@@ -8,7 +8,7 @@ status: ready
 # GATED (see the audit doc's G1–G4) — do not start Phase 1 before the gates.
 sprint: current
 created: 2026-07-08
-updated: 2026-07-11
+updated: 2026-07-13
 priority: high
 horizon: xl
 feasibility: medium
@@ -176,6 +176,41 @@ copies live in `expressions/helpers.ts`), `index.ts#registerExternClassImports`,
 Dead-export baseline ratcheted 36 → 16 entries (19 stale entries from
 already-landed deletions also cleared). Byte-inertness proven: 13 playground
 examples × 2 string modes SHA-identical vs base commit.
+
+## Phase 2e — dead `UndefinedKeyword`-as-expression handler + disjuncts (2026-07-13, opus-dead)
+
+A **structurally-dead** (not merely unreferenced) deletion the static
+reachability audit cannot see, found via the byte-identity oracle.
+
+**Root cause / WHY it is dead:** in TypeScript's parsed AST the value
+`undefined` is always an `Identifier` (text `"undefined"`); the
+`UndefinedKeyword` SyntaxKind is emitted **only in type position**
+(`x: undefined`), never as an `ts.Expression`. Verified with an AST probe
+over every value/type occurrence (0 expression-position `UndefinedKeyword`,
+type-position only) and a repo-wide scan confirming nothing synthesizes an
+`UndefinedKeyword` **expression** node and feeds it to the dispatcher. So the
+`compileExpressionInner` dispatch arm `if (expr.kind === UndefinedKeyword)`
+was a dead handler branch, and the three `inner.kind === UndefinedKeyword ||`
+disjuncts in the numeric / ref / any-value null-fast-paths were always-false
+`||` operands (the companion `ts.isIdentifier(inner) && inner.text ===
+"undefined"` clause is the live one and is retained).
+
+Note this is why the audit's static reachability marked these regions "live":
+the enclosing functions ARE reached; only the specific `UndefinedKeyword`
+sub-conditions are unreachable — a case only the emit-byte oracle catches.
+
+**Deleted** (all in `src/codegen/expressions.ts`, my lane): the dead dispatch
+arm in `compileExpressionInner` + the 3 dead disjuncts in
+`compileExpressionBody`. **Net −14 LOC** (3 ins / 17 del); `emitUndefined`
+retains 8 live callers (no orphaned symbol).
+
+**Byte-identity PROOF of dead-ness:** `prove-emit-identity check` over the full
+`website/playground/examples/` corpus × {gc, standalone, wasi} = **39/39
+(file,target) emits IDENTICAL** to the pre-edit golden baseline. Behaviour
+cross-check: the null/undefined equivalence batch (11 files, 83 cases)
+produces the **same 8 pre-existing failures** (`null-dereference-guards`
+#396) with and without the change — **zero delta**. typecheck / prettier /
+`check:dead-exports` / `check:ir-fallbacks` / `check:loc-budget` all green.
 
 ## Guardrails / hazards
 

@@ -682,10 +682,7 @@ function compileExpressionBody(
             : (inner as ts.TypeAssertion).expression;
     }
     const isNull = inner.kind === ts.SyntaxKind.NullKeyword;
-    const isUndefined =
-      inner.kind === ts.SyntaxKind.UndefinedKeyword ||
-      (ts.isIdentifier(inner) && inner.text === "undefined") ||
-      ts.isOmittedExpression(inner);
+    const isUndefined = (ts.isIdentifier(inner) && inner.text === "undefined") || ts.isOmittedExpression(inner);
     if (isNull || isUndefined) {
       if (expectedType.kind === "f64") {
         if (isNull) {
@@ -748,10 +745,7 @@ function compileExpressionBody(
             : (inner as ts.TypeAssertion).expression;
     }
     const isNull = inner.kind === ts.SyntaxKind.NullKeyword;
-    const isUndefined =
-      inner.kind === ts.SyntaxKind.UndefinedKeyword ||
-      (ts.isIdentifier(inner) && inner.text === "undefined") ||
-      ts.isOmittedExpression(inner);
+    const isUndefined = (ts.isIdentifier(inner) && inner.text === "undefined") || ts.isOmittedExpression(inner);
     if (isNull || isUndefined) {
       const typeIdx = (expectedType as { typeIdx: number }).typeIdx;
       fctx.body.push({ op: "ref.null", typeIdx });
@@ -777,10 +771,7 @@ function compileExpressionBody(
             : (inner as ts.TypeAssertion).expression;
     }
     const isNull = inner.kind === ts.SyntaxKind.NullKeyword;
-    const isUndefined =
-      inner.kind === ts.SyntaxKind.UndefinedKeyword ||
-      (ts.isIdentifier(inner) && inner.text === "undefined") ||
-      ts.isOmittedExpression(inner);
+    const isUndefined = (ts.isIdentifier(inner) && inner.text === "undefined") || ts.isOmittedExpression(inner);
     if (isNull || isUndefined) {
       ensureAnyHelpers(ctx);
       const helperName = isNull ? "__any_box_null" : "__any_box_undefined";
@@ -1002,11 +993,6 @@ function compileExpressionInner(
 
   if (expr.kind === ts.SyntaxKind.NullKeyword) {
     fctx.body.push({ op: "ref.null.extern" });
-    return { kind: "externref" };
-  }
-
-  if (expr.kind === ts.SyntaxKind.UndefinedKeyword) {
-    emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
 
