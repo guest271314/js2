@@ -47,6 +47,7 @@ import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts,
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { emitUndefined } from "./expressions/late-imports.js";
 import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
@@ -682,7 +683,12 @@ export function tryCompileNativeDisposableStackAnyMethodCall(
   methodName: string,
 ): InnerResult | undefined {
   if (!ctx.nativeStrings) return undefined;
-  // Slice 1: `dispose` (zero-arg) only. Callback methods are Slice 2.
+  // Slice 2: the callback methods `defer`/`adopt`/`use` route through the native
+  // append/use substrate guarded by the same `ref.test $DisposableStack` shape
+  // dispatch. Slice 1 handles `dispose` below.
+  if (methodName === "defer" || methodName === "adopt" || methodName === "use") {
+    return compileNativeDisposableStackAnyCallbackMethod(ctx, fctx, propAccess, callExpr, methodName);
+  }
   if (methodName !== "dispose") return undefined;
   if (callExpr.arguments.length !== 0) return undefined;
 
@@ -716,15 +722,253 @@ export function tryCompileNativeDisposableStackAnyMethodCall(
   } as Instr);
 
   // `dispose()` returns undefined. In a VALUE position (`assert.sameValue(
-  // s.dispose(), undefined)` — returns-undefined.js) hand back the undefined
-  // singleton (null externref ≡ undefined in standalone; cf. the DataView-setter
-  // precedent in calls.ts) so the caller's argument stack stays balanced.
+  // s.dispose(), undefined)` — returns-undefined.js) hand back the canonical
+  // undefined value via `emitUndefined` so the caller's stack stays balanced AND
+  // a subsequent `=== undefined` compares equal. A raw `ref.null.extern` is NOT
+  // the undefined singleton under the #2106 regime (`x === undefined` checks the
+  // singleton, not null), so `let u = s.dispose(); u === undefined` was false —
+  // `emitUndefined` emits the singleton (standalone) / `__get_undefined` (host).
   // Statement position keeps the zero-cost VOID_RESULT.
   if (!ts.isExpressionStatement(callExpr.parent)) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
   return VOID_RESULT;
+}
+
+/**
+ * (#3237 Slice 2) The callback DisposableStack methods — `defer(cb)` /
+ * `adopt(value, cb)` / `use(value)` — on an `any`/externref receiver. Same leak
+ * as Slice 1's `dispose`: reaching `tryExternClassMethodOnAny`'s first-match
+ * extern loop, an `any`-typed `stack.defer(fn)` / `stack.adopt(v, fn)` /
+ * `stack.use(v)` would otherwise bind the `DisposableStack_defer` / `_adopt` /
+ * `_use` HOST import — unsatisfiable standalone, so the module fails to
+ * instantiate BEFORE dispose ever runs (this is the residual leak of the
+ * dispose/defer test262 cluster the #3234 SuppressedError aggregation was a
+ * prerequisite for).
+ *
+ * Dispatch on the RUNTIME shape instead: `ref.test $DisposableStack` on the
+ * receiver. Match → the SAME native append (`defer`/`adopt`) / use substrate the
+ * typed path uses. Miss (incl. null/undefined) → a clean TypeError
+ * (RequireInternalSlot, §12.3.3.{2,4} step 1) — NEVER the host import, and never a
+ * `ref.cast_null` trap (the append/use helpers cast externref→struct and would
+ * trap on a non-stack non-null ref, so the brand test must gate them).
+ *
+ * The receiver and args are evaluated ONCE into externref locals BEFORE the guard
+ * — preserving JS call-site evaluation order (arguments are evaluated before the
+ * method body runs, so a non-stack receiver still evaluates its args). The
+ * `defer`/`adopt` callbacks compile as native first-class WasmGC closures via the
+ * standalone closure gate (#3235), so no `__make_callback` host bridge leaks.
+ *
+ * funcIdx-ordering (the crux, cf. the late-import shifter in index.ts): every
+ * late import is registered FIRST (append/use helpers → `__new_ReferenceError`;
+ * the object substrate → `__box_symbol`/`__extern_is_undefined`/`__extern_get`;
+ * the guard TypeError → `__new_ReferenceError`/`__new_TypeError`), the guard
+ * TypeError's `buildThrowJsErrorInstrs` performs the final `flushLateImportShifts`
+ * against `fctx.body` (fixing the already-emitted receiver/arg eval), and only
+ * THEN are the native helper funcIdxs re-fetched from `ctx.funcMap` (post-shift,
+ * final) and baked into the nested `if` arms. No late import is registered after
+ * that re-fetch, so the baked indices stay valid.
+ */
+function compileNativeDisposableStackAnyCallbackMethod(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  methodName: string,
+): InnerResult {
+  const t = ensureDisposableStackTypes(ctx);
+  const args = callExpr.arguments;
+
+  // Evaluate the receiver ONCE into an externref local (consumed by the brand
+  // test AND, on a hit, the native op).
+  const recvLocal = allocLocal(fctx, `__ds_anyrecv_${fctx.locals.length}`, EXTERNREF);
+  const rt = compileExpression(ctx, fctx, propAccess.expression);
+  if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
+  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+
+  // `ref.test (ref $DisposableStack)` is 0 for null and for a non-matching ref, so
+  // a null/undefined/wrong-type receiver lands in the TypeError arm — matching
+  // RequireInternalSlot without ever emitting the host import.
+  const brandTest = (): Instr[] => [
+    { op: "local.get", index: recvLocal } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.test", typeIdx: t.stackTypeIdx } as Instr,
+  ];
+  const guardMsg = `DisposableStack.prototype.${methodName} requires a DisposableStack receiver`;
+
+  if (methodName === "defer") {
+    ensureDisposableStackAppend(ctx); // register the helper + its late imports
+    // Eval callback → cbLocal (after receiver — call-site order).
+    const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
+    if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
+    else fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
+    // Guard TypeError registers the last late import + flushes fctx; fetch the
+    // append funcIdx AFTER so the bake is post-shift.
+    const elseThrow = buildThrowJsErrorInstrs(ctx, "TypeError", guardMsg, { flush: fctx });
+    const appendIdx = ctx.funcMap.get("__disposablestack_append")!;
+    fctx.body.push(...brandTest());
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: recvLocal } as Instr,
+        { op: "local.get", index: cbLocal } as Instr,
+        { op: "ref.null.extern" } as Instr, // value = null
+        { op: "i32.const", value: ENTRY_KIND_DEFER } as Instr,
+        { op: "call", funcIdx: appendIdx } as Instr,
+      ],
+      else: elseThrow,
+    } as Instr);
+    // `defer()` returns undefined (VOID in statement position; the canonical
+    // undefined value via `emitUndefined` in value position — so `=== undefined`
+    // compares equal, matching Slice 1 `dispose`). The guarded `if` is already in
+    // `fctx.body`, so any late-import shift `emitUndefined` triggers correctly
+    // updates the `appendIdx` baked in its `then` arm.
+    if (!ts.isExpressionStatement(callExpr.parent)) {
+      emitUndefined(ctx, fctx);
+      return { kind: "externref" };
+    }
+    return VOID_RESULT;
+  }
+
+  if (methodName === "adopt") {
+    ensureDisposableStackAppend(ctx);
+    // adopt(value, onDispose) — eval value then onDispose; return value.
+    const valueLocal = allocLocal(fctx, `__ds_val_${fctx.locals.length}`, EXTERNREF);
+    if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
+    else fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+    const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
+    if (args[1]) compileArgAsExternref(ctx, fctx, args[1]);
+    else fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
+    const elseThrow = buildThrowJsErrorInstrs(ctx, "TypeError", guardMsg, { flush: fctx });
+    const appendIdx = ctx.funcMap.get("__disposablestack_append")!;
+    fctx.body.push(...brandTest());
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: recvLocal } as Instr,
+        { op: "local.get", index: cbLocal } as Instr,
+        { op: "local.get", index: valueLocal } as Instr,
+        { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
+        { op: "call", funcIdx: appendIdx } as Instr,
+      ],
+      else: elseThrow,
+    } as Instr);
+    // adopt returns the value (§12.3.3.4 step 5). The throw arm is unreachable, so
+    // the post-`if` `value` is the sole result on both statement/value positions.
+    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    return { kind: "externref" };
+  }
+
+  // methodName === "use": value[Symbol.dispose] member-lookup disposer (§12.3.3.3).
+  return compileNativeDisposableStackAnyUse(ctx, fctx, propAccess, callExpr, recvLocal, brandTest, guardMsg);
+}
+
+/**
+ * (#3237 Slice 2) `DisposableStack.prototype.use(value)` on an `any` receiver —
+ * the typed-path use logic (`compileNativeDisposableStackUse`) wrapped in the
+ * `ref.test $DisposableStack` brand guard. Steps (§12.3.3.3): RequireInternalSlot
+ * (the brand test — a non-stack `this` throws TypeError, matching step 1's
+ * distinction from the disposed ReferenceError), then disposed-throw + the
+ * GetDisposeMethod(value, @@dispose) read + conditional append, all inside the
+ * hit arm. The value arg is evaluated up front (call-site order) into a local so
+ * the miss/TypeError arm still evaluates it. Returns the value.
+ */
+function compileNativeDisposableStackAnyUse(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  recvLocal: number,
+  brandTest: () => Instr[],
+  guardMsg: string,
+): InnerResult {
+  void propAccess;
+  const args = callExpr.arguments;
+  const valueLocal = allocLocal(fctx, `__ds_val_${fctx.locals.length}`, EXTERNREF);
+  const methodLocal = allocLocal(fctx, `__ds_method_${fctx.locals.length}`, EXTERNREF);
+
+  // Eval value → valueLocal (after receiver — call-site order).
+  if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
+  else fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+
+  // Register every late import BEFORE the final flush: the append/check helpers
+  // (→ `__new_ReferenceError`), the object substrate (`__extern_get`), and
+  // `__box_symbol`/`__extern_is_undefined`.
+  ensureDisposableStackAppend(ctx);
+  ensureDisposableStackCheckActive(ctx);
+  ensureObjectRuntime(ctx);
+  ensureLateImport(ctx, "__box_symbol", [I32], [EXTERNREF]);
+  ensureLateImport(ctx, "__extern_is_undefined", [EXTERNREF], [I32]);
+  // The guard TypeError registers the final late import (`__new_TypeError`) and
+  // performs the flush against fctx.body; fetch every helper funcIdx AFTER.
+  const elseThrow = buildThrowJsErrorInstrs(ctx, "TypeError", guardMsg, { flush: fctx });
+  const appendIdx = ctx.funcMap.get("__disposablestack_append")!;
+  const checkIdx = ctx.funcMap.get("__disposablestack_check_active")!;
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  const boxSymIdx = ctx.funcMap.get("__box_symbol");
+  const isUndefinedIdx = ctx.funcMap.get("__extern_is_undefined");
+  if (externGetIdx === undefined || boxSymIdx === undefined || isUndefinedIdx === undefined) {
+    // Substrate unavailable (should not happen once ensureObjectRuntime ran) —
+    // keep the body balanced: value was evaluated for side effects; return it.
+    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    return { kind: "externref" };
+  }
+
+  // Regime-independent "is null OR undefined" for a value held in `localIdx`
+  // (mirrors the typed use path — cover both the boxed-undefined and the
+  // undefined-singleton regimes).
+  const nullishOf = (localIdx: number): Instr[] => [
+    { op: "local.get", index: localIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    { op: "local.get", index: localIdx } as Instr,
+    { op: "call", funcIdx: isUndefinedIdx } as Instr,
+    { op: "i32.or" } as Instr,
+  ];
+
+  // Hit arm: disposed-throw check, then GetDisposeMethod + conditional append.
+  const hit: Instr[] = [];
+  hit.push({ op: "local.get", index: recvLocal } as Instr);
+  hit.push({ op: "call", funcIdx: checkIdx } as Instr);
+
+  // if !nullish(value): method = __extern_get(value, __box_symbol(13)); validate; append.
+  const nonNullishBody: Instr[] = [];
+  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
+  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: externGetIdx } as Instr);
+  nonNullishBody.push({ op: "local.set", index: methodLocal } as Instr);
+  nonNullishBody.push(...nullishOf(methodLocal));
+  nonNullishBody.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: buildThrowJsErrorInstrs(ctx, "TypeError", "DisposableStack.prototype.use: value is not disposable", {
+      flush: fctx,
+    }),
+    else: [],
+  } as Instr);
+  nonNullishBody.push({ op: "local.get", index: recvLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: methodLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
+  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: appendIdx } as Instr);
+
+  hit.push(...nullishOf(valueLocal));
+  hit.push({ op: "i32.eqz" } as Instr);
+  hit.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] } as Instr);
+
+  fctx.body.push(...brandTest());
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: hit, else: elseThrow } as Instr);
+
+  // Return value.
+  fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+  return { kind: "externref" };
 }
 
 /**
