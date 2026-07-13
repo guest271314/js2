@@ -164,6 +164,7 @@ import {
   emitTypedArrayIntrinsicCtorObject,
   emitArrayIteratorPrototypeSingleton,
   emitGeneratorFunctionPrototypeSingleton,
+  emitGeneratorPrototypeSingleton,
   emitFunctionPrototypeObjectSingleton,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
@@ -8164,6 +8165,32 @@ function compileCallExpression(
         const argType = compileExpression(ctx, fctx, arg0);
         if (argType) fctx.body.push({ op: "drop" });
         const protoType = emitArrayIteratorPrototypeSingleton(ctx, fctx);
+        if (protoType) return protoType;
+        // Runtime unavailable: preserve the historical null return.
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
+      // (#3236 S2) `Object.getPrototypeOf(<sync generator instance>)` → the same
+      // native `%GeneratorPrototype%` singleton that `genFn.prototype` /
+      // `getPrototypeOf(genFn).prototype` resolve to (§27.5.1). A generator
+      // INSTANCE (`g()`) is OrdinaryCreateFromConstructor(g, "%GeneratorPrototype%")
+      // — its `[[Prototype]]` is the intrinsic %GeneratorPrototype% captured at
+      // instantiation, INDEPENDENT of any later mutation of `g.prototype`
+      // (default-proto.js sets `g.prototype = null` yet still expects GP). The
+      // native generator model doesn't carry a per-instance proto slot, so we
+      // route to the identity-stable GP singleton directly — the SAME cached
+      // global `emitGeneratorPrototypeSingleton` returns everywhere, so the
+      // `getPrototypeOf(g()) === getPrototypeOf(g).prototype` identity holds.
+      // The TS checker names a sync generator's result type `Generator`
+      // (distinct from `AsyncGenerator`, which keeps the host path), so this
+      // routes genuinely. Compile+drop the arg for its evaluation side effects
+      // (`g()` evaluates arguments; the generator body itself stays suspended).
+      // Host/gc mode keeps the `__getPrototypeOf` import (byte-inert).
+      if ((ctx.standalone || ctx.wasi) && argTsType.getSymbol()?.name === "Generator") {
+        const argType = compileExpression(ctx, fctx, arg0);
+        if (argType) fctx.body.push({ op: "drop" });
+        const protoType = emitGeneratorPrototypeSingleton(ctx, fctx);
         if (protoType) return protoType;
         // Runtime unavailable: preserve the historical null return.
         fctx.body.push({ op: "ref.null.extern" });

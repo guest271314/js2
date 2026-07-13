@@ -33,8 +33,9 @@
  */
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
+import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
-import { ensureAnyFromExternHelper } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
@@ -522,6 +523,38 @@ export function emitLooseEq(
   return emitAnyEquality(ctx, fctx, expr, "__any_eq", negate);
 }
 
+/**
+ * (#3236 S2) True when an operand's static type is a REFERENCE-like value that
+ * `===` must compare by object identity (or a dynamic `any` that could be one) —
+ * so the standalone `ref.eq` object-identity fast path (`__extern_strict_eq`) is
+ * safe to apply. Excludes number/boolean/bigint/symbol value types, which must
+ * keep their existing tag-3/tag-4 numeric/boolean comparison path. Strings are
+ * excluded too (content equality already works via the tag-5 arm and needs no
+ * identity fast path). Unions qualify only when EVERY constituent qualifies, so
+ * a `number | object` operand conservatively stays on the legacy path.
+ *
+ * Classifies via `ctx.oracle` (#1930 type-query boundary), not the raw checker.
+ */
+function isReferenceLikeEqFact(fact: TypeFact): boolean {
+  switch (fact.kind) {
+    case "array":
+    case "tuple":
+    case "function":
+    case "class":
+    case "builtin":
+    case "object":
+    case "any":
+    case "unknown":
+      return true;
+    case "union":
+      return fact.parts.every(isReferenceLikeEqFact);
+    default:
+      // number / boolean / string / bigint / symbol / undefined / null / void /
+      // unresolvable → keep the existing tag-3/tag-4/tag-5 path.
+      return false;
+  }
+}
+
 function emitAnyEquality(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -532,6 +565,39 @@ function emitAnyEquality(
   ensureAnyHelpers(ctx);
   const funcIdx = ctx.funcMap.get(helperName);
   if (funcIdx === undefined) return null;
+
+  // (#3236 S2) Native object-identity for standalone `===`/`!==`. Two native
+  // `$Object` externrefs (e.g. `getPrototypeOf(g()) === genFn.prototype`,
+  // default-proto.js §27.5.1) otherwise fold to the tag-5 (string) fallback in
+  // `__any_from_extern` and get string-CONTENT compared — a layout-dependent
+  // result that made object `===` unreliable (and left Slice-1's
+  // prototype-relation flip passing only coincidentally). `__extern_strict_eq`
+  // (#2734) prepends the `ref.eq` reference-identity fast path (both operands
+  // internalized; identical `eq` ref → 1) then falls through to the SAME
+  // `__any_from_extern` + `__any_strict_eq` primitive comparison, so it never
+  // false-positives a primitive. Scoped to OBJECT/`any` operands only (via
+  // `isReferenceLikeEqFact`): number/boolean/bigint/symbol comparisons keep
+  // their exact existing tag-3/tag-4 path untouched. Standalone/WASI only — the
+  // host lane emits nothing new (byte-identical).
+  if (helperName === "__any_strict_eq" && (ctx.standalone || ctx.wasi)) {
+    if (
+      isReferenceLikeEqFact(ctx.oracle.typeFactOf(expr.left)) &&
+      isReferenceLikeEqFact(ctx.oracle.typeFactOf(expr.right))
+    ) {
+      const externEqIdx = ensureExternStrictEqHelper(ctx);
+      if (externEqIdx !== undefined) {
+        const lt = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+        if (!lt) return null;
+        if (lt.kind !== "externref") coerceType(ctx, fctx, lt, { kind: "externref" });
+        const rt = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+        if (!rt) return null;
+        if (rt.kind !== "externref") coerceType(ctx, fctx, rt, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: externEqIdx });
+        if (negate) fctx.body.push({ op: "i32.eqz" });
+        return { kind: "i32" };
+      }
+    }
+  }
 
   if (!emitAnyEqOperands(ctx, fctx, expr)) return null;
 
