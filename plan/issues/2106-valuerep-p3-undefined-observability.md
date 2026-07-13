@@ -2,7 +2,7 @@
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
 status: in-progress
-assignee: ttraenkler/fable-2106
+assignee: ttraenkler/opus-regexp
 sprint: current
 created: 2026-06-11
 updated: 2026-06-26
@@ -19,10 +19,16 @@ related: [2004, 2051, 2030, 2001]
 # explanatory comments to three god-files (destructuring-params +13, type-coercion
 # +13, array-methods +11). The growth is intended (byte-inert flag-OFF producer
 # fixes at their canonical sites, not a barrel/driver); allow it for this change-set.
+#
+# (#2106 PR-3) hoisted-var RegExp-match undefined-init retype fix: hoist gate in
+# index.ts (+14, hoistVarDecl is the canonical hoist site) + the retype predicate
+# in statements/variables.ts (+23). Byte-inert flag-OFF, at the canonical sites.
 loc-budget-allow:
   - src/codegen/destructuring-params.ts
   - src/codegen/type-coercion.ts
   - src/codegen/array-methods.ts
+  - src/codegen/index.ts
+  - src/codegen/statements/variables.ts
 origin: "2026-06-11 analysis program (report 02 phase P3); stub 08-E21"
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): SUSPENDED, not dev-claimable as a fresh sprint task. P3 headline landed (PR #1701, commit 347f3c79a). The remaining S1 standalone $undefined tag-1 singleton is an ATOMIC ~40-site change (producer flip breaks all ref.is_null nullish consumers) — see memory project_2106_undefined_singleton_s1_atomic; branch issue-2106-s1-undefined-singleton. Resume-only for a senior-dev (max effort), NOT a routine sprint-65 dev pull. → backlog."
 ---
@@ -838,3 +844,67 @@ audit (nested `[[a=9]]`/`[{p=9}]`, rest, multi-param, object defaults, arrow,
 expression-default side-effects, for-of) is all green flag-ON after the three
 producer flips. Any producer still missed is byte-inert (flag-OFF default) and
 will surface as a residual bucket in PR-2's fork A/B, not a floor breach now.
+
+## PR-3 (this change) — hoisted-`var` RegExp-match undefined-init retype fix (byte-inert)
+
+opus-flip measured the authoritative flip A/B at **−328** (NO-GO) after PR-1's
+array-absence completion, and pinned the residual: **ONE cluster dominates — 231
+"illegal cast" RegExp regressions** (constant across every diff → a genuine
+flip-caused residual; the descriptor long-tail is noise, verified pass ON+OFF).
+This PR eliminates that cluster.
+
+### Root cause (WAT-confirmed, opus-regexp 2026-07-13, max-reasoning)
+
+The trap is NOT on the exec-RESULT path — it is at the **hoisted `var` init**. A
+function-scoped `var e = /re/.exec(s)` has its static type widened to include
+`undefined`, so `hoistVarDecl` (`src/codegen/index.ts` ~14890) allocates the slot
+as **externref** and emits `emitUndefined; local.set` at function entry. Under the
+`undefinedSingleton` regime `emitUndefined` produces the tag-1 `$undefined`
+singleton — a **NON-null** `$AnyValue` ref (`global.get $undefined;
+extern.convert_any`), where flag-OFF emits `ref.null.extern`.
+
+The declaration statement then **retypes** the slot externref → the concrete
+match-array struct ref `(ref null N)` at `statements/variables.ts:1252`
+(`standaloneRegExpMatchArrayType && existingIsExternref && newIsRef`) — the SOLE
+externref → concrete-ref hoist retype (the general #962 guard at ~1272 refuses
+every other). The `local-set-coerce` stack-balance fixup
+(`stack-balance.ts` → `callArgCoercionInstrs` externref→ref arm) then splices an
+**UNGUARDED** `any.convert_extern; ref.cast_null N` before the hoist `local.set`.
+Flag-OFF: `ref.null.extern → any.convert_extern → ref.cast_null N` = `ref.null N`
+(null casts cleanly). Flag-ON: the non-null singleton is not a type-N →
+`ref.cast_null` **TRAPS "illegal cast"** at the very first instruction of the
+function. RegExp dominates because `var __executed = re.exec(...)` (hoisted var,
+no null-narrowing) is ubiquitous in the RegExp harness (`assert.sameValue(
+__executed.length, …)`), and the test262 wrapper puts it inside a `try {}`.
+
+### Fix
+
+A concrete-ref slot **cannot represent the singleton** anyway (it is not `any`;
+undefined-vs-null observability there is the out-of-scope S3/S4 union-collapse
+story), so the correct value is `null`. The hoist now emits the flag-OFF
+`ref.null.extern` for a var whose declaration will retype the slot to a concrete
+ref — detected via the new exported predicate `hoistedVarRetypesToConcreteRef`
+(= `inferStandaloneRegExpMatchArrayType(...) !== null`, the exact retype
+condition). This casts cleanly to `ref.null N` after the retype. Placed at the
+**hoist** (not the retype site) because `fctx.body` is the root function body
+there — a retype-site patch misses the init when the decl compiles inside a
+swapped body (try/if/loop), which is exactly the test262 harness shape.
+
+**Byte-inert flag-OFF**: gated on `undefinedSingletonActive(ctx)` (false flag-OFF
+→ the exact prior `emitUndefined` path). Proven: SHA A/B over gc/standalone/wasi
+× 7 programs (incl. `var e = exec()`) is byte-identical before/after.
+
+**Validation**: `tests/issue-2106-s1-regexp-hoisted-var.test.ts` (5 cases incl.
+the try-wrapped harness shape); real file `RegExp/S15.10.2.6_A4_T4.js` flips
+fail→pass flag-ON; a 180-file RegExp A/B shows **0 remaining illegal-cast
+regressions** and **0 regressions introduced by this change** (the 5 residual
+`fail`s are a PRE-EXISTING, separately-verified "unmatched capture group →
+undefined representation" bucket on INLINE `.match()`/`.exec()` — not hoisted
+vars — confirmed identical with this change stashed). Existing S1 suites
+(undefined-singleton 9, array-absence 5, #2574 7) all green; tsc + prettier clean.
+
+**Next (PR-4)**: after this lands, re-run the fork A/B. Expected residual bucket
+if any: the "unmatched capture group / named-group `.groups.x` = undefined"
+representation on inline match results (`captures*.js`, `*-references.js`,
+`lookbehind.js`) — a distinct producer, separate byte-inert PR. Report the new
+`#2097 host_free_pass` floor delta to the lead for the flip go/no-go.
