@@ -789,6 +789,13 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   // ABI of 3a but boxes an i32 boolean result via __box_boolean.
   const SEARCH_BOOLEAN = new Set(["includes", "startsWith", "endsWith"]);
   if (SEARCH_BOOLEAN.has(member)) return emitStringSearchBooleanMemberBody(ctx, fctx, member);
+  // (#3217) The whitespace-trim family — `trim` / `trimStart` / `trimEnd` —
+  // returns a STRING (not an index/boolean) and takes NO args, so it has a
+  // dedicated body: `? RequireObjectCoercible(this)` → `? ToString(this)` →
+  // the native `__str_trim*` helper. Routed here so it never reads the absent
+  // arg-2 slot the char/search bodies unbox (these closures have arity 0).
+  const TRIM = new Set(["trim", "trimStart", "trimEnd"]);
+  if (TRIM.has(member)) return emitStringTrimMemberBody(ctx, fctx, member);
   if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
@@ -1187,6 +1194,51 @@ function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionCo
   fctx.body.push({ op: "local.get", index: posLocal } as Instr);
   fctx.body.push({ op: "call", funcIdx: coreIdx } as Instr);
   fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
+ * (#3217) Native body for a reflective `String.prototype.{trim,trimStart,trimEnd}`
+ * closure. These §22.1.3.{32,34,33} methods take NO arguments and return a
+ * STRING, so unlike the char/search bodies this one never touches an arg slot
+ * beyond `this` (the closure has arity 0 — reading a param-2 slot that doesn't
+ * exist emits invalid Wasm). Implements the spec preamble
+ * `? RequireObjectCoercible(this)` → `S = ? ToString(this)`, then delegates to
+ * the standalone-native `__str_trim` / `__str_trimStart` / `__str_trimEnd`
+ * helper (native-strings.ts — the SAME whitespace kernel the direct `"x".trim()`
+ * path uses; it flattens its `ref $AnyString` arg internally), and up-converts
+ * the resulting native string to externref (the uniform closure result type).
+ *
+ * Funcidx discipline: this body adds NO late imports of its own (no numeric
+ * box/unbox — the result is a string), so there is nothing to over-shift; the
+ * helper funcIdxs are fetched by NAME after `ensureNativeStringHelpers` (which
+ * flushes any pending import batch on entry) and `ensureAnyToStringHelper`.
+ */
+function emitStringTrimMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  const helperName = member === "trim" ? "__str_trim" : member === "trimStart" ? "__str_trimStart" : "__str_trimEnd";
+
+  // Fetch helper funcIdxs. `ensureAnyToStringHelper` is the last ensure that
+  // could register a defined func, so fetch the trim helper's idx AFTER it
+  // (mirrors the search body's post-ensure fetch order).
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const trimIdx = ctx.nativeStrHelpers.get(helperName);
+  if (trimIdx === undefined) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
+
+  // (1) RequireObjectCoercible(this) [param 1]: in standalone undefined≡null≡
+  // ref.null.extern, so a bare ref.is_null throw covers both → catchable TypeError.
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow } as Instr);
+
+  // (2) S = ToString(this); __str_trim*(S) → native string; → externref.
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: anyToStrIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: trimIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
   return { kind: "externref" };
 }
 
