@@ -58,6 +58,11 @@ export const BUILTIN_TYPE_TAGS = {
   EvalError: -15,
   ReferenceError: -16,
   AggregateError: -17,
+  // (#3234) SuppressedError (ES2026 error aggregation) — an Error subclass; its
+  // native `$Error_struct` carries this tag so `instanceof SuppressedError` and
+  // `instanceof Error` discriminate host-free (the DisposableStack dispose driver
+  // builds SuppressedError instances natively for multi-error aggregation).
+  SuppressedError: -18,
 
   // Keyed collections
   Map: -20,
@@ -118,6 +123,7 @@ const BUILTIN_PARENT: Partial<Record<BuiltinTypeName, BuiltinTypeName>> = {
   EvalError: "Error",
   ReferenceError: "Error",
   AggregateError: "Error",
+  SuppressedError: "Error",
 };
 
 /**
