@@ -97,10 +97,10 @@ body path only emits in standalone) → zero host-mode impact.
 
 Full `built-ins/Date/prototype/<getter>/` suite (18 getters, 144 files):
 
-| lane | pass | fail |
-| --- | ---: | ---: |
-| pristine-main control | 108 | 36 |
-| this branch | **144** | **0** |
+| lane                  |    pass |  fail |
+| --------------------- | ------: | ----: |
+| pristine-main control |     108 |    36 |
+| this branch           | **144** | **0** |
 
 **+36 genuine fail→pass, ZERO pass→fail regressions.** The 36 flips are the
 reflective `this-value-non-date.js` + `this-value-non-object.js` brand rows (18
