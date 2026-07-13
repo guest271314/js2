@@ -4206,19 +4206,27 @@ export function isStandalonePromiseActive(ctx: CodegenContext): boolean {
 }
 
 /**
- * (#2980 conservative Promise-lane fallback) On the widened-standalone measure
- * lane, a module with ANY async generator keeps a host-MIXED promise pipeline
- * (a legacy gen's yields flow through the host `__gen_*` buffer; `.next()` +
- * `.then`/`.catch` over it stay host), so promoting Promise.resolve/reject
- * construction, `await` unwrap, and `__get_caught_exception` to the native
- * `$Promise` feeds native structs into host machinery that mishandles them —
- * the 07-09 async-generator −4. Keeping BOTH gates off for such a module keeps
- * the pipeline host-consistent (those files stay fully-host + passing). WASI +
- * gc/host are unaffected (standalone-only check). Minimal-first flip-blocker
- * fallback; a native-`$Promise`-into-host-`.then` bridge is a follow-up.
+ * (#2980 conservative Promise-lane fallback, #3132 PR-2 refinement) Keep BOTH
+ * standalone carrier gates OFF for a module that WILL emit a legacy `__gen_*`
+ * host buffer — there a native `$Promise` fed into the gen's legacy buffer /
+ * host `.then` over `__gen_next` is mishandled (the 07-09 async-generator −4).
+ *
+ * #2980 keyed this on `moduleHasAsyncGen` (ANY async gen ⇒ carrier off) — safe
+ * but blunt: it also blocked modules whose async gens ALL drive host-free, which
+ * have NO legacy buffer to mix into. #3132 PR-2 refines it to
+ * `moduleHasNonDrivableAsyncGen` — off ONLY when at least one async gen falls to
+ * the legacy buffer (method / unbounded body / rest param / unsafe spill / stem
+ * collision). An all-drivable module keeps the carrier ON, so its driven gens
+ * settle through the native `$Promise` and lose their `env::Promise_*` /
+ * `__get_caught_exception` imports (host-free floor). The verdict is computed
+ * pre-body in `collectDeclarations` with the SAME drive-shape predicate the emit
+ * gate uses (`asyncGenDrivableUnderCarrier`), so a module judged all-drivable
+ * never falls a gen to the buffer at emit — no mixing. CONSERVATIVE: any doubt
+ * ⇒ non-drivable ⇒ carrier off (pre-#2980 host-consistent behaviour). WASI
+ * (carrier always on) + gc/host unaffected (standalone-only check).
  */
 function widenAsyncGenFallback(ctx: CodegenContext): boolean {
-  return ctx.moduleHasAsyncGen === true;
+  return ctx.moduleHasNonDrivableAsyncGen === true;
 }
 
 // (#2980) The `JS2WASM_ASYNC_CARRIER_WIDEN` measurement instrument is RETIRED

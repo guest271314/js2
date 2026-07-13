@@ -21,7 +21,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../i
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
-import { asyncFnNeedsHostDrive } from "./async-frame.js";
+import { asyncFnNeedsHostDrive, asyncGenDrivableUnderCarrier, asyncGenStem } from "./async-frame.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import {
   collectBindingPatternNames,
@@ -146,6 +146,10 @@ interface UnifiedCollectorState {
   unionFound: boolean;
   // -- collectGeneratorImports --
   generatorFound: boolean;
+  // (#3132 PR-2) sanitized stems of async gens judged drivable so far — a
+  // repeat stem is a collision (second gen falls to legacy), so it flips the
+  // module to non-drivable (carrier off). See widenAsyncGenFallback.
+  asyncGenDrivableStems: Set<string>;
   // -- collectIteratorImports --
   iteratorFound: boolean;
   // -- collectArrayIteratorImports --
@@ -248,6 +252,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     funcArrayNeed2: false,
     unionFound: false,
     generatorFound: false,
+    asyncGenDrivableStems: new Set(),
     iteratorFound: false,
     arrayIteratorFound: false,
     forInFound: false,
@@ -1089,13 +1094,40 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   // fallback (see `moduleHasAsyncGen` in context/types.ts). Pre-body so a
   // `Promise.reject` INSIDE the gen sees it.
   if (
-    !ctx.moduleHasAsyncGen &&
     (node as ts.Node & { asteriskToken?: ts.Node }).asteriskToken !== undefined &&
     (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node)) &&
     node.body !== undefined &&
     hasAsyncModifier(node)
   ) {
     ctx.moduleHasAsyncGen = true;
+    // (#3132 PR-2) Decide, conservatively and pre-body, whether THIS async gen
+    // will drive-lower host-free under the native `$Promise` carrier. If ANY
+    // async gen in the module will NOT (a method — not wired to the drive; a
+    // body outside the bounded drive shape; a rest param / unsafe spill; a
+    // stem collision), the module keeps a legacy `__gen_*` buffer, so the
+    // carrier must stay OFF (widenAsyncGenFallback) to avoid the #2980
+    // native-`$Promise`-into-host-buffer mix. Only a module whose async gens
+    // are ALL drivable keeps the carrier ON. `asyncGenDrivableUnderCarrier`
+    // is the SAME shape `isAsyncGenDriveCandidate` admits under the carrier, so
+    // the pre-pass verdict matches the emit-time decision; the stem-dedup here
+    // mirrors emit's stem-collision guard.
+    if (!ctx.moduleHasNonDrivableAsyncGen) {
+      let drivable: boolean;
+      if (ts.isMethodDeclaration(node)) {
+        drivable = false; // async-gen methods stay legacy (S2 not yet wired)
+      } else if (asyncGenDrivableUnderCarrier(ctx, node)) {
+        const stem = asyncGenStem(node);
+        if (state.asyncGenDrivableStems.has(stem)) {
+          drivable = false; // stem collision → second gen falls to legacy
+        } else {
+          state.asyncGenDrivableStems.add(stem);
+          drivable = true;
+        }
+      } else {
+        drivable = false;
+      }
+      if (!drivable) ctx.moduleHasNonDrivableAsyncGen = true;
+    }
   }
 
   // (#2903) Flag any construct that can mint a HOST promise in a standalone

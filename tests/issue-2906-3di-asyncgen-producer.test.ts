@@ -136,15 +136,22 @@ describe("#2906 slice 3d-i — async-generator producer core", () => {
     expect(step(ex, frame).done).toBe(1);
   });
 
-  it("byte-inert: gc + standalone lanes are unchanged (async gen stays on the legacy path)", async () => {
+  it("gc lane unchanged; standalone drives host-free under the carrier (#3132 PR-2)", async () => {
     const src = `export async function* g(): AsyncGenerator<number> { yield await Promise.resolve(1); yield 2; }`;
-    // gc: compiles via the legacy __create_async_generator path (host imports).
+    // gc: compiles via the legacy __create_async_generator path (host imports) — UNCHANGED.
     const gc = await compile(src, { fileName: "test.ts" });
     expect(gc.success).toBe(true);
     expect((gc.imports ?? []).length).toBeGreaterThan(0); // legacy host-backed
-    // standalone (non-wasi): the native `$Promise` carrier is not active, so the
-    // drive is (correctly) NOT taken — stays on the legacy #680-gated path.
+    // standalone (non-wasi): this module's ONLY async gen is drive-lowerable
+    // under the native `$Promise` carrier (a bounded body, awaited yields
+    // included), so #3132 PR-2 keeps the carrier ON (widenAsyncGenFallback →
+    // moduleHasNonDrivableAsyncGen is false: no legacy `__gen_*` buffer to mix
+    // into). The awaited yield now drives host-free instead of hitting the #680
+    // gate — the intended flip. (Pre-PR-2 this asserted `success === false`.)
     const standalone = await compile(src, { fileName: "test.ts", target: "standalone" });
-    expect(standalone.success).toBe(false); // #680 native-generator gate (unchanged)
+    expect(standalone.success).toBe(true);
+    // Fully host-free: no legacy gen imports AND no host Promise imports.
+    const imps = (standalone.imports ?? []).map((i) => String((i as { name?: string }).name ?? ""));
+    expect(imps.filter((n) => /__gen_|__create_async_generator|Promise_|__get_caught_exception/.test(n))).toEqual([]);
   });
 });
