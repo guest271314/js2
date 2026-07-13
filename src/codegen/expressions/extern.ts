@@ -16,6 +16,7 @@ import { tryCompileNativeDisposableStackMethodCall } from "../disposable-runtime
 import { tryCompileNativeSetMethodCall } from "../set-runtime.js";
 import { tryCompileNativeSetAlgebraCall } from "../set-algebra.js";
 import { tryCompileNativeWeakMethodCall } from "../weak-collections-runtime.js";
+import { tryCompileNativeWeakRefDeref } from "../weakref-runtime.js";
 import { addStringConstantGlobal } from "../registry/imports.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
@@ -122,6 +123,15 @@ function compileExternMethodCall(
     }
     const weakResult = tryCompileNativeWeakMethodCall(ctx, fctx, className, propAccess, callExpr);
     if (weakResult !== undefined) return weakResult;
+  }
+
+  // (#3242) Native WeakRef.prototype.deref in standalone / nativeStrings mode.
+  // Without this, `wr.deref()` emits a `WeakRef_deref` host import the standalone
+  // runtime can't satisfy. Route to the native `$WeakRef` struct (single anyref
+  // target field) — `struct.get 0`. Strong-backed; see weakref-runtime.ts.
+  if (className === "WeakRef" && ctx.nativeStrings && methodName === "deref") {
+    const derefResult = tryCompileNativeWeakRefDeref(ctx, fctx, propAccess);
+    if (derefResult !== undefined) return derefResult;
   }
 
   // (#3231) Native DisposableStack method dispatch in standalone / nativeStrings

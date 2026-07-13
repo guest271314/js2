@@ -1804,6 +1804,11 @@ export interface CodegenContext {
   mapIterResultTypeIdx: number;
   /** Map from native Map helper name → function index. */
   mapHelpers: Map<string, number>;
+  /** #3242: Wasm-native WeakRef struct `{ target: anyref (immut) }` for
+   *  standalone / WASI. `-1` until `ensureWeakRefStruct` registers it (gated on
+   *  nativeStrings). Strong-backed — no real GC weakness (WasmGC has no weak
+   *  refs; no passing spec test observes the difference). */
+  weakRefTypeIdx: number;
   /** Whether the Map runtime helper functions have been emitted. */
   mapHelpersEmitted: boolean;
   /** #1539: map from native standalone-regex helper name → function index.
