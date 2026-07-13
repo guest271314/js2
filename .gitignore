@@ -117,3 +117,6 @@ test262-diff-regressions-report/
 examples/native-messaging/node-shim.wasm
 examples/native-messaging/node-process.wasm
 examples/native-messaging/node-fs.wasm
+
+# Claude Code session transcripts (bind-mounted into devcontainer, host-persisted)
+.claude-sessions/
