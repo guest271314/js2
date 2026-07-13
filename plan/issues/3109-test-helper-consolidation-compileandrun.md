@@ -4,7 +4,7 @@ title: "Test-helper consolidation: 132 test files re-declare compileAndRun (10+ 
 status: ready
 sprint: current
 created: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-13
 priority: high
 # 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
 # Re-measured: 133 test files declare their own compileAndRun today.
@@ -82,3 +82,43 @@ one correct harness for host-closure wiring.
 1. `tests/helpers/compile.ts` exists; ≥ 100 of the 132 local definitions removed.
 2. Full vitest suite green with unchanged assertions.
 3. No src/ changes in the PR(s).
+
+## Progress
+
+### Slice 1 (ttraenkler/opus-tests) — 19 files, `tests/helpers/compile.ts` seeded
+
+Behavior-preserving refactor. `tests/helpers/compile.ts` created with the three
+highest-duplication **identical-body** clusters extracted ONCE. Migrated files
+delete their local `compileAndRun` and import the shared function under an alias
+(`import { compileAndRunStubs as compileAndRun } from "./helpers/compile.js"`),
+so every call site is unchanged.
+
+Why three distinct helpers, not one merged shape: the clusters differ in how
+they wire host imports, and merging them would change which imports a module
+links (semantic drift). Each exported function is byte-for-byte behaviorally
+identical to the local copy it replaces:
+
+- `compileAndRunStubs` — 9 files: assert `result.success` (msg + WAT), bare
+  `env.console_log_*` no-op stub imports. codegen, void-expr, compiler, bitwise,
+  generics, numeric-separators, logical-assignment, issue-243, spread-rest.
+- `compileAndRunImportObject` — 5 files: assert `result.success` (no WAT),
+  instantiate against `result.importObject!`. issue-2055/2062/2067/2053/2065.
+- `compileAndRunBuildImports` — 5 files: guard non-empty `result.binary` then
+  full `buildImports(...)` host object; compiles with `{ fileName: "test.ts" }`.
+  math-minmax, issue-146, math-inline, new-array, string-coercion.
+
+Net −247 LOC across the 19 test files; +78 for the shared module. Orphaned
+`compile` / `buildImports` imports dropped where the local helper was their only
+user.
+
+**Parity proof:** the 19 files were run with `vitest --reporter=json` before and
+after migration — identical per-test result set (224 tests, 125 pass / 99 fail;
+the 99 pre-existing main-state failures are unchanged). Full `tsc --noEmit`,
+`biome lint`, and `prettier --check` all green. Zero `src/` changes.
+
+**Remaining (future slices):** ~113 local `compileAndRun` definitions across the
+other signature variants (result-object shapes, `Promise<number>`,
+`expectCompiles`-based, custom import-stub variants, `compileAndRunMulti`, …).
+Migrate additional identical-body clusters the same way; keep non-equivalent
+local helpers local (or thread the extra via an `opts` param). This issue stays
+`ready` until ≥100 of 132 removed (acceptance criterion 1).

@@ -13,6 +13,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.j
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
+import { undefinedExternInstrs } from "./any-helpers.js"; // (#2106 S1)
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { ensureWrapperStringValueHelper } from "./object-runtime.js";
@@ -3199,6 +3200,18 @@ function emitUndefinedValue(ctx: CodegenContext, fctx: FunctionContext): void {
   if (funcIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx });
+    return;
+  }
+  // (#2106 S1) In standalone/nativeStrings with the $undefined singleton flag ON,
+  // an absent optional/default parameter must be the tag-1 singleton so the
+  // callee's externref default-check (`__extern_is_undefined`, singleton-only
+  // under the flag) fires the default. Flag OFF → the legacy `ref.null.extern`
+  // (byte-identical). Without this, a missing `any`-typed default param
+  // (`function f(x = 9){} ; f()`) padded with raw null was invisible to the
+  // flag-on check → the default spuriously failed to fire.
+  const singletonInstrs = undefinedExternInstrs(ctx);
+  if (singletonInstrs !== undefined) {
+    fctx.body.push(...singletonInstrs);
   } else {
     fctx.body.push({ op: "ref.null.extern" });
   }

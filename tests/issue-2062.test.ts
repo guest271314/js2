@@ -1,20 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
+import { compileAndRunImportObject as compileAndRun } from "./helpers/compile.js";
 
 // #2062 — `catch (e) { e = ...; throw e; }` used to emit Wasm `rethrow`, which
 // re-raises the ORIGINALLY-caught exception, ignoring the reassignment. The
 // rethrow fast path is now disabled whenever the catch parameter is written
 // anywhere in the block (assignment, compound, ++/--, or via a capturing
 // closure); plain `catch (e) { throw e; }` keeps the fast path.
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
-    true,
-  );
-  const { instance } = await WebAssembly.instantiate(result.binary, result.importObject!);
-  return instance.exports as Record<string, Function>;
-}
 
 describe("#2062 throw e after catch-param reassignment", () => {
   it("reassign then throw propagates the new value", async () => {
