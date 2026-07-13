@@ -85,7 +85,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitFnctorProtoGet } from "./fnctor-prototype.js"; // (#2660 S3a) reconstruct `new F()` as $Object
-import { emitStandalonePromiseFromExecutor } from "../promise-executor.js"; // (#2959) native new Promise(executor)
+import { emitStandalonePromiseFromExecutor, emitStandalonePromiseFromExecutorValue } from "../promise-executor.js"; // (#2959 / #2903 R1) native new Promise(executor)
 import { deriveFnctorFields, resolveFnctorSymbol, resolveEnclosingFnctorOwner } from "../fnctor-escape-gate.js"; // (#2660 S3a) canonical fnctor-name key; (#2773 S1) shared field derivation; (#2681/#2686 A1) `new this()` owner
 import { funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 
@@ -3027,6 +3027,26 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       !ctx.classSet.has("Promise") &&
       resolvesToAmbientGlobal(ctx, expr.expression) &&
       emitStandalonePromiseFromExecutor(ctx, fctx, promiseArgs[0]!)
+    ) {
+      return { kind: "externref" };
+    }
+    // (#2903 R1) Native path for a NON-inline executor VALUE (identifier / param
+    // / any runtime closure) — invoked through `__apply_closure` since its
+    // concrete closure type isn't recoverable at compile time. Tried only when
+    // the inline path above declined AND the executor arg is not a syntactic
+    // arrow/function-expression (those are the inline path's domain). Retires the
+    // `Promise_new` + `__make_callback` leak for `make(ex)=>new Promise(ex)`.
+    if (
+      promiseArgs.length >= 1 &&
+      !ctx.classSet.has("Promise") &&
+      resolvesToAmbientGlobal(ctx, expr.expression) &&
+      !ts.isArrowFunction(promiseArgs[0]!) &&
+      !ts.isFunctionExpression(promiseArgs[0]!) &&
+      emitStandalonePromiseFromExecutorValue(ctx, fctx, () => {
+        const t = compileExpression(ctx, fctx, promiseArgs[0]!, { kind: "externref" });
+        if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+        else if (t === null) fctx.body.push({ op: "ref.null.extern" });
+      })
     ) {
       return { kind: "externref" };
     }
