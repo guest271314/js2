@@ -14,6 +14,13 @@ language_feature: methods, dynamic-dispatch, disposablestack
 goal: standalone
 related: [2151, 3231, 3234]
 umbrella: 1781
+# Slice 1 wiring: the bulk of the logic lives in the disposable-runtime.ts
+# subsystem module; these two driver files grow only by the minimal dispatch
+# hookup (dispose interception in tryExternClassMethodOnAny; disposed getter in
+# compilePropertyAccess). Genuine, minimal growth — allowance granted per #3102.
+loc-budget-allow:
+  - src/codegen/property-access.ts
+  - src/codegen/expressions/calls-closures.ts
 ---
 
 # Standalone: any-receiver dispatch for builtin-native methods leaks host imports
