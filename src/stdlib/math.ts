@@ -186,11 +186,89 @@ export function Math_log1p(x: number): number {
 `;
 
 /**
+ * Math.log — natural log via range reduction to `f ∈ [sqrt(0.5), sqrt(2)]`
+ * (`x = f · 2^e`) plus the `atanh` series `2t(1 + t²/3 + t²²/5 + …)` with
+ * `t = (f-1)/(f+1)`. Mirrors the deleted hand `Instr[]` op-for-op (same
+ * special-case ladder order, same Horner grouping, same LN2 constant), so
+ * results are bit-identical. `-Infinity` for `x === 0` is produced with
+ * `-1 / 0` (the dialect forbids the `Infinity` identifier; `0 / 0` is NaN);
+ * the `x === +Infinity` arm is the `x > MAX_VALUE` test (negatives and NaN
+ * already returned). The hand version's `if (f > sqrt2) { f *= 0.5; e += 1; }`
+ * adjust is expressed with ternary-initialized locals (`over`/`ea`/`fa`)
+ * rather than a mid-body statement-if: from-ast currently mis-scopes the `let`
+ * declarations that FOLLOW a non-returning statement-if into its then-branch
+ * (so they are skipped when the branch is not taken — a real from-ast
+ * limitation, flagged for #2856); the ternary form is bit-identical and stays
+ * in the proven decl-only tail subset. Registered as an EARLY core (before its
+ * hand-emitted callers pow/log10/asinh/acosh/atanh), not in the leaf
+ * `SELF_HOSTED_MATH` map. (#3204)
+ */
+const LOG_SOURCE = `
+export function Math_log(x: number): number {
+  if (x < 0) return 0 / 0;
+  if (x === 0) return -1 / 0;
+  if (x !== x) return x;
+  if (x > 1.7976931348623157e308) return x;
+  if (x === 1) return 0;
+  let e: number = 0;
+  let f: number = x;
+  while (f >= 2) { f = f * 0.5; e = e + 1; }
+  while (f < 0.5) { f = f * 2; e = e - 1; }
+  let over: number = f > 1.4142135623730951 ? 1 : 0;
+  let ea: number = e + over;
+  let fa: number = over === 1 ? f * 0.5 : f;
+  let t: number = (fa - 1) / (fa + 1);
+  let t2: number = t * t;
+  let p: number = ((((((t2 * (1 / 13) + 1 / 11) * t2 + 1 / 9) * t2 + 1 / 7) * t2 + 1 / 5) * t2 + 1 / 3) * t2 + 1) * t * 2;
+  return p + ea * 0.6931471805599453;
+}
+`;
+
+/**
+ * Math.log2 — identical range-reduction + `atanh` series as `Math.log`, then
+ * `log2(f) = log(f) · LOG2E` added to the exponent `e`. The hand version's
+ * `if (f === 1) return e;` short-circuit is dropped: at `f === 1` the series
+ * yields `t = 0 → p = 0 → 0·LOG2E + e = e` exactly, so the result is
+ * bit-identical without the branch. LOG2E = 1.4426950408889634. (#3204)
+ */
+const LOG2_SOURCE = `
+export function Math_log2(x: number): number {
+  if (x < 0) return 0 / 0;
+  if (x === 0) return -1 / 0;
+  if (x !== x) return x;
+  if (x > 1.7976931348623157e308) return x;
+  if (x === 1) return 0;
+  let e: number = 0;
+  let f: number = x;
+  while (f >= 2) { f = f * 0.5; e = e + 1; }
+  while (f < 0.5) { f = f * 2; e = e - 1; }
+  let over: number = f > 1.4142135623730951 ? 1 : 0;
+  let ea: number = e + over;
+  let fa: number = over === 1 ? f * 0.5 : f;
+  let t: number = (fa - 1) / (fa + 1);
+  let t2: number = t * t;
+  let p: number = ((((((t2 * (1 / 13) + 1 / 11) * t2 + 1 / 9) * t2 + 1 / 7) * t2 + 1 / 5) * t2 + 1 / 3) * t2 + 1) * t * 2;
+  return p * 1.4426950408889634 + ea;
+}
+`;
+
+/**
+ * Early-core self-hosted builtins (#3204) — registered INLINE by
+ * `emitInlineMathFunctions` at the exact emission point their hand-`Instr[]`
+ * predecessors occupied (BEFORE the later hand cores that call them by
+ * funcMap name: pow/log10 → Math_log). NOT part of `SELF_HOSTED_MATH` (that
+ * map's leaves are emitted last). Both are standalone (no `callees`).
+ */
+export const LOG_BUILTIN: StdlibMathBuiltin = { name: "Math_log", callees: [], source: LOG_SOURCE };
+export const LOG2_BUILTIN: StdlibMathBuiltin = { name: "Math_log2", callees: [], source: LOG2_SOURCE };
+
+/**
  * The self-hosted subset of the Math family, keyed by `Math.<method>`
- * name. Phase-1 cores (sin/cos/exp/log/atan, atan2/pow, log2/log10,
- * random) stay hand-emitted for now — they are the precision-sensitive
- * range-reduction kernels; converting them is the scale-up decision
- * this pilot informs (#3141 verdict / battle-plan slice 9).
+ * name. Remaining hand-emitted cores (sin/cos/exp/atan, atan2/pow, log10,
+ * random) are the precision-sensitive kernels with dialect gaps
+ * (exp: exponent-extraction bit ops; pow: i32 exp-by-squaring; log10:
+ * `f64.nearest`; random: RNG import) — converting them needs the intrinsics
+ * groundwork (#3204 follow-up). `log`/`log2` moved to EARLY cores above.
  */
 export const SELF_HOSTED_MATH: ReadonlyMap<string, StdlibMathBuiltin> = new Map([
   ["cbrt", { name: "Math_cbrt", callees: [], source: CBRT_SOURCE }],
