@@ -576,7 +576,7 @@ function emitAnyEquality(
   // internalized; identical `eq` ref → 1) then falls through to the SAME
   // `__any_from_extern` + `__any_strict_eq` primitive comparison, so it never
   // false-positives a primitive. Scoped to OBJECT/`any` operands only (via
-  // `isReferenceLikeEqOperand`): number/boolean/bigint/symbol comparisons keep
+  // `isReferenceLikeEqFact`): number/boolean/bigint/symbol comparisons keep
   // their exact existing tag-3/tag-4 path untouched. Standalone/WASI only — the
   // host lane emits nothing new (byte-identical).
   if (helperName === "__any_strict_eq" && (ctx.standalone || ctx.wasi)) {
