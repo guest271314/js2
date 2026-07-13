@@ -115,3 +115,29 @@ are NOT the method-read OOB this slice fixes:
 3. **Revoked-Proxy `illegal cast`** (concat/slice `create-revoked-proxy`,
    `is-concat-spreadable-*-revoked`) — Proxy is a deferred feature; the revoked
    handle should surface a TypeError rather than trapping on `ref.cast`.
+
+## Progress — sparse-array structural-copy trap-safety (slice/concat) landed (opus-dstr, 2026-07-13)
+
+Second trap-first slice, following the indexOf/lastIndexOf read-clamp (#2968).
+`slice` and `concat` build their result with `array.copy` over the source range
+`[start, start+len)`. On a sparse array (logical `.length` beyond the physical
+WasmGC backing) that range runs past `array.len(data)` and the `array.copy`
+TRAPS ("array element access out of bounds"). Added `emitBackingClampedCopyLen`
+— a shared helper that clamps each copy COUNT to `clamp(array.len(data) - start,
+0, requestedLen)` while the destination keeps its full logical length (the
+beyond-backing tail stays a default-initialised hole, per the spec's skip of
+absent indices). Applied to `compileArraySliceFromVecLocal` and all three
+`compileArrayConcat` copy sites (0-arg + 1-arg × 2). Pure-sparse `slice()` /
+`concat()` now return a correctly-sized result with no trap (pass-flip);
+in-backing prefixes preserved; dense arrays byte-unchanged (clamp is a no-op).
+Zero array-suite regressions (`tests/issue-3201-slice-concat.test.ts` 8/8; the
+one pre-existing `array-oob-bounds-check > destructuring shorter array` fail is
+unrelated, present on clean main).
+
+Still open in this family (documented above): huge sparse-index WRITES (trap on
+the densely-growing-backing write path), the harness-entangled `Array.prototype`
+mutation `illegal cast` cluster (reproduces only through the full test262
+preamble — not cleanly bounded), revoked-Proxy casts (deferred, #1355/#1472),
+and `includes`/`splice`/`sort`/`pop` sparse reads (includes needs a
+bounds-checked read rather than a loop-clamp because §Array.prototype.includes
+treats absent indices as `undefined` — a follow-up).
