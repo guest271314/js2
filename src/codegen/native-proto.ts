@@ -473,7 +473,22 @@ export function ensureStandaloneNativeMethodClosure(
   // body for a catchable-TypeError throw. Every non-opted-in caller keeps the
   // exact null-return contract (this check precedes the funcMap lookup, so a
   // fallback-minted closure is never returned to a caller that didn't opt in).
-  const useRefusalBody = probedResult === null && opts?.refusalBodyFallback === true && kind === "method";
+  // (#3250) The fallback now applies to accessor GETTERS too, not just methods.
+  // An un-wired builtin-proto getter (e.g. `ArrayBuffer.prototype.byteLength`,
+  // `DataView.prototype.buffer`, `%TypedArray%.prototype.buffer`) previously
+  // returned a null closure, so the #2885 Site-2 gOPD synthesis could not build
+  // an accessor descriptor — `Object.getOwnPropertyDescriptor(<Ctor>.prototype,
+  // "<getter>")` answered `undefined` and the test's `.get` deref then trapped
+  // with our "Cannot access property on null or undefined" (~cluster #2). Minting
+  // the getter with the catchable-TypeError body makes gOPD return a spec-shaped
+  // accessor descriptor whose `.get` throws a real TypeError when invoked on a
+  // non-branded `this` (§23.2.3 / §25.1.5 / §25.2.5 / §25.3.4 RequireInternalSlot).
+  // This is spec-correct for these getters: unlike RegExp's §22.2.6 legacy accessor
+  // (SameValue(this,%Proto%)→undefined, whose getters ARE wired), the buffer-family
+  // getters have no proto-identity carve-out — reading them off the bare prototype
+  // (or any non-view `this`) throws. Getters with a real wired body are unaffected
+  // (their `emitMemberBody` returns non-null, so this fallback never fires).
+  const useRefusalBody = probedResult === null && opts?.refusalBodyFallback === true;
   if (probedResult === null && !useRefusalBody) return null;
   const resultType: ValType = probedResult ?? { kind: "externref" };
 
@@ -499,7 +514,14 @@ export function ensureStandaloneNativeMethodClosure(
       emitThrowTypeError(
         ctx,
         closureFctx,
-        `${glue.name}.prototype.${member} is not yet implemented in --target standalone`,
+        // (#3250) A getter reached here is invoked on a `this` that lacks the
+        // internal slot (the wired-body getters short-circuit a valid `this`
+        // before this fallback): that is a genuine spec RequireInternalSlot
+        // throw, so word it as such. Methods keep the "not yet implemented"
+        // spelling — their fallback stands in for an unwired native body.
+        kind === "getter"
+          ? `get ${glue.name}.prototype.${member} called on an incompatible receiver`
+          : `${glue.name}.prototype.${member} is not yet implemented in --target standalone`,
       );
     } else {
       const committedResult = glue.emitMemberBody(ctx, closureFctx, member, kind);
