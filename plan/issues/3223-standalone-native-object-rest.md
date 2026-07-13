@@ -1,5 +1,5 @@
 ---
-id: 3218
+id: 3223
 title: "Standalone: native `__extern_rest_object` — object-rest `{a, ...rest}` leaks env host import (leaky→host-free de-leak, ~234–417 test262 files)"
 status: in-progress
 assignee: ttraenkler/opus-substrate
@@ -27,7 +27,7 @@ loc-budget-allow:
   - src/codegen/destructuring-params.ts
 ---
 
-# #3218 — native standalone `__extern_rest_object` (object-rest de-leak)
+# #3223 — native standalone `__extern_rest_object` (object-rest de-leak)
 
 ## Problem (verified on current main, target standalone)
 

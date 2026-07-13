@@ -503,7 +503,7 @@ export function destructureParamObjectExternref(
       if (restIdx === undefined) {
         restIdx = allocLocal(fctx, restName, { kind: "externref" });
       }
-      // (#3218) Standalone/WASI: use the native host-free __extern_rest_object
+      // (#3223) Standalone/WASI: use the native host-free __extern_rest_object
       // (a DEFINED func) instead of the `env.__extern_rest_object` host import,
       // which would leak an env:: import and fail zero-import instantiation.
       // The native helper takes an EXCLUSION OBJECT (own keys = excluded

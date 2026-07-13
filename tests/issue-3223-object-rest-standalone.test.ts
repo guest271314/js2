@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3218 — native standalone `__extern_rest_object` (object-rest de-leak).
+ * #3223 — native standalone `__extern_rest_object` (object-rest de-leak).
  *
  * Object-rest destructuring `const {a, ...rest} = o` previously compiled to a
  * call to the `env.__extern_rest_object` HOST IMPORT, which is unsatisfiable
@@ -36,7 +36,7 @@ async function restStandalone(body: string): Promise<number> {
   return (instance.exports as { main(): number }).main();
 }
 
-describe("#3218 standalone object-rest — no host imports, correct CopyDataProperties", () => {
+describe("#3223 standalone object-rest — no host imports, correct CopyDataProperties", () => {
   it("copies non-excluded own values", async () => {
     expect(
       await restStandalone(

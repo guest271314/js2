@@ -9291,7 +9291,7 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
 }
 
 /**
- * (#3218) Native standalone/WASI `__extern_rest_object(obj, excl) -> externref`
+ * (#3223) Native standalone/WASI `__extern_rest_object(obj, excl) -> externref`
  * — the host-free implementation of object-rest destructuring's
  * CopyDataProperties (ES §14.7.4). Under `--target standalone`/`wasi` there is
  * no JS runtime to satisfy the `env.__extern_rest_object` host import, so
