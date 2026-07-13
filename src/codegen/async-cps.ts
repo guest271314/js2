@@ -1688,25 +1688,61 @@ const FORAWAIT_ARESULT = "__forawait_aresult";
  * (`asyncFnName` → `anon_<pos>`) or a member call is a 3d-iii edge.
  */
 function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expression): string | null {
-  if (!ts.isCallExpression(source)) return null;
-  const callee = source.expression;
-  if (!ts.isIdentifier(callee)) return null;
-  const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
-  if (ctx.funcMap.has(name)) return name;
-  // (#2865) A const/var-held fn-EXPRESSION producer (`const f = async
-  // function* () {...}`) registers under its synthesized anon stem, not the
-  // binding name. Resolve the callee's declaration through the checker and
-  // match the producer registry by INITIALIZER NODE — exact, no naming games.
-  if (ctx.asyncGenProducers !== undefined) {
-    const { checker } = ctx;
-    const sym = checker.getSymbolAtLocation(callee);
+  // (#3132) A VAR-HELD async-gen FRAME: `var it = (async function*(){})();
+  // for await (x of it)`. The `for await` source is the identifier `it`, not a
+  // direct call — resolve its (single) initializer, which must itself be a
+  // direct async-gen call, and recurse. Only a const/var whose initializer is a
+  // CallExpression qualifies (a reassigned / param-held / member-held binding
+  // cannot be statically tied to one producer → stays legacy, correct-or-legacy).
+  // This is the row-flipping half of the ~390-file for-await-over-async-gen leak
+  // (the producer is already driven; the CONSUMER bailed to legacy CPS because
+  // the frame was held in a variable rather than called inline).
+  if (ts.isIdentifier(source)) {
+    const sym = ctx.checker.getSymbolAtLocation(source);
     const vd = sym?.valueDeclaration;
-    if (vd !== undefined && ts.isVariableDeclaration(vd) && vd.initializer !== undefined) {
-      for (const [stem, p] of ctx.asyncGenProducers) {
-        if (p.decl === vd.initializer) {
-          const exprName = `__async_gen_next_${stem}`;
-          if (ctx.funcMap.has(exprName)) return exprName;
+    if (
+      vd !== undefined &&
+      ts.isVariableDeclaration(vd) &&
+      vd.initializer !== undefined &&
+      ts.isCallExpression(vd.initializer)
+    ) {
+      return resolveAsyncGenNextHelperName(ctx, vd.initializer);
+    }
+    return null;
+  }
+  if (!ts.isCallExpression(source)) return null;
+  let callee = source.expression;
+  while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
+  if (ts.isIdentifier(callee)) {
+    const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
+    if (ctx.funcMap.has(name)) return name;
+    // (#2865) A const/var-held fn-EXPRESSION producer (`const f = async
+    // function* () {...}`) registers under its synthesized anon stem, not the
+    // binding name. Resolve the callee's declaration through the checker and
+    // match the producer registry by INITIALIZER NODE — exact, no naming games.
+    if (ctx.asyncGenProducers !== undefined) {
+      const sym = ctx.checker.getSymbolAtLocation(callee);
+      const vd = sym?.valueDeclaration;
+      if (vd !== undefined && ts.isVariableDeclaration(vd) && vd.initializer !== undefined) {
+        for (const [stem, p] of ctx.asyncGenProducers) {
+          if (p.decl === vd.initializer) {
+            const exprName = `__async_gen_next_${stem}`;
+            if (ctx.funcMap.has(exprName)) return exprName;
+          }
         }
+      }
+    }
+    return null;
+  }
+  // (#3132) An IIFE async-gen producer: `(async function*(){})()` — the callee
+  // is the async-gen function EXPRESSION itself. Match the producer registry by
+  // its declaration node (registered by `emitAsyncGenerator` when the fn-expr
+  // compiled, in source order before this consumer).
+  if ((ts.isFunctionExpression(callee) || ts.isArrowFunction(callee)) && ctx.asyncGenProducers !== undefined) {
+    for (const [stem, p] of ctx.asyncGenProducers) {
+      if (p.decl === callee) {
+        const exprName = `__async_gen_next_${stem}`;
+        if (ctx.funcMap.has(exprName)) return exprName;
       }
     }
   }
