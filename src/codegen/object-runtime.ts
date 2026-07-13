@@ -5927,6 +5927,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const hasOwnIdx = ctx.funcMap.get("__hasOwnProperty")!;
     const isTruthyIdx = ctx.funcMap.get("__is_truthy")!;
     const typeofFunctionIdx = ctx.funcMap.get("__typeof_function")!;
+    const typeofObjectIdx = ctx.funcMap.get("__typeof_object")!;
     const defineValueIdx = ctx.funcMap.get("__defineProperty_value")!;
     const defineAccessorIdx = ctx.funcMap.get("__defineProperty_accessor")!;
     const externGetIdx = ctx.funcMap.get("__extern_get")!;
@@ -6190,16 +6191,27 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "extern.convert_any" },
               { op: "local.set", index: L_RAW_DESC },
 
-              // Per-property descriptor must be a `$Object` in this slice.
+              // (#3246) Per-property descriptor must be an OBJECT per
+              // ToPropertyDescriptor §6.2.5.6 — ANY object (plain object,
+              // function, array, wrapper), not only a native `$Object` struct.
+              // The field reads below go through __hasOwnProperty/__extern_get,
+              // which dispatch dynamically on any object externref, so accept
+              // object|function and reject only primitives. (Pre-#3246 this
+              // `ref.test $Object` gate over-rejected function/array descriptors
+              // — e.g. `Object.create(o, {p: fn})` — as "unsupported shape".)
+              // NOTE: `__typeof_object(null)` is 1 (typeof null === "object"),
+              // but Type(null) is NOT Object, so a `null` descriptor value must
+              // still throw (§6.2.5.6 step 2) — reject it explicitly first.
               { op: "local.get", index: L_RAW_DESC },
-              { op: "any.convert_extern" },
-              { op: "local.tee", index: L_RAW_ANY },
-              { op: "ref.test", typeIdx: objectTypeIdx },
+              { op: "ref.is_null" },
+              { op: "if", blockType: { kind: "empty" }, then: throwUnsupported() },
+              { op: "local.get", index: L_RAW_DESC },
+              { op: "call", funcIdx: typeofObjectIdx },
+              { op: "local.get", index: L_RAW_DESC },
+              { op: "call", funcIdx: typeofFunctionIdx },
+              { op: "i32.or" },
               { op: "i32.eqz" },
               { op: "if", blockType: { kind: "empty" }, then: throwUnsupported() },
-              { op: "local.get", index: L_RAW_ANY },
-              { op: "ref.cast", typeIdx: objectTypeIdx },
-              { op: "local.set", index: L_RAW_OBJ },
 
               // Reset descriptor accumulators.
               { op: "i32.const", value: 0 },
@@ -6418,6 +6430,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const hasOwnIdx = ctx.funcMap.get("__hasOwnProperty")!;
     const isTruthyIdx = ctx.funcMap.get("__is_truthy")!;
     const typeofFunctionIdx = ctx.funcMap.get("__typeof_function")!;
+    const typeofObjectIdx = ctx.funcMap.get("__typeof_object")!;
     const defineValueIdx = ctx.funcMap.get("__defineProperty_value")!;
     const defineAccessorIdx = ctx.funcMap.get("__defineProperty_accessor")!;
     const externGetIdx = ctx.funcMap.get("__extern_get")!;
@@ -6607,11 +6620,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 2 },
       { op: "ref.is_null" },
       { op: "if", blockType: { kind: "empty" }, then: [{ op: "local.get", index: 0 }, { op: "return" }] },
-      // desc must be a standalone $Object; otherwise TypeError (ToPropertyDescriptor §10.1.6).
+      // (#3246) desc must be an OBJECT per ToPropertyDescriptor §10.1.6 — ANY
+      // object (plain object, function, array, wrapper), not only a native
+      // `$Object` struct. The field reads below dispatch dynamically via
+      // __hasOwnProperty/__extern_get on the externref, so accept
+      // object|function and throw only for primitives. (Pre-#3246 this
+      // `ref.test $Object` gate over-rejected a function/array descriptor —
+      // e.g. `Object.create(o, {p: fnObj})` — with a spurious TypeError.)
       { op: "local.get", index: 2 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: L_DESC_ANY },
-      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "call", funcIdx: typeofObjectIdx },
+      { op: "local.get", index: 2 },
+      { op: "call", funcIdx: typeofFunctionIdx },
+      { op: "i32.or" },
       { op: "i32.eqz" },
       {
         op: "if",
