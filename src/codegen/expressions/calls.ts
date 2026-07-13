@@ -193,6 +193,7 @@ import {
   compileNativeStringMethodCall,
   compileStringLiteral,
   emitBoolToString,
+  emitBorrowedStringReceiverToString,
   isStaticUndefinedArg,
 } from "../string-ops.js";
 import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.js";
@@ -6324,7 +6325,18 @@ function compileCallExpression(
 
             if (typeName === "String" && STANDALONE_STR_PROTO_METHODS.has(methodName)) {
               const { prop, call } = synthesizeBorrowedCall();
-              const strResult = compileNativeStringMethodCall(ctx, fctx, call, prop, methodName);
+              // (#3254) The borrowed `this` is the FIRST arg. §22.1.3 requires
+              // `RequireObjectCoercible(this)` then `ToString(this)` on it — a
+              // null/undefined receiver must throw TypeError, and a
+              // boolean/number/object receiver must ToString (the default
+              // `emitReceiver` only handled a string/object-struct receiver, so
+              // `.call(false)` yielded "[object Object]" and `.call(undefined)`
+              // silently coerced). Feed a ROC+ToString receiver override so the
+              // fix covers every method in STANDALONE_STR_PROTO_METHODS.
+              const borrowedReceiver = expr.arguments[0]!;
+              const strResult = compileNativeStringMethodCall(ctx, fctx, call, prop, methodName, () =>
+                emitBorrowedStringReceiverToString(ctx, fctx, borrowedReceiver, methodName),
+              );
               if (strResult !== null) return strResult;
               // Native string path declined (unexpected shape) — fall through
               // to the refuse-loud below rather than the host import.
