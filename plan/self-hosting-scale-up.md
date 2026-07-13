@@ -27,7 +27,7 @@ standalone + wasi green; **zero dialect gaps**; 3.3× body compression measured
 
 | # | Family (file, current LOC) | Est. TS source | Est. net | Expressible today? | Precursors / risk |
 | - | --- | ---: | ---: | --- | --- |
-| 1 | **math cores** — `math-helpers.ts` remainder: sin/cos/exp/log/atan/tan/atan2/pow/log2/log10 (~1,050 of 1,394) | ~320 | **−0.8k** | **YES — proven dialect, zero precursors** (loops, f64 compares, 2-param callees all exercised by pilot) | Lowest risk in the whole program. atan2/pow are 2-param — `calleeTypes` already supports arity ≥ 2. Math_random stays (WASI import plumbing). Dispatchable NOW. |
+| 1 | ✅ **DONE — math cores** — `math-helpers.ts` remainder: sin/cos/exp/log/atan/tan/atan2/pow/log2/log10 | ~320 | **−0.8k (realised)** | **DONE** (#3141 pilot → #3204 log/trig → #3233 atan2 → #3226 exp/pow/log10) | **COMPLETE 2026-07-13.** The whole Math family is self-hosted; only `Math_random` stays hand-emitted (WASI `random_get` host import — not a dialect gap). #3226 reframed: exp/pow needed NO i32-bit-op/reinterpret and log10 NO `f64.nearest` — all expressible in pure f64 (`ni & 1`→`ni-Math.floor(ni/2)*2`, `ni>>>1`→`Math.floor(ni/2)`, `f64.nearest`→guard-bounded `Math.floor(x+0.5)`). Each bit-exact-validated vs a main-built control (0 mismatches). Net realised ≈ −0.8k across the four PRs. |
 | 2 | **parse/format** — `parse-number-native.ts` (1,838) + `number-format-native.ts` (1,712) | ~700 | **−2.8k** | MOSTLY — numeric scanning loops are pure i32/f64; needs char-code access on the string rep | Precursor A (string intrinsics: `__str_char_code_at`-style callees — the `__str_*` helpers EXIST, just declare their sigs in `calleeTypes`). Medium-low risk. |
 | 3 | **string methods** — `string-ops.ts` (3,495) + parts of `native-strings.ts` (7,433; keep the i16-array core kernels hand-written) | ~1.6k | **−6–7k** | PARTIAL — method bodies (indexOf/split/pad/trim logic) express as loops over char codes; the rep kernels (alloc, copy-tree, flatten) stay hand-written as callees | Precursor A + driver-resolver widening (Precursor C). IrType.string exists; leaf-first: express methods as calls into the retained `__str_` kernels. Medium risk. |
 | 4 | **array methods** — `array-methods.ts` (9,565) | ~1.2–1.5k | **−8k** | PARTIAL — per-element loops + callback invocation express today (IR has vec get/set/len, closure.call); the dynamic boxed-any element rep and growth semantics need intrinsic callees | Precursor B (`__vec_len` / element get-set / `__arr_push` declared as typed callees — most exist as helpers already, e.g. `ensureVecElemSet`) + Precursor C. Porffor benchmark: all of Array in 1,038 TS lines. Medium-high risk, HIGHEST single payoff. |
@@ -70,3 +70,66 @@ IR loop/try lowering is WasmGC-`Instr[]`-only until the #1584 a1..a6 trait migra
 self-hosted bodies with loops serve the WasmGC backend today. The linear backend does
 not consume these emission files at all currently, so nothing regresses — but the
 "one source, both backends" dividend for loop-bearing builtins arrives with #1584.
+
+## Tier-1 resolver-widening scope (Precursor C) — next-window handoff
+
+_Author: opus-selfhost2, 2026-07-13. Durable capture of the scope analysis done_
+_after the Math family completed, so the next-window Tier-1 agent inherits it._
+
+**FLAG — the ranked table's "Precursor C = export `makeResolver` (S)" is
+misleading.** `makeResolver` (`src/ir/integration.ts:1281`) is NOT drop-in
+reusable: it takes **6 constructed dependencies** — `unionRegistry`,
+`stringBackend` (from `computeStringBackend`, currently **not exported**), and
+four **deferred registry resolvers** (`DeferredObjectResolver`,
+`DeferredClosureResolver`, `DeferredRefCellResolver`, `DeferredClassResolver`)
+that are wired to `ObjectStructRegistry` / `ClosureStructRegistry` / … across
+~40 lines of Phase-3 back-patching (`integration.ts:706–740`). Dragging that
+whole apparatus into the stdlib-selfhost driver is not an "S".
+
+**The genuinely-S/M path is a TIERED, purpose-built widening of the driver's
+OWN resolver** (`src/codegen/stdlib-selfhost.ts:243`, currently
+`resolveFunc`=funcMap-only, `resolveGlobal`/`resolveType`=throw,
+`internFuncType`). Do NOT reuse `makeResolver` wholesale; grow the driver's
+resolver tier by tier, only as far as each family needs:
+
+- **Tier 1 (strings)** — for a leaf `__str_*` helper that only reads char codes:
+  1. widen `resolveFunc` to add `makeResolver`'s name-fallback + on-demand
+     string-helper materialization (scan `ctx.mod.functions` + `ctx.nativeStrHelpers`
+     by name; `ensureHostCharCodeAtGuarded` / `ensureNativeStringHelpers` —
+     mirror `integration.ts:1322–1383`);
+  2. add `resolveString` by **exporting `computeStringBackend(ctx)`** and calling it;
+  3. add `resolveType` for the string struct type.
+  **No object/closure/vec/union registries needed.** This is the whole Tier-1 lift.
+- **Tier 2 (arrays/vecs)** — additionally: `resolveFunc`'s `VEC_ELEM_SET`
+  on-demand path (`ensureVecElemSet`) + `resolveType` for vec structs. Still no
+  objects/closures.
+- **Tier 3 (objects/classes, families 6–8)** — only HERE do you need the full
+  deferred-registry machinery (`ObjectStructRegistry` etc.). This is the
+  genuinely hard part; keep it deferred per the ranked table (convert LAST).
+
+**Precursor A (char-code callee sigs)** co-lands with Tier 1: declare the
+existing `__str_*` helper signatures (e.g. a `__str_charCodeAt`-style
+`(string, i32) -> i32`) as `calleeTypes` entries so stdlib source can call them.
+No new Wasm — pure descriptor/`calleeTypes` plumbing.
+
+**First-unit choice.** NOT `string-ops.ts` — that file is **AST-dispatch
+emitters** (`compileNativeStringMethodCall`, `compileStringLiteral`, …), not
+stdlib-shaped functions. The real leaf candidates are the discrete fixed-ABI
+`__str_*` **runtime helpers** in `native-strings.ts` (`__str_repeat`,
+`__str_indexOf`, `__str_padStart`/`padEnd`, `__str_startsWith`/`endsWith`/
+`includes`, `__str_slice`, …) — pure char-code loops over the i16-array rep.
+**Recommend `__str_repeat` or `__str_startsWith`** as the smallest fixed-ABI
+leaf.
+
+**Measure-first first PR** = Tier-1 resolver widening + Precursor A char-code
+callee + **ONE** `__str_*` helper converted. Validation differs from Math:
+these are **non-numeric**, so use **A/B equivalence** (compiled self-hosted vs
+compiled hand helper on a corpus of inputs, incl. empty/unicode/surrogate/large)
++ a **containment SHA check** for non-users — the bit-exact f64-bit-pattern
+sweep is a numeric-only tool. Both host and standalone/wasi lanes.
+
+**Reusable driver mechanism confirmed working for binary builtins**: the
+`StdlibMathBuiltin.arity?: 1|2` field + `mathBuiltinDef`'s `paramTypes` split
+(landed in #3233/#3226) generalises; a string helper descriptor will want its
+own positional `paramTypes`/`returnType`/`calleeTypes` via the already-general
+`SelfHostedFuncDef` / `emitSelfHostedFunc` path (`stdlib-selfhost.ts:91,232`).

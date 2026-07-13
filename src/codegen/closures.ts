@@ -3717,6 +3717,14 @@ export function compileArrowAsCallback(
   const makeCallbackName = needsThis ? "__make_getter_callback" : "__make_callback";
   const makeCallbackIdx = ctx.funcMap.get(makeCallbackName);
   if (makeCallbackIdx === undefined) {
+    // (#3235) Standalone/WASI intentionally doesn't register the `__make_callback`
+    // host bridge (declarations.ts). Rather than hard-error, degrade a callback
+    // that reaches this host-bridge path to the native first-class closure struct;
+    // the #3098 substrate (`__apply_closure`/`__call_fn_N`) invokes it host-free
+    // wherever it's exercised. JS-host lane unaffected (idx always defined there).
+    if (ctx.standalone || ctx.wasi) {
+      return compileArrowAsClosure(ctx, fctx, arrow);
+    }
     reportError(ctx, arrow, `Missing ${makeCallbackName} import`);
     return null;
   }

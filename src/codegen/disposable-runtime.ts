@@ -26,18 +26,28 @@
  * `__call_fn_0`/`__call_fn_1` exist.
  *
  * Phase 1a scope: construct / `disposed` / `defer` / `adopt` / `dispose` (LIFO) /
- * `move` / disposed-throw / `[Symbol.dispose]`. `use()` (dynamic `[Symbol.dispose]`
- * lookup) and SuppressedError aggregation are Phase 1b (#3231).
+ * `move` / disposed-throw / `[Symbol.dispose]`.
+ *
+ * Phase 1b adds `use(value)`: a RUNTIME `value[Symbol.dispose]` member lookup on
+ * an arbitrary receiver (`__box_symbol(13)` + `__extern_get` over the native
+ * `$Object` substrate), TypeError on a non-disposable arg, and a third disposer
+ * kind (`ENTRY_KIND_USE`) invoked at dispose via `__call_fn_method_0(value,
+ * method)` so the method's `this` binds to the used value. SuppressedError
+ * multi-error aggregation remains a follow-up (see the issue file).
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType, StructTypeDef, ArrayTypeDef } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getOrRegisterErrorStructType } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import type { InnerResult } from "./shared.js";
-import { coerceType, compileExpression, VOID_RESULT } from "./shared.js";
+import { coerceType, compileExpression, ensureLateImport, flushLateImportShifts, VOID_RESULT } from "./shared.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { BUILTIN_TYPE_TAGS } from "./builtin-tags.js";
 
 const EXTERNREF: ValType = { kind: "externref" };
 const I32: ValType = { kind: "i32" };
@@ -324,6 +334,49 @@ export function ensureDisposableStackMove(ctx: CodegenContext): number {
   );
 }
 
+/**
+ * `__disposablestack_check_active(stack)` — RequireInternalSlot (null →
+ * ReferenceError) + disposed-throw (ReferenceError). No append/return. `use()`
+ * needs this as a standalone check because the null/undefined-value fast path
+ * (§ AddDisposableResource step 1.a) skips the append helper (which carries the
+ * same check) yet the disposed check must STILL fire first (§
+ * DisposableStack.prototype.use steps 2–3 run before AddDisposableResource).
+ */
+export function ensureDisposableStackCheckActive(ctx: CodegenContext): number {
+  const t = ensureDisposableStackTypes(ctx);
+  return ensureHelper(
+    ctx,
+    "__disposablestack_check_active",
+    [EXTERNREF],
+    [],
+    [{ name: "__ds", type: stackRefNull(ctx) }],
+    () => {
+      const STACK = 0,
+        DS = 1;
+      const body: Instr[] = [];
+      body.push({ op: "local.get", index: STACK } as Instr);
+      body.push(...externToStack(ctx));
+      body.push({ op: "local.tee", index: DS } as Instr);
+      body.push({ op: "ref.is_null" } as Instr);
+      body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack has no [[DisposableState]]"),
+        else: [],
+      } as Instr);
+      body.push({ op: "local.get", index: DS } as Instr);
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+      body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack already disposed"),
+        else: [],
+      } as Instr);
+      return body;
+    },
+  );
+}
+
 // ── dispose reserve/fill driver (needs __call_fn_N, emitted late) ────────────
 
 const DISPOSE_DRIVER = "__disposablestack_dispose";
@@ -337,6 +390,16 @@ export function reserveDisposableStackDisposeDriver(ctx: CodegenContext): number
   const existing = ctx.funcMap.get(DISPOSE_DRIVER);
   if (existing !== undefined) return existing;
   ensureDisposableStackTypes(ctx);
+  // (#3234) SuppressedError multi-error aggregation: the dispose driver wraps a
+  // second+ disposer throw into a native `$Error_struct` (SuppressedError tag)
+  // whose `error`/`suppressed` fields live on the `$props` open-object backing.
+  // Ensure the object runtime (`__new_plain_object`/`__extern_set`), the
+  // `$Error_struct` type, and the interned key/name strings NOW (compile time) so
+  // the finalize-time `fillDisposableStackDisposeDriver` can resolve them (adding
+  // them at finalize is unsafe — object-runtime registration runs during compile).
+  ensureObjectRuntime(ctx);
+  getOrRegisterErrorStructType(ctx);
+  for (const s of ["error", "suppressed", "SuppressedError", ""]) addStringConstantGlobal(ctx, s);
   const typeIdx = addFuncType(ctx, [EXTERNREF], []);
   const funcIdx = mintDefinedFunc(ctx);
   ctx.funcMap.set(DISPOSE_DRIVER, funcIdx);
@@ -372,19 +435,43 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   };
   const callFn0 = callFnIdx("__call_fn_0");
   const callFn1 = callFnIdx("__call_fn_1");
+  // (#3231 Phase 1b) `use()` disposers invoke `value[@@dispose]()` — the stored
+  // method with `value` bound as `this` — via the `__call_fn_method_0` bridge
+  // (unlike `__call_fn_N`, it IS registered in `funcMap`; #1636-S1). Emitted by
+  // `emitClosureMethodCallExportN(0)` BEFORE this fill runs (index.ts finalize
+  // order: 2560 < 2621), so a `use()` module has it. Resolve by name.
+  const callFnMethod0 = ctx.funcMap.get("__call_fn_method_0");
+
+  // (#3234) SuppressedError aggregation dependencies (pre-registered at reserve).
+  const exnTag = ensureExnTag(ctx);
+  const errStructIdx = getOrRegisterErrorStructType(ctx);
+  const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+  const externSetIdx = ctx.funcMap.get("__extern_set");
+  const canAggregate = newPlainObjIdx !== undefined && externSetIdx !== undefined;
 
   const STACK = 0,
     DS = 0 + 1,
     ENTRIES = 2,
     I = 3,
     ENTRY = 4,
-    KIND = 5;
+    KIND = 5,
+    // (#3234) aggregation slots: PENDING = accumulated completion error, HASPENDING
+    // its presence flag (`throw null`/`throw undefined` are still throws), CUR the
+    // just-caught error, PROPS the SuppressedError `$props` scratch.
+    PENDING = 6,
+    HASPENDING = 7,
+    CUR = 8,
+    PROPS = 9;
   driverFn.locals = [
     { name: "__ds", type: stackRefNull(ctx) },
     { name: "__entries", type: { kind: "ref_null", typeIdx: t.entriesTypeIdx } },
     { name: "__i", type: I32 },
     { name: "__entry", type: { kind: "ref_null", typeIdx: t.entryTypeIdx } },
     { name: "__kind", type: I32 },
+    { name: "__pending", type: EXTERNREF },
+    { name: "__haspending", type: I32 },
+    { name: "__cur", type: EXTERNREF },
+    { name: "__props", type: EXTERNREF },
   ];
 
   const body: Instr[] = [];
@@ -431,40 +518,101 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   dispatch.push({ op: "local.get", index: ENTRY } as Instr);
   dispatch.push({ op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 2 } as Instr);
   dispatch.push({ op: "local.set", index: KIND } as Instr);
-  // kind == ADOPT (1) and callFn1 available: cb(value)
-  if (callFn1 !== undefined) {
-    dispatch.push({ op: "local.get", index: KIND } as Instr);
-    dispatch.push({ op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr);
-    dispatch.push({ op: "i32.eq" } as Instr);
-    dispatch.push({
+  // Instr helpers for the entry's callback (fieldIdx 0) and captured value (1).
+  const entryCb = (): Instr[] => [
+    { op: "local.get", index: ENTRY } as Instr,
+    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 } as Instr,
+  ];
+  const entryValue = (): Instr[] => [
+    { op: "local.get", index: ENTRY } as Instr,
+    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 1 } as Instr,
+  ];
+  // Per-kind invocation, each a no-op when its dispatcher is unavailable:
+  //   USE   (2): `value[@@dispose]()` → __call_fn_method_0(value, method)
+  //   ADOPT (1): onDispose(value)     → __call_fn_1(cb, value)
+  //   DEFER (0): onDispose()          → __call_fn_0(cb)
+  const useCall: Instr[] =
+    callFnMethod0 !== undefined
+      ? [...entryValue(), ...entryCb(), { op: "call", funcIdx: callFnMethod0 } as Instr, { op: "drop" } as Instr]
+      : [];
+  const adoptCall: Instr[] =
+    callFn1 !== undefined
+      ? [...entryCb(), ...entryValue(), { op: "call", funcIdx: callFn1 } as Instr, { op: "drop" } as Instr]
+      : [];
+  const deferCall: Instr[] =
+    callFn0 !== undefined ? [...entryCb(), { op: "call", funcIdx: callFn0 } as Instr, { op: "drop" } as Instr] : [];
+  // if kind == USE → useCall; else if kind == ADOPT → adoptCall; else deferCall.
+  const invokeSwitch: Instr[] = [
+    { op: "local.get", index: KIND } as Instr,
+    { op: "i32.const", value: ENTRY_KIND_USE } as Instr,
+    { op: "i32.eq" } as Instr,
+    {
       op: "if",
       blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: ENTRY } as Instr,
-        { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 } as Instr, // cb
-        { op: "local.get", index: ENTRY } as Instr,
-        { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 1 } as Instr, // value
-        { op: "call", funcIdx: callFn1 } as Instr,
-        { op: "drop" } as Instr,
+      then: useCall,
+      else: [
+        { op: "local.get", index: KIND } as Instr,
+        { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
+        { op: "i32.eq" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: adoptCall, else: deferCall } as Instr,
       ],
-      else:
-        callFn0 !== undefined
-          ? [
-              // else defer (0): cb()
-              { op: "local.get", index: ENTRY } as Instr,
-              { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 } as Instr,
-              { op: "call", funcIdx: callFn0 } as Instr,
-              { op: "drop" } as Instr,
-            ]
-          : [],
-    } as Instr);
-  } else if (callFn0 !== undefined) {
-    // only defer possible
-    dispatch.push({ op: "local.get", index: ENTRY } as Instr);
-    dispatch.push({ op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 } as Instr);
-    dispatch.push({ op: "call", funcIdx: callFn0 } as Instr);
-    dispatch.push({ op: "drop" } as Instr);
-  }
+    } as Instr,
+  ];
+  // (#3234) Run EVERY disposer even if a prior threw (§ DisposeResources). Wrap the
+  // invocation in try/catch on the module exception tag ($exn carries the thrown
+  // externref); Wasm traps are not catchable and there is no JS host to raise a
+  // foreign exception standalone, so a single-tag catch is complete (no catch_all).
+  // On the FIRST caught error: pending = err. On each SUBSEQUENT: pending =
+  // SuppressedError{ error: newer, suppressed: prior } (LIFO nesting).
+  const buildSuppressedError: Instr[] = canAggregate
+    ? [
+        // props = __new_plain_object(); props.error = cur; props.suppressed = pending
+        { op: "call", funcIdx: newPlainObjIdx! } as Instr,
+        { op: "local.set", index: PROPS } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        ...stringConstantExternrefInstrs(ctx, "error"),
+        { op: "local.get", index: CUR } as Instr,
+        { op: "call", funcIdx: externSetIdx! } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        ...stringConstantExternrefInstrs(ctx, "suppressed"),
+        { op: "local.get", index: PENDING } as Instr,
+        { op: "call", funcIdx: externSetIdx! } as Instr,
+        // pending = struct.new $Error_struct{ tag, message "", name, stack null, userClassId -1, props }
+        { op: "i32.const", value: BUILTIN_TYPE_TAGS.SuppressedError } as Instr,
+        ...stringConstantExternrefInstrs(ctx, ""),
+        ...stringConstantExternrefInstrs(ctx, "SuppressedError"),
+        { op: "ref.null.extern" } as Instr,
+        { op: "i32.const", value: -1 } as Instr,
+        { op: "local.get", index: PROPS } as Instr,
+        { op: "struct.new", typeIdx: errStructIdx } as Instr,
+        { op: "extern.convert_any" } as Instr,
+        { op: "local.set", index: PENDING } as Instr,
+      ]
+    : // Object runtime unavailable (should not happen — reserved at compile time):
+      // degrade to last-error-wins so the module stays valid Wasm.
+      [{ op: "local.get", index: CUR } as Instr, { op: "local.set", index: PENDING } as Instr];
+  const catchHandler: Instr[] = [
+    { op: "local.set", index: CUR } as Instr,
+    { op: "local.get", index: HASPENDING } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: buildSuppressedError,
+      else: [
+        { op: "local.get", index: CUR } as Instr,
+        { op: "local.set", index: PENDING } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "local.set", index: HASPENDING } as Instr,
+      ],
+    } as Instr,
+  ];
+  dispatch.push({
+    op: "try",
+    blockType: { kind: "empty" },
+    body: invokeSwitch,
+    catches: [{ tagIdx: exnTag, body: catchHandler }],
+    catchAll: undefined,
+  } as Instr);
   loopBody.push({ op: "if", blockType: { kind: "empty" }, then: dispatch, else: [] } as Instr);
   // i = i - 1; continue
   loopBody.push({ op: "local.get", index: I } as Instr);
@@ -478,6 +626,16 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
     op: "block",
     blockType: { kind: "empty" },
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // (#3234) After all disposers ran: if any error was accumulated, rethrow the
+  // final completion (the outermost SuppressedError, or the single error as-is).
+  body.push({ op: "local.get", index: HASPENDING } as Instr);
+  body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "local.get", index: PENDING } as Instr, { op: "throw", tagIdx: exnTag } as Instr],
+    else: [],
   } as Instr);
 
   driverFn.body = body;
@@ -564,8 +722,130 @@ export function tryCompileNativeDisposableStackMethodCall(
     return EXTERNREF;
   }
 
-  // `use` (dynamic [Symbol.dispose] lookup) → Phase 1b; host fallthrough.
+  if (methodName === "use") {
+    return compileNativeDisposableStackUse(ctx, fctx, propAccess, args);
+  }
+
   return undefined;
+}
+
+/** Well-known-symbol id for `Symbol.dispose` (property-access.ts registry). */
+const SYMBOL_DISPOSE_ID = 13;
+
+/**
+ * (#3231 Phase 1b) `DisposableStack.prototype.use(value)` — the one method whose
+ * disposer is discovered by a RUNTIME member lookup on an arbitrary receiver
+ * (§ CreateDisposableResource → GetDisposeMethod → GetMethod(V, @@dispose)),
+ * rather than a caller-supplied `onDispose`. Spec order (§12.3.3.3):
+ *
+ *   1. RequireInternalSlot + disposed-throw (ReferenceError) — ALWAYS first,
+ *      even for `use(null)` on a disposed stack (test `throws-if-disposed`).
+ *   2. If value is null/undefined → return value, no resource added
+ *      (AddDisposableResource step 1.a; tests `allows-null-value`/`returns-value`).
+ *   3. Else GetMethod(value, @@dispose): read `value[Symbol.dispose]` ONCE (an
+ *      accessor is invoked exactly once — test `gets-value-…-property-once`) via
+ *      the native `$Object` dynamic reader `__extern_get(value, __box_symbol(13))`.
+ *      A non-object receiver reads back undefined (miss), so it lands in the same
+ *      TypeError arm as an object missing the method — matching the spec's two
+ *      distinct TypeError sources with one observable result.
+ *   4. If the method is nullish → TypeError (tests `throws-if-value-not-object`,
+ *      `throws-if-value-missing-Symbol.dispose`, `…-property-is-null`).
+ *   5. Append entry{cb: method, value, kind: USE}; the dispose loop later runs
+ *      `__call_fn_method_0(value, method)` (method-bound `this`). Return value.
+ *
+ * Gated `ctx.nativeStrings` (the caller's gate). The value is read via the same
+ * native `$Object`/`__box_symbol` substrate the object-literal writer uses
+ * (`literals.ts`), so a `{ [Symbol.dispose]() {} }` resource — always represented
+ * as a native `$Object` under a `$Symbol` key — is found host-free.
+ */
+function compileNativeDisposableStackUse(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  args: ts.NodeArray<ts.Expression> | readonly ts.Expression[],
+): InnerResult {
+  const appendIdx = ensureDisposableStackAppend(ctx);
+  const checkIdx = ensureDisposableStackCheckActive(ctx);
+  // Ensure the native object runtime is registered so `__extern_get` and
+  // `__box_symbol` exist for the reads below.
+  ensureObjectRuntime(ctx);
+
+  const stackLocal = allocLocal(fctx, `__ds_stack_${fctx.locals.length}`, EXTERNREF);
+  const valueLocal = allocLocal(fctx, `__ds_val_${fctx.locals.length}`, EXTERNREF);
+  const methodLocal = allocLocal(fctx, `__ds_method_${fctx.locals.length}`, EXTERNREF);
+
+  // Eval receiver → stackLocal; disposed-throw check FIRST (spec steps 2–3).
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.set", index: stackLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: stackLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: checkIdx } as Instr);
+
+  // Eval value → valueLocal.
+  if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
+  else fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+
+  // Resolve the runtime helpers (registered by ensureObjectRuntime). `__box_symbol`
+  // + `__extern_is_undefined` are ensured as (native, in standalone) late imports;
+  // flush index shifts against fctx before baking the funcIdxs.
+  const boxSymIdx = ensureLateImport(ctx, "__box_symbol", [{ kind: "i32" }], [EXTERNREF]);
+  ensureLateImport(ctx, "__extern_is_undefined", [EXTERNREF], [{ kind: "i32" }]);
+  flushLateImportShifts(ctx, fctx);
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  const isUndefinedIdx = ctx.funcMap.get("__extern_is_undefined");
+
+  // The substrate should always exist once ensureObjectRuntime ran; if not, keep
+  // the stack consistent (value evaluated for its side effects) and return value
+  // rather than emit an unbalanced body.
+  if (boxSymIdx === undefined || externGetIdx === undefined || isUndefinedIdx === undefined) {
+    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    return EXTERNREF;
+  }
+
+  // Regime-independent "is null OR undefined" for a value held in `localIdx`,
+  // leaving an i32 on the stack. `__extern_is_nullish` exists only under the
+  // undefined-singleton regime (object-runtime.ts, #2106 S1); combine the always-
+  // present `ref.is_null` (JS null / ref.null.extern) with `__extern_is_undefined`
+  // (the boxed/singleton undefined) so both regimes are covered.
+  const nullishOf = (localIdx: number): Instr[] => [
+    { op: "local.get", index: localIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    { op: "local.get", index: localIdx } as Instr,
+    { op: "call", funcIdx: isUndefinedIdx } as Instr,
+    { op: "i32.or" } as Instr,
+  ];
+  const typeErr = (msg: string): Instr[] => buildThrowJsErrorInstrs(ctx, "TypeError", msg, { flush: fctx });
+
+  // if !nullish(value): read method, validate, append.
+  const nonNullishBody: Instr[] = [];
+  // method = __extern_get(value, __box_symbol(SYMBOL_DISPOSE_ID)) — read ONCE.
+  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
+  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: externGetIdx } as Instr);
+  nonNullishBody.push({ op: "local.set", index: methodLocal } as Instr);
+  // if nullish(method): TypeError (non-object receiver OR missing/null @@dispose).
+  nonNullishBody.push(...nullishOf(methodLocal));
+  nonNullishBody.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: typeErr("DisposableStack.prototype.use: value is not disposable"),
+    else: [],
+  } as Instr);
+  // append entry{cb: method, value, kind: USE}
+  nonNullishBody.push({ op: "local.get", index: stackLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: methodLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
+  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE } as Instr);
+  nonNullishBody.push({ op: "call", funcIdx: appendIdx } as Instr);
+
+  fctx.body.push(...nullishOf(valueLocal));
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] } as Instr);
+
+  // Return value.
+  fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+  return EXTERNREF;
 }
 
 /**

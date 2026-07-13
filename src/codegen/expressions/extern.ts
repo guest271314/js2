@@ -127,8 +127,9 @@ function compileExternMethodCall(
   // (#3231) Native DisposableStack method dispatch in standalone / nativeStrings
   // mode. Without this, `s.defer(...)`/`.dispose()` etc. emit `DisposableStack_*`
   // host imports the standalone runtime can't satisfy. Route to the WasmGC-native
-  // DisposableStack runtime. `use` (dynamic [Symbol.dispose] lookup) and
-  // AsyncDisposableStack are Phase 1b/2 — they fall through to the host path.
+  // DisposableStack runtime — construct / disposed / defer / adopt / move / dispose
+  // and (Phase 1b) `use` (dynamic [Symbol.dispose] lookup) are all native.
+  // AsyncDisposableStack is Phase 2 — it falls through to the host path.
   if (className === "DisposableStack" && ctx.nativeStrings) {
     const dsResult = tryCompileNativeDisposableStackMethodCall(ctx, fctx, propAccess, callExpr);
     if (dsResult !== undefined) return dsResult;
