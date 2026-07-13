@@ -111,6 +111,10 @@ new helpers only emit when a genuine covariant/async candidate set exists.
 
 ## Measured yield (per-file `runTest262File`, branch vs pristine-main control)
 
+Permanent repro: `tests/equivalence/issue-3205-property-call-wrapper-root.test.ts`
+(5 cases — covariant number/string property-call, async-closure property-call,
+element-access covariant call, matching-signature control).
+
 Controls (all trap on `main`, WAT-verified wrapper mismatch):
 
 | shape | main | branch |
