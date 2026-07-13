@@ -41,6 +41,7 @@ import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
+import { tryCompileNativeWeakRefNew } from "../weakref-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs, ensureAnyToStringHelper } from "../native-strings.js";
@@ -2853,6 +2854,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       fctx.body.push({ op: "call", funcIdx: mapNewIdx });
       return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
+  }
+
+  // (#3242) `new WeakRef(target)` in standalone / nativeStrings mode → the
+  // native `$WeakRef` struct (single anyref target field). Without this the
+  // generic externClass ctor table emits a `WeakRef_new` host import the
+  // standalone runtime can't satisfy. Strong-backed (no real GC weakness); see
+  // weakref-runtime.ts. Requires exactly one arg — other arities fall through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "WeakRef" &&
+    (expr.arguments?.length ?? 0) === 1
+  ) {
+    addUnionImports(ctx); // register __box_number before the target coerce (idempotent)
+    const weakRefResult = tryCompileNativeWeakRefNew(ctx, fctx, expr);
+    if (weakRefResult !== undefined) return weakRefResult;
   }
 
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
