@@ -1,7 +1,8 @@
 ---
 id: 3215
 title: "standalone: reflective Date.prototype.<getter>.call brand check + host-free native body (getters slice of #3174)"
-status: in-progress
+status: done
+completed: 2026-07-13
 assignee: ttraenkler/opus-date
 created: 2026-07-13
 updated: 2026-07-13
@@ -88,3 +89,30 @@ body path only emits in standalone) → zero host-mode impact.
   modules; direct-call Date host-mode path byte-identical.
 - Genuine fail→pass only (per-file process-isolated measure vs pristine-main
   control); no vacuous passes.
+
+## Result (measured 2026-07-13, `runTest262File` standalone, branch vs pristine-main)
+
+Full `built-ins/Date/prototype/<getter>/` suite (18 getters, 144 files):
+
+| lane | pass | fail |
+| --- | ---: | ---: |
+| pristine-main control | 108 | 36 |
+| this branch | **144** | **0** |
+
+**+36 genuine fail→pass, ZERO pass→fail regressions.** The 36 flips are the
+reflective `this-value-non-date.js` + `this-value-non-object.js` brand rows (18
+getters × 2) — pre-fix they returned 0 / did not throw (assert #2 failed);
+post-fix the reflective call throws TypeError on a non-Date receiver and returns
+the correct value host-free on a Date. The 108 already-passing rows (direct-call
+`this-value-valid-date.js` / `this-value-invalid-date.js`) are unchanged.
+
+**Non-vacuity**: `tests/issue-3215.test.ts` asserts the reflective happy path
+returns the CORRECT component value (getTime=1000, getUTCHours=1, getFullYear=1970,
+…) and Invalid Date → NaN, not merely that non-Date throws.
+
+**Byte-identity**: `prove-emit-identity` IDENTICAL across gc/standalone/wasi for
+the example corpus + a dedicated Date-getters module (direct-call kernel emission
+unchanged by the extraction).
+
+Remaining Date brand rows (setters, `S15.9.5_A6` top-level, toISOString/
+Symbol.toPrimitive, coercion-order) stay under #3174 as documented follow-on.
