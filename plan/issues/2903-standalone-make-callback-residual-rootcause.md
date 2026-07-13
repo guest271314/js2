@@ -4,7 +4,7 @@ title: "standalone: residual env.__make_callback leak is host-backed builtin met
 status: ready
 sprint: current
 created: 2026-06-30
-updated: 2026-07-11
+updated: 2026-07-13
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -52,7 +52,7 @@ to route the closure through `call_ref`/funcref (extending the #2070/#2075 /
 **That premise does not hold.** Measured on current main (`target: standalone`),
 the residual `__make_callback` is a **real, referenced** host import (the binary
 fails `WebAssembly.instantiate(binary, {})` with `Import #0 "env"`), and its
-call sites are **host-backed builtin methods** whose *native* prototype bodies
+call sites are **host-backed builtin methods** whose _native_ prototype bodies
 are refusal stubs (`emitProtoMemberBodyRefusal` in
 `src/codegen/array-object-proto.ts`). The callback **must** be host-callable
 because the host implements the method — there is no native method body for a
@@ -62,7 +62,7 @@ callback representation.
 
 ## Why the earlier "dead import" read was wrong (trap to avoid)
 
-A first pass classified the leak as a *dead* import (registered, never called)
+A first pass classified the leak as a _dead_ import (registered, never called)
 by grepping the WAT for the symbolic call name `$__make_callback_import`. **The
 WAT printer emits the import call as a numeric `call 0`, not the symbolic
 name** — so the text grep found zero call sites and falsely concluded "dead."
@@ -110,7 +110,7 @@ these "work" today is the host bridge, which is exactly the leak.
    (#1326 / #1326c / #2895). The `.then(cb)` callback should be lowered to a
    native continuation (closure struct + `call_ref`) registered on a Wasm
    microtask queue, not `__make_callback`. **Blocked on / stacks onto #2895.**
-2. **Iterator.prototype.* helpers native bodies (find/map/filter/every/some/
+2. **Iterator.prototype.\* helpers native bodies (find/map/filter/every/some/
    reduce/forEach/…)** — replace `emitProtoMemberBodyRefusal` for the `Iterator`
    brand with real native bodies that drive the underlying iterator and invoke
    the predicate via `call_ref` on the closure-struct shape. Requires
@@ -181,7 +181,7 @@ promise**:
    `allSettledKeyed`/`fromAsync` calls, subclass-receiver `all`/`race`.
    Order-safe for the lazily-registered producers.
 2. **funcMap producer check** at bridge emit (`Promise_all/race/allSettled/
-   any/finally`, `__dynamic_import`, `__array_from_async`) — the static
+any/finally`, `__dynamic_import`, `__array_from_async`) — the static
    producers register UPFRONT in the `collectPromiseImports` finalize, so this
    is order-safe for them. `Promise_resolve`/`Promise_reject`/`Promise_new`
    are deliberately NOT checked (upfront-registered even when the lowering is
@@ -260,8 +260,8 @@ identity LOST (a probe chain `reject(err).finally(f).then(_, r)` delivered
 - De-leak: `"finally"` removed from `HOST_PROMISE_SOURCE_METHOD_NAMES`
   (declarations.ts) — `.finally`-using modules un-flag for the sub-front-1
   then-bridge de-leak (HF gains include `allSettled/race
-  resolved-then-catch-finally.js`). NEW producer flag: `class X extends
-  Promise` (heritage scan) — subclass statics mint host promises through a
+resolved-then-catch-finally.js`). NEW producer flag: `class X extends
+Promise` (heritage scan) — subclass statics mint host promises through a
   symbol-derived import (`FileSystemDirectoryHandle_resolve` — the mislabeled
   lib-interface name) that no funcMap producer list can enumerate; the
   `.finally` syntactic flag had been masking this hole.
@@ -283,7 +283,7 @@ host-free on main ⇒ no host_free_pass/floor/gc-lane gate sees it.
 
 ### Remaining sub-fronts (issue stays open)
 
-- **Iterator.prototype.* helpers native bodies** (sub-front 2) and
+- **Iterator.prototype.\* helpers native bodies** (sub-front 2) and
   **TypedArray callback methods** (sub-front 4) — the 31 live
   `__make_callback` residuals.
 - The 69-fail "Promise resolve or reject function is not callable" cluster in
@@ -308,7 +308,7 @@ imports** and instantiates host-free; the callback compiles natively. The
 RESIDUAL is **silently-wrong results**: a generator/iterator receiver matches
 neither the closed-struct arms (no `<Struct>_find`) nor the vec/$ObjVec HOF arm
 in `__call_m_<name>_<arity>`, so it falls to `__extern_method_call`, whose
-non-`$Object` arm answers `undefined`. Baseline measured:
+non-`$Object`arm answers`undefined`. Baseline measured:
 `built-ins/Iterator/prototype` standalone = **72/373 pass**.
 
 A second gap surfaced while fixing the first: an `any`-held DRIVEN native sync
@@ -507,11 +507,11 @@ carrier-admission add** — it is a **dispatch-SELECTION** issue in the
 `%TypedArray%.prototype` HOF bodies (find/findIndex/findLast*/forEach/some/
 every/reduce/reduceRight — scalar/undefined returns) in the proto glue, driving
 via the already-working `__extern_get_idx`/`__extern_length` + `__apply_closure`
-(mirror `__hof_*` / the eager `__iter_hof_*` bodies), and route the typed
-callback path there instead of the refusal stub / `__make_callback`. `map`/
-`filter` need typed-RESULT construction (a new typed vec with element-width
+(mirror `\_*hof**`/ the eager`**iter*hof*\*`bodies), and route the typed
+callback path there instead of the refusal stub /`**make_callback`. `map`/
+`filter`need typed-RESULT construction (a new typed vec with element-width
 wrapping per #2593) — split as **R4b**. Note: WAT symbolic-name grep is
-unreliable for confirming the runtime call target (numeric `call N` encoding,
+unreliable for confirming the runtime call target (numeric`call N` encoding,
 per the TL;DR trap) — use runtime instrumentation or read the proto-glue member
 routing directly.
 
@@ -551,6 +551,7 @@ through. `fn` invoked via `__apply_closure` — **no `env.__make_callback`, no h
 import**.
 
 The wrapper is itself an iterator, wired into BOTH drive paths:
+
 - `closed-method-dispatch.ts` — a lazy arm mirrors the #2903 eager arm's
   non-vec/non-`$Object` split; for map/filter it sits UNDER the #3098 vec HOF arm
   so a vec receiver still eager-maps (arrays keep `[...].map` returning an array).
@@ -621,12 +622,14 @@ closure struct (invoked by `__apply_closure`) instead of leaking
 flatMap was not in that set).
 
 ### Proofs
+
 - `tests/issue-2903-r3.test.ts` (+4, 18 total): array-literal inners,
   generator inners, empty inners, counter, `flatMap(...).map(...)` chaining —
   host-free + value-correct.
 - R3 map/filter/take/drop probes unchanged (no regression).
 
 ### Boundaries
+
 - A non-iterable non-null mapper result traps (`__iterator` hard-cast) rather
   than the spec TypeError (§27.1.4.6 step 6.b) — the no-throw-boundary
   approximation; the mapper is required to return an iterable.
@@ -693,6 +696,7 @@ a disjoint receiver) and `join`. Whoever de-leaks the dyn-view case must NOT add
 a competing direct-carrier de-leak there.
 
 ### Proofs
+
 - `tests/issue-2903-r4.test.ts` (13 tests): static + untyped + `any`-held +
   Uint16/Int32 + the signedness boundary — all host-free (zero imports) +
   value-correct.
@@ -701,6 +705,7 @@ a competing direct-carrier de-leak there.
   suite `issue-2648`/`2872-dynview`/`2593`/`1787` (66) green; tsc clean.
 
 ### Remaining sub-fronts (issue stays `ready`)
+
 - **R4b** — TypedArray `map`/`filter` (typed-RESULT construction, per-#2593
   element-width wrapping).
 - **R2** — `class X extends Promise` producer. **R3 lazy iter helpers** landed.
@@ -726,6 +731,7 @@ route through the ordinary array-HOF path.)
 `ensureTaMapFilterHelper(ctx, "map"|"filter", vecTypeIdx)` mints
 `__ta_map_<vecTypeIdx>` / `__ta_filter_<vecTypeIdx>`
 `(recv externref, cb externref, thisArg externref) -> (ref $vec)`:
+
 - allocate `array.new_default(len)` of the packed backing array;
 - loop reading each element via R4's byte-carrier-aware `__extern_get_idx`,
   build the `[value, index, receiver]` `$ObjVec` args, invoke the callback via
@@ -736,7 +742,7 @@ route through the ordinary array-HOF path.)
   over-allocate a length-`len` backing, store the ELEMENT at the kept cursor `k`
   when `__is_truthy(cbResult)`, return a vec whose LENGTH field is `k`;
 - return the `(ref $vec)` directly so the static result binding (`const b:
-  Uint8Array = a.map(...)`) matches and reads element-correctly (signed views
+Uint8Array = a.map(...)`) matches and reads element-correctly (signed views
   read `array.get_s`).
 
 Routed from `expressions/calls.ts` (mirrors the R4 scalar interception) for the
@@ -753,6 +759,7 @@ six PACKED-INTEGER views before the array-methods.ts `__make_callback` stub.
 - **Float32/Float64Array** — already correct via the `f64` path; untouched.
 
 ### Proofs
+
 - `tests/issue-2903-r4b.test.ts` (10): map application + width-wrapping
   (300→44, 65535+2→1), filter length/values + empty, Int8 signed static read,
   Int16/Uint16/Int32, chaining (`map(...).reduce(...)`), untyped shape — all
@@ -762,6 +769,58 @@ six PACKED-INTEGER views before the array-methods.ts `__make_callback` stub.
   tsc + prettier + oracle-ratchet clean.
 
 ### Remaining sub-fronts (issue stays `ready`)
-- **R4c** (small) — Uint8ClampedArray map/filter (clamp store) + `any`-held
-  map/filter (runtime carrier-kind dispatch).
+
+- **R4c** — Uint8ClampedArray `map`/`filter` clamp store DONE (below); the
+  `any`-held receiver is split out as its own follow-up (below).
 - **R2** — `class X extends Promise` producer.
+
+## Landed: sub-front R4c — Uint8ClampedArray map/filter clamp store (opus-r4c, 2026-07-13)
+
+**PR:** `issue-2903-r4c-clamped-anyheld`. Standalone-gated; gc/host keep the
+existing host path (byte-identical — the interception + the helper are both
+`ctx.standalone`-only).
+
+### The gap (post-R4b)
+
+R4b routed the six packed-integer views to `__ta_map_<idx>`/`__ta_filter_<idx>`
+storing via `i32.trunc_sat_f64_s` (JS `ToInt8`/`ToUint8`/… width-truncation).
+`Uint8ClampedArray` shares the `i8_byte` carrier but its element conversion is
+§7.1.11 **ToUint8Clamp** — NaN→0, ≤0→0, ≥255→255, else round-**HALF-TO-EVEN** —
+NOT modulo. It was excluded from the R4b view set and still leaked
+`env.__make_callback` (host-free instantiation failed) + returned nothing.
+
+### The lowering
+
+`ensureTaMapFilterHelper(ctx, method, vecTypeIdx, clamp=true)` now mints a
+DISTINCT helper `__ta_<method>_clamp_<vecTypeIdx>` (distinct name is REQUIRED —
+`Uint8ClampedArray` shares the `i8_byte` `vecTypeIdx` with `Int8Array`/
+`Uint8Array`, so reusing the truncating name would collide). The clamp variant
+replaces the `i32.trunc_sat_f64_s` store step with an inline ToUint8Clamp
+sequence mirroring `emitToUint8Clamp` (binary-ops.ts, #2593): `x>=255 → 255`,
+`x>0 → roundHalfEven` (via `f64.floor` + tie-to-even), else `0`; NaN falls to 0
+through the `x>0` false arm. Four extra helper-local f64/i32 scratch slots
+(indices 10..13), appended only when `clamp`. `filter`'s stored value is the
+already-in-range element, so the clamp is a harmless no-op there.
+Routed from `expressions/calls.ts`: the R4b interception now also fires for
+`viewName === "Uint8ClampedArray"`, passing `clamp=true`.
+
+### Proofs
+
+- `tests/issue-2903-r4c.test.ts` (11): map application, clamp 300→255,
+  negatives→0, round-half-to-even ties (2.5→2, 3.5→4, 0.5→0, 1.5→2), non-tie
+  rounding (2.4→2, 2.6→3), index arg, filter length/values/empty/unsigned-read
+  — all host-free (zero imports) + value-correct.
+- R4b (10) still green (unchanged truncating path); tsc + coercion-sites gate
+  clean.
+
+### Split out: `any`-held receiver → own follow-up
+
+A TypedArray held as `any` (kind erased to externref across a fn boundary) needs
+a runtime carrier-kind dispatch to pick the result carrier. Crucially the
+clamp-vs-truncate distinction is **UNRECOVERABLE from the carrier alone** — a
+`Uint8ClampedArray` and a `Uint8Array` compile to the _identical_ `i8_byte`
+struct, so a runtime dispatcher cannot tell which store rule to apply without a
+per-instance kind TAG. That is a value-representation / substrate concern, not a
+same-shape extension of R4b/R4c, so it is deferred as a distinct sub-front (the
+static/known-kind path — which carries the test262 yield, since untyped JS
+infers the concrete view type — is unaffected).
