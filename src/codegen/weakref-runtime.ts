@@ -30,7 +30,6 @@
  */
 import { ts } from "../ts-api.js";
 import type { Instr, StructTypeDef, ValType } from "../ir/types.js";
-import { isBooleanType } from "../checker/type-mapper.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression } from "./shared.js";
@@ -83,14 +82,16 @@ export function tryCompileNativeWeakRefNew(
   // box via `__box_symbol` (identity-stable `$Symbol` carrier), NOT `__box_number`
   // — otherwise `wr.deref() === sym` compares a number-box against the interned
   // symbol and fails. `coerceMapKeyToAnyref` mis-boxes a symbol-branded i32 as a
-  // number, so brand explicitly here off the static TS type and route through
-  // `coerceType` (which honours `.symbol` / `.boolean`). Objects / native strings
-  // are already anyref-subtypes → `extern.convert_any`.
-  const argTsType = ctx.checker.getTypeAtLocation(args[0]!);
+  // number, so brand explicitly here off the static type FACT (via `ctx.oracle`,
+  // the #1930 type-query boundary — the raw checker is ratchet-blocked in
+  // codegen) and route through `coerceType` (which honours `.symbol` /
+  // `.boolean`). Objects / native strings are already anyref-subtypes →
+  // `extern.convert_any`.
+  const argFactKind = ctx.oracle.typeFactOf(args[0]!).kind;
   const branded: ValType =
-    t.kind === "i32" && (argTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0
+    t.kind === "i32" && argFactKind === "symbol"
       ? { kind: "i32", symbol: true }
-      : t.kind === "i32" && isBooleanType(argTsType)
+      : t.kind === "i32" && argFactKind === "boolean"
         ? { kind: "i32", boolean: true }
         : t;
   coerceType(ctx, fctx, branded, { kind: "externref" });
