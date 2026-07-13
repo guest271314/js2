@@ -1,7 +1,8 @@
 ---
 id: 3242
 title: Native standalone WeakRef — retire WeakRef_new / WeakRef_deref host imports
-status: in-progress
+status: done
+completed: 2026-07-13
 assignee: opus-weakcoll
 sprint: current
 priority: high
