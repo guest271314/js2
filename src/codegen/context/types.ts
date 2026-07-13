@@ -1596,6 +1596,23 @@ export interface CodegenContext {
    */
   moduleHasAsyncGen?: boolean;
   /**
+   * (#3132 PR-2) True when the module SOURCE has an async generator that is NOT
+   * provably drive-lowered under the native `$Promise` carrier — i.e. one that
+   * WILL fall to the legacy `__gen_*`/`__create_async_generator` host buffer:
+   * an async gen METHOD (class/obj-literal — not yet wired to the drive), a body
+   * outside the bounded drive shape (`asyncGenDrivableUnderCarrier`), a
+   * top-level rest param, an unsafe spill, or a stem collision. Set in the
+   * pre-body `collectDeclarations` walk (same discipline as
+   * {@link moduleHasAsyncGen}). `widenAsyncGenFallback` (async-scheduler.ts)
+   * keeps the native carrier OFF ONLY for such a module — the exact case where a
+   * native `$Promise` would mix into a host `__gen_*` buffer (the #2980 07-09
+   * −4). A module whose async gens are ALL drivable keeps the carrier ON and its
+   * driven gens become fully host-free (no Promise host imports). CONSERVATIVE:
+   * any doubt sets this true (carrier off = pre-#2980 host-consistent behaviour).
+   * Standalone-gated read; wasi (carrier always on) + gc/host unaffected.
+   */
+  moduleHasNonDrivableAsyncGen?: boolean;
+  /**
    * (#2903) True when the module SOURCE contains any construct that can mint a
    * HOST promise under `--target standalone` while the native `$Promise` chain
    * is active: dynamic `import()`, host-routed combinators

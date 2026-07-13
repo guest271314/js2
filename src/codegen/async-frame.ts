@@ -520,6 +520,19 @@ function asyncFnName(decl: ts.FunctionLikeDeclaration): string {
 }
 
 /**
+ * (#3132 PR-2) The sanitized per-gen STEM (`__async_gen_next_<stem>` /
+ * `$AsyncFrame_<stem>`), derived identically to `emitAsyncGenerator` and the
+ * `isAsyncGenDriveCandidate` stem-collision guard. Exported so the
+ * `widenAsyncGenFallback` pre-pass can dedup stems the SAME way emit does — two
+ * same-named gens collide on one helper (typed for the first frame) and the
+ * second falls to legacy, so the pre-pass must count a duplicate stem as
+ * non-drivable to stay consistent with emit.
+ */
+export function asyncGenStem(decl: ts.FunctionLikeDeclaration): string {
+  return sanitizeTypeName(asyncFnName(decl));
+}
+
+/**
  * The Wasm ValType a resume binding (`const x = await P`) settles to — the
  * coercion target the continuation writes `SENT_FIELD` into, and (when the
  * binding survives a later await) the type of its frame spill field. Resolved
@@ -2025,6 +2038,35 @@ export function emitAsyncFrameStateMachine(
  * BEFORE the #680 native-generator gate; everything else stays on the legacy gen
  * path (correct-or-legacy, the #2367 graveyard rule).
  */
+/**
+ * (#3132 PR-2) The carrier-ON drive-SHAPE of an async generator: no top-level
+ * rest param (pattern params OK — PR-1), spill-safe own locals, and a bounded
+ * body (`isBoundedAsyncGenBody` — the full shape incl. awaited yields the native
+ * `$Promise` carrier assimilates). This is EXACTLY the shape
+ * `isAsyncGenDriveCandidate` admits under `isStandalonePromiseActive`, factored
+ * out so the pre-pass carrier decision (`widenAsyncGenFallback`, async-scheduler)
+ * can predict drivability BEFORE any body compiles — WITHOUT the stem-collision
+ * guard (which needs cross-decl `asyncGenProducers` state; the pre-pass caller
+ * dedups stems itself) and WITHOUT reading `isStandalonePromiseActive` (which
+ * depends on the very fallback being decided — reading it here would be
+ * circular). A module whose async gens ALL satisfy this shape (no stem
+ * collision, fn decl/expr not method) can safely keep the native carrier ON:
+ * every gen drives host-free, so there is NO legacy `__gen_*` buffer for a
+ * native `$Promise` to mix into (the #2980 07-09 −4 hazard). CONSERVATIVE — any
+ * doubt (rest param, unbounded body, unsafe spill) returns false ⇒ the module
+ * keeps the pre-#2980 host Promise pipeline, exactly as before.
+ */
+export function asyncGenDrivableUnderCarrier(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  for (const p of decl.parameters) {
+    if (p.dotDotDotToken !== undefined) return false;
+  }
+  for (const node of asyncGenOwnLocalDecls(decl).values()) {
+    if (!isSpillSafeType(resolveSpillLocalValType(ctx, node) ?? { kind: "externref" })) return false;
+  }
+  return isBoundedAsyncGenBody(decl);
+}
+
 export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionLikeDeclaration): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
   // (#3132) Binding-PATTERN params (`f([x])`, `f({x})`) ARE now driven: the
@@ -2058,10 +2100,15 @@ export function isAsyncGenDriveCandidate(ctx: CodegenContext, decl: ts.FunctionL
     }
     return true;
   };
-  // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`, wasi
-  // today): the full bounded shape, awaited yields included — the awaited
-  // operand lowers to a native `$Promise` the suspend arm can assimilate.
-  if (isStandalonePromiseActive(ctx)) return isBoundedAsyncGenBody(decl) && spillsSafe();
+  // Under the native-`$Promise` CARRIER (`isStandalonePromiseActive`): the full
+  // bounded shape, awaited yields included — the awaited operand lowers to a
+  // native `$Promise` the suspend arm can assimilate. Identical to
+  // `asyncGenDrivableUnderCarrier` (the pre-pass predicate) plus the
+  // stem-collision guard already applied above — the shared helper keeps the
+  // emit gate and the `widenAsyncGenFallback` pre-pass provably consistent, so a
+  // module the pre-pass judged all-driven never falls a gen to the legacy buffer
+  // here (which would re-introduce the native-`$Promise`-into-host-buffer mix).
+  if (isStandalonePromiseActive(ctx)) return asyncGenDrivableUnderCarrier(ctx, decl);
   // (#2865) `--target standalone` with the carrier gate still OFF (#2980):
   // drive the producer host-free ONLY for await-free bodies. With the carrier
   // off an awaited operand does not lower to a native `$Promise`, so
