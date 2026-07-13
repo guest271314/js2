@@ -4546,6 +4546,27 @@ function compileArrayIndexOf(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
+  // (#3201) A sparse array (logical `.length` set beyond the physical backing,
+  // or a high-index write) has `lenTmp` (field 0) > `array.len(dataTmp)`. The
+  // search loop below reads `data[i]` with a raw `array.get`, which TRAPS
+  // ("array element access out of bounds") once `i` passes the backing length.
+  // Per §23.1.3.14 (HasProperty-driven) those absent indices are SKIPPED, so
+  // clamp the iteration bound to the backing length — the beyond-backing holes
+  // can never strict-equal the search value anyway. Normal (non-sparse) vecs
+  // keep `lenTmp` unchanged (backing capacity ≥ length ⇒ min is the length).
+  const effLenTmp = allocLocal(fctx, `__arr_iof_efflen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: lenTmp } as Instr],
+    else: [{ op: "local.get", index: dataTmp } as Instr, { op: "array.len" } as Instr],
+  } as Instr);
+  fctx.body.push({ op: "local.set", index: effLenTmp });
+
   compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
@@ -4654,7 +4675,7 @@ function compileArrayIndexOf(
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
+    { op: "local.get", index: effLenTmp },
     { op: "i32.ge_s" },
     { op: "br_if", depth: 1 },
 
@@ -5583,8 +5604,16 @@ export function compileArraySliceFromVecLocal(
   fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.set", index: newData });
 
-  // array.copy newData[0..sliceLen] = data[start..start+sliceLen]
-  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataTmp, startLocal, sliceLenTmp);
+  // (#3201) A sparse array (logical `.length` > physical backing) makes the
+  // copy source range `[start, start+sliceLen)` run past `array.len(data)`, so
+  // the `array.copy` below TRAPS ("array element access out of bounds"). The
+  // result must stay `sliceLen` long — the beyond-backing tail is a hole (spec
+  // skips absent indices), which the default-initialised `newData` already
+  // represents. So copy only the in-backing prefix.
+  const copyLenTmp = emitBackingClampedCopyLen(fctx, dataTmp, startLocal, sliceLenTmp);
+
+  // array.copy newData[0..copyLen] = data[start..start+copyLen] (bounds-safe)
+  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataTmp, startLocal, copyLenTmp);
 
   // struct.new vec { sliceLen, newData }
   fctx.body.push({ op: "local.get", index: sliceLenTmp });
@@ -5592,6 +5621,43 @@ export function compileArraySliceFromVecLocal(
   fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
   return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+/**
+ * (#3201) Emit a copy-count clamped to the SOURCE array's physical backing so a
+ * sparse vec (logical `.length` > `array.len(data)`) never `array.copy`s past
+ * the backing — which traps ("array element access out of bounds"). Returns a
+ * fresh i32 local holding `clamp(array.len(data) - start, 0, requestedLen)`.
+ * The destination array keeps its full `requestedLen` slots; the beyond-backing
+ * tail stays default-initialised (a hole, per the spec's skip of absent
+ * indices). Non-sparse vecs are unaffected (backing capacity ≥ length ⇒ the
+ * clamp == requestedLen). `startLocal === null` means a start offset of 0.
+ */
+function emitBackingClampedCopyLen(
+  fctx: FunctionContext,
+  dataLocal: number,
+  startLocal: number | null,
+  requestedLenLocal: number,
+): number {
+  const out = allocLocal(fctx, `__arr_copyclamp_${fctx.locals.length}`, { kind: "i32" });
+  // avail = array.len(data) - start
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "array.len" });
+  if (startLocal !== null) {
+    fctx.body.push({ op: "local.get", index: startLocal });
+    fctx.body.push({ op: "i32.sub" });
+  }
+  fctx.body.push({ op: "local.set", index: out });
+  emitClampNonNeg(fctx, out); // avail = max(0, avail)
+  // out = min(requestedLen, avail)  (select returns first if cond, else second)
+  fctx.body.push({ op: "local.get", index: requestedLenLocal });
+  fctx.body.push({ op: "local.get", index: out });
+  fctx.body.push({ op: "local.get", index: requestedLenLocal });
+  fctx.body.push({ op: "local.get", index: out });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: out });
+  return out;
 }
 
 /**
@@ -5628,8 +5694,10 @@ function compileArrayConcat(
     fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
     fctx.body.push({ op: "local.set", index: newData });
 
-    // array.copy newData[0..lenA] = dataA[0..lenA]
-    emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, lenA);
+    // array.copy newData[0..lenA] = dataA[0..lenA] — (#3201) copy count clamped
+    // to the backing so a sparse receiver (lenA > array.len(dataA)) doesn't trap.
+    const catCopyLenA0 = emitBackingClampedCopyLen(fctx, dataA, null, lenA);
+    emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, catCopyLenA0);
 
     // Create new vec struct: { lenA, newData }
     fctx.body.push({ op: "local.get", index: lenA });
@@ -5704,11 +5772,16 @@ function compileArrayConcat(
   fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.set", index: newData });
 
-  // array.copy newData[0..lenA] = dataA[0..lenA]
-  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, lenA);
+  // array.copy newData[0..lenA] = dataA[0..lenA] — (#3201) clamp both copy
+  // counts to each source's backing so a sparse operand (logical length >
+  // array.len(data)) doesn't array.copy past the backing (which traps). The
+  // destination keeps totalLen slots; beyond-backing tails stay default holes.
+  const catCopyLenA = emitBackingClampedCopyLen(fctx, dataA, null, lenA);
+  emitArrayCopy(fctx, arrTypeIdx, newData, null, dataA, null, catCopyLenA);
 
   // array.copy newData[lenA..lenA+lenB] = dataB[0..lenB]
-  emitArrayCopy(fctx, arrTypeIdx, newData, lenA, dataB, null, lenB);
+  const catCopyLenB = emitBackingClampedCopyLen(fctx, dataB, null, lenB);
+  emitArrayCopy(fctx, arrTypeIdx, newData, lenA, dataB, null, catCopyLenB);
 
   // Create new vec struct: { totalLen, newData }
   fctx.body.push({ op: "local.get", index: totalLen });
@@ -9459,6 +9532,30 @@ function compileArrayLastIndexOf(
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // (#3201) A sparse array (logical `.length` > physical backing) starts the
+  // reverse scan at `len-1`, beyond the backing array — the first `data[i]`
+  // read TRAPS ("array element access out of bounds"). Per §23.1.3.20
+  // (HasProperty-driven) the absent top indices are SKIPPED, so clamp the
+  // start index down to `array.len(data)-1`. Non-sparse vecs are unaffected
+  // (backing capacity ≥ length ⇒ the clamp is a no-op).
+  fctx.body.push({ op: "local.get", index: iTmp });
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.gt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: dataTmp } as Instr,
+      { op: "array.len" } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.sub" } as Instr,
+      { op: "local.set", index: iTmp } as Instr,
+    ],
+  } as Instr);
 
   // Compile search value
   compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);

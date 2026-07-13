@@ -24,6 +24,7 @@
   "codegen/host-import-allowlist.ts": 2,
   "codegen/index.ts": 25,
   "codegen/iter-hof-native.ts": 2,
+  "codegen/iter-lazy-native.ts": 2,
   "codegen/iterator-native.ts": 2,
   "codegen/json-codec-native.ts": 10,
   "codegen/map-runtime.ts": 2,

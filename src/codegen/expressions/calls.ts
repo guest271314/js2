@@ -29,6 +29,7 @@ import { ensureIterStepScratchGlobal, ensureNativeIteratorRuntime } from "../ite
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
+import { LAZY_ITER_METHODS } from "../iter-lazy-native.js"; // (#2903 R3b) flatMap closure-path exemption
 import {
   ensureObjVecBuilders,
   ensureObjectGroupBy,
@@ -13697,7 +13698,7 @@ function compileCallExpression(
             // (#3016) precedent; standalone-gated so gc/wasi stay byte-identical.
             if (
               ctx.standalone &&
-              NATIVE_HOF_METHODS.has(methodName) &&
+              (NATIVE_HOF_METHODS.has(methodName) || LAZY_ITER_METHODS.has(methodName)) &&
               (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))
             ) {
               const at = compileArrowAsClosure(ctx, fctx, arg);
