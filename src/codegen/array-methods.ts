@@ -588,6 +588,78 @@ export function emitClampNonNeg(fctx: FunctionContext, local: number): void {
   } as Instr);
 }
 
+/**
+ * (#3201 write-path) Grow a vec's physical WasmGC backing array so it can hold
+ * at least `neededLen` elements, then keep `dataLocal` pointing at the (possibly
+ * reallocated) backing. The mirror-image of the READ family's
+ * {@link emitBackingClampedCopyLen}: those methods COPY out and clamp the count
+ * down to the backing so they never trap; the in-place WRITE/move family
+ * (`fill`/`reverse`/`copyWithin`) must instead materialise the missing slots so
+ * the write itself lands in-bounds.
+ *
+ * A sparse array — logical `.length` (field 0) pushed beyond the backing via the
+ * `a.length = N` setter — has `array.len(data) < length`. `fill`/`reverse`/
+ * `copyWithin` then index `data[i]` up to the LOGICAL length and TRAP ("array
+ * element access out of bounds"), an uncatchable abort. This helper reallocates
+ * the backing to `neededLen` (`array.new_default` + `array.copy` of the existing
+ * prefix + `struct.set` field 1), exactly the grow shape used by
+ * `compileArrayPush` / `maybeEmitVecLengthGrowth`, so the vec regains
+ * `capacity ≥ neededLen` and the write is bounds-safe. The freshly-allocated
+ * tail is default-initialised (0 / null) — the beyond-backing indices that were
+ * absent holes; `fill` overwrites its range unconditionally (spec-exact,
+ * §23.3.3.7 writes without a HasProperty guard), while `reverse`/`copyWithin`
+ * move those defaults (the minor undefined-vs-null fidelity gap for externref
+ * sparse arrays matches the read family's precedent; the trap-first mandate,
+ * #3185 §4, prioritises eliminating the abort).
+ *
+ * Grow only — never shrinks. A non-sparse vec (backing capacity ≥ neededLen) is
+ * a runtime no-op (the `if` is not taken). Callers gate the EMISSION on
+ * `ctx.standalone`/`ctx.wasi` so the host/gc lane stays byte-identical.
+ */
+function emitEnsureBackingCapacity(
+  fctx: FunctionContext,
+  vecLocal: number,
+  dataLocal: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  neededLenLocal: number,
+): void {
+  const oldCap = allocLocal(fctx, `__ensure_ocap_${fctx.locals.length}`, { kind: "i32" });
+  const newData = allocLocal(fctx, `__ensure_ndata_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+
+  // if (array.len(data) < needed) grow backing to `needed`
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "local.tee", index: oldCap });
+  fctx.body.push({ op: "local.get", index: neededLenLocal });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // newData = array.new_default(needed)
+      { op: "local.get", index: neededLenLocal } as Instr,
+      { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+      { op: "local.set", index: newData } as Instr,
+      // array.copy newData[0..oldCap] = data[0..oldCap]
+      { op: "local.get", index: newData } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: dataLocal } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: oldCap } as Instr,
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+      // vec.data = newData
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "local.get", index: newData } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+      // keep the caller's data pointer pointing at the grown backing
+      { op: "local.get", index: newData } as Instr,
+      { op: "local.set", index: dataLocal } as Instr,
+    ],
+  } as Instr);
+}
+
 // ── Array method calls (pure Wasm, no host imports) ─────────────────
 
 /** Resolve array type info from a TS type. Returns null if not a Wasm GC vec struct. */
@@ -5009,6 +5081,21 @@ function compileArrayReverse(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
+  // (#3201 write-path) A SPARSE array (logical `.length` beyond the WasmGC
+  // backing via `a.length = N`) makes the two-pointer swap read/write `data[i]`
+  // / `data[j]` up to the LOGICAL length (`j = length - 1`) and TRAP ("array
+  // element access out of bounds"). Grow the backing to the logical length
+  // (`j + 1`) so the whole reversal lands in-bounds. Standalone/WASI-gated
+  // (host/gc byte-identical); dense receiver ⇒ runtime no-op.
+  if (ctx.standalone || ctx.wasi) {
+    const needTmp = allocLocal(fctx, `__arr_rev_need_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: jTmp });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: needTmp });
+    emitEnsureBackingCapacity(fctx, vecTmp, dataTmp, vecTypeIdx, arrTypeIdx, needTmp);
+  }
+
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
@@ -9204,6 +9291,18 @@ function compileArrayFill(
   fctx.body.push({ op: "local.set", index: endTmp });
   emitClampIndex(fctx, endTmp, lenTmp);
 
+  // (#3201 write-path) On a SPARSE array (logical `.length` set beyond the
+  // WasmGC backing via `a.length = N`) the write range `[start, end)` runs past
+  // `array.len(data)` and the `array.set` below TRAPS ("array element access out
+  // of bounds"). `fill` writes its range unconditionally (§23.3.3.7 has no
+  // HasProperty guard), so grow the backing to the clamped `end` first — then
+  // the whole loop lands in-bounds and materialises the (formerly absent) slots
+  // as required. Standalone/WASI-gated so the host/gc lane stays byte-identical;
+  // a dense receiver (capacity ≥ end) makes the grow a runtime no-op.
+  if (ctx.standalone || ctx.wasi) {
+    emitEnsureBackingCapacity(fctx, vecTmp, dataTmp, vecTypeIdx, arrTypeIdx, endTmp);
+  }
+
   // i = start
   fctx.body.push({ op: "local.get", index: startTmp });
   fctx.body.push({ op: "local.set", index: iTmp });
@@ -9612,6 +9711,19 @@ function compileArrayCopyWithin(
   fctx.body.push({ op: "select" });
   fctx.body.push({ op: "local.set", index: countTmp });
   emitClampNonNeg(fctx, countTmp);
+
+  // (#3201 write-path) On a SPARSE array (logical `.length` beyond the WasmGC
+  // backing via `a.length = N`) both the source `[start, start+count)` and the
+  // destination `[target, target+count)` ranges — clamped to the LOGICAL length
+  // — can run past `array.len(data)`, so the in-place `array.copy` below TRAPS
+  // ("array element access out of bounds"). Grow the backing to the logical
+  // length first (target/start/end are all clamped to `len`, so
+  // `target+count ≤ len` and `start+count ≤ len`); the move then lands
+  // in-bounds. Standalone/WASI-gated (host/gc byte-identical); dense receiver ⇒
+  // runtime no-op.
+  if (ctx.standalone || ctx.wasi) {
+    emitEnsureBackingCapacity(fctx, vecTmp, dataTmp, vecTypeIdx, arrTypeIdx, lenTmp);
+  }
 
   // array.copy data[target..target+count] = data[start..start+count]
   emitArrayCopy(fctx, arrTypeIdx, dataTmp, targetTmp, dataTmp, startTmp, countTmp);
