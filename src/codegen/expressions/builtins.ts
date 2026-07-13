@@ -1376,6 +1376,383 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
 }
 
 /**
+ * (#3219) Shared zero-arg Date getter arithmetic, keyed on an i64 timestamp
+ * local (`tsLocal`) rather than the Date ref, so BOTH the direct-call kernel
+ * (`compileDateMethodCall`) and the reflective closure body
+ * (`emitDateProtoMemberBody`) share ONE copy — no duplicated Date kernel
+ * (#3174 anti-bloat). Covers the time-of-day + calendar getters
+ * (getHours/getMinutes/getSeconds/getMilliseconds/getDay/getFullYear/getYear/
+ * getMonth/getDate + UTC variants). Each arm reads `tsLocal` and pushes an f64
+ * result (NaN for the Invalid-Date sentinel). Returns `{kind:"f64"}` when it
+ * handled `methodName`, or `undefined` (emitting nothing) for any other method.
+ *
+ * getTime/valueOf/getTimezoneOffset are NOT here — they have distinct
+ * non-guarded semantics and are handled inline by each caller.
+ *
+ * NOTE: for a non-matching method this returns BEFORE ensuring the civil helper,
+ * so `compileDateMethodCall` re-asserts `ensureDateCivilHelper` after the call to
+ * keep its formatter path byte-identical (the formatters historically ran after
+ * the calendar-getter section had incidentally ensured that helper).
+ */
+export function emitDateZeroArgGetterFromTsLocal(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  methodName: string,
+  tsLocal: number,
+): ValType | undefined {
+  const MS_PER_DAY = 86400000n;
+  const MS_PER_HOUR = 3600000n;
+  const MS_PER_MINUTE = 60000n;
+  const MS_PER_SECOND = 1000n;
+
+  /** Wrap a getter's arithmetic in the invalid-Date NaN guard. The
+   *  callback should emit instructions that consume the i64 timestamp
+   *  on the stack and produce an f64 result. */
+  const wrapWithInvalidDateGuard = (emitArithmetic: () => void): ValType => {
+    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+    fctx.body.push({ op: "i64.eq" } as Instr);
+    const savedBody = pushBody(fctx);
+    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
+    emitArithmetic();
+    const elseInstrs = fctx.body;
+    popBody(fctx, savedBody);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN } as Instr],
+      else: elseInstrs,
+    });
+    return { kind: "f64" };
+  };
+
+  if (methodName === "getHours" || methodName === "getUTCHours") {
+    // hours = ((timestamp % 86400000) + 86400000) % 86400000 / 3600000
+    return wrapWithInvalidDateGuard(() =>
+      fctx.body.push(
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_HOUR } as Instr,
+        { op: "i64.div_s" } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+      ),
+    );
+  }
+
+  if (methodName === "getMinutes" || methodName === "getUTCMinutes") {
+    // minutes = ((timestamp % 3600000) + 3600000) % 3600000 / 60000
+    return wrapWithInvalidDateGuard(() =>
+      fctx.body.push(
+        { op: "i64.const", value: MS_PER_HOUR } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_HOUR } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: MS_PER_HOUR } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
+        { op: "i64.div_s" } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+      ),
+    );
+  }
+
+  if (methodName === "getSeconds" || methodName === "getUTCSeconds") {
+    // seconds = ((timestamp % 60000) + 60000) % 60000 / 1000
+    return wrapWithInvalidDateGuard(() =>
+      fctx.body.push(
+        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_SECOND } as Instr,
+        { op: "i64.div_s" } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+      ),
+    );
+  }
+
+  if (methodName === "getMilliseconds" || methodName === "getUTCMilliseconds") {
+    // ms = ((timestamp % 1000) + 1000) % 1000
+    return wrapWithInvalidDateGuard(() =>
+      fctx.body.push(
+        { op: "i64.const", value: MS_PER_SECOND } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: MS_PER_SECOND } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: MS_PER_SECOND } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+      ),
+    );
+  }
+
+  // getDay / getUTCDay: day of week (0=Sunday)
+  // (floor(timestamp / 86400000) + 4) % 7  (1970-01-01 was Thursday = 4)
+  if (methodName === "getDay" || methodName === "getUTCDay") {
+    return wrapWithInvalidDateGuard(() =>
+      fctx.body.push(
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.div_s" } as Instr,
+        { op: "i64.const", value: 4n } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: 7n } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i64.const", value: 7n } as Instr,
+        { op: "i64.add" } as Instr,
+        { op: "i64.const", value: 7n } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "f64.convert_i64_s" } as Instr,
+      ),
+    );
+  }
+
+  // Only the calendar getters below need civil_from_days. Return (without
+  // ensuring it) for any other method so the caller's byte-identity re-assert
+  // is the single place that (re)ensures the helper for the fall-through path.
+  const CALENDAR_GETTERS = new Set([
+    "getFullYear",
+    "getUTCFullYear",
+    "getYear",
+    "getMonth",
+    "getUTCMonth",
+    "getDate",
+    "getUTCDate",
+  ]);
+  if (!CALENDAR_GETTERS.has(methodName)) return undefined;
+
+  // Calendar getters need civil_from_days.
+  // (#1344) Each branch is wrapped with the invalid-Date guard. The guard
+  // re-pushes the saved timestamp so the floor-div + civil_from_days
+  // sequence below sees it on the stack.
+  const civilIdx = ensureDateCivilHelper(ctx);
+
+  /** Emit floor-div(ts, MS_PER_DAY) -> days, then civil_from_days(days). */
+  const emitDaysToCivil = (): void => {
+    const tempTs = allocTempLocal(fctx, { kind: "i64" });
+    fctx.body.push({ op: "local.set", index: tempTs } as Instr);
+    fctx.body.push(
+      { op: "local.get", index: tempTs } as Instr,
+      { op: "i64.const", value: 0n } as Instr,
+      { op: "i64.ge_s" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i64" } },
+        then: [
+          { op: "local.get", index: tempTs } as Instr,
+          { op: "i64.const", value: MS_PER_DAY } as Instr,
+          { op: "i64.div_s" } as Instr,
+        ],
+        else: [
+          { op: "local.get", index: tempTs } as Instr,
+          { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
+          { op: "i64.sub" } as Instr,
+          { op: "i64.const", value: MS_PER_DAY } as Instr,
+          { op: "i64.div_s" } as Instr,
+        ],
+      },
+    );
+    releaseTempLocal(fctx, tempTs);
+    fctx.body.push({ op: "call", funcIdx: civilIdx } as Instr);
+  };
+
+  if (methodName === "getFullYear" || methodName === "getUTCFullYear") {
+    return wrapWithInvalidDateGuard(() => {
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedYear(fctx.body, tmp); // floor(packed/10000)
+      releaseTempLocal(fctx, tmp);
+      fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+    });
+  }
+
+  // (#2671) Annex B §B.2.4 `Date.prototype.getYear()` — legacy `getFullYear() -
+  // 1900`. Like getFullYear but with the −1900 offset; NaN-guarded the same way.
+  if (methodName === "getYear") {
+    return wrapWithInvalidDateGuard(() => {
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedYear(fctx.body, tmp); // floor(packed/10000) → full year (i64)
+      releaseTempLocal(fctx, tmp);
+      fctx.body.push(
+        { op: "i64.const", value: 1900n } as Instr,
+        { op: "i64.sub" } as Instr, // year - 1900
+        { op: "f64.convert_i64_s" } as Instr,
+      );
+    });
+  }
+
+  if (methodName === "getMonth" || methodName === "getUTCMonth") {
+    return wrapWithInvalidDateGuard(() => {
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      const yTmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
+      releaseTempLocal(fctx, tmp);
+      releaseTempLocal(fctx, yTmp);
+      fctx.body.push(
+        { op: "i64.const", value: 100n } as Instr,
+        { op: "i64.div_s" } as Instr, // month (1-12)
+        { op: "i64.const", value: 1n } as Instr,
+        { op: "i64.sub" } as Instr, // 0-based
+        { op: "f64.convert_i64_s" } as Instr,
+      );
+    });
+  }
+
+  if (methodName === "getDate" || methodName === "getUTCDate") {
+    return wrapWithInvalidDateGuard(() => {
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      const yTmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
+      releaseTempLocal(fctx, tmp);
+      releaseTempLocal(fctx, yTmp);
+      fctx.body.push(
+        { op: "i64.const", value: 100n } as Instr,
+        { op: "i64.rem_s" } as Instr, // day (1-31)
+        { op: "f64.convert_i64_s" } as Instr,
+      );
+    });
+  }
+
+  return undefined;
+}
+
+/**
+ * (#3219) Native reflective body for a `Date.prototype.<getter>` closure value
+ * under `--target standalone`. `this` is closure-param 1 (externref); the
+ * closure ABI is `(self, this, …args)` and every zero-arg getter ignores args.
+ *
+ * Implements the §21.4.4 `thisTimeValue` brand check as the shared
+ * [[DateValue]] preamble #3174 asks for: recover the receiver as a `$Date`
+ * struct (`any.convert_extern` + `ref.test`); a receiver WITHOUT a [[DateValue]]
+ * slot throws a (catchable) TypeError. For a genuine Date, read [[DateValue]]
+ * (field 0) and compute the getter, boxing the f64 result to externref (the
+ * uniform closure-call result type). This is what makes
+ * `Date.prototype.<getter>.call(recv)` run host-free instead of falling through
+ * to the legacy value-erased `.call` (which dropped `thisArg` → returned 0).
+ *
+ * Only the zero-arg getters are wired; setters/formatters return `null`, so
+ * `ensureStandaloneNativeMethodClosure` mints no closure and the reflective call
+ * falls through to the legacy path UNCHANGED (no vacuity introduced).
+ *
+ * Funcidx discipline: `__box_number` is ensured FIRST (earliest import slot →
+ * its funcidx never shifts when `emitThrowTypeError` later adds `__new_TypeError`)
+ * and re-fetched immediately before the box call; the civil-helper defined-func
+ * idx is captured fresh inside `emitDateZeroArgGetterFromTsLocal` and used at
+ * once. All emission is standalone-gated by construction (this body only emits
+ * on the reflective-proto path, which is standalone-only).
+ */
+export function emitDateProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
+  const DIRECT_TS_GETTERS = new Set(["getTime", "valueOf", "getTimezoneOffset"]);
+  const CIVIL_GETTERS = new Set([
+    "getHours",
+    "getUTCHours",
+    "getMinutes",
+    "getUTCMinutes",
+    "getSeconds",
+    "getUTCSeconds",
+    "getMilliseconds",
+    "getUTCMilliseconds",
+    "getDay",
+    "getUTCDay",
+    "getFullYear",
+    "getUTCFullYear",
+    "getYear",
+    "getMonth",
+    "getUTCMonth",
+    "getDate",
+    "getUTCDate",
+  ]);
+  // Setters / formatters: refuse (null) → the closure is not minted and the
+  // reflective call falls through to the legacy path, byte-identical to today.
+  if (!DIRECT_TS_GETTERS.has(member) && !CIVIL_GETTERS.has(member)) return null;
+
+  const SENTINEL = -9223372036854775808n; // Invalid-Date [[DateValue]] sentinel.
+
+  // __box_number FIRST (earliest import slot) + flush → funcidx-shift-safe.
+  const boxIdxProbe = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  if (boxIdxProbe === undefined) return null;
+  flushLateImportShifts(ctx, fctx);
+
+  const dateTypeIdx = ensureDateStruct(ctx);
+
+  // ── [[DateValue]]-brand preamble ────────────────────────────────────────
+  // this (param 1, externref) → anyref; throw TypeError if not a $Date struct.
+  const anyTmp = allocTempLocal(fctx, { kind: "anyref" });
+  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.tee", index: anyTmp } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dateTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.eqz" } as Instr);
+  const savedThrow = pushBody(fctx);
+  // §thisTimeValue step 2: no [[DateValue]] internal slot → TypeError.
+  emitThrowTypeError(ctx, fctx, "Date.prototype method called on a non-Date receiver");
+  const throwInstrs = fctx.body;
+  popBody(fctx, savedThrow);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: throwInstrs,
+    else: [],
+  } as unknown as Instr);
+
+  // Genuine Date: read [[DateValue]] (field 0, i64) into tsLocal.
+  const tsLocal = allocTempLocal(fctx, { kind: "i64" });
+  fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: dateTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: tsLocal } as Instr);
+  releaseTempLocal(fctx, anyTmp);
+
+  // ── Compute the getter → f64 on the stack ───────────────────────────────
+  if (member === "getTime" || member === "valueOf") {
+    // §21.4.4.10 / §21.4.4.44: Invalid Date → NaN, else the ms timestamp.
+    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
+    fctx.body.push({ op: "i64.const", value: SENTINEL } as Instr);
+    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN } as Instr],
+      else: [{ op: "local.get", index: tsLocal } as Instr, { op: "f64.convert_i64_s" } as Instr],
+    });
+  } else if (member === "getTimezoneOffset") {
+    // §21.4.4.7: UTC-only runtime → 0 for a valid Date, NaN for Invalid Date.
+    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
+    fctx.body.push({ op: "i64.const", value: SENTINEL } as Instr);
+    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: NaN } as Instr],
+      else: [{ op: "f64.const", value: 0 } as Instr],
+    });
+  } else {
+    const g = emitDateZeroArgGetterFromTsLocal(ctx, fctx, member, tsLocal);
+    if (!g) {
+      releaseTempLocal(fctx, tsLocal);
+      return null; // unreachable (CIVIL_GETTERS gate above) — defensive.
+    }
+  }
+  releaseTempLocal(fctx, tsLocal);
+
+  // Box f64 → externref (uniform closure-call result). Re-fetch the funcidx
+  // (idempotent; post-any-shift-correct) then flush before the call.
+  const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (boxIdx === undefined) return null;
+  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  return { kind: "externref" };
+}
+
+/**
  * Compile a Date method call on a Date struct receiver.
  * Returns undefined if this is not a Date method (caller should continue).
  */
@@ -2234,208 +2611,17 @@ function compileDateMethodCall(
   fctx.body.push({ op: "local.set", index: tsLocalShared } as Instr);
   // Stack: []
 
-  /** Wrap a getter's arithmetic in the invalid-Date NaN guard. The
-   *  callback should emit instructions that consume the i64 timestamp
-   *  on the stack and produce an f64 result. */
-  const wrapWithInvalidDateGuard = (emitArithmetic: () => void): ValType => {
-    fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
-    const savedBody = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr);
-    emitArithmetic();
-    const elseInstrs = fctx.body;
-    popBody(fctx, savedBody);
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
-      else: elseInstrs,
-    });
-    return { kind: "f64" };
-  };
-
-  if (methodName === "getHours" || methodName === "getUTCHours") {
-    // hours = ((timestamp % 86400000) + 86400000) % 86400000 / 3600000
-    return wrapWithInvalidDateGuard(() =>
-      fctx.body.push(
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      ),
-    );
-  }
-
-  if (methodName === "getMinutes" || methodName === "getUTCMinutes") {
-    // minutes = ((timestamp % 3600000) + 3600000) % 3600000 / 60000
-    return wrapWithInvalidDateGuard(() =>
-      fctx.body.push(
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      ),
-    );
-  }
-
-  if (methodName === "getSeconds" || methodName === "getUTCSeconds") {
-    // seconds = ((timestamp % 60000) + 60000) % 60000 / 1000
-    return wrapWithInvalidDateGuard(() =>
-      fctx.body.push(
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      ),
-    );
-  }
-
-  if (methodName === "getMilliseconds" || methodName === "getUTCMilliseconds") {
-    // ms = ((timestamp % 1000) + 1000) % 1000
-    return wrapWithInvalidDateGuard(() =>
-      fctx.body.push(
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      ),
-    );
-  }
-
-  // getDay / getUTCDay: day of week (0=Sunday)
-  // (floor(timestamp / 86400000) + 4) % 7  (1970-01-01 was Thursday = 4)
-  if (methodName === "getDay" || methodName === "getUTCDay") {
-    return wrapWithInvalidDateGuard(() =>
-      fctx.body.push(
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "i64.const", value: 4n } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      ),
-    );
-  }
-
-  // Calendar getters need civil_from_days.
-  // (#1344) Each branch is wrapped with the invalid-Date guard. The guard
-  // re-pushes the saved timestamp so the floor-div + civil_from_days
-  // sequence below sees it on the stack.
-  const civilIdx = ensureDateCivilHelper(ctx);
-
-  /** Emit floor-div(ts, MS_PER_DAY) -> days, then civil_from_days(days). */
-  const emitDaysToCivil = (): void => {
-    const tempTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.set", index: tempTs } as Instr);
-    fctx.body.push(
-      { op: "local.get", index: tempTs } as Instr,
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.ge_s" } as Instr,
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i64" } },
-        then: [
-          { op: "local.get", index: tempTs } as Instr,
-          { op: "i64.const", value: MS_PER_DAY } as Instr,
-          { op: "i64.div_s" } as Instr,
-        ],
-        else: [
-          { op: "local.get", index: tempTs } as Instr,
-          { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
-          { op: "i64.sub" } as Instr,
-          { op: "i64.const", value: MS_PER_DAY } as Instr,
-          { op: "i64.div_s" } as Instr,
-        ],
-      },
-    );
-    releaseTempLocal(fctx, tempTs);
-    fctx.body.push({ op: "call", funcIdx: civilIdx } as Instr);
-  };
-
-  if (methodName === "getFullYear" || methodName === "getUTCFullYear") {
-    return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil(); // packed on stack
-      const tmp = allocTempLocal(fctx, { kind: "i64" });
-      emitPackedYear(fctx.body, tmp); // floor(packed/10000)
-      releaseTempLocal(fctx, tmp);
-      fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
-    });
-  }
-
-  // (#2671) Annex B §B.2.4 `Date.prototype.getYear()` — legacy `getFullYear() -
-  // 1900`. Like getFullYear but with the −1900 offset; NaN-guarded the same way.
-  // (`setYear` already exists in the set-path below; this is the missing getter.)
-  if (methodName === "getYear") {
-    return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil(); // packed on stack
-      const tmp = allocTempLocal(fctx, { kind: "i64" });
-      emitPackedYear(fctx.body, tmp); // floor(packed/10000) → full year (i64)
-      releaseTempLocal(fctx, tmp);
-      fctx.body.push(
-        { op: "i64.const", value: 1900n } as Instr,
-        { op: "i64.sub" } as Instr, // year - 1900
-        { op: "f64.convert_i64_s" } as Instr,
-      );
-    });
-  }
-
-  if (methodName === "getMonth" || methodName === "getUTCMonth") {
-    return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil(); // packed on stack
-      const tmp = allocTempLocal(fctx, { kind: "i64" });
-      const yTmp = allocTempLocal(fctx, { kind: "i64" });
-      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
-      releaseTempLocal(fctx, tmp);
-      releaseTempLocal(fctx, yTmp);
-      fctx.body.push(
-        { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.div_s" } as Instr, // month (1-12)
-        { op: "i64.const", value: 1n } as Instr,
-        { op: "i64.sub" } as Instr, // 0-based
-        { op: "f64.convert_i64_s" } as Instr,
-      );
-    });
-  }
-
-  if (methodName === "getDate" || methodName === "getUTCDate") {
-    return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil(); // packed on stack
-      const tmp = allocTempLocal(fctx, { kind: "i64" });
-      const yTmp = allocTempLocal(fctx, { kind: "i64" });
-      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
-      releaseTempLocal(fctx, tmp);
-      releaseTempLocal(fctx, yTmp);
-      fctx.body.push(
-        { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.rem_s" } as Instr, // day (1-31)
-        { op: "f64.convert_i64_s" } as Instr,
-      );
-    });
-  }
+  // (#3219) The zero-arg time-of-day + calendar getters now live in the shared
+  // `emitDateZeroArgGetterFromTsLocal` helper (reused by the reflective closure
+  // body). It reads `tsLocalShared` and returns f64 for a getter, or undefined
+  // (emitting nothing) for the string formatters below.
+  const zeroArgGetter = emitDateZeroArgGetterFromTsLocal(ctx, fctx, methodName, tsLocalShared);
+  if (zeroArgGetter) return zeroArgGetter;
+  // (#3219 byte-identity) The formatter arms below historically ran only after
+  // the calendar-getter section had (incidentally) ensured the civil helper.
+  // The shared helper returns before ensuring it for non-getters, so re-assert
+  // it here to keep the direct-path formatter emission byte-identical.
+  ensureDateCivilHelper(ctx);
 
   // (#1638) String formatters. The timestamp lives in `tsLocalShared` (i64).
   // We delegate to the `__date_format(ts, mode)` host import which builds the
