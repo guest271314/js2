@@ -12,6 +12,14 @@ language_feature: generators, intrinsics, prototype-chain, standalone
 goal: host-independence
 umbrella: 1781
 assignee: ttraenkler/opus-genproto
+# (#3102/#3236 S1) Genuine native-substrate growth: the intrinsic-chain
+# singleton emitters + brand-checked method-closure install live with the
+# native-proto singletons (array-object-proto.ts); the two rewire call sites are
+# minimal (+31/+15). Allowed for this change-set.
+loc-budget-allow:
+  - src/codegen/array-object-proto.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/property-access.ts
 related: [3235, 1516, 1639, 3013, 2901]
 origin: "2026-07-13 standalone sole-import leak ranking (opus-leak), #2 bounded cluster after #3235. 13 sole leaks: 8 __get_generator_function_prototype + 2 __get_generator_prototype + 3 combined."
 ---
