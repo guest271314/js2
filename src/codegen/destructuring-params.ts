@@ -25,7 +25,7 @@ import { ensureExternRestObject } from "./object-runtime.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
-import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
+import { emitIsUndefinedSingletonExternAt, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js"; // (#2106 S1)
 import {
   coerceType,
   compileExpression,
@@ -226,8 +226,21 @@ function emitBoundsCheckedArrayGetUndef(
   const getUndefIdx = ctx.nativeStrings
     ? undefined
     : ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
-  if (getUndefIdx === undefined) {
-    // standalone mode — can't get JS undefined, fall back to regular path
+  // (#2106 S1) Determine the OOB "undefined" else-arm producer:
+  //   - host mode → the `__get_undefined` import call;
+  //   - standalone/nativeStrings with the $undefined singleton flag ON → the
+  //     tag-1 singleton (so the externref default-check, which is singleton-only
+  //     under the flag, fires the destructuring default for a past-length index);
+  //   - standalone flag OFF → the legacy fallback below (byte-identical).
+  // Without the singleton arm, standalone OOB yielded raw `ref.null.extern`,
+  // which the flag-on `__extern_is_undefined` (singleton-only) does NOT treat as
+  // undefined → array-pattern defaults spuriously failed to fire (the #2106
+  // array-absence producer gap: `[x=9]=[]`, `[,y=9]=[1]`, `[a,b=9]=[1]`).
+  const singletonOobInstrs = getUndefIdx === undefined ? undefinedExternInstrs(ctx) : undefined;
+  const oobElse: Instr[] | undefined =
+    getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx } as Instr] : singletonOobInstrs;
+  if (oobElse === undefined) {
+    // standalone flag OFF — can't get JS undefined, fall back to regular path
     emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType);
     return;
   }
@@ -264,7 +277,7 @@ function emitBoundsCheckedArrayGetUndef(
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
     then: inBoundsThen,
-    else: [{ op: "call", funcIdx: getUndefIdx } as Instr],
+    else: oobElse,
   });
 }
 
