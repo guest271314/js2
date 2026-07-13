@@ -6847,6 +6847,17 @@ function compileExternPropertyGet(
     if (disposedResult !== undefined) return disposedResult as ValType;
   }
 
+  // (#3234) Native SuppressedError `.error` / `.suppressed` reads in standalone /
+  // nativeStrings mode → read from the `$Error_struct.$props` (fieldIdx 5) backing
+  // object (where the dispose driver stores them via `__extern_set`) instead of the
+  // `SuppressedError_get_error` / `SuppressedError_get_suppressed` host imports.
+  // Identity-preserving: the stored externref is returned verbatim, so
+  // `se.error === originalError` holds via `ref.eq`.
+  if (className === "SuppressedError" && (propName === "error" || propName === "suppressed") && ctx.nativeStrings) {
+    const ownFieldResult = emitExternrefBackedOwnFieldRead(ctx, fctx, expr, propName);
+    if (ownFieldResult !== undefined) return ownFieldResult;
+  }
+
   // Walk inheritance chain to find the class that declares the property
   const resolvedInfo = findExternInfoForMember(ctx, className, propName, "property");
   const propOwner = resolvedInfo ?? ctx.externClasses.get(className);

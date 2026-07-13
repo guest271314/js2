@@ -67,6 +67,10 @@ function collectErrorInstanceOfTags(ctorName: string): number[] {
     "EvalError",
     "ReferenceError",
     "AggregateError",
+    // (#3234) SuppressedError is an Error subclass (BUILTIN_PARENT). Included so
+    // `instanceof SuppressedError` matches its own tag, and `instanceof Error`
+    // also matches a native SuppressedError (built by the dispose driver).
+    "SuppressedError",
   ] as const;
   const tags: number[] = [];
   for (const n of errorNames) {
@@ -1773,7 +1777,16 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   // tags compatible with `ctorName`. No `__instanceof` host import.
   // (#1536c) `userErrorParent` extends this to externref-backed user Error
   // subclasses.
-  if (noJsHost(ctx) && (ctorName === "Error" || isWasiErrorName(ctorName) || userErrorParent !== undefined)) {
+  if (
+    noJsHost(ctx) &&
+    (ctorName === "Error" ||
+      isWasiErrorName(ctorName) ||
+      // (#3234) SuppressedError is not in WASI_ERROR_NAMES (its ctor arity/args
+      // differ), but its native `$Error_struct` carries the SuppressedError tag,
+      // so the field-0 tag check answers `instanceof SuppressedError` host-free.
+      ctorName === "SuppressedError" ||
+      userErrorParent !== undefined)
+  ) {
     const structIdx = getOrRegisterErrorStructType(ctx);
     // (#2188) When the RHS is a *user* Error subclass, sibling subclasses share
     // the same builtin parent `$tag`, so the builtin-tag check (field 0) cannot
