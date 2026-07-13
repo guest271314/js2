@@ -10,6 +10,9 @@ goal: standalone-mode
 umbrella: 1781
 assignee: opus-restobj
 completed: 2026-07-13
+loc-budget-allow:
+  - src/codegen/destructuring-params.ts
+  - src/codegen/statements/loops.ts
 ---
 
 ## Problem

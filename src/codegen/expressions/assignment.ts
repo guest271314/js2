@@ -30,11 +30,7 @@ import {
 } from "../index.js";
 import { getSubviewArrTypeIdx, isSubviewTypeIdx, isTaViewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write; (#3054 B1) TA view write
 import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-native.js"; // (#3054 B1) shared-backing TA view write; (#3057) dynamic view element write
-import {
-  buildDestructureNullThrow,
-  emitStandaloneObjectRest,
-  patternIteratorStepCount,
-} from "../destructuring-params.js";
+import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
 import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/#2686 A3) pre-check set dispatcher
@@ -1482,17 +1478,6 @@ function compileDestructuringAssignment(
             else if (ts.isNumericLiteral(pn)) excludedKeys.push(pn.text);
           }
         }
-        // (#3241) NOTE: the standalone/WASI object-rest de-leak for the
-        // ASSIGNMENT target path (`({a, ...rest} = obj)`) is deferred to a
-        // follow-up slice. Unlike the decl / for-of / function-param rest sites,
-        // this path has two entangled sub-paths (an externref-RHS reader that
-        // never collects the rest at all, and this struct-RHS path where
-        // `resultType` can be externref while `structTypeIdx` names a struct), so
-        // a correct native route needs that untangling first. Its test262 cases
-        // are all `fail` for INDEPENDENT reasons (getter side-effects, computed
-        // keys, descriptor checks), so de-leaking flips nothing today — deferring
-        // avoids regressing shim-provided runs. It keeps the host import (leak)
-        // below, matching prior behaviour.
         // Use __extern_rest_object(externObj, excludedKeysStr)
         let restObjIdx = ctx.funcMap.get("__extern_rest_object");
         if (restObjIdx === undefined) {
