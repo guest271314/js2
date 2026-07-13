@@ -152,6 +152,7 @@ import {
 import {
   ensureArrayNativeProtoGlue,
   ensureDataViewNativeProtoGlue,
+  ensureDateNativeProtoGlue,
   ensureObjectNativeProtoGlue,
   ensureStringNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
@@ -1209,7 +1210,9 @@ function tryEmitNativeProtoReflectiveCall(
   else if (ifaceName === "Object") brand = ensureObjectNativeProtoGlue(ctx);
   else if (ifaceName === "String")
     brand = ensureStringNativeProtoGlue(ctx); // (#2875)
-  else if (ifaceName === "DataView") brand = ensureDataViewNativeProtoGlue(ctx); // (#3173)
+  else if (ifaceName === "DataView")
+    brand = ensureDataViewNativeProtoGlue(ctx); // (#3173)
+  else if (ifaceName === "Date") brand = ensureDateNativeProtoGlue(ctx); // (#3219)
   if (brand === undefined) return undefined;
 
   const glue = getNativeProtoBuiltinGlue(ctx, brand);
