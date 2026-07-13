@@ -15,6 +15,14 @@ area: codegen
 language_feature: type-coercion
 goal: core-semantics
 related: [2004, 2051, 2030, 2001]
+# (#3102) PR-1 array-absence producer completion adds gated singleton arms +
+# explanatory comments to three god-files (destructuring-params +13, type-coercion
+# +13, array-methods +11). The growth is intended (byte-inert flag-OFF producer
+# fixes at their canonical sites, not a barrel/driver); allow it for this change-set.
+loc-budget-allow:
+  - src/codegen/destructuring-params.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/array-methods.ts
 origin: "2026-06-11 analysis program (report 02 phase P3); stub 08-E21"
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): SUSPENDED, not dev-claimable as a fresh sprint task. P3 headline landed (PR #1701, commit 347f3c79a). The remaining S1 standalone $undefined tag-1 singleton is an ATOMIC ~40-site change (producer flip breaks all ref.is_null nullish consumers) — see memory project_2106_undefined_singleton_s1_atomic; branch issue-2106-s1-undefined-singleton. Resume-only for a senior-dev (max effort), NOT a routine sprint-65 dev pull. → backlog."
 ---
@@ -686,3 +694,89 @@ needs the box-protocol fix), S4 (union-collapse reversal) remain per plan.
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — the referencing merged PR was a REVERT (PR #2025 auto-parked: standalone floor breach, NET -1245 test262 rows), so it is floor-neutral undo, NOT progress. S1 (standalone tag-1 $undefined singleton) still requires the FULL ~40-site producer+consumer sweep (architect re-spec) — no narrow floor-saving subset exists. S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object all remain. Stays in-progress; resume-only for a senior-dev at max effort.
+
+---
+
+# S1 default-flip RE-MEASURE + array-absence producer COMPLETION (opus-2580, 2026-07-13, max-reasoning)
+
+> Scope-first re-measure of the default-flip NO-GO (PR #2655) against CURRENT
+> main, then a bounded, byte-inert completion of the residual producer gap. The
+> flagged sweep (PR #2633) IS on main; this is PR-1 of a two-step decoupling
+> (PR-1 = byte-inert completion; PR-2 = the default flip, gated on a FULL fork
+> A/B). All probes per-process; the fork run's floor step decoded, not trusted.
+
+## Why the last default-flip (PR #2655) was declined — VERIFIED, not stale-inferred
+
+PR #2655 (flip `undefinedSingleton` default ON) was closed citing the fork A/B
+"conclusion=failure". Decoded fork run **28716643775**: all 30 shards were GREEN;
+the failing job is `merge shard reports` → step **"Standalone pass-count
+high-water floor (#2097)"**: `current pass=19062, mark=20952, delta=-1890`. So
+the decline was correct — flag-ON was a genuine **−1890** standalone floor breach
+(worse than June's partial −1245), NOT infra. BUT that A/B is against main @
+`265a26fc3` (8 days / hundreds of commits stale; #3053 U0-U2 carrier, #3033,
+#3183, #3169 landed since).
+
+## The −1890 is a BOUNDED lockstep gap, not a representation cost (current-main A/B)
+
+Re-measured flag-ON vs flag-OFF per-process on current main. Flag-ON is ALREADY
+correct for: null/undefined distinctness, `typeof null === "object"`, the June
+−1245 ROOT (dstr default no longer fires on a present `null`), `""+undefined`,
+**object** missing-key default (`{a=7}={}`→7), explicit `[undefined]` element,
+`fn(undefined)`. The ONLY live regression class was the **array-element-absence
+producers** — they still emitted raw `ref.null.extern` for "absent", while their
+dstr-default CONSUMER (`emitExternrefDefaultCheck` → `__extern_is_undefined`,
+which is **singleton-only** under the flag, dropping the `ref.is_null` arm) was
+flipped → the default spuriously failed to fire:
+
+| shape | flag-OFF | flag-ON (before) | producer |
+| --- | --- | --- | --- |
+| `[x=9]=[]` (hole) | 9 | **0** | array-OOB decl/param read |
+| `[,y=9]=[1]` (elision) | 9 | **0** | array-OOB decl/param read |
+| `[a,b=9]=[1]` (past-end) | 9 | **0** | array-OOB decl/param read |
+| `fn(x=9)` absent param | 9 | **0** | absent optional/default param padding |
+| `for(const [a=9] of [[]])` | 9 | **0** | for-of loop-head array-destructure |
+
+Object-key-absence and explicit-undefined were already flipped; only the
+array-absence + absent-param producers were missed — the dstr/dflt/ptrn cluster
+that was ~70% of June's −1245, hence it plausibly dominates the −1890.
+
+## PR-1 (this change) — the array-absence producer completion (byte-inert)
+
+Three producers now route the "absent → undefined" value through the `$undefined`
+singleton under the flag (byte-identical flag-OFF, so PR-1 cannot breach the floor
+— it only matters once PR-2 flips the default). Each is the `emitUndefined`/
+`undefinedExternInstrs` singleton vehicle, gated so flag-OFF emits the exact prior
+`ref.null.extern`:
+
+1. **`emitBoundsCheckedArrayGetUndef`** (`destructuring-params.ts`) — the OOB
+   else-arm of the decl/param array-element read. Standalone flag-ON → singleton;
+   host unchanged (`__get_undefined`); standalone flag-OFF → legacy fallback.
+2. **`emitUndefinedValue`** (`type-coercion.ts`, the param-padding chokepoint used
+   by `pushDefaultValue`/`pushParamSentinel`) — absent optional/default param.
+   Standalone flag-ON → singleton; else `ref.null.extern` (byte-identical).
+3. **`emitBoundsCheckedArrayGet`** (`array-methods.ts`) — the `useUndefinedSentinel`
+   OOB else-arm (the for-of loop-head destructuring path). Gated on
+   `useUndefinedSentinel` so non-destructuring array reads are byte-identical.
+
+**Validated** (per-process A/B, both flag states + `tests/issue-2106-s1-array-absence-producers.test.ts`,
+5 cases): all 5 shapes above flip to correct under flag-ON; present-value / explicit-
+undefined / present-`null` unaffected; flag-OFF byte-inert (control green). Existing
+`issue-2106-s1-undefined-singleton` (9) + `issue-2574` (7) + default-param/dstr batch
+(32/33; the 1 fail is a pre-existing `wasm:js-string` host-import env artifact in
+`issue-1016b`, flag-OFF, unrelated). tsc + prettier clean.
+
+## PR-2 (NEXT, separate) — the default flip, gated on a FULL fork A/B
+
+Do NOT flip the default from this PR. After PR-1 lands, re-run the FULL fork
+sharded A/B (`JS2WASM_UNDEF_SINGLETON=1`, the merge_group standalone-floor #2097 —
+NEVER a local/scoped measurement) and flip the default OFF→ON only if
+`host_free_pass` is net-non-negative vs the flag-OFF floor. If a residual remains,
+document the next producer bucket and keep the flag OFF — PR-1's completion still
+banks as progress toward a future flip. The −1245/−1890 history is unambiguous:
+the flip decision is a full-gate measurement, not a local judgment.
+
+**Audit note (heeded):** this is NOT a single-site fix — the broad per-process
+audit (nested `[[a=9]]`/`[{p=9}]`, rest, multi-param, object defaults, arrow,
+expression-default side-effects, for-of) is all green flag-ON after the three
+producer flips. Any producer still missed is byte-inert (flag-OFF default) and
+will surface as a residual bucket in PR-2's fork A/B, not a floor breach now.
