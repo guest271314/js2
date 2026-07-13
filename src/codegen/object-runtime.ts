@@ -9291,6 +9291,151 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
 }
 
 /**
+ * (#3218) Native standalone/WASI `__extern_rest_object(obj, excl) -> externref`
+ * — the host-free implementation of object-rest destructuring's
+ * CopyDataProperties (ES §14.7.4). Under `--target standalone`/`wasi` there is
+ * no JS runtime to satisfy the `env.__extern_rest_object` host import, so
+ * `{a, ...rest} = o` otherwise fails to instantiate host-free (a leaky pass).
+ *
+ * Signature differs from the host import ONLY in the second argument's shape:
+ * the host import takes a comma-joined excluded-keys STRING; this native helper
+ * takes an **exclusion object** `excl` (a plain `$Object` whose OWN keys are the
+ * excluded property names), built at the call site
+ * (`destructuring-params.ts`). Membership is therefore delegated to
+ * `__extern_get(excl, key)` — the proven open-object hash-map lookup — so there
+ * is NO runtime string tokenising, NO delimiter false-match, and NO trap-prone
+ * `$AnyString`/`$NativeString` cast in this body. The helper stays 100% in
+ * externref land, mirroring `ensureObjectGroupBy`.
+ *
+ *   out = OrdinaryObjectCreate(null)                 // __new_plain_object
+ *   if obj is null: return out                       // defensive; the source is
+ *                                                    // already RequireObjectCoercible-guarded upstream
+ *   keys = __object_keys(obj)                        // OWN-ENUMERABLE string keys, insertion order
+ *   for i in 0 .. __extern_length(keys):
+ *     key = __extern_get_idx(keys, i)
+ *     if __extern_get(excl, key) is nullish:         // key NOT excluded
+ *       __extern_set(out, key, __extern_get(obj, key))   // [[Get]] — invokes own getters, matches host
+ *   return out
+ *
+ * Registered lazily (append-only defined func — no funcidx shift of the
+ * in-flight function; all deps are object-runtime defined funcs already present
+ * once `ensureObjectRuntime` has run). Returns the `__extern_rest_object`
+ * funcIdx. Idempotent.
+ */
+export function ensureExternRestObject(ctx: CodegenContext): number {
+  ensureObjectRuntime(ctx);
+  const existing = ctx.funcMap.get("__extern_rest_object");
+  if (existing !== undefined) return existing;
+
+  const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+  const objectKeysIdx = ctx.funcMap.get("__object_keys")!;
+  const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+  const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+  const externGetIdx = ctx.funcMap.get("__extern_get")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  // Membership against the exclusion object is a BOOLEAN presence test
+  // (`__extern_has` — the native `in`-operator predicate). This deliberately
+  // does NOT go through `__extern_get`'s value/miss channel, which is ambiguous
+  // under the #2106 S1 regime (an absent key reads back as the non-null
+  // undefined SINGLETON, not null, so a `ref.is_null` probe would wrongly drop
+  // every non-excluded key). `__extern_has` returns i32 1/0 with no ambiguity.
+  const externHasIdx = ctx.funcMap.get("__extern_has")!;
+
+  // params: 0=obj 1=excl
+  // locals: 2=out 3=keys 4=len(f64) 5=i(i32) 6=key
+  const body: Instr[] = [
+    { op: "call", funcIdx: newPlainObjectIdx },
+    { op: "local.set", index: 2 },
+    // Defensive: a null source yields an empty rest object (matches the host
+    // `if (obj == null) return {}`). Upstream RequireObjectCoercible already
+    // throws for null/undefined sources, so this is belt-and-suspenders.
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 2 } as Instr, { op: "return" } as Instr],
+    } as Instr,
+    // keys = __object_keys(obj)
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: objectKeysIdx },
+    { op: "local.set", index: 3 },
+    // len = __extern_length(keys)
+    { op: "local.get", index: 3 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "local.set", index: 4 },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 5 },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if f64(i) >= len → break
+            { op: "local.get", index: 5 },
+            { op: "f64.convert_i32_s" },
+            { op: "local.get", index: 4 },
+            { op: "f64.ge" },
+            { op: "br_if", depth: 1 },
+            // key = __extern_get_idx(keys, f64(i))
+            { op: "local.get", index: 3 },
+            { op: "local.get", index: 5 },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: externGetIdxIdx },
+            { op: "local.set", index: 6 },
+            // if key is NOT in excl (i.e. NOT excluded) → out[key] = __extern_get(obj, key)
+            { op: "local.get", index: 1 },
+            { op: "local.get", index: 6 },
+            { op: "call", funcIdx: externHasIdx },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 2 } as Instr,
+                { op: "local.get", index: 6 } as Instr,
+                { op: "local.get", index: 0 } as Instr,
+                { op: "local.get", index: 6 } as Instr,
+                { op: "call", funcIdx: externGetIdx } as Instr,
+                { op: "call", funcIdx: externSetIdx } as Instr,
+              ],
+            } as Instr,
+            // i++
+            { op: "local.get", index: 5 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: 5 },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: 2 },
+  ];
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__extern_rest_object", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__extern_rest_object",
+    typeIdx,
+    locals: [
+      { name: "out", type: { kind: "externref" } },
+      { name: "keys", type: { kind: "externref" } },
+      { name: "len", type: { kind: "f64" } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "key", type: { kind: "externref" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
  * (#1888 Slice 1) Reserve the `__apply_closure(externref fn, externref recv,
  * externref args) -> externref` arity-bridge funcIdx with a placeholder
  * `unreachable` body, registered in `funcMap`. The real body (an arity switch
