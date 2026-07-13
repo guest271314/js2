@@ -17,6 +17,8 @@ sprint: current
 horizon: m
 related: [2875, 2860, 2979, 1961]
 umbrella: 2860
+loc-budget-allow:
+  - src/codegen/native-strings.ts
 ---
 
 # Standalone: `__any_to_string` bakes "[object Object]" for boxed primitives when it is the first number-stringifier (build-ordering)
