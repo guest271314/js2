@@ -62,6 +62,7 @@ import {
 import { emitJsonStringifyValue } from "./json-codec-native.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
+import { tryCompileNativeDisposableStackDisposedGet } from "./disposable-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
 import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
 import { tryEmitFnctorPrototypeRead } from "./expressions/fnctor-prototype.js";
@@ -6835,6 +6836,15 @@ function compileExternPropertyGet(
     addUnionImports(ctx);
     const sizeResult = tryCompileNativeSetSizeGet(ctx, fctx, expr.expression);
     if (sizeResult !== undefined) return sizeResult as ValType;
+  }
+
+  // (#3231) Native DisposableStack `.disposed` accessor in standalone /
+  // nativeStrings mode → the struct's `disposed` flag instead of the
+  // `DisposableStack_get_disposed` host import.
+  if (className === "DisposableStack" && propName === "disposed" && ctx.nativeStrings) {
+    addUnionImports(ctx);
+    const disposedResult = tryCompileNativeDisposableStackDisposedGet(ctx, fctx, expr.expression);
+    if (disposedResult !== undefined) return disposedResult as ValType;
   }
 
   // Walk inheritance chain to find the class that declares the property
