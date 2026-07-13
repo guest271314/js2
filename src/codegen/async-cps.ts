@@ -1779,7 +1779,7 @@ function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expressio
     return null;
   }
   if (!ts.isCallExpression(source)) return null;
-  let callee = source.expression;
+  let callee: ts.Expression = source.expression;
   while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
   if (ts.isIdentifier(callee)) {
     const name = `__async_gen_next_${sanitizeTypeName(callee.text)}`;
