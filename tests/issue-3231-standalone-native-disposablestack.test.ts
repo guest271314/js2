@@ -110,6 +110,78 @@ describe("#3231 native standalone DisposableStack", () => {
   });
 });
 
+describe("#3231 Phase 1b — use() dynamic [Symbol.dispose] lookup (host-free)", () => {
+  it("use(resource) runs the resource's [Symbol.dispose] at dispose", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { let n = 0; const s = new DisposableStack(); s.use({ [Symbol.dispose]() { n = 9; } }); s.dispose(); return n; }`,
+      ),
+    ).toBe(9);
+  });
+
+  it("binds the disposer's `this` to the used value", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { let g = 0; const s = new DisposableStack(); const r = { v: 3, [Symbol.dispose]() { g = this.v; } }; s.use(r); s.dispose(); return g; }`,
+      ),
+    ).toBe(3);
+  });
+
+  it("use(null) / use(undefined) are no-ops that add no resource", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { let n = 0; const s = new DisposableStack(); s.use(null); s.use(undefined); s.defer(() => { n = 5; }); s.dispose(); return n; }`,
+      ),
+    ).toBe(5);
+  });
+
+  it("interleaves use/adopt/defer disposers in LIFO order", async () => {
+    // use→resource(1) first, adopt(2), defer(3); dispose LIFO → defer(3),adopt(2),use(1).
+    expect(
+      await runStandalone(
+        `export function f(): number { const order: number[] = []; const s = new DisposableStack();
+         s.use({ [Symbol.dispose]() { order.push(1); } });
+         s.adopt({}, () => order.push(2));
+         s.defer(() => order.push(3));
+         s.dispose();
+         return order[0]*100 + order[1]*10 + order[2]; }`,
+      ),
+    ).toBe(321);
+  });
+
+  it("throws TypeError when the value is not an object", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { const s = new DisposableStack(); try { s.use(true as any); return 0; } catch (e) { return e instanceof TypeError ? 2 : 1; } }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("throws TypeError when the value has no [Symbol.dispose]", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { const s = new DisposableStack(); try { s.use({} as any); return 0; } catch (e) { return e instanceof TypeError ? 2 : 1; } }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("throws TypeError when [Symbol.dispose] is null", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { const s = new DisposableStack(); try { s.use({ [Symbol.dispose]: null } as any); return 0; } catch (e) { return e instanceof TypeError ? 2 : 1; } }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("throws ReferenceError on use() after dispose — even for use(undefined)", async () => {
+    expect(
+      await runStandalone(
+        `export function f(): number { const s = new DisposableStack(); s.dispose(); try { s.use(undefined); return 0; } catch (e) { return e instanceof ReferenceError ? 2 : 1; } }`,
+      ),
+    ).toBe(2);
+  });
+});
+
 describe("#3231 host lane unchanged (byte-identical gate)", () => {
   it("gc/host mode still routes DisposableStack through host imports", async () => {
     const r = await compile(
@@ -120,5 +192,14 @@ describe("#3231 host lane unchanged (byte-identical gate)", () => {
     const names = r.imports.map((i) => i.name);
     expect(names).toContain("DisposableStack_new");
     expect(names).toContain("DisposableStack_dispose");
+  });
+
+  it("gc/host mode still routes use() through the DisposableStack_use host import", async () => {
+    const r = await compile(
+      `export function f(): number { const s = new DisposableStack(); s.use({ [Symbol.dispose]() {} }); return 0; }`,
+      {},
+    );
+    expect(r.success).toBe(true);
+    expect(r.imports.map((i) => i.name)).toContain("DisposableStack_use");
   });
 });
