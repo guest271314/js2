@@ -10,6 +10,10 @@ horizon: m
 goal: standalone-mode
 umbrella: 1781
 feasibility: hard
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/expressions/extern.ts
 ---
 
 # Native standalone WeakRef (host-free)
