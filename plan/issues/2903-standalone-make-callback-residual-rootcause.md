@@ -454,6 +454,42 @@ Measure FIRST how many of the ~15 leaky + fail-bucket rows need real
 species is load-bearing, keep host and document as deferred (graveyard rule:
 measure-first honest yield).
 
+**MEASURED 2026-07-13 (opus-rescue) — DEFERRED, species is load-bearing on
+every row. Native routing yields ZERO host-free-pass flips and would regress to
+wrong results.** Grounded on current main + the 2026-07-11 standalone baseline.
+
+Repro confirmed the mechanism: `class P extends Promise {}` + `P.resolve(42)`
+leaks `__make_callback, __new_Promise, FileSystemDirectoryHandle_resolve,
+Promise_then`; `P.all([...])` leaks `__make_callback, __new_Promise,
+Promise_then`; `P.reject(7).catch` leaks `..., Promise_catch` — while plain
+`Promise.resolve(42).then(...)` is host-free (control). The divergence is in
+`expressions/calls.ts`: `isResolveReject` (~L10091) matches only
+`propAccess.expression.text === "Promise"`, and `nativeCombinatorEligible`
+(~L10112) explicitly excludes `isPromiseSubclassReceiver` — so subclass statics
+fall to the `Promise_{method}` / symbol-derived host import.
+
+**The 24 `built-ins/Promise/**` `extends Promise` tests, standalone baseline:**
+3 pass (all `prototype/finally/subclass-*` — already host-free via the finally
+sub-front, untouched by this arm), 19 fail, 2 compile_error. EVERY failing row
+asserts constructor-chain/species that a plain native `$Promise` cannot satisfy:
+- `{resolve,reject,race,any,all,allSettled,withResolvers,try}/ctx-ctor.js` →
+  `instance instanceof SubPromise === true`, `instance.constructor === SubPromise`,
+  subclass `callCount === 1`, `typeof executor === 'function'` (NewPromiseCapability
+  must invoke the SUBCLASS ctor with an executor).
+- `{all,any,allSettled,race}/invoke-resolve-on-*-every-iteration-of-custom.js` →
+  `Custom.resolve` invoked once per iterated value and `Promise.resolve` NEVER
+  invoked (the combinator must dispatch through the receiver ctor's `resolve`).
+
+A native `$Promise` from `emitStandalonePromiseResolve` is a fixed WasmGC struct
+with no per-subclass RTT/brand: it is not `instanceof SubPromise`, never calls the
+subclass ctor (`callCount` stays 0), and cannot route combinators through
+`C.resolve`. So native routing flips 0 of the 19 fails to host-free-pass and
+would produce semantically WRONG results (worse than the current clean
+leaky-fail). True native subclass statics require carrying a subclass brand on the
+promise carrier so `instanceof P` holds and the ctor runs — that is the
+builtin-subclass object-model substrate (shared with #2622 "subclass a builtin"),
+NOT an S/M lever. **R2 kept HOST, deferred to the #2622 builtin-subclass track.**
+
 ### R3 — lazy Iterator helpers `map/filter/take/drop/flatMap` (fable-executable-now, M)
 
 Sub-front 2 covered the EAGER helpers. The lazy five need a wrapper-iterator:
