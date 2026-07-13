@@ -10051,12 +10051,32 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   if (!types) return;
 
   // Enumerate concrete `__vec_<elemKind>` carriers (NOT $ObjVec — it keeps its
-  // own dedicated arm — and NOT the non-array `_byte` carriers). Dedup by
-  // typeIdx; sort for deterministic emission.
+  // own dedicated arm). Dedup by typeIdx; sort for deterministic emission.
+  //
+  // (#2903 R4) The packed TypedArray ELEMENT carriers — `i8_byte`
+  // (Int8/Uint8/Uint8Clamped), `i16_byte` (Int16/Uint16), `i32_elem`
+  // (Int32/Uint32) — ARE included here so an `any`-held / dynamically-dispatched
+  // typed array reads its elements through `__extern_get_idx` (the single
+  // chokepoint the native array-HOF loop `__hof_*`, `a[i]`, indexOf, includes
+  // and for-in all read through). Without this, those carriers fell to the null
+  // fallback → the HOF loop saw `undefined` at every index and returned wrong
+  // results host-free (findIndex→-1, reduce→0). The ArrayBuffer/DataView BYTE
+  // buffer `i32_byte` stays excluded (it is a raw byte store, not a JS-array-
+  // indexable element carrier). SIGNEDNESS BOUNDARY: `i8_byte`/`i16_byte` are
+  // read UNSIGNED (`array.get_u`) — correct for Uint8/Uint8Clamped/Uint16 (the
+  // common case + the storage's documented default read, dataview-native.ts),
+  // but a negative Int8/Int16 element reads as its unsigned bit-pattern. The
+  // shared carrier type (index.ts TYPED_ARRAY_PACKED_STORAGE — Int8Array and
+  // Uint8Array both map to `i8_byte`/kind `i8`) loses the constructor's
+  // signedness, so this generic read cannot recover it (every consumer routing
+  // through here — static or dynamic — reads unsigned). Those Int8/16 reads were
+  // already fully broken (null) here, so this is not a regression; recovering
+  // sub-i32 signed reads needs a per-signedness carrier type (deferred).
+  const excludedByteVecElemKinds = new Set(["i32_byte"]);
   const seen = new Set<number>();
   const carriers: { typeIdx: number; arrTypeIdx: number; elemType: ValType }[] = [];
   for (const [elemKind, vecTypeIdx] of ctx.vecTypeMap.entries()) {
-    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    if (excludedByteVecElemKinds.has(elemKind)) continue;
     if (seen.has(vecTypeIdx)) continue;
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     if (arrTypeIdx < 0) continue;
@@ -10072,10 +10092,28 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   // double-remap hazard). The singleton instrs carry no funcIdx/typeIdx, so
   // splicing them at FINALIZE cannot desync any index-shift walk.
   const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  // (#2903 R4) Packed sub-i32 element carriers (`i8`/`i16`) need an UNSIGNED
+  // packed load (`array.get_u`) — plain `array.get` is invalid on a packed
+  // array — then f64-box the zero-extended i32 (0..255 / 0..65535, always
+  // positive so `f64.convert_i32_s` == `_u`). Non-packed carriers keep the
+  // generic `array.get` + `boxVecElementToExternref`. Returns null for a kind
+  // with no boxing (leave that carrier to the null fallback).
+  const boxNumIdx = ctx.funcMap.get("__box_number");
+  const packedElemReadBox = (elemType: ValType): { getOp: string; boxOps: Instr[] } | null => {
+    if ((elemType.kind === "i8" || elemType.kind === "i16") && boxNumIdx !== undefined) {
+      return {
+        getOp: "array.get_u",
+        boxOps: [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+      };
+    }
+    const generic = boxVecElementToExternref(ctx, elemType);
+    return generic === null ? null : { getOp: "array.get", boxOps: generic };
+  };
   const vecArms: Instr[] = [];
   for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
-    const boxOps = boxVecElementToExternref(ctx, elemType);
-    if (boxOps === null) continue; // unsupported element kind — leave to null fallback
+    const readBox = packedElemReadBox(elemType);
+    if (readBox === null) continue; // unsupported element kind — leave to null fallback
+    const { getOp, boxOps } = readBox;
     vecArms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
       op: "if",
       blockType: { kind: "empty" },
@@ -10107,7 +10145,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
         { op: "ref.cast", typeIdx },
         { op: "struct.get", typeIdx, fieldIdx: 1 },
         { op: "local.get", index: 4 },
-        { op: "array.get", typeIdx: arrTypeIdx },
+        { op: getOp, typeIdx: arrTypeIdx } as Instr,
         ...boxOps,
         { op: "return" },
       ],
