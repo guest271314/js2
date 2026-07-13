@@ -1765,8 +1765,9 @@ function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expressio
   // This is the row-flipping half of the ~390-file for-await-over-async-gen leak
   // (the producer is already driven; the CONSUMER bailed to legacy CPS because
   // the frame was held in a variable rather than called inline).
+  const { checker } = ctx;
   if (ts.isIdentifier(source)) {
-    const sym = ctx.checker.getSymbolAtLocation(source);
+    const sym = checker.getSymbolAtLocation(source);
     const vd = sym?.valueDeclaration;
     if (
       vd !== undefined &&
@@ -1789,7 +1790,7 @@ function resolveAsyncGenNextHelperName(ctx: CodegenContext, source: ts.Expressio
     // binding name. Resolve the callee's declaration through the checker and
     // match the producer registry by INITIALIZER NODE — exact, no naming games.
     if (ctx.asyncGenProducers !== undefined) {
-      const sym = ctx.checker.getSymbolAtLocation(callee);
+      const sym = checker.getSymbolAtLocation(callee);
       const vd = sym?.valueDeclaration;
       if (vd !== undefined && ts.isVariableDeclaration(vd) && vd.initializer !== undefined) {
         for (const [stem, p] of ctx.asyncGenProducers) {
