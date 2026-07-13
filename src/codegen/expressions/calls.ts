@@ -8473,7 +8473,7 @@ function compileCallExpression(
               // `compileObjectLiteralAsExternref` returns null only before any
               // emit (import unavailable) and skips computed/symbol keys, so a
               // fall-through to the generic path is side-effect-free.
-              let descValType: InnerResult | null | undefined;
+              let descValType: ValType | null | undefined;
               if (ctx.standalone && ts.isObjectLiteralExpression(prop.initializer)) {
                 descValType = compileObjectLiteralAsExternref(ctx, fctx, prop.initializer);
               }
