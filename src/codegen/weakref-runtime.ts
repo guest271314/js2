@@ -69,7 +69,7 @@ export function tryCompileNativeWeakRefNew(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.NewExpression,
-): InnerResult | undefined {
+): ValType | undefined {
   if (!ctx.nativeStrings) return undefined;
   if (!ts.isIdentifier(expr.expression) || expr.expression.text !== "WeakRef") return undefined;
   const args = expr.arguments;
