@@ -1,7 +1,8 @@
 ---
 id: 3237
 title: "Standalone: any-receiver dispatch for builtin-native methods (DisposableStack/Map/Set/…) leaks host imports"
-status: ready
+status: in-progress
+assignee: opus-anyrecv
 created: 2026-07-13
 updated: 2026-07-13
 priority: high
@@ -91,3 +92,47 @@ methods).
 - No `DisposableStack_*` / `__make_callback` host import for a standalone
   DisposableStack method call regardless of receiver static type.
 - Host lane byte-identical; NET ≥ 0 on the standalone floor.
+
+## Slice 1 — DONE (PR #3023)
+
+**Scope shipped:** `dispose()` (call) + `disposed` (accessor) on an `any`/union
+receiver carrying a native `$DisposableStack`.
+
+**Root cause confirmed (measure-first, on current main):**
+- `dispose()` on an `any` receiver did NOT go through the `className ===` gate at
+  `extern.ts:133` at all — an `any` receiver has no nominal symbol, so
+  `isExternalDeclaredClass` is false and `compileExternMethodCall` is skipped.
+  The leak actually came from the **any-receiver first-match extern loop**
+  `tryExternClassMethodOnAny` (`calls-closures.ts:1463`): it iterates
+  `ctx.externClasses`, first-matches `DisposableStack.dispose`, and lazily adds
+  the `DisposableStack_dispose` **host import** → module fails to instantiate.
+- `disposed` on an `any` receiver did NOT leak — it fell to the generic
+  `__extern_get` dynamic reader (`property-access.ts`), a MISS on the non-`$Object`
+  native struct → always `false` (silently wrong after dispose;
+  `sets-state-to-disposed.js`).
+
+**Why the interception is regression-safe (the key subtlety):** a user
+object-literal `{ dispose(){} }` on an `any` receiver ALREADY works host-free —
+the #3033 user-function-member refusal (`calls-closures.ts:1438`) fires first and
+routes it to the #2151 closed-struct dispatcher. So the fix intercepts `dispose`
+**after** that refusal, right before the host-import loop — exactly (and only)
+where the loop would otherwise bind the host import. Both interceptions are
+additionally gated on `DisposableStack` being a registered extern class, so they
+are inert for programs that don't use it.
+
+**Implementation:**
+- `tryCompileNativeDisposableStackAnyMethodCall` (disposable-runtime.ts) — `dispose`
+  only: `ref.test $DisposableStack` → native driver on a hit, clean TypeError on a
+  miss (never the host import). Value vs statement position handled (undefined
+  singleton in value position).
+- `tryCompileNativeDisposableStackAnyDisposedGet` (disposable-runtime.ts) —
+  `ref.test $DisposableStack` → struct disposed flag (boxed boolean) on a hit,
+  generic `__extern_get` read on a miss (user object's own `.disposed` preserved).
+- Wired into `tryExternClassMethodOnAny` (calls-closures.ts) and
+  `compilePropertyAccess` (property-access.ts).
+
+**Remaining (Slice 2 / future):** the callback methods `defer`/`adopt`/`use` on an
+`any` receiver still leak — they additionally need the standalone closure gate
+(`closures.ts`) to fire on the any-receiver path (currently only reached when the
+call is recognised as a typed native DisposableStack method). Also the broader
+`Map`/`Set`/`WeakMap`/… any-receiver `className ===` arms (out of Slice-1 scope).
