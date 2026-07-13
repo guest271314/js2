@@ -11,7 +11,7 @@ area: codegen
 language_feature: generators, intrinsics, prototype-chain, standalone
 goal: host-independence
 umbrella: 1781
-assignee: ttraenkler/opus-genproto
+assignee: ttraenkler/opus-genproto2
 # (#3102/#3236 S1) Genuine native-substrate growth: the intrinsic-chain
 # singleton emitters + brand-checked method-closure install live with the
 # native-proto singletons (array-object-proto.ts); the two rewire call sites are
@@ -158,3 +158,62 @@ this-val group until the `.call`-on-native-method-closure invocation path lands.
 Slice 1b: route `<value>.call(thisArg)` where `<value>` is a
 `nativeProtoReceiverClosureStructTypes` closure to the closure invocation (thread
 `thisArg` → param 1), mirroring the direct-call dispatch that already works.
+
+## Implementation Notes (Slice 1b — opus-genproto2)
+
+### What shipped (host-free, 6 this-val flips)
+
+`Function.prototype.call`/`.apply` on a dynamically-read %GeneratorPrototype%
+member closure now INVOKES the closure so its Slice-1 catchable-TypeError
+refusal body fires. Flips `GeneratorPrototype/{next,return,throw}/this-val-not-{object,generator}.js`
+(the 6 remaining this-val entries). All changes in
+`src/codegen/expressions/calls.ts` only (+111/−1); host lane byte-identical.
+
+### Root cause (WHY the symbol path missed)
+
+The test binds `var GeneratorPrototype = Object.getPrototypeOf(g).prototype`,
+which is **fully `any`-typed** (both `getPrototypeOf` and the `.prototype` read
+on `any` produce `any`). So `GeneratorPrototype.next` has NO method-signature
+symbol — `tryEmitNativeProtoReflectiveCall` (the #2193 symbol/var-init recovery)
+can't resolve `(brand, member)` and `.call` degraded to a plain `next.call`
+property read → `undefined` → no invocation → no throw. (Direct `GP.next()`
+already threw: it routes through the `__call_m_next_N` closed-method dispatcher →
+open-`$Object` fall-through → dynamic closure invoke.)
+
+### Design (WHY this shape, not a runtime dispatch)
+
+Two new helpers + one hook in the `.call`/`.apply` handler (Case-2 sibling),
+all gated on `ctx.standalone || ctx.wasi`:
+
+- **`isGeneratorPrototypeReceiver`** — resolves that the `.call` receiver object
+  is `%GeneratorPrototype%` from its **syntactic provenance** (spec chain
+  §27.3.3.3 / §27.5.1), tracing ≤1 var-initializer indirection:
+  `<genFn>.prototype` or `Object.getPrototypeOf(<genFn>).prototype`, where
+  `<genFn> ∈ ctx.generatorFunctions` (sync only — async generators keep the host
+  path). Conservative: any unprovable shape → `false` → unchanged legacy `.call`.
+- **`tryEmitGeneratorProtoReflectiveCall`** — for member ∈ {next,return,throw}
+  with a GeneratorPrototype receiver, resolves the brand via
+  `ensureGeneratorPrototypeNativeProtoGlue` and reuses the shared reflective
+  emitter (`emitReflectiveNativeProtoClosureCall`), which compiles the receiver
+  `GP.next` to the stored closure externref, `ref.cast`s it to the wrapper
+  struct, and `call_ref`s it threading `thisArg → this` param 1. Static
+  resolution (not a runtime ref.test chain) because the (brand, member) is
+  syntactically knowable and it exactly matches the existing native-proto
+  reflective-call architecture.
+
+**Key correction (the blocker):** `emitReflectiveNativeProtoClosureCall` called
+`ensureStandaloneNativeMethodClosure` WITHOUT `refusalBodyFallback`, so for a
+member whose only body is the refusal (GeneratorPrototype has no wired native
+body) it returned `null` and the reflective call bailed. Added a **strictly
+opt-in** `useRefusalBodyFallback` param (default `false`) so only the
+GeneratorPrototype caller mints/casts to the identity-stable fallback singleton —
+the same struct type the Slice-1 value-read stored on the `$Object`. Default-off
+preserves the documented `hasOwnProperty.call` fall-through contract (verified
+unregressed) that the other reflective callers depend on.
+
+### Host-lane neutrality
+
+`tryEmitGeneratorProtoReflectiveCall` returns `undefined` on its first line when
+`!(ctx.standalone || ctx.wasi)`, so the host path emits nothing new; the shared
+`emitReflectiveNativeProtoClosureCall` param defaults off → existing callers
+byte-identical.
