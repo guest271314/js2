@@ -12447,14 +12447,9 @@ function compileCallExpression(
     // path in array-methods.ts (disjoint receiver). map/filter (typed-RESULT)
     // deferred to R4b. Standalone-gated → gc/wasi byte-identical.
     if (ctx.standalone && STANDALONE_TA_SCALAR_HOFS.has(propAccess.name.text)) {
-      let taName = receiverType.getSymbol?.()?.getName?.();
-      if (taName === undefined || !isWiredTypedArrayViewName(taName)) {
-        try {
-          taName = ctx.checker.getApparentType?.(receiverType)?.getSymbol?.()?.getName?.();
-        } catch {
-          taName = undefined;
-        }
-      }
+      // A concrete typed-array receiver carries its view name directly on the
+      // type symbol (the known-element-kind shape this interception targets).
+      const taName = receiverType.getSymbol?.()?.getName?.();
       const hasSpread = expr.arguments.some((a) => ts.isSpreadElement(a));
       const dispatchArgs = hasSpread ? flattenCallArgs(expr.arguments) : [...expr.arguments];
       if (

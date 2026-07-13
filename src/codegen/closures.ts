@@ -1341,19 +1341,13 @@ const STANDALONE_TYPED_ARRAY_SCALAR_HOFS: ReadonlySet<string> = new Set([
  * (`Uint8Array`, `Int8Array`, …). Recognises the type via its symbol name and,
  * defensively, via the apparent type so a narrowed/aliased view still matches.
  */
-function isTypedArrayReceiverType(recvType: ts.Type, ctx: CodegenContext): boolean {
-  const named = (t: ts.Type | undefined): boolean => {
-    const n = t?.getSymbol?.()?.getName?.();
-    return n !== undefined && TYPED_ARRAY_VIEW_NAMES.has(n);
-  };
-  if (named(recvType)) return true;
-  try {
-    const apparent = ctx.checker.getApparentType?.(recvType);
-    if (named(apparent)) return true;
-  } catch {
-    // ignore checker errors — default to the host-callback path
-  }
-  return false;
+function isTypedArrayReceiverType(recvType: ts.Type, _ctx: CodegenContext): boolean {
+  // A concrete typed-array receiver carries its view name directly on the type
+  // symbol; the interception is scoped to that (known-element-kind) shape. A
+  // narrowed/aliased view without a direct symbol falls through to the host
+  // path (no regression — that path already worked pre-#2903).
+  const n = recvType.getSymbol?.()?.getName?.();
+  return n !== undefined && TYPED_ARRAY_VIEW_NAMES.has(n);
 }
 
 /**
