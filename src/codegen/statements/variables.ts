@@ -273,6 +273,29 @@ function nativeStringVecType(ctx: CodegenContext): ValType | null {
   return { kind: "ref_null", typeIdx: vecTypeIdx };
 }
 
+/**
+ * (#2106 S1 / PR-2) Will this `var` declaration's slot be retyped from the
+ * hoist-time externref to a concrete non-any ref during its declaration compile?
+ *
+ * The ONLY arm that retypes a hoisted externref slot to a concrete ref is the
+ * standalone-RegExp-match-array override below (`existingIsExternref && newIsRef`
+ * — the general #962 guard refuses every other externref → ref retype). So this
+ * predicate is exactly `inferStandaloneRegExpMatchArrayType(...) !== null`.
+ *
+ * Used by `hoistVarDecl` (index.ts): under the `undefinedSingleton` regime the
+ * hoisted externref slot is initialized to the tag-1 `$undefined` singleton (a
+ * NON-null `$AnyValue` ref). After the retype to `(ref null N)`, the
+ * `local-set-coerce` stack-balance fixup would splice an UNGUARDED
+ * `any.convert_extern; ref.cast_null N` on that non-null singleton → "illegal
+ * cast" trap at the first instruction of the function (the dominant flip-ON
+ * RegExp regression cluster). A concrete-ref slot cannot represent the singleton
+ * anyway (it is not `any`), so the hoist emits the flag-OFF `ref.null.extern`
+ * value instead — which casts cleanly to `ref.null N`. Byte-inert flag-OFF.
+ */
+export function hoistedVarRetypesToConcreteRef(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
+  return inferStandaloneRegExpMatchArrayType(ctx, decl.initializer) !== null;
+}
+
 function inferStandaloneRegExpMatchArrayType(
   ctx: CodegenContext,
   initializer: ts.Expression | undefined,

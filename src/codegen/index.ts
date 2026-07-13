@@ -49,6 +49,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
+import { hoistedVarRetypesToConcreteRef } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
@@ -14887,7 +14888,20 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     // In JS, hoisted `var` variables are `undefined` before their declaration,
     // not `null`. For externref locals, emit __get_undefined() + local.set (#737).
     if (wasmType.kind === "externref") {
-      emitUndefined(ctx, fctx);
+      // (#2106 S1 / PR-2) Under the `undefinedSingleton` regime `emitUndefined`
+      // produces the NON-null tag-1 `$undefined` singleton. If this var's
+      // declaration will retype the slot from externref to a concrete non-any
+      // ref (standalone RegExp match array — the sole externref → ref hoist
+      // retype), the later `local-set-coerce` fixup would `ref.cast_null`-trap on
+      // that singleton ("illegal cast", the dominant flip-ON RegExp cluster). A
+      // concrete-ref slot cannot represent the singleton anyway, so emit the
+      // flag-OFF `ref.null.extern` value — it casts cleanly to `ref.null N`.
+      // Byte-inert flag-OFF (the guard is false unless the regime is active).
+      if (undefinedSingletonActive(ctx) && hoistedVarRetypesToConcreteRef(ctx, decl)) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else {
+        emitUndefined(ctx, fctx);
+      }
       fctx.body.push({ op: "local.set", index: localIdx });
     }
     return;
