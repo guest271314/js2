@@ -194,17 +194,37 @@ export function ensureTimsortHelper(
   // the self-hosted driver. Kept hand-written (vec struct access is not in
   // the stdlib dialect; 6 instrs).
   const vecRef: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+  const dataL = 1; // local 0 is the vec param; local 1 holds the extracted data array
+  const dataLocal: LocalDef = { name: "__ts_data", type: { kind: "ref_null", typeIdx: arrTypeIdx } };
   return emitFunc(
     ctx,
     name,
     [vecRef],
     [],
-    [],
+    [dataLocal],
     [
+      // data = vec.data
       L(0),
       { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: dataL },
+      // arg0: data
+      { op: "local.get", index: dataL },
+      // arg1: effLen = min(vec.length, array.len(data)) — (#3201) clamp the sort
+      // length to the physical backing so a sparse array (logical `.length`
+      // beyond the backing) does not trap on the out-of-bounds element access in
+      // the kernel. Beyond-backing indices are holes that sort to the end
+      // (§23.1.3.30); dense arrays keep the logical length (backing ≥ length).
       L(0),
       { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+      { op: "local.get", index: dataL },
+      { op: "array.len" },
+      { op: "i32.lt_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [L(0), { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }],
+        else: [{ op: "local.get", index: dataL }, { op: "array.len" }],
+      } as Instr,
       { op: "f64.convert_i32_s" },
       { op: "call", funcIdx: shTimsortIdx },
     ],
