@@ -47,7 +47,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
-import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
+import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper, undefinedExternInstrs } from "./any-helpers.js";
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -498,10 +498,21 @@ export function emitBoundsCheckedArrayGet(
 
   // Build the "else" branch: out-of-bounds -> default value (or JS undefined
   // when the destructuring caller opted in via `useUndefinedSentinel`).
+  // (#2106 S1) In standalone/nativeStrings with the $undefined singleton flag ON,
+  // an OOB externref destructuring read must yield the tag-1 singleton (not raw
+  // `ref.null.extern`), so the externref default-check (`__extern_is_undefined`,
+  // singleton-only under the flag) fires the default — the for-of loop-head
+  // array-destructuring producer arm (`for (const [a=9] of [[]]) …`). Gated on
+  // `useUndefinedSentinel` so non-destructuring array reads are byte-identical;
+  // flag OFF → `defaultValueInstrs` (`ref.null.extern`, byte-identical).
+  const singletonOob =
+    useUndefinedSentinel && ctx && (elementType.kind === "externref" || elementType.kind === "ref_extern")
+      ? undefinedExternInstrs(ctx)
+      : undefined;
   const elseInstrs: Instr[] =
     undefinedFuncIdx !== undefined
       ? [{ op: "call", funcIdx: undefinedFuncIdx } as Instr]
-      : defaultValueInstrs(valueType);
+      : (singletonOob ?? defaultValueInstrs(valueType));
 
   // When the element type is a non-null ref, the else branch produces ref.null
   // which is ref_null. Use ref_null as the block type so both branches validate,
