@@ -15,6 +15,14 @@ area: codegen
 language_feature: type-coercion
 goal: core-semantics
 related: [2004, 2051, 2030, 2001]
+# (#3102) PR-1 array-absence producer completion adds gated singleton arms +
+# explanatory comments to three god-files (destructuring-params +13, type-coercion
+# +13, array-methods +11). The growth is intended (byte-inert flag-OFF producer
+# fixes at their canonical sites, not a barrel/driver); allow it for this change-set.
+loc-budget-allow:
+  - src/codegen/destructuring-params.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/array-methods.ts
 origin: "2026-06-11 analysis program (report 02 phase P3); stub 08-E21"
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): SUSPENDED, not dev-claimable as a fresh sprint task. P3 headline landed (PR #1701, commit 347f3c79a). The remaining S1 standalone $undefined tag-1 singleton is an ATOMIC ~40-site change (producer flip breaks all ref.is_null nullish consumers) — see memory project_2106_undefined_singleton_s1_atomic; branch issue-2106-s1-undefined-singleton. Resume-only for a senior-dev (max effort), NOT a routine sprint-65 dev pull. → backlog."
 ---
