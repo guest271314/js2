@@ -189,6 +189,51 @@ export interface ObjectRuntimeTypes {
  * instead of `__obj_hash`, 146 invalid-Wasm test262 binaries). So we end any
  * pending batch first; registration then happens in a clean, final regime.
  */
+/**
+ * (#3238) Standalone/WASI-native `class Sub extends Object` construction.
+ *
+ * `super()` / the implicit default derived constructor of an `Object` subclass
+ * lowers the parent creation to a `__new_Object` host import (see the two
+ * `ensureLateImport(ctx, "__new_<Parent>", …)` sites in class-bodies.ts). In
+ * standalone mode there is no JS host to satisfy it, so the import leaks even
+ * though the module still passes — the sole remaining host import of the
+ * `subclass-Object` conformance cluster.
+ *
+ * Per §20.1.1.1 `Object ( [ value ] )`: when NewTarget is a subclass (neither
+ * undefined nor the `%Object%` intrinsic itself), the `value` argument is
+ * IGNORED and the result is `OrdinaryCreateFromConstructor(NewTarget,
+ * "%Object.prototype%")` — a fresh ordinary object whose [[Prototype]] is the
+ * subclass's prototype. The caller already re-points the prototype and brand
+ * via `emitSetSubclassProto` / `emitSetSubclassUserBrand`, so constructing a
+ * fresh native plain object here (and letting those run) is spec-correct.
+ * Argument side effects are still evaluated at the call site (then passed as
+ * this function's — ignored — params), preserving §13.3.7.1
+ * ArgumentListEvaluation ordering.
+ *
+ * Emits an in-module `__new_Object : (externref × argCount) -> externref` whose
+ * body ignores its params and tail-returns `call __new_plain_object`. Idempotent
+ * on `__new_Object`. Host/gc mode never calls this — it keeps the import.
+ */
+export function emitStandaloneObjectConstructor(ctx: CodegenContext, argCount: number): void {
+  if (ctx.funcMap.has("__new_Object")) return;
+
+  // Guarantee the native plain-object substrate is registered (registers
+  // `__new_plain_object` as a DEFINED func; idempotent).
+  ensureObjectRuntime(ctx);
+  const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object");
+  if (newPlainObjectIdx === undefined) return; // defensive: substrate unavailable
+
+  const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
+  const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], "__new_Object_type");
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__new_Object", funcIdx);
+  // Ignore the (already side-effect-evaluated) constructor arguments and return
+  // a fresh native plain object. `return_call` keeps the tail position so no
+  // extra frame is retained.
+  const body: Instr[] = [{ op: "return_call", funcIdx: newPlainObjectIdx } as Instr];
+  pushDefinedFunc(ctx, funcIdx, { name: "__new_Object", typeIdx, locals: [], body, exported: false });
+}
+
 export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (ctx.objectRuntimeTypes) return ctx.objectRuntimeTypes;
 
