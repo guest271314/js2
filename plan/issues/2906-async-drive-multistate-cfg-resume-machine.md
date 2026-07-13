@@ -1009,3 +1009,27 @@ the gen body / `yield*` / nested-yield (shared with 3d-i′); forward-referenced
 const/arrow-held async gens (the gate is bounded to direct named-function calls);
 `break`/`continue`/`try` in the consumer loop body (abrupt close via `it.return()`).
 Issue stays `in-progress` for 3d-iii + the slice-1d carrier widen.
+
+## Slice 3d-iii(a) — implicit yield-await §27.6.3.8 for PromiseLike operands (LANDED → #3207)
+
+**What shipped (host-free wasi lane).** §27.6.3.8 `AsyncGeneratorYield` awaits ANY
+thenable, not only the `Promise` builtin. #3120 landed the static classifier for
+`Promise`-typed / union-with-Promise plain `yield E`; #3207 extends
+`yieldOperandIsPromiseTyped` (async-cps.ts) to also recognise a `PromiseLike<T>`-typed
+operand (a structural thenable), routing it through the same
+suspend+`settleYield(fromSent)` lane. Verified: `const t: PromiseLike<number> =
+Promise.resolve(5); yield t` delivers `5` (was NaN — the un-awaited thenable object).
+Correct-or-inert (a non-native thenable fails the suspend's `ref.test $Promise` and
+falls through to the pre-fix raw-yield delivery). Byte-inertness A/B: exactly ONE hash
+changed (`promiseLikeYield wasi`); all gc/standalone + every other wasi program
+identical. Tests in `tests/issue-3207-asyncgen-yield-promiselike.test.ts`.
+
+**Banked (higher-value, blocked BELOW this lane).** The dominant residual §27.6.3.8
+gap is a **native-`$Promise` value-representation bug**, not a classifier issue: a
+`$Promise` that flows through a user-function return (`yield mk()`) or a Promise-typed
+local (`const pv = mk(); yield pv`) loses its native struct identity (the suspend's
+`ref.test $Promise` fails → delivered raw → NaN), while `yield await mk()` → 5 works.
+This is the native-`$Promise` identity-preservation family (cf. #3134), below the
+async-frame lane — the yield-await classifier cannot reach it. `any`-typed runtime
+thenables need a runtime thenable probe in the settle arm (the #3120 follow-up).
+Issue stays `in-progress` for the remaining 3d-iii edges + the slice-1d carrier widen.
