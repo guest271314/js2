@@ -1,10 +1,11 @@
 ---
 id: 3231
 title: "Standalone: native DisposableStack (sync) — replace host imports with a WasmGC class"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-dispose
 created: 2026-07-13
 updated: 2026-07-13
+completed: 2026-07-13
 priority: high
 feasibility: hard
 task_type: feature
@@ -121,3 +122,26 @@ reuses `using` substrate). Async = Phase 2 (#3132).
 `tests/issue-3231-standalone-native-disposablestack.test.ts` — construct/disposed,
 use/adopt/defer LIFO, move transfer, disposed-throw, SuppressedError aggregation;
 host lane byte-identical; NET≥0 merge_group standalone floor.
+
+## Landed (Phase 1a — PR #3009)
+
+`src/codegen/disposable-runtime.ts` (new) + wiring in `expressions/extern.ts`
+(method dispatch), `expressions/new-super.ts` (`new`), `property-access.ts`
+(`disposed` getter), `closures.ts` (native-closure gate for defer/adopt),
+`index.ts` (finalize fill). Externref-carried `$DisposableStack` struct; disposer
+callbacks stored as WasmGC closures + invoked LIFO via a reserve/fill driver
+calling `__call_fn_0`/`__call_fn_1` (funcIdx resolved from `mod.exports` — the
+`__call_fn_N` exports are NOT in `funcMap`, unlike `__call_fn_method_N`). Host lane
+proven byte-identical. 11 local tests green; no Map-native / #2029 regression.
+
+**Phase 1b / follow-ups** (all fall through to the existing host path → NET-neutral
+in standalone, not regressions):
+- `use()` — dynamic `value[Symbol.dispose]` lookup + callable validation (reuse the
+  `using`-statement native disposer read). ~14 flips.
+- SuppressedError aggregation for multi-error disposal (try/catch per disposer,
+  chain into a native SuppressedError). 7 tests.
+- **defer-in-a-loop closures** — a loop-body arrow passed to `defer` does not run at
+  dispose (a loop-scoped-closure storage limitation, not the entry array — proven:
+  5 explicit defers past the initial capacity work; a `for`-loop of 3 does not).
+- `AsyncDisposableStack` (`disposeAsync` → Promise) — Phase 2, gated on #3132.
+- `stack[Symbol.dispose]()` element-access call (vs `.dispose()`).
