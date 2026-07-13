@@ -116,16 +116,27 @@ function inlineIntoFunction(
   let currentSize = originalSize;
   let anyFuncChange = false;
 
+  // callerRename collects rewrites that apply to caller-scope SSA ids
+  // produced by inlined calls. Each time we inline a call, we add:
+  //   callSite.result  →  renamedReturn (callee's return value post-rename)
+  // so every later instruction / terminator uses the inlined value
+  // transparently.
+  //
+  // #3213 — this MUST be function-scoped, not per-block. An inlined call's
+  // result can be a CROSS-BLOCK value: `const b = pred(n); if (…) …; use b`
+  // defines `b` in the entry block but uses it in the then-block and the
+  // continuation. When `callerRename` was reset per block, those downstream
+  // uses of `b` were never repointed to the inlined return id, leaving `b`
+  // undefined → `verifyIrFunction` reported "use of SSA value before def" and
+  // demoted the whole function (an IR-first hard error). Blocks are visited in
+  // definition/dominance order (from-ast emits reducible, forward-only CFGs —
+  // loops are declarative instrs, not br_if back-edges), so a call's rename is
+  // always recorded before the blocks that consume it are processed; SSA ids
+  // are globally unique, so a rename only ever repoints its own def's uses.
+  const callerRename = new Map<IrValueId, IrValueId>();
+
   const newBlocks: IrBlock[] = [];
   for (const block of caller.blocks) {
-    // callerRename collects rewrites that apply to caller-scope SSA ids
-    // produced by prior instructions in THIS block. Specifically, each time
-    // we inline a call, we add:
-    //   callSite.result  →  renamedReturn (callee's return value post-rename)
-    // so every later instruction / the terminator uses the inlined value
-    // transparently.
-    const callerRename = new Map<IrValueId, IrValueId>();
-
     const newInstrs: IrInstr[] = [];
     let blockChanged = false;
 
