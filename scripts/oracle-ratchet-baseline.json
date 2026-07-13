@@ -273,6 +273,12 @@
       "field": "ctxChecker",
       "extra": 1,
       "reason": "#3173: tryEmitNativeProtoReflectiveCall resolves a LIB-MISSING DataView member (getFloat16/setFloat16 — absent from the bundled lib, so no method-signature symbol exists) by tracing the receiver variable back to its `<Builtin>.prototype.<member>` initializer via checker.getSymbolAtLocation(ident).valueDeclaration. ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires. Same shape as the #3172 collections-brand entry above."
+    },
+    {
+      "file": "src/codegen/expressions/calls.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3236 Slice 1b: isGeneratorPrototypeReceiver traces the `.call`/`.apply` receiver variable back to its `Object.getPrototypeOf(<genFn>).prototype` / `<genFn>.prototype` initializer NODE via checker.getSymbolAtLocation(ident).valueDeclaration to prove it is the native %GeneratorPrototype% singleton (the receiver is `any`-typed, so no type-fact resolves it). ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires — identical shape to the #3173 DataView entry above."
     }
   ]
 }

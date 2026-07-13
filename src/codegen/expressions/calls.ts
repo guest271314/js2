@@ -160,6 +160,7 @@ import {
   ensureDateNativeProtoGlue,
   ensureObjectNativeProtoGlue,
   ensureStringNativeProtoGlue,
+  ensureGeneratorPrototypeNativeProtoGlue,
   emitTypedArrayIntrinsicCtorObject,
   emitArrayIteratorPrototypeSingleton,
   emitGeneratorFunctionPrototypeSingleton,
@@ -1250,8 +1251,24 @@ function emitReflectiveNativeProtoClosureCall(
   member: string,
   kind: "method" | "getter",
   isCall: boolean,
+  /**
+   * (#3236 Slice 1b) When set, resolve the closure through the factory's
+   * `refusalBodyFallback` — the identity-stable throwing stand-in a member with
+   * no wired native body reifies to. Needed for the %GeneratorPrototype% members
+   * (`next`/`return`/`throw`), whose only body IS the catchable-TypeError refusal
+   * and whose stored `$Object` data-property value is exactly that fallback
+   * singleton. Off by default so the existing native-bodied callers (Array/Object
+   * proto slice/etc.) are byte-identical.
+   */
+  useRefusalBodyFallback = false,
 ): ValType | undefined {
-  const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, kind);
+  const closure = ensureStandaloneNativeMethodClosure(
+    ctx,
+    brand,
+    member,
+    kind,
+    useRefusalBodyFallback ? { refusalBodyFallback: true } : undefined,
+  );
   if (!closure) return undefined; // member body refuses / not native yet → fall through
   const closureInfo = ctx.closureInfoByTypeIdx.get(closure.type.typeIdx);
   if (!closureInfo) return undefined;
@@ -1338,6 +1355,90 @@ function emitReflectiveNativeProtoClosureCall(
   emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
   fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
   return closureInfo.returnType ?? { kind: "externref" };
+}
+
+/**
+ * (#3236 Slice 1b) True when `objExpr` syntactically resolves to the native
+ * `%GeneratorPrototype%` singleton — the object whose own `next`/`return`/`throw`
+ * are the brand-checked closure values Slice 1 installed. Recognises the two
+ * shapes the test262 GeneratorPrototype `this-val-*` tests use, tracing at most
+ * ONE variable-initializer indirection (`var GP = <expr>; GP.next.call(x)`):
+ *
+ *   - `<genFn>.prototype`                    (§27.5.1 — genFn.prototype IS %GP%)
+ *   - `Object.getPrototypeOf(<genFn>).prototype`
+ *          (getPrototypeOf(genFn) = %Generator%, whose own `.prototype` = %GP%)
+ *
+ * `<genFn>` must be a `function*` declaration known to `ctx.generatorFunctions`
+ * (sync only — async generators keep the host-import path). Conservative: any
+ * shape it can't prove returns false, so the caller falls through to the
+ * unchanged legacy `.call` lowering (no regression).
+ */
+function isGeneratorPrototypeReceiver(ctx: CodegenContext, objExpr: ts.Expression): boolean {
+  let cur = unwrapTransparent(objExpr);
+  // One level of `var GP = <init>` indirection.
+  if (ts.isIdentifier(cur)) {
+    const sym = ctx.checker.getSymbolAtLocation(cur);
+    const decl = sym?.valueDeclaration;
+    if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
+      cur = unwrapTransparent(decl.initializer);
+    }
+  }
+  if (!ts.isPropertyAccessExpression(cur) || cur.name.text !== "prototype") return false;
+  const base = unwrapTransparent(cur.expression);
+  // Shape A: `<genFn>.prototype`.
+  if (ts.isIdentifier(base) && ctx.generatorFunctions.has(base.text)) return true;
+  // Shape B: `Object.getPrototypeOf(<genFn>).prototype`.
+  if (ts.isCallExpression(base)) {
+    const callee = unwrapTransparent(base.expression);
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "getPrototypeOf" &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "Object" &&
+      base.arguments.length >= 1
+    ) {
+      const arg = unwrapTransparent(base.arguments[0]!);
+      if (ts.isIdentifier(arg) && ctx.generatorFunctions.has(arg.text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * (#3236 Slice 1b) Reflective `<GP>.next.call/apply(thisArg, …)` where the
+ * `.call`/`.apply` receiver `<GP>.next` is a DYNAMICALLY-READ %GeneratorPrototype%
+ * member closure. Unlike `tryEmitNativeProtoReflectiveCall` (which recovers the
+ * closure from the receiver's TS symbol), here the receiver object `<GP>` is
+ * `any`-typed (`Object.getPrototypeOf(g).prototype`), so `<GP>.next` has no
+ * method-signature symbol — the closure value is an own `$Object` data property.
+ * We instead resolve the `(brand, member)` from the receiver's syntactic
+ * GeneratorPrototype provenance, then reuse the shared reflective closure-call
+ * emitter, which compiles `<GP>.next` to the stored closure externref, casts it
+ * to the wrapper struct, and `call_ref`s it with `thisArg → this` param. The
+ * closure's Slice-1 catchable-TypeError refusal body then fires on the bad
+ * `this` (GeneratorValidate §27.5.1.2). Standalone-gated; returns the result
+ * ValType when handled, or `undefined` to fall through unchanged.
+ */
+function tryEmitGeneratorProtoReflectiveCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  innerExpr: ts.Expression,
+  isCall: boolean,
+): ValType | undefined {
+  if (!(ctx.standalone || ctx.wasi)) return undefined;
+  const recv = unwrapTransparent(innerExpr);
+  if (!ts.isPropertyAccessExpression(recv)) return undefined;
+  const member = recv.name.text;
+  if (member !== "next" && member !== "return" && member !== "throw") return undefined;
+  if (!isGeneratorPrototypeReceiver(ctx, recv.expression)) return undefined;
+  const brand = ensureGeneratorPrototypeNativeProtoGlue(ctx);
+  if (brand === undefined) return undefined;
+  // `useRefusalBodyFallback: true` — the GeneratorPrototype members carry only
+  // the catchable-TypeError refusal body (no wired native body), and their
+  // stored `$Object` data-property value IS that identity-stable fallback
+  // singleton, so the reflective cast must target the same struct type.
+  return emitReflectiveNativeProtoClosureCall(ctx, fctx, expr, recv, brand, member, "method", isCall, true);
 }
 
 /** Unwrap parenthesized / `as` / non-null wrappers to the underlying expression. */
@@ -5686,6 +5787,15 @@ function compileCallExpression(
         // recovered by data-flow trace rather than a TS symbol.
         const descAccResult = tryEmitNativeProtoDescriptorAccessorCall(ctx, fctx, expr, recv, isCall);
         if (descAccResult !== undefined) return descAccResult;
+
+        // (#3236 Slice 1b) Reflective `.call`/`.apply` on a dynamically-read
+        // %GeneratorPrototype% member closure (`GeneratorPrototype.next.call(x)`).
+        // The receiver object is `any`-typed so the symbol-based paths above miss;
+        // resolve the (brand, member) from the receiver's GeneratorPrototype
+        // provenance and invoke the stored closure with `thisArg → this`, so its
+        // Slice-1 brand-check fires on the bad `this`. Standalone-gated.
+        const genProtoResult = tryEmitGeneratorProtoReflectiveCall(ctx, fctx, expr, recv, isCall);
+        if (genProtoResult !== undefined) return genProtoResult;
       }
 
       // Sub-fix 3 (#1596): Function.prototype.{apply,call}.call(fn, ...) reshape.
