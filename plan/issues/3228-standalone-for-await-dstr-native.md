@@ -17,6 +17,13 @@ goal: standalone-mode
 umbrella: 3178
 related: [3178, 2906, 3132, 2602, 1930]
 origin: "2026-07-13 opus-gapmap standalone leaky-column measure-first: the only genuinely-unclaimed bounded leaky de-leak. #3178 slice S4."
+# (#3102) Intentional growth: the dstr-head admission arm in analyzeForAwait +
+# the pattern-name spill exclusion + the destructuring post-deliver hook live
+# next to their for-await siblings in async-cps.ts (the for-await planner owns
+# this seam); async-frame.ts gets the single additive postDeliverEmit call.
+loc-budget-allow:
+  - src/codegen/async-cps.ts
+  - src/codegen/async-frame.ts
 ---
 
 # #3228 — native async-iterator drive for `for await` with a destructuring binding
