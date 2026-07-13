@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
-// #3208 — reflective String.prototype.{trim,trimStart,trimEnd}.call in
+// #3217 — reflective String.prototype.{trim,trimStart,trimEnd}.call in
 // standalone mode. Before this slice the reflective closure body for the
 // whitespace-trim family REFUSED (emitProtoMemberBodyRefusal), so the call fell
 // through to the legacy `.call` lowering, which for primitive / array receivers
@@ -28,7 +28,7 @@ async function runStandalone(src: string): Promise<number> {
   return (instance.exports as { test(): number }).test();
 }
 
-describe("#3208 — reflective String.prototype.{trim,trimStart,trimEnd}.call (standalone)", () => {
+describe("#3217 — reflective String.prototype.{trim,trimStart,trimEnd}.call (standalone)", () => {
   it("trim.call('  x  ') === 'x'", async () => {
     expect(
       await runStandalone(

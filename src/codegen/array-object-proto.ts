@@ -789,7 +789,7 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   // ABI of 3a but boxes an i32 boolean result via __box_boolean.
   const SEARCH_BOOLEAN = new Set(["includes", "startsWith", "endsWith"]);
   if (SEARCH_BOOLEAN.has(member)) return emitStringSearchBooleanMemberBody(ctx, fctx, member);
-  // (#3208) The whitespace-trim family — `trim` / `trimStart` / `trimEnd` —
+  // (#3217) The whitespace-trim family — `trim` / `trimStart` / `trimEnd` —
   // returns a STRING (not an index/boolean) and takes NO args, so it has a
   // dedicated body: `? RequireObjectCoercible(this)` → `? ToString(this)` →
   // the native `__str_trim*` helper. Routed here so it never reads the absent
@@ -1198,7 +1198,7 @@ function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionCo
 }
 
 /**
- * (#3208) Native body for a reflective `String.prototype.{trim,trimStart,trimEnd}`
+ * (#3217) Native body for a reflective `String.prototype.{trim,trimStart,trimEnd}`
  * closure. These §22.1.3.{32,34,33} methods take NO arguments and return a
  * STRING, so unlike the char/search bodies this one never touches an arg slot
  * beyond `this` (the closure has arity 0 — reading a param-2 slot that doesn't

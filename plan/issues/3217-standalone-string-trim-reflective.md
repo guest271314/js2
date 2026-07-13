@@ -1,5 +1,5 @@
 ---
-id: 3208
+id: 3217
 title: "standalone: String.prototype.trim/trimStart/trimEnd reflective-call over coerced receivers (host-free native body)"
 status: done
 assignee: ttraenkler/opus-standalone
@@ -22,7 +22,7 @@ related: [2860, 2875, 2885]
 origin: "opus-standalone harvest of #2860 honest-gap lane diff (2026-07-13): String.prototype.trim family sub-slice of #2875, independent of #2885 descriptor core."
 ---
 
-# #3208 — standalone: String.prototype.{trim,trimStart,trimEnd} reflective body
+# #3217 — standalone: String.prototype.{trim,trimStart,trimEnd} reflective body
 
 ## Problem
 
