@@ -1,7 +1,9 @@
 ---
 id: 3244
 title: "Standalone: any-boxed homogeneous reference-element array reads elements as undefined (index + destructuring)"
-status: ready
+status: done
+assignee: opus-anycontainer
+completed: 2026-07-13
 sprint: current
 priority: high
 feasibility: hard
@@ -12,6 +14,9 @@ language_feature: arrays, any-boxing, destructuring, element-access
 goal: standalone-mode
 umbrella: 1781
 related: [2379, 3059, 2151, 2186, 3132, 1042]
+loc-budget-allow:
+  - src/codegen/literals.ts
+  - src/codegen/object-runtime.ts
 created: 2026-07-13
 origin: "opus-asyncthen bucket-2 diagnosis of async-gen dstr host-free fails — the nested-`[{x}]` destructure-null trap drilled to a broader any-container element-rep substrate bug affecting plain index access too. opus-anyrecv confirmed NOT method-dispatch (their #3237); it is value-representation (#2379/#3059 family)."
 ---
@@ -93,3 +98,63 @@ back undefined (nested `[{x}]`, object-property nested-defaults `{ w: {x,y,z} =
 
 `/workspace/.claude/worktrees/*/.tmp/`: `anyarr.mts`, `elemtypes.mts`,
 `index-vs-dstr.mts`, `nullcheck.mts`, `bugB.mts`, `bugB2.mts`.
+
+## Resolution (opus-anycontainer, 2026-07-13)
+
+Root cause was **two separate defects on the standalone lane**, not one. WAT
+inspection of `const a: any = [{ x: 777 }]; a[0].x` vs the working
+`const o = { x: 777 }; const a: any = [o]; a[0].x` was decisive — the inline
+literal built a **null** element, the named-var built a real struct.
+
+**Defect 1 — element read-back (READ time).** `boxVecElementToExternref`
+(`src/codegen/object-runtime.ts`) — which `fillExternGetIdxVecArms` uses to box
+a typed `__vec_<k>` element as it is read through the externref boundary
+(`__extern_get_idx`) — only had arms for `f64` / `i32` / `externref` /
+**string-ref** elements. A homogeneous object array is a `__vec_<objStruct>` and
+a nested array is a `__vec_<innerVec>`; both have a **general GC struct/array
+ref** element, which hit the `return null` fallback → the carrier was skipped →
+`__extern_get_idx` answered the null miss → element read back undefined/NaN.
+Fix: generalize the string-only ref arm to box **any GC struct/array referent**
+via `extern.convert_any` (the universal GC-ref → externref boxing the string arm
+already used), guarded to skip **func-typed** referents (`funcref` is not an
+`anyref` subtype — converting it is invalid Wasm). This alone flipped nested
+arrays, string sub-arrays, and named-object arrays.
+
+**Defect 2 — inline-object-literal carrier mismatch (BUILD time).** An inline
+object literal in an `any` / `Array<any>` context is compiled as a **dynamic
+`$Object`** (externref), because its contextual type is `any`. But the array's
+element carrier is inferred from the literal's *structural* type
+(`{ x: number }` → a **closed `__anon_0` struct** → `__vec_<__anon_0>`). The
+element store then coerced `$Object → (ref null __anon_0)` via
+`any.convert_extern; ref.test; (if … ref.cast (else ref.null))` — the `ref.test`
+**fails** ($Object is not the closed struct) → the element was stored as
+**NULL**. So `a[0]` was genuinely null and Defect 1's fix could not help.
+Fix: extend the existing `#3154`/`#2106 S0` `any`-context element-widening in
+`compileArrayLiteral` (`src/codegen/literals.ts`) — which already re-keys numeric
+`any[]` elements to an externref carrier — to also fire for **plain object-struct
+elements**, so each object is stored by its own dynamic rep (identical to a
+heterogeneous `[1, { x: 777 }]` array, which already boxes every element).
+Standalone/nativeStrings-gated (the host lane uses `__js_array_new` + real JS
+values, already correct); nested-array vec-struct carriers are **excluded**
+(they read back fine via Defect 1's typed vec arm).
+
+**Both fixes are standalone-only** — host-lane binaries are byte-identical to
+`origin/main` (verified via SHA over the host-lane binary for object-array,
+typed-array, class, and object-literal shapes). GC-vs-standalone parity verified
+across 13 shapes (index, nested, deep-nested, multi-field, multi-element,
+string-field, nested-object-field, typed-then-any, and primitive/string/boolean
+controls) — all match host-free. Regression test:
+`tests/issue-3244-standalone-any-container-elem-rep.test.ts` (10 cases).
+
+**Flip-ceiling / breadth.** test262 is not checked out locally, so the full
+corpus flip-count runs in CI's merge_group standalone floor. Per opus-asyncthen's
+#3245 decomposition, #3244 is the **dominant root** of the ~85-file async-gen
+dstr host-free-FAIL cluster (nested `[{x}]`, `{ w: {x,y,z} = … }` nested-default
+patterns, etc.); the ~30 `notSameValue` files are any-strict-eq (genproto3,
+separate), and the ~29 "error-path" files were a mirage that collapse into #3244
+(their binding-value assert fails first). Coordinated with **opus-leak3**
+(cluster #2, ~925 "Cannot access property on null/undefined") — that cluster is a
+DISTINCT root (missing this-brand-check TypeError on TypedArray/ArrayBuffer
+prototype accessors), NOT #3244; only a small nested-`results[i][j]` slice
+overlaps. Coordinated with **opus-crashes** (`__iterator` plain/user-iterable
+dispatch-guard cluster) — also distinct, no src overlap.
