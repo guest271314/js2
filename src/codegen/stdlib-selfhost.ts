@@ -203,8 +203,9 @@ function mathBuiltinDef(builtin: StdlibMathBuiltin): SelfHostedFuncDef {
   for (const callee of builtin.callees) {
     calleeTypes.set(callee, { params: [F64], returnType: F64 });
   }
-  // Arity 1 (default) or 2 (`pow(base, exp)`) — every param is f64 either way,
-  // matching the sources' `: number` annotations. Context-free, so memoize.
+  // Arity 1 (default) or 2 (`atan2(y, x)`, `pow(base, exp)`) — every param is
+  // f64 either way, matching the sources' `: number` annotations. Context-free,
+  // so memoize.
   const paramTypes: IrType[] = builtin.arity === 2 ? [F64, F64] : [F64];
   return {
     name: builtin.name,

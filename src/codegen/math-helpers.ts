@@ -11,15 +11,15 @@
  * with arithmetic range reduction. Precision target: within 4 ULP of
  * IEEE 754 for the common range.
  *
- * #3141/#3204/#3226 — nearly the whole family is now SELF-HOSTED: written as
- * ordinary TS source in `src/stdlib/math.ts`, compiled through the compiler's
+ * #3141/#3204/#3233/#3226 — nearly the whole family is now SELF-HOSTED: written
+ * as ordinary TS source in `src/stdlib/math.ts`, compiled through the compiler's
  * own IR pipeline (`stdlib-selfhost.ts`) instead of hand-emitted `Instr[]` —
  * the derived family (sinh/cosh/tanh, asinh/acosh/atanh, cbrt, expm1, log1p),
- * the log/trig cores (log/log2, reduce_trig, sin/cos/tan, atan/asin/acos), and
- * exp/pow/log10 (#3226 established none needs new dialect intrinsics — the
- * presumed i32-bit-op / reinterpret / f64.nearest gaps are all avoidable in
- * pure f64). The ONLY Math core still hand-written here is `random` — a host
- * RNG import, not a dialect gap. (`atan2` self-hosts via #3233.)
+ * the log/trig cores (log/log2, reduce_trig, sin/cos/tan, atan/asin/acos),
+ * atan2 (#3233), and exp/pow/log10 (#3226 established none needs new dialect
+ * intrinsics — the presumed i32-bit-op / reinterpret / f64.nearest gaps are all
+ * avoidable in pure f64). The ONLY Math core still hand-written here is
+ * `random` — a host RNG import, not a dialect gap.
  */
 import type { Instr, ValType } from "../ir/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
@@ -37,10 +37,11 @@ import {
   TAN_BUILTIN,
   ASIN_BUILTIN,
   ACOS_BUILTIN,
+  ATAN2_BUILTIN,
   EXP_BUILTIN,
   LOG10_BUILTIN,
   POW_BUILTIN,
-} from "../stdlib/math.js"; // (#3141/#3204/#3226) TS-source builtin bodies
+} from "../stdlib/math.js"; // (#3141/#3204/#3233/#3226) TS-source builtin bodies
 
 // ─── Instruction shorthand helpers ──────────────────────────────────
 const f64c = (v: number): Instr => ({ op: "f64.const", value: v }) as Instr;
@@ -270,16 +271,10 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
     addedFuncs.set("Math_acos", emitSelfHostedMathFunc(ctx, ACOS_BUILTIN));
   }
 
-  // Math.atan2(y, x)
+  // Math.atan2(y, x) — self-hosted (#3233): binary, pure f64, calls the
+  // self-hosted Math_atan (registered just above via `needAtan`).
   if (needed.has("atan2")) {
-    const atanIdx = getFuncIdx("Math_atan");
-    addMathFunc({
-      name: "Math_atan2",
-      params: [f64Type, f64Type],
-      results: f64Result,
-      locals: [{ name: "atmp", type: f64Type }], // local 2 = atan_result temp
-      body: buildAtan2Body(atanIdx),
-    });
+    addedFuncs.set("Math_atan2", emitSelfHostedMathFunc(ctx, ATAN2_BUILTIN));
   }
 
   // Math.log2(x) = e + log2(f), computed via range reduction (exact for powers of 2)
@@ -315,118 +310,4 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
       addedFuncs.set(builtin.name, emitSelfHostedMathFunc(ctx, builtin));
     }
   }
-}
-
-// ─── Complex body builders ──────────────────────────────────────────
-
-function buildAtan2Body(atanIdx: number): Instr[] {
-  // atan2(y, x): params 0=y, 1=x
-  return [
-    // NaN checks
-    ...ifThenRet([localGet(0), localGet(0), fne], [f64c(NaN)]),
-    ...ifThenRet([localGet(1), localGet(1), fne], [f64c(NaN)]),
-
-    // y == 0 cases
-    localGet(0),
-    f64c(0),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // y == 0, x > 0 → +0 (preserving sign of y)
-        localGet(1),
-        f64c(0),
-        fgt,
-        { op: "if", blockType: { kind: "empty" }, then: [localGet(0), ret] } as Instr,
-        // y == 0, x < 0 → copysign(pi, y)
-        localGet(1),
-        f64c(0),
-        flt,
-        { op: "if", blockType: { kind: "empty" }, then: [f64c(PI), localGet(0), copysign, ret] } as Instr,
-        // y == 0, x == 0 → copysign(0 or pi based on sign of x)
-        // atan2(+0,+0) = +0, atan2(+0,-0) = pi, atan2(-0,+0) = -0, atan2(-0,-0) = -pi
-        // Check sign of x via 1/x: +0 → +Inf, -0 → -Inf
-        f64c(1),
-        localGet(1),
-        div,
-        f64c(0),
-        fgt,
-        ifElse(f64Type, [f64c(0), localGet(0), copysign], [f64c(PI), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // x == +Inf
-    localGet(1),
-    f64c(Infinity),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        localGet(0),
-        fabs,
-        f64c(Infinity),
-        feq,
-        ifElse(f64Type, [f64c(PI / 4), localGet(0), copysign], [f64c(0), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // x == -Inf
-    localGet(1),
-    f64c(-Infinity),
-    feq,
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        localGet(0),
-        fabs,
-        f64c(Infinity),
-        feq,
-        ifElse(f64Type, [f64c((3 * PI) / 4), localGet(0), copysign], [f64c(PI), localGet(0), copysign]),
-        ret,
-      ],
-    } as Instr,
-
-    // y == ±Inf, x finite
-    ...ifThenRet([localGet(0), fabs, f64c(Infinity), feq], [f64c(HALF_PI), localGet(0), copysign]),
-
-    // General case: atan(y/x) with quadrant adjustment
-    localGet(1),
-    f64c(0),
-    fgt,
-    ifElse(
-      f64Type,
-      [localGet(0), localGet(1), div, call(atanIdx)],
-      [
-        localGet(1),
-        f64c(0),
-        flt,
-        ifElse(
-          f64Type,
-          [
-            localGet(0),
-            localGet(1),
-            div,
-            call(atanIdx),
-            localSet(2),
-            // Add or subtract pi based on sign of y
-            localGet(0),
-            f64c(0),
-            fge,
-            ifElse(f64Type, [localGet(2), f64c(PI), add], [localGet(2), f64c(PI), sub]),
-          ],
-          [
-            // x == 0, y != 0 → copysign(pi/2, y)
-            f64c(HALF_PI),
-            localGet(0),
-            copysign,
-          ],
-        ),
-      ],
-    ),
-  ];
 }
