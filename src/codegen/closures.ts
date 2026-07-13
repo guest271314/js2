@@ -1424,6 +1424,20 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
       if (ctx.standalone && (methodName === "call" || methodName === "apply")) {
         return false;
       }
+      // (#3231) In standalone/nativeStrings mode a callback passed to a native
+      // DisposableStack `defer`/`adopt` is STORED as a first-class WasmGC closure
+      // (the native runtime later invokes it via `__call_fn_N`), NOT wrapped by
+      // the host `__make_callback`. Route it to the closure-struct path so the
+      // dispatcher can find it host-free. `use` isn't native yet (Phase 1b) — its
+      // callback keeps the host path. Standalone-gated; js-host lane unchanged.
+      if (ctx.nativeStrings && (methodName === "defer" || methodName === "adopt")) {
+        try {
+          const rt = ctx.checker.getTypeAtLocation(propAccess.expression);
+          if (rt.getSymbol?.()?.getName?.() === "DisposableStack") return false;
+        } catch {
+          // fall through to the default host-callback decision
+        }
+      }
       try {
         const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
         // Search the receiver type's symbol chain for a class name that

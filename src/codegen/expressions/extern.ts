@@ -12,6 +12,7 @@ import type { CodegenContext, ExternClassInfo, FunctionContext, RestParamInfo } 
 import { compileCollectionGetOrInsert } from "../collections-es2025.js";
 import { addUnionImports, getArrTypeIdxFromVec } from "../index.js";
 import { tryCompileNativeMapMethodCall } from "../map-runtime.js";
+import { tryCompileNativeDisposableStackMethodCall } from "../disposable-runtime.js";
 import { tryCompileNativeSetMethodCall } from "../set-runtime.js";
 import { tryCompileNativeSetAlgebraCall } from "../set-algebra.js";
 import { tryCompileNativeWeakMethodCall } from "../weak-collections-runtime.js";
@@ -121,6 +122,16 @@ function compileExternMethodCall(
     }
     const weakResult = tryCompileNativeWeakMethodCall(ctx, fctx, className, propAccess, callExpr);
     if (weakResult !== undefined) return weakResult;
+  }
+
+  // (#3231) Native DisposableStack method dispatch in standalone / nativeStrings
+  // mode. Without this, `s.defer(...)`/`.dispose()` etc. emit `DisposableStack_*`
+  // host imports the standalone runtime can't satisfy. Route to the WasmGC-native
+  // DisposableStack runtime. `use` (dynamic [Symbol.dispose] lookup) and
+  // AsyncDisposableStack are Phase 1b/2 — they fall through to the host path.
+  if (className === "DisposableStack" && ctx.nativeStrings) {
+    const dsResult = tryCompileNativeDisposableStackMethodCall(ctx, fctx, propAccess, callExpr);
+    if (dsResult !== undefined) return dsResult;
   }
 
   if (!className) return null;
