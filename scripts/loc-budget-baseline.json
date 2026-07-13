@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-13",
   "threshold": 1500,
-  "totalCeiling": 407669,
+  "totalCeiling": 407695,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -18,7 +18,7 @@
     "src/codegen/dataview-native.ts": 5287,
     "src/codegen/declarations.ts": 5637,
     "src/codegen/destructuring-params.ts": 2119,
-    "src/codegen/expressions.ts": 1525,
+    "src/codegen/expressions.ts": 1551,
     "src/codegen/expressions/assignment.ts": 7471,
     "src/codegen/expressions/builtins.ts": 3895,
     "src/codegen/expressions/calls-closures.ts": 1517,

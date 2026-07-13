@@ -44,7 +44,7 @@ import { elemGetOp, resolveArrayInfo, typedArraySearchSignedness, unpackedElemTy
 import { flatStringType, stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
-import { coercionInstrs } from "../type-coercion.js";
+import { coercionInstrs, defaultValueInstrs } from "../type-coercion.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import {
   addFuncType,
@@ -4050,14 +4050,50 @@ function compileForOfArray(
   // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
   // a growth that reallocated the backing array leaves the hoisted `dataLocal`
   // stale.
-  if (reReadLive) {
-    fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  // (#3224) In standalone, bounds-check the per-element read against the
+  // physical WasmGC backing so a sparse array (logical `.length` set beyond the
+  // backing) yields the absent value instead of an OOB TRAP. The array iterator
+  // visits every index up to the LOGICAL length (§23.1.5.1) — so this does NOT
+  // clamp the loop; it only guards the READ: `if i < array.len(data): data[i]
+  // else <default>`. `defaultValueInstrs` gives the same rep the within-backing
+  // holes use — externref → `ref.null.extern` (≡ standalone `undefined`), f64 →
+  // the sNaN hole sentinel, i32/packed → 0. No-op for dense arrays.
+  if (ctx.standalone) {
+    const dataIterLocal = allocLocal(fctx, `__forof_dataiter_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: arrTypeIdx,
+    });
+    if (reReadLive) {
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+    }
+    fctx.body.push({ op: "local.set", index: dataIterLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: dataIterLocal });
+    fctx.body.push({ op: "array.len" });
+    fctx.body.push({ op: "i32.lt_s" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: readElemType },
+      then: [
+        { op: "local.get", index: dataIterLocal } as Instr,
+        { op: "local.get", index: iLocal } as Instr,
+        { op: elemReadOp, typeIdx: arrTypeIdx } as Instr,
+      ],
+      else: defaultValueInstrs(readElemType),
+    } as Instr);
   } else {
-    fctx.body.push({ op: "local.get", index: dataLocal });
+    if (reReadLive) {
+      fctx.body.push({ op: "local.get", index: vecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+    }
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
   }
-  fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
   // (#2001 S1) A for-of over an `any[]` with a literal hole reads `$Hole` at the
   // hole index; map it back to `undefined` (the iteration value of an absent
   // index — for-of uses array iterator Get, which yields undefined for holes).
@@ -4332,9 +4368,31 @@ function compileForOfArrayEntries(
     fctx.body.push({ op: "f64.convert_i32_s" });
     fctx.body.push({ op: "local.set", index: keyLocal! });
     // value = data[i] (packed i8/i16 widens to i32 on read, #2934)
-    fctx.body.push({ op: "local.get", index: dataLocal });
-    fctx.body.push({ op: "local.get", index: iLocal });
-    fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
+    // (#3224) In standalone, bounds-check the read against the physical backing
+    // so a sparse array (logical length beyond the backing) yields the absent
+    // value (undefined ≡ ref.null.extern; f64 → sNaN sentinel) instead of an OOB
+    // trap. entries() visits every index up to the logical length; the read is
+    // guarded, the loop is not clamped. No-op for dense arrays.
+    if (ctx.standalone) {
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "local.get", index: dataLocal });
+      fctx.body.push({ op: "array.len" });
+      fctx.body.push({ op: "i32.lt_s" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: readElemType },
+        then: [
+          { op: "local.get", index: dataLocal } as Instr,
+          { op: "local.get", index: iLocal } as Instr,
+          { op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr,
+        ],
+        else: defaultValueInstrs(readElemType),
+      } as Instr);
+    } else {
+      fctx.body.push({ op: "local.get", index: dataLocal });
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
+    }
     const valLocalType = getLocalType(fctx, valLocal!);
     if (valLocalType && !valTypesMatch(readElemType, valLocalType)) {
       coerceType(ctx, fctx, readElemType, valLocalType);
