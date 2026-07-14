@@ -854,18 +854,7 @@ export function emitArrowParamDestructuring(
           // Per JS spec: only undefined triggers defaults, NOT null (#796)
           const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
           fctx.body.push({ op: "local.tee", index: tmpField });
-          const isUndefIdx = ensureLateImportShared(
-            ctx,
-            "__extern_is_undefined",
-            [{ kind: "externref" }],
-            [{ kind: "i32" }],
-          );
-          flushLateImportShiftsShared(ctx, fctx);
-          if (isUndefIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          } else {
-            fctx.body.push({ op: "ref.is_null" });
-          }
+          emitExternIsUndefinedCheck(ctx, fctx);
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, element.initializer, fieldType);
           fctx.body.push({ op: "local.set", index: localIdx });
@@ -979,18 +968,7 @@ export function emitArrowParamDestructuring(
           // Per JS spec: only undefined triggers defaults, NOT null (#796)
           const tmpElem = allocLocal(fctx, `__ary_dflt_${fctx.locals.length}`, bindingWasmType);
           fctx.body.push({ op: "local.tee", index: tmpElem });
-          const isUndefIdx = ensureLateImportShared(
-            ctx,
-            "__extern_is_undefined",
-            [{ kind: "externref" }],
-            [{ kind: "i32" }],
-          );
-          flushLateImportShiftsShared(ctx, fctx);
-          if (isUndefIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          } else {
-            fctx.body.push({ op: "ref.is_null" });
-          }
+          emitExternIsUndefinedCheck(ctx, fctx);
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, bindingElem.initializer, bindingWasmType);
           fctx.body.push({ op: "local.set", index: localIdx });
@@ -1078,8 +1056,7 @@ function emitParamDefaultCheckInline(
     // `__extern_is_undefined` catches both "omitted" and "explicit undefined".
     // Using `ref.is_null` in addition would wrongly fire the default when the
     // caller passed explicit `null` (#1025 / #1021).
-    const undefIdx = ensureLateImportShared(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-    flushLateImportShiftsShared(ctx, fctx);
+    const undefIdx = ensureExternIsUndefinedImport(ctx, fctx);
     fctx.body.push({ op: "local.get", index: paramIdx });
     if (undefIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: undefIdx });
@@ -1158,8 +1135,7 @@ export function emitArrowParamDefaults(
     // triggered by ensureLateImport inside emitParamDefaultCheckInline would
     // miss `thenInstrs`, leaving stale funcIdx values in its `call` ops.
     if (paramType.kind === "externref") {
-      ensureLateImportShared(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-      flushLateImportShiftsShared(ctx, fctx);
+      ensureExternIsUndefinedImport(ctx, fctx);
     }
 
     // Per spec §14.3.3.1/§8.4.2: throw TypeError when destructuring null/undefined.
@@ -1264,8 +1240,7 @@ export function emitMethodParamDefaults(
     // rationale above in emitArrowParamDefaults. Without this, a late-import
     // shift inside emitParamDefaultCheckInline misses the detached thenInstrs.
     if (paramType.kind === "externref") {
-      ensureLateImportShared(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-      flushLateImportShiftsShared(ctx, fctx);
+      ensureExternIsUndefinedImport(ctx, fctx);
     }
 
     // Per spec §14.3.3.1/§8.4.2: throw TypeError when destructuring null/undefined.
@@ -1642,6 +1617,35 @@ function buildCaptureFieldDef(
   }
   // Immutable, or already boxed (capture's type IS the ref cell type already).
   return { name: cap.name, type: cap.type, mutable: false };
+}
+
+/**
+ * (#3270 dedup) Ensure the `__extern_is_undefined` late import is registered and
+ * flush any resulting funcIdx shift onto the live `fctx.body`, returning its
+ * index (or `undefined` in standalone mode where the import is unavailable).
+ * The flush must land while `fctx.body` is authoritative — before any body swap
+ * detaches the initializer instructions.
+ */
+function ensureExternIsUndefinedImport(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
+  const idx = ensureLateImportShared(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+  flushLateImportShiftsShared(ctx, fctx);
+  return idx;
+}
+
+/**
+ * (#3270 dedup) Assuming the candidate value is already on the stack, emit the
+ * "is this externref `undefined`?" test: call `__extern_is_undefined` when it is
+ * available, else fall back to `ref.is_null` (imprecise in standalone — treats
+ * `null` as `undefined`). Leaves an i32 on the stack. Shared by the object- and
+ * array-binding default-initializer arms.
+ */
+function emitExternIsUndefinedCheck(ctx: CodegenContext, fctx: FunctionContext): void {
+  const isUndefIdx = ensureExternIsUndefinedImport(ctx, fctx);
+  if (isUndefIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+  } else {
+    fctx.body.push({ op: "ref.is_null" });
+  }
 }
 
 export function compileArrowFunction(
