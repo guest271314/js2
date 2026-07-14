@@ -44,7 +44,7 @@ import {
   compileObjectDestructuring,
   ensureAsyncIterator,
 } from "./destructuring.js";
-import { adjustRethrowDepth, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
+import { blockLoop, restoreBlockScopedShadows, saveBlockScopedShadows, shiftLoopDepths } from "./shared.js";
 import {
   bodyHasMatchingCharRead,
   collectBindingNames,
@@ -69,6 +69,23 @@ import { collectPatternBindingNames } from "./tdz.js";
 import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
 import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
+/**
+ * Compile a loop body, saving/restoring block-scoped shadows (#817) so that
+ * `let`/`const` declared at the top of the body don't leak into the outer
+ * scope. Extracted from 11 identical inline copies (#3269 DRY).
+ */
+function compileLoopBodyWithShadows(ctx: CodegenContext, fctx: FunctionContext, body: ts.Statement): void {
+  if (ts.isBlock(body)) {
+    const savedScope = saveBlockScopedShadows(fctx, body);
+    for (const s of body.statements) {
+      compileStatement(ctx, fctx, s);
+    }
+    restoreBlockScopedShadows(fctx, savedScope);
+  } else {
+    compileStatement(ctx, fctx, body);
+  }
+}
+
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
   //   loop $continue
@@ -88,10 +105,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+body-block adds 3 levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   // Track break/continue depths
   // From body inside $continue_body: break = br 2, continue = br 0.
@@ -111,15 +125,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
 
   // Compile body — must save/restore block-scoped shadows so that let/const
   // declarations inside the loop body do not leak into the outer scope (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   const bodyInstrs = fctx.body;
 
@@ -127,10 +133,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -140,17 +143,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
     ...arenaReset,
     { op: "br", depth: 0 },
   ];
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
   ctx.liveBodies.delete(condInstrs);
 }
 
@@ -582,10 +575,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   // From body inside $continue block:
   //   break = br 2 (exits $break block)
@@ -665,15 +655,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
 
   // Body (inside $continue block) — save/restore block-scoped shadows so that
   // let/const declarations inside the loop body do not leak into outer scope (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
   const bodyInstrs = fctx.body;
 
   // Restore previous safeIndexedArrays (scoped to this loop)
@@ -698,10 +680,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -741,17 +720,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
     { op: "br", depth: 0 }, // restart $loop
   ];
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // (#1690) The cond/incr Instr objects are now reachable via fctx.body →
   // assembled loop. The condInstrs/incrInstrs arrays themselves are no longer
@@ -837,10 +806,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   // From body inside $continue block:
   //   break = br 2 (exits $break block)
@@ -849,15 +815,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   fctx.continueStack.push(0);
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
   const bodyInstrs = fctx.body;
 
   // Compile condition — true means continue looping
@@ -874,10 +832,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -892,17 +847,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
     ...condInstrs,
   ];
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // (#1690) The cond Instr objects are now reachable via fctx.body → loop.
   ctx.liveBodies.delete(condInstrs);
@@ -1160,10 +1105,7 @@ function compileForOfNativeMapEntries(
   // Build the loop body (block { loop { body-block } }) — 3 nesting levels, so
   // adjust break/continue/return depths like compileForOfArray.
   const savedBody = pushBody(fctx);
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
   fctx.breakStack.push(2); // break = exit outer block
   fctx.continueStack.push(0); // continue = exit body block, then increment
 
@@ -1197,13 +1139,7 @@ function compileForOfNativeMapEntries(
   // Compile the user body inside its own block so `continue` (br depth 0 from
   // inside the body) exits the body block and falls through to the loop's `br`.
   const savedLoopBody = pushBody(fctx);
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) compileStatement(ctx, fctx, s);
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
   const bodyInstrs = fctx.body;
   popBody(fctx, savedLoopBody);
   fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: bodyInstrs });
@@ -1214,17 +1150,10 @@ function compileForOfNativeMapEntries(
   const loopBody = fctx.body;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
   popBody(fctx, savedBody);
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
-  });
+  fctx.body.push(blockLoop(loopBody));
   return true;
 }
 
@@ -1402,10 +1331,7 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  shiftLoopDepths(fctx, 2);
 
   fctx.breakStack.push(1); // break = depth 1 (exit block)
   fctx.continueStack.push(0); // continue = depth 0 (restart loop)
@@ -1474,15 +1400,7 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   fctx.body.push({ op: "local.set", index: elemLocal });
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   // Advance by the consumed code-unit count (1, or 2 for a surrogate pair)
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -1497,24 +1415,11 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  shiftLoopDepths(fctx, -2);
 
   popBody(fctx, savedBody);
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // Null guard: if string ref is nullable, throw TypeError on null (#775)
   // In JS, `for (const c of null)` throws TypeError
@@ -1746,10 +1651,7 @@ function compileForOfArray(
 
   // Structure: block { loop { guard/bind; block { body }; i++; br loop } }.
   // `continue` exits the inner body block so the increment still runs.
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   fctx.breakStack.push(2); // break = depth 2 (exit outer block)
   fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
@@ -1848,15 +1750,7 @@ function compileForOfArray(
   const savedLoopBody = pushBody(fctx);
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
   const bodyInstrs = fctx.body;
   popBody(fctx, savedLoopBody);
 
@@ -1879,24 +1773,11 @@ function compileForOfArray(
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // Null guard: if vec ref is nullable, guard against null (#775, #789)
   // If null from a failed guarded cast (wrong struct type), just skip the loop.
@@ -2189,10 +2070,7 @@ function emitArrayKeysEntriesLoop(
   // block+loop+body-block adds 3 nesting levels. The inner body block makes
   // `continue` fall through to the index increment instead of re-reading the
   // same element forever.
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   fctx.breakStack.push(2); // break = exit outer block
   fctx.continueStack.push(0); // continue = exit body block, then increment
@@ -2209,15 +2087,7 @@ function emitArrayKeysEntriesLoop(
   const savedLoopBody = pushBody(fctx);
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
   const bodyInstrs = fctx.body;
   popBody(fctx, savedLoopBody);
 
@@ -2239,18 +2109,11 @@ function emitArrayKeysEntriesLoop(
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // Null guard: throw TypeError for genuinely null receiver (`arr` is null).
   if (vecType.kind === "ref_null") {
@@ -2448,10 +2311,7 @@ function compileForOfDirectIterator(
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += forAwaitDepth;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += forAwaitDepth;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += forAwaitDepth;
-  adjustRethrowDepth(fctx, forAwaitDepth);
+  shiftLoopDepths(fctx, forAwaitDepth);
 
   fctx.breakStack.push(1);
   fctx.continueStack.push(0);
@@ -2539,15 +2399,7 @@ function compileForOfDirectIterator(
   }
 
   // Compile body
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   fctx.body.push({ op: "br", depth: 0 });
 
@@ -2555,10 +2407,7 @@ function compileForOfDirectIterator(
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= forAwaitDepth;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= forAwaitDepth;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= forAwaitDepth;
-  adjustRethrowDepth(fctx, -forAwaitDepth);
+  shiftLoopDepths(fctx, -forAwaitDepth);
 
   popBody(fctx, savedBody);
 
@@ -2575,17 +2424,7 @@ function compileForOfDirectIterator(
     ...(returnMethodResultArity > 0 ? ([{ op: "drop" }] satisfies Instr[]) : []),
   ];
 
-  const blockLoop: Instr = {
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  };
+  const blockLoopInstr: Instr = blockLoop(loopBody);
 
   if (wrapForAwaitClose) {
     // (#2978) `for await`: close the iterator on ABRUPT (throw) completion —
@@ -2597,7 +2436,7 @@ function compileForOfDirectIterator(
     fctx.body.push({
       op: "try",
       blockType: { kind: "empty" },
-      body: [blockLoop],
+      body: [blockLoopInstr],
       catches: [],
       catchAll: [
         { op: "local.get", index: doneFlagDirect },
@@ -2620,7 +2459,7 @@ function compileForOfDirectIterator(
       ],
     });
   } else {
-    fctx.body.push(blockLoop);
+    fctx.body.push(blockLoopInstr);
   }
 
   // Iterator close protocol (#851): call iterator.return() only on abrupt
@@ -2870,10 +2709,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
 
   // Adjust existing break/continue depths: try+block+loop adds 3 nesting levels (#851).
   // The extra +1 (vs the old +2) is for the try wrapper that enables iterator close on throw.
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   // Done flag: tracks whether iterator completed normally (done=true).
   // Used after the loop to decide whether to call iterator.return() (#851).
@@ -2983,15 +2819,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   }
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   fctx.body.push({ op: "br", depth: 0 }); // continue loop
 
@@ -3005,26 +2833,13 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   }
 
   // Restore existing break/continue depths (undo the +3 applied at loop entry).
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
   // The block/loop body; wrapped in try/catch_all when __iterator_return is available
   // to call iterator.return() on throw (#851 via-throw).
-  const blockLoop: Instr = {
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  };
+  const blockLoopInstr: Instr = blockLoop(loopBody);
 
   if (returnIdx !== undefined) {
     // Wrap in try/catch_all: on exception, call iterator.return() then rethrow.
@@ -3059,12 +2874,12 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     fctx.body.push({
       op: "try",
       blockType: { kind: "empty" },
-      body: [blockLoop],
+      body: [blockLoopInstr],
       catches: [],
       catchAll: catchAllBody,
     });
   } else {
-    fctx.body.push(blockLoop);
+    fctx.body.push(blockLoopInstr);
   }
 
   // Iterator close protocol (#851): call iterator.return() on break (post-loop check).
@@ -3251,10 +3066,7 @@ function emitArrayForIn(
   // dynamic-object path), with the per-iteration head write for non-identifier
   // heads (#1613).
   const savedBody = pushBody(fctx);
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
   fctx.breakStack.push(2);
   fctx.continueStack.push(0);
 
@@ -3270,21 +3082,12 @@ function emitArrayForIn(
     }
   }
 
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) compileStatement(ctx, fctx, s);
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   const userBody = fctx.body;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
   popBody(fctx, savedBody);
 
   const loopBody: Instr[] = [];
@@ -3312,11 +3115,7 @@ function emitArrayForIn(
   loopBody.push({ op: "local.set", index: iLocal });
   loopBody.push({ op: "br", depth: 0 });
 
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
-  });
+  fctx.body.push(blockLoop(loopBody));
 }
 
 /**
@@ -3681,10 +3480,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
-  adjustRethrowDepth(fctx, 3);
+  shiftLoopDepths(fctx, 3);
 
   fctx.breakStack.push(2); // break = depth 2 (exit $break block)
   fctx.continueStack.push(0); // continue = depth 0 (exit $continue block -> falls to incr)
@@ -3711,25 +3507,14 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   }
 
   // Compile the user's loop body — save/restore block-scoped shadows for let/const (#817).
-  if (ts.isBlock(stmt.statement)) {
-    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
-    for (const s of stmt.statement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-    restoreBlockScopedShadows(fctx, savedScope);
-  } else {
-    compileStatement(ctx, fctx, stmt.statement);
-  }
+  compileLoopBodyWithShadows(ctx, fctx, stmt.statement);
 
   const userBody = fctx.body;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
-  adjustRethrowDepth(fctx, -3);
+  shiftLoopDepths(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -3787,17 +3572,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   loopBody.push({ op: "br", depth: 0 }); // restart $loop
 
   // Emit block $break { loop $loop { ...loopBody } }
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: loopBody,
-      },
-    ],
-  });
+  fctx.body.push(blockLoop(loopBody));
 
   // (#2705 Slice B) Restore the outer bindings the head TDZ / per-iteration env
   // shadowed, so the head names do not leak past the loop (§14.7.5.7 — the
