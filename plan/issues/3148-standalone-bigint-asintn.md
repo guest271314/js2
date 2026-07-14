@@ -12,6 +12,14 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2984, 1349, 1644]
 origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
+# (#3102) The native BigInt.asIntN/asUintN handler is added inline in the
+# property-access-call dispatch of calls.ts, consistent with its sibling
+# standalone-native builtin handlers already inline in the SAME block
+# (Number.is*, RegExp.escape, String.fromCharCode). calls.ts sits exactly at
+# its LOC cap, so this genuinely-intended feature growth needs an allowance;
+# the baseline re-absorbs it post-merge (#3131).
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3148 — standalone BigInt.asIntN / asUintN
