@@ -12,6 +12,8 @@ subtask_of: 3182
 type: refactor
 loc-budget-allow:
   - src/codegen/property-access-dispatch.ts
+coercion-sites-allow:
+  - src/codegen/property-access-dispatch.ts
 ---
 
 ## Problem
