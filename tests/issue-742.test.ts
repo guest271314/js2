@@ -94,3 +94,64 @@ describe("#742 identifier-callee dispatch (compileIdentifierCall)", () => {
     );
   });
 });
+
+// Slice 2 (#742 Wave B): the built-in static-method dispatch block — Math /
+// BigInt / Number / Array / String / Object namespace statics — was moved
+// verbatim out of compileCallExpression's property-access arm into the sibling
+// module call-builtin-static.ts (compileBuiltinStaticCall). These tests pin the
+// behaviour of those moved static-call paths (wasm output must match JS).
+describe("#742 built-in static-method dispatch (compileBuiltinStaticCall)", () => {
+  it("Math.* statics", async () => {
+    await assertEquivalent(
+      `export function mx(): number { return Math.max(3, 7, 2); }
+       export function mmin(): number { return Math.min(3, 7, 2); }
+       export function mfloor(): number { return Math.floor(3.9); }
+       export function mpow(): number { return Math.pow(2, 10); }`,
+      [
+        { fn: "mx", args: [] },
+        { fn: "mmin", args: [] },
+        { fn: "mfloor", args: [] },
+        { fn: "mpow", args: [] },
+      ],
+    );
+  });
+
+  it("Number.* statics", async () => {
+    await assertEquivalent(
+      `export function nInt(): number { return Number.isInteger(4.0) ? 1 : 0; }
+       export function nNotInt(): number { return Number.isInteger(4.5) ? 1 : 0; }
+       export function nFin(): number { return Number.isFinite(1 / 3) ? 1 : 0; }
+       export function nNaN(): number { return Number.isNaN(0 / 0) ? 1 : 0; }`,
+      [
+        { fn: "nInt", args: [] },
+        { fn: "nNotInt", args: [] },
+        { fn: "nFin", args: [] },
+        { fn: "nNaN", args: [] },
+      ],
+    );
+  });
+
+  it("Array.of / Array.from and String.fromCharCode statics", async () => {
+    await assertEquivalent(
+      `export function aof(): number { const a = Array.of(5, 6, 7); return a[0] + a[1] + a[2]; }
+       export function afrom(): number { const a = Array.from([1, 2, 3]); return a.length; }
+       export function sfcc(): number { return String.fromCharCode(65) === "A" ? 1 : 0; }`,
+      [
+        { fn: "aof", args: [] },
+        { fn: "afrom", args: [] },
+        { fn: "sfcc", args: [] },
+      ],
+    );
+  });
+
+  it("Object.keys / Object.values statics", async () => {
+    await assertEquivalent(
+      `export function okeys(): number { const o = { a: 1, b: 2, c: 3 }; return Object.keys(o).length; }
+       export function ovals(): number { const o = { a: 10, b: 20 }; const v = Object.values(o); return v[0] + v[1]; }`,
+      [
+        { fn: "okeys", args: [] },
+        { fn: "ovals", args: [] },
+      ],
+    );
+  });
+});
