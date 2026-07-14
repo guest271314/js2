@@ -1,7 +1,8 @@
 ---
 id: 742
 title: "Extract and refactor compileCallExpression (3,350 lines)"
-status: in-progress
+status: done
+completed: 2026-07-14
 assignee: ttraenkler/sendev-waveb
 created: 2026-03-17
 updated: 2026-07-14
@@ -17,10 +18,12 @@ loc-budget-allow:
   - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/expressions/call-namespace-static.ts
   - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/call-tail-dispatch.ts
 coercion-sites-allow:
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/expressions/call-namespace-static.ts
   - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/call-tail-dispatch.ts
 # 2026-07-12 (#3182 groom): elevated medium→high. The EXTRACTION half is done
 # (calls.ts exists, 18,753 LOC — see #803, closed as landed); the live scope is
 # the REFACTOR half: break up compileCallExpression inside
@@ -271,3 +274,47 @@ dispatch (`compileIdentifierCall`), and the remaining tail arms — IIFE, super
 (`compileSuperMethodCall`), element-access, call-of-call, and conditional callee
 (~3,430 LOC total). Those tail arms are the remaining slices. Issue stays
 `in-progress`.
+
+## Progress — Wave B chunk 5: tail dispatch + epic DONE (2026-07-14, sendev-waveb)
+
+Final slice. Extracts `compileCallExpression`'s **tail dispatch** — the IIFE
+forms (`(function(){…})()` / `(()=>…)()`), super method calls, element-access
+method calls (`obj[expr](…)`), call-of-call chains, the conditional callee, and
+the graceful fallback for unrecognized shapes (calls.ts 6810–8596 post-chunk-4,
+~1,787 LOC) — into a new sibling module
+`src/codegen/expressions/call-tail-dispatch.ts` (`compileTailDispatch`).
+
+The tail ends in an **unconditional** graceful-fallback return, so the helper
+always returns `InnerResult` (no fall-through sentinel) and
+`compileCallExpression`'s tail is a single `return compileTailDispatch(ctx, fctx,
+expr, expectedType)`. Self-contained on `ctx`/`fctx`/`expr`/`expectedType`; 12
+`calls.ts` internals imported (6 newly exported, the rest already exported by
+earlier slices / the export block).
+
+**Result**: `compileCallExpression` ~3,430 → **~1,685 LOC** (a lean dispatch
+skeleton); `calls.ts` 9,534 → 7,753 LOC; new `call-tail-dispatch.ts` 1,872 LOC.
+
+### Epic summary — `compileCallExpression` decomposition DONE
+
+| slice | extracted arm | module | fn LOC after |
+| ----- | ------------- | ------ | ------------ |
+| 1 | identifier-callee dispatch | `call-identifier.ts` | ~11,388 |
+| 2 | Math/Number/Array/String/Object statics | `call-builtin-static.ts` | ~8,410 |
+| 3 | Symbol/Reflect/Promise/JSON/Date statics | `call-namespace-static.ts` | ~6,480 |
+| 4 | receiver-type method dispatch | `call-receiver-method.ts` | ~3,430 |
+| 5 | IIFE/super/element/call-of-call/conditional tail | `call-tail-dispatch.ts` | **~1,685** |
+
+`compileCallExpression` went from **13,371 LOC (the single biggest function in
+the codebase) to ~1,685** (−87%), and `calls.ts` from **19,435 → 7,753**. The
+function is now a readable dispatch skeleton: guard prelude → property-access arm
+(regexp guards + `compileBuiltinStaticCall` / `compileNamespaceStaticCall` /
+`compileReceiverMethodCall`) → `compileIdentifierCall` → `compileTailDispatch`.
+**Every slice was byte-identical** (`prove-emit-identity` IDENTICAL, 39/39
+gc/standalone/wasi × 13-file corpus, after each same-file + sibling-relocate
+step), `tsc` 0, `oracle-ratchet` net-zero, with per-issue `loc-budget` /
+`coercion-sites` allowances for the six new modules (all net-zero relocations).
+`tests/issue-742.test.ts` grew to 16 wasm≡JS cases spanning every moved arm.
+
+The re-scope's table-driven callee registry (item a) is now largely moot — the
+callee-shape dispatch is cleanly delegated to per-shape sibling modules. Marking
+`status: done`.
