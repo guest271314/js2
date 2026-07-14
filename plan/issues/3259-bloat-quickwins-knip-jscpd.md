@@ -48,7 +48,12 @@ passes bank easy −LOC and inform the self-host order.
 
 ## Outcome (2026-07-14) — no cheap −LOC left; both halves empty
 
-Full run recorded in `plan/log/3259-bloat-quickwins-report.md`.
+Full run recorded in `plan/log/3259-bloat-quickwins-report.md`. Shipped the
+god-file profiler as the durable follow-on tool (#3047):
+`pnpm run profile:godfiles` (rank god-file functions by LOC + emission-density,
+classify bloat shape → lever) and `pnpm run check:godfiles` (regression gate vs
+`scripts/godfile-profile-baseline.json`, 62 tracked functions). #3256/#3257/#3258
+use it as their landing-proof meter.
 
 **Half 1 — dead-export sweep.** knip was never actually wired (the premise was
 off — #3090 Phase 2b used a purpose-built reachability audit,

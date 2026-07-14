@@ -43,6 +43,20 @@ any-elem helpers for the object tier.
   backend needs the a1..a6 trait migration first (it doesn't consume array-methods
   today either, so nothing regresses).
 
+## Measurement (the profiler is this issue's progress meter)
+
+Use the god-file profiler from #3259 as the acceptance instrument:
+
+- **Before/after:** `pnpm run profile:godfiles` — `array-methods.ts` is the
+  target; the tracked `hand-emitted-runtime` blocks this tier shrinks include
+  `compileArrayLikePrototypeCall` (1,100 LOC, d≈0.21) and the per-method helpers
+  (`compileArrayIncludes` d≈0.31, `compileArrayLastIndexOf` d≈0.32, …). Record
+  the per-helper LOC delta here and in `plan/self-hosting-scale-up.md`.
+- **Landing proof:** after each conversion, `node scripts/profile-godfiles.mjs
+  --update` and commit `scripts/godfile-profile-baseline.json` so
+  `pnpm run check:godfiles` ratchets down (fails on regrowth).
+- Shape context: `plan/log/3259-bloat-quickwins-report.md`.
+
 ## Non-goals
 
 - Object-family / any-elem helpers (Tier-3, #3258).

@@ -52,6 +52,24 @@ style callee sigs.
   containment SHA (non-users byte-identical). Both pure-Wasm lanes zero host imports.
 - Update `plan/self-hosting-scale-up.md` with the measured per-helper compression.
 
+## Measurement (the profiler is this issue's progress meter)
+
+Use the god-file profiler from #3259 as the acceptance instrument, not eyeballed
+LOC:
+
+- **Before/after:** `pnpm run profile:godfiles` — `native-strings.ts` is the
+  target; its `ensureNativeStringHelpers` (baseline 4,844 LOC, emission-density
+  d≈0.46, classified `hand-emitted-runtime`) is the block this tier shrinks.
+  Record the LOC delta per converted helper here and in
+  `plan/self-hosting-scale-up.md`.
+- **Landing proof:** after each conversion, refresh the tracked baseline —
+  `node scripts/profile-godfiles.mjs --update` and commit
+  `scripts/godfile-profile-baseline.json` — so the `pnpm run check:godfiles`
+  gate ratchets down (it fails on regrowth). A shrink that isn't reflected in the
+  baseline isn't banked.
+- Shape context: report `plan/log/3259-bloat-quickwins-report.md` (32,272 LOC of
+  `hand-emitted-runtime` across the god-files → this self-host track).
+
 ## Non-goals
 
 - No object/array family (Tier-2/3, separate issues #3257/#3258).
