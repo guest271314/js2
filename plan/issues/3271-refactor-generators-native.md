@@ -1,7 +1,8 @@
 ---
 id: 3271
 title: "refactor(codegen): break up generators-native.ts god-file + DRY cleanup"
-status: ready
+status: done
+completed: 2026-07-14
 sprint: current
 priority: high
 feasibility: medium
@@ -10,6 +11,14 @@ task_type: refactor
 subtask_of: 3182
 area: codegen
 assignee: ttraenkler/senior-dev-3271
+# (#3131/#1930) Verbatim relocation: the consumer subsystem moved to
+# generators-native-consumer.ts carries its existing direct ts.checker
+# call-sites (getTypeAtLocation/ctx.checker in tryCompileNativeGeneratorResultProperty)
+# unchanged — total src/codegen/ usage is CONSERVED (generators-native.ts drops
+# exactly what the new file gains). Change-scoped allowance, never a whole-tree
+# baseline edit.
+oracle-ratchet-allow:
+  - src/codegen/generators-native-consumer.ts
 ---
 
 # refactor(codegen): break up `generators-native.ts` god-file + DRY cleanup
