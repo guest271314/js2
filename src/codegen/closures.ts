@@ -409,6 +409,40 @@ export function collectWrittenIdentifiers(node: ts.Node, names: Set<string>, sha
 }
 
 /**
+ * (#3270 dedup) Apply an identifier collector (`collectReferencedIdentifiers` /
+ * `collectWrittenIdentifiers`) across a function `body`: iterate the statements
+ * of a block body, or scan a concise-expression body directly. Factors the
+ * block-vs-expression fan-out that the arrow-closure and arrow-callback
+ * free-variable scans each open-coded identically.
+ */
+function collectOverBody(
+  collectFn: (node: ts.Node, names: Set<string>, shadowed?: ReadonlySet<string>) => void,
+  body: ts.Node,
+  names: Set<string>,
+  shadowed?: ReadonlySet<string>,
+): void {
+  if (ts.isBlock(body)) {
+    for (const stmt of body.statements) collectFn(stmt, names, shadowed);
+  } else {
+    collectFn(body, names, shadowed);
+  }
+}
+
+/**
+ * (#3270 dedup) Compute a function-like node's own-locals shadow set: its
+ * memoized own locals (#2103) plus, for a named function expression, its own
+ * name (so self-references aren't treated as outer captures). The
+ * free-variable, mutated-capture, and callback-capture analyses each built this
+ * set identically.
+ */
+function arrowOwnLocals(arrow: ts.ArrowFunction | ts.FunctionExpression): Set<string> {
+  const ownLocals = new Set<string>();
+  addFunctionOwnLocals(arrow, ownLocals); // (#2103) memoized own-locals
+  if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
+  return ownLocals;
+}
+
+/**
  * Promote captured locals to globals for getter/setter accessor functions.
  *
  * When an object literal getter/setter references variables from the enclosing
@@ -1678,9 +1712,7 @@ export function compileArrowAsClosure(
   //    `var` declarations and parameter bindings inside the closure body shadow
   //    outer references — otherwise a closure with its own `var i;` would be
   //    treated as capturing the outer `i` (#995/#996).
-  const ownLocals = new Set<string>();
-  addFunctionOwnLocals(arrow, ownLocals); // (#2103) memoized own-locals
-  if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
+  const ownLocals = arrowOwnLocals(arrow);
 
   // (#2118) Self-recursive const/let arrow: `const f = (n) => ... f(n-1)`.
   // The closure references its own binding `f`. Without special handling the
@@ -1707,13 +1739,7 @@ export function compileArrowAsClosure(
   }
 
   const referencedNames = new Set<string>();
-  if (ts.isBlock(body)) {
-    for (const stmt of body.statements) {
-      collectReferencedIdentifiers(stmt, referencedNames, ownLocals);
-    }
-  } else {
-    collectReferencedIdentifiers(body, referencedNames, ownLocals);
-  }
+  collectOverBody(collectReferencedIdentifiers, body, referencedNames, ownLocals);
   // (#3096) Free variables referenced ONLY in a parameter default initializer
   // — or in a binding-pattern element default / computed key — must be
   // captured too. The body scan above misses them, so a default like
@@ -1759,13 +1785,7 @@ export function compileArrowAsClosure(
 
   // Detect which captured variables are written inside the closure body
   const writtenInClosure = new Set<string>();
-  if (ts.isBlock(body)) {
-    for (const stmt of body.statements) {
-      collectWrittenIdentifiers(stmt, writtenInClosure, ownLocals);
-    }
-  } else {
-    collectWrittenIdentifiers(body, writtenInClosure, ownLocals);
-  }
+  collectOverBody(collectWrittenIdentifiers, body, writtenInClosure, ownLocals);
   // (#3040) Symmetric with the referencedNames scan above: a param default that
   // ASSIGNS an outer var (rare, e.g. `[x] = (outer = 5, [outer])`) must keep that
   // capture boxed rather than snapshotted.
@@ -2958,16 +2978,10 @@ export function collectMutatedCaptureNames(
   fctx: FunctionContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
 ): Set<string> {
-  const ownLocals = new Set<string>();
-  addFunctionOwnLocals(arrow, ownLocals); // (#2103) memoized own-locals
-  if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
+  const ownLocals = arrowOwnLocals(arrow);
   const written = new Set<string>();
   const body = arrow.body;
-  if (ts.isBlock(body)) {
-    for (const stmt of body.statements) collectWrittenIdentifiers(stmt, written, ownLocals);
-  } else {
-    collectWrittenIdentifiers(body, written, ownLocals);
-  }
+  collectOverBody(collectWrittenIdentifiers, body, written, ownLocals);
   const result = new Set<string>();
   for (const name of written) {
     if (fctx.localMap.has(name)) result.add(name);
@@ -3006,18 +3020,10 @@ export function compileArrowAsCallback(
   const body = arrow.body;
 
   // 1. Analyze captured variables (scope-aware so own params/var-decls shadow)
-  const ownLocals = new Set<string>();
-  addFunctionOwnLocals(arrow, ownLocals); // (#2103) memoized own-locals
-  if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
+  const ownLocals = arrowOwnLocals(arrow);
 
   const referencedNames = new Set<string>();
-  if (ts.isBlock(body)) {
-    for (const stmt of body.statements) {
-      collectReferencedIdentifiers(stmt, referencedNames, ownLocals);
-    }
-  } else {
-    collectReferencedIdentifiers(body, referencedNames, ownLocals);
-  }
+  collectOverBody(collectReferencedIdentifiers, body, referencedNames, ownLocals);
   // (#3096) Also capture free variables referenced only in a parameter default
   // initializer / binding-pattern element default / computed key (see the
   // rationale on the identical scan in `compileArrowAsClosure`).
@@ -3025,13 +3031,7 @@ export function compileArrowAsCallback(
 
   // Detect which captured variables are written inside the callback body (#859)
   const writtenInCallback = new Set<string>();
-  if (ts.isBlock(body)) {
-    for (const stmt of body.statements) {
-      collectWrittenIdentifiers(stmt, writtenInCallback, ownLocals);
-    }
-  } else {
-    collectWrittenIdentifiers(body, writtenInCallback, ownLocals);
-  }
+  collectOverBody(collectWrittenIdentifiers, body, writtenInCallback, ownLocals);
 
   const captures: { name: string; type: ValType; localIdx: number; mutable: boolean; alreadyBoxed: boolean }[] = [];
   for (const name of referencedNames) {

@@ -522,6 +522,41 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
  * Returns `true` if the access was emitted; `false` if the method's
  * signature couldn't be resolved (caller should fall back).
  */
+/**
+ * (#3270 dedup) Emit the shared lazy externref-cache access kernel:
+ *
+ *   global.get $cache
+ *   ref.is_null
+ *   if (then: ref.func $tramp; struct.new $struct; extern.convert_any; global.set $cache)
+ *   global.get $cache
+ *
+ * builds the closure ONCE into the module-level cache global, then reads it.
+ * The func-decl caller appends its own `any.convert_extern` + `ref.cast`
+ * recovery after this returns.
+ */
+function emitLazyClosureCacheAccess(
+  fctx: FunctionContext,
+  cacheGlobalIdx: number,
+  trampolineFuncIdx: number,
+  structTypeIdx: number,
+): void {
+  const initBody: Instr[] = [
+    { op: "ref.func", funcIdx: trampolineFuncIdx },
+    { op: "struct.new", typeIdx: structTypeIdx },
+    { op: "extern.convert_any" },
+    { op: "global.set", index: cacheGlobalIdx },
+  ];
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: initBody,
+    else: [],
+  });
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+}
+
 export function emitCachedMethodClosureAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -538,21 +573,7 @@ export function emitCachedMethodClosureAccess(
   //   ref.is_null
   //   if (then: build closure, store in $cache)
   //   global.get $cache
-  const initBody: Instr[] = [
-    { op: "ref.func", funcIdx: trampolineFuncIdx },
-    { op: "struct.new", typeIdx: closureStructTypeIdx },
-    { op: "extern.convert_any" },
-    { op: "global.set", index: cacheGlobalIdx },
-  ];
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: initBody,
-    else: [],
-  });
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx);
   return true;
 }
 
@@ -796,21 +817,7 @@ export function emitCachedFuncClosureAccess(
   //   global.get $cache
   //   any.convert_extern
   //   ref.cast (ref $struct)
-  const initBody: Instr[] = [
-    { op: "ref.func", funcIdx: trampolineFuncIdx },
-    { op: "struct.new", typeIdx: structTypeIdx },
-    { op: "extern.convert_any" },
-    { op: "global.set", index: cacheGlobalIdx },
-  ];
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: initBody,
-    else: [],
-  });
-  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, structTypeIdx);
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
