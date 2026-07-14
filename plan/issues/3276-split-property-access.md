@@ -12,6 +12,8 @@ subtask_of: 3182
 type: refactor
 loc-budget-allow:
   - src/codegen/property-access-dispatch.ts
+coercion-sites-allow:
+  - src/codegen/property-access-dispatch.ts
 ---
 
 ## Problem
@@ -99,3 +101,23 @@ Extracted 7 cohesive guard bands from `compilePropertyAccess` into the new
   any-box-sites, coercion-sites, speculative-rollback, stack-balance, dead-exports,
   prettier.
 - Smoke test `tests/issue-3276.test.ts`: 7/7 pass.
+
+### Slice 2 (stacked on slice 1 — private/super + identifier-namespace + static-receiver bands)
+
+Extracted 4 more cohesive guard bands into `property-access-dispatch.ts`:
+
+| Helper | Families |
+| --- | --- |
+| `tryPrivateIdentifierRead` | #1365 private-name read with spec brand check |
+| `trySuperAndImportMetaRead` | `super.prop`, `import.meta.*` |
+| `tryGlobalThisAndProcessRead` | `globalThis.prop` (dual-mode), Node `process.argv`/`env`/`platform` |
+| `tryIdentifierNamespaceAndStaticReceiverRead` | builtin-namespace `Builtin.prop`, enum member, static-`this`, static `ClassName.staticProp` |
+
+- `property-access.ts`: 7107 → 6473 LOC (−634 in slice 2; **7989 → 6473 = −1516 cumulative**).
+- New module: 1078 → ~1800 LOC (loc-budget allowance granted).
+- **Byte-identity: IDENTICAL 39/39** (gc/standalone/wasi). `tsc --noEmit` 0.
+  Gates green: loc-budget (net +293), oracle-ratchet (net +0), any-box-sites,
+  coercion-sites, stack-balance, dead-exports, prettier.
+- Smoke test: 11/11 pass.
+- Stacked on slice 1's branch; PR opens once slice 1 merges. Remaining for later
+  slices: `.length`/`.name`/string/iterator families + terminal struct-name block.
