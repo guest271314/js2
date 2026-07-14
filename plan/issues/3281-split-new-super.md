@@ -1,7 +1,8 @@
 ---
 id: 3281
 title: "refactor: decompose compileNewExpression mega-function (WAVE-C)"
-status: in-progress
+status: done
+completed: 2026-07-14
 assignee: ttraenkler/Dev-WaveC-New
 sprint: current
 priority: high
@@ -71,3 +72,19 @@ After both: `compileNewExpression` ≈ 1,312 LOC. Both new modules are <1,500 LO
 - `prove-emit-identity check` prints IDENTICAL (39/39) after each slice.
 - `tsc --noEmit` clean.
 - Smoke test added (#2093 gate).
+
+## Result
+
+- **Slice 1** (`new-builtin-globals.ts`, 1,155 LOC): lifted the built-in global
+  ctor band (Promise, Number/String/Boolean, Error family, AggregateError,
+  SuppressedError, Object, Proxy, Function, Date, TypedArray). Byte-identical.
+  compileNewExpression ~3,082 → ~1,994 LOC.
+- **Slice 2** (`new-indexed.ts`, 685 LOC): lifted the indexed builtin band
+  (ArrayBuffer incl. resizable, DataView, Array). Byte-identical.
+  compileNewExpression ~1,994 → **1,357 LOC** (under 1,500 ✓).
+- Both slices: `prove-emit-identity check` IDENTICAL across all 39
+  gc/standalone/wasi emits; `tsc --noEmit` clean;
+  `tests/issue-3281.test.ts` green.
+- Exported four band-shared helpers from new-super.ts (`isStringTypedArg`,
+  `emitHostTaBufferConstruct`, `hostTaBufferArgSymName`,
+  `resolvesToAmbientGlobal`) plus `inferArrayElementType`.
