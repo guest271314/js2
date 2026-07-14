@@ -143,11 +143,27 @@ function recordExportSignature(
   ctx.exportSignatures.set(exportName, { params, result });
 }
 
+// An unannotated binding-pattern parameter — `function f([x, y])` or
+// `function f({a, b})` — must route through the externref destructure path
+// so that the iterator protocol drives element extraction (spec
+// §13.3.3.6 IteratorBindingInitialization). Without this widening the
+// param compiles to a tuple struct signature and `f(generator)` silently
+// skips the iterator's `.next()`. Mirrors closures.ts:905 for arrows /
+// function-expressions. Skip when the user wrote an explicit type
+// annotation — they asked for the tuple-struct specialization. (#862)
 function bindingPatternParamNeedsWiden(p: ts.ParameterDeclaration): boolean {
   if (p.type || p.dotDotDotToken) return false;
   return ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
 }
 
+// A binding-pattern parameter with a rest element and no type annotation
+// (e.g. `function f([...r])` or `function f({...x})`) infers as `{}` or
+// `{ [k: string]: any }` in TypeScript, which resolveWasmType maps to a
+// degenerate struct (single-field cell or empty struct). Callers that
+// pass an array/object to such a param fail the ref.test cast and
+// receive ref.null — breaking destructuring inside the function. Force
+// externref so the conversion paths in destructureParam{Array,Object}
+// handle the incoming value correctly.
 function restBindingOverridesToExternref(p: ts.ParameterDeclaration): boolean {
   if (p.type || p.dotDotDotToken) return false;
   if (ts.isArrayBindingPattern(p.name)) {
@@ -719,38 +735,6 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
 
       let params: ValType[];
       let results: ValType[];
-
-      // A binding-pattern parameter with a rest element and no type annotation
-      // (e.g. `function f([...r])` or `function f({...x})`) infers as `{}` or
-      // `{ [k: string]: any }` in TypeScript, which resolveWasmType maps to a
-      // degenerate struct (single-field cell or empty struct). Callers that
-      // pass an array/object to such a param fail the ref.test cast and
-      // receive ref.null — breaking destructuring inside the function. Force
-      // externref so the conversion paths in destructureParam{Array,Object}
-      // handle the incoming value correctly.
-      const restBindingOverridesToExternref = (p: ts.ParameterDeclaration): boolean => {
-        if (p.type || p.dotDotDotToken) return false;
-        if (ts.isArrayBindingPattern(p.name)) {
-          return p.name.elements.some((e) => !ts.isOmittedExpression(e) && !!e.dotDotDotToken);
-        }
-        if (ts.isObjectBindingPattern(p.name)) {
-          return p.name.elements.some((e) => !!e.dotDotDotToken);
-        }
-        return false;
-      };
-
-      // An unannotated binding-pattern parameter — `function f([x, y])` or
-      // `function f({a, b})` — must route through the externref destructure path
-      // so that the iterator protocol drives element extraction (spec
-      // §13.3.3.6 IteratorBindingInitialization). Without this widening the
-      // param compiles to a tuple struct signature and `f(generator)` silently
-      // skips the iterator's `.next()`. Mirrors closures.ts:905 for arrows /
-      // function-expressions. Skip when the user wrote an explicit type
-      // annotation — they asked for the tuple-struct specialization. (#862)
-      const bindingPatternParamNeedsWiden = (p: ts.ParameterDeclaration): boolean => {
-        if (p.type || p.dotDotDotToken) return false;
-        return ts.isArrayBindingPattern(p.name) || ts.isObjectBindingPattern(p.name);
-      };
 
       if (isGenerator) {
         // Generator functions: parameters are compiled normally, return is externref

@@ -7,7 +7,8 @@
 import { mapTsTypeToWasm } from "../../checker/type-mapper.js";
 import { ts } from "../../ts-api.js";
 import { resolveWasmType } from "../index.js";
-import type { FieldDef, StructTypeDef } from "../../ir/types.js";
+import { registerStructType } from "../registry/types.js";
+import type { FieldDef } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
 
 export function collectInterface(ctx: CodegenContext, decl: ts.InterfaceDeclaration): void {
@@ -27,15 +28,7 @@ export function collectInterface(ctx: CodegenContext, decl: ts.InterfaceDeclarat
     }
   }
 
-  const typeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({
-    kind: "struct",
-    name,
-    fields,
-  } as StructTypeDef);
-  ctx.structMap.set(name, typeIdx);
-  ctx.typeIdxToStructName.set(typeIdx, name);
-  ctx.structFields.set(name, fields);
+  registerStructType(ctx, name, fields);
 }
 
 /**
@@ -111,14 +104,6 @@ export function collectObjectType(ctx: CodegenContext, name: string, type: ts.Ty
   }
 
   if (fields.length > 0) {
-    const typeIdx = ctx.mod.types.length;
-    ctx.mod.types.push({
-      kind: "struct",
-      name,
-      fields,
-    } as StructTypeDef);
-    ctx.structMap.set(name, typeIdx);
-    ctx.typeIdxToStructName.set(typeIdx, name);
-    ctx.structFields.set(name, fields);
+    registerStructType(ctx, name, fields);
   }
 }

@@ -8,8 +8,8 @@ import { collectShapes } from "../../shape-inference.js";
 import { forEachChild, ts } from "../../ts-api.js";
 import { resolveWasmType } from "../index.js";
 import { localGlobalIdx } from "../registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterVecType } from "../registry/types.js";
-import type { FieldDef, StructTypeDef, ValType } from "../../ir/types.js";
+import { getArrTypeIdxFromVec, getOrRegisterVecType, registerStructType } from "../registry/types.js";
+import type { FieldDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
 
 /**
@@ -168,15 +168,7 @@ export function collectEmptyObjectWidening(
               mutable: true,
             }));
             const structName = `__anon_${ctx.anonTypeCounter++}`;
-            const typeIdx = ctx.mod.types.length;
-            ctx.mod.types.push({
-              kind: "struct",
-              name: structName,
-              fields,
-            } as StructTypeDef);
-            ctx.structMap.set(structName, typeIdx);
-            ctx.typeIdxToStructName.set(typeIdx, structName);
-            ctx.structFields.set(structName, fields);
+            registerStructType(ctx, structName, fields);
             // Map variable name to struct name for later lookup
             ctx.widenedVarStructMap.set(varName, structName);
             // Also try to map TS types (may not match later due to type identity)
@@ -516,6 +508,40 @@ function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<
   visit(node);
 }
 
+/**
+ * (#3268) Extract the `value` type from an `Object.defineProperty` descriptor
+ * object literal (defaulting to externref) and record the widened property plus
+ * its `${varName}:${propName}` key. Shared by the ExpressionStatement and
+ * VariableStatement `Object.defineProperty(...)` branches of
+ * {@link collectPropsFromStatements}.
+ */
+function recordDefinePropertyWiden(
+  ctx: CodegenContext,
+  checker: ts.TypeChecker,
+  varName: string,
+  propName: string,
+  descArg: ts.Expression,
+  extraProps: { name: string; type: ValType }[],
+  seenProps: Set<string>,
+): void {
+  if (!seenProps.has(propName)) {
+    seenProps.add(propName);
+    // Try to get value type from descriptor.value
+    let wasmType: ValType = { kind: "externref" };
+    if (ts.isObjectLiteralExpression(descArg)) {
+      for (const prop of descArg.properties) {
+        if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
+          const rhsType = checker.getTypeAtLocation(prop.initializer);
+          wasmType = resolveWasmType(ctx, rhsType);
+          break;
+        }
+      }
+    }
+    extraProps.push({ name: propName, type: wasmType });
+    ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
+  }
+}
+
 export function collectPropsFromStatements(
   checker: ts.TypeChecker,
   ctx: CodegenContext,
@@ -578,22 +604,7 @@ export function collectPropsFromStatements(
           if (ctx.standalone && !ts.isObjectLiteralExpression(descArg)) {
             ctx.dynamicDescriptorWidenVars.add(varName);
           }
-          if (!seenProps.has(propName)) {
-            seenProps.add(propName);
-            // Try to get value type from descriptor.value
-            let wasmType: ValType = { kind: "externref" };
-            if (ts.isObjectLiteralExpression(descArg)) {
-              for (const prop of descArg.properties) {
-                if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
-                  const rhsType = checker.getTypeAtLocation(prop.initializer);
-                  wasmType = resolveWasmType(ctx, rhsType);
-                  break;
-                }
-              }
-            }
-            extraProps.push({ name: propName, type: wasmType });
-            ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
-          }
+          recordDefinePropertyWiden(ctx, checker, varName, propName, descArg, extraProps, seenProps);
         }
       }
     }
@@ -615,21 +626,7 @@ export function collectPropsFromStatements(
             const descArg = call.arguments[2]!;
             if (ts.isIdentifier(objArg) && objArg.text === varName && ts.isStringLiteral(propArg)) {
               const propName = propArg.text;
-              if (!seenProps.has(propName)) {
-                seenProps.add(propName);
-                let wasmType: ValType = { kind: "externref" };
-                if (ts.isObjectLiteralExpression(descArg)) {
-                  for (const prop of descArg.properties) {
-                    if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
-                      const rhsType = checker.getTypeAtLocation(prop.initializer);
-                      wasmType = resolveWasmType(ctx, rhsType);
-                      break;
-                    }
-                  }
-                }
-                extraProps.push({ name: propName, type: wasmType });
-                ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
-              }
+              recordDefinePropertyWiden(ctx, checker, varName, propName, descArg, extraProps, seenProps);
             }
           }
         }
