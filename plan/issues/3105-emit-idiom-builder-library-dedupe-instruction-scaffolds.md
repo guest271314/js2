@@ -1,10 +1,11 @@
 ---
 id: 3105
 title: "Emit-idiom builder library: dedupe repeated Wasm instruction scaffolds (throw-guard x17, counter-loop x21, proxy-guard x12, hash-probe x10)"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/sendev-3105
+sprint: current
 created: 2026-07-09
-updated: 2026-07-09
+updated: 2026-07-14
 priority: high
 horizon: m
 feasibility: medium
@@ -106,3 +107,53 @@ builders also stop the idioms from re-multiplying (compounding with #3102).
 2. ≥ 40 hand-rolled idiom copies replaced by builder calls.
 3. `codegen-linear/runtime.ts` duplicated-line ratio drops below 15% (from 24%).
 4. No test262 regression.
+
+## Slice log
+
+### Slice 1 — hash-probe advance ×10 (linear backend) — DONE (PR pending)
+
+**Idiom chosen:** the open-addressing probe advance `idx = (idx + 1) % cap` —
+the tail of every linear probe loop. Picked over throw-guard×17 /
+counter-loop×21 because it is the single cleanest win: **all 10 copies are
+byte-identical** (same op sequence, same `idxLocal`/`capLocal` operands, each
+immediately followed by the loop back-branch `br 0`), concentrated in one
+untouched file, with **zero diverged copies** to exclude. The builder is a
+trivial 6-instruction return with no `blockType`/branch-depth surface.
+
+**What landed:**
+
+- New builder `src/codegen-linear/emit-idioms.ts` →
+  `hashProbeAdvanceInstrs(idxLocal, capLocal): Instr[]` returning the exact
+  six instructions: `local.get idx · i32.const 1 · i32.add · local.get cap ·
+  i32.rem_u · local.set idx`. Per-backend by design (#1527) — these are
+  linear-memory locals with no WasmGC analogue.
+- All **10** hand-rolled advance copies in `src/codegen-linear/runtime.ts`
+  migrated to `...hashProbeAdvanceInstrs(idxLocal, capLocal)` — across the
+  string Map (`__map_set/get/has`), string Set, numeric Map, and numeric Set
+  runtimes. **runtime.ts: 3638 → 3589 lines (−49 net;** 60 deleted / 11
+  added = 10 call sites + 1 import).
+- **`linear` added to the `TARGETS` matrix** of
+  `scripts/prove-emit-identity.mjs` (required by this issue). The playground
+  corpus is all DOM/Promise-oriented and CEs under `linear`, which would make
+  the target vacuous — so a new **linear-safe corpus root**
+  `scripts/emit-identity-corpus/collections.ts` (string+numeric Map & Set) was
+  added; it compiles under all four targets and forces the map/set runtimes
+  (added unconditionally in `codegen-linear/index.ts`) into the emitted binary.
+
+**Byte-identity proof:** baseline written across 56 `(file,target)` records
+(14 files × 4 targets), then `check` after migration → **IDENTICAL — all 56
+match** (incl. `collections.ts::linear`). Non-vacuousness verified by a
+perturbation test: temporarily changing the builder's `i32.const 1` → `2`
+drifted **exactly** `collections.ts::linear` (sha `a3bf3f63…` → `457f53ad…`)
+and nothing else, confirming (a) the corpus exercises the advance code and (b)
+only the linear backend uses it. `tsc --noEmit` clean; smoke test
+`tests/issue-3105.test.ts` (builder-shape + linear compile/run determinism).
+
+**Note (out of scope):** the corpus `run()` returns 212 under `linear` vs 232
+under reference JS — a pre-existing linear-backend Map-update discrepancy,
+independent of this byte-identical refactor. Worth a separate issue; not
+touched here.
+
+**Remaining slices (issue stays `in-progress`):** hash-probe *initial* modulo
+`idx = hash % cap` ×10 (same file, next obvious slice), throw-guard×17
+(`expressions/calls.ts`), counter-loop×21, proxy-guard×12, param-object×24.
