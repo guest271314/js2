@@ -1,7 +1,7 @@
 ---
 id: 3264
 title: "Split array-methods.ts — extract Array.prototype-borrow subsystem into array-prototype-borrow.ts"
-status: ready
+status: done
 sprint: current
 priority: high
 feasibility: medium
@@ -10,6 +10,19 @@ task_type: refactor
 subtask_of: 3182
 area: codegen
 assignee: ttraenkler/sendev-array-split
+created: 2026-07-14
+completed: 2026-07-14
+# Relocation-shift ratchet allowances for the NEW destination module (#3131 hatch).
+# This PR is a VERBATIM move (byte-identity IDENTICAL across 39 gc/standalone/wasi
+# emits) — every flagged "growth" in array-prototype-borrow.ts is a call-site
+# RELOCATED out of array-methods.ts, so total repo usage is conserved. Granting
+# the change-scoped frontmatter allowance (never a whole-tree baseline edit).
+loc-budget-allow:
+  - src/codegen/array-prototype-borrow.ts
+coercion-sites-allow:
+  - src/codegen/array-prototype-borrow.ts
+oracle-ratchet-allow:
+  - src/codegen/array-prototype-borrow.ts
 ---
 
 # Split `array-methods.ts` — extract the `Array.prototype.<m>.call(arrayLike,…)` borrow subsystem
