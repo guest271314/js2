@@ -193,16 +193,21 @@ jobs:
         # through snapshotSpeculative/rollbackSpeculative instead.
         run: pnpm run check:speculative-rollback
 
-      - name: Coercion-site drift gate (#2108/#3131)
+      - name: Coercion-site drift gate (#2108/#3131/#3279)
         # Fails when the JS-semantic coercion vocabulary (ToString/ToNumber/
         # ToPrimitive/equality/ToBoolean) is hand-rolled at a NEW site outside
         # the coercion engine (see plan/log/analysis-2026-06/03-coercion-engine
-        # -spec.md §5). CHANGE-SCOPED like check:loc-budget (#3131): judged
-        # against this change-set's own base (HEAD^1 of the synthetic merge),
-        # no committed-baseline read, no per-PR baseline bump (bump commits
-        # merge-conflicted with the post-merge refreshes on main). Intentional
-        # migration-step growth: `coercion-sites-allow:` frontmatter in the
-        # PR's own issue file. Fetch feeds the merge-base fallback only.
+        # -spec.md §5). CHANGE-SCOPED like check:loc-budget (#3131) AND
+        # NET-PER-VOCABULARY (#3279, mirroring check:oracle-ratchet #3070/#3273):
+        # judged against this change-set's own base (HEAD^1 of the synthetic
+        # merge); fails only when the change-set's NET count per vocabulary token
+        # (summed over the changed files) grew. A god-file split that relocates
+        # existing coercion sites into a new sibling module is net-neutral and
+        # passes with NO allowance (the #3076 treadmill). No committed-baseline
+        # read, no per-PR baseline bump (bump commits merge-conflicted with the
+        # post-merge refreshes on main). Intentional migration-step growth:
+        # `coercion-sites-allow:` frontmatter in the PR's own issue file. Fetch
+        # feeds the merge-base fallback only.
         run: |
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:coercion-sites
