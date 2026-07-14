@@ -30,10 +30,12 @@ natural PHASE sequence:
 5. lifted-fn body compilation (async / generator / block / concise) →
 6. finalize + construction-site emit + closure-info registration.
 
-The decomposition lifts cohesive phase blocks **verbatim** into named
-module-private phase helpers in the same file, called at the same point with
-the same arguments (operating on the shared `liftedFctx` / `fctx` objects by
-reference), so the emitted bytes are IDENTICAL.
+The decomposition lifts cohesive phase blocks **verbatim** into named phase
+helpers in a sibling module `src/codegen/closures/arrow-phases.ts` (matching the
+established WAVE B pattern — #3271/#3275/#3276 — and the #3182
+code-bloat-elimination goal of *shrinking* the god-file). The helpers are called
+at the same point with the same arguments (operating on the shared `liftedFctx`
+/ `fctx` objects by reference), so the emitted bytes are IDENTICAL.
 
 ## Safety — prove-emit-identity
 
@@ -81,12 +83,18 @@ not reproduce the block's state threading → fix or revert.
 
 ## Test Results
 
-### Slice 1 — planClosureCaptures + mintClosureStructTypes
+### Slice 1 — planClosureCaptures + mintClosureStructTypes (sibling module)
 
-- `compileArrowAsClosure`: 1,311 → 966 LOC (−345); two module-private phase
-  helpers extracted (`planClosureCaptures` capture analysis,
-  `mintClosureStructTypes` capture-struct type minting).
-- `scripts/prove-emit-identity.mjs check`: **IDENTICAL — 39/39** (gc/standalone/wasi).
+- Phases 1–2 lifted verbatim into a new sibling module
+  `src/codegen/closures/arrow-phases.ts` (`planClosureCaptures` capture
+  analysis, `mintClosureStructTypes` capture-struct type minting).
+- `src/codegen/closures.ts`: 3,472 → 3,129 LOC (−343 — passes the #3102
+  LOC-budget gate); `compileArrowAsClosure` body 1,311 → 966 LOC. Four shared
+  private helpers (`arrowOwnLocals`, `collectOverBody`,
+  `closureProvablyAfterLetDecl`, `buildCaptureFieldDef`) exported for the sibling
+  (a function-body-only import cycle, safe).
+- `scripts/prove-emit-identity.mjs check`: **IDENTICAL — 39/39** (gc/standalone/wasi),
+  control = origin/main.
 - `tsc --noEmit`: 0 errors.
 - `tests/issue-3278.test.ts`: 10/10 green (no-capture concise, immutable/mutable
   captures, outer-write boxing, nested transitive captures, named-funcexpr
