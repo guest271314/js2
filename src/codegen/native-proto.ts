@@ -313,7 +313,7 @@ export function emitLazyNativeProtoGet(ctx: CodegenContext, fctx: FunctionContex
       name: globalName,
       type: { kind: "externref" },
       mutable: true,
-      init: [{ op: "ref.null.extern" } as Instr],
+      init: [{ op: "ref.null.extern" }],
     });
     protoGlobals.set(brand, globalIdx);
   }
@@ -333,14 +333,14 @@ export function emitLazyNativeProtoGet(ctx: CodegenContext, fctx: FunctionContex
   // $name
   for (const instr of stringConstantExternrefInstrs(ctx, glue.name)) initBody.push(instr);
   pushNativeStringToExternref(initBody);
-  initBody.push({ op: "struct.new", typeIdx: structTypeIdx } as Instr);
-  initBody.push({ op: "extern.convert_any" } as Instr);
-  initBody.push({ op: "global.set", index: globalIdx } as Instr);
+  initBody.push({ op: "struct.new", typeIdx: structTypeIdx });
+  initBody.push({ op: "extern.convert_any" });
+  initBody.push({ op: "global.set", index: globalIdx });
 
-  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] } as Instr);
-  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] });
+  fctx.body.push({ op: "global.get", index: globalIdx });
   return true;
 }
 
@@ -629,31 +629,31 @@ export function emitNativeProtoIdentityReturnUndefined(
   // Force-materialize the proto object and stash its anyref view.
   const protoAny = allocLocal(fctx, `__proto_id_proto_${fctx.locals.length}`, { kind: "anyref" } as ValType);
   emitLazyNativeProtoGet(ctx, fctx, brand); // leaves the proto externref on the stack
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: protoAny } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.set", index: protoAny });
 
   // `this` (externref) → anyref; only an eqref can be `ref.eq`-compared.
   const thisAny = allocLocal(fctx, `__proto_id_this_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "local.get", index: thisParamIdx } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.tee", index: thisAny } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr);
+  fctx.body.push({ op: "local.get", index: thisParamIdx });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.tee", index: thisAny });
+  fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: [
-      { op: "local.get", index: thisAny } as Instr,
-      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
-      { op: "local.get", index: protoAny } as Instr,
-      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
-      { op: "ref.eq" } as Instr,
+      { op: "local.get", index: thisAny },
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+      { op: "local.get", index: protoAny },
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+      { op: "ref.eq" },
     ],
-    else: [{ op: "i32.const", value: 0 } as Instr],
-  } as Instr);
+    else: [{ op: "i32.const", value: 0 }],
+  });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [...undefinedResult, { op: "return" } as Instr],
+    then: [...undefinedResult, { op: "return" }],
     else: [],
-  } as Instr);
+  });
 }

@@ -103,7 +103,7 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
   // standalone `ref.null.extern` convention.
   const getUndefIdx = ensureGetUndefined(ctx);
   const undefInstrs: Instr[] =
-    getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx } as Instr] : [{ op: "ref.null.extern" } as Instr];
+    getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx }] : [{ op: "ref.null.extern" }];
   // (#2106 S1) Under the `undefinedSingleton` regime `__extern_get` ALREADY
   // returns the singleton for an absent property, and a null result means a
   // STORED JS null — so `__dyn_get` must NOT remap null → undefined (that
@@ -154,24 +154,24 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
       ? [
           // (#2106 S1) plain pass-through: __extern_get already answers the
           // singleton for absent, and null means a stored JS null.
-          { op: "local.get", index: 0 } as Instr,
-          { op: "local.get", index: 1 } as Instr,
-          { op: "call", funcIdx: externGetIdx } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
         ]
       : [
           // val = __extern_get(recv, key)
-          { op: "local.get", index: 0 } as Instr,
-          { op: "local.get", index: 1 } as Instr,
-          { op: "call", funcIdx: externGetIdx } as Instr,
-          { op: "local.tee", index: 2 } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          { op: "local.tee", index: 2 },
           // if (val is null) return undefined  — §Get of an absent property is undefined
-          { op: "ref.is_null" } as Instr,
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "val", type: externref },
             then: undefInstrs,
-            else: [{ op: "local.get", index: 2 } as Instr],
-          } as Instr,
+            else: [{ op: "local.get", index: 2 }],
+          },
         ],
     [{ name: "__dg_val", type: externref }],
   );
@@ -192,18 +192,18 @@ export function ensureDynReadHelpers(ctx: CodegenContext): void {
     s1IsNullishIdx !== undefined
       ? [
           // (#2106 S1) present ⇔ NOT nullish (absent = the undefined singleton).
-          { op: "local.get", index: 0 } as Instr,
-          { op: "local.get", index: 1 } as Instr,
-          { op: "call", funcIdx: externGetIdx } as Instr,
-          { op: "call", funcIdx: s1IsNullishIdx } as Instr,
-          { op: "i32.eqz" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          { op: "call", funcIdx: s1IsNullishIdx },
+          { op: "i32.eqz" },
         ]
       : [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "local.get", index: 1 } as Instr,
-          { op: "call", funcIdx: externGetIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
-          { op: "i32.eqz" } as Instr, // present ⇔ NOT null
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          { op: "ref.is_null" },
+          { op: "i32.eqz" }, // present ⇔ NOT null
         ],
   );
 
@@ -240,7 +240,7 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     const dynGetIdx = ctx.funcMap.get("__dyn_get");
     if (dynGetIdx === undefined) return false;
     for (const instr of stringConstantExternrefInstrs(ctx, keyName)) fctx.body.push(instr);
-    fctx.body.push({ op: "call", funcIdx: dynGetIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: dynGetIdx });
     return true;
   }
   // HOST mode: INLINE `__extern_get(recv, key)` directly — do NOT call the
@@ -309,16 +309,16 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     // Stash the receiver externref (currently on the stack) so we can test it.
     const recvTmp = allocLocal(fctx, `__dg_recv_${fctx.locals.length}`, { kind: "externref" });
     const anyTmp = allocLocal(fctx, `__dg_any_${fctx.locals.length}`, { kind: "anyref" });
-    fctx.body.push({ op: "local.set", index: recvTmp } as Instr);
-    fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+    fctx.body.push({ op: "local.set", index: recvTmp });
+    fctx.body.push({ op: "local.get", index: recvTmp });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.set", index: anyTmp });
 
     // The MISS branch: __extern_get(recv, "length") → value-or-undefined externref.
     let chain: Instr[] = [
-      { op: "local.get", index: recvTmp } as Instr,
+      { op: "local.get", index: recvTmp },
       ...stringConstantExternrefInstrs(ctx, keyName),
-      { op: "call", funcIdx: finalExternGetIdx } as Instr,
+      { op: "call", funcIdx: finalExternGetIdx },
     ];
     // (#2580 M1a v2 — merge_group eject fix) CLOSURE arm, innermost so it is
     // tested LAST inside the vec chain's else. A function/closure `.length` is its
@@ -341,33 +341,39 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     const closureArmThen = (): Instr[] => {
       if (bfnGetMetaIdx === undefined) {
         // arity fallback: box_number(0.0) — matches the prior numeric path.
-        return [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+        return [
+          { op: "f64.const", value: 0 },
+          { op: "call", funcIdx: boxNumIdx },
+        ];
       }
       const metaTmp = allocLocal(fctx, `__dg_bfnmeta_${fctx.locals.length}`, { kind: "externref" });
       return [
-        { op: "local.get", index: recvTmp } as Instr,
+        { op: "local.get", index: recvTmp },
         ...stringConstantExternrefInstrs(ctx, keyName),
-        { op: "call", funcIdx: bfnGetMetaIdx } as Instr,
-        { op: "local.tee", index: metaTmp } as Instr,
-        { op: "ref.is_null" } as Instr,
+        { op: "call", funcIdx: bfnGetMetaIdx },
+        { op: "local.tee", index: metaTmp },
+        { op: "ref.is_null" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
-          else: [{ op: "local.get", index: metaTmp } as Instr],
-        } as Instr,
+          then: [
+            { op: "f64.const", value: 0 },
+            { op: "call", funcIdx: boxNumIdx },
+          ],
+          else: [{ op: "local.get", index: metaTmp }],
+        },
       ];
     };
     for (const closureBaseTypeIdx of closureBaseWrapperTypeIdxs(ctx)) {
       chain = [
-        { op: "local.get", index: anyTmp } as Instr,
-        { op: "ref.test", typeIdx: closureBaseTypeIdx } as Instr,
+        { op: "local.get", index: anyTmp },
+        { op: "ref.test", typeIdx: closureBaseTypeIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: closureArmThen(),
           else: chain,
-        } as Instr,
+        },
       ];
     }
     // Wrap from the innermost (last) vec type outward: each layer is
@@ -379,20 +385,20 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
         continue; // not a length/data vec — skip
       }
       chain = [
-        { op: "local.get", index: anyTmp } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: anyTmp },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: [
-            { op: "local.get", index: anyTmp } as Instr,
-            { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-            { op: "f64.convert_i32_s" } as Instr,
-            { op: "call", funcIdx: boxNumIdx } as Instr,
+            { op: "local.get", index: anyTmp },
+            { op: "ref.cast", typeIdx: vecTypeIdx },
+            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+            { op: "f64.convert_i32_s" },
+            { op: "call", funcIdx: boxNumIdx },
           ],
           else: chain,
-        } as Instr,
+        },
       ];
     }
     // (#2580 M2 slice 1) NULL/UNDEFINED-RECEIVER guard, OUTERMOST (tested FIRST).
@@ -408,14 +414,17 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
     // miss → reaches `__extern_get` → undefined (preserved).
     if (isUndefIdx !== undefined && boxNumIdx !== undefined) {
       chain = [
-        { op: "local.get", index: recvTmp } as Instr,
-        { op: "call", funcIdx: isUndefIdx } as Instr,
+        { op: "local.get", index: recvTmp },
+        { op: "call", funcIdx: isUndefIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [{ op: "f64.const", value: 0 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+          then: [
+            { op: "f64.const", value: 0 },
+            { op: "call", funcIdx: boxNumIdx },
+          ],
           else: chain,
-        } as Instr,
+        },
       ];
     }
     for (const instr of chain) fctx.body.push(instr);
@@ -424,7 +433,7 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
 
   // receiver externref already on the stack → push key → call __extern_get.
   for (const instr of stringConstantExternrefInstrs(ctx, keyName)) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: finalExternGetIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: finalExternGetIdx });
   return true;
 }
 
@@ -589,95 +598,95 @@ export function ensureDynMemberGet(ctx: CodegenContext): void {
     //   tag 4 → __box_boolean; tag 0/1/null → ref.null.extern (a null/undefined
     //   receiver → __extern_get miss → the singleton, no null-deref).
     const peelBody: Instr[] = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "ref.is_null" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-      } as Instr,
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
+      },
       // tag = v.tag
-      { op: "local.get", index: 0 } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
-      { op: "local.set", index: 1 } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG },
+      { op: "local.set", index: 1 },
       // tag 6 → extern.convert_any(v.refval)  — the RAW $Object
-      { op: "local.get", index: 1 } as Instr,
-      { op: "i32.const", value: TAG_REF } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: TAG_REF },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_REF } as Instr,
-          { op: "extern.convert_any" } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_REF },
+          { op: "extern.convert_any" },
+          { op: "return" },
         ],
-      } as Instr,
+      },
       // tag 5 → v.externval (string externref)
-      { op: "local.get", index: 1 } as Instr,
-      { op: "i32.const", value: 5 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 5 },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_EXT } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_EXT },
+          { op: "return" },
         ],
-      } as Instr,
+      },
       // tag 3 → __box_number(v.f64val)
-      { op: "local.get", index: 1 } as Instr,
-      { op: "i32.const", value: 3 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 3 },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 } as Instr,
-          { op: "call", funcIdx: boxNumberIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 },
+          { op: "call", funcIdx: boxNumberIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
       // tag 4 → __box_boolean(v.i32val)
-      { op: "local.get", index: 1 } as Instr,
-      { op: "i32.const", value: 4 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 4 },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 } as Instr,
-          { op: "call", funcIdx: boxBooleanIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 },
+          { op: "call", funcIdx: boxBooleanIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
       // tag 2 → __box_number(f64.convert_i32_s(v.i32val))
-      { op: "local.get", index: 1 } as Instr,
-      { op: "i32.const", value: 2 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 2 },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 } as Instr,
-          { op: "f64.convert_i32_s" } as Instr,
-          { op: "call", funcIdx: boxNumberIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_I32 },
+          { op: "f64.convert_i32_s" },
+          { op: "call", funcIdx: boxNumberIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
       // tag 0 (null) / 1 (undefined) receiver → null externref → __extern_get miss
-      { op: "ref.null.extern" } as Instr,
+      { op: "ref.null.extern" },
     ];
     const peelIdx = addHelper("__carrier_recv_to_extern", [anyRefNull], [externref], peelBody, [
       { name: "tag", type: i32 },
@@ -692,12 +701,12 @@ export function ensureDynMemberGet(ctx: CodegenContext): void {
     // round-trip. The result of `__any_from_extern_honest` is a (ref $AnyValue),
     // a subtype of the (ref null $AnyValue) result, so it flows unchanged.
     const dmgBody: Instr[] = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "call", funcIdx: peelIdx } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: anyToExternIdx } as Instr,
-      { op: "call", funcIdx: externGetIdx } as Instr,
-      { op: "call", funcIdx: honestIdx } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: peelIdx },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: anyToExternIdx },
+      { op: "call", funcIdx: externGetIdx },
+      { op: "call", funcIdx: honestIdx },
     ];
     const dmgIdx = addHelper("__dyn_member_get", [anyRefNull, anyRefNull], [anyRefNull], dmgBody);
     if (dmgIdx === undefined) {
@@ -724,9 +733,9 @@ export function ensureDynMemberGet(ctx: CodegenContext): void {
   // a later dead-elim import shift remaps this baked call (stable-handle body,
   // scanned by `eliminateDeadImports`).
   const dmgHostBody: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "call", funcIdx: externGetIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 1 },
+    { op: "call", funcIdx: externGetIdx },
   ];
   const dmgHostIdx = addHelper("__dyn_member_get", [externref, externref], [externref], dmgHostBody);
   if (dmgHostIdx === undefined) {
@@ -788,17 +797,14 @@ function emitDynMemberGetSelfTestStandalone(
   ) {
     return; // dependency missing → skip drivers (self-test will surface it)
   }
-  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s) as Instr[];
-  const newObj = (): Instr[] => [{ op: "call", funcIdx: newObjIdx } as Instr];
-  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn }) as Instr;
+  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s);
+  const newObj = (): Instr[] => [{ op: "call", funcIdx: newObjIdx }];
+  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn });
   const box = (carrier: number): Instr => call(carrier); // honest classifier / box helper
   // carrierOf(objLocal): honest($AnyValue tag-6) of the object externref in a local
-  const carrierOf = (objLocal: number): Instr[] => [{ op: "local.get", index: objLocal } as Instr, call(honestIdx)];
+  const carrierOf = (objLocal: number): Instr[] => [{ op: "local.get", index: objLocal }, call(honestIdx)];
   const keyCarrier = (s: string): Instr[] => [...key(s), call(honestIdx)];
-  const readTag = (): Instr[] => [
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
-  ];
+  const readTag = (): Instr[] => [{ op: "ref.as_non_null" }, { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG }];
   // `read(k)` leaves the (ref null $AnyValue) carrier of o[k] on the stack.
   const read = (k: string): Instr[] => [...carrierOf(0), ...keyCarrier(k), call(dmgIdx)];
   // Field extractors that turn the carrier on the stack into an `eq`/`f64` value
@@ -808,20 +814,14 @@ function emitDynMemberGetSelfTestStandalone(
   //     strings are `(array i16)`, an eq subtype; two reads of one stored value
   //     yield the SAME ref → ref.eq → 1);
   //   tag-3 number → f64val (field 2) → f64.eq.
-  const refvalEq: Instr[] = [
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_REF } as Instr,
-  ];
+  const refvalEq: Instr[] = [{ op: "ref.as_non_null" }, { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_REF }];
   const externvalEq: Instr[] = [
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_EXT } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_EXT },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
   ];
-  const f64val: Instr[] = [
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 } as Instr,
-  ];
+  const f64val: Instr[] = [{ op: "ref.as_non_null" }, { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 }];
 
   // Driver 1 — object read → tag 6.
   addDriverExport(
@@ -834,12 +834,12 @@ function emitDynMemberGetSelfTestStandalone(
     ],
     [
       ...newObj(),
-      { op: "local.set", index: 1 } as Instr, // inner
+      { op: "local.set", index: 1 }, // inner
       ...newObj(),
-      { op: "local.set", index: 0 } as Instr, // o
-      { op: "local.get", index: 0 } as Instr,
+      { op: "local.set", index: 0 }, // o
+      { op: "local.get", index: 0 },
       ...key("a"),
-      { op: "local.get", index: 1 } as Instr,
+      { op: "local.get", index: 1 },
       call(externSetIdx),
       ...carrierOf(0),
       ...keyCarrier("a"),
@@ -851,23 +851,23 @@ function emitDynMemberGetSelfTestStandalone(
   // Driver 2 — aliased object reads ARE === (identity via tag-6 refval ref.eq).
   const aliasedIdentity = (k1: string, k2: string, distinct: boolean): Instr[] => [
     ...newObj(),
-    { op: "local.set", index: 1 } as Instr, // inner
-    ...(distinct ? [...newObj(), { op: "local.set", index: 2 } as Instr] : []), // inner2 (distinct only)
+    { op: "local.set", index: 1 }, // inner
+    ...((distinct ? [...newObj(), { op: "local.set", index: 2 }] : []) satisfies Instr[]), // inner2 (distinct only)
     ...newObj(),
-    { op: "local.set", index: 0 } as Instr, // o
-    { op: "local.get", index: 0 } as Instr,
+    { op: "local.set", index: 0 }, // o
+    { op: "local.get", index: 0 },
     ...key(k1),
-    { op: "local.get", index: 1 } as Instr,
+    { op: "local.get", index: 1 },
     call(externSetIdx),
-    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: 0 },
     ...key(k2),
-    { op: "local.get", index: distinct ? 2 : 1 } as Instr,
+    { op: "local.get", index: distinct ? 2 : 1 },
     call(externSetIdx),
     ...read(k1),
     ...refvalEq,
     ...read(k2),
     ...refvalEq,
-    { op: "ref.eq" } as Instr,
+    { op: "ref.eq" },
   ];
   addDriverExport(
     ctx,
@@ -896,8 +896,8 @@ function emitDynMemberGetSelfTestStandalone(
   // Driver 4/5 — string read → tag 5, content-=== → 1.
   const buildStringObj: Instr[] = [
     ...newObj(),
-    { op: "local.set", index: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
+    { op: "local.set", index: 0 },
+    { op: "local.get", index: 0 },
     ...key("s"),
     ...key("ab"),
     call(externSetIdx),
@@ -914,16 +914,16 @@ function emitDynMemberGetSelfTestStandalone(
     "__dmg_st_string_value",
     [i32],
     [{ name: "o", type: externref }],
-    [...buildStringObj, ...read("s"), ...externvalEq, ...read("s"), ...externvalEq, { op: "ref.eq" } as Instr],
+    [...buildStringObj, ...read("s"), ...externvalEq, ...read("s"), ...externvalEq, { op: "ref.eq" }],
   );
 
   // Driver 6/7 — number read → tag 3, value-=== → 1.
   const buildNumberObj: Instr[] = [
     ...newObj(),
-    { op: "local.set", index: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
+    { op: "local.set", index: 0 },
+    { op: "local.get", index: 0 },
     ...key("n"),
-    { op: "f64.const", value: 42 } as Instr,
+    { op: "f64.const", value: 42 },
     box(boxNumberIdx),
     call(externSetIdx),
   ];
@@ -939,7 +939,7 @@ function emitDynMemberGetSelfTestStandalone(
     "__dmg_st_number_value",
     [i32],
     [{ name: "o", type: externref }],
-    [...buildNumberObj, ...read("n"), ...f64val, ...read("n"), ...f64val, { op: "f64.eq" } as Instr],
+    [...buildNumberObj, ...read("n"), ...f64val, ...read("n"), ...f64val, { op: "f64.eq" }],
   );
 
   // Driver 8 — boolean read → tag 4.
@@ -950,10 +950,10 @@ function emitDynMemberGetSelfTestStandalone(
     [{ name: "o", type: externref }],
     [
       ...newObj(),
-      { op: "local.set", index: 0 } as Instr,
-      { op: "local.get", index: 0 } as Instr,
+      { op: "local.set", index: 0 },
+      { op: "local.get", index: 0 },
       ...key("bo"),
-      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.const", value: 1 },
       box(boxBooleanIdx),
       call(externSetIdx),
       ...carrierOf(0),
@@ -978,17 +978,17 @@ function emitDynMemberGetSelfTestStandalone(
     ],
     [
       ...newObj(),
-      { op: "local.set", index: 1 } as Instr, // inner
-      { op: "local.get", index: 1 } as Instr,
+      { op: "local.set", index: 1 }, // inner
+      { op: "local.get", index: 1 },
       ...key("z"),
-      { op: "f64.const", value: 7 } as Instr,
+      { op: "f64.const", value: 7 },
       box(boxNumberIdx),
       call(externSetIdx),
       ...newObj(),
-      { op: "local.set", index: 0 } as Instr, // o
-      { op: "local.get", index: 0 } as Instr,
+      { op: "local.set", index: 0 }, // o
+      { op: "local.get", index: 0 },
       ...key("a"),
-      { op: "local.get", index: 1 } as Instr,
+      { op: "local.get", index: 1 },
       call(externSetIdx),
       // r = dmg(dmg(carrier(o), "a"), "z")
       ...carrierOf(0),
@@ -996,19 +996,19 @@ function emitDynMemberGetSelfTestStandalone(
       call(dmgIdx),
       ...keyCarrier("z"),
       call(dmgIdx),
-      { op: "local.set", index: 2 } as Instr,
+      { op: "local.set", index: 2 },
       // tag*1000
-      { op: "local.get", index: 2 } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG } as Instr,
-      { op: "i32.const", value: 1000 } as Instr,
-      { op: "i32.mul" } as Instr,
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_TAG },
+      { op: "i32.const", value: 1000 },
+      { op: "i32.mul" },
       // + trunc(f64val)
-      { op: "local.get", index: 2 } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 } as Instr,
-      { op: "i32.trunc_f64_s" } as Instr,
-      { op: "i32.add" } as Instr,
+      { op: "local.get", index: 2 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: anyIdx, fieldIdx: AV_F64 },
+      { op: "i32.trunc_f64_s" },
+      { op: "i32.add" },
     ],
   );
 }
@@ -1040,8 +1040,8 @@ function emitDynMemberGetSelfTestHost(ctx: CodegenContext, dmgIdx: number): void
   ) {
     return;
   }
-  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s) as Instr[];
-  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn }) as Instr;
+  const key = (s: string): Instr[] => stringConstantExternrefInstrs(ctx, s);
+  const call = (fn: number): Instr => ({ op: "call", funcIdx: fn });
 
   // Present-key read via the host wrapper is a non-null externref → 1.
   addDriverExport(
@@ -1050,18 +1050,18 @@ function emitDynMemberGetSelfTestHost(ctx: CodegenContext, dmgIdx: number): void
     [i32],
     [{ name: "o", type: externref }],
     [
-      { op: "call", funcIdx: newObjIdx } as Instr,
-      { op: "local.set", index: 0 } as Instr,
-      { op: "local.get", index: 0 } as Instr,
+      { op: "call", funcIdx: newObjIdx },
+      { op: "local.set", index: 0 },
+      { op: "local.get", index: 0 },
       ...key("n"),
-      { op: "f64.const", value: 7 } as Instr,
+      { op: "f64.const", value: 7 },
       call(boxNumberIdx),
       call(externSetIdx),
-      { op: "local.get", index: 0 } as Instr,
+      { op: "local.get", index: 0 },
       ...key("n"),
       call(dmgIdx),
-      { op: "ref.is_null" } as Instr,
-      { op: "i32.eqz" } as Instr, // 1 iff the read produced a non-null result
+      { op: "ref.is_null" },
+      { op: "i32.eqz" }, // 1 iff the read produced a non-null result
     ],
   );
 }
@@ -1144,7 +1144,7 @@ export function widenBooleanDynamicAccess(t: ts.Type, wasm: ValType): ValType {
  */
 export function emitGlobalThisGopdFold(ctx: CodegenContext, fctx: FunctionContext, key: string): void {
   const recvTmp = allocLocal(fctx, `__gopd_this_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: recvTmp } as Instr);
+  fctx.body.push({ op: "local.set", index: recvTmp });
   const boxIdx =
     key === "undefined" ? undefined : ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   const createIdx = ensureLateImport(
@@ -1165,16 +1165,16 @@ export function emitGlobalThisGopdFold(ctx: CodegenContext, fctx: FunctionContex
   flushLateImportShifts(ctx, fctx);
   if (createIdx === undefined || dynGopdIdx === undefined || isUndefIdx === undefined) {
     // Degenerate (imports unregisterable): preserve the one-externref contract.
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
   // nullish? (ref.is_null catches the standalone null-extern regime; the host
   // `undefined` sentinel is a NON-null externref → __extern_is_undefined.)
-  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
-  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
-  fctx.body.push({ op: "call", funcIdx: isUndefIdx } as Instr);
-  fctx.body.push({ op: "i32.or" } as Instr);
+  fctx.body.push({ op: "local.get", index: recvTmp });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({ op: "local.get", index: recvTmp });
+  fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+  fctx.body.push({ op: "i32.or" });
   const thenInstrs: Instr[] = [];
   if (key === "undefined") {
     // Regime-aware `undefined` (host sentinel / standalone singleton / null
@@ -1186,20 +1186,20 @@ export function emitGlobalThisGopdFold(ctx: CodegenContext, fctx: FunctionContex
     emitUndefined(ctx, fctx);
     fctx.body = savedBody;
   } else {
-    thenInstrs.push({ op: "f64.const", value: key === "NaN" ? Number.NaN : Number.POSITIVE_INFINITY } as Instr);
-    if (boxIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
-    else thenInstrs.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+    thenInstrs.push({ op: "f64.const", value: key === "NaN" ? Number.NaN : Number.POSITIVE_INFINITY });
+    if (boxIdx !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx });
+    else thenInstrs.push({ op: "drop" }, { op: "ref.null.extern" });
   }
-  thenInstrs.push({ op: "i32.const", value: 0 } as Instr); // writable/enumerable/configurable: false (§19.1)
-  thenInstrs.push({ op: "call", funcIdx: createIdx } as Instr);
+  thenInstrs.push({ op: "i32.const", value: 0 }); // writable/enumerable/configurable: false (§19.1)
+  thenInstrs.push({ op: "call", funcIdx: createIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
     then: thenInstrs,
     else: [
-      { op: "local.get", index: recvTmp } as Instr,
+      { op: "local.get", index: recvTmp },
       ...stringConstantExternrefInstrs(ctx, key),
-      { op: "call", funcIdx: dynGopdIdx } as Instr,
+      { op: "call", funcIdx: dynGopdIdx },
     ],
-  } as Instr);
+  });
 }

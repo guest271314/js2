@@ -921,7 +921,7 @@ function emitToFixed(
             op: "if",
             blockType: { kind: "empty" },
             then: [{ op: "local.get", index: L_VALUE }, { op: "call", funcIdx: numToStrIdx }, { op: "return" }],
-          } as Instr,
+          },
         ]
       : [];
 

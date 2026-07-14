@@ -104,12 +104,12 @@ function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): voi
       { op: "ref.cast_null", typeIdx: funcTypeIdx },
     ],
     else: [{ op: "ref.null", typeIdx: funcTypeIdx }],
-  } as Instr);
+  });
 }
 
 function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionContext): void {
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
 }
 
 /**
@@ -198,7 +198,7 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
       blockType: { kind: "val", type: nativeStringType(ctx) },
       then: trueInstrs,
       else: falseInstrs,
-    } as Instr);
+    });
     return true;
   }
 
@@ -330,7 +330,7 @@ function emitArgAsNativeString(ctx: CodegenContext, fctx: FunctionContext, value
     if (tryThrowOnSymbolStringCoercion(ctx, fctx, value)) {
       // After the unreachable throw the stack is polymorphic, but downstream
       // code expects a native-string ref; push a null sentinel of that type.
-      fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx });
       return;
     }
     // A static / backend-created RegExp argument (`indexOf(/./)` — no IsRegExp
@@ -425,7 +425,7 @@ export function emitBorrowedStringReceiverToString(
   // nullish = ref.is_null(recv)  [∨ isUndefinedSingleton(recv) when the regime
   // is active — undefined is then a NON-null tag-1 box that ref.is_null misses].
   fctx.body.push({ op: "local.get", index: recvExtern });
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "ref.is_null" });
   if (undefinedSingletonActive(ctx)) {
     const scratchAny = allocLocal(fctx, `__borrow_this_any_${fctx.locals.length}`, { kind: "anyref" });
     if (emitIsUndefinedSingletonExternAt(ctx, fctx, recvExtern, scratchAny)) {
@@ -434,11 +434,11 @@ export function emitBorrowedStringReceiverToString(
   }
   const throwInstrs: Instr[] = [];
   emitBrandCheckTypeError(ctx, throwInstrs, roMsg);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs });
 
   // S = ToString(this)
   fctx.body.push({ op: "local.get", index: recvExtern });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
   fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
   return nativeStringType(ctx);
@@ -681,11 +681,11 @@ export function compileNativeTemplateExpression(
         if (i === 0 && !expr.head.text) {
           // no head — first span result is the running accumulator
         } else {
-          fctx.body.push({ op: "call", funcIdx: concatIdx } as Instr);
+          fctx.body.push({ op: "call", funcIdx: concatIdx });
         }
         if (span.literal.text) {
           compileStringLiteral(ctx, fctx, span.literal.text, span.literal);
-          fctx.body.push({ op: "call", funcIdx: concatIdx } as Instr);
+          fctx.body.push({ op: "call", funcIdx: concatIdx });
         }
         continue;
       }
@@ -698,7 +698,7 @@ export function compileNativeTemplateExpression(
       // Scalar-lowered null/undefined → drop the placeholder, build the native
       // string constant inline (#2005/#2006). Leaves the native string ref on
       // the stack for the shared concat tail below.
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       compileStringLiteral(ctx, fctx, spanNativeIsNull ? "null" : "undefined", span.expression);
     } else if (spanIsBool) {
       // boolean i32 → native "true"/"false" (#2005)
@@ -746,7 +746,7 @@ export function compileNativeTemplateExpression(
       }
     } else if (spanType && (spanType.kind === "f64" || spanType.kind === "i32" || spanType.kind === "i64")) {
       reportError(ctx, span.expression, "Template literal numeric substitution requires number_toString");
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       compileStringLiteral(ctx, fctx, "", span.expression);
     } else if (spanType && spanType.kind === "externref") {
       // #1470 — `any`-typed substitution lowers to externref. In standalone /
@@ -1027,7 +1027,7 @@ export function compileTaggedTemplateExpression(
   const pushStringElem = (text: string): void => {
     compileStringLiteral(ctx, fctx, text, expr);
     if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
   };
 
@@ -1085,7 +1085,7 @@ export function compileTaggedTemplateExpression(
     op: "if",
     blockType: { kind: "empty" },
     then: thenBody,
-  } as Instr);
+  });
 
   // Load cached template object into the local
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
@@ -1300,7 +1300,7 @@ export function compileTaggedTemplateExpression(
 
       // Push closure ref as self param (first arg of lifted function)
       fctx.body.push({ op: "local.get", index: closureLocal });
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" });
 
       // Push strings array as first argument
       fctx.body.push({ op: "local.get", index: stringsLocal });
@@ -1323,7 +1323,7 @@ export function compileTaggedTemplateExpression(
 
       // Push funcref from closure struct field 0 and call_ref
       fctx.body.push({ op: "local.get", index: closureLocal });
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" });
       fctx.body.push({
         op: "struct.get",
         typeIdx: matchedStructTypeIdx,
@@ -1451,7 +1451,7 @@ export function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): Va
       blockType: { kind: "val", type: nativeStringType(ctx) },
       then: trueInstrs,
       else: falseInstrs,
-    } as Instr);
+    });
     return nativeStringType(ctx);
   }
 
@@ -1688,10 +1688,10 @@ function emitNullableStringEquals(
   // else { result = __str_equals(flatten(left), flatten(right)) }
   const compareBody: Instr[] = [
     { op: "local.get", index: leftLocal },
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
     { op: "call", funcIdx: flattenIdx },
     { op: "local.get", index: rightLocal },
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
     { op: "call", funcIdx: flattenIdx },
     { op: "call", funcIdx: equalsIdx },
   ];
@@ -1701,18 +1701,18 @@ function emitNullableStringEquals(
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
-      then: [{ op: "i32.const", value: 0 } as Instr],
+      then: [{ op: "i32.const", value: 0 }],
       else: compareBody,
-    } as Instr,
+    },
   ];
   fctx.body.push({ op: "local.get", index: leftLocal });
   fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "local.get", index: rightLocal } as Instr, { op: "ref.is_null" } as Instr],
+    then: [{ op: "local.get", index: rightLocal }, { op: "ref.is_null" }],
     else: rightNullCheck,
-  } as Instr);
+  });
 }
 
 export function compileStringBinaryOp(
@@ -2124,7 +2124,7 @@ function emitTypeErrorThrow(ctx: CodegenContext, fctx: FunctionContext, msg: str
   // constructor (no `__throw_type_error` host import).
   if (noJsHost(ctx)) {
     emitThrowTypeError(ctx, fctx, msg);
-    fctx.body.push({ op: "unreachable" } as Instr);
+    fctx.body.push({ op: "unreachable" });
     return;
   }
   const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
@@ -2133,14 +2133,14 @@ function emitTypeErrorThrow(ctx: CodegenContext, fctx: FunctionContext, msg: str
     if (throwIdx !== undefined) {
       flushLateImportShifts(ctx, fctx);
       // GC-ref → externref bridge so the host import receives a JS string.
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       const funcIdx = ctx.funcMap.get("__throw_type_error")!;
-      fctx.body.push({ op: "call", funcIdx } as Instr);
-      fctx.body.push({ op: "unreachable" } as Instr);
+      fctx.body.push({ op: "call", funcIdx });
+      fctx.body.push({ op: "unreachable" });
     } else {
       const tagIdx = ensureExnTag(ctx);
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
-      fctx.body.push({ op: "throw", tagIdx } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
+      fctx.body.push({ op: "throw", tagIdx });
     }
     return;
   }
@@ -2148,13 +2148,13 @@ function emitTypeErrorThrow(ctx: CodegenContext, fctx: FunctionContext, msg: str
   if (throwIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     const funcIdx = ctx.funcMap.get("__throw_type_error")!;
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-    fctx.body.push({ op: "call", funcIdx } as Instr);
-    fctx.body.push({ op: "unreachable" } as Instr);
+    fctx.body.push({ op: "global.get", index: strIdx });
+    fctx.body.push({ op: "call", funcIdx });
+    fctx.body.push({ op: "unreachable" });
   } else {
     const tagIdx = ensureExnTag(ctx);
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-    fctx.body.push({ op: "throw", tagIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: strIdx });
+    fctx.body.push({ op: "throw", tagIdx });
   }
 }
 
@@ -2230,7 +2230,7 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
     }
     if (argType.kind === "i64") {
       // BigInt fell through static detection (e.g. `any` widened to bigint).
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       emitTypeErrorThrow(ctx, fctx, "TypeError: Cannot convert a BigInt value to a number");
       fctx.body.push({ op: "i32.const", value: 0 });
       return;
@@ -2255,7 +2255,7 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
       blockType: { kind: "val", type: { kind: "i32" } },
       then: [{ op: "i32.const", value: 0 }],
       else: [{ op: "local.get", index: fTmp }, { op: "i32.trunc_sat_f64_s" }],
-    } as Instr);
+    });
     return;
   }
   const argType = compileExpression(ctx, fctx, arg, { kind: "i32" });
@@ -2264,7 +2264,7 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
   } else if (argType.kind === "i64") {
     // BigInt fell through static detection (e.g. `any` widened to bigint).
     // Drop the i64 and throw TypeError per §7.1.4.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     emitTypeErrorThrow(ctx, fctx, "TypeError: Cannot convert a BigInt value to a number");
     fctx.body.push({ op: "i32.const", value: 0 });
   }
@@ -2477,7 +2477,7 @@ export function compileNativeStringMethodCall(
         { op: "array.get_u", typeIdx: strDataTypeIdx },
         { op: "f64.convert_i32_u" },
       ],
-    } as Instr);
+    });
     return { kind: "f64" };
   }
 
@@ -2530,7 +2530,7 @@ export function compileNativeStringMethodCall(
         { op: "i32.add" },
         { op: "local.set", index: idxTmp },
       ],
-    } as Instr);
+    });
     // ECMA-262 §22.1.3.1 String.prototype.at: after resolving a relative
     // index, an out-of-range position (idx < 0 || idx >= len) yields
     // `undefined`, NOT the empty string that `charAt` returns. Represent that
@@ -2556,7 +2556,7 @@ export function compileNativeStringMethodCall(
         { op: "local.get", index: idxTmp },
         { op: "call", funcIdx: charAtIdx },
       ],
-    } as Instr);
+    });
     return nativeStringTypeNullable(ctx);
   }
 
@@ -2857,7 +2857,7 @@ export function compileNativeStringMethodCall(
         const countLocal = allocLocal(fctx, `__repeat_count_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: countLocal });
         // Check ToIntegerOrInfinity(count) < 0 — truncate toward zero first.
-        fctx.body.push({ op: "f64.trunc" } as Instr);
+        fctx.body.push({ op: "f64.trunc" });
         fctx.body.push({ op: "f64.const", value: 0 });
         fctx.body.push({ op: "f64.lt" });
         // Check count is Infinity (count != count is NaN, but we also need +Inf)
@@ -2873,7 +2873,7 @@ export function compileNativeStringMethodCall(
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
             else: [],
           });
         }
@@ -3125,23 +3125,23 @@ export function compileNativeStringMethodCall(
     fctx.body.push({ op: "local.set", index: limLocal });
     // lim === 0 ? { length: 0, data: [] } : { length: 1, data: [S] }
     fctx.body.push({ op: "local.get", index: limLocal });
-    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "ref", typeIdx: vecTypeIdx } as ValType },
       then: [
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-        { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+        { op: "i32.const", value: 0 },
+        { op: "i32.const", value: 0 },
+        { op: "array.new_default", typeIdx: arrTypeIdx },
+        { op: "struct.new", typeIdx: vecTypeIdx },
       ],
       else: [
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "local.get", index: recvLocal } as Instr,
-        { op: "array.new_fixed", typeIdx: arrTypeIdx, length: 1 } as Instr,
-        { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+        { op: "i32.const", value: 1 },
+        { op: "local.get", index: recvLocal },
+        { op: "array.new_fixed", typeIdx: arrTypeIdx, length: 1 },
+        { op: "struct.new", typeIdx: vecTypeIdx },
       ],
-    } as Instr);
+    });
     return { kind: "ref", typeIdx: vecTypeIdx };
   }
 
@@ -3278,7 +3278,7 @@ export function compileNativeStringMethodCall(
           else: [{ op: "local.get", index: firstLocal }, { op: "f64.convert_i32_u" }],
         },
       ],
-    } as Instr);
+    });
     return { kind: "f64" };
   }
 
@@ -3296,7 +3296,7 @@ export function compileNativeStringMethodCall(
           addStringConstantGlobal(ctx, rangeErrMsg);
           const tagIdx = ensureExnTag(ctx);
           fctx.body.push(...stringConstantExternrefInstrs(ctx, rangeErrMsg));
-          fctx.body.push({ op: "throw", tagIdx } as Instr);
+          fctx.body.push({ op: "throw", tagIdx });
           return null;
         }
       }
@@ -3474,9 +3474,9 @@ export function compileGuardedNativeStringMethodCall(
   // Evaluate the receiver once → externref temp (side effects happen here only).
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType && recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (!recvType) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
   const recvExt = allocLocal(fctx, `__strm_ext_${fctx.locals.length}`, {
     kind: "externref",
@@ -3487,9 +3487,9 @@ export function compileGuardedNativeStringMethodCall(
   // separate body so we can learn its result ValType before shaping the else.
   const savedBody = pushBody(fctx);
   const resultType = compileNativeStringMethodCall(ctx, fctx, expr, propAccess, method, () => {
-    fctx.body.push({ op: "local.get", index: recvExt } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: recvExt });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
     return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
   });
   const thenInstrs = fctx.body;
@@ -3528,22 +3528,22 @@ export function compileGuardedNativeStringMethodCall(
     if (haveUnbox) {
       const saved = pushBody(fctx);
       // recv (the already-evaluated externref temp) + each arg boxed to externref.
-      fctx.body.push({ op: "local.get", index: recvExt } as Instr);
+      fctx.body.push({ op: "local.get", index: recvExt });
       for (const arg of expr.arguments) {
         const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
         if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
-        else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+        else if (at === null) fctx.body.push({ op: "ref.null.extern" });
       }
-      fctx.body.push({ op: "call", funcIdx: dispatchIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: dispatchIdx });
       // Dispatcher returns a boxed externref. Unbox to the string method's
       // result kind: includes → boolean(i32); indexOf/lastIndexOf → number(f64),
       // truncated to i32 when the string arm's result is i32.
       if (method === "includes") {
-        fctx.body.push({ op: "call", funcIdx: unboxBoolIdx! } as Instr);
-        if (resultType.kind === "f64") fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: unboxBoolIdx! });
+        if (resultType.kind === "f64") fctx.body.push({ op: "f64.convert_i32_s" });
       } else {
-        fctx.body.push({ op: "call", funcIdx: unboxNumIdx! } as Instr); // externref → f64
-        if (resultType.kind === "i32") fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: unboxNumIdx! }); // externref → f64
+        if (resultType.kind === "i32") fctx.body.push({ op: "i32.trunc_sat_f64_s" });
       }
       elseInstrs = fctx.body;
       popBody(fctx, saved);
@@ -3552,28 +3552,28 @@ export function compileGuardedNativeStringMethodCall(
   if (elseInstrs === undefined) {
     elseInstrs = [];
     if (resultType.kind === "f64") {
-      elseInstrs.push({ op: "f64.const", value: NaN } as Instr);
+      elseInstrs.push({ op: "f64.const", value: NaN });
     } else if (resultType.kind === "i32") {
-      elseInstrs.push({ op: "i32.const", value: 0 } as Instr);
+      elseInstrs.push({ op: "i32.const", value: 0 });
     } else if (resultType.kind === "ref" || resultType.kind === "ref_null") {
       elseInstrs.push({
         op: "ref.null",
         typeIdx: (resultType as { typeIdx: number }).typeIdx,
-      } as Instr);
+      });
     } else {
-      elseInstrs.push({ op: "ref.null.extern" } as Instr);
+      elseInstrs.push({ op: "ref.null.extern" });
     }
   }
 
   fctx.body.push({ op: "local.get", index: recvExt });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: resultType },
     then: thenInstrs,
     else: elseInstrs,
-  } as Instr);
+  });
   return resultType;
 }
 

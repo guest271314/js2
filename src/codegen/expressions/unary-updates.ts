@@ -1033,7 +1033,7 @@ function compilePrefixUpdate(
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "val" as const, type: { kind: "f64" } },
-                then: [{ op: "f64.const", value: NaN } as Instr],
+                then: [{ op: "f64.const", value: NaN }],
                 else: elseBranch,
               });
               return { kind: "f64" };
@@ -1046,23 +1046,23 @@ function compilePrefixUpdate(
               blockType: { kind: "val" as const, type: boxedPP.valType },
               then: defaultValueInstrs(boxedPP.valType),
               else: [
-                { op: "local.get", index: idx } as Instr,
-                { op: "local.get", index: idx } as Instr,
+                { op: "local.get", index: idx },
+                { op: "local.get", index: idx },
                 {
                   op: "struct.get",
                   typeIdx: boxedPP.refCellTypeIdx,
                   fieldIdx: 0,
-                } as Instr,
-                ...(boxedPP.valType.kind === "i32"
-                  ? [{ op: "i32.const", value: 1 } as Instr, { op: "i32.add" } as Instr]
-                  : [{ op: "f64.const", value: 1 } as Instr, { op: "f64.add" } as Instr]),
-                { op: "local.tee", index: ppTmp } as Instr,
+                },
+                ...((boxedPP.valType.kind === "i32"
+                  ? [{ op: "i32.const", value: 1 }, { op: "i32.add" }]
+                  : [{ op: "f64.const", value: 1 }, { op: "f64.add" }]) satisfies Instr[]),
+                { op: "local.tee", index: ppTmp },
                 {
                   op: "struct.set",
                   typeIdx: boxedPP.refCellTypeIdx,
                   fieldIdx: 0,
-                } as Instr,
-                { op: "local.get", index: ppTmp } as Instr,
+                },
+                { op: "local.get", index: ppTmp },
               ],
             });
             return boxedPP.valType;
@@ -1249,7 +1249,7 @@ function compilePrefixUpdate(
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "val" as const, type: { kind: "f64" } },
-                then: [{ op: "f64.const", value: NaN } as Instr],
+                then: [{ op: "f64.const", value: NaN }],
                 else: elseBranch,
               });
               return { kind: "f64" };
@@ -1262,23 +1262,23 @@ function compilePrefixUpdate(
               blockType: { kind: "val" as const, type: boxed.valType },
               then: defaultValueInstrs(boxed.valType),
               else: [
-                { op: "local.get", index: idx } as Instr,
-                { op: "local.get", index: idx } as Instr,
+                { op: "local.get", index: idx },
+                { op: "local.get", index: idx },
                 {
                   op: "struct.get",
                   typeIdx: boxed.refCellTypeIdx,
                   fieldIdx: 0,
-                } as Instr,
-                ...(boxed.valType.kind === "i32"
-                  ? [{ op: "i32.const", value: 1 } as Instr, { op: arithOpI32 } as Instr]
-                  : [{ op: "f64.const", value: 1 } as Instr, { op: arithOp } as Instr]),
-                { op: "local.tee", index: tmp } as Instr,
+                },
+                ...((boxed.valType.kind === "i32"
+                  ? [{ op: "i32.const", value: 1 }, { op: arithOpI32 }]
+                  : [{ op: "f64.const", value: 1 }, { op: arithOp }]) satisfies Instr[]),
+                { op: "local.tee", index: tmp },
                 {
                   op: "struct.set",
                   typeIdx: boxed.refCellTypeIdx,
                   fieldIdx: 0,
-                } as Instr,
-                { op: "local.get", index: tmp } as Instr,
+                },
+                { op: "local.get", index: tmp },
               ],
             });
             return boxed.valType;
@@ -1556,7 +1556,7 @@ function compilePostfixUnary(
         fctx.body.push({
           op: "if",
           blockType: { kind: "val" as const, type: { kind: "f64" } },
-          then: [{ op: "f64.const", value: NaN } as Instr],
+          then: [{ op: "f64.const", value: NaN }],
           else: elseBranch,
         });
         return { kind: "f64" };
@@ -1569,28 +1569,28 @@ function compilePostfixUnary(
         blockType: { kind: "val" as const, type: boxedPost.valType },
         then: defaultValueInstrs(boxedPost.valType),
         else: [
-          { op: "local.get", index: idx } as Instr,
+          { op: "local.get", index: idx },
           {
             op: "struct.get",
             typeIdx: boxedPost.refCellTypeIdx,
             fieldIdx: 0,
-          } as Instr,
-          { op: "local.tee", index: oldTmp } as Instr,
-          ...(boxedPost.valType.kind === "i32"
-            ? [{ op: "i32.const", value: 1 } as Instr, { op: arithOpI32 } as Instr]
-            : [{ op: "f64.const", value: 1 } as Instr, { op: arithOp } as Instr]),
-          ...(() => {
+          },
+          { op: "local.tee", index: oldTmp },
+          ...((boxedPost.valType.kind === "i32"
+            ? [{ op: "i32.const", value: 1 }, { op: arithOpI32 }]
+            : [{ op: "f64.const", value: 1 }, { op: arithOp }]) satisfies Instr[]),
+          ...((): Instr[] => {
             const newTmp = allocLocal(fctx, `__postnew_${fctx.locals.length}`, boxedPost.valType);
             return [
-              { op: "local.set", index: newTmp } as Instr,
-              { op: "local.get", index: idx } as Instr,
-              { op: "local.get", index: newTmp } as Instr,
+              { op: "local.set", index: newTmp },
+              { op: "local.get", index: idx },
+              { op: "local.get", index: newTmp },
               {
                 op: "struct.set",
                 typeIdx: boxedPost.refCellTypeIdx,
                 fieldIdx: 0,
-              } as Instr,
-              { op: "local.get", index: oldTmp } as Instr,
+              },
+              { op: "local.get", index: oldTmp },
             ];
           })(),
         ],
@@ -1838,14 +1838,14 @@ function compilePostfixIncrementElement(
     fctx.body.push({ op: "local.get", index: vecLocal });
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 });
     fctx.body.push({ op: "array.len" });
-    fctx.body.push({ op: "i32.lt_u" } as Instr);
+    fctx.body.push({ op: "i32.lt_u" });
 
     // Build the in-bounds branch: read old, compute new, write, return old
     const thenInstrs: Instr[] = [];
-    thenInstrs.push({ op: "local.get", index: vecLocal } as Instr);
-    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
-    thenInstrs.push({ op: "local.get", index: idxLocal } as Instr);
-    thenInstrs.push({ op: "array.get", typeIdx: arrTypeIdx } as Instr);
+    thenInstrs.push({ op: "local.get", index: vecLocal });
+    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 });
+    thenInstrs.push({ op: "local.get", index: idxLocal });
+    thenInstrs.push({ op: "array.get", typeIdx: arrTypeIdx });
     if (elemType.kind !== "f64") {
       const savedBody = fctx.body;
       fctx.body = thenInstrs as any;
@@ -1855,36 +1855,36 @@ function compilePostfixIncrementElement(
     const oldVal = allocLocal(fctx, `__postinc_old_${fctx.locals.length}`, {
       kind: "f64",
     });
-    thenInstrs.push({ op: "local.set", index: oldVal } as Instr);
+    thenInstrs.push({ op: "local.set", index: oldVal });
     // Compute new value
-    thenInstrs.push({ op: "local.get", index: oldVal } as Instr);
-    thenInstrs.push({ op: "f64.const", value: 1 } as Instr);
-    thenInstrs.push({ op: isIncrement ? "f64.add" : "f64.sub" } as Instr);
+    thenInstrs.push({ op: "local.get", index: oldVal });
+    thenInstrs.push({ op: "f64.const", value: 1 });
+    thenInstrs.push({ op: isIncrement ? "f64.add" : "f64.sub" });
     // Coerce and write back
     const newVal = allocLocal(fctx, `__postinc_new_${fctx.locals.length}`, {
       kind: "f64",
     });
-    thenInstrs.push({ op: "local.set", index: newVal } as Instr);
-    thenInstrs.push({ op: "local.get", index: vecLocal } as Instr);
-    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
-    thenInstrs.push({ op: "local.get", index: idxLocal } as Instr);
-    thenInstrs.push({ op: "local.get", index: newVal } as Instr);
+    thenInstrs.push({ op: "local.set", index: newVal });
+    thenInstrs.push({ op: "local.get", index: vecLocal });
+    thenInstrs.push({ op: "struct.get", typeIdx, fieldIdx: 1 });
+    thenInstrs.push({ op: "local.get", index: idxLocal });
+    thenInstrs.push({ op: "local.get", index: newVal });
     if (elemType.kind !== "f64") {
       const savedBody = fctx.body;
       fctx.body = thenInstrs as any;
       coerceType(ctx, fctx, { kind: "f64" }, elemType);
       fctx.body = savedBody;
     }
-    thenInstrs.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
+    thenInstrs.push({ op: "array.set", typeIdx: arrTypeIdx });
     // Return old value
-    thenInstrs.push({ op: "local.get", index: oldVal } as Instr);
+    thenInstrs.push({ op: "local.get", index: oldVal });
 
     fctx.body.push({
       op: "if",
       blockType: { kind: "val" as const, type: { kind: "f64" as const } },
       then: thenInstrs,
-      else: [{ op: "f64.const", value: NaN } as Instr],
-    } as Instr);
+      else: [{ op: "f64.const", value: NaN }],
+    });
 
     return { kind: "f64" };
   }

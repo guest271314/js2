@@ -1060,7 +1060,7 @@ export function addArrayRuntime(mod: WasmModule): void {
           ],
         },
         { op: "local.get", index: newArrLocal },
-      ] as Instr[];
+      ];
     },
     2,
   );
@@ -1780,7 +1780,7 @@ export function addStringRuntime(mod: WasmModule): void {
         },
         // return result
         { op: "local.get", index: resultLocal },
-      ] as Instr[];
+      ];
     },
     4,
   );
@@ -1863,7 +1863,7 @@ export function addStringRuntime(mod: WasmModule): void {
           ],
         },
         { op: "local.get", index: ptrLocal },
-      ] as Instr[];
+      ];
     },
     3,
   );
@@ -1987,7 +1987,7 @@ export function addStringRuntime(mod: WasmModule): void {
             { op: "i32.const", value: -1 },
           ],
         },
-      ] as Instr[];
+      ];
     },
     5,
   );
@@ -2078,7 +2078,7 @@ export function addStringRuntime(mod: WasmModule): void {
         { op: "call", funcIdx: arrPushIdx },
         // return result
         { op: "local.get", index: resultLocal },
-      ] as Instr[];
+      ];
     },
     5,
   );

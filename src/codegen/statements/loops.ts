@@ -1241,16 +1241,16 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
         blockType: { kind: "empty" },
         then: [],
         else: [
-          { op: "local.get", index: pb.boxedLocal } as Instr,
-          { op: "ref.as_non_null" } as Instr,
+          { op: "local.get", index: pb.boxedLocal },
+          { op: "ref.as_non_null" },
           {
             op: "struct.get",
             typeIdx: pb.refCellTypeIdx,
             fieldIdx: 0,
-          } as Instr,
-          { op: "local.set", index: pb.originalLocalIdx } as Instr,
+          },
+          { op: "local.set", index: pb.originalLocalIdx },
         ],
-      } as Instr);
+      });
       fctx.localMap.set(pb.name, pb.originalLocalIdx);
     }
   }
@@ -1407,7 +1407,7 @@ export function compileForOfDestructuring(
         if (element.initializer) {
           const instrs = collectInstrs(fctx, () => {
             compileExpression(ctx, fctx, element.initializer!, bindingType);
-            fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+            fctx.body.push({ op: "local.set", index: localIdx });
           });
           fctx.body.push(...instrs);
         } else {
@@ -1480,10 +1480,10 @@ export function compileForOfDestructuring(
                 fctx,
                 () => {
                   fctx.body.push({ op: "local.get", index: elemLocal });
-                  if (elemType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+                  if (elemType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
                   if (!materializeStructAsObject(ctx, fctx, structTypeIdx, { skipInternalFields: true })) {
                     // Declined — struct ref still on stack; reinterpret as-is.
-                    fctx.body.push({ op: "extern.convert_any" } as Instr);
+                    fctx.body.push({ op: "extern.convert_any" });
                   }
                 },
                 excludedKeys,
@@ -1512,7 +1512,7 @@ export function compileForOfDestructuring(
               const excludedStrIdx = ctx.stringGlobalMap.get(excludedStr);
               if (excludedStrIdx !== undefined) {
                 fctx.body.push({ op: "local.get", index: elemLocal });
-                fctx.body.push({ op: "extern.convert_any" } as Instr);
+                fctx.body.push({ op: "extern.convert_any" });
                 // (#51) `addStringConstantGlobal` stores a `-1` sentinel under
                 // nativeStrings (no host string-constant global); a bare
                 // `global.get -1` crashes binary emit ("global index out of
@@ -1611,7 +1611,7 @@ export function compileForOfDestructuring(
           if (element.initializer) {
             const instrs = collectInstrs(fctx, () => {
               compileExpression(ctx, fctx, element.initializer!, bindingType);
-              fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+              fctx.body.push({ op: "local.set", index: localIdx });
             });
             fctx.body.push(...instrs);
           } else {
@@ -1742,7 +1742,7 @@ export function compileForOfDestructuring(
             }
             if (sliceIdx !== undefined) {
               fctx.body.push({ op: "local.get", index: elemLocal });
-              fctx.body.push({ op: "extern.convert_any" } as Instr);
+              fctx.body.push({ op: "extern.convert_any" });
               fctx.body.push({ op: "f64.const", value: i });
               fctx.body.push({ op: "call", funcIdx: sliceIdx });
               fctx.body.push({ op: "local.set", index: restIdx });
@@ -1882,15 +1882,15 @@ export function compileForOfDestructuring(
             fieldIdx: 0,
           }); // length
           fctx.body.push({ op: "i32.const", value: i });
-          fctx.body.push({ op: "i32.sub" } as Instr);
+          fctx.body.push({ op: "i32.sub" });
           fctx.body.push({ op: "local.set", index: restLenLocal });
           // Clamp to 0 if negative
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 });
           fctx.body.push({ op: "local.get", index: restLenLocal });
           fctx.body.push({ op: "local.get", index: restLenLocal });
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-          fctx.body.push({ op: "i32.lt_s" } as Instr);
-          fctx.body.push({ op: "select" } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "i32.lt_s" });
+          fctx.body.push({ op: "select" });
           fctx.body.push({ op: "local.set", index: restLenLocal });
 
           // Create new data array: array.new_default(restLen)
@@ -1902,7 +1902,7 @@ export function compileForOfDestructuring(
           fctx.body.push({
             op: "array.new_default",
             typeIdx: innerArrTypeIdx,
-          } as Instr);
+          });
           fctx.body.push({ op: "local.set", index: restArrLocal });
 
           // array.copy(restArr, 0, srcData, i, restLen)
@@ -1920,13 +1920,13 @@ export function compileForOfDestructuring(
             op: "array.copy",
             dstTypeIdx: innerArrTypeIdx,
             srcTypeIdx: innerArrTypeIdx,
-          } as Instr);
+          });
 
           // Create new vec struct: struct.new(restLen, restArr)
           const restVecType: ValType = { kind: "ref", typeIdx: structTypeIdx };
           fctx.body.push({ op: "local.get", index: restLenLocal });
           fctx.body.push({ op: "local.get", index: restArrLocal });
-          fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx } as Instr);
+          fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
 
           let restIdx = fctx.localMap.get(restName);
           if (restIdx === undefined) {
@@ -2029,7 +2029,7 @@ function emitBoxedForOfAssignStore(
   if (!valTypesMatch(fieldType, valType)) {
     coerceType(ctx, fctx, fieldType, valType);
   }
-  fctx.body.push({ op: "struct.set", typeIdx: boxedCap.refCellTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: boxedCap.refCellTypeIdx, fieldIdx: 0 });
 }
 
 function compileForOfAssignDestructuring(
@@ -2050,7 +2050,7 @@ function compileForOfAssignDestructuring(
     : findUnresolvableInArrayPattern(ctx, fctx, expr);
   if (hasUnresolvable && isStrictContext(stmt)) {
     const tagIdx = ensureExnTag(ctx);
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     fctx.body.push({ op: "throw", tagIdx });
     return;
   }
@@ -2092,7 +2092,7 @@ function compileForOfAssignDestructuring(
             if (boxedCapPrim) {
               emitBoxedForOfAssignStore(ctx, fctx, targetLocal, dfltType ?? boxedCapPrim.valType, boxedCapPrim);
             } else {
-              fctx.body.push({ op: "local.set", index: targetLocal } as Instr);
+              fctx.body.push({ op: "local.set", index: targetLocal });
             }
           });
           fctx.body.push(...instrs);
@@ -2186,7 +2186,7 @@ function compileForOfAssignDestructuring(
         if (!valTypesMatch(fieldType, valType)) {
           coerceType(ctx, fctx, fieldType, valType);
         }
-        fctx.body.push({ op: "struct.set", typeIdx: boxedCapObj.refCellTypeIdx, fieldIdx: 0 } as Instr);
+        fctx.body.push({ op: "struct.set", typeIdx: boxedCapObj.refCellTypeIdx, fieldIdx: 0 });
         continue;
       }
       const targetType = getLocalType(fctx, targetLocal);
@@ -2257,7 +2257,7 @@ function compileForOfAssignDestructuring(
             const oobType = getLocalType(fctx, oobLocal);
             const instrs = collectInstrs(fctx, () => {
               compileExpression(ctx, fctx, oobInit!, oobType ?? { kind: "f64" });
-              fctx.body.push({ op: "local.set", index: oobLocal! } as Instr);
+              fctx.body.push({ op: "local.set", index: oobLocal! });
             });
             fctx.body.push(...instrs);
             if (oobSyncGlobalIdx !== undefined) {
@@ -2282,7 +2282,7 @@ function compileForOfAssignDestructuring(
           // WasmGC tuple to externref so __extern_slice can produce the rest
           // slice (a JS array host / native array standalone), then PutValue it.
           fctx.body.push({ op: "local.get", index: elemLocal });
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
           emitForOfRestAssignment(ctx, fctx, el, i, (name) => ctx.moduleGlobals.get(name));
           continue;
         }
@@ -2314,7 +2314,7 @@ function compileForOfAssignDestructuring(
               const oobType = getLocalType(fctx, oobLocal);
               const instrs = collectInstrs(fctx, () => {
                 compileExpression(ctx, fctx, oobInit!, oobType ?? { kind: "f64" });
-                fctx.body.push({ op: "local.set", index: oobLocal! } as Instr);
+                fctx.body.push({ op: "local.set", index: oobLocal! });
               });
               fctx.body.push(...instrs);
               if (oobSyncGlobalIdx !== undefined) {
@@ -2402,7 +2402,7 @@ function compileForOfAssignDestructuring(
             emitDefaultValueCheck(ctx, fctx, fieldType, tmpV, defaultInit, boxedCapTup.valType);
             fctx.body.push({ op: "local.get", index: targetLocal });
             fctx.body.push({ op: "local.get", index: tmpV });
-            fctx.body.push({ op: "struct.set", typeIdx: boxedCapTup.refCellTypeIdx, fieldIdx: 0 } as Instr);
+            fctx.body.push({ op: "struct.set", typeIdx: boxedCapTup.refCellTypeIdx, fieldIdx: 0 });
           } else {
             emitBoxedForOfAssignStore(ctx, fctx, targetLocal, fieldType, boxedCapTup);
           }
@@ -2555,10 +2555,10 @@ function compileForOfAssignDestructuring(
             if (undefIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx: undefIdx });
             } else {
-              fctx.body.push({ op: "ref.is_null" } as Instr);
+              fctx.body.push({ op: "ref.is_null" });
             }
           } else if (innerElemType.kind === "ref" || innerElemType.kind === "ref_null") {
-            fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "ref.is_null" });
           } else {
             // i32 or other — no reliable undefined sentinel; treat as not-undefined.
             fctx.body.push({ op: "i32.const", value: 0 });
@@ -2567,7 +2567,7 @@ function compileForOfAssignDestructuring(
             compileExpression(ctx, fctx, defaultInit!, valType);
           });
           const elseInstrs = collectInstrs(fctx, () => {
-            fctx.body.push({ op: "local.get", index: tmpVal } as Instr);
+            fctx.body.push({ op: "local.get", index: tmpVal });
             if (!valTypesMatch(innerElemType, valType)) {
               coerceType(ctx, fctx, innerElemType, valType);
             }
@@ -2612,30 +2612,30 @@ function compileForOfAssignDestructuring(
           fctx.body.push({ op: "local.tee", index: arrDataLocal });
           fctx.body.push({ op: "array.len" });
           fctx.body.push({ op: "i32.const", value: i });
-          fctx.body.push({ op: "i32.gt_s" } as Instr); // len > i means in-bounds
+          fctx.body.push({ op: "i32.gt_s" }); // len > i means in-bounds
 
           const hintType = targetType ?? innerElemType;
           // Then branch: in-bounds — get element, check for undefined, apply default if needed
           const thenInstrs = collectInstrs(fctx, () => {
-            fctx.body.push({ op: "local.get", index: arrDataLocal } as Instr);
-            fctx.body.push({ op: "i32.const", value: i } as Instr);
+            fctx.body.push({ op: "local.get", index: arrDataLocal });
+            fctx.body.push({ op: "i32.const", value: i });
             fctx.body.push({
               op: "array.get",
               typeIdx: innerArrTypeIdx,
-            } as Instr);
+            });
             emitDefaultValueCheck(ctx, fctx, innerElemType, targetLocal!, defaultInit!, targetType ?? undefined);
           });
           // Else branch: OOB — apply default directly
           const elseInstrs = collectInstrs(fctx, () => {
             compileExpression(ctx, fctx, defaultInit!, hintType);
-            fctx.body.push({ op: "local.set", index: targetLocal! } as Instr);
+            fctx.body.push({ op: "local.set", index: targetLocal! });
           });
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
             else: elseInstrs,
-          } as Instr);
+          });
         } else {
           fctx.body.push({ op: "local.get", index: elemLocal });
           fctx.body.push({
@@ -2708,7 +2708,7 @@ function emitForOfRestAssignment(
   if (!ts.isIdentifier(restTarget)) {
     // Unhandled rest target (property/element access). Drop the source externref
     // the caller pushed so the value stack stays balanced, then bail.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return true;
   }
 
@@ -2723,7 +2723,7 @@ function emitForOfRestAssignment(
   }
   if (sliceIdx === undefined) {
     // Could not register the slice helper — drop the source to keep balance.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return true;
   }
 
@@ -2734,7 +2734,7 @@ function emitForOfRestAssignment(
     const globalIdx = syncGlobalForName(restName);
     if (globalIdx === undefined) {
       // No local and no module global — nothing to write to. Drop and bail.
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       return true;
     }
     const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
@@ -2822,21 +2822,21 @@ function emitVecRestAssignment(
   fctx.body.push({ op: "local.get", index: elemLocal });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // length
   fctx.body.push({ op: "i32.const", value: restStartIndex });
-  fctx.body.push({ op: "i32.sub" } as Instr);
+  fctx.body.push({ op: "i32.sub" });
   fctx.body.push({ op: "local.set", index: restLenLocal });
   // clamp negative to 0: select(0, restLen, restLen < 0)
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.get", index: restLenLocal });
   fctx.body.push({ op: "local.get", index: restLenLocal });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
-  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "select" });
   fctx.body.push({ op: "local.set", index: restLenLocal });
 
   // restArr = array.new_default(restLen)
   const restArrLocal = allocLocal(fctx, `__rest_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.get", index: restLenLocal });
-  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
   fctx.body.push({ op: "local.set", index: restArrLocal });
 
   // array.copy(restArr, 0, srcData, restStartIndex, restLen)
@@ -2846,7 +2846,7 @@ function emitVecRestAssignment(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 }); // src data
   fctx.body.push({ op: "i32.const", value: restStartIndex });
   fctx.body.push({ op: "local.get", index: restLenLocal });
-  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
   // innerElemType is referenced for symmetry with the binding-form rest (the
   // array element type is already arrTypeIdx's element); no per-element coercion
   // is needed since we copy raw same-typed elements.
@@ -2855,7 +2855,7 @@ function emitVecRestAssignment(
   // restVec = struct.new(restLen, restArr)
   fctx.body.push({ op: "local.get", index: restLenLocal });
   fctx.body.push({ op: "local.get", index: restArrLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
 
   if (isNestedPattern) {
     // Store the fresh rest vec into the temp local, then recurse into the
@@ -3003,10 +3003,10 @@ function compileForOfAssignDestructuringExternref(
       // skip silently rather than miscompile.
       if (defaultInit) {
         // Drop the value we just pushed; nothing to write without default-handling.
-        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "drop" });
         // Also drop key + receiver — they're still on the stack.
-        fctx.body.push({ op: "drop" } as Instr);
-        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
         continue;
       }
       // __extern_set(receiver, key, value) -> void
@@ -3095,7 +3095,7 @@ function compileForOfAssignDestructuringExternref(
       } else {
         // Fallback: ref.is_null treats null AS undefined — imprecise but safer
         // than crashing. The runtime always exposes __extern_is_undefined.
-        fctx.body.push({ op: "ref.is_null" } as Instr);
+        fctx.body.push({ op: "ref.is_null" });
       }
       // Build then-branch (default fires): compile default to valType.
       const thenInstrs = collectInstrs(fctx, () => {
@@ -3103,7 +3103,7 @@ function compileForOfAssignDestructuringExternref(
       });
       // Build else-branch (value used as-is): coerce externref -> valType.
       const elseInstrs = collectInstrs(fctx, () => {
-        fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+        fctx.body.push({ op: "local.get", index: tmpExt });
         if (valType.kind !== "externref") {
           coerceType(ctx, fctx, { kind: "externref" }, valType);
         }
@@ -3397,22 +3397,22 @@ function compileForOfNativeMapEntries(
 
   // entry = (cast $MapEntry) m.entries[i]
   const loadEntry: Instr[] = [
-    { op: "local.get", index: mTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
-    { op: "local.get", index: iTmp } as Instr,
-    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-    { op: "local.set", index: entryTmp } as Instr,
+    { op: "local.get", index: mTmp },
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
+    { op: "local.get", index: iTmp },
+    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
+    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx },
+    { op: "local.set", index: entryTmp },
   ];
 
   // Externalize a $MapEntry field then coerce to the bound local's type, mirroring
   // the forEach driver (entry fields are stored anyref / boxed externref).
   const bindFromEntry = (field: number, targetType: ValType, targetLocal: number): Instr[] => [
-    { op: "local.get", index: entryTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: field } as unknown as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "local.get", index: entryTmp },
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: field },
+    { op: "extern.convert_any" },
     ...coercionInstrs(ctx, { kind: "externref" }, targetType, fctx),
-    { op: "local.set", index: targetLocal } as Instr,
+    { op: "local.set", index: targetLocal },
   ];
 
   // i = 0
@@ -3432,7 +3432,7 @@ function compileForOfNativeMapEntries(
   // if i >= entryCount → break
   fctx.body.push({ op: "local.get", index: iTmp });
   fctx.body.push({ op: "local.get", index: mTmp });
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT });
   fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "br_if", depth: 1 });
 
@@ -3447,7 +3447,7 @@ function compileForOfNativeMapEntries(
 
   // tombstone → skip this slot (continue the loop; cursor already advanced).
   fctx.body.push({ op: "local.get", index: entryTmp });
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH });
   fctx.body.push({ op: "i32.const", value: TOMBSTONE_BIT });
   fctx.body.push({ op: "i32.and" });
   fctx.body.push({ op: "br_if", depth: 0 });
@@ -3721,13 +3721,13 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
           { op: "i32.const", value: 2 },
           { op: "local.set", index: takeLocal },
         ],
-      } as Instr,
+      },
     ],
-  } as Instr);
+  });
 
   // Get element: c = __str_substring(flat, i, i + take)
   fctx.body.push({ op: "local.get", index: flatLocal });
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "local.get", index: takeLocal });
@@ -3784,11 +3784,11 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
     const guardedInstrs = fctx.body.splice(strNullGuardStart);
     const tagIdx = ensureExnTag(ctx);
     fctx.body.push({ op: "local.get", index: strLocal });
-    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+      then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
       else: guardedInstrs,
     });
   }
@@ -4109,12 +4109,12 @@ function compileForOfArray(
       op: "if",
       blockType: { kind: "val", type: readElemType },
       then: [
-        { op: "local.get", index: dataIterLocal } as Instr,
-        { op: "local.get", index: iLocal } as Instr,
-        { op: elemReadOp, typeIdx: arrTypeIdx } as Instr,
+        { op: "local.get", index: dataIterLocal },
+        { op: "local.get", index: iLocal },
+        { op: elemReadOp, typeIdx: arrTypeIdx },
       ],
       else: defaultValueInstrs(readElemType),
-    } as Instr);
+    });
   } else {
     if (reReadLive) {
       fctx.body.push({ op: "local.get", index: vecLocal });
@@ -4123,7 +4123,7 @@ function compileForOfArray(
       fctx.body.push({ op: "local.get", index: dataLocal });
     }
     fctx.body.push({ op: "local.get", index: iLocal });
-    fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx } as Instr);
+    fctx.body.push({ op: elemReadOp, typeIdx: arrTypeIdx });
   }
   // (#2001 S1) A for-of over an `any[]` with a literal hole reads `$Hole` at the
   // hole index; map it back to `undefined` (the iteration value of an absent
@@ -4216,7 +4216,7 @@ function compileForOfArray(
     const guardedInstrs = fctx.body.splice(nullGuardStart);
     const backupLocal: number | undefined = (fctx as any).__lastGuardedCastBackup;
     fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({ op: "ref.is_null" });
     if (backupLocal !== undefined) {
       // A guarded cast backup exists: distinguish "wrong type" from "genuinely null"
       const tagIdx = ensureExnTag(ctx);
@@ -4224,14 +4224,14 @@ function compileForOfArray(
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: backupLocal } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: backupLocal },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
             else: [], // wrong struct type → skip loop
-          } as Instr,
+          },
         ],
         else: guardedInstrs,
       });
@@ -4240,7 +4240,7 @@ function compileForOfArray(
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+        then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
         else: guardedInstrs,
       });
     }
@@ -4413,16 +4413,16 @@ function compileForOfArrayEntries(
         op: "if",
         blockType: { kind: "val", type: readElemType },
         then: [
-          { op: "local.get", index: dataLocal } as Instr,
-          { op: "local.get", index: iLocal } as Instr,
-          { op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr,
+          { op: "local.get", index: dataLocal },
+          { op: "local.get", index: iLocal },
+          { op: elemReadOp, typeIdx: loopArrTypeIdx },
         ],
         else: defaultValueInstrs(readElemType),
-      } as Instr);
+      });
     } else {
       fctx.body.push({ op: "local.get", index: dataLocal });
       fctx.body.push({ op: "local.get", index: iLocal });
-      fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx } as Instr);
+      fctx.body.push({ op: elemReadOp, typeIdx: loopArrTypeIdx });
     }
     const valLocalType = getLocalType(fctx, valLocal!);
     if (valLocalType && !valTypesMatch(readElemType, valLocalType)) {
@@ -4568,11 +4568,11 @@ function emitArrayKeysEntriesLoop(
     const guardedInstrs = fctx.body.splice(nullGuardStart);
     const tagIdx = ensureExnTag(ctx);
     fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+      then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
       else: guardedInstrs,
     });
   }
@@ -4744,9 +4744,9 @@ function compileForOfIteratorAssignDestructuring(
         fctx.body.push({ op: "call", funcIdx: getIdx! });
         if (defaultInitIter) {
           // Out-of-scope for #1258: defaults on property targets. Drop and skip.
-          fctx.body.push({ op: "drop" } as Instr);
-          fctx.body.push({ op: "drop" } as Instr);
-          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "drop" });
           continue;
         }
         fctx.body.push({ op: "call", funcIdx: setFnIdx });
@@ -4814,13 +4814,13 @@ function compileForOfIteratorAssignDestructuring(
         if (undefIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: undefIdx });
         } else {
-          fctx.body.push({ op: "ref.is_null" } as Instr);
+          fctx.body.push({ op: "ref.is_null" });
         }
         const thenInstrs = collectInstrs(fctx, () => {
           compileExpression(ctx, fctx, defaultInitIter!, valType);
         });
         const elseInstrs = collectInstrs(fctx, () => {
-          fctx.body.push({ op: "local.get", index: tmpExt } as Instr);
+          fctx.body.push({ op: "local.get", index: tmpExt });
           if (valType.kind !== "externref") {
             coerceType(ctx, fctx, { kind: "externref" }, valType);
           }
@@ -4930,52 +4930,52 @@ function emitForAwaitElementUnwrap(ctx: CodegenContext, fctx: FunctionContext, v
     typeIdx: promiseTypeIdx,
   });
   fctx.body.push({ op: "local.get", index: valueLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
       // Narrow once into the typed local.
-      { op: "local.get", index: valueLocal } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-      { op: "local.set", index: pLocal } as Instr,
+      { op: "local.get", index: valueLocal },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: promiseTypeIdx },
+      { op: "local.set", index: pLocal },
       // state == REJECTED → throw the reason (abrupt loop completion).
-      { op: "local.get", index: pLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: PROMISE_STATE_REJECTED } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: pLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: PROMISE_STATE_REJECTED },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: pLocal } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
-          { op: "throw", tagIdx } as Instr,
+          { op: "local.get", index: pLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+          { op: "throw", tagIdx },
         ],
         else: [
           // state == FULFILLED → unwrap one level.
-          { op: "local.get", index: pLocal } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "i32.const", value: PROMISE_STATE_FULFILLED } as Instr,
-          { op: "i32.eq" } as Instr,
+          { op: "local.get", index: pLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+          { op: "i32.const", value: PROMISE_STATE_FULFILLED },
+          { op: "i32.eq" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: pLocal } as Instr,
-              { op: "ref.as_non_null" } as Instr,
-              { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
-              { op: "local.set", index: valueLocal } as Instr,
+              { op: "local.get", index: pLocal },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
+              { op: "local.set", index: valueLocal },
             ],
             else: [], // PENDING — leave as-is (see doc comment).
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ],
     else: [],
   });
@@ -5002,7 +5002,7 @@ function emitForAwaitStepCapCheck(ctx: CodegenContext, fctx: FunctionContext, ca
   fctx.body.push({ op: "i32.add" });
   fctx.body.push({ op: "local.tee", index: capLocal });
   fctx.body.push({ op: "i32.const", value: FOR_AWAIT_SYNC_DRIVE_STEP_CAP });
-  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({ op: "i32.gt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
@@ -5102,14 +5102,14 @@ function compileForOfDirectIterator(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+    then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
     else: [],
   });
 
   // Call @@iterator method: iter = obj[Symbol.iterator]()
   fctx.body.push({ op: "local.get", index: nullTmp });
   if (iterableType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({ op: "call", funcIdx: iterMethodIdx });
 
@@ -5213,7 +5213,7 @@ function compileForOfDirectIterator(
   // Call next(): result = iter.next()
   fctx.body.push({ op: "local.get", index: iterLocal });
   if (iterResultType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({ op: "call", funcIdx: nextMethodIdx });
   fctx.body.push({ op: "local.set", index: resultLocal });
@@ -5221,7 +5221,7 @@ function compileForOfDirectIterator(
   // Check done: result.done -> set done flag and break if truthy
   fctx.body.push({ op: "local.get", index: resultLocal });
   if (nextResultType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({
     op: "struct.get",
@@ -5230,16 +5230,16 @@ function compileForOfDirectIterator(
   });
   // done field might be i32 (boolean) or f64; convert to i32 for br_if
   if (doneFieldType.kind === "f64") {
-    fctx.body.push({ op: "i32.trunc_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_f64_s" });
   }
   // If done, set the done flag to 1 before breaking (#851)
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "local.set", index: doneFlagDirect } as Instr,
-      { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
+      { op: "i32.const", value: 1 },
+      { op: "local.set", index: doneFlagDirect },
+      { op: "br", depth: 2 }, // break out of block (if + loop = depth 2)
     ],
     else: [],
   });
@@ -5247,7 +5247,7 @@ function compileForOfDirectIterator(
   // Get value: elem = result.value
   fctx.body.push({ op: "local.get", index: resultLocal });
   if (nextResultType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({
     op: "struct.get",
@@ -5311,12 +5311,12 @@ function compileForOfDirectIterator(
   // aliased into two branches double-remaps under DCE (see
   // reference_shared_instr_object_dce_double_remap).
   const closeCallInstrs = (): Instr[] => [
-    { op: "local.get", index: iterLocal } as Instr,
-    ...(iterResultType.kind === "ref_null" ? [{ op: "ref.as_non_null" } as Instr] : []),
-    { op: "call", funcIdx: returnMethodIdx! } as Instr,
+    { op: "local.get", index: iterLocal },
+    ...(iterResultType.kind === "ref_null" ? ([{ op: "ref.as_non_null" }] satisfies Instr[]) : []),
+    { op: "call", funcIdx: returnMethodIdx! },
     // Drop the return value only when return() actually yields one
     // (#2978 / #2934-3b — a void return() has nothing to drop).
-    ...(returnMethodResultArity > 0 ? [{ op: "drop" } as Instr] : []),
+    ...(returnMethodResultArity > 0 ? ([{ op: "drop" }] satisfies Instr[]) : []),
   ];
 
   const blockLoop: Instr = {
@@ -5344,8 +5344,8 @@ function compileForOfDirectIterator(
       body: [blockLoop],
       catches: [],
       catchAll: [
-        { op: "local.get", index: doneFlagDirect } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: doneFlagDirect },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -5356,11 +5356,11 @@ function compileForOfDirectIterator(
               body: closeCallInstrs(),
               catches: [],
               catchAll: [], // suppress return() errors per §7.4.6 step 6
-            } as Instr,
+            },
           ],
           else: [],
-        } as Instr,
-        { op: "rethrow", depth: 0 } as Instr,
+        },
+        { op: "rethrow", depth: 0 },
       ],
     });
   } else {
@@ -5502,14 +5502,14 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: backupLocal } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: backupLocal },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+            then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
             else: [],
-          } as Instr,
+          },
         ],
         else: [],
       });
@@ -5517,7 +5517,7 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+        then: [{ op: "ref.null.extern" }, { op: "throw", tagIdx }],
         else: [],
       });
     }
@@ -5644,14 +5644,14 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     // are unused. We still satisfy the finallyStack entry shape.
     const cloneIterClose = (): Instr[] =>
       structuredClone([
-        { op: "local.get", index: capturedDoneFlag } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: capturedDoneFlag },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: capturedIterLocal } as Instr,
-            { op: "call", funcIdx: capturedReturnIdx } as Instr,
+            { op: "local.get", index: capturedIterLocal },
+            { op: "call", funcIdx: capturedReturnIdx },
           ],
           else: [],
         },
@@ -5697,9 +5697,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "local.set", index: doneFlag } as Instr,
-      { op: "br", depth: 2 } as Instr, // break out of block (if + loop = depth 2)
+      { op: "i32.const", value: 1 },
+      { op: "local.set", index: doneFlag },
+      { op: "br", depth: 2 }, // break out of block (if + loop = depth 2)
     ],
     else: [],
   });
@@ -5782,13 +5782,16 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     const innerCloseTry: Instr = {
       op: "try",
       blockType: { kind: "empty" },
-      body: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
+      body: [
+        { op: "local.get", index: iterLocal },
+        { op: "call", funcIdx: returnIdx },
+      ],
       catches: [],
       catchAll: [], // suppress any error from GetMethod / return() per spec step 6
     };
     const catchAllBody: Instr[] = [
-      { op: "local.get", index: doneFlag } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "local.get", index: doneFlag },
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -5816,7 +5819,10 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: iterLocal } as Instr, { op: "call", funcIdx: returnIdx } as Instr],
+      then: [
+        { op: "local.get", index: iterLocal },
+        { op: "call", funcIdx: returnIdx },
+      ],
       else: [],
     });
   }
@@ -5851,7 +5857,7 @@ function emitForInMemberTargetWrite(
   if (recvType && recvType.kind !== "externref") {
     coerceType(ctx, fctx, recvType, { kind: "externref" });
   } else if (recvType === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   // Key
@@ -5867,7 +5873,7 @@ function emitForInMemberTargetWrite(
     if (keyType && keyType.kind !== "externref") {
       coerceType(ctx, fctx, keyType, { kind: "externref" });
     } else if (keyType === null) {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
   }
 
@@ -5945,19 +5951,19 @@ function emitArrayForIn(
     fctx.body.push({ op: "local.set", index: vecLocal });
   } else if (exprType && exprType.kind === "externref") {
     const anyTmp = allocLocal(fctx, `__forin_any_${fctx.locals.length}`, { kind: "anyref" });
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "local.tee", index: anyTmp } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: vecBaseTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.tee", index: anyTmp });
+    fctx.body.push({ op: "ref.test", typeIdx: vecBaseTypeIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: anyTmp } as Instr,
-        { op: "ref.cast", typeIdx: vecBaseTypeIdx } as Instr,
-        { op: "local.set", index: vecLocal } as Instr,
+        { op: "local.get", index: anyTmp },
+        { op: "ref.cast", typeIdx: vecBaseTypeIdx },
+        { op: "local.set", index: vecLocal },
       ],
       // non-vec runtime value → vecLocal stays null → 0 iterations
-    } as Instr);
+    });
   } else {
     // Defensive: unexpected receiver type on the stack — preserve the historical
     // bare local.set (validation surfaces a genuine type mismatch, as before).
@@ -5971,13 +5977,13 @@ function emitArrayForIn(
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "i32.const", value: 0 } as Instr],
+    then: [{ op: "i32.const", value: 0 }],
     else: [
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vecBaseTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vecBaseTypeIdx, fieldIdx: 0 },
     ],
-  } as Instr);
+  });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   // Counter i = 0
@@ -6372,7 +6378,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
           kind: "ref_null",
           typeIdx: valCellTypeIdx,
         });
-        fctx.body.push({ op: "ref.null.extern" } as Instr); // placeholder value
+        fctx.body.push({ op: "ref.null.extern" }); // placeholder value
         fctx.body.push({ op: "struct.new", typeIdx: valCellTypeIdx });
         fctx.body.push({ op: "local.set", index: boxLocal });
         const flagCellTypeIdx = getOrRegisterRefCellType(ctx, { kind: "i32" });
@@ -6547,12 +6553,12 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     guardedBody.unshift({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "br", depth: 1 } as Instr],
-    } as Instr);
-    guardedBody.unshift({ op: "i32.eqz" } as Instr);
-    guardedBody.unshift({ op: "call", funcIdx: hasIdx } as Instr);
-    guardedBody.unshift({ op: "local.get", index: keyLocal } as Instr);
-    guardedBody.unshift({ op: "local.get", index: objLocal } as Instr);
+      then: [{ op: "br", depth: 1 }],
+    });
+    guardedBody.unshift({ op: "i32.eqz" });
+    guardedBody.unshift({ op: "call", funcIdx: hasIdx });
+    guardedBody.unshift({ op: "local.get", index: keyLocal });
+    guardedBody.unshift({ op: "local.get", index: objLocal });
   }
 
   // Wrap user body in block $continue so `continue` exits here

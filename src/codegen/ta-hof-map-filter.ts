@@ -109,43 +109,49 @@ export function ensureTaMapFilterHelper(
   const COUT = 13; // i32 — clamped result
 
   // fidx(i) → f64 index for the externref indexers.
-  const fIdx: Instr[] = [{ op: "local.get", index: I } as Instr, { op: "f64.convert_i32_s" } as Instr];
+  const fIdx: Instr[] = [{ op: "local.get", index: I }, { op: "f64.convert_i32_s" }];
 
   // elem = __extern_get_idx(recv, f64(i))
   const readElem: Instr[] = [
-    { op: "local.get", index: RECV } as Instr,
+    { op: "local.get", index: RECV },
     ...fIdx,
-    { op: "call", funcIdx: externGetIdxIdx } as Instr,
-    { op: "local.set", index: ELEM } as Instr,
+    { op: "call", funcIdx: externGetIdxIdx },
+    { op: "local.set", index: ELEM },
   ];
   // args = __objvec_new(); push(elem); push(box(f64 i)); push(recv)
   const buildArgs: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: ARGS } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "local.get", index: ELEM } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: ARGS },
+    { op: "local.get", index: ARGS },
+    { op: "local.get", index: ELEM },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: ARGS },
     ...fIdx,
-    { op: "call", funcIdx: boxNumIdx } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "local.get", index: RECV } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "call", funcIdx: boxNumIdx },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: ARGS },
+    { op: "local.get", index: RECV },
+    { op: "call", funcIdx: objVecPushIdx },
   ];
   // res = __apply_closure(cb, thisArg, args)
   const invoke: Instr[] = [
-    { op: "local.get", index: CB } as Instr,
-    { op: "local.get", index: THIS } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "call", funcIdx: applyClosureIdx } as Instr,
-    { op: "local.set", index: RES } as Instr,
+    { op: "local.get", index: CB },
+    { op: "local.get", index: THIS },
+    { op: "local.get", index: ARGS },
+    { op: "call", funcIdx: applyClosureIdx },
+    { op: "local.set", index: RES },
   ];
 
   // The value to STORE: map → the callback result; filter → the element itself.
   const storeSourceUnbox: Instr[] = isFilter
-    ? [{ op: "local.get", index: ELEM } as Instr, { op: "call", funcIdx: unboxNumIdx } as Instr]
-    : [{ op: "local.get", index: RES } as Instr, { op: "call", funcIdx: unboxNumIdx } as Instr];
+    ? [
+        { op: "local.get", index: ELEM },
+        { op: "call", funcIdx: unboxNumIdx },
+      ]
+    : [
+        { op: "local.get", index: RES },
+        { op: "call", funcIdx: unboxNumIdx },
+      ];
 
   // f64 (on stack) → the i32 to store. Default: `i32.trunc_sat_f64_s` (packed
   // `array.set` masks to element width = JS ToInt8/ToUint8/…). Clamp variant
@@ -154,91 +160,89 @@ export function ensureTaMapFilterHelper(
   // helper's own scratch locals; `roundHalfEven` only runs for 0<x<255 so its
   // final `i32.trunc_sat_f64_u` is exact.
   const roundHalfEven: Instr[] = [
-    { op: "local.get", index: CX } as Instr,
-    { op: "f64.floor" } as Instr,
-    { op: "local.set", index: CF } as Instr,
-    { op: "local.get", index: CX } as Instr,
-    { op: "local.get", index: CF } as Instr,
-    { op: "f64.sub" } as Instr,
-    { op: "local.set", index: CD } as Instr,
-    { op: "local.get", index: CD } as Instr,
-    { op: "f64.const", value: 0.5 } as Instr,
-    { op: "f64.lt" } as Instr,
+    { op: "local.get", index: CX },
+    { op: "f64.floor" },
+    { op: "local.set", index: CF },
+    { op: "local.get", index: CX },
+    { op: "local.get", index: CF },
+    { op: "f64.sub" },
+    { op: "local.set", index: CD },
+    { op: "local.get", index: CD },
+    { op: "f64.const", value: 0.5 },
+    { op: "f64.lt" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } as ValType },
-      then: [{ op: "local.get", index: CF } as Instr],
+      then: [{ op: "local.get", index: CF }],
       else: [
-        { op: "local.get", index: CD } as Instr,
-        { op: "f64.const", value: 0.5 } as Instr,
-        { op: "f64.gt" } as Instr,
+        { op: "local.get", index: CD },
+        { op: "f64.const", value: 0.5 },
+        { op: "f64.gt" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "f64" } as ValType },
-          then: [
-            { op: "local.get", index: CF } as Instr,
-            { op: "f64.const", value: 1 } as Instr,
-            { op: "f64.add" } as Instr,
-          ],
+          then: [{ op: "local.get", index: CF }, { op: "f64.const", value: 1 }, { op: "f64.add" }],
           else: [
             // tie (d == 0.5): round to even. f even ⇔ floor(f/2) == f/2.
-            { op: "local.get", index: CF } as Instr,
-            { op: "f64.const", value: 0.5 } as Instr,
-            { op: "f64.mul" } as Instr,
-            { op: "local.set", index: CD } as Instr,
-            { op: "local.get", index: CD } as Instr,
-            { op: "f64.floor" } as Instr,
-            { op: "local.get", index: CD } as Instr,
-            { op: "f64.eq" } as Instr,
+            { op: "local.get", index: CF },
+            { op: "f64.const", value: 0.5 },
+            { op: "f64.mul" },
+            { op: "local.set", index: CD },
+            { op: "local.get", index: CD },
+            { op: "f64.floor" },
+            { op: "local.get", index: CD },
+            { op: "f64.eq" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "f64" } as ValType },
-              then: [{ op: "local.get", index: CF } as Instr],
-              else: [
-                { op: "local.get", index: CF } as Instr,
-                { op: "f64.const", value: 1 } as Instr,
-                { op: "f64.add" } as Instr,
-              ],
-            } as Instr,
+              then: [{ op: "local.get", index: CF }],
+              else: [{ op: "local.get", index: CF }, { op: "f64.const", value: 1 }, { op: "f64.add" }],
+            },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
-    { op: "i32.trunc_sat_f64_u" } as Instr,
-    { op: "local.set", index: COUT } as Instr,
+    },
+    { op: "i32.trunc_sat_f64_u" },
+    { op: "local.set", index: COUT },
   ];
   const clampToUint8: Instr[] = [
-    { op: "local.set", index: CX } as Instr,
-    { op: "local.get", index: CX } as Instr,
-    { op: "f64.const", value: 255 } as Instr,
-    { op: "f64.ge" } as Instr,
+    { op: "local.set", index: CX },
+    { op: "local.get", index: CX },
+    { op: "f64.const", value: 255 },
+    { op: "f64.ge" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 255 } as Instr, { op: "local.set", index: COUT } as Instr],
+      then: [
+        { op: "i32.const", value: 255 },
+        { op: "local.set", index: COUT },
+      ],
       else: [
-        { op: "local.get", index: CX } as Instr,
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "f64.gt" } as Instr,
+        { op: "local.get", index: CX },
+        { op: "f64.const", value: 0 },
+        { op: "f64.gt" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: roundHalfEven,
-          else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: COUT } as Instr],
-        } as Instr,
+          else: [
+            { op: "i32.const", value: 0 },
+            { op: "local.set", index: COUT },
+          ],
+        },
       ],
-    } as Instr,
-    { op: "local.get", index: COUT } as Instr,
+    },
+    { op: "local.get", index: COUT },
   ];
-  const f64ToStore: Instr[] = clamp ? clampToUint8 : [{ op: "i32.trunc_sat_f64_s" } as Instr];
+  const f64ToStore: Instr[] = clamp ? clampToUint8 : [{ op: "i32.trunc_sat_f64_s" }];
 
   // data[dst] = f64ToStore(unbox(source))   (packed array.set masks to width)
   const writeAt = (dstLocal: number): Instr[] => [
-    { op: "local.get", index: DATA } as Instr,
-    { op: "local.get", index: dstLocal } as Instr,
+    { op: "local.get", index: DATA },
+    { op: "local.get", index: dstLocal },
     ...storeSourceUnbox,
     ...f64ToStore,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: arrTypeIdx },
   ];
 
   // Per-iteration body.
@@ -249,19 +253,19 @@ export function ensureTaMapFilterHelper(
       ...buildArgs,
       ...invoke,
       // if (__is_truthy(res)) { data[k] = elem; k++ }
-      { op: "local.get", index: RES } as Instr,
-      { op: "call", funcIdx: isTruthyIdx } as Instr,
+      { op: "local.get", index: RES },
+      { op: "call", funcIdx: isTruthyIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           ...writeAt(K),
-          { op: "local.get", index: K } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: K } as Instr,
+          { op: "local.get", index: K },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: K },
         ],
-      } as Instr,
+      },
     ];
   } else {
     perIter = [...readElem, ...buildArgs, ...invoke, ...writeAt(I)];
@@ -269,17 +273,17 @@ export function ensureTaMapFilterHelper(
 
   // len = trunc_sat(__extern_length(recv)) ; data = array.new_default(len)
   const body: Instr[] = [
-    { op: "local.get", index: RECV } as Instr,
-    { op: "call", funcIdx: externLengthIdx } as Instr,
-    { op: "i32.trunc_sat_f64_s" } as Instr,
-    { op: "local.tee", index: LEN } as Instr,
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.set", index: DATA } as Instr,
+    { op: "local.get", index: RECV },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "i32.trunc_sat_f64_s" },
+    { op: "local.tee", index: LEN },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: DATA },
     // i = 0 ; k = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: K } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: K },
     // loop while i < len
     {
       op: "block",
@@ -289,25 +293,25 @@ export function ensureTaMapFilterHelper(
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             ...perIter,
             // i++
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
-            { op: "br", depth: 0 } as Instr,
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     // return struct.new $vec (length = map:len / filter:k, data)
-    { op: "local.get", index: isFilter ? K : LEN } as Instr,
-    { op: "local.get", index: DATA } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+    { op: "local.get", index: isFilter ? K : LEN },
+    { op: "local.get", index: DATA },
+    { op: "struct.new", typeIdx: vecTypeIdx },
   ];
 
   const params: ValType[] = [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }];

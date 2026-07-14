@@ -607,7 +607,7 @@ export function promoteAccessorCapturesToGlobals(
       const boxed = fctx.boxedTdzFlags?.get(name);
       if (boxed) {
         fctx.body.push({ op: "local.get", index: boxed.localIdx });
-        fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+        fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
       } else {
         fctx.body.push({ op: "local.get", index: tdzFlagLocalIdx });
       }
@@ -703,7 +703,7 @@ export function emitArrowParamDestructuring(
       // If yes: convert and use struct path. If no: use __extern_get fallback.
       const testLocal = allocLocal(fctx, `__destr_test_${fctx.locals.length}`, { kind: "i32" });
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
       fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
       fctx.body.push({ op: "local.set", index: testLocal });
 
@@ -712,7 +712,7 @@ export function emitArrowParamDestructuring(
       const structPath = collectInstrs(fctx, () => {
         const convertedIdx = allocLocal(fctx, `__destr_ref_${fctx.locals.length}`, structRefType);
         fctx.body.push({ op: "local.get", index: paramIdx });
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "any.convert_extern" });
         emitGuardedRefCast(fctx, structTypeIdx);
         fctx.body.push({ op: "local.set", index: convertedIdx });
 
@@ -799,33 +799,39 @@ export function emitArrowParamDestructuring(
           if (isUndefIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: isUndefIdx });
           } else {
-            fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "ref.is_null" });
           }
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, element.initializer, fieldType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpField } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpField },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else if (fieldType.kind === "ref_null" || fieldType.kind === "ref") {
           const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
           fctx.body.push({ op: "local.tee", index: tmpField });
-          fctx.body.push({ op: "ref.is_null" } as Instr);
+          fctx.body.push({ op: "ref.is_null" });
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, element.initializer, fieldType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpField } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpField },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else if (fieldType.kind === "f64") {
           const tmpField = allocLocal(fctx, `__dflt_${fctx.locals.length}`, fieldType);
@@ -834,14 +840,17 @@ export function emitArrowParamDestructuring(
           fctx.body.push({ op: "f64.ne" });
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, element.initializer, fieldType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpField } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpField },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else {
           fctx.body.push({ op: "local.set", index: localIdx });
@@ -855,7 +864,7 @@ export function emitArrowParamDestructuring(
     fctx.body = savedBodyAPD;
     if (paramType.kind === "ref_null" && apdInstrs.length > 0) {
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "ref.is_null" } as Instr);
+      fctx.body.push({ op: "ref.is_null" });
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: apdInstrs });
     } else {
       fctx.body.push(...apdInstrs);
@@ -921,34 +930,40 @@ export function emitArrowParamDestructuring(
           if (isUndefIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: isUndefIdx });
           } else {
-            fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "ref.is_null" });
           }
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, bindingElem.initializer, bindingWasmType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpElem } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpElem },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else if (bindingWasmType.kind === "ref_null" || bindingWasmType.kind === "ref") {
           // Internal struct refs: use ref.is_null for missing values
           const tmpElem = allocLocal(fctx, `__ary_dflt_${fctx.locals.length}`, bindingWasmType);
           fctx.body.push({ op: "local.tee", index: tmpElem });
-          fctx.body.push({ op: "ref.is_null" } as Instr);
+          fctx.body.push({ op: "ref.is_null" });
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, bindingElem.initializer, bindingWasmType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpElem } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpElem },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else if (bindingWasmType.kind === "f64") {
           // f64: undefined is NaN, check NaN self-test
@@ -958,14 +973,17 @@ export function emitArrowParamDestructuring(
           fctx.body.push({ op: "f64.ne" });
           const savedBody = pushBody(fctx);
           compileExpression(ctx, fctx, bindingElem.initializer, bindingWasmType);
-          fctx.body.push({ op: "local.set", index: localIdx } as Instr);
+          fctx.body.push({ op: "local.set", index: localIdx });
           const thenInstrs = fctx.body;
           fctx.body = savedBody;
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: thenInstrs,
-            else: [{ op: "local.get", index: tmpElem } as Instr, { op: "local.set", index: localIdx } as Instr],
+            else: [
+              { op: "local.get", index: tmpElem },
+              { op: "local.set", index: localIdx },
+            ],
           });
         } else {
           // i32/other: no reliable sentinel, just set directly
@@ -980,7 +998,7 @@ export function emitArrowParamDestructuring(
     fctx.body = savedBodyAPDA;
     if (paramType.kind === "ref_null" && apdaInstrs.length > 0) {
       fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "ref.is_null" } as Instr);
+      fctx.body.push({ op: "ref.is_null" });
       fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: apdaInstrs });
     } else {
       fctx.body.push(...apdaInstrs);
@@ -1011,7 +1029,7 @@ function emitParamDefaultCheckInline(
     flushLateImportShiftsShared(ctx, fctx);
     fctx.body.push({ op: "local.get", index: paramIdx });
     if (undefIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: undefIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: undefIdx });
     } else {
       // Fallback (standalone mode): ref.is_null is imprecise — treats null
       // as undefined.
@@ -1807,7 +1825,7 @@ function ensureGenEagerFlag(ctx: CodegenContext): number {
     name: "__gen_eager_mode",
     type: { kind: "i32" },
     mutable: true,
-    init: [{ op: "i32.const", value: 0 }] as Instr[],
+    init: [{ op: "i32.const", value: 0 }],
   });
   ctx.genEagerFlagGlobalIdx = globalIdx;
   if (!ctx.funcMap.has("__gen_set_eager")) {
@@ -1817,7 +1835,10 @@ function ensureGenEagerFlag(ctx: CodegenContext): number {
       name: "__gen_set_eager",
       typeIdx,
       locals: [],
-      body: [{ op: "local.get", index: 0 }, { op: "global.set", index: globalIdx } as Instr],
+      body: [
+        { op: "local.get", index: 0 },
+        { op: "global.set", index: globalIdx },
+      ],
       exported: true,
     });
     ctx.funcMap.set("__gen_set_eager", funcIdx);
@@ -2453,7 +2474,7 @@ export function compileArrowAsClosure(
   if (usesWrapperFuncType && captures.length > 0) {
     const castLocal = allocLocal(liftedFctx, "__self_cast", { kind: "ref", typeIdx: structTypeIdx });
     liftedFctx.body.push({ op: "local.get", index: 0 }); // __self (wrapper base type)
-    liftedFctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+    liftedFctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
     liftedFctx.body.push({ op: "local.set", index: castLocal });
     selfLocalForCaptures = castLocal;
   }
@@ -2705,15 +2726,15 @@ export function compileArrowAsClosure(
                 liftedFctx.body.push({ op: "local.get", index: srcParamIdx });
                 liftedFctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 }); // length
                 liftedFctx.body.push({ op: "i32.const", value: ei });
-                liftedFctx.body.push({ op: "i32.sub" } as Instr);
+                liftedFctx.body.push({ op: "i32.sub" });
                 liftedFctx.body.push({ op: "local.set", index: restLenLocal });
                 // Clamp to 0 if negative
-                liftedFctx.body.push({ op: "i32.const", value: 0 } as Instr);
+                liftedFctx.body.push({ op: "i32.const", value: 0 });
                 liftedFctx.body.push({ op: "local.get", index: restLenLocal });
                 liftedFctx.body.push({ op: "local.get", index: restLenLocal });
-                liftedFctx.body.push({ op: "i32.const", value: 0 } as Instr);
-                liftedFctx.body.push({ op: "i32.lt_s" } as Instr);
-                liftedFctx.body.push({ op: "select" } as Instr);
+                liftedFctx.body.push({ op: "i32.const", value: 0 });
+                liftedFctx.body.push({ op: "i32.lt_s" });
+                liftedFctx.body.push({ op: "select" });
                 liftedFctx.body.push({ op: "local.set", index: restLenLocal });
 
                 // Create new data array
@@ -2722,7 +2743,7 @@ export function compileArrowAsClosure(
                   typeIdx: arrTypeIdx,
                 });
                 liftedFctx.body.push({ op: "local.get", index: restLenLocal });
-                liftedFctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
+                liftedFctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
                 liftedFctx.body.push({ op: "local.set", index: restArrLocal });
 
                 // array.copy(restArr, 0, srcData, ei, restLen)
@@ -2732,12 +2753,12 @@ export function compileArrowAsClosure(
                 liftedFctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // src data
                 liftedFctx.body.push({ op: "i32.const", value: ei });
                 liftedFctx.body.push({ op: "local.get", index: restLenLocal });
-                liftedFctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+                liftedFctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
 
                 // Create new vec struct: struct.new(restLen, restArr)
                 liftedFctx.body.push({ op: "local.get", index: restLenLocal });
                 liftedFctx.body.push({ op: "local.get", index: restArrLocal });
-                liftedFctx.body.push({ op: "struct.new", typeIdx } as Instr);
+                liftedFctx.body.push({ op: "struct.new", typeIdx });
 
                 const vecType: ValType = { kind: "ref_null", typeIdx };
                 const restLocal = allocLocal(liftedFctx, restName, vecType);
@@ -2757,7 +2778,7 @@ export function compileArrowAsClosure(
             liftedFctx.body = savedBodyFPAD;
             if (resolvedParamType.kind === "ref_null" && fpadInstrs.length > 0) {
               liftedFctx.body.push({ op: "local.get", index: srcParamIdx });
-              liftedFctx.body.push({ op: "ref.is_null" } as Instr);
+              liftedFctx.body.push({ op: "ref.is_null" });
               liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpadInstrs });
             } else {
               liftedFctx.body.push(...fpadInstrs);
@@ -2785,7 +2806,7 @@ export function compileArrowAsClosure(
             liftedFctx.body = savedBodyFPAD;
             if (resolvedParamType.kind === "ref_null" && fpadInstrs.length > 0) {
               liftedFctx.body.push({ op: "local.get", index: srcParamIdx });
-              liftedFctx.body.push({ op: "ref.is_null" } as Instr);
+              liftedFctx.body.push({ op: "ref.is_null" });
               liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpadInstrs });
             } else {
               liftedFctx.body.push(...fpadInstrs);
@@ -2844,7 +2865,7 @@ export function compileArrowAsClosure(
           liftedFctx.body = savedBodyFPOD;
           if (paramType.kind === "ref_null" && fpodInstrs.length > 0) {
             liftedFctx.body.push({ op: "local.get", index: paramIdx });
-            liftedFctx.body.push({ op: "ref.is_null" } as Instr);
+            liftedFctx.body.push({ op: "ref.is_null" });
             liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpodInstrs });
           } else {
             liftedFctx.body.push(...fpodInstrs);
@@ -2980,7 +3001,7 @@ export function compileArrowAsClosure(
     // function (`ensureNativeGeneratorResumeFunction`). ZERO host imports —
     // no `__gen_create_buffer` / `__create_generator` / `__get_caught_exception`.
     compileNativeGeneratorFunction(ctx, liftedFctx, arrow, nativeGenExprInfo);
-    liftedFctx.body.push({ op: "extern.convert_any" } as Instr);
+    liftedFctx.body.push({ op: "extern.convert_any" });
     conciseBodyHasValue = true;
   } else if (isGenerator && ts.isBlock(body)) {
     // Generator function expression: eagerly evaluate body, collect yields
@@ -3062,7 +3083,10 @@ export function compileArrowAsClosure(
     const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
     const catchAllBody: Instr[] =
       getCaughtIdx !== undefined
-        ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+        ? [
+            { op: "call", funcIdx: getCaughtIdx },
+            { op: "local.set", index: pendingThrowLocal },
+          ]
         : [];
     liftedFctx.body.push({
       op: "try",
@@ -3089,22 +3113,18 @@ export function compileArrowAsClosure(
     if (genLazyEligible) {
       liftedFctx.body = genOuterBody;
       const flagGlobalIdx = ensureGenEagerFlag(ctx);
-      liftedFctx.body.push({ op: "global.get", index: flagGlobalIdx } as Instr);
+      liftedFctx.body.push({ op: "global.get", index: flagGlobalIdx });
       liftedFctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
-        then: [
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "global.set", index: flagGlobalIdx } as Instr,
-          ...eagerSeq,
-        ],
+        then: [{ op: "i32.const", value: 0 }, { op: "global.set", index: flagGlobalIdx }, ...eagerSeq],
         else: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "extern.convert_any" } as Instr,
-          { op: "ref.null.extern" } as Instr,
-          { op: "call", funcIdx: createGenIdx } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "extern.convert_any" },
+          { op: "ref.null.extern" },
+          { op: "call", funcIdx: createGenIdx },
         ],
-      } as Instr);
+      });
     }
     conciseBodyHasValue = true; // generator return value is already on stack
   } else if (asyncDecision) {
@@ -3794,20 +3814,20 @@ export function compileArrowAsCallback(
         // (#2128) Null-guard the cell: writebacks are re-emitted at sites that
         // may execute while the creation site (e.g. inside an untaken branch)
         // hasn't run, leaving refCellLocal null — skip instead of trapping.
-        writebacks.push({ op: "local.get", index: rc.refCellLocal } as Instr);
-        writebacks.push({ op: "ref.is_null" } as Instr);
-        writebacks.push({ op: "i32.eqz" } as Instr);
+        writebacks.push({ op: "local.get", index: rc.refCellLocal });
+        writebacks.push({ op: "ref.is_null" });
+        writebacks.push({ op: "i32.eqz" });
         writebacks.push({
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: rc.refCellLocal } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 } as Instr,
-            { op: "local.set", index: rc.outerLocalIdx } as Instr,
+            { op: "local.get", index: rc.refCellLocal },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 },
+            { op: "local.set", index: rc.outerLocalIdx },
           ],
           else: [],
-        } as Instr);
+        });
       }
       // (#1695) Promote to persistent for stored-callback host methods too:
       // defer/use/adopt only register the callback, the actual invocation
@@ -4218,26 +4238,26 @@ export function emitFuncRefAsClosure(
     const castedSelfLocal = 1 + userParams.length;
 
     // Cast self from base struct to custom struct to access capture fields
-    trampolineBody.push({ op: "local.get", index: 0 } as Instr);
+    trampolineBody.push({ op: "local.get", index: 0 });
     trampolineBody.push({ op: "ref.cast", typeIdx: structTypeIdx });
 
     if (totalCapFields === 1) {
       // Exactly one capture field (a value capture; TDZ-flag-only with zero
       // value captures is impossible because each flag is paired with a value).
-      trampolineBody.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 1 } as Instr);
+      trampolineBody.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: 1 });
     } else {
-      trampolineBody.push({ op: "local.set", index: castedSelfLocal } as Instr);
+      trampolineBody.push({ op: "local.set", index: castedSelfLocal });
       // Push value captures first, then TDZ-flag captures, mirroring the
       // lifted fn's leading-param order.
       for (let i = 0; i < totalCapFields; i++) {
-        trampolineBody.push({ op: "local.get", index: castedSelfLocal } as Instr);
-        trampolineBody.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i + 1 } as Instr);
+        trampolineBody.push({ op: "local.get", index: castedSelfLocal });
+        trampolineBody.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i + 1 });
       }
     }
     for (let i = 0; i < userParams.length; i++) {
-      trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+      trampolineBody.push({ op: "local.get", index: i + 1 });
     }
-    trampolineBody.push({ op: "call", funcIdx } as Instr);
+    trampolineBody.push({ op: "call", funcIdx });
 
     const trampolineFuncIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, trampolineFuncIdx, {
@@ -4291,9 +4311,9 @@ export function emitFuncRefAsClosure(
 
   // Push the user-visible params (skip self at param 0)
   for (let i = 0; i < userParams.length; i++) {
-    trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+    trampolineBody.push({ op: "local.get", index: i + 1 });
   }
-  trampolineBody.push({ op: "call", funcIdx } as Instr);
+  trampolineBody.push({ op: "call", funcIdx });
 
   const trampolineFuncIdx = mintDefinedFunc(ctx);
   pushDefinedFunc(ctx, trampolineFuncIdx, {
@@ -4376,8 +4396,8 @@ function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
   if (newTypeErrorIdx === undefined || ctx.exnTagIdx < 0) return null;
   return [
     ...stringConstantExternrefInstrs(ctx, NULL_THIS_TYPEERROR_MSG),
-    { op: "call", funcIdx: newTypeErrorIdx } as Instr,
-    { op: "throw", tagIdx: ctx.exnTagIdx } as Instr,
+    { op: "call", funcIdx: newTypeErrorIdx },
+    { op: "throw", tagIdx: ctx.exnTagIdx },
   ];
 }
 
@@ -4397,7 +4417,7 @@ function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number): boolea
       if (instr.op === "local.get" && (instr as { index?: number }).index === 0) return true;
       for (const key of ["body", "then", "else", "catchAll"] as const) {
         const nested = (instr as Record<string, unknown>)[key];
-        if (Array.isArray(nested) && walk(nested as Instr[])) return true;
+        if (Array.isArray(nested) && walk(nested)) return true;
       }
       const catches = (instr as { catches?: { body?: Instr[] }[] }).catches;
       if (Array.isArray(catches)) {
@@ -4416,7 +4436,7 @@ function buildTrampolineThisSlot(
   methodUsesThis: boolean,
 ): Instr[] {
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
-  const nullThis: Instr[] = [{ op: "ref.null", typeIdx: objStructTypeIdx } as Instr];
+  const nullThis: Instr[] = [{ op: "ref.null", typeIdx: objStructTypeIdx }];
   if (currentThisGlobalIdx < 0) return nullThis;
   // (#2025) When the resolved `this` isn't the method's struct, distinguish a
   // GENUINELY-ABSENT receiver (`__current_this` null — the unbound extraction
@@ -4433,8 +4453,8 @@ function buildTrampolineThisSlot(
   const throwInstrs = methodUsesThis ? buildNullThisTypeErrorThrow(ctx) : null;
   const elseArm: Instr[] = throwInstrs
     ? [
-        { op: "local.get", index: anyTempLocalIdx } as Instr,
-        { op: "ref.is_null" } as Instr,
+        { op: "local.get", index: anyTempLocalIdx },
+        { op: "ref.is_null" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
@@ -4444,16 +4464,16 @@ function buildTrampolineThisSlot(
       ]
     : nullThis;
   return [
-    { op: "global.get", index: currentThisGlobalIdx } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.tee", index: anyTempLocalIdx } as Instr,
-    { op: "ref.test", typeIdx: objStructTypeIdx } as Instr,
+    { op: "global.get", index: currentThisGlobalIdx },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: anyTempLocalIdx },
+    { op: "ref.test", typeIdx: objStructTypeIdx },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
       then: [
-        { op: "local.get", index: anyTempLocalIdx } as Instr,
-        { op: "ref.cast", typeIdx: objStructTypeIdx } as Instr,
+        { op: "local.get", index: anyTempLocalIdx },
+        { op: "ref.cast", typeIdx: objStructTypeIdx },
       ],
       else: elseArm,
     },
@@ -4532,9 +4552,9 @@ export function emitObjectMethodAsClosure(
   const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
   for (let i = 0; i < userParams.length; i++) {
     // Skip closure_self at param 0; user params start at index 1
-    trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+    trampolineBody.push({ op: "local.get", index: i + 1 });
   }
-  trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
+  trampolineBody.push({ op: "call", funcIdx: methodFuncIdx });
 
   const trampolineFuncIdx = mintDefinedFunc(ctx);
   pushDefinedFunc(ctx, trampolineFuncIdx, {
@@ -4700,7 +4720,7 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       newBody = buildTrampolineThisSlot(ctx, t.objStructTypeIdx, anyTempLocalIdx, usesThis);
     }
     for (let i = 0; i < methodUserParams.length; i++) {
-      newBody.push({ op: "local.get", index: i + 1 } as Instr);
+      newBody.push({ op: "local.get", index: i + 1 });
       const from = wrapperUserParams[i];
       const to = methodUserParams[i]!;
       if (from && from.kind !== to.kind) {
@@ -4720,11 +4740,11 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
         }
       }
     }
-    newBody.push({ op: "call", funcIdx: t.methodFuncIdx } as Instr);
+    newBody.push({ op: "call", funcIdx: t.methodFuncIdx });
     // Reconcile the result arity/type with the wrapper's declared result.
     if (methodResult && !wrapperResult) {
       // Method now returns a value the void wrapper must discard.
-      newBody.push({ op: "drop" } as Instr);
+      newBody.push({ op: "drop" });
     } else if (wrapperResult && methodResult && wrapperResult.kind !== methodResult.kind) {
       tFctx.body = newBody;
       newBody.push(...coercionInstrs(ctx, methodResult, wrapperResult, tFctx));
@@ -4753,14 +4773,14 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       const wrapperTypeIdx = (wrapperResult as { typeIdx: number }).typeIdx;
       if (methodResult.kind === "ref") {
         // Non-null source: cast directly.
-        newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+        newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx });
       } else {
         // Nullable source: a null must stay null; cast preserves nullability when
         // the target is also nullable, else guard. Wrapper result kind dictates.
         if (wrapperResult.kind === "ref_null") {
-          newBody.push({ op: "ref.cast_null", typeIdx: wrapperTypeIdx } as Instr);
+          newBody.push({ op: "ref.cast_null", typeIdx: wrapperTypeIdx });
         } else {
-          newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx } as Instr);
+          newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx });
         }
       }
     }
@@ -4824,10 +4844,10 @@ export function emitCachedMethodClosureAccess(
   //   if (then: build closure, store in $cache)
   //   global.get $cache
   const initBody: Instr[] = [
-    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
-    { op: "struct.new", typeIdx: closureStructTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
-    { op: "global.set", index: cacheGlobalIdx } as Instr,
+    { op: "ref.func", funcIdx: trampolineFuncIdx },
+    { op: "struct.new", typeIdx: closureStructTypeIdx },
+    { op: "extern.convert_any" },
+    { op: "global.set", index: cacheGlobalIdx },
   ];
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
   fctx.body.push({ op: "ref.is_null" });
@@ -4904,9 +4924,9 @@ export function ensureMethodClosureSingleton(
       methodUsesThisCached,
     );
     for (let i = 0; i < userParams.length; i++) {
-      trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+      trampolineBody.push({ op: "local.get", index: i + 1 });
     }
-    trampolineBody.push({ op: "call", funcIdx: methodFuncIdx } as Instr);
+    trampolineBody.push({ op: "call", funcIdx: methodFuncIdx });
     trampolineFuncIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
@@ -5010,9 +5030,9 @@ export function emitCachedFuncClosureAccess(
     // don't have a hidden `this` param like methods do.
     const trampolineBody: Instr[] = [];
     for (let i = 0; i < userParams.length; i++) {
-      trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
+      trampolineBody.push({ op: "local.get", index: i + 1 });
     }
-    trampolineBody.push({ op: "call", funcIdx } as Instr);
+    trampolineBody.push({ op: "call", funcIdx });
     trampolineFuncIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, trampolineFuncIdx, {
       name: trampolineName,
@@ -5082,10 +5102,10 @@ export function emitCachedFuncClosureAccess(
   //   any.convert_extern
   //   ref.cast (ref $struct)
   const initBody: Instr[] = [
-    { op: "ref.func", funcIdx: trampolineFuncIdx } as Instr,
-    { op: "struct.new", typeIdx: structTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
-    { op: "global.set", index: cacheGlobalIdx } as Instr,
+    { op: "ref.func", funcIdx: trampolineFuncIdx },
+    { op: "struct.new", typeIdx: structTypeIdx },
+    { op: "extern.convert_any" },
+    { op: "global.set", index: cacheGlobalIdx },
   ];
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
   fctx.body.push({ op: "ref.is_null" });
@@ -5096,8 +5116,8 @@ export function emitCachedFuncClosureAccess(
     else: [],
   });
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
 }
 

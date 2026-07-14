@@ -352,7 +352,7 @@ export function maybeWrapAnyReadEqualityCarrier(
   if (ctx.anyValueTypeIdx < 0) return result;
   const classifyIdx = ensureAnyFromExternHelper(ctx, { forceHonest: true });
   if (classifyIdx === undefined) return result;
-  fctx.body.push({ op: "call", funcIdx: classifyIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: classifyIdx });
   return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
 }
 
@@ -791,9 +791,9 @@ function emitRuntimeDescriptorGet(
     if (!isProvablyNonNull(receiver, ctx.checker)) {
       emitNullCheckThrow(ctx, fctx, recvType, accessNode);
     }
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (recvType.kind === "ref") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (recvType.kind !== "externref") {
     coerceType(ctx, fctx, recvType, { kind: "externref" });
   }
@@ -871,22 +871,22 @@ export function emitArrayIsArrayExternrefPredicate(ctx: CodegenContext, fctx: Fu
 
   if (vecTypeIdxs.length > 0) {
     const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.get", index: externTmp });
+    fctx.body.push({ op: "any.convert_extern" });
     fctx.body.push({ op: "local.set", index: anyTmp });
     for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
-      fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-      fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
-      if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "local.get", index: anyTmp });
+      fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! });
+      if (vi > 0) fctx.body.push({ op: "i32.or" });
     }
     emittedTerm = true;
   }
 
   if (isArrIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
-    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+    fctx.body.push({ op: "local.get", index: externTmp });
     fctx.body.push({ op: "call", funcIdx: isArrIdx });
-    if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
+    if (emittedTerm) fctx.body.push({ op: "i32.or" });
     emittedTerm = true;
   }
 
@@ -1144,7 +1144,7 @@ function tryCompileStandaloneBuiltinProtoMemberMeta(
     const staticArity = BUILTIN_STATIC_METHOD_ARITY[inner.text]?.[memberAccess.name.text];
     if (!staticShadowed && staticArity !== undefined) {
       if (metaProp === "length") {
-        fctx.body.push({ op: "f64.const", value: staticArity } as Instr);
+        fctx.body.push({ op: "f64.const", value: staticArity });
         return { kind: "f64" };
       }
       return compileStringLiteral(ctx, fctx, memberAccess.name.text) ?? undefined;
@@ -1169,7 +1169,7 @@ function tryCompileStandaloneBuiltinProtoMemberMeta(
 
   if (metaProp === "length") {
     const arity = glue.memberKind(member) === "getter" ? 0 : glue.memberLength(member);
-    fctx.body.push({ op: "f64.const", value: arity } as Instr);
+    fctx.body.push({ op: "f64.const", value: arity });
     return { kind: "f64" };
   }
   // `.name` — the member's own name (getters are spelled "get <member>" per
@@ -1225,8 +1225,8 @@ function tryCompileStandaloneBuiltinProtoMemberRead(
     // call_ref operand: the typed funcref. `ref.func` yields `(ref liftedType)`
     // directly (the func's declared type IS the lifted closure type), so no
     // struct.get / guard-cast is needed.
-    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
+    fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
+    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
     return closureInfo.returnType ?? { kind: "externref" };
   }
 
@@ -1423,9 +1423,9 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       const rootIdx = ctx.funcMap.get("__json_stringify_root");
       if (rootIdx === undefined) return null;
       closureFctx.body.push({ op: "local.get", index: 1 });
-      closureFctx.body.push({ op: "any.convert_extern" } as Instr);
+      closureFctx.body.push({ op: "any.convert_extern" });
       closureFctx.body.push({ op: "call", funcIdx: rootIdx });
-      closureFctx.body.push({ op: "extern.convert_any" } as Instr);
+      closureFctx.body.push({ op: "extern.convert_any" });
     } else if (genericThrowBody) {
       // (#2984 Phase 3) Degrade-to-catchable body: a real TypeError instance +
       // `throw` — the EXACT helper the Phase-2 proto refusal bodies use,
@@ -1876,7 +1876,7 @@ export function typeErrorThrowInstrs(ctx: CodegenContext, node?: ts.Node): Instr
   // so call sites can materialize it inline (#1174).
   addStringConstantGlobal(ctx, message);
   const tagIdx = ensureExnTag(ctx);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
+  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }];
 }
 
 /**
@@ -1901,14 +1901,14 @@ export function emitNullCheckThrow(ctx: CodegenContext, fctx: FunctionContext, r
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: backupLocal } as Instr,
-        { op: "ref.is_null" } as Instr,
+        { op: "local.get", index: backupLocal },
+        { op: "ref.is_null" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: typeErrorThrowInstrs(ctx, node),
           else: [], // wrong struct type — don't throw
-        } as Instr,
+        },
       ],
       else: [],
     });
@@ -1982,9 +1982,9 @@ export function emitAlternateStructSetDispatch(
   if (dispIdx === undefined) return false;
   // recv is externref; the dispatcher does `any.convert_extern` + `ref.test`
   // internally and forwards the externref recv to the sidecar fallback.
-  fctx.body.push({ op: "local.get", index: recvExtLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: valExtLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: dispIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: recvExtLocal });
+  fctx.body.push({ op: "local.get", index: valExtLocal });
+  fctx.body.push({ op: "call", funcIdx: dispIdx });
   return true;
 }
 
@@ -2050,7 +2050,10 @@ export function emitNullGuardedStructGet(
         op: "if",
         blockType: { kind: "val" as const, type: resultType },
         then: typeErrorThrowInstrs(ctx),
-        else: [{ op: "local.get", index: tmp } as Instr, { op: "struct.get", typeIdx, fieldIdx } as Instr],
+        else: [
+          { op: "local.get", index: tmp },
+          { op: "struct.get", typeIdx, fieldIdx },
+        ],
       });
       return;
     }
@@ -2069,20 +2072,20 @@ export function emitNullGuardedStructGet(
         const alt = alternates[altIdx]!;
         const altCoerce = coercionInstrs(ctx, alt.fieldType, resultType, fctx);
         return [
-          { op: "local.get", index: srcLocal } as Instr,
-          { op: "ref.test", typeIdx: alt.structTypeIdx } as Instr,
+          { op: "local.get", index: srcLocal },
+          { op: "ref.test", typeIdx: alt.structTypeIdx },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: srcLocal } as Instr,
-              { op: "ref.cast", typeIdx: alt.structTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.fieldIdx } as Instr,
+              { op: "local.get", index: srcLocal },
+              { op: "ref.cast", typeIdx: alt.structTypeIdx },
+              { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.fieldIdx },
               ...altCoerce,
-              { op: "local.set", index: resultLocal } as Instr,
+              { op: "local.set", index: resultLocal },
             ],
             else: buildFallback(srcLocal, altIdx + 1),
-          } as Instr,
+          },
         ];
       }
       // No more inline alternates. (#2674) The inline `alternates` set was frozen
@@ -2101,15 +2104,15 @@ export function emitNullGuardedStructGet(
       const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
       if (getDispIdx !== undefined) {
         return [
-          { op: "local.get", index: srcLocal } as Instr,
-          { op: "extern.convert_any" } as Instr,
-          { op: "call", funcIdx: getDispIdx } as Instr,
+          { op: "local.get", index: srcLocal },
+          { op: "extern.convert_any" },
+          { op: "call", funcIdx: getDispIdx },
           ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
-          { op: "local.set", index: resultLocal } as Instr,
+          { op: "local.set", index: resultLocal },
         ];
       }
       // No dispatcher — return default value (legacy behaviour).
-      return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal } as Instr];
+      return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal }];
     };
 
     // Check if emitGuardedRefCast saved a pre-cast backup (#792).
@@ -2130,8 +2133,8 @@ export function emitNullGuardedStructGet(
           ? [
               // Value is null — could be wrong struct type or genuinely null.
               // Check the backup anyref to distinguish.
-              { op: "local.get", index: backupLocal } as Instr,
-              { op: "ref.is_null" } as Instr,
+              { op: "local.get", index: backupLocal },
+              { op: "ref.is_null" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
@@ -2139,21 +2142,21 @@ export function emitNullGuardedStructGet(
                 then: typeErrorThrowInstrs(ctx),
                 // Backup is non-null → wrong struct type, try primary + alternates on backup
                 else: [
-                  { op: "local.get", index: backupLocal } as Instr,
-                  { op: "ref.test", typeIdx } as Instr,
+                  { op: "local.get", index: backupLocal },
+                  { op: "ref.test", typeIdx },
                   {
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [
-                      { op: "local.get", index: backupLocal } as Instr,
-                      { op: "ref.cast", typeIdx } as Instr,
-                      { op: "struct.get", typeIdx, fieldIdx } as Instr,
-                      { op: "local.set", index: resultLocal } as Instr,
+                      { op: "local.get", index: backupLocal },
+                      { op: "ref.cast", typeIdx },
+                      { op: "struct.get", typeIdx, fieldIdx },
+                      { op: "local.set", index: resultLocal },
                     ],
                     else: buildFallback(backupLocal, 0),
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
             ]
           : typeErrorThrowInstrs(ctx),
       else: [],
@@ -2167,10 +2170,10 @@ export function emitNullGuardedStructGet(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: tmpAny } as Instr,
-        { op: "ref.cast", typeIdx } as Instr,
-        { op: "struct.get", typeIdx, fieldIdx } as Instr,
-        { op: "local.set", index: resultLocal } as Instr,
+        { op: "local.get", index: tmpAny },
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx },
+        { op: "local.set", index: resultLocal },
       ],
       else: buildFallback(tmpAny, 0),
     });
@@ -2188,7 +2191,10 @@ export function emitNullGuardedStructGet(
     op: "if",
     blockType: { kind: "val" as const, type: resultType },
     then: nullBranch,
-    else: [{ op: "local.get", index: tmp } as Instr, { op: "struct.get", typeIdx, fieldIdx } as Instr],
+    else: [
+      { op: "local.get", index: tmp },
+      { op: "struct.get", typeIdx, fieldIdx },
+    ],
   });
 }
 
@@ -2259,11 +2265,11 @@ export function emitCapturedBoxGlobalWrite(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [] as Instr[],
+    then: [],
     else: [
-      { op: "global.get", index: entry.globalIdx } as Instr,
-      { op: "local.get", index: valLocalIdx } as Instr,
-      { op: "struct.set", typeIdx: entry.refCellTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "global.get", index: entry.globalIdx },
+      { op: "local.get", index: valLocalIdx },
+      { op: "struct.set", typeIdx: entry.refCellTypeIdx, fieldIdx: 0 },
     ],
   });
 }
@@ -2309,27 +2315,27 @@ function emitExternrefBackedOwnFieldRead(
 
   const selfResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
   if (!selfResult) return null;
-  if (selfResult.kind !== "externref") fctx.body.push({ op: "extern.convert_any" } as Instr);
+  if (selfResult.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
 
   // props = self.$props (fieldIdx 5): cast externref → (ref $Error_struct) once.
   const propsLocal = allocLocal(fctx, `__ownf_rprops_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: errStructIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: errStructIdx, fieldIdx: 5 } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: errStructIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: errStructIdx, fieldIdx: 5 });
   fctx.body.push({ op: "local.tee", index: propsLocal });
   // props == null ? undefined : __extern_get(props, propName)
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "ref.is_null" });
   addStringConstantGlobal(ctx, propName);
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: [{ op: "ref.null.extern" } as Instr],
+    then: [{ op: "ref.null.extern" }],
     else: [
-      { op: "local.get", index: propsLocal } as Instr,
+      { op: "local.get", index: propsLocal },
       ...stringConstantExternrefInstrs(ctx, propName),
-      { op: "call", funcIdx: externGetIdx } as Instr,
+      { op: "call", funcIdx: externGetIdx },
     ],
-  } as Instr);
+  });
   return { kind: "externref" };
 }
 
@@ -2347,7 +2353,7 @@ export function emitExternrefToStructGet(
     fieldType.kind === "ref" ? { kind: "ref_null", typeIdx: (fieldType as any).typeIdx } : fieldType;
 
   // Convert externref -> anyref for struct type testing
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
 
   // Use multi-struct dispatch: try the primary struct type, then any
   // alternative struct types that have the same field name.  This handles
@@ -2388,24 +2394,24 @@ export function emitExternrefToStructGet(
     if (getIdx !== undefined) {
       externGetFallback = [];
       // Convert anyref back to externref for __extern_get
-      externGetFallback.push({ op: "local.get", index: tmpAny } as Instr);
-      externGetFallback.push({ op: "extern.convert_any" } as Instr);
+      externGetFallback.push({ op: "local.get", index: tmpAny });
+      externGetFallback.push({ op: "extern.convert_any" });
       // Push property name string
       addStringConstantGlobal(ctx, propName);
       externGetFallback.push(...stringConstantExternrefInstrs(ctx, propName));
-      externGetFallback.push({ op: "call", funcIdx: getIdx } as Instr);
+      externGetFallback.push({ op: "call", funcIdx: getIdx });
       // Coerce externref result to the expected result type
       if (resultType.kind === "f64") {
         const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
         flushLateImportShifts(ctx, fctx);
         if (unboxIdx !== undefined) {
-          externGetFallback.push({ op: "call", funcIdx: unboxIdx } as Instr);
+          externGetFallback.push({ op: "call", funcIdx: unboxIdx });
         }
       } else if (resultType.kind === "i32") {
         const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
         flushLateImportShifts(ctx, fctx);
         if (unboxIdx !== undefined) {
-          externGetFallback.push({ op: "call", funcIdx: unboxIdx } as Instr);
+          externGetFallback.push({ op: "call", funcIdx: unboxIdx });
           externGetFallback.push({ op: "i32.trunc_sat_f64_s" });
         }
       }
@@ -2415,22 +2421,22 @@ export function emitExternrefToStructGet(
       if (resultType.kind === "ref_null") {
         // The __extern_get returns externref; convert to anyref, try ref.cast_null
         const tmpExtResult = allocTempLocal(fctx, { kind: "anyref" });
-        externGetFallback.push({ op: "any.convert_extern" } as Instr);
-        externGetFallback.push({ op: "local.tee", index: tmpExtResult } as Instr);
-        externGetFallback.push({ op: "ref.test", typeIdx: (resultType as any).typeIdx } as Instr);
+        externGetFallback.push({ op: "any.convert_extern" });
+        externGetFallback.push({ op: "local.tee", index: tmpExtResult });
+        externGetFallback.push({ op: "ref.test", typeIdx: (resultType as any).typeIdx });
         externGetFallback.push({
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: tmpExtResult } as Instr,
-            { op: "ref.cast", typeIdx: (resultType as any).typeIdx } as Instr,
-            { op: "local.set", index: resultLocal } as Instr,
+            { op: "local.get", index: tmpExtResult },
+            { op: "ref.cast", typeIdx: (resultType as any).typeIdx },
+            { op: "local.set", index: resultLocal },
           ],
-          else: [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal } as Instr],
-        } as Instr);
+          else: [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal }],
+        });
         releaseTempLocal(fctx, tmpExtResult);
       } else {
-        externGetFallback.push({ op: "local.set", index: resultLocal } as Instr);
+        externGetFallback.push({ op: "local.set", index: resultLocal });
       }
     }
   }
@@ -2446,20 +2452,20 @@ export function emitExternrefToStructGet(
       const alt = alternates[altIdx]!;
       const altCoerce = coercionInstrs(ctx, alt.fieldType, resultType, fctx);
       return [
-        { op: "local.get", index: tmpAny } as Instr,
-        { op: "ref.test", typeIdx: alt.structTypeIdx } as Instr,
+        { op: "local.get", index: tmpAny },
+        { op: "ref.test", typeIdx: alt.structTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: tmpAny } as Instr,
-            { op: "ref.cast", typeIdx: alt.structTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.fieldIdx } as Instr,
+            { op: "local.get", index: tmpAny },
+            { op: "ref.cast", typeIdx: alt.structTypeIdx },
+            { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.fieldIdx },
             ...altCoerce,
-            { op: "local.set", index: resultLocal } as Instr,
+            { op: "local.set", index: resultLocal },
           ],
           else: buildFallbackChain(altIdx + 1),
-        } as Instr,
+        },
       ];
     }
     // No more INLINE struct alternates. (#2674) Route the terminal through the
@@ -2475,28 +2481,28 @@ export function emitExternrefToStructGet(
     const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
     if (getDispIdx !== undefined) {
       return [
-        { op: "local.get", index: tmpAny } as Instr,
-        { op: "extern.convert_any" } as Instr,
-        { op: "call", funcIdx: getDispIdx } as Instr,
+        { op: "local.get", index: tmpAny },
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: getDispIdx },
         ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
-        { op: "local.set", index: resultLocal } as Instr,
+        { op: "local.set", index: resultLocal },
       ];
     }
     // No dispatcher — use __extern_get for JS objects, or default value (legacy).
     if (externGetFallback) {
       return externGetFallback;
     }
-    return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal } as Instr];
+    return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal }];
   };
 
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: tmpAny } as Instr,
-      { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx } as Instr,
-      { op: "local.set", index: resultLocal } as Instr,
+      { op: "local.get", index: tmpAny },
+      { op: "ref.cast", typeIdx: structTypeIdx },
+      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
+      { op: "local.set", index: resultLocal },
     ],
     else: buildFallbackChain(0),
   });
@@ -2574,8 +2580,8 @@ export function compileOptionalPropertyAccess(
     if (s1IsUndefIdx !== undefined) {
       flushLateImportShifts(ctx, fctx);
       fctx.body.push({ op: "local.get", index: tmp });
-      fctx.body.push({ op: "call", funcIdx: s1IsUndefIdx } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "call", funcIdx: s1IsUndefIdx });
+      fctx.body.push({ op: "i32.or" });
     }
   }
 
@@ -2645,7 +2651,7 @@ export function compileOptionalPropertyAccess(
           // threads it as `this` via __current_this (#1636-S1), then call. Result
           // is externref (the getter's boxed return); downstream coerces to the
           // member's static type, exactly as the __extern_get path does.
-          fctx.body.push({ op: "extern.convert_any" } as Instr); // recv struct ref → externref
+          fctx.body.push({ op: "extern.convert_any" }); // recv struct ref → externref
           fctx.body.push({ op: "global.get", index: closureAccGet }); // getter closure (externref)
           const driverIdx = reserveAccessorGetDriver(ctx);
           fctx.body.push({ op: "call", funcIdx: driverIdx });
@@ -2683,7 +2689,7 @@ export function compileOptionalPropertyAccess(
                     ? [{ op: "i64.const", value: 0x7ff00000deadc0den }, { op: "f64.reinterpret_i64" }]
                     : fields[fieldIdx]!.type.kind === "i32"
                       ? [{ op: "i32.const", value: 0 }]
-                      : [{ op: "ref.null.extern" }]) as Instr[]),
+                      : [{ op: "ref.null.extern" }]) satisfies Instr[]),
                 ],
               });
             } else {
@@ -2882,19 +2888,19 @@ function emitGuardedNativeStringLength(
   const recvExtern = allocLocal(fctx, `__strlen_ext_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: recvExtern });
   fctx.body.push({ op: "local.get", index: recvExtern });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: [
-      { op: "local.get", index: recvExtern } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: recvExtern },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+      { op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 },
     ],
     else: buildElseInstrs(recvExtern),
-  } as Instr);
+  });
 }
 
 /**
@@ -2960,7 +2966,7 @@ function tryEmitPinnedStructMemberGet(
   if (objResult && objResult.kind !== "externref") {
     coerceType(ctx, fctx, objResult, { kind: "externref" });
   } else if (!objResult) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   const getDispIdx = reserveMemberGetDispatch(ctx, propName, fctx);
@@ -2978,17 +2984,17 @@ function tryEmitPinnedStructMemberGet(
     );
     flushLateImportShifts(ctx, fctx);
     if (getIdx === undefined) {
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
     addStringConstantGlobal(ctx, propName);
     fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-    fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: getIdx });
     return { kind: "externref" };
   }
   // Receiver is on the stack; the dispatcher takes (recv) → call directly.
-  fctx.body.push({ op: "call", funcIdx: getDispIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: getDispIdx });
   return { kind: "externref" };
 }
 
@@ -3072,13 +3078,13 @@ function tryEmitDeleteAwareDynamicGet(
   if (objResult && objResult.kind !== "externref") {
     coerceType(ctx, fctx, objResult, { kind: "externref" });
   } else if (!objResult) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   if (getMemberIdx === undefined) {
     // No dispatcher available — legacy bare tombstone-aware host read.
     fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-    fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: getIdx });
     return { kind: "externref" };
   }
 
@@ -3087,18 +3093,21 @@ function tryEmitDeleteAwareDynamicGet(
   // `finalizeInModuleInitFlag` (after all import globals settle).
   const flagGet = recordInModuleInitFlagRead(ctx);
   const recvLocal = allocLocal(fctx, `__dadg_recv_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
   fctx.body.push(flagGet);
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } as ValType },
-    then: [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: getMemberIdx } as Instr],
-    else: [
-      { op: "local.get", index: recvLocal } as Instr,
-      ...stringConstantExternrefInstrs(ctx, propName),
-      { op: "call", funcIdx: getIdx } as Instr,
+    then: [
+      { op: "local.get", index: recvLocal },
+      { op: "call", funcIdx: getMemberIdx },
     ],
-  } as Instr);
+    else: [
+      { op: "local.get", index: recvLocal },
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "call", funcIdx: getIdx },
+    ],
+  });
   return { kind: "externref" };
 }
 
@@ -3174,7 +3183,7 @@ export function tryEmitDeleteAwareDynamicSet(
   if (objResult && objResult.kind !== "externref") {
     coerceType(ctx, fctx, objResult, { kind: "externref" });
   } else if (!objResult) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
   const objLocal = allocLocal(fctx, `__daset_obj_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: objLocal });
@@ -3184,7 +3193,7 @@ export function tryEmitDeleteAwareDynamicSet(
   if (valResult && valResult.kind !== "externref") {
     coerceType(ctx, fctx, valResult, { kind: "externref" });
   } else if (!valResult) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
   const valLocal = allocLocal(fctx, `__daset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
@@ -3248,7 +3257,7 @@ export function tryEmitDeleteAwareDynamicSet(
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
     fctx.body.push({ op: "local.get", index: valLocal });
-    fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: setIdx });
     fctx.body.push({ op: "local.get", index: valLocal });
     return { kind: "externref" };
   }
@@ -3263,17 +3272,17 @@ export function tryEmitDeleteAwareDynamicSet(
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: objLocal } as Instr,
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "call", funcIdx: setMemberIdx } as Instr,
+      { op: "local.get", index: objLocal },
+      { op: "local.get", index: valLocal },
+      { op: "call", funcIdx: setMemberIdx },
     ],
     else: [
-      { op: "local.get", index: objLocal } as Instr,
+      { op: "local.get", index: objLocal },
       ...stringConstantExternrefInstrs(ctx, propName),
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "call", funcIdx: setIdx } as Instr,
+      { op: "local.get", index: valLocal },
+      { op: "call", funcIdx: setIdx },
     ],
-  } as Instr);
+  });
 
   // `=` evaluates to the assigned value.
   fctx.body.push({ op: "local.get", index: valLocal });
@@ -3339,9 +3348,9 @@ function tryEmitConstructorViaTag(
   if (objResult && objResult.kind !== "externref") {
     coerceType(ctx, fctx, objResult, { kind: "externref" });
   } else if (!objResult) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   const instLocal = allocLocal(fctx, `__ctoridn_inst_${fctx.locals.length}`, { kind: "anyref" } as ValType);
   fctx.body.push({ op: "local.set", index: instLocal });
 
@@ -3358,19 +3367,19 @@ function tryEmitConstructorViaTag(
     fctx.body.push({ op: "i32.const", value: -1 });
     fctx.body.push({ op: "i32.eq" });
     fctx.body.push({ op: "local.get", index: instLocal });
-    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx });
     fctx.body.push({ op: "i32.and" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: instLocal },
-        { op: "ref.cast", typeIdx: structIdx } as Instr,
-        { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+        { op: "ref.cast", typeIdx: structIdx },
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 },
         { op: "local.set", index: tagLocal },
       ],
       else: [],
-    } as Instr);
+    });
   }
 
   // Result local: seeded with the GENERIC `.constructor` read of the receiver,
@@ -3418,15 +3427,15 @@ function tryEmitConstructorViaTag(
     flushLateImportShifts(ctx, fctx);
     // __extern_get(extern.convert_any(instLocal), "constructor")
     fctx.body.push({ op: "local.get", index: instLocal });
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
     addStringConstantGlobal(ctx, "constructor");
     fctx.body.push(...stringConstantExternrefInstrs(ctx, "constructor"));
-    fctx.body.push({ op: "call", funcIdx: externGetIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: externGetIdx });
     fctx.body.push({ op: "local.set", index: resLocal });
   } else {
     // No-host gc mode without the runtime reader: preserve the prior behaviour
     // for a non-class receiver (null externref).
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     fctx.body.push({ op: "local.set", index: resLocal });
   }
 
@@ -3437,7 +3446,7 @@ function tryEmitConstructorViaTag(
     const savedBody = fctx.body;
     fctx.body = arm;
     if (emitLazyClassObjectGet(ctx, fctx, className)) {
-      fctx.body.push({ op: "local.set", index: resLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: resLocal });
     } else {
       // No singleton emitted (shouldn't happen — classObjectGlobals has it):
       // leave resLocal null. This clears the DETACHED `arm` buffer (fctx.body is
@@ -3449,7 +3458,7 @@ function tryEmitConstructorViaTag(
     fctx.body.push({ op: "local.get", index: tagLocal });
     fctx.body.push({ op: "i32.const", value: classTag });
     fctx.body.push({ op: "i32.eq" });
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] } as Instr);
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] });
   }
 
   fctx.body.push({ op: "local.get", index: resLocal });
@@ -3820,13 +3829,13 @@ export function compilePropertyAccess(
     ) {
       if (propName === "encoding") {
         const recvType = compileExpression(ctx, fctx, expr.expression);
-        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+        if (recvType !== null) fctx.body.push({ op: "drop" });
         return compileStringLiteral(ctx, fctx, "utf-8");
       }
       if (objSym === "TextDecoder" && (propName === "fatal" || propName === "ignoreBOM")) {
         const recvType = compileExpression(ctx, fctx, expr.expression);
-        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        if (recvType !== null) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
         return { kind: "i32" };
       }
     }
@@ -3880,36 +3889,36 @@ export function compilePropertyAccess(
       // regardless of whether the local is typed as the vec or externref.
       const recvType = compileExpression(ctx, fctx, expr.expression);
       if (recvType?.kind === "externref") {
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "any.convert_extern" });
       }
       const abAny = allocLocal(fctx, `__rab_any_${fctx.locals.length}`, { kind: "anyref" });
-      fctx.body.push({ op: "local.set", index: abAny } as Instr);
+      fctx.body.push({ op: "local.set", index: abAny });
       if (propName === "resizable") {
-        fctx.body.push({ op: "local.get", index: abAny } as Instr);
-        fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: abAny });
+        fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx });
         // Boolean result. In non-fast mode surface it as an f64 0/1 (truthy in
         // conditionals, and `=== true` compares fold correctly downstream).
-        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
         return ctx.fast ? { kind: "i32", boolean: true } : { kind: "f64" };
       }
       // maxByteLength: if resizable read field 2, else the byteLength (field 0).
-      fctx.body.push({ op: "local.get", index: abAny } as Instr);
-      fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: abAny });
+      fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx });
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } as ValType },
         then: [
-          { op: "local.get", index: abAny } as Instr,
-          { op: "ref.cast", typeIdx: rabTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 } as Instr,
+          { op: "local.get", index: abAny },
+          { op: "ref.cast", typeIdx: rabTypeIdx },
+          { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
         ],
         else: [
-          { op: "local.get", index: abAny } as Instr,
-          { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "local.get", index: abAny },
+          { op: "ref.cast", typeIdx: vecTypeIdx },
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
         ],
-      } as Instr);
-      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      });
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
     }
   }
@@ -3987,40 +3996,40 @@ export function compilePropertyAccess(
       const recvType = compileExpression(ctx, fctx, expr.expression);
       const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
       if (recvType?.kind === "externref") {
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "any.convert_extern" });
       }
-      fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: anyLocal });
       const winBranch: Instr[] = [
         // detached? → TypeError
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "i32.lt_s" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] } as Instr,
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: dvWinTypeIdx },
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 }, // buf
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }, // buf.length
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        { op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] },
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: dvWinTypeIdx },
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx },
       ];
       const vecBranch: Instr[] =
         propName === "byteOffset"
-          ? [{ op: "i32.const", value: 0 } as Instr]
+          ? [{ op: "i32.const", value: 0 }]
           : [
-              { op: "local.get", index: anyLocal } as Instr,
-              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+              { op: "local.get", index: anyLocal },
+              { op: "ref.cast", typeIdx: vecTypeIdx },
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
             ];
-      fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-      fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: anyLocal });
+      fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx });
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: winBranch,
         else: vecBranch,
-      } as Instr);
-      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      });
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
     }
     // (#3062) JS-host DataView `byteLength` / `byteOffset`. In host mode
@@ -4045,11 +4054,11 @@ export function compilePropertyAccess(
         // an inline `new DataView(...)` receiver may hand back a GC ref
         // (`ref`/`ref_null`) — recover it to externref before the call.
         if (recvType && recvType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         }
-        fctx.body.push({ op: "i32.const", value: propName === "byteOffset" ? 0 : 1 } as Instr);
-        fctx.body.push({ op: "call", funcIdx: attrIdx } as Instr);
-        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        fctx.body.push({ op: "i32.const", value: propName === "byteOffset" ? 0 : 1 });
+        fctx.body.push({ op: "call", funcIdx: attrIdx });
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
         return ctx.fast ? { kind: "i32" } : { kind: "f64" };
       }
     }
@@ -4057,8 +4066,8 @@ export function compilePropertyAccess(
       // byteOffset on a fresh-backing view is always 0.
       if (propName === "byteOffset") {
         const recvType = compileExpression(ctx, fctx, expr.expression);
-        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
-        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+        if (recvType !== null) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 });
         return ctx.fast ? { kind: "i32" } : { kind: "f64" };
       }
       // (#2595) `view.BYTES_PER_ELEMENT` — instance element byte width
@@ -4069,9 +4078,9 @@ export function compilePropertyAccess(
       if (propName === "BYTES_PER_ELEMENT") {
         if (isTypedArr) {
           const recvType = compileExpression(ctx, fctx, expr.expression);
-          if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+          if (recvType !== null) fctx.body.push({ op: "drop" });
           const bytes = TYPED_ARRAY_BYTES_PER_ELEMENT[recvName!] ?? 1;
-          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: bytes } as Instr);
+          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: bytes });
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       } else {
@@ -4096,27 +4105,27 @@ export function compilePropertyAccess(
         // (`byteLength` of an empty view is 0 regardless of element width).
         const recvType = compileExpression(ctx, fctx, expr.expression);
         if (recvType?.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
         }
         const lenTmpBL = allocLocal(fctx, `__bl_len_${fctx.locals.length}`, { kind: "anyref" });
-        fctx.body.push({ op: "local.set", index: lenTmpBL } as Instr);
-        fctx.body.push({ op: "local.get", index: lenTmpBL } as Instr);
-        fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: lenTmpBL });
+        fctx.body.push({ op: "local.get", index: lenTmpBL });
+        fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx });
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } as ValType },
           then: [
-            { op: "local.get", index: lenTmpBL } as Instr,
-            { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "local.get", index: lenTmpBL },
+            { op: "ref.cast", typeIdx: vecTypeIdx },
+            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
           ],
-          else: [{ op: "i32.const", value: 0 } as Instr],
-        } as Instr);
+          else: [{ op: "i32.const", value: 0 }],
+        });
         if (bytesPerElem !== 1) {
-          fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
-          fctx.body.push({ op: "i32.mul" } as Instr);
+          fctx.body.push({ op: "i32.const", value: bytesPerElem });
+          fctx.body.push({ op: "i32.mul" });
         }
-        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+        if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
         return ctx.fast ? { kind: "i32" } : { kind: "f64" };
       }
     }
@@ -4163,27 +4172,24 @@ export function compilePropertyAccess(
           const recvType = compileExpression(ctx, fctx, expr.expression);
           const anyLocal = allocLocal(fctx, `__tabuf_any_${fctx.locals.length}`, { kind: "anyref" });
           if (recvType?.kind === "externref") {
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
           }
-          fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: anyLocal });
           const winBranch: Instr[] = [
-            { op: "local.get", index: anyLocal } as Instr,
-            { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr, // buf (shared)
-            { op: "extern.convert_any" } as Instr,
+            { op: "local.get", index: anyLocal },
+            { op: "ref.cast", typeIdx: dvWinTypeIdx },
+            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 }, // buf (shared)
+            { op: "extern.convert_any" },
           ];
-          const vecBranch: Instr[] = [
-            { op: "local.get", index: anyLocal } as Instr,
-            { op: "extern.convert_any" } as Instr,
-          ];
-          fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-          fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+          const vecBranch: Instr[] = [{ op: "local.get", index: anyLocal }, { op: "extern.convert_any" }];
+          fctx.body.push({ op: "local.get", index: anyLocal });
+          fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx });
           fctx.body.push({
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: winBranch,
             else: vecBranch,
-          } as Instr);
+          });
           return { kind: "externref" };
         } else {
           // TypedArray: backing is an f64 vec (or i8 for standalone Uint8Array);
@@ -4193,31 +4199,31 @@ export function compilePropertyAccess(
           const viewVecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
           const recvType = compileExpression(ctx, fctx, expr.expression);
           if (recvType?.kind === "externref") {
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
-            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
+            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx });
           } else if (
             (recvType?.kind === "ref" || recvType?.kind === "ref_null") &&
             "typeIdx" in recvType &&
             recvType.typeIdx !== viewVecTypeIdx
           ) {
-            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx } as Instr);
+            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx });
           }
-          fctx.body.push({ op: "struct.get", typeIdx: viewVecTypeIdx, fieldIdx: 0 } as Instr);
+          fctx.body.push({ op: "struct.get", typeIdx: viewVecTypeIdx, fieldIdx: 0 });
           const bytesPerElem = TYPED_ARRAY_BYTES_PER_ELEMENT[bufRecvName!] ?? 1;
           if (bytesPerElem !== 1) {
-            fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
-            fctx.body.push({ op: "i32.mul" } as Instr);
+            fctx.body.push({ op: "i32.const", value: bytesPerElem });
+            fctx.body.push({ op: "i32.mul" });
           }
-          fctx.body.push({ op: "local.set", index: byteLenLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: byteLenLocal });
         }
         // Build the i32_byte ArrayBuffer vec: struct.new (byteLen, zero-filled
         // array of byteLen bytes). One i32 per byte (0..255), matching the
         // ArrayBuffer / DataView backing representation (dataview-native.ts).
-        fctx.body.push({ op: "local.get", index: byteLenLocal } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr); // default byte value
-        fctx.body.push({ op: "local.get", index: byteLenLocal } as Instr);
-        fctx.body.push({ op: "array.new", typeIdx: byteArrTypeIdx } as Instr);
-        fctx.body.push({ op: "struct.new", typeIdx: byteVecTypeIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: byteLenLocal });
+        fctx.body.push({ op: "i32.const", value: 0 }); // default byte value
+        fctx.body.push({ op: "local.get", index: byteLenLocal });
+        fctx.body.push({ op: "array.new", typeIdx: byteArrTypeIdx });
+        fctx.body.push({ op: "struct.new", typeIdx: byteVecTypeIdx });
         return { kind: "ref", typeIdx: byteVecTypeIdx };
       }
     }
@@ -4282,13 +4288,13 @@ export function compilePropertyAccess(
       (recvType.kind === "ref" || recvType.kind === "ref_null") &&
       recvType.typeIdx === resultTypeIdx
     ) {
-      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 });
       return { kind: "f64" };
     }
     // Receiver didn't lower to the result struct — undo nothing (we already
     // emitted it); coerce/return a sensible f64 fallback.
-    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    if (recvType !== null) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "f64.const", value: 0 });
     return { kind: "f64" };
   }
 
@@ -4387,9 +4393,9 @@ export function compilePropertyAccess(
       if (objResult && objResult.kind !== "externref") {
         coerceType(ctx, fctx, objResult, { kind: "externref" });
       } else if (!objResult) {
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
       }
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
 
       // The `$Error_struct` message/name fields are stored as `externref`
       // (populated by the ctor via `extern.convert_any` over a native
@@ -4407,8 +4413,8 @@ export function compilePropertyAccess(
       if (isErrorLhs) {
         // Static Error type — the value is always an `$Error` struct, so cast
         // unconditionally (a runtime non-Error would mean a miscompile elsewhere).
-        fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
-        fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: structIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx });
         if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
         return resultType;
       }
@@ -4422,29 +4428,29 @@ export function compilePropertyAccess(
       // never executes a struct.get/cast. Mirrors the instanceof guard in
       // identifiers.ts, which proves the caught struct is recoverable here.
       const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
-      fctx.body.push({ op: "local.set", index: tmpAny } as Instr);
-      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
-      fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: tmpAny });
+      fctx.body.push({ op: "local.get", index: tmpAny });
+      fctx.body.push({ op: "ref.test", typeIdx: structIdx });
       // Build the `then` arm (read + coerce) into a swapped body buffer so
       // coerceType's appends land in the arm, not the main body.
       const savedBody = fctx.body;
       fctx.body = [];
-      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: tmpAny });
+      fctx.body.push({ op: "ref.cast", typeIdx: structIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx });
       if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
       const thenInstrs = fctx.body;
       fctx.body = savedBody;
       const elseInstrs: Instr[] =
         resultType.kind === "externref"
-          ? [{ op: "ref.null.extern" } as Instr]
-          : [{ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr];
+          ? [{ op: "ref.null.extern" }]
+          : [{ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx }];
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: resultType },
         then: thenInstrs,
         else: elseInstrs,
-      } as Instr);
+      });
       releaseTempLocal(fctx, tmpAny);
       return resultType;
     }
@@ -4489,16 +4495,16 @@ export function compilePropertyAccess(
         // can hold class-refs and externrefs uniformly.
         const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
         if (objResult?.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
         emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
         // result-type block: on success, return the field value; on
         // failure, throw TypeError (which doesn't return).
         const successInstrs: Instr[] = [
-          { op: "local.get", index: tmpAny } as Instr,
-          { op: "ref.cast", typeIdx: declared.structTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: declared.structTypeIdx, fieldIdx } as Instr,
+          { op: "local.get", index: tmpAny },
+          { op: "ref.cast", typeIdx: declared.structTypeIdx },
+          { op: "struct.get", typeIdx: declared.structTypeIdx, fieldIdx },
         ];
         // Capture failure-path instrs by emitting into a saved body buffer.
         // Use pushBody/popBody (not a raw swap): emitThrowTypeError can add a
@@ -4523,7 +4529,7 @@ export function compilePropertyAccess(
           blockType: { kind: "val", type: fieldType },
           then: successInstrs,
           else: failureInstrs,
-        } as Instr);
+        });
         releaseTempLocal(fctx, tmpAny);
         return fieldType;
       }
@@ -4558,7 +4564,7 @@ export function compilePropertyAccess(
         const objResult = compileExpression(ctx, fctx, expr.expression);
         const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
         if (objResult?.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
         emitPrivateBrandPredicate(ctx, fctx, tmpAny, cls.className, structTypeIdx!);
@@ -4583,8 +4589,8 @@ export function compilePropertyAccess(
         // Success path: cast to the declaring struct, then either call the
         // getter (accessor) or answer the method VALUE.
         let successInstrs: Instr[] = [
-          { op: "local.get", index: tmpAny } as Instr,
-          { op: "ref.cast", typeIdx: structTypeIdx! } as Instr,
+          { op: "local.get", index: tmpAny },
+          { op: "ref.cast", typeIdx: structTypeIdx! },
         ];
         let resultKind: ValType;
         if (cls.kind === "method") {
@@ -4618,7 +4624,7 @@ export function compilePropertyAccess(
           }
           if (!emitted) {
             // Fallback (signature unresolvable): legacy receiver-view.
-            successInstrs.push({ op: "extern.convert_any" } as Instr);
+            successInstrs.push({ op: "extern.convert_any" });
           }
           resultKind = { kind: "externref" };
         } else {
@@ -4638,7 +4644,7 @@ export function compilePropertyAccess(
           blockType: { kind: "val", type: resultKind },
           then: successInstrs,
           else: failureInstrs,
-        } as Instr);
+        });
         releaseTempLocal(fctx, tmpAny);
         return resultKind;
       }
@@ -5458,19 +5464,19 @@ export function compilePropertyAccess(
             // [(ref $vec)] → length (vec struct field 0). Every registered vec
             // type has `length` at field 0, so the matched concrete type works.
             const vecIdx = (concreteType as { typeIdx: number }).typeIdx;
-            fctx.body.push({ op: "struct.get", typeIdx: vecIdx, fieldIdx: 0 } as Instr);
-            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+            fctx.body.push({ op: "struct.get", typeIdx: vecIdx, fieldIdx: 0 });
+            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
           },
           () => {
             // [externref] → __extern_length (genuine host receiver / real JS array)
             const lengthFuncIdx = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
             flushLateImportShifts(ctx, fctx);
             if (lengthFuncIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx: lengthFuncIdx } as Instr);
-              if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+              fctx.body.push({ op: "call", funcIdx: lengthFuncIdx });
+              if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" });
             } else {
-              fctx.body.push({ op: "drop" } as Instr);
-              fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+              fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 });
             }
           },
         );
@@ -5545,7 +5551,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "local.set", index: extTmpIdx });
           const anyTmpIdx = allocLocal(fctx, `__len_any_${fctx.locals.length}`, { kind: "anyref" });
           fctx.body.push({ op: "local.get", index: extTmpIdx });
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
           fctx.body.push({ op: "local.set", index: anyTmpIdx });
           const lenType = ctx.fast ? { kind: "i32" as const } : { kind: "f64" as const };
           const lenTmp2 = allocLocal(fctx, `__len_val_${fctx.locals.length}`, lenType);
@@ -5554,14 +5560,14 @@ export function compilePropertyAccess(
           const fallbackInstrs2: Instr[] =
             lengthFuncIdx !== undefined
               ? [
-                  { op: "local.get", index: extTmpIdx } as Instr,
-                  { op: "call", funcIdx: lengthFuncIdx } as Instr,
-                  ...(ctx.fast ? [{ op: "i32.trunc_sat_f64_s" } as Instr] : []),
-                  { op: "local.set", index: lenTmp2 } as Instr,
+                  { op: "local.get", index: extTmpIdx },
+                  { op: "call", funcIdx: lengthFuncIdx },
+                  ...(ctx.fast ? ([{ op: "i32.trunc_sat_f64_s" }] satisfies Instr[]) : []),
+                  { op: "local.set", index: lenTmp2 },
                 ]
               : [
-                  { op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr,
-                  { op: "local.set", index: lenTmp2 } as Instr,
+                  { op: ctx.fast ? "i32.const" : "f64.const", value: 0 },
+                  { op: "local.set", index: lenTmp2 },
                 ];
           fctx.body.push({ op: "local.get", index: anyTmpIdx });
           fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx });
@@ -5569,11 +5575,11 @@ export function compilePropertyAccess(
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: anyTmpIdx } as Instr,
-              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-              ...(ctx.fast ? [] : [{ op: "f64.convert_i32_s" } as Instr]),
-              { op: "local.set", index: lenTmp2 } as Instr,
+              { op: "local.get", index: anyTmpIdx },
+              { op: "ref.cast", typeIdx: vecTypeIdx },
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+              ...(ctx.fast ? [] : ([{ op: "f64.convert_i32_s" }] satisfies Instr[])),
+              { op: "local.set", index: lenTmp2 },
             ],
             else: fallbackInstrs2,
           });
@@ -5597,12 +5603,12 @@ export function compilePropertyAccess(
             op: "if",
             blockType: { kind: "val" as const, type: lenResult },
             then: [
-              { op: "local.get", index: lenTmp } as Instr,
-              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-              ...(ctx.fast ? [] : [{ op: "f64.convert_i32_s" } as Instr]),
+              { op: "local.get", index: lenTmp },
+              { op: "ref.cast", typeIdx: vecTypeIdx },
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+              ...(ctx.fast ? [] : ([{ op: "f64.convert_i32_s" }] satisfies Instr[])),
             ],
-            else: [{ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr],
+            else: [{ op: ctx.fast ? "i32.const" : "f64.const", value: 0 }],
           });
           return lenResult;
         }
@@ -5722,23 +5728,23 @@ export function compilePropertyAccess(
             emitGuardedNativeStringLength(ctx, fctx, (recvExternLocal) =>
               lenFn !== undefined
                 ? [
-                    { op: "local.get", index: recvExternLocal } as Instr,
-                    { op: "call", funcIdx: lenFn } as Instr,
-                    { op: "i32.trunc_sat_f64_s" } as Instr,
+                    { op: "local.get", index: recvExternLocal },
+                    { op: "call", funcIdx: lenFn },
+                    { op: "i32.trunc_sat_f64_s" },
                   ]
-                : [{ op: "i32.const", value: 0 } as Instr],
+                : [{ op: "i32.const", value: 0 }],
             );
-            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
             return ctx.fast ? { kind: "i32" } : { kind: "f64" };
           }
           if (lenFn !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
-            if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            fctx.body.push({ op: "call", funcIdx: lenFn });
+            if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" });
             return ctx.fast ? { kind: "i32" } : { kind: "f64" };
           }
           // No helper available — drop and yield 0.
-          fctx.body.push({ op: "drop" } as Instr);
-          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 });
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       }
@@ -5798,15 +5804,15 @@ export function compilePropertyAccess(
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: rawObj } as Instr,
-          { op: "ref.cast", typeIdx: templateVecTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: templateVecTypeIdx, fieldIdx: 2 } as Instr,
-          { op: "local.set", index: rawTmp } as Instr,
+          { op: "local.get", index: rawObj },
+          { op: "ref.cast", typeIdx: templateVecTypeIdx },
+          { op: "struct.get", typeIdx: templateVecTypeIdx, fieldIdx: 2 },
+          { op: "local.set", index: rawTmp },
         ],
         else: [
           // Not a template vec — return null (no raw field available)
-          { op: "ref.null", typeIdx: baseVecTypeIdx } as Instr,
-          { op: "local.set", index: rawTmp } as Instr,
+          { op: "ref.null", typeIdx: baseVecTypeIdx },
+          { op: "local.set", index: rawTmp },
         ],
       });
       fctx.body.push({ op: "local.get", index: rawTmp });
@@ -6054,7 +6060,7 @@ export function compilePropertyAccess(
     if (closureAccGet !== undefined) {
       const recvType = compileExpression(ctx, fctx, expr.expression);
       if (recvType && recvType.kind !== "externref") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
+        fctx.body.push({ op: "extern.convert_any" });
       }
       fctx.body.push({ op: "global.get", index: closureAccGet });
       const driverIdx = reserveAccessorGetDriver(ctx);
@@ -6308,7 +6314,7 @@ export function compilePropertyAccess(
           const objLocal = allocLocal(fctx, `__pobj_${fctx.locals.length}`, { kind: "anyref" });
           // If the expression returned externref, convert to anyref first
           if (objResult && objResult.kind === "externref") {
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
           }
           fctx.body.push({ op: "local.set", index: objLocal });
 
@@ -6322,28 +6328,28 @@ export function compilePropertyAccess(
             blockType: { kind: "empty" },
             then: [
               // Null object → null proto
-              { op: "ref.null.extern" } as Instr,
-              { op: "local.set", index: protoLocal } as Instr,
+              { op: "ref.null.extern" },
+              { op: "local.set", index: protoLocal },
             ],
             else: [
               // Try to cast to expected struct type and get __proto__
-              { op: "local.get", index: objLocal } as Instr,
-              { op: "ref.test", typeIdx: structTypeIdx } as Instr,
+              { op: "local.get", index: objLocal },
+              { op: "ref.test", typeIdx: structTypeIdx },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  { op: "local.get", index: objLocal } as Instr,
-                  { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                  { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: protoFieldIdx } as Instr,
-                  { op: "local.set", index: protoLocal } as Instr,
+                  { op: "local.get", index: objLocal },
+                  { op: "ref.cast", typeIdx: structTypeIdx },
+                  { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: protoFieldIdx },
+                  { op: "local.set", index: protoLocal },
                 ],
                 else: [
                   // Wrong struct type — try alternate structs that have __proto__
-                  { op: "ref.null.extern" } as Instr,
-                  { op: "local.set", index: protoLocal } as Instr,
+                  { op: "ref.null.extern" },
+                  { op: "local.set", index: protoLocal },
                 ],
-              } as Instr,
+              },
             ],
           });
 
@@ -6358,14 +6364,14 @@ export function compilePropertyAccess(
             blockType: { kind: "val" as const, type: effectiveResult },
             then: protoDefaultInstrs,
             else: [
-              { op: "local.get", index: protoLocal } as Instr,
+              { op: "local.get", index: protoLocal },
               ...stringConstantExternrefInstrs(ctx, propName),
-              { op: "call", funcIdx: getIdx } as Instr,
-              ...(effectiveResult.kind === "f64" && unboxIdx !== undefined
-                ? [{ op: "call", funcIdx: unboxIdx } as Instr]
+              { op: "call", funcIdx: getIdx },
+              ...((effectiveResult.kind === "f64" && unboxIdx !== undefined
+                ? [{ op: "call", funcIdx: unboxIdx }]
                 : effectiveResult.kind === "i32" && unboxIdx !== undefined
-                  ? [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr]
-                  : []),
+                  ? [{ op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" }]
+                  : []) satisfies Instr[]),
             ],
           });
 
@@ -6579,7 +6585,7 @@ export function compilePropertyAccess(
           // Convert externref -> anyref for struct type testing
           const tmpAnyExt = allocLocal(fctx, `__sd_any_${fctx.locals.length}`, { kind: "anyref" });
           fctx.body.push({ op: "local.get", index: objTmp });
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
           fctx.body.push({ op: "local.set", index: tmpAnyExt });
 
           // Phase 3 (#1269): consumer-side specialization. When
@@ -6627,17 +6633,17 @@ export function compilePropertyAccess(
           const resultLocal = allocLocal(fctx, `__sd_res_${fctx.locals.length}`, resultWasm);
 
           // Build the __extern_get fallback instructions
-          const externGetFallback: Instr[] = [{ op: "local.get", index: objTmp } as Instr];
+          const externGetFallback: Instr[] = [{ op: "local.get", index: objTmp }];
           addStringConstantGlobal(ctx, propName);
           externGetFallback.push(...stringConstantExternrefInstrs(ctx, propName));
-          externGetFallback.push({ op: "call", funcIdx: getIdx } as Instr);
+          externGetFallback.push({ op: "call", funcIdx: getIdx });
           if (resultWasm.kind === "f64" && unboxIdx !== undefined) {
-            externGetFallback.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            externGetFallback.push({ op: "call", funcIdx: unboxIdx });
           } else if (resultWasm.kind === "i32" && unboxIdx !== undefined) {
-            externGetFallback.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            externGetFallback.push({ op: "call", funcIdx: unboxIdx });
             externGetFallback.push({ op: "i32.trunc_sat_f64_s" });
           }
-          externGetFallback.push({ op: "local.set", index: resultLocal } as Instr);
+          externGetFallback.push({ op: "local.set", index: resultLocal });
 
           // (#2674) Terminal: route the un-matched case through the deferred-fill
           // `__get_member_<name>` dispatcher (complete candidate set at finalize)
@@ -6657,11 +6663,11 @@ export function compilePropertyAccess(
           const dispatchTerminal: Instr[] =
             getMemberIdx !== undefined
               ? [
-                  { op: "local.get", index: tmpAnyExt } as Instr,
-                  { op: "extern.convert_any" } as Instr,
-                  { op: "call", funcIdx: getMemberIdx } as Instr,
+                  { op: "local.get", index: tmpAnyExt },
+                  { op: "extern.convert_any" },
+                  { op: "call", funcIdx: getMemberIdx },
                   ...coercionInstrs(ctx, { kind: "externref" }, resultWasm, fctx),
-                  { op: "local.set", index: resultLocal } as Instr,
+                  { op: "local.set", index: resultLocal },
                 ]
               : externGetFallback;
 
@@ -6672,23 +6678,23 @@ export function compilePropertyAccess(
             }
             const cand = structCandidates[idx]!;
             const getFieldInstrs: Instr[] = [
-              { op: "local.get", index: tmpAnyExt } as Instr,
-              { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx } as Instr,
+              { op: "local.get", index: tmpAnyExt },
+              { op: "ref.cast", typeIdx: cand.structTypeIdx },
+              { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx },
             ];
             const coerce = coercionInstrs(ctx, cand.fieldType, resultWasm, fctx);
             getFieldInstrs.push(...coerce);
-            getFieldInstrs.push({ op: "local.set", index: resultLocal } as Instr);
+            getFieldInstrs.push({ op: "local.set", index: resultLocal });
 
             return [
-              { op: "local.get", index: tmpAnyExt } as Instr,
-              { op: "ref.test", typeIdx: cand.structTypeIdx } as Instr,
+              { op: "local.get", index: tmpAnyExt },
+              { op: "ref.test", typeIdx: cand.structTypeIdx },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: getFieldInstrs,
                 else: buildStructDispatch(idx + 1),
-              } as Instr,
+              },
             ];
           };
 
@@ -6722,7 +6728,7 @@ export function compilePropertyAccess(
           const getMemberIdx = reserveMemberGetDispatch(ctx, propName, fctx);
           if (getMemberIdx !== undefined) {
             fctx.body.push({ op: "local.get", index: objTmp });
-            fctx.body.push({ op: "call", funcIdx: getMemberIdx } as Instr);
+            fctx.body.push({ op: "call", funcIdx: getMemberIdx });
             if (accessWasm.kind === "f64") {
               if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
               return { kind: "f64" };
@@ -6933,19 +6939,19 @@ export function emitBoundsGuardedArraySet(
   fctx.body.push({ op: "local.get", index: vecLocal });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "array.len" });
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "i32.lt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" as const },
     then: [
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "local.get", index: idxLocal } as Instr,
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.get", index: idxLocal },
+      { op: "local.get", index: valLocal },
+      { op: "array.set", typeIdx: arrTypeIdx },
     ],
     else: [],
-  } as Instr);
+  });
 }
 
 /**
@@ -7095,12 +7101,12 @@ function emitPlainArrayUndefinedOobGet(
   const inBoundsLocal = allocLocal(fctx, `__oobu_in_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: idxLocal });
   if (lengthBoundInstrs) {
-    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i }) as Instr));
+    fctx.body.push(...lengthBoundInstrs.map((i) => ({ ...i })));
   } else {
     fctx.body.push({ op: "local.get", index: arrLocal });
     fctx.body.push({ op: "array.len" });
   }
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "i32.lt_u" });
   fctx.body.push({ op: "local.set", index: inBoundsLocal });
 
   // (2) Bounded native read (OOB → type-default, never traps), then box to
@@ -7134,9 +7140,9 @@ function emitPlainArrayUndefinedOobGet(
   fctx.body.push({
     op: "if",
     blockType: { kind: "val" as const, type: { kind: "externref" } },
-    then: [{ op: "local.get", index: boxedLocal } as Instr],
-    else: [{ op: "local.get", index: undefLocal } as Instr],
-  } as Instr);
+    then: [{ op: "local.get", index: boxedLocal }],
+    else: [{ op: "local.get", index: undefLocal }],
+  });
 }
 
 /**
@@ -7191,7 +7197,7 @@ function emitTypedArrayUndefinedOobGet(
   fctx.body.push({ op: "local.get", index: idxLocal });
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "array.len" });
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "i32.lt_u" });
   fctx.body.push({ op: "local.set", index: inBoundsLocal });
 
   // (2) Bounded native read (OOB → type-default, never traps) WITH the view-name
@@ -7208,11 +7214,11 @@ function emitTypedArrayUndefinedOobGet(
   // 32 bits: unsigned for `Uint32Array` (`signedness === "u"`), signed for
   // `Int32Array`. f32 promotes; f64 is already a number.
   if (elementType.kind === "i8" || elementType.kind === "i16") {
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
   } else if (elementType.kind === "i32") {
-    fctx.body.push({ op: signedness === "u" ? "f64.convert_i32_u" : "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: signedness === "u" ? "f64.convert_i32_u" : "f64.convert_i32_s" });
   } else if (elementType.kind === "f32") {
-    fctx.body.push({ op: "f64.promote_f32" } as Instr);
+    fctx.body.push({ op: "f64.promote_f32" });
   }
   // Box the f64 to an externref number (host `__box_number`; standalone native).
   coerceType(ctx, fctx, { kind: "f64" }, { kind: "externref" });
@@ -7230,9 +7236,9 @@ function emitTypedArrayUndefinedOobGet(
   fctx.body.push({
     op: "if",
     blockType: { kind: "val" as const, type: { kind: "externref" } },
-    then: [{ op: "local.get", index: boxedLocal } as Instr],
-    else: [{ op: "local.get", index: undefLocal } as Instr],
-  } as Instr);
+    then: [{ op: "local.get", index: boxedLocal }],
+    else: [{ op: "local.get", index: undefLocal }],
+  });
 }
 
 // ── Element access ───────────────────────────────────────────────────
@@ -7270,7 +7276,7 @@ export function emitThisReceiverGuardConvert(
 ): void {
   const externrefTmp = allocTempLocal(fctx, { kind: "externref" });
   fctx.body.push({ op: "local.tee", index: externrefTmp });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   const anyTmp = allocTempLocal(fctx, { kind: "anyref" });
   fctx.body.push({ op: "local.set", index: anyTmp });
 
@@ -7281,7 +7287,7 @@ export function emitThisReceiverGuardConvert(
       const hostBody: Instr[] = [];
       const saved = fctx.body;
       fctx.body = hostBody;
-      fctx.body.push({ op: "local.get", index: externrefTmp } as Instr);
+      fctx.body.push({ op: "local.get", index: externrefTmp });
       elseEmit();
       fctx.body = saved;
       return hostBody;
@@ -7290,13 +7296,13 @@ export function emitThisReceiverGuardConvert(
     const thenBody: Instr[] = [];
     const saved = fctx.body;
     fctx.body = thenBody;
-    fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: tIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: anyTmp });
+    fctx.body.push({ op: "ref.cast", typeIdx: tIdx });
     thenEmit({ kind: "ref", typeIdx: tIdx });
     fctx.body = saved;
     return [
-      { op: "local.get", index: anyTmp } as Instr,
-      { op: "ref.test", typeIdx: tIdx } as Instr,
+      { op: "local.get", index: anyTmp },
+      { op: "ref.test", typeIdx: tIdx },
       {
         op: "if",
         blockType: { kind: "val", type: resultType },
@@ -7758,7 +7764,7 @@ export function compileElementAccess(
           if (elemResult && elemResult.kind !== "externref") {
             coerceType(ctx, fctx, elemResult, resultType);
           } else if (!elemResult) {
-            fctx.body.push({ op: "ref.null.extern" } as Instr);
+            fctx.body.push({ op: "ref.null.extern" });
           }
         },
         () => {
@@ -7766,7 +7772,7 @@ export function compileElementAccess(
           if (hostResult && hostResult.kind !== "externref") {
             coerceType(ctx, fctx, hostResult, resultType);
           } else if (!hostResult) {
-            fctx.body.push({ op: "ref.null.extern" } as Instr);
+            fctx.body.push({ op: "ref.null.extern" });
           }
         },
       );
@@ -7920,7 +7926,7 @@ export function compileElementAccessBody(
       // recv externref is on the stack → recvLocal (allocated FIRST so the local
       // numbering of recv / idx / anyTmp is unchanged from before #3007).
       const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: recvLocal });
       // (#3007) index → f64 → idxLocal, compiled BEFORE the fast-path funcIdxs are
       // captured. A computed index (`a[a.length - 1]`) lowers its own dynamic
       // reads, which can register late imports and shift every DEFINED-function
@@ -7934,7 +7940,7 @@ export function compileElementAccessBody(
       // byte-for-byte unchanged.
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
       const idxLocal = allocLocal(fctx, `__nve_idx_${fctx.locals.length}`, { kind: "f64" });
-      fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: idxLocal });
       const extGetIdx = ensureLateImport(
         ctx,
         "__extern_get",
@@ -7947,36 +7953,36 @@ export function compileElementAccessBody(
       if (vgIdx !== undefined && extGetIdx !== undefined && boxNumIdx !== undefined) {
         // isVec = OR of ref.test over the registered vec carriers.
         const anyTmp = allocLocal(fctx, `__nve_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
-        fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+        fctx.body.push({ op: "local.get", index: recvLocal });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "local.set", index: anyTmp });
         let emitted = false;
         for (const vi of new Set(ctx.vecTypeMap.values())) {
-          fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-          fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
-          if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+          fctx.body.push({ op: "local.get", index: anyTmp });
+          fctx.body.push({ op: "ref.test", typeIdx: vi });
+          if (emitted) fctx.body.push({ op: "i32.or" });
           emitted = true;
         }
         // THEN: __vec_get(recv, i32(idx)).
         const thenStart = fctx.body.length;
-        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-        fctx.body.push({ op: "call", funcIdx: vgIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: recvLocal });
+        fctx.body.push({ op: "local.get", index: idxLocal });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        fctx.body.push({ op: "call", funcIdx: vgIdx });
         const thenInstrs = fctx.body.splice(thenStart);
         // ELSE: __extern_get(recv, box(idx)).
         const elseStart = fctx.body.length;
-        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-        fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
-        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: recvLocal });
+        fctx.body.push({ op: "local.get", index: idxLocal });
+        fctx.body.push({ op: "call", funcIdx: boxNumIdx });
+        fctx.body.push({ op: "call", funcIdx: extGetIdx });
         const elseInstrs = fctx.body.splice(elseStart);
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: thenInstrs,
           else: elseInstrs,
-        } as Instr);
+        });
         return { kind: "externref" };
       }
       // (#3007) Defensive fallback — recv/idx were consumed into locals above, so
@@ -7984,15 +7990,15 @@ export function compileElementAccessBody(
       // to the generic path (which expects recv on the stack). Emit the generic
       // host read from the stored locals. Unreachable in host mode (the box/extern
       // imports are always registerable), so this changes no valid output.
-      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: recvLocal });
       if (boxNumIdx !== undefined && extGetIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-        fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
-        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: idxLocal });
+        fctx.body.push({ op: "call", funcIdx: boxNumIdx });
+        fctx.body.push({ op: "call", funcIdx: extGetIdx });
         return { kind: "externref" };
       }
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
     // (#2773) DYNAMIC-index native-vec element read. The #2784 arm above only
@@ -8017,13 +8023,13 @@ export function compileElementAccessBody(
       // recv externref is on the stack → recvLocal (allocated FIRST so local
       // numbering is stable through the index compile, per #3007).
       const recvLocal = allocLocal(fctx, `__dyn_recv_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: recvLocal });
       // Compile the key as externref FIRST (preserves a string key's identity for
       // the host fallback) BEFORE capturing helper funcIdxs — the key's own
       // lowering may register late imports that shift them (#3007). Single flush.
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
       const keyLocal = allocLocal(fctx, `__dyn_key_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: keyLocal });
       const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
       const extGetIdx = ensureLateImport(
         ctx,
@@ -8040,56 +8046,56 @@ export function compileElementAccessBody(
         // idxF64 = Number(key); idxI32 = truncated integer. Number(non-numeric
         // string) is NaN, and i32.trunc_sat(NaN) = 0 — the integer round-trip
         // check below rejects it so a genuine string key never mis-indexes.
-        fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
-        fctx.body.push({ op: "call", funcIdx: unboxIdx } as Instr);
-        fctx.body.push({ op: "local.tee", index: idxF64 } as Instr);
-        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-        fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+        fctx.body.push({ op: "local.get", index: keyLocal });
+        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        fctx.body.push({ op: "local.tee", index: idxF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        fctx.body.push({ op: "local.set", index: idxI32 });
         // cond = idxI32 >= 0 && idxI32 < __vec_len(recv) && f64(idxI32) === idxF64
-        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-        fctx.body.push({ op: "i32.ge_s" } as Instr);
-        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-        fctx.body.push({ op: "call", funcIdx: vlIdx } as Instr);
-        fctx.body.push({ op: "i32.lt_s" } as Instr);
-        fctx.body.push({ op: "i32.and" } as Instr);
-        fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-        fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-        fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        fctx.body.push({ op: "i32.and" } as Instr);
+        fctx.body.push({ op: "local.get", index: idxI32 });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "i32.ge_s" });
+        fctx.body.push({ op: "local.get", index: idxI32 });
+        fctx.body.push({ op: "local.get", index: recvLocal });
+        fctx.body.push({ op: "call", funcIdx: vlIdx });
+        fctx.body.push({ op: "i32.lt_s" });
+        fctx.body.push({ op: "i32.and" });
+        fctx.body.push({ op: "local.get", index: idxI32 });
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        fctx.body.push({ op: "local.get", index: idxF64 });
+        fctx.body.push({ op: "f64.eq" });
+        fctx.body.push({ op: "i32.and" });
         // then: __vec_get(recv, idxI32) — in-bounds native element (boxed carrier)
         const thenInstrs: Instr[] = [
-          { op: "local.get", index: recvLocal } as Instr,
-          { op: "local.get", index: idxI32 } as Instr,
-          { op: "call", funcIdx: vgIdx } as Instr,
+          { op: "local.get", index: recvLocal },
+          { op: "local.get", index: idxI32 },
+          { op: "call", funcIdx: vgIdx },
         ];
         // else: __extern_get(recv, key) — non-vec host object, OOB, or string key
         const elseInstrs: Instr[] = [
-          { op: "local.get", index: recvLocal } as Instr,
-          { op: "local.get", index: keyLocal } as Instr,
-          { op: "call", funcIdx: extGetIdx } as Instr,
+          { op: "local.get", index: recvLocal },
+          { op: "local.get", index: keyLocal },
+          { op: "call", funcIdx: extGetIdx },
         ];
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: thenInstrs,
           else: elseInstrs,
-        } as Instr);
+        });
         return { kind: "externref" };
       }
       // Defensive fallback — helpers unavailable (unreachable in host mode). Read
       // via the host from the stored key so the stack stays balanced.
-      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      fctx.body.push({ op: "local.get", index: keyLocal });
       if (extGetIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx });
         return { kind: "externref" };
       }
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
     // (#3169) STANDALONE twin of the #2773 dynamic-`any`-index arm above (which
@@ -8133,13 +8139,13 @@ export function compileElementAccessBody(
       // recv externref is on the stack → recvLocal (allocated FIRST so local
       // numbering is stable through the key compile, per #3007).
       const recvLocal = allocLocal(fctx, `__sdyn_recv_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: recvLocal });
       // Compile the key as externref FIRST (preserves a string key's identity
       // for the string-keyed read) BEFORE capturing helper funcIdxs — the
       // key's own lowering may register late imports that shift them (#3007).
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
       const keyLocal = allocLocal(fctx, `__sdyn_key_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: keyLocal });
       const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
       const getIdxFn = ensureLateImport(
         ctx,
@@ -8163,31 +8169,34 @@ export function compileElementAccessBody(
         const resLocal = allocLocal(fctx, `__sdyn_res_${fctx.locals.length}`, { kind: "externref" });
         const idxF64 = allocLocal(fctx, `__sdyn_idxf_${fctx.locals.length}`, { kind: "f64" });
         // res = __extern_get(recv, key) — the legacy read, byte-exact.
-        fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
-        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
-        fctx.body.push({ op: "local.set", index: resLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: recvLocal });
+        fctx.body.push({ op: "local.get", index: keyLocal });
+        fctx.body.push({ op: "call", funcIdx: extGetIdx });
+        fctx.body.push({ op: "local.set", index: resLocal });
         // miss = res == null || __extern_is_undefined(res)
-        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
-        fctx.body.push({ op: "ref.is_null" } as Instr);
+        fctx.body.push({ op: "local.get", index: resLocal });
+        fctx.body.push({ op: "ref.is_null" });
         if (isUndefIdx !== undefined) {
           fctx.body.push({
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } as ValType },
-            then: [{ op: "i32.const", value: 1 } as Instr],
-            else: [{ op: "local.get", index: resLocal } as Instr, { op: "call", funcIdx: isUndefIdx } as Instr],
-          } as Instr);
+            then: [{ op: "i32.const", value: 1 }],
+            else: [
+              { op: "local.get", index: resLocal },
+              { op: "call", funcIdx: isUndefIdx },
+            ],
+          });
         }
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // idxF64 = Number(key); NaN (non-numeric key) → keep the miss.
-            { op: "local.get", index: keyLocal } as Instr,
-            { op: "call", funcIdx: unboxIdx } as Instr,
-            { op: "local.tee", index: idxF64 } as Instr,
-            { op: "local.get", index: idxF64 } as Instr,
-            { op: "f64.eq" } as Instr, // not-NaN ⇒ numeric key
+            { op: "local.get", index: keyLocal },
+            { op: "call", funcIdx: unboxIdx },
+            { op: "local.tee", index: idxF64 },
+            { op: "local.get", index: idxF64 },
+            { op: "f64.eq" }, // not-NaN ⇒ numeric key
             // …AND the key is not a genuine STRING. The native `__unbox_number`
             // is the ToNumber engine, so a numeric-looking string key ("1e3",
             // "01") would unbox non-NaN and retry positionally under a
@@ -8195,39 +8204,39 @@ export function compileElementAccessBody(
             // "1000" ≠ "1e3"). String keys keep the exact old miss.
             ...[ctx.anyStrTypeIdx, ctx.nativeStrTypeIdx]
               .filter((t) => t >= 0)
-              .flatMap((strTypeIdx) => [
-                { op: "local.get", index: keyLocal } as Instr,
-                { op: "any.convert_extern" } as Instr,
-                { op: "ref.test", typeIdx: strTypeIdx } as Instr,
-                { op: "i32.eqz" } as Instr,
-                { op: "i32.and" } as Instr,
+              .flatMap((strTypeIdx): Instr[] => [
+                { op: "local.get", index: keyLocal },
+                { op: "any.convert_extern" },
+                { op: "ref.test", typeIdx: strTypeIdx },
+                { op: "i32.eqz" },
+                { op: "i32.and" },
               ]),
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: recvLocal } as Instr,
-                { op: "local.get", index: idxF64 } as Instr,
-                { op: "call", funcIdx: getIdxFn } as Instr,
-                { op: "local.set", index: resLocal } as Instr,
+                { op: "local.get", index: recvLocal },
+                { op: "local.get", index: idxF64 },
+                { op: "call", funcIdx: getIdxFn },
+                { op: "local.set", index: resLocal },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr);
-        fctx.body.push({ op: "local.get", index: resLocal } as Instr);
+        });
+        fctx.body.push({ op: "local.get", index: resLocal });
         return { kind: "externref" };
       }
       // Defensive fallback — helpers unavailable. Read via the string-keyed
       // path from the stored locals so the stack stays balanced.
-      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: keyLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: recvLocal });
+      fctx.body.push({ op: "local.get", index: keyLocal });
       if (extGetIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: extGetIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: extGetIdx });
         return { kind: "externref" };
       }
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
     // (#2166 PR-C2) A NUMERIC index on a standalone externref must go through
@@ -8363,15 +8372,15 @@ export function compileElementAccessBody(
       return null;
     }
     const svLocal = allocLocal(fctx, `__sv_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
-    fctx.body.push({ op: "local.set", index: svLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: svLocal });
     // data = sv.data (the SHARED parent backing array, field 1)
-    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
+    fctx.body.push({ op: "local.get", index: svLocal });
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 });
     // index = sv.byteOffset + i
-    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // byteOffset
+    fctx.body.push({ op: "local.get", index: svLocal });
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 }); // byteOffset
     compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
-    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "i32.add" });
     const svValueType: ValType =
       subArrDef.element.kind === "i8" || subArrDef.element.kind === "i16" ? { kind: "i32" } : subArrDef.element;
     emitBoundsCheckedArrayGet(fctx, subArrTypeIdx, subArrDef.element);
@@ -8521,14 +8530,14 @@ export function compileElementAccessBody(
             kind: "ref_null",
             typeIdx,
           });
-          fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: recvLocal });
           // Key as f64 (numeric reads box through f64; matches the literal path).
           compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
           const keyLocal = allocLocal(fctx, `__numkey_idx_${fctx.locals.length}`, { kind: "f64" });
-          fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: keyLocal });
           // Build a nested if/else chain from the innermost (default) outward:
           //   if key==N0 then struct.get F0 else if key==N1 then … else null
-          let chain: Instr[] = [{ op: "ref.null.extern" } as Instr];
+          let chain: Instr[] = [{ op: "ref.null.extern" }];
           for (let i = numericFields.length - 1; i >= 0; i--) {
             const { f, idx } = numericFields[i]!;
             const fieldNum = Number(f.name);
@@ -8536,19 +8545,19 @@ export function compileElementAccessBody(
             // above), so a bare `struct.get` already yields externref — the
             // unified result type of a dynamic-key read. No coercion needed.
             const thenArm: Instr[] = [
-              { op: "local.get", index: recvLocal } as Instr,
-              { op: "struct.get", typeIdx, fieldIdx: idx } as Instr,
+              { op: "local.get", index: recvLocal },
+              { op: "struct.get", typeIdx, fieldIdx: idx },
             ];
             chain = [
-              { op: "local.get", index: keyLocal } as Instr,
-              { op: "f64.const", value: fieldNum } as Instr,
-              { op: "f64.eq" } as Instr,
+              { op: "local.get", index: keyLocal },
+              { op: "f64.const", value: fieldNum },
+              { op: "f64.eq" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "externref" } },
                 then: thenArm,
                 else: chain,
-              } as Instr,
+              },
             ];
           }
           for (const instr of chain) fctx.body.push(instr);
@@ -8598,13 +8607,13 @@ export function compileElementAccessBody(
     // receiver vec ref is on the stack here (nothing emitted since entry), so
     // drop it — `Array.prototype.values` is the shared intrinsic.
     if (!noJsHost(ctx) && isSymbolIteratorKey(expr.argumentExpression)) {
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       const valuesIdx = ensureLateImport(ctx, "__array_proto_values", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (valuesIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: valuesIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: valuesIdx });
       } else {
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
       }
       return { kind: "externref" };
     }
@@ -8657,10 +8666,10 @@ export function compileElementAccessBody(
     let vecLenBoundInstrs: Instr[] | undefined;
     if (useLenBound) {
       const vecRefLocal = allocLocal(fctx, `__vecref_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
-      fctx.body.push({ op: "local.tee", index: vecRefLocal } as Instr);
+      fctx.body.push({ op: "local.tee", index: vecRefLocal });
       vecLenBoundInstrs = [
-        { op: "local.get", index: vecRefLocal } as Instr,
-        { op: "struct.get", typeIdx, fieldIdx: 0 } as Instr, // logical length
+        { op: "local.get", index: vecRefLocal },
+        { op: "struct.get", typeIdx, fieldIdx: 0 }, // logical length
       ];
     }
     // Unwrap: struct.get data field, then index into backing array
@@ -8684,7 +8693,7 @@ export function compileElementAccessBody(
                 ? "array.get_u"
                 : "array.get_s"
           : "array.get";
-      fctx.body.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
+      fctx.body.push({ op: getOp, typeIdx: arrTypeIdx });
       // (#2001 S1) Even bounds-eliminated externref reads must map a `$Hole`
       // slot back to `undefined` — the loop guard proves in-bounds, not present.
       if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
@@ -8759,7 +8768,7 @@ export function compileElementAccessBody(
     // (Int32Array is signed → the default signed coercion is already correct;
     // i8/i16 already sign/zero-extended into the i32 via array.get_s/_u above.)
     if (arrDef.element.kind === "i32" && taSignedness === "u") {
-      fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+      fctx.body.push({ op: "f64.convert_i32_u" });
       return { kind: "f64" };
     }
     return valueType;
@@ -8803,7 +8812,7 @@ export function compileElementAccessBody(
               ? "array.get_u"
               : "array.get_s"
         : "array.get";
-    fctx.body.push({ op: getOp, typeIdx } as Instr);
+    fctx.body.push({ op: getOp, typeIdx });
     // (#2001 S1) Map a `$Hole` slot back to `undefined` on bounds-eliminated
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);

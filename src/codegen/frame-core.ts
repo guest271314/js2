@@ -88,11 +88,11 @@ export function defaultSpillInstr(type: ValType): Instr {
     case "i32":
       return { op: "i32.const", value: 0 };
     case "i64":
-      return { op: "i64.const", value: 0n } as Instr;
+      return { op: "i64.const", value: 0n };
     case "externref":
-      return { op: "ref.null.extern" } as Instr;
+      return { op: "ref.null.extern" };
     default:
-      return { op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx } as Instr;
+      return { op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx };
   }
 }
 

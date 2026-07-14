@@ -64,10 +64,10 @@ const C_LC_Z = 122;
  */
 function externToFlat(ctx: CodegenContext, flattenIdx: number): Instr[] {
   return [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
   ];
 }
 
@@ -80,48 +80,48 @@ function externToFlat(ctx: CodegenContext, flattenIdx: number): Instr[] {
  * Leaves i32 bool. Operand: the code unit is consumed via a local.
  */
 function isWsBody(cLocal: number): Instr[] {
-  const get = (): Instr => ({ op: "local.get", index: cLocal }) as Instr;
-  const eq = (code: number): Instr[] => [get(), { op: "i32.const", value: code } as Instr, { op: "i32.eq" } as Instr];
+  const get = (): Instr => ({ op: "local.get", index: cLocal });
+  const eq = (code: number): Instr[] => [get(), { op: "i32.const", value: code }, { op: "i32.eq" }];
   // c >= lo && c <= hi  (the contiguous Zs run U+2000..U+200A).
   const inRange = (lo: number, hi: number): Instr[] => [
     get(),
-    { op: "i32.const", value: lo } as Instr,
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.const", value: lo },
+    { op: "i32.ge_u" },
     get(),
-    { op: "i32.const", value: hi } as Instr,
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.const", value: hi },
+    { op: "i32.le_u" },
+    { op: "i32.and" },
   ];
   return [
     ...eq(C_SPACE),
     ...eq(C_TAB),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_LF),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_VT),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_FF),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_CR),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_NBSP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_BOM),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_LS),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_PS),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_OGHAM_SP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...inRange(C_ENQUAD, C_HAIR_SP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_NNBSP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_MMSP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eq(C_IDEO_SP),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
   ];
 }
 
@@ -1012,7 +1012,7 @@ function emitRadixPrefixParse(
                   { op: "local.get", index: L_I },
                   { op: "array.get_u", typeIdx: strDataTypeIdx },
                   { op: "local.set", index: L_C },
-                ] as Instr[]),
+                ] satisfies Instr[]),
                 ...emitDigitValue(L_C, L_DIG),
                 // invalid digit or >= radix → NaN
                 { op: "local.get", index: L_DIG },
@@ -1509,7 +1509,7 @@ function emitParseInt(ctx: CodegenContext, flattenIdx: number, strTypeIdx: numbe
       { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
       { op: "call", funcIdx: flattenIdx },
       { op: "local.set", index: L_FLAT },
-    ] as Instr[]),
+    ] satisfies Instr[]),
     { op: "local.get", index: L_FLAT },
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     { op: "local.set", index: L_DATA },

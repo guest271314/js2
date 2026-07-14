@@ -80,7 +80,7 @@ export function hostStringRepr(ctx: CodegenContext): StringRepr | undefined {
       return stringConstantExternrefInstrs(ctx, value);
     },
     concat(a: Instr[], b: Instr[]): Instr[] {
-      return [...a, ...b, { op: "call", funcIdx: concatIdx } as Instr];
+      return [...a, ...b, { op: "call", funcIdx: concatIdx }];
     },
   };
 }
@@ -103,10 +103,10 @@ export function nativeStringRepr(ctx: CodegenContext): StringRepr | undefined {
       // `nativeStringLiteralInstrs` yields a `$NativeString`; cast up to the
       // `$AnyString` supertype so it composes with `__str_concat` (which is
       // typed over `$AnyString`).
-      return [...nativeStringLiteralInstrs(ctx, value), { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr];
+      return [...nativeStringLiteralInstrs(ctx, value), { op: "ref.cast", typeIdx: anyStrTypeIdx }];
     },
     concat(a: Instr[], b: Instr[]): Instr[] {
-      return [...a, ...b, { op: "call", funcIdx: strConcatIdx } as Instr];
+      return [...a, ...b, { op: "call", funcIdx: strConcatIdx }];
     },
   };
 }
@@ -184,10 +184,7 @@ export function emitStringJoinFold(
 ): void {
   const { iTmp, lenTmp, resultTmp, sepTmp } = locals;
 
-  const concatWithSep = repr.concat(
-    [{ op: "local.get", index: resultTmp } as Instr],
-    [{ op: "local.get", index: sepTmp } as Instr],
-  );
+  const concatWithSep = repr.concat([{ op: "local.get", index: resultTmp }], [{ op: "local.get", index: sepTmp }]);
 
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
@@ -202,9 +199,9 @@ export function emitStringJoinFold(
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...elemToStr, { op: "local.set", index: resultTmp } as Instr],
-      else: [...repr.concat(concatWithSep, elemToStr), { op: "local.set", index: resultTmp } as Instr],
-    } as Instr,
+      then: [...elemToStr, { op: "local.set", index: resultTmp }],
+      else: [...repr.concat(concatWithSep, elemToStr), { op: "local.set", index: resultTmp }],
+    },
 
     { op: "local.get", index: iTmp },
     { op: "i32.const", value: 1 },
@@ -216,7 +213,7 @@ export function emitStringJoinFold(
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
   });
 }
 

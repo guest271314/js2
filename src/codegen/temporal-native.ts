@@ -194,12 +194,12 @@ function temporalKindForExpression(
 
 function compileF64(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression | undefined, fallback = 0): void {
   if (!expr) {
-    fctx.body.push({ op: "f64.const", value: fallback } as Instr);
+    fctx.body.push({ op: "f64.const", value: fallback });
     return;
   }
   const result = compileExpression(ctx, fctx, expr, F64);
   if (result === null) {
-    fctx.body.push({ op: "f64.const", value: fallback } as Instr);
+    fctx.body.push({ op: "f64.const", value: fallback });
     return;
   }
   if (!valTypesMatch(result, F64)) {
@@ -215,7 +215,7 @@ function compileExternref(ctx: CodegenContext, fctx: FunctionContext, expr: ts.E
   }
   const result = compileExpression(ctx, fctx, expr, EXTERNREF);
   if (result === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
   if (!valTypesMatch(result, EXTERNREF)) {
@@ -233,7 +233,7 @@ function compileTemporalRefOnStack(
   const result = compileExpression(ctx, fctx, expr, expected);
   if (result === null) return false;
   if (result.kind === "ref_null" && expected.kind === "ref" && result.typeIdx === expected.typeIdx) {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
     return true;
   }
   if (!valTypesMatch(result, expected)) {
@@ -251,7 +251,7 @@ function compileTemporalRefToLocal(
   if (!compileTemporalRefOnStack(ctx, fctx, expr, kind)) return null;
   const typeIdx = ensureTemporalStruct(ctx, kind);
   const local = allocTempLocal(fctx, { kind: "ref", typeIdx });
-  fctx.body.push({ op: "local.set", index: local } as Instr);
+  fctx.body.push({ op: "local.set", index: local });
   return { local, typeIdx };
 }
 
@@ -318,48 +318,48 @@ function emitDurationValidityCheck(ctx: CodegenContext, fctx: FunctionContext, l
   const hasPos = allocTempLocal(fctx, I32);
   const hasNeg = allocTempLocal(fctx, I32);
   fctx.body.push(
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: bad } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: hasPos } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: hasNeg } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: bad },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: hasPos },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: hasNeg },
   );
   for (let i = 0; i < locals.length; i++) {
     const v = locals[i]!;
     fctx.body.push(
       // non-integral or NaN: v != trunc(v)
-      { op: "local.get", index: v } as Instr,
-      { op: "local.get", index: v } as Instr,
-      { op: "f64.trunc" } as Instr,
-      { op: "f64.ne" } as Instr,
-      { op: "local.get", index: bad } as Instr,
-      { op: "i32.or" } as Instr,
-      { op: "local.set", index: bad } as Instr,
+      { op: "local.get", index: v },
+      { op: "local.get", index: v },
+      { op: "f64.trunc" },
+      { op: "f64.ne" },
+      { op: "local.get", index: bad },
+      { op: "i32.or" },
+      { op: "local.set", index: bad },
       // sign accumulation
-      { op: "local.get", index: v } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.gt" } as Instr,
-      { op: "local.get", index: hasPos } as Instr,
-      { op: "i32.or" } as Instr,
-      { op: "local.set", index: hasPos } as Instr,
-      { op: "local.get", index: v } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.lt" } as Instr,
-      { op: "local.get", index: hasNeg } as Instr,
-      { op: "i32.or" } as Instr,
-      { op: "local.set", index: hasNeg } as Instr,
+      { op: "local.get", index: v },
+      { op: "f64.const", value: 0 },
+      { op: "f64.gt" },
+      { op: "local.get", index: hasPos },
+      { op: "i32.or" },
+      { op: "local.set", index: hasPos },
+      { op: "local.get", index: v },
+      { op: "f64.const", value: 0 },
+      { op: "f64.lt" },
+      { op: "local.get", index: hasNeg },
+      { op: "i32.or" },
+      { op: "local.set", index: hasNeg },
     );
     if (i < 3) {
       // |years| / |months| / |weeks| >= 2^32 is invalid
       fctx.body.push(
-        { op: "local.get", index: v } as Instr,
-        { op: "f64.abs" } as Instr,
-        { op: "f64.const", value: 4294967296 } as Instr,
-        { op: "f64.ge" } as Instr,
-        { op: "local.get", index: bad } as Instr,
-        { op: "i32.or" } as Instr,
-        { op: "local.set", index: bad } as Instr,
+        { op: "local.get", index: v },
+        { op: "f64.abs" },
+        { op: "f64.const", value: 4294967296 },
+        { op: "f64.ge" },
+        { op: "local.get", index: bad },
+        { op: "i32.or" },
+        { op: "local.set", index: bad },
       );
     }
   }
@@ -371,48 +371,48 @@ function emitDurationValidityCheck(ctx: CodegenContext, fctx: FunctionContext, l
   // below), so |S| and |F| accumulate the same direction.
   fctx.body.push(
     // S
-    { op: "local.get", index: locals[3]! } as Instr,
-    { op: "f64.const", value: 86400 } as Instr,
-    { op: "f64.mul" } as Instr,
-    { op: "local.get", index: locals[4]! } as Instr,
-    { op: "f64.const", value: 3600 } as Instr,
-    { op: "f64.mul" } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "local.get", index: locals[5]! } as Instr,
-    { op: "f64.const", value: 60 } as Instr,
-    { op: "f64.mul" } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "local.get", index: locals[6]! } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "f64.abs" } as Instr,
-    { op: "f64.const", value: 9007199254740992 } as Instr,
-    { op: "f64.sub" } as Instr,
-    { op: "f64.const", value: 1e9 } as Instr,
-    { op: "f64.mul" } as Instr,
+    { op: "local.get", index: locals[3]! },
+    { op: "f64.const", value: 86400 },
+    { op: "f64.mul" },
+    { op: "local.get", index: locals[4]! },
+    { op: "f64.const", value: 3600 },
+    { op: "f64.mul" },
+    { op: "f64.add" },
+    { op: "local.get", index: locals[5]! },
+    { op: "f64.const", value: 60 },
+    { op: "f64.mul" },
+    { op: "f64.add" },
+    { op: "local.get", index: locals[6]! },
+    { op: "f64.add" },
+    { op: "f64.abs" },
+    { op: "f64.const", value: 9007199254740992 },
+    { op: "f64.sub" },
+    { op: "f64.const", value: 1e9 },
+    { op: "f64.mul" },
     // F
-    { op: "local.get", index: locals[7]! } as Instr,
-    { op: "f64.const", value: 1e6 } as Instr,
-    { op: "f64.mul" } as Instr,
-    { op: "local.get", index: locals[8]! } as Instr,
-    { op: "f64.const", value: 1e3 } as Instr,
-    { op: "f64.mul" } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "local.get", index: locals[9]! } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "f64.abs" } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "f64.const", value: 0 } as Instr,
-    { op: "f64.ge" } as Instr,
-    { op: "local.get", index: bad } as Instr,
-    { op: "i32.or" } as Instr,
+    { op: "local.get", index: locals[7]! },
+    { op: "f64.const", value: 1e6 },
+    { op: "f64.mul" },
+    { op: "local.get", index: locals[8]! },
+    { op: "f64.const", value: 1e3 },
+    { op: "f64.mul" },
+    { op: "f64.add" },
+    { op: "local.get", index: locals[9]! },
+    { op: "f64.add" },
+    { op: "f64.abs" },
+    { op: "f64.add" },
+    { op: "f64.const", value: 0 },
+    { op: "f64.ge" },
+    { op: "local.get", index: bad },
+    { op: "i32.or" },
     // mixed signs are invalid
-    { op: "local.get", index: hasPos } as Instr,
-    { op: "local.get", index: hasNeg } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "i32.or" } as Instr,
-    { op: "local.set", index: bad } as Instr,
-    { op: "local.get", index: bad } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: throwInstrs } as Instr,
+    { op: "local.get", index: hasPos },
+    { op: "local.get", index: hasNeg },
+    { op: "i32.and" },
+    { op: "i32.or" },
+    { op: "local.set", index: bad },
+    { op: "local.get", index: bad },
+    { op: "if", blockType: { kind: "empty" }, then: throwInstrs },
   );
   releaseTempLocal(fctx, hasNeg);
   releaseTempLocal(fctx, hasPos);
@@ -481,7 +481,7 @@ function compileObjectFieldsToLocals(
     const local = allocTempLocal(fctx, F64);
     locals.push(local);
     compileF64(ctx, fctx, findObjectField(obj, [fields[i]!]), defaults[i] ?? 0);
-    fctx.body.push({ op: "local.set", index: local } as Instr);
+    fctx.body.push({ op: "local.set", index: local });
   }
   return locals;
 }
@@ -496,7 +496,7 @@ function compileParsedStringFieldsToLocals(
   const helperIdx = ensureTemporalImport(ctx, fctx, helperName, [EXTERNREF, F64], [F64]);
   const strLocal = allocTempLocal(fctx, EXTERNREF);
   compileExternref(ctx, fctx, expr);
-  fctx.body.push({ op: "local.set", index: strLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: strLocal });
 
   const locals: number[] = [];
   for (let i = 0; i < count; i++) {
@@ -504,13 +504,13 @@ function compileParsedStringFieldsToLocals(
     locals.push(local);
     if (helperIdx !== undefined) {
       fctx.body.push(
-        { op: "local.get", index: strLocal } as Instr,
-        { op: "f64.const", value: i } as Instr,
-        { op: "call", funcIdx: ctx.funcMap.get(helperName) ?? helperIdx } as Instr,
-        { op: "local.set", index: local } as Instr,
+        { op: "local.get", index: strLocal },
+        { op: "f64.const", value: i },
+        { op: "call", funcIdx: ctx.funcMap.get(helperName) ?? helperIdx },
+        { op: "local.set", index: local },
       );
     } else {
-      fctx.body.push({ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: local } as Instr);
+      fctx.body.push({ op: "f64.const", value: 0 }, { op: "local.set", index: local });
     }
   }
   releaseTempLocal(fctx, strLocal);
@@ -522,7 +522,7 @@ function releaseLocals(fctx: FunctionContext, locals: readonly number[]): void {
 }
 
 function pushLocals(fctx: FunctionContext, locals: readonly number[]): void {
-  for (const local of locals) fctx.body.push({ op: "local.get", index: local } as Instr);
+  for (const local of locals) fctx.body.push({ op: "local.get", index: local });
 }
 
 /**
@@ -672,9 +672,9 @@ function compilePlainDateLikeToLocals(
         const locals = PLAIN_DATE_FIELDS.map((_, fieldIdx) => {
           const local = allocTempLocal(fctx, F64);
           fctx.body.push(
-            { op: "local.get", index: ref.local } as Instr,
-            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx } as Instr,
-            { op: "local.set", index: local } as Instr,
+            { op: "local.get", index: ref.local },
+            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx },
+            { op: "local.set", index: local },
           );
           return local;
         });
@@ -697,10 +697,7 @@ function compilePlainDateLikeToLocals(
       const locals = compileObjectFieldsToLocals(ctx, fctx, target, PLAIN_DATE_FIELDS, [0, 1, 1]);
       if (monthFromMonthCode !== undefined) {
         // monthCode-only bag: install the month implied by the code.
-        fctx.body.push(
-          { op: "f64.const", value: monthFromMonthCode } as Instr,
-          { op: "local.set", index: locals[1]! } as Instr,
-        );
+        fctx.body.push({ op: "f64.const", value: monthFromMonthCode }, { op: "local.set", index: locals[1]! });
       }
       // CalendarResolveFields / PrepareTemporalFields reject non-positive
       // month or day in a property bag with RangeError regardless of the
@@ -709,14 +706,14 @@ function compilePlainDateLikeToLocals(
       if (isUserAuthoredNode(target)) {
         const throwInstrs = buildTemporalThrowInstrs(ctx, fctx, "invalid Temporal.PlainDate field value");
         fctx.body.push(
-          { op: "local.get", index: locals[1]! } as Instr,
-          { op: "f64.const", value: 1 } as Instr,
-          { op: "f64.lt" } as Instr,
-          { op: "local.get", index: locals[2]! } as Instr,
-          { op: "f64.const", value: 1 } as Instr,
-          { op: "f64.lt" } as Instr,
-          { op: "i32.or" } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: throwInstrs } as Instr,
+          { op: "local.get", index: locals[1]! },
+          { op: "f64.const", value: 1 },
+          { op: "f64.lt" },
+          { op: "local.get", index: locals[2]! },
+          { op: "f64.const", value: 1 },
+          { op: "f64.lt" },
+          { op: "i32.or" },
+          { op: "if", blockType: { kind: "empty" }, then: throwInstrs },
         );
       }
       return locals;
@@ -739,9 +736,9 @@ function compilePlainTimeLikeToLocals(
         const locals = PLAIN_TIME_FIELDS.map((_, fieldIdx) => {
           const local = allocTempLocal(fctx, F64);
           fctx.body.push(
-            { op: "local.get", index: ref.local } as Instr,
-            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx } as Instr,
-            { op: "local.set", index: local } as Instr,
+            { op: "local.get", index: ref.local },
+            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx },
+            { op: "local.set", index: local },
           );
           return local;
         });
@@ -770,9 +767,9 @@ function compileDurationLikeToLocals(
         const locals = DURATION_FIELDS.map((_, fieldIdx) => {
           const local = allocTempLocal(fctx, F64);
           fctx.body.push(
-            { op: "local.get", index: ref.local } as Instr,
-            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx } as Instr,
-            { op: "local.set", index: local } as Instr,
+            { op: "local.get", index: ref.local },
+            { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx },
+            { op: "local.set", index: local },
           );
           return local;
         });
@@ -806,7 +803,7 @@ function emitTemporalStructFromLocals(
 ): ValType {
   pushLocals(fctx, locals);
   const typeIdx = ensureTemporalStruct(ctx, kind);
-  fctx.body.push({ op: "struct.new", typeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx });
   return { kind: "ref", typeIdx };
 }
 
@@ -826,11 +823,11 @@ export function compileTemporalNewExpression(
   }
   for (let i = fields.length; i < args.length; i++) {
     const extraType = compileExpression(ctx, fctx, args[i]!);
-    if (extraType !== null) fctx.body.push({ op: "drop" } as Instr);
+    if (extraType !== null) fctx.body.push({ op: "drop" });
   }
 
   const typeIdx = ensureTemporalStruct(ctx, kind);
-  fctx.body.push({ op: "struct.new", typeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx });
   return { kind: "ref", typeIdx };
 }
 
@@ -848,22 +845,22 @@ export function tryCompileTemporalPropertyAccess(
   if (fieldIdx < 0) {
     if (kind === "PlainDate" && propName === "calendarId") {
       const recvType = compileExpression(ctx, fctx, expr.expression);
-      if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+      if (recvType !== null) fctx.body.push({ op: "drop" });
       return compileStringLiteral(ctx, fctx, "iso8601") ?? EXTERNREF;
     }
     if (kind === "PlainDate" && propName === "monthCode") {
       const ref = compileTemporalRefToLocal(ctx, fctx, expr.expression, "PlainDate");
       if (!ref) return compileStringLiteral(ctx, fctx, "M00") ?? EXTERNREF;
       const helperIdx = ensureTemporalImport(ctx, fctx, "__temporal_plain_date_month_code", [F64], [EXTERNREF]);
-      fctx.body.push({ op: "local.get", index: ref.local } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: 1 } as Instr);
+      fctx.body.push({ op: "local.get", index: ref.local });
+      fctx.body.push({ op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: 1 });
       if (helperIdx !== undefined) {
         fctx.body.push({
           op: "call",
           funcIdx: ctx.funcMap.get("__temporal_plain_date_month_code") ?? helperIdx,
-        } as Instr);
+        });
       } else {
-        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: "drop" });
         compileStringLiteral(ctx, fctx, "M00");
       }
       releaseRefLocal(fctx, ref);
@@ -872,7 +869,7 @@ export function tryCompileTemporalPropertyAccess(
     if (kind === "Duration" && (propName === "sign" || propName === "blank")) {
       const ref = compileTemporalRefToLocal(ctx, fctx, expr.expression, "Duration");
       if (!ref) {
-        fctx.body.push({ op: propName === "sign" ? "f64.const" : "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: propName === "sign" ? "f64.const" : "i32.const", value: 0 });
         return propName === "sign" ? F64 : { kind: "i32" };
       }
       const helperIdx = ensureTemporalImport(
@@ -883,19 +880,16 @@ export function tryCompileTemporalPropertyAccess(
         [F64],
       );
       for (let i = 0; i < DURATION_FIELDS.length; i++) {
-        fctx.body.push(
-          { op: "local.get", index: ref.local } as Instr,
-          { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-        );
+        fctx.body.push({ op: "local.get", index: ref.local }, { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i });
       }
       if (helperIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__temporal_duration_sign") ?? helperIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__temporal_duration_sign") ?? helperIdx });
       } else {
-        fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+        fctx.body.push({ op: "f64.const", value: 0 });
       }
       releaseRefLocal(fctx, ref);
       if (propName === "blank") {
-        fctx.body.push({ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr);
+        fctx.body.push({ op: "f64.const", value: 0 }, { op: "f64.eq" });
         return { kind: "i32" };
       }
       return F64;
@@ -904,10 +898,10 @@ export function tryCompileTemporalPropertyAccess(
   }
 
   if (!compileTemporalRefOnStack(ctx, fctx, expr.expression, kind)) {
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
     return F64;
   }
-  fctx.body.push({ op: "struct.get", typeIdx: ensureTemporalStruct(ctx, kind), fieldIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: ensureTemporalStruct(ctx, kind), fieldIdx });
   return F64;
 }
 
@@ -934,10 +928,10 @@ export function tryCompileTemporalStaticCall(
   if (temporalNowMethod(propAccess.expression) && propAccess.name.text === "plainDateISO") {
     const typeIdx = ensureTemporalStruct(ctx, "PlainDate");
     fctx.body.push(
-      { op: "f64.const", value: 2026 } as Instr,
-      { op: "f64.const", value: 6 } as Instr,
-      { op: "f64.const", value: 7 } as Instr,
-      { op: "struct.new", typeIdx } as Instr,
+      { op: "f64.const", value: 2026 },
+      { op: "f64.const", value: 6 },
+      { op: "f64.const", value: 7 },
+      { op: "struct.new", typeIdx },
     );
     return { kind: "ref", typeIdx };
   }
@@ -959,18 +953,18 @@ function emitTemporalEquals(
       : compilePlainTimeLikeToLocals(ctx, fctx, other);
   if (!ref) {
     releaseLocals(fctx, otherLocals);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
   }
   const fields = kind === "PlainDate" ? PLAIN_DATE_FIELDS : PLAIN_TIME_FIELDS;
   for (let i = 0; i < fields.length; i++) {
     fctx.body.push(
-      { op: "local.get", index: ref.local } as Instr,
-      { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-      { op: "local.get", index: otherLocals[i]! } as Instr,
-      { op: "f64.eq" } as Instr,
+      { op: "local.get", index: ref.local },
+      { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i },
+      { op: "local.get", index: otherLocals[i]! },
+      { op: "f64.eq" },
     );
-    if (i > 0) fctx.body.push({ op: "i32.and" } as Instr);
+    if (i > 0) fctx.body.push({ op: "i32.and" });
   }
   releaseRefLocal(fctx, ref);
   releaseLocals(fctx, otherLocals);
@@ -1012,17 +1006,14 @@ function emitPlainDateAddSubtract(
     const local = allocTempLocal(fctx, F64);
     resultLocals.push(local);
     for (let i = 0; i < 3; i++) {
-      fctx.body.push(
-        { op: "local.get", index: ref.local } as Instr,
-        { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-      );
+      fctx.body.push({ op: "local.get", index: ref.local }, { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i });
     }
-    for (let i = 0; i < 4; i++) fctx.body.push({ op: "local.get", index: durationLocals[i]! } as Instr);
+    for (let i = 0; i < 4; i++) fctx.body.push({ op: "local.get", index: durationLocals[i]! });
     fctx.body.push(
-      { op: "f64.const", value: sign } as Instr,
-      { op: "f64.const", value: field } as Instr,
-      { op: "call", funcIdx: ctx.funcMap.get("__temporal_plain_date_add_field") ?? helperIdx } as Instr,
-      { op: "local.set", index: local } as Instr,
+      { op: "f64.const", value: sign },
+      { op: "f64.const", value: field },
+      { op: "call", funcIdx: ctx.funcMap.get("__temporal_plain_date_add_field") ?? helperIdx },
+      { op: "local.set", index: local },
     );
   }
   const result = emitTemporalStructFromLocals(ctx, fctx, "PlainDate", resultLocals);
@@ -1067,17 +1058,14 @@ function emitPlainTimeAddSubtract(
     const local = allocTempLocal(fctx, F64);
     resultLocals.push(local);
     for (let i = 0; i < 6; i++) {
-      fctx.body.push(
-        { op: "local.get", index: ref.local } as Instr,
-        { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-      );
+      fctx.body.push({ op: "local.get", index: ref.local }, { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i });
     }
-    for (let i = 4; i < 10; i++) fctx.body.push({ op: "local.get", index: durationLocals[i]! } as Instr);
+    for (let i = 4; i < 10; i++) fctx.body.push({ op: "local.get", index: durationLocals[i]! });
     fctx.body.push(
-      { op: "f64.const", value: sign } as Instr,
-      { op: "f64.const", value: field } as Instr,
-      { op: "call", funcIdx: ctx.funcMap.get("__temporal_plain_time_add_field") ?? helperIdx } as Instr,
-      { op: "local.set", index: local } as Instr,
+      { op: "f64.const", value: sign },
+      { op: "f64.const", value: field },
+      { op: "call", funcIdx: ctx.funcMap.get("__temporal_plain_time_add_field") ?? helperIdx },
+      { op: "local.set", index: local },
     );
   }
   const result = emitTemporalStructFromLocals(ctx, fctx, "PlainTime", resultLocals);
@@ -1122,28 +1110,28 @@ function emitDurationAddSubtract(
     );
     for (let i = 0; i < 3; i++) {
       fctx.body.push(
-        { op: "local.get", index: ref.local } as Instr,
-        { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "f64.ne" } as Instr,
-        { op: "local.get", index: otherLocals[i]! } as Instr,
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "f64.ne" } as Instr,
-        { op: "i32.or" } as Instr,
+        { op: "local.get", index: ref.local },
+        { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i },
+        { op: "f64.const", value: 0 },
+        { op: "f64.ne" },
+        { op: "local.get", index: otherLocals[i]! },
+        { op: "f64.const", value: 0 },
+        { op: "f64.ne" },
+        { op: "i32.or" },
       );
-      if (i > 0) fctx.body.push({ op: "i32.or" } as Instr);
+      if (i > 0) fctx.body.push({ op: "i32.or" });
     }
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs } as Instr);
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs });
   }
   for (let i = 0; i < DURATION_FIELDS.length; i++) {
     const local = allocTempLocal(fctx, F64);
     resultLocals.push(local);
     fctx.body.push(
-      { op: "local.get", index: ref.local } as Instr,
-      { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-      { op: "local.get", index: otherLocals[i]! } as Instr,
-      sign === 1 ? ({ op: "f64.add" } as Instr) : ({ op: "f64.sub" } as Instr),
-      { op: "local.set", index: local } as Instr,
+      { op: "local.get", index: ref.local },
+      { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i },
+      { op: "local.get", index: otherLocals[i]! },
+      sign === 1 ? { op: "f64.add" } : { op: "f64.sub" },
+      { op: "local.set", index: local },
     );
   }
   const result = emitTemporalStructFromLocals(ctx, fctx, "Duration", resultLocals);
@@ -1176,15 +1164,12 @@ function emitTemporalToString(
     [EXTERNREF],
   );
   for (let i = 0; i < fieldCount; i++) {
-    fctx.body.push(
-      { op: "local.get", index: ref.local } as Instr,
-      { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-    );
+    fctx.body.push({ op: "local.get", index: ref.local }, { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i });
   }
   if (helperIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(helperName) ?? helperIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(helperName) ?? helperIdx });
   } else {
-    for (let i = 0; i < fieldCount; i++) fctx.body.push({ op: "drop" } as Instr);
+    for (let i = 0; i < fieldCount; i++) fctx.body.push({ op: "drop" });
     compileStringLiteral(ctx, fctx, "");
   }
   releaseRefLocal(fctx, ref);
@@ -1206,9 +1191,9 @@ export function tryCompileTemporalMethodCall(
   }
   if (methodName === "valueOf") {
     const recvType = compileExpression(ctx, fctx, propAccess.expression);
-    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+    if (recvType !== null) fctx.body.push({ op: "drop" });
     emitThrowTypeError(ctx, fctx, "Temporal objects do not have a primitive value");
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return EXTERNREF;
   }
   if ((kind === "PlainDate" || kind === "PlainTime") && methodName === "equals") {
@@ -1248,16 +1233,13 @@ export function tryCompileTemporalMethodCall(
     for (let i = 0; i < DURATION_FIELDS.length; i++) {
       const local = allocTempLocal(fctx, F64);
       locals.push(local);
-      fctx.body.push(
-        { op: "local.get", index: ref.local } as Instr,
-        { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i } as Instr,
-      );
+      fctx.body.push({ op: "local.get", index: ref.local }, { op: "struct.get", typeIdx: ref.typeIdx, fieldIdx: i });
       if (methodName === "negated") {
-        fctx.body.push({ op: "f64.neg" } as Instr);
+        fctx.body.push({ op: "f64.neg" });
       } else {
-        fctx.body.push({ op: "f64.abs" } as Instr);
+        fctx.body.push({ op: "f64.abs" });
       }
-      fctx.body.push({ op: "local.set", index: local } as Instr);
+      fctx.body.push({ op: "local.set", index: local });
     }
     const result = emitTemporalStructFromLocals(ctx, fctx, "Duration", locals);
     releaseRefLocal(fctx, ref);

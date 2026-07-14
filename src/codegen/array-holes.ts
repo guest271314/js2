@@ -165,7 +165,7 @@ export function ensureHoleType(ctx: CodegenContext): number {
     name: "__hole",
     type: { kind: "ref", typeIdx: holeTypeIdx },
     mutable: false,
-    init: [{ op: "struct.new", typeIdx: holeTypeIdx } as Instr],
+    init: [{ op: "struct.new", typeIdx: holeTypeIdx }],
   });
   ctx.holeGlobalIdx = globalIdx;
   return globalIdx;
@@ -178,8 +178,8 @@ export function ensureHoleType(ctx: CodegenContext): number {
  */
 export function emitHoleSentinel(ctx: CodegenContext, fctx: FunctionContext): void {
   const globalIdx = ensureHoleType(ctx);
-  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "global.get", index: globalIdx });
+  fctx.body.push({ op: "extern.convert_any" });
 }
 
 /**
@@ -222,15 +222,15 @@ export function holeToUndefinedInstrs(ctx: CodegenContext, fctx: FunctionContext
   fctx.body = saved;
 
   return [
-    { op: "local.tee", index: tmp } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.test", typeIdx: holeTypeIdx } as Instr,
+    { op: "local.tee", index: tmp },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: holeTypeIdx },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
       then: undefBody,
-      else: [{ op: "local.get", index: tmp } as Instr],
-    } as Instr,
+      else: [{ op: "local.get", index: tmp }],
+    },
   ];
 }
 
@@ -246,5 +246,5 @@ export function holeToUndefinedInstrs(ctx: CodegenContext, fctx: FunctionContext
 export function holeTestInstrs(ctx: CodegenContext): Instr[] {
   ensureHoleType(ctx);
   const holeTypeIdx = ctx.holeTypeIdx;
-  return [{ op: "any.convert_extern" } as Instr, { op: "ref.test", typeIdx: holeTypeIdx } as Instr];
+  return [{ op: "any.convert_extern" }, { op: "ref.test", typeIdx: holeTypeIdx }];
 }

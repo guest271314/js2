@@ -59,16 +59,16 @@ export function emitLinearU8ArenaMark(
 ): number | undefined {
   if (!ctx.wasi || ctx.linearU8ArenaGlobalIdx === undefined) return undefined;
   const markLocal = allocLocal(fctx, `${name}_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "global.get", index: ctx.linearU8ArenaGlobalIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: markLocal } as Instr);
+  fctx.body.push({ op: "global.get", index: ctx.linearU8ArenaGlobalIdx });
+  fctx.body.push({ op: "local.set", index: markLocal });
   return markLocal;
 }
 
 export function linearU8ArenaResetInstrs(ctx: CodegenContext, markLocalIdx: number | undefined): Instr[] {
   if (markLocalIdx === undefined || ctx.linearU8ArenaGlobalIdx === undefined) return [];
   return [
-    { op: "local.get", index: markLocalIdx } as Instr,
-    { op: "global.set", index: ctx.linearU8ArenaGlobalIdx } as Instr,
+    { op: "local.get", index: markLocalIdx },
+    { op: "global.set", index: ctx.linearU8ArenaGlobalIdx },
   ];
 }
 

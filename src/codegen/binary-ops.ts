@@ -527,7 +527,7 @@ export function compileBinaryExpression(
           fctx.body.push({ op: "ref.is_null" });
           fctx.body.push({ op: "local.get", index: tmpLocal });
           fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          fctx.body.push({ op: "i32.or" } as Instr);
+          fctx.body.push({ op: "i32.or" });
           releaseTempLocal(fctx, tmpLocal);
           if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
           return { kind: "i32" };
@@ -614,7 +614,7 @@ export function compileBinaryExpression(
         // ancestry.
         const objResult = compileExpression(ctx, fctx, expr.right);
         if (objResult?.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
         }
         const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
         fctx.body.push({ op: "local.set", index: tmpAny });
@@ -1068,7 +1068,7 @@ export function compileBinaryExpression(
             if (isStr) {
               // native string ref → externref → __str_to_number → f64
               compileExpression(ctx, fctx, operand);
-              fctx.body.push({ op: "extern.convert_any" } as Instr);
+              fctx.body.push({ op: "extern.convert_any" });
               fctx.body.push({ op: "call", funcIdx: strToNumIdx });
             } else if (isBool) {
               compileExpression(ctx, fctx, operand);
@@ -2065,9 +2065,9 @@ export function compileBinaryExpression(
           if (flattenIdx !== undefined && strEqIdx !== undefined) {
             // Stack: [left, right] → anyref temps.
             const tmpRightAny = allocTempLocal(fctx, { kind: "anyref" });
-            if (!rightIsRef) fctx.body.push({ op: "any.convert_extern" } as Instr);
+            if (!rightIsRef) fctx.body.push({ op: "any.convert_extern" });
             fctx.body.push({ op: "local.set", index: tmpRightAny });
-            if (!leftIsRef) fctx.body.push({ op: "any.convert_extern" } as Instr);
+            if (!leftIsRef) fctx.body.push({ op: "any.convert_extern" });
             const tmpLeftAny = allocTempLocal(fctx, { kind: "anyref" });
             fctx.body.push({ op: "local.set", index: tmpLeftAny });
             // Both sides strings → content equality; otherwise strict
@@ -2081,30 +2081,30 @@ export function compileBinaryExpression(
             // `ref.test` is false for null, so the old blanket `0` else-arm
             // reported unequal. One-null-one-value stays unequal.
             fctx.body.push({ op: "local.get", index: tmpLeftAny });
-            fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx });
             fctx.body.push({ op: "local.get", index: tmpRightAny });
-            fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr);
-            fctx.body.push({ op: "i32.and" } as Instr);
+            fctx.body.push({ op: "ref.test", typeIdx: ctx.anyStrTypeIdx });
+            fctx.body.push({ op: "i32.and" });
             fctx.body.push({
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
               then: [
-                { op: "local.get", index: tmpLeftAny } as Instr,
-                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                { op: "call", funcIdx: flattenIdx } as Instr,
-                { op: "local.get", index: tmpRightAny } as Instr,
-                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                { op: "call", funcIdx: flattenIdx } as Instr,
-                { op: "call", funcIdx: strEqIdx } as Instr,
+                { op: "local.get", index: tmpLeftAny },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "call", funcIdx: flattenIdx },
+                { op: "local.get", index: tmpRightAny },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "call", funcIdx: flattenIdx },
+                { op: "call", funcIdx: strEqIdx },
               ],
               else: [
-                { op: "local.get", index: tmpLeftAny } as Instr,
-                { op: "ref.is_null" } as Instr,
-                { op: "local.get", index: tmpRightAny } as Instr,
-                { op: "ref.is_null" } as Instr,
-                { op: "i32.and" } as Instr,
+                { op: "local.get", index: tmpLeftAny },
+                { op: "ref.is_null" },
+                { op: "local.get", index: tmpRightAny },
+                { op: "ref.is_null" },
+                { op: "i32.and" },
               ],
-            } as Instr);
+            });
             releaseTempLocal(fctx, tmpLeftAny);
             releaseTempLocal(fctx, tmpRightAny);
             if (isStrictNeq) fctx.body.push({ op: "i32.eqz" });
@@ -2199,22 +2199,22 @@ export function compileBinaryExpression(
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [
-              { op: "local.get", index: tmpRightAny } as Instr,
+              { op: "local.get", index: tmpRightAny },
               { op: "ref.test", typeIdx: EQ_HEAP_TYPE_BR },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
                 then: [
-                  { op: "local.get", index: tmpLeftAny } as Instr,
+                  { op: "local.get", index: tmpLeftAny },
                   { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR },
-                  { op: "local.get", index: tmpRightAny } as Instr,
+                  { op: "local.get", index: tmpRightAny },
                   { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_BR },
-                  { op: "ref.eq" } as Instr,
+                  { op: "ref.eq" },
                 ],
-                else: [{ op: "i32.const", value: 0 } as Instr],
+                else: [{ op: "i32.const", value: 0 }],
               },
             ],
-            else: [{ op: "i32.const", value: 0 } as Instr],
+            else: [{ op: "i32.const", value: 0 }],
           });
           releaseTempLocal(fctx, tmpLeftAny);
           releaseTempLocal(fctx, tmpRightAny);
@@ -2598,22 +2598,22 @@ export function compileBinaryExpression(
       if (isLoose && toPrimIdx !== undefined && typeofObject !== undefined) {
         const reduceOperand = (externLocal: number): Instr[] => [
           { op: "local.get", index: externLocal },
-          { op: "ref.null.extern" } as Instr, // default hint
-          { op: "call", funcIdx: toPrimIdx } as Instr,
+          { op: "ref.null.extern" }, // default hint
+          { op: "call", funcIdx: toPrimIdx },
           { op: "local.set", index: externLocal },
         ];
         fctx.body.push(
           // lIsObj XOR rIsObj  ≡  lIsObj !== rIsObj
           { op: "local.get", index: lTmp },
-          { op: "call", funcIdx: typeofObject } as Instr,
+          { op: "call", funcIdx: typeofObject },
           { op: "local.get", index: rTmp },
-          { op: "call", funcIdx: typeofObject } as Instr,
-          { op: "i32.ne" } as Instr,
+          { op: "call", funcIdx: typeofObject },
+          { op: "i32.ne" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [...reduceOperand(lTmp), ...reduceOperand(rTmp)],
-          } as Instr,
+          },
         );
       }
 
@@ -2632,7 +2632,7 @@ export function compileBinaryExpression(
       // only when the arm has already established the operand is number-or-bool.
       const looseToNum = (externLocal: number): Instr[] => [
         { op: "local.get", index: externLocal },
-        { op: "call", funcIdx: typeofBool } as Instr,
+        { op: "call", funcIdx: typeofBool },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "f64" } },
@@ -2645,42 +2645,50 @@ export function compileBinaryExpression(
             { op: "local.get", index: externLocal },
             { op: "call", funcIdx: unboxNum },
           ],
-        } as Instr,
+        },
       ];
       const coreEqInstrs: Instr[] = [
         // ── number (loose: number-or-boolean — §7.2.15 step 8 Boolean→ToNumber,
         //    so `true == 1`, `false == 0` compare numerically; strict keeps
         //    number-only since `true === 1` is false by type)? ──
         { op: "local.get", index: lTmp },
-        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "call", funcIdx: typeofNum },
         ...(looseNullish
-          ? ([{ op: "local.get", index: lTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          ? ([
+              { op: "local.get", index: lTmp },
+              { op: "call", funcIdx: typeofBool },
+              { op: "i32.or" },
+            ] satisfies Instr[])
           : []),
         { op: "local.get", index: rTmp },
-        { op: "call", funcIdx: typeofNum } as Instr,
+        { op: "call", funcIdx: typeofNum },
         ...(looseNullish
-          ? ([{ op: "local.get", index: rTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          ? ([
+              { op: "local.get", index: rTmp },
+              { op: "call", funcIdx: typeofBool },
+              { op: "i32.or" },
+            ] satisfies Instr[])
           : []),
-        { op: "i32.and" } as Instr,
+        { op: "i32.and" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
           then: looseNullish
-            ? [...looseToNum(lTmp), ...looseToNum(rTmp), { op: "f64.eq" } as Instr]
+            ? [...looseToNum(lTmp), ...looseToNum(rTmp), { op: "f64.eq" }]
             : [
                 { op: "local.get", index: lTmp },
                 { op: "call", funcIdx: unboxNum },
                 { op: "local.get", index: rTmp },
                 { op: "call", funcIdx: unboxNum },
-                { op: "f64.eq" } as Instr,
+                { op: "f64.eq" },
               ],
           else: [
             // ── boolean? ──
             { op: "local.get", index: lTmp },
-            { op: "call", funcIdx: typeofBool } as Instr,
+            { op: "call", funcIdx: typeofBool },
             { op: "local.get", index: rTmp },
-            { op: "call", funcIdx: typeofBool } as Instr,
-            { op: "i32.and" } as Instr,
+            { op: "call", funcIdx: typeofBool },
+            { op: "i32.and" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
@@ -2689,15 +2697,15 @@ export function compileBinaryExpression(
                 { op: "call", funcIdx: unboxBool },
                 { op: "local.get", index: rTmp },
                 { op: "call", funcIdx: unboxBool },
-                { op: "i32.eq" } as Instr,
+                { op: "i32.eq" },
               ],
               else: [
                 // ── bigint? ──
                 { op: "local.get", index: lTmp },
-                { op: "call", funcIdx: typeofBigint } as Instr,
+                { op: "call", funcIdx: typeofBigint },
                 { op: "local.get", index: rTmp },
-                { op: "call", funcIdx: typeofBigint } as Instr,
-                { op: "i32.and" } as Instr,
+                { op: "call", funcIdx: typeofBigint },
+                { op: "i32.and" },
                 {
                   op: "if",
                   blockType: { kind: "val", type: { kind: "i32" } },
@@ -2706,34 +2714,34 @@ export function compileBinaryExpression(
                     { op: "call", funcIdx: toBigint },
                     { op: "local.get", index: rTmp },
                     { op: "call", funcIdx: toBigint },
-                    { op: "i64.eq" } as Instr,
+                    { op: "i64.eq" },
                   ],
                   else: [
                     // ── reference identity ──
                     // Both must be WasmGC eqref for ref.eq; otherwise unequal.
                     { op: "local.get", index: lTmp },
-                    { op: "any.convert_extern" } as Instr,
+                    { op: "any.convert_extern" },
                     { op: "local.get", index: rTmp },
-                    { op: "any.convert_extern" } as Instr,
+                    { op: "any.convert_extern" },
                     ...(() => {
                       const lAny = allocTempLocal(fctx, { kind: "anyref" });
                       const rAny = allocTempLocal(fctx, { kind: "anyref" });
                       // ── eqref identity ── (the final fallback arm)
                       const identityArm: Instr[] = [
                         { op: "local.get", index: lAny },
-                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                        { op: "ref.test", typeIdx: EQ_HEAP },
                         { op: "local.get", index: rAny },
-                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "ref.test", typeIdx: EQ_HEAP },
+                        { op: "i32.and" },
                         {
                           op: "if",
                           blockType: { kind: "val", type: { kind: "i32" } },
                           then: [
                             { op: "local.get", index: lAny },
-                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                            { op: "ref.cast", typeIdx: EQ_HEAP },
                             { op: "local.get", index: rAny },
-                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
-                            { op: "ref.eq" } as Instr,
+                            { op: "ref.cast", typeIdx: EQ_HEAP },
+                            { op: "ref.eq" },
                           ],
                           // (#2161 B0) `ref.test` is FALSE for null, so two
                           // nullish operands (both `ref.null` — the standalone
@@ -2744,12 +2752,12 @@ export function compileBinaryExpression(
                           // one-null-one-value stays 0 via the i32.and.
                           else: [
                             { op: "local.get", index: lAny },
-                            { op: "ref.is_null" } as Instr,
+                            { op: "ref.is_null" },
                             { op: "local.get", index: rAny },
-                            { op: "ref.is_null" } as Instr,
-                            { op: "i32.and" } as Instr,
+                            { op: "ref.is_null" },
+                            { op: "i32.and" },
                           ],
-                        } as Instr,
+                        },
                       ];
                       // ── string? ── (#1914) Native strings are VALUE-compared
                       // (§7.2.16 "If x is a String"). Without this, `a === b` over
@@ -2765,24 +2773,24 @@ export function compileBinaryExpression(
                           if (flattenIdx !== undefined && strEqIdx !== undefined) {
                             return [
                               { op: "local.get", index: lAny },
-                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
                               { op: "local.get", index: rAny },
-                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                              { op: "i32.and" } as Instr,
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+                              { op: "i32.and" },
                               {
                                 op: "if",
                                 blockType: { kind: "val", type: { kind: "i32" } },
                                 then: [
                                   { op: "local.get", index: lAny },
-                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
                                   { op: "call", funcIdx: flattenIdx },
                                   { op: "local.get", index: rAny },
-                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
                                   { op: "call", funcIdx: flattenIdx },
                                   { op: "call", funcIdx: strEqIdx },
                                 ],
                                 else: identityArm,
-                              } as Instr,
+                              },
                             ];
                           }
                         }
@@ -2827,7 +2835,7 @@ export function compileBinaryExpression(
                           // boolean fell to the identity arm → spurious `false`.
                           const toNumberOf = (anyLocal: number, externLocal: number): Instr[] => [
                             { op: "local.get", index: anyLocal },
-                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
                             {
                               op: "if",
                               blockType: { kind: "val", type: { kind: "f64" } },
@@ -2838,7 +2846,7 @@ export function compileBinaryExpression(
                               else: [
                                 // boolean → 0/1, else unbox the number.
                                 { op: "local.get", index: externLocal },
-                                { op: "call", funcIdx: typeofBool } as Instr,
+                                { op: "call", funcIdx: typeofBool },
                                 {
                                   op: "if",
                                   blockType: { kind: "val", type: { kind: "f64" } },
@@ -2851,9 +2859,9 @@ export function compileBinaryExpression(
                                     { op: "local.get", index: externLocal },
                                     { op: "call", funcIdx: unboxNum },
                                   ],
-                                } as Instr,
+                                },
                               ],
-                            } as Instr,
+                            },
                           ];
                           // §7.2.15: String⇄Number (steps 4-7) and String⇄Boolean
                           // (step 8 — ToNumber the boolean) both ToNumber-compare.
@@ -2861,28 +2869,28 @@ export function compileBinaryExpression(
                           // OTHER is a number or a boolean.
                           const isNumOrBool = (externLocal: number): Instr[] => [
                             { op: "local.get", index: externLocal },
-                            { op: "call", funcIdx: typeofNum } as Instr,
+                            { op: "call", funcIdx: typeofNum },
                             { op: "local.get", index: externLocal },
-                            { op: "call", funcIdx: typeofBool } as Instr,
-                            { op: "i32.or" } as Instr,
+                            { op: "call", funcIdx: typeofBool },
+                            { op: "i32.or" },
                           ];
                           // (lIsStr && rIsNumOrBool) || (rIsStr && lIsNumOrBool)
                           seq.push(
                             { op: "local.get", index: lAny },
-                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
                             ...isNumOrBool(rTmp),
-                            { op: "i32.and" } as Instr,
+                            { op: "i32.and" },
                             { op: "local.get", index: rAny },
-                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
                             ...isNumOrBool(lTmp),
-                            { op: "i32.and" } as Instr,
-                            { op: "i32.or" } as Instr,
+                            { op: "i32.and" },
+                            { op: "i32.or" },
                             {
                               op: "if",
                               blockType: { kind: "val", type: { kind: "i32" } },
-                              then: [...toNumberOf(lAny, lTmp), ...toNumberOf(rAny, rTmp), { op: "f64.eq" } as Instr],
+                              then: [...toNumberOf(lAny, lTmp), ...toNumberOf(rAny, rTmp), { op: "f64.eq" }],
                               else: stringAndIdentityArm(),
-                            } as Instr,
+                            },
                           );
                         }
                       }
@@ -2892,11 +2900,11 @@ export function compileBinaryExpression(
                       return seq;
                     })(),
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       ];
       // For loose equality, wrap the core cascade in the nullish guard
       // (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish ⇒ false.
@@ -2916,58 +2924,58 @@ export function compileBinaryExpression(
       const eqInstrs: Instr[] = s1NullishGuard
         ? [
             { op: "local.get", index: lTmp },
-            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+            { op: "call", funcIdx: s1IsNullishIdx! },
             { op: "local.get", index: rTmp },
-            { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "call", funcIdx: s1IsNullishIdx! },
+            { op: "i32.or" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
               then: isStrict
                 ? [
                     { op: "local.get", index: lTmp },
-                    { op: "ref.is_null" } as Instr,
+                    { op: "ref.is_null" },
                     { op: "local.get", index: rTmp },
-                    { op: "ref.is_null" } as Instr,
-                    { op: "i32.and" } as Instr,
+                    { op: "ref.is_null" },
+                    { op: "i32.and" },
                     { op: "local.get", index: lTmp },
-                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
+                    { op: "call", funcIdx: s1IsUndefIdx! },
                     { op: "local.get", index: rTmp },
-                    { op: "call", funcIdx: s1IsUndefIdx! } as Instr,
-                    { op: "i32.and" } as Instr,
-                    { op: "i32.or" } as Instr,
+                    { op: "call", funcIdx: s1IsUndefIdx! },
+                    { op: "i32.and" },
+                    { op: "i32.or" },
                   ]
                 : [
                     { op: "local.get", index: lTmp },
-                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
+                    { op: "call", funcIdx: s1IsNullishIdx! },
                     { op: "local.get", index: rTmp },
-                    { op: "call", funcIdx: s1IsNullishIdx! } as Instr,
-                    { op: "i32.and" } as Instr,
+                    { op: "call", funcIdx: s1IsNullishIdx! },
+                    { op: "i32.and" },
                   ],
               else: coreEqInstrs,
-            } as Instr,
+            },
           ]
         : looseNullish
           ? [
               { op: "local.get", index: lTmp },
-              { op: "ref.is_null" } as Instr,
+              { op: "ref.is_null" },
               { op: "local.get", index: rTmp },
-              { op: "ref.is_null" } as Instr,
+              { op: "ref.is_null" },
               // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
               // are nullish (true) or not (false) — never coerce against a nullish.
-              { op: "i32.or" } as Instr,
+              { op: "i32.or" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
                 then: [
                   { op: "local.get", index: lTmp },
-                  { op: "ref.is_null" } as Instr,
+                  { op: "ref.is_null" },
                   { op: "local.get", index: rTmp },
-                  { op: "ref.is_null" } as Instr,
-                  { op: "i32.and" } as Instr,
+                  { op: "ref.is_null" },
+                  { op: "i32.and" },
                 ],
                 else: coreEqInstrs,
-              } as Instr,
+              },
             ]
           : coreEqInstrs;
       for (const ins of eqInstrs) fctx.body.push(ins);
@@ -3214,9 +3222,9 @@ export function compileBinaryExpression(
           // Identity check produced 0 or 1 — use it directly
           // For != / !==, negate
           { op: "local.get", index: identityResult },
-          ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
+          ...(isNeqOp ? ([{ op: "i32.eqz" }] satisfies Instr[]) : []),
         ],
-        else: (() => {
+        else: ((): Instr[] => {
           // Host equality fallback — two host externrefs (e.g. functions
           // like `Array === Array`) are not WasmGC eqrefs, so ref.eq cannot
           // compare them. For strict equality, `__host_eq` calls JS `===`.
@@ -3257,20 +3265,20 @@ export function compileBinaryExpression(
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: finalHostEqIdx } as Instr,
+              { op: "call", funcIdx: finalHostEqIdx! },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
-                then: [{ op: "i32.const", value: isNeqOp ? 0 : 1 } as Instr],
+                then: [{ op: "i32.const", value: isNeqOp ? 0 : 1 }],
                 else: [
                   // Both operands must be JS numbers for the numeric-unbox
                   // fallback to be sound. Otherwise host_eq's `false` is
                   // definitive (cross-type strict equality is always false).
                   { op: "local.get", index: tmpLeft },
-                  { op: "call", funcIdx: typeofNumIdx } as Instr,
+                  { op: "call", funcIdx: typeofNumIdx },
                   { op: "local.get", index: tmpRight },
-                  { op: "call", funcIdx: typeofNumIdx } as Instr,
-                  { op: "i32.and" } as Instr,
+                  { op: "call", funcIdx: typeofNumIdx },
+                  { op: "i32.and" },
                   {
                     op: "if",
                     blockType: { kind: "val", type: { kind: "i32" } },
@@ -3281,16 +3289,16 @@ export function compileBinaryExpression(
                       { op: "call", funcIdx: unboxIdx },
                       { op: "local.get", index: tmpRight },
                       { op: "call", funcIdx: unboxIdx },
-                      { op: isEqOp ? "f64.eq" : "f64.ne" } as Instr,
-                    ] as Instr[],
+                      { op: isEqOp ? "f64.eq" : "f64.ne" },
+                    ],
                     else: [
                       // Cross-type or non-number: host_eq's false is final.
-                      { op: "i32.const", value: isNeqOp ? 1 : 0 } as Instr,
-                    ] as Instr[],
-                  } as Instr,
-                ] as Instr[],
-              } as Instr,
-            ] as Instr[];
+                      { op: "i32.const", value: isNeqOp ? 1 : 0 },
+                    ],
+                  },
+                ],
+              },
+            ];
           } else {
             // Loose equality fallback for two externref `any` operands that are
             // not eqref-identical.
@@ -3331,9 +3339,9 @@ export function compileBinaryExpression(
             return [
               { op: "local.get", index: tmpLeft },
               { op: "local.get", index: tmpRight },
-              { op: "call", funcIdx: finalHostLooseEqIdx } as Instr,
-              ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
-            ] as Instr[];
+              { op: "call", funcIdx: finalHostLooseEqIdx! },
+              ...(isNeqOp ? ([{ op: "i32.eqz" }] satisfies Instr[]) : []),
+            ];
           }
         })(),
       });
@@ -3736,12 +3744,12 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
       const rPrim = allocTempLocal(fctx, { kind: "externref" });
       if (toPrimIdx !== undefined) {
         fctx.body.push({ op: "local.get", index: lTmp });
-        fctx.body.push({ op: "ref.null.extern" } as Instr); // default hint
-        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "ref.null.extern" }); // default hint
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
         fctx.body.push({ op: "local.set", index: lPrim });
         fctx.body.push({ op: "local.get", index: rTmp });
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
-        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
         fctx.body.push({ op: "local.set", index: rPrim });
       } else {
         // Degrade: no ToPrimitive available — carry the raw operands through.
@@ -3753,9 +3761,9 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
 
       const emitToAnyString = (tmp: number): Instr[] => [
         { op: "local.get", index: tmp },
-        { op: "call", funcIdx: finalToStr } as Instr,
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "call", funcIdx: finalToStr! },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
       ];
 
       // if (__typeof_string(lprim) | __typeof_string(rprim)) → concat both as
@@ -3764,33 +3772,33 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
       const concatArm: Instr[] = [
         ...emitToAnyString(lPrim),
         ...emitToAnyString(rPrim),
-        { op: "call", funcIdx: concatIdx } as Instr,
-        { op: "extern.convert_any" } as Instr,
+        { op: "call", funcIdx: concatIdx },
+        { op: "extern.convert_any" },
       ];
       const numericArm: Instr[] = [
         { op: "local.get", index: lPrim },
-        { op: "call", funcIdx: unboxNum } as Instr,
+        { op: "call", funcIdx: unboxNum },
         { op: "local.get", index: rPrim },
-        { op: "call", funcIdx: unboxNum } as Instr,
-        { op: "f64.add" } as Instr,
+        { op: "call", funcIdx: unboxNum },
+        { op: "f64.add" },
       ];
       // Box the numeric arm's f64 result back to externref so both arms agree.
       const boxNum = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       const finalBoxNum = ctx.funcMap.get("__box_number") ?? boxNum;
-      numericArm.push({ op: "call", funcIdx: finalBoxNum } as Instr);
+      numericArm.push({ op: "call", funcIdx: finalBoxNum! });
 
       fctx.body.push({ op: "local.get", index: lPrim });
-      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
+      fctx.body.push({ op: "call", funcIdx: typeofStr });
       fctx.body.push({ op: "local.get", index: rPrim });
-      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "call", funcIdx: typeofStr });
+      fctx.body.push({ op: "i32.or" });
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: concatArm,
         else: numericArm,
-      } as Instr);
+      });
       releaseTempLocal(fctx, rPrim);
       releaseTempLocal(fctx, lPrim);
       releaseTempLocal(fctx, rTmp);
@@ -3915,69 +3923,65 @@ export function emitAnyRelational(
       // ToString-free lexicographic compare of two boxed native strings → -1/0/1.
       const toFlatNativeStr = (tmp: number): Instr[] => [
         { op: "local.get", index: tmp },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-        { op: "call", funcIdx: strFlatten } as Instr,
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+        { op: "call", funcIdx: strFlatten },
       ];
-      const strArm: Instr[] = [
-        ...toFlatNativeStr(lTmp),
-        ...toFlatNativeStr(rTmp),
-        { op: "call", funcIdx: strCompare } as Instr,
-      ];
+      const strArm: Instr[] = [...toFlatNativeStr(lTmp), ...toFlatNativeStr(rTmp), { op: "call", funcIdx: strCompare }];
       // Numeric arm: ToNumber(unbox) both sides, then derive a -1/0/1/2 sign.
       const lf = allocTempLocal(fctx, { kind: "f64" });
       const rf = allocTempLocal(fctx, { kind: "f64" });
       const numSign: Instr[] = [
         { op: "local.get", index: lTmp },
-        { op: "call", funcIdx: unboxNum } as Instr,
+        { op: "call", funcIdx: unboxNum },
         { op: "local.set", index: lf },
         { op: "local.get", index: rTmp },
-        { op: "call", funcIdx: unboxNum } as Instr,
+        { op: "call", funcIdx: unboxNum },
         { op: "local.set", index: rf },
         // (l < r) ? -1 : (l > r ? 1 : (l == r ? 0 : 2))
         { op: "local.get", index: lf },
         { op: "local.get", index: rf },
-        { op: "f64.lt" } as Instr,
+        { op: "f64.lt" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [{ op: "i32.const", value: -1 } as Instr],
+          then: [{ op: "i32.const", value: -1 }],
           else: [
             { op: "local.get", index: lf },
             { op: "local.get", index: rf },
-            { op: "f64.gt" } as Instr,
+            { op: "f64.gt" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
-              then: [{ op: "i32.const", value: 1 } as Instr],
+              then: [{ op: "i32.const", value: 1 }],
               else: [
                 { op: "local.get", index: lf },
                 { op: "local.get", index: rf },
-                { op: "f64.eq" } as Instr,
+                { op: "f64.eq" },
                 {
                   op: "if",
                   blockType: { kind: "val", type: { kind: "i32" } },
-                  then: [{ op: "i32.const", value: 0 } as Instr],
-                  else: [{ op: "i32.const", value: 2 } as Instr], // NaN → incomparable
-                } as Instr,
+                  then: [{ op: "i32.const", value: 0 }],
+                  else: [{ op: "i32.const", value: 2 }], // NaN → incomparable
+                },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       ];
       const cmpTmp = allocTempLocal(fctx, { kind: "i32" });
       // if (__typeof_string(l) && __typeof_string(r)) strArm else numSign
       fctx.body.push({ op: "local.get", index: lTmp });
-      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
+      fctx.body.push({ op: "call", funcIdx: typeofStr });
       fctx.body.push({ op: "local.get", index: rTmp });
-      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
-      fctx.body.push({ op: "i32.and" } as Instr);
+      fctx.body.push({ op: "call", funcIdx: typeofStr });
+      fctx.body.push({ op: "i32.and" });
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: strArm,
         else: numSign,
-      } as Instr);
+      });
       fctx.body.push({ op: "local.set", index: cmpTmp });
       mapCmpToOp(cmpTmp);
       releaseTempLocal(fctx, cmpTmp);
@@ -4318,89 +4322,87 @@ export function emitToUint8Clamp(fctx: FunctionContext): void {
   const f = allocTempLocal(fctx, { kind: "f64" }); // floor(x)
   const d = allocTempLocal(fctx, { kind: "f64" }); // x - floor(x)
   const out = allocTempLocal(fctx, { kind: "i32" });
-  fctx.body.push({ op: "local.set", index: x } as Instr);
+  fctx.body.push({ op: "local.set", index: x });
 
   // roundHalfEven(x) → i32 (only evaluated when 0 < x < 255, so trunc is exact):
   //   f = floor(x); d = x - f;
   //   d<0.5 → f ; d>0.5 → f+1 ; d==0.5 → (f even ? f : f+1)
   const roundHalfEven: Instr[] = [
-    { op: "local.get", index: x } as Instr,
-    { op: "f64.floor" } as Instr,
-    { op: "local.set", index: f } as Instr,
-    { op: "local.get", index: x } as Instr,
-    { op: "local.get", index: f } as Instr,
-    { op: "f64.sub" } as Instr,
-    { op: "local.set", index: d } as Instr,
+    { op: "local.get", index: x },
+    { op: "f64.floor" },
+    { op: "local.set", index: f },
+    { op: "local.get", index: x },
+    { op: "local.get", index: f },
+    { op: "f64.sub" },
+    { op: "local.set", index: d },
     // d < 0.5 ?
-    { op: "local.get", index: d } as Instr,
-    { op: "f64.const", value: 0.5 } as Instr,
-    { op: "f64.lt" } as Instr,
+    { op: "local.get", index: d },
+    { op: "f64.const", value: 0.5 },
+    { op: "f64.lt" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } as ValType },
-      then: [{ op: "local.get", index: f } as Instr],
+      then: [{ op: "local.get", index: f }],
       else: [
         // d > 0.5 ?
-        { op: "local.get", index: d } as Instr,
-        { op: "f64.const", value: 0.5 } as Instr,
-        { op: "f64.gt" } as Instr,
+        { op: "local.get", index: d },
+        { op: "f64.const", value: 0.5 },
+        { op: "f64.gt" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "f64" } as ValType },
-          then: [
-            { op: "local.get", index: f } as Instr,
-            { op: "f64.const", value: 1 } as Instr,
-            { op: "f64.add" } as Instr,
-          ],
+          then: [{ op: "local.get", index: f }, { op: "f64.const", value: 1 }, { op: "f64.add" }],
           else: [
             // tie (d == 0.5): round to even. f even ⇔ floor(f/2) == f/2.
-            { op: "local.get", index: f } as Instr,
-            { op: "f64.const", value: 0.5 } as Instr,
-            { op: "f64.mul" } as Instr,
-            { op: "local.set", index: d } as Instr, // d := f/2 (reuse d, no longer needed)
-            { op: "local.get", index: d } as Instr,
-            { op: "f64.floor" } as Instr,
-            { op: "local.get", index: d } as Instr,
-            { op: "f64.eq" } as Instr,
+            { op: "local.get", index: f },
+            { op: "f64.const", value: 0.5 },
+            { op: "f64.mul" },
+            { op: "local.set", index: d }, // d := f/2 (reuse d, no longer needed)
+            { op: "local.get", index: d },
+            { op: "f64.floor" },
+            { op: "local.get", index: d },
+            { op: "f64.eq" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "f64" } as ValType },
-              then: [{ op: "local.get", index: f } as Instr],
-              else: [
-                { op: "local.get", index: f } as Instr,
-                { op: "f64.const", value: 1 } as Instr,
-                { op: "f64.add" } as Instr,
-              ],
-            } as Instr,
+              then: [{ op: "local.get", index: f }],
+              else: [{ op: "local.get", index: f }, { op: "f64.const", value: 1 }, { op: "f64.add" }],
+            },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
-    { op: "i32.trunc_sat_f64_u" } as Instr,
-    { op: "local.set", index: out } as Instr,
+    },
+    { op: "i32.trunc_sat_f64_u" },
+    { op: "local.set", index: out },
   ];
 
   // Clamp: x>=255 → 255 ; x>0 (NaN-false) → round ; else → 0.
-  fctx.body.push({ op: "local.get", index: x } as Instr);
-  fctx.body.push({ op: "f64.const", value: 255 } as Instr);
-  fctx.body.push({ op: "f64.ge" } as Instr);
+  fctx.body.push({ op: "local.get", index: x });
+  fctx.body.push({ op: "f64.const", value: 255 });
+  fctx.body.push({ op: "f64.ge" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "i32.const", value: 255 } as Instr, { op: "local.set", index: out } as Instr],
+    then: [
+      { op: "i32.const", value: 255 },
+      { op: "local.set", index: out },
+    ],
     else: [
-      { op: "local.get", index: x } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.gt" } as Instr,
+      { op: "local.get", index: x },
+      { op: "f64.const", value: 0 },
+      { op: "f64.gt" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: roundHalfEven,
-        else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: out } as Instr],
-      } as Instr,
+        else: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: out },
+        ],
+      },
     ],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: out } as Instr);
+  });
+  fctx.body.push({ op: "local.get", index: out });
   releaseTempLocal(fctx, x);
   releaseTempLocal(fctx, f);
   releaseTempLocal(fctx, d);

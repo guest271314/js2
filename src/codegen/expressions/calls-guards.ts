@@ -268,7 +268,7 @@ export function emitObjectCoercion(
   } else if (isBooleanType(argTsType)) {
     // __new_Boolean takes f64 — coerce bool→f64.
     compileExpression(ctx, fctx, args[0]!, { kind: "i32" });
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     const newBoolIdx = ensureLateImport(ctx, "__new_Boolean", [{ kind: "f64" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     const finalBoolIdx = ctx.funcMap.get("__new_Boolean") ?? newBoolIdx;

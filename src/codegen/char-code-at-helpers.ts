@@ -87,7 +87,7 @@ export function ensureHostCharCodeAtGuarded(ctx: CodegenContext): number | null 
         { op: "f64.convert_i32_u" },
       ],
       else: [{ op: "f64.const", value: Number.NaN }],
-    } as Instr,
+    },
   ];
 
   const fn: WasmFunction = {
@@ -154,7 +154,7 @@ export function ensureNativeCharCodeAtHelper(ctx: CodegenContext): number | null
         { op: "array.get_u", typeIdx: strDataTypeIdx },
         { op: "f64.convert_i32_u" },
       ],
-    } as Instr,
+    },
   ];
 
   const fn: WasmFunction = {

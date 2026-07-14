@@ -966,7 +966,7 @@ function emitObjectLiteralAccessorFn(
     const closureType = compileArrowAsClosure(ctx, fctx, fn);
     if (!closureType) return false;
     if (closureType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     return true;
   }
@@ -996,7 +996,7 @@ function emitObjectLiteralMethodFn(ctx: CodegenContext, fctx: FunctionContext, f
     const closureType = compileArrowAsClosure(ctx, fctx, fn);
     if (!closureType) return false;
     if (closureType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     return true;
   }
@@ -2390,7 +2390,7 @@ export function compileObjectLiteralForStruct(
           // For a concretely-typed struct field of the same closure type,
           // no coercion is needed.
           if (field.type.kind === "externref") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           } else if (field.type.kind === "eqref") {
             // ref → eqref: GC ref subtype, no instruction needed (implicit).
           } else if (
@@ -2401,7 +2401,7 @@ export function compileObjectLiteralForStruct(
             // dropping our closure and re-emitting undefined below. This
             // shouldn't happen for well-formed fields but keeps codegen
             // sound under TypeChecker quirks.
-            fctx.body.push({ op: "drop" } as Instr);
+            fctx.body.push({ op: "drop" });
             fctx.body.push({ op: "ref.null", typeIdx: (field.type as { typeIdx: number }).typeIdx });
           }
           continue; // field handled
@@ -2994,7 +2994,10 @@ export function compileObjectLiteralForStruct(
         const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
         const catchAllBody: Instr[] =
           getCaughtIdx !== undefined
-            ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+            ? [
+                { op: "call", funcIdx: getCaughtIdx },
+                { op: "local.set", index: pendingThrowLocal },
+              ]
             : [];
         methodFctx.body.push({
           op: "try",
@@ -3984,7 +3987,7 @@ export function compileArrayLiteral(
           continue;
         }
         if (srcType.kind === "ref_null") {
-          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" });
         }
         fctx.body.push({ op: "call", funcIdx: toCharVecIdx });
         const srcLocal = allocLocal(fctx, `__spread_str_${fctx.locals.length}`, {
@@ -4113,7 +4116,7 @@ export function compileArrayLiteral(
           // already-emitted call and the drive resolves to the wrong function
           // (returning a null iterator → empty spread). (#1749)
           const valueCoerce = collectInstrs(fctx, () => {
-            fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: valLocal });
             coerceType(ctx, fctx, { kind: "externref" }, elemType);
           });
           flushLateImportShifts(ctx, fctx);
@@ -4125,72 +4128,72 @@ export function compileArrayLiteral(
           // Stack: [vec-ref]. Drive the override → iterator externref local.
           const iterLocal = emitArrayProtoIteratorDrive(ctx, fctx, overrideGlobalIdx);
           // cap = 4; data = new array[cap]; len = 0.
-          fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-          fctx.body.push({ op: "local.set", index: capLocal } as Instr);
-          fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-          fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-          fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-          fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+          fctx.body.push({ op: "i32.const", value: 4 });
+          fctx.body.push({ op: "local.set", index: capLocal });
+          fctx.body.push({ op: "local.get", index: capLocal });
+          fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+          fctx.body.push({ op: "local.set", index: dataLocal });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.set", index: lenLocal });
           // Grow when len == cap: cap *= 2; grow = new array[cap];
           // array.copy grow[0..len] = data[0..len]; data = grow.
           const growInstrs = collectInstrs(fctx, () => {
-            fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-            fctx.body.push({ op: "i32.const", value: 2 } as Instr);
-            fctx.body.push({ op: "i32.mul" } as Instr);
-            fctx.body.push({ op: "local.set", index: capLocal } as Instr);
-            fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-            fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-            fctx.body.push({ op: "local.set", index: growLocal } as Instr);
-            fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-            fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
-            fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-            fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-            fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
-            fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-            fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: capLocal });
+            fctx.body.push({ op: "i32.const", value: 2 });
+            fctx.body.push({ op: "i32.mul" });
+            fctx.body.push({ op: "local.set", index: capLocal });
+            fctx.body.push({ op: "local.get", index: capLocal });
+            fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+            fctx.body.push({ op: "local.set", index: growLocal });
+            fctx.body.push({ op: "local.get", index: growLocal });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "local.get", index: dataLocal });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "local.get", index: lenLocal });
+            fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
+            fctx.body.push({ op: "local.get", index: growLocal });
+            fctx.body.push({ op: "local.set", index: dataLocal });
           });
           // loop body: (done, val) = __iterator_next(iter); if done break;
           // if len == cap grow; data[len] = coerce(val); len++.
           const loopBody: Instr[] = [];
-          loopBody.push({ op: "local.get", index: iterLocal } as Instr);
-          loopBody.push({ op: "call", funcIdx: drainNextIdx } as Instr);
-          loopBody.push({ op: "local.set", index: valLocal } as Instr); // value (top)
-          loopBody.push({ op: "local.set", index: doneLocal } as Instr); // done (below)
-          loopBody.push({ op: "local.get", index: doneLocal } as Instr);
-          loopBody.push({ op: "br_if", depth: 1 } as Instr); // done → break
-          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
-          loopBody.push({ op: "local.get", index: capLocal } as Instr);
-          loopBody.push({ op: "i32.ge_s" } as Instr);
-          loopBody.push({ op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr);
-          loopBody.push({ op: "local.get", index: dataLocal } as Instr);
-          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
+          loopBody.push({ op: "local.get", index: iterLocal });
+          loopBody.push({ op: "call", funcIdx: drainNextIdx });
+          loopBody.push({ op: "local.set", index: valLocal }); // value (top)
+          loopBody.push({ op: "local.set", index: doneLocal }); // done (below)
+          loopBody.push({ op: "local.get", index: doneLocal });
+          loopBody.push({ op: "br_if", depth: 1 }); // done → break
+          loopBody.push({ op: "local.get", index: lenLocal });
+          loopBody.push({ op: "local.get", index: capLocal });
+          loopBody.push({ op: "i32.ge_s" });
+          loopBody.push({ op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] });
+          loopBody.push({ op: "local.get", index: dataLocal });
+          loopBody.push({ op: "local.get", index: lenLocal });
           for (const instr of valueCoerce) loopBody.push(instr);
-          loopBody.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
-          loopBody.push({ op: "local.get", index: lenLocal } as Instr);
-          loopBody.push({ op: "i32.const", value: 1 } as Instr);
-          loopBody.push({ op: "i32.add" } as Instr);
-          loopBody.push({ op: "local.set", index: lenLocal } as Instr);
-          loopBody.push({ op: "br", depth: 0 } as Instr); // continue
+          loopBody.push({ op: "array.set", typeIdx: arrTypeIdx });
+          loopBody.push({ op: "local.get", index: lenLocal });
+          loopBody.push({ op: "i32.const", value: 1 });
+          loopBody.push({ op: "i32.add" });
+          loopBody.push({ op: "local.set", index: lenLocal });
+          loopBody.push({ op: "br", depth: 0 }); // continue
           // Guard the whole drain on a non-null iterator (an unresolved-override
           // drive returns null — degrade to an empty contribution, no trap).
           const drainInstrs = collectInstrs(fctx, () => {
             fctx.body.push({
               op: "block",
               blockType: { kind: "empty" },
-              body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-            } as Instr);
+              body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+            });
           });
-          fctx.body.push({ op: "local.get", index: iterLocal } as Instr);
-          fctx.body.push({ op: "ref.is_null" } as Instr);
-          fctx.body.push({ op: "i32.eqz" } as Instr);
-          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: drainInstrs, else: [] } as Instr);
+          fctx.body.push({ op: "local.get", index: iterLocal });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({ op: "i32.eqz" });
+          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: drainInstrs, else: [] });
           // Build the contributed vec { len, data } and accumulate its length
           // into the running total, exactly like the other spread sources.
-          fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-          fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
-          fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+          fctx.body.push({ op: "local.get", index: lenLocal });
+          fctx.body.push({ op: "local.get", index: dataLocal });
+          fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
           const srcLocal = allocLocal(fctx, `__spread_ovr_${fctx.locals.length}`, {
             kind: "ref_null",
             typeIdx: vecTypeIdx,
@@ -4412,7 +4415,7 @@ export function compileArrayConstructorCall(
     //   floor(n) === n  (integer check; also rejects NaN since NaN !== NaN)
     fctx.body.push({ op: "local.get", index: lenLocal });
     fctx.body.push({ op: "local.get", index: lenLocal });
-    fctx.body.push({ op: "f64.floor" } as Instr);
+    fctx.body.push({ op: "f64.floor" });
     fctx.body.push({ op: "f64.eq" });
     fctx.body.push({ op: "i32.and" });
     // if (!valid) throw RangeError
@@ -4423,8 +4426,8 @@ export function compileArrayConstructorCall(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
-    } as Instr);
+      then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
+    });
     // Valid length: build the array of that size.
     fctx.body.push({ op: "local.get", index: lenLocal });
     fctx.body.push({ op: "i32.trunc_sat_f64_s" });

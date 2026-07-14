@@ -117,60 +117,63 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
     : { len: 3, i: 4, val: 5, res: 6, args: 7, out: 8, acc: -1 };
 
   const loopExitTest: Instr[] = backward
-    ? [{ op: "local.get", index: L.i } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.lt" } as Instr]
-    : [{ op: "local.get", index: L.i } as Instr, { op: "local.get", index: L.len } as Instr, { op: "f64.ge" } as Instr];
+    ? [{ op: "local.get", index: L.i }, { op: "f64.const", value: 0 }, { op: "f64.lt" }]
+    : [{ op: "local.get", index: L.i }, { op: "local.get", index: L.len }, { op: "f64.ge" }];
   const loopStep: Instr[] = [
-    { op: "local.get", index: L.i } as Instr,
-    { op: "f64.const", value: 1 } as Instr,
-    { op: backward ? "f64.sub" : "f64.add" } as Instr,
-    { op: "local.set", index: L.i } as Instr,
+    { op: "local.get", index: L.i },
+    { op: "f64.const", value: 1 },
+    { op: backward ? "f64.sub" : "f64.add" },
+    { op: "local.set", index: L.i },
   ];
   // val = __extern_get_idx(recv, i)
   const readVal: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: L.i } as Instr,
-    { op: "call", funcIdx: externGetIdxIdx } as Instr,
-    { op: "local.set", index: L.val } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: L.i },
+    { op: "call", funcIdx: externGetIdxIdx },
+    { op: "local.set", index: L.val },
   ];
   // args = __objvec_new(); [acc,] val, boxNum(i), recv pushed in callback order.
   const buildArgs: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: L.args } as Instr,
-    ...(isReduce
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: L.args },
+    ...((isReduce
       ? [
-          { op: "local.get", index: L.args } as Instr,
-          { op: "local.get", index: L.acc } as Instr,
-          { op: "call", funcIdx: objVecPushIdx } as Instr,
+          { op: "local.get", index: L.args },
+          { op: "local.get", index: L.acc },
+          { op: "call", funcIdx: objVecPushIdx },
         ]
-      : []),
-    { op: "local.get", index: L.args } as Instr,
-    { op: "local.get", index: L.val } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: L.args } as Instr,
-    { op: "local.get", index: L.i } as Instr,
-    { op: "call", funcIdx: boxNumIdx } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: L.args } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
+      : []) satisfies Instr[]),
+    { op: "local.get", index: L.args },
+    { op: "local.get", index: L.val },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: L.args },
+    { op: "local.get", index: L.i },
+    { op: "call", funcIdx: boxNumIdx },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: L.args },
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: objVecPushIdx },
   ];
   // invoke: __apply_closure(cb, thisArg | undefined, args)
   const invoke: Instr[] = [
-    { op: "local.get", index: 1 } as Instr,
-    ...(isReduce ? [{ op: "ref.null.extern" } as Instr] : [{ op: "local.get", index: 2 } as Instr]),
-    { op: "local.get", index: L.args } as Instr,
-    { op: "call", funcIdx: applyClosureIdx } as Instr,
-    { op: "local.set", index: isReduce ? L.acc : L.res } as Instr,
+    { op: "local.get", index: 1 },
+    ...((isReduce ? [{ op: "ref.null.extern" }] : [{ op: "local.get", index: 2 }]) satisfies Instr[]),
+    { op: "local.get", index: L.args },
+    { op: "call", funcIdx: applyClosureIdx },
+    { op: "local.set", index: isReduce ? L.acc : L.res },
   ];
   const truthyRes: Instr[] = [
-    { op: "local.get", index: L.res } as Instr,
-    { op: "call", funcIdx: isTruthyIdx } as Instr,
+    { op: "local.get", index: L.res },
+    { op: "call", funcIdx: isTruthyIdx },
   ];
   const boxedBool = (v: 0 | 1): Instr[] => [
-    { op: "i32.const", value: v } as Instr,
-    { op: "call", funcIdx: boxBoolIdx } as Instr,
+    { op: "i32.const", value: v },
+    { op: "call", funcIdx: boxBoolIdx },
   ];
-  const boxedIndex: Instr[] = [{ op: "local.get", index: L.i } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+  const boxedIndex: Instr[] = [
+    { op: "local.get", index: L.i },
+    { op: "call", funcIdx: boxNumIdx },
+  ];
 
   // ── Method-specific per-iteration tail + final result ──
   let perIter: Instr[];
@@ -178,15 +181,15 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
   switch (methodName) {
     case "forEach":
       perIter = [];
-      finalResult = [{ op: "ref.null.extern" } as Instr];
+      finalResult = [{ op: "ref.null.extern" }];
       break;
     case "map":
       perIter = [
-        { op: "local.get", index: L.out } as Instr,
-        { op: "local.get", index: L.res } as Instr,
-        { op: "call", funcIdx: objVecPushIdx } as Instr,
+        { op: "local.get", index: L.out },
+        { op: "local.get", index: L.res },
+        { op: "call", funcIdx: objVecPushIdx },
       ];
-      finalResult = [{ op: "local.get", index: L.out } as Instr];
+      finalResult = [{ op: "local.get", index: L.out }];
       break;
     case "filter":
       perIter = [
@@ -195,13 +198,13 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: L.out } as Instr,
-            { op: "local.get", index: L.val } as Instr,
-            { op: "call", funcIdx: objVecPushIdx } as Instr,
+            { op: "local.get", index: L.out },
+            { op: "local.get", index: L.val },
+            { op: "call", funcIdx: objVecPushIdx },
           ],
-        } as Instr,
+        },
       ];
-      finalResult = [{ op: "local.get", index: L.out } as Instr];
+      finalResult = [{ op: "local.get", index: L.out }];
       break;
     case "find":
     case "findLast":
@@ -210,10 +213,10 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "local.get", index: L.val } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "local.get", index: L.val }, { op: "return" }],
+        },
       ];
-      finalResult = [{ op: "ref.null.extern" } as Instr];
+      finalResult = [{ op: "ref.null.extern" }];
       break;
     case "findIndex":
     case "findLastIndex":
@@ -222,20 +225,23 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...boxedIndex, { op: "return" } as Instr],
-        } as Instr,
+          then: [...boxedIndex, { op: "return" }],
+        },
       ];
-      finalResult = [{ op: "f64.const", value: -1 } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+      finalResult = [
+        { op: "f64.const", value: -1 },
+        { op: "call", funcIdx: boxNumIdx },
+      ];
       break;
     case "every":
       perIter = [
         ...truthyRes,
-        { op: "i32.eqz" } as Instr,
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...boxedBool(0), { op: "return" } as Instr],
-        } as Instr,
+          then: [...boxedBool(0), { op: "return" }],
+        },
       ];
       finalResult = boxedBool(1);
       break;
@@ -245,83 +251,86 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...boxedBool(1), { op: "return" } as Instr],
-        } as Instr,
+          then: [...boxedBool(1), { op: "return" }],
+        },
       ];
       finalResult = boxedBool(0);
       break;
     default:
       // reduce / reduceRight — acc already updated by `invoke`.
       perIter = [];
-      finalResult = [{ op: "local.get", index: L.acc } as Instr];
+      finalResult = [{ op: "local.get", index: L.acc }];
       break;
   }
 
   // ── Prologue ──
   const prologue: Instr[] = [
     // len = __extern_length(recv)
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: externLengthIdx } as Instr,
-    { op: "local.set", index: L.len } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "local.set", index: L.len },
   ];
-  const iInitForward: Instr[] = [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: L.i } as Instr];
+  const iInitForward: Instr[] = [
+    { op: "f64.const", value: 0 },
+    { op: "local.set", index: L.i },
+  ];
   const iInitBackward: Instr[] = [
-    { op: "local.get", index: L.len } as Instr,
-    { op: "f64.const", value: 1 } as Instr,
-    { op: "f64.sub" } as Instr,
-    { op: "local.set", index: L.i } as Instr,
+    { op: "local.get", index: L.len },
+    { op: "f64.const", value: 1 },
+    { op: "f64.sub" },
+    { op: "local.set", index: L.i },
   ];
   if (!isReduce) {
     if (methodName === "map" || methodName === "filter") {
-      prologue.push({ op: "call", funcIdx: objVecNewIdx } as Instr, { op: "local.set", index: L.out } as Instr);
+      prologue.push({ op: "call", funcIdx: objVecNewIdx }, { op: "local.set", index: L.out });
     }
     prologue.push(...(backward ? iInitBackward : iInitForward));
   } else {
     // hasInit ? (acc = init; i = first) : (empty → undefined; acc = first elem; i = second)
     prologue.push(
-      { op: "local.get", index: 3 } as Instr,
+      { op: "local.get", index: 3 },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 2 } as Instr,
-          { op: "local.set", index: L.acc } as Instr,
+          { op: "local.get", index: 2 },
+          { op: "local.set", index: L.acc },
           ...(backward ? iInitBackward : iInitForward),
         ],
         else: [
           // len <= 0 → return undefined (boundary: spec TypeError, see header)
-          { op: "local.get", index: L.len } as Instr,
-          { op: "f64.const", value: 0 } as Instr,
-          { op: "f64.le" } as Instr,
+          { op: "local.get", index: L.len },
+          { op: "f64.const", value: 0 },
+          { op: "f64.le" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-          } as Instr,
+            then: [{ op: "ref.null.extern" }, { op: "return" }],
+          },
           // acc = first-in-iteration-order element; i = the next one
-          ...(backward
+          ...((backward
             ? [
-                { op: "local.get", index: 0 } as Instr,
-                { op: "local.get", index: L.len } as Instr,
-                { op: "f64.const", value: 1 } as Instr,
-                { op: "f64.sub" } as Instr,
-                { op: "call", funcIdx: externGetIdxIdx } as Instr,
-                { op: "local.set", index: L.acc } as Instr,
-                { op: "local.get", index: L.len } as Instr,
-                { op: "f64.const", value: 2 } as Instr,
-                { op: "f64.sub" } as Instr,
-                { op: "local.set", index: L.i } as Instr,
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: L.len },
+                { op: "f64.const", value: 1 },
+                { op: "f64.sub" },
+                { op: "call", funcIdx: externGetIdxIdx },
+                { op: "local.set", index: L.acc },
+                { op: "local.get", index: L.len },
+                { op: "f64.const", value: 2 },
+                { op: "f64.sub" },
+                { op: "local.set", index: L.i },
               ]
             : [
-                { op: "local.get", index: 0 } as Instr,
-                { op: "f64.const", value: 0 } as Instr,
-                { op: "call", funcIdx: externGetIdxIdx } as Instr,
-                { op: "local.set", index: L.acc } as Instr,
-                { op: "f64.const", value: 1 } as Instr,
-                { op: "local.set", index: L.i } as Instr,
-              ]),
+                { op: "local.get", index: 0 },
+                { op: "f64.const", value: 0 },
+                { op: "call", funcIdx: externGetIdxIdx },
+                { op: "local.set", index: L.acc },
+                { op: "f64.const", value: 1 },
+                { op: "local.set", index: L.i },
+              ]) satisfies Instr[]),
         ],
-      } as Instr,
+      },
     );
   }
 
@@ -336,17 +345,17 @@ export function ensureNativeArrayHof(ctx: CodegenContext, methodName: string): n
           blockType: { kind: "empty" },
           body: [
             ...loopExitTest,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "br_if", depth: 1 },
             ...readVal,
             ...buildArgs,
             ...invoke,
             ...perIter,
             ...loopStep,
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     ...finalResult,
   ];
 

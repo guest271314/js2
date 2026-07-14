@@ -897,7 +897,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         // Create an empty vec struct: struct.new(length=0, data=array.new_default(4))
         fctx.body.push({ op: "i32.const", value: 0 }); // length = 0
         fctx.body.push({ op: "i32.const", value: 4 }); // initial capacity
-        fctx.body.push({ op: "array.new_default", typeIdx: shapeInfo.arrTypeIdx } as Instr);
+        fctx.body.push({ op: "array.new_default", typeIdx: shapeInfo.arrTypeIdx });
         fctx.body.push({ op: "struct.new", typeIdx: shapeInfo.vecTypeIdx });
         fctx.body.push({ op: "global.set", index: moduleGlobalIdx });
         // Set TDZ flag to 1 (initialized)
@@ -1373,7 +1373,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
 
           if (matchedClosureInfo) {
             // Convert externref back to closure struct ref (guarded to avoid illegal cast)
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
             emitGuardedRefCast(fctx, matchedClosureInfo.structTypeIdx);
             const castType: ValType = { kind: "ref_null", typeIdx: matchedClosureInfo.structTypeIdx };
             if (localIdx >= fctx.params.length) {
@@ -1471,15 +1471,15 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [] as Instr[],
+          then: [],
           else: [
-            { op: "local.get", index: localIdx } as Instr,
-            { op: "local.get", index: tmpVal } as Instr,
+            { op: "local.get", index: localIdx },
+            { op: "local.get", index: tmpVal },
             {
               op: "struct.set",
               typeIdx: boxedForInit.refCellTypeIdx,
               fieldIdx: 0,
-            } as Instr,
+            },
           ],
         });
       } else {
@@ -1516,11 +1516,11 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [] as Instr[],
+            then: [],
             else: [
-              { op: "local.get", index: localIdx } as Instr,
-              { op: "local.get", index: tmpVal } as Instr,
-              { op: "struct.set", typeIdx: boxedNoInit.refCellTypeIdx, fieldIdx: 0 } as Instr,
+              { op: "local.get", index: localIdx },
+              { op: "local.get", index: tmpVal },
+              { op: "struct.set", typeIdx: boxedNoInit.refCellTypeIdx, fieldIdx: 0 },
             ],
           });
         } else {
@@ -1544,14 +1544,14 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       const localSlot = fctx.locals[localIdx - fctx.params.length];
       const globalSlot = ctx.mod.globals[localGlobalIdx(ctx, capturedGlobalIdx)];
       if (localSlot && globalSlot) {
-        fctx.body.push({ op: "local.get", index: localIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: localIdx });
         // Coerce the local value to the global's declared type if they differ
         // (e.g. local is `(ref N)` while the captured global was widened to
         // `ref_null`/`externref`). Reuse the shared coercion helper.
         if (!valTypesMatch(localSlot.type, globalSlot.type)) {
           coerceType(ctx, fctx, localSlot.type, globalSlot.type);
         }
-        fctx.body.push({ op: "global.set", index: capturedGlobalIdx } as Instr);
+        fctx.body.push({ op: "global.set", index: capturedGlobalIdx });
       }
     }
   }

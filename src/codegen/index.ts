@@ -2995,11 +2995,11 @@ function finalizeInModuleInitFlag(ctx: CodegenContext): void {
   if (initArrayIdx < 0) return;
   const initFn = ctx.mod.functions[initArrayIdx]!;
   initFn.body = [
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "global.set", index: flagIdx } as Instr,
+    { op: "i32.const", value: 1 },
+    { op: "global.set", index: flagIdx },
     ...initFn.body,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "global.set", index: flagIdx } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "global.set", index: flagIdx },
   ];
 }
 
@@ -3027,10 +3027,10 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
   });
   const initFn = ctx.mod.functions[initArrayIdx]!;
   initFn.body = [
-    { op: "global.get", index: doneGlobalIdx } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "global.set", index: doneGlobalIdx } as Instr,
+    { op: "global.get", index: doneGlobalIdx },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
+    { op: "i32.const", value: 1 },
+    { op: "global.set", index: doneGlobalIdx },
     ...initFn.body,
   ];
 
@@ -3039,7 +3039,7 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
   for (const fn of ctx.mod.functions) {
     if (!fn.exported) continue;
     if (fn.name === "__module_init") continue;
-    fn.body = [{ op: "call", funcIdx: initFuncIdx } as Instr, ...fn.body];
+    fn.body = [{ op: "call", funcIdx: initFuncIdx }, ...fn.body];
   }
 
   ctx.moduleInitGuardApplied = true;
@@ -3182,15 +3182,15 @@ function addWasiStartExport(ctx: CodegenContext): void {
                   tagIdx: ctx.exnTagIdx,
                   body: [
                     // The catch pushes the thrown externref payload; render + write it.
-                    { op: "call", funcIdx: exnPrinterIdx } as Instr,
+                    { op: "call", funcIdx: exnPrinterIdx },
                     // An uncaught exception is a failure — exit nonzero.
-                    { op: "i32.const", value: 1 } as Instr,
-                    { op: "call", funcIdx: ctx.wasiProcExitIdx } as Instr,
-                    { op: "unreachable" } as Instr,
+                    { op: "i32.const", value: 1 },
+                    { op: "call", funcIdx: ctx.wasiProcExitIdx },
+                    { op: "unreachable" },
                   ],
                 },
               ],
-            } as unknown as Instr,
+            },
           ]
         : body;
 
@@ -3583,9 +3583,9 @@ function buildSetterNestedIfElse(
   const body: Instr[] = [];
 
   // Convert obj externref to anyref and store
-  body.push({ op: "local.get", index: 0 } as Instr);
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "local.get", index: 0 });
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: anyLocal });
 
   // Chain: if (ref.test T1) { cast + struct.set T1 } else if (ref.test T2) { ... }
   let current: Instr[] = []; // final else: no-op (wrote flag stays 0)
@@ -3601,12 +3601,12 @@ function buildSetterNestedIfElse(
     // a same-slot field of the wrong struct.
     if (entry.shapeId !== undefined && entry.shapeFieldIdx !== undefined) {
       thenBranch = [
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
-        { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.shapeFieldIdx } as Instr,
-        { op: "i32.const", value: entry.shapeId } as Instr,
-        { op: "i32.eq" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: thenBranch } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: entry.typeIdx },
+        { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.shapeFieldIdx },
+        { op: "i32.const", value: entry.shapeId },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: thenBranch },
       ];
     }
 
@@ -3617,16 +3617,12 @@ function buildSetterNestedIfElse(
       else: current,
     };
 
-    current = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
-      ifInstr,
-    ];
+    current = [{ op: "local.get", index: anyLocal }, { op: "ref.test", typeIdx: entry.typeIdx }, ifInstr];
   }
 
   body.push(...current);
   // Result: 1 iff an arm matched this receiver's runtime type and wrote.
-  body.push({ op: "local.get", index: wroteLocal } as Instr);
+  body.push({ op: "local.get", index: wroteLocal });
   return body;
 }
 
@@ -3642,15 +3638,18 @@ function buildSetterStore(
 ): Instr[] {
   const then: Instr[] = [];
   const ft = entry.fieldType;
-  const markWrote: Instr[] = [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: wroteLocal } as Instr];
+  const markWrote: Instr[] = [
+    { op: "i32.const", value: 1 },
+    { op: "local.set", index: wroteLocal },
+  ];
 
   // Push the cast struct ref onto the stack
-  then.push({ op: "local.get", index: anyLocal } as Instr);
-  then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
+  then.push({ op: "local.get", index: anyLocal });
+  then.push({ op: "ref.cast", typeIdx: entry.typeIdx });
 
   // Push the value (typed per valMode; for extern-mode buckets the arm
   // coerces per its own field kind below — mixed buckets are allowed, #2853 B).
-  then.push({ op: "local.get", index: 1 } as Instr);
+  then.push({ op: "local.get", index: 1 });
 
   if (valMode === "extern") {
     // (#2831) Vec-typed field: the inbound externref may be a HOST-marshalled
@@ -3665,9 +3664,9 @@ function buildSetterStore(
     const vecMatName = ft.kind === "ref" || ft.kind === "ref_null" ? ctx.vecFromExternMap?.get(ft.typeIdx) : undefined;
     const vecMatIdx = vecMatName !== undefined ? ctx.funcMap.get(vecMatName) : undefined;
     if (vecMatIdx !== undefined) {
-      then.push({ op: "call", funcIdx: vecMatIdx } as Instr);
-      if (ft.kind === "ref") then.push({ op: "ref.as_non_null" } as Instr);
-      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push({ op: "call", funcIdx: vecMatIdx });
+      if (ft.kind === "ref") then.push({ op: "ref.as_non_null" });
+      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx });
       then.push(...markWrote);
       return then;
     }
@@ -3676,9 +3675,9 @@ function buildSetterStore(
     // fields. Boolean-branded i32 fields coerce true/false → 1/0 the same way.
     if (ft.kind === "f64" || ft.kind === "i32") {
       // Caller guarantees unboxNumIdx is defined for these arms (bucket filter).
-      then.push({ op: "call", funcIdx: unboxNumIdx! } as Instr);
-      if (ft.kind === "i32") then.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+      then.push({ op: "call", funcIdx: unboxNumIdx! });
+      if (ft.kind === "i32") then.push({ op: "i32.trunc_sat_f64_s" });
+      then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx });
       then.push(...markWrote);
       return then;
     }
@@ -3690,16 +3689,16 @@ function buildSetterStore(
     // wraps the setter call in try/catch so a wrong-type assign degrades to
     // sidecar-only (the prior behaviour) rather than crashing.
     if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref") {
-      then.push({ op: "any.convert_extern" } as Instr);
+      then.push({ op: "any.convert_extern" });
     }
     if (ft.kind === "ref") {
-      then.push({ op: "ref.cast", typeIdx: ft.typeIdx } as Instr);
+      then.push({ op: "ref.cast", typeIdx: ft.typeIdx });
     } else if (ft.kind === "ref_null") {
-      then.push({ op: "ref.cast_null", typeIdx: ft.typeIdx } as Instr);
+      then.push({ op: "ref.cast_null", typeIdx: ft.typeIdx });
     }
   }
 
-  then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  then.push({ op: "struct.set", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx });
   then.push(...markWrote);
   return then;
 }
@@ -3869,18 +3868,18 @@ function patchStructNewWithShapeId(ctx: CodegenContext, typeIdx: number, shapeId
       for (let i = arr.length - 1; i >= 0; i--) {
         const instr = arr[i]!;
         if (instr.op === "struct.new" && (instr as { typeIdx?: number }).typeIdx === typeIdx) {
-          arr.splice(i, 0, { op: "i32.const", value: shapeId } as Instr);
+          arr.splice(i, 0, { op: "i32.const", value: shapeId });
         }
         const anyInstr = instr as Record<string, unknown>;
-        if (Array.isArray(anyInstr.body)) work.push(anyInstr.body as Instr[]);
-        if (Array.isArray(anyInstr.then)) work.push(anyInstr.then as Instr[]);
-        if (Array.isArray(anyInstr.else)) work.push(anyInstr.else as Instr[]);
+        if (Array.isArray(anyInstr.body)) work.push(anyInstr.body);
+        if (Array.isArray(anyInstr.then)) work.push(anyInstr.then);
+        if (Array.isArray(anyInstr.else)) work.push(anyInstr.else);
         if (Array.isArray(anyInstr.catches)) {
           for (const c of anyInstr.catches as { body?: Instr[] }[]) {
             if (Array.isArray(c.body)) work.push(c.body);
           }
         }
-        if (Array.isArray(anyInstr.catchAll)) work.push(anyInstr.catchAll as Instr[]);
+        if (Array.isArray(anyInstr.catchAll)) work.push(anyInstr.catchAll);
       }
     }
   };
@@ -3971,67 +3970,67 @@ function emitStructFieldNamesExport(
   const shapeLocal = 2; // i32 scratch for the read shape-id (colliding arms)
 
   const body: Instr[] = [];
-  body.push({ op: "local.get", index: 0 } as Instr);
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "local.get", index: 0 });
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: anyLocal });
 
   // Helper: dispatch on a shape-id value (on stack) → CSV global.
   const buildShapeIdDispatch = (): Instr[] => {
     const ids = [...shapeIdToGlobalIdx.entries()];
-    let chain: Instr[] = [{ op: "ref.null.extern" } as Instr];
+    let chain: Instr[] = [{ op: "ref.null.extern" }];
     for (let i = ids.length - 1; i >= 0; i--) {
       const [shapeId, globalIdx] = ids[i]!;
       chain = [
-        { op: "local.get", index: shapeLocal } as Instr,
-        { op: "i32.const", value: shapeId } as Instr,
-        { op: "i32.eq" } as Instr,
+        { op: "local.get", index: shapeLocal },
+        { op: "i32.const", value: shapeId },
+        { op: "i32.eq" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
-          then: [{ op: "global.get", index: globalIdx } as Instr],
+          then: [{ op: "global.get", index: globalIdx }],
           else: chain,
-        } as Instr,
+        },
       ];
     }
-    return [{ op: "local.set", index: shapeLocal } as Instr, ...chain];
+    return [{ op: "local.set", index: shapeLocal }, ...chain];
   };
 
   // Build nested if-else chain: legacy arms first, then colliding $shape arms.
-  let fallback: Instr[] = [{ op: "ref.null.extern" } as Instr];
+  let fallback: Instr[] = [{ op: "ref.null.extern" }];
 
   for (let i = legacyEntries.length - 1; i >= 0; i--) {
     const typeIdx = legacyEntries[i]!.typeIdx;
     const globalIdx = legacyTypeIdxToGlobalIdx.get(typeIdx);
     if (globalIdx === undefined) continue;
     fallback = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
-        then: [{ op: "global.get", index: globalIdx } as Instr],
+        then: [{ op: "global.get", index: globalIdx }],
         else: fallback,
-      } as Instr,
+      },
     ];
   }
 
   for (let i = shapeEntries.length - 1; i >= 0; i--) {
     const { typeIdx, shapeFieldIdx } = shapeEntries[i]!;
     const thenBranch: Instr[] = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx } as Instr,
-      { op: "struct.get", typeIdx, fieldIdx: shapeFieldIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx },
+      { op: "struct.get", typeIdx, fieldIdx: shapeFieldIdx },
       ...buildShapeIdDispatch(),
     ];
     fallback = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: thenBranch,
         else: fallback,
-      } as Instr,
+      },
     ];
   }
 
@@ -4103,43 +4102,43 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [];
     body.push({ op: "local.get", index: 0 });
-    body.push({ op: "any.convert_extern" } as Instr);
-    body.push({ op: "local.set", index: 1 } as Instr);
+    body.push({ op: "any.convert_extern" });
+    body.push({ op: "local.set", index: 1 });
 
-    let current: Instr[] = [{ op: "ref.null.extern" } as Instr];
+    let current: Instr[] = [{ op: "ref.null.extern" }];
 
     for (const entry of entries) {
       const testAndCall: Instr[] = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
-        { op: "call", funcIdx: entry.funcIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: entry.typeIdx },
+        { op: "call", funcIdx: entry.funcIdx },
       ];
 
       if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
-        testAndCall.push({ op: "extern.convert_any" } as Instr);
+        testAndCall.push({ op: "extern.convert_any" });
       } else if (entry.resultType.kind === "f64") {
         const boxIdx = ctx.funcMap.get("__box_number");
         if (boxIdx !== undefined) {
-          testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+          testAndCall.push({ op: "call", funcIdx: boxIdx });
         }
       } else if (entry.resultType.kind === "i32") {
-        testAndCall.push({ op: "f64.convert_i32_s" } as Instr);
+        testAndCall.push({ op: "f64.convert_i32_s" });
         const boxIdx = ctx.funcMap.get("__box_number");
         if (boxIdx !== undefined) {
-          testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+          testAndCall.push({ op: "call", funcIdx: boxIdx });
         }
       }
       // externref: no conversion needed
 
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: entry.typeIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
           then: testAndCall,
           else: current,
-        } as Instr,
+        },
       ];
     }
 
@@ -4243,16 +4242,16 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
     // __member_kind_<key>: ref.test cascade → 1 (method) / 2 (getter) / 0.
     {
       const funcIdx = ctx.numImportFuncs + mod.functions.length;
-      let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+      let current: Instr[] = [{ op: "i32.const", value: 0 }];
       const arm = (typeIdx: number, kind: number, tail: Instr[]): Instr[] => [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [{ op: "i32.const", value: kind } as Instr],
+          then: [{ op: "i32.const", value: kind }],
           else: tail,
-        } as Instr,
+        },
       ];
       for (const e of methodEntries) current = arm(e.typeIdx, 1, current);
       for (const e of getterEntries) current = arm(e.typeIdx, 2, current);
@@ -4261,12 +4260,7 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
         name: exportName,
         typeIdx: kindTypeIdx,
         locals: [{ name: "__any", type: { kind: "anyref" } }],
-        body: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "local.set", index: 1 } as Instr,
-          ...current,
-        ],
+        body: [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }, ...current],
         exported: true,
       } as WasmFunction);
       mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
@@ -4276,32 +4270,32 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
     // __call_get_<key>: run the compiled getter, box-coerce to externref.
     if (getterEntries.length > 0) {
       const funcIdx = ctx.numImportFuncs + mod.functions.length;
-      let current: Instr[] = [{ op: "ref.null.extern" } as Instr];
+      let current: Instr[] = [{ op: "ref.null.extern" }];
       for (const e of getterEntries) {
         const callArm: Instr[] = [
-          { op: "local.get", index: 1 } as Instr,
-          { op: "ref.cast", typeIdx: e.typeIdx } as Instr,
-          { op: "call", funcIdx: e.funcIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: e.typeIdx },
+          { op: "call", funcIdx: e.funcIdx },
         ];
         if (e.resultType.kind === "ref" || e.resultType.kind === "ref_null") {
-          callArm.push({ op: "extern.convert_any" } as Instr);
+          callArm.push({ op: "extern.convert_any" });
         } else if (e.resultType.kind === "f64") {
           const boxIdx = ctx.funcMap.get("__box_number");
-          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx } as Instr);
+          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx });
         } else if (e.resultType.kind === "i32") {
-          callArm.push({ op: "f64.convert_i32_s" } as Instr);
+          callArm.push({ op: "f64.convert_i32_s" });
           const boxIdx = ctx.funcMap.get("__box_number");
-          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx } as Instr);
+          if (boxIdx !== undefined) callArm.push({ op: "call", funcIdx: boxIdx });
         }
         current = [
-          { op: "local.get", index: 1 } as Instr,
-          { op: "ref.test", typeIdx: e.typeIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "ref.test", typeIdx: e.typeIdx },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: callArm,
             else: current,
-          } as Instr,
+          },
         ];
       }
       const exportName = `__call_get_${key}`;
@@ -4309,12 +4303,7 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
         name: exportName,
         typeIdx: dispatchTypeIdx,
         locals: [{ name: "__any", type: { kind: "anyref" } }],
-        body: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "local.set", index: 1 } as Instr,
-          ...current,
-        ],
+        body: [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }, ...current],
         exported: true,
       } as WasmFunction);
       mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
@@ -4430,45 +4419,45 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   const body: Instr[] = [];
   // local 2 = any.convert_extern(self)
   body.push({ op: "local.get", index: 0 });
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: 2 } as Instr);
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: 2 });
 
-  let current: Instr[] = [{ op: "ref.null.extern" } as Instr];
+  let current: Instr[] = [{ op: "ref.null.extern" }];
 
   for (const entry of entries) {
     const testAndCall: Instr[] = [
-      { op: "local.get", index: 2 } as Instr,
-      { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: entry.typeIdx },
     ];
     // (#2883) Forward the ToPrimitive hint ONLY to a method that declared it.
     // A hint-less `[Symbol.toPrimitive]()` body takes a single (self/capture)
     // param; pushing the hint there is an arity mismatch that corrupts the
     // dispatcher (see entry-collection comment above).
     if (entry.takesHint) {
-      testAndCall.push({ op: "local.get", index: 1 } as Instr); // hint (externref)
+      testAndCall.push({ op: "local.get", index: 1 }); // hint (externref)
     }
-    testAndCall.push({ op: "call", funcIdx: entry.funcIdx } as Instr);
+    testAndCall.push({ op: "call", funcIdx: entry.funcIdx });
 
     if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
-      testAndCall.push({ op: "extern.convert_any" } as Instr);
+      testAndCall.push({ op: "extern.convert_any" });
     } else if (entry.resultType.kind === "f64") {
       const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx });
     } else if (entry.resultType.kind === "i32") {
-      testAndCall.push({ op: "f64.convert_i32_s" } as Instr);
+      testAndCall.push({ op: "f64.convert_i32_s" });
       const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx } as Instr);
+      if (boxIdx !== undefined) testAndCall.push({ op: "call", funcIdx: boxIdx });
     }
 
     current = [
-      { op: "local.get", index: 2 } as Instr,
-      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: entry.typeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: testAndCall,
         else: current,
-      } as Instr,
+      },
     ];
   }
 
@@ -4610,11 +4599,11 @@ function needsExternToAnyForClosureParam(paramType: ValType): boolean {
  * `needsExternToAnyForClosureParam(paramType)` first.
  */
 function externToClosureParamRef(paramType: ValType): Instr[] {
-  const ops: Instr[] = [{ op: "any.convert_extern" } as Instr];
+  const ops: Instr[] = [{ op: "any.convert_extern" }];
   if (paramType.kind === "ref") {
-    ops.push({ op: "ref.cast", typeIdx: paramType.typeIdx } as Instr);
+    ops.push({ op: "ref.cast", typeIdx: paramType.typeIdx });
   } else if (paramType.kind === "ref_null") {
-    ops.push({ op: "ref.cast_null", typeIdx: paramType.typeIdx } as Instr);
+    ops.push({ op: "ref.cast_null", typeIdx: paramType.typeIdx });
   }
   return ops;
 }
@@ -4745,26 +4734,26 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   const body: Instr[] = [];
   body.push({ op: "local.get", index: 0 });
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: anyLocal });
 
-  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
+  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" }];
 
   for (const entry of entries) {
     const funcTypeDef = mod.types[entry.funcTypeIdx];
 
     const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
-      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
+      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx }];
       if (paramType) {
         if (paramType.kind === "f64") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
-            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "call", funcIdx: unboxIdx });
           }
         } else if (paramType.kind === "i32") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
-            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "call", funcIdx: unboxIdx });
             ops.push({ op: "i32.trunc_f64_s" });
           }
         } else if (needsExternToAnyForClosureParam(paramType)) {
@@ -4809,33 +4798,33 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     // broke bound-function over-arity forwarding (the bound `[[Call]]` prepends
     // partial args, so the target sees more args than its declared formals).
     const setupInstrs: Instr[] = [
-      { op: "i32.const", value: entry.closureArity } as Instr,
-      { op: "global.set", index: argcGlobalIdx } as Instr,
+      { op: "i32.const", value: entry.closureArity },
+      { op: "global.set", index: argcGlobalIdx },
     ];
     if (arity > entry.closureArity) {
       // vec struct field order: (length: i32, data: arrRef). Push len first.
       const extrasCount = arity - entry.closureArity;
-      setupInstrs.push({ op: "i32.const", value: extrasCount } as Instr);
+      setupInstrs.push({ op: "i32.const", value: extrasCount });
       for (let i = entry.closureArity; i < arity; i++) {
-        setupInstrs.push({ op: "local.get", index: i + 1 } as Instr);
+        setupInstrs.push({ op: "local.get", index: i + 1 });
       }
-      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
-      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
-      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount });
+      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx });
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx });
     } else {
       // No extras for this arm — reset to avoid stale data from a prior call.
-      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
-      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx });
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx });
     }
 
     const callBody: Instr[] = [
       ...setupInstrs,
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: entry.selfTypeIdx },
       ...argInstrs,
-      { op: "local.get", index: funcLocal } as Instr,
-      { op: "ref.cast", typeIdx: entry.funcTypeIdx } as Instr,
-      { op: "call_ref", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "local.get", index: funcLocal },
+      { op: "ref.cast", typeIdx: entry.funcTypeIdx },
+      { op: "call_ref", typeIdx: entry.funcTypeIdx },
     ];
 
     // Coerce result to externref.
@@ -4843,49 +4832,49 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
       if ((ctx.standalone || ctx.wasi) && isAnyValue(entry.returnType, ctx)) {
         const anyToExternIdx = ensureAnyToExternHelper(ctx);
         if (anyToExternIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: anyToExternIdx } as Instr);
+          callBody.push({ op: "call", funcIdx: anyToExternIdx });
         } else {
-          callBody.push({ op: "extern.convert_any" } as Instr);
+          callBody.push({ op: "extern.convert_any" });
         }
       } else if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
-        callBody.push({ op: "extern.convert_any" } as Instr);
+        callBody.push({ op: "extern.convert_any" });
       } else if (entry.returnType.kind === "f64") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" } as Instr);
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "f64.convert_i32_s" });
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i64_s" } as Instr);
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "f64.convert_i64_s" });
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       }
     } else {
-      callBody.push({ op: "ref.null.extern" } as Instr);
+      callBody.push({ op: "ref.null.extern" });
     }
 
     funcrefDispatch = [
-      { op: "local.get", index: funcLocal } as Instr,
-      { op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "local.get", index: funcLocal },
+      { op: "ref.test", typeIdx: entry.funcTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: callBody,
         else: funcrefDispatch,
-      } as Instr,
+      },
     ];
   }
 
@@ -4938,18 +4927,18 @@ function buildFuncrefExtraction(entries: { selfTypeIdx: number }[], anyLocal: nu
   for (const entry of entries) {
     if (seenShape.has(entry.selfTypeIdx)) continue;
     seenShape.add(entry.selfTypeIdx);
-    out.push({ op: "local.get", index: anyLocal } as Instr);
-    out.push({ op: "ref.test", typeIdx: entry.selfTypeIdx } as Instr);
+    out.push({ op: "local.get", index: anyLocal });
+    out.push({ op: "ref.test", typeIdx: entry.selfTypeIdx });
     out.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: entry.selfTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: funcLocal } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: entry.selfTypeIdx },
+        { op: "struct.get", typeIdx: entry.selfTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: funcLocal },
       ],
-    } as Instr);
+    });
   }
   return out;
 }
@@ -5062,33 +5051,33 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
 
   // Convert closure externref → anyref (closure is at local index 1).
   const body: Instr[] = [];
-  body.push({ op: "local.get", index: 1 } as Instr);
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "local.get", index: 1 });
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: anyLocal });
 
   // Save previous __current_this for nesting safety, then install thisVal.
-  body.push({ op: "global.get", index: currentThisGlobalIdx } as Instr);
-  body.push({ op: "local.set", index: prevThisLocal } as Instr);
-  body.push({ op: "local.get", index: 0 } as Instr);
-  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
+  body.push({ op: "global.get", index: currentThisGlobalIdx });
+  body.push({ op: "local.set", index: prevThisLocal });
+  body.push({ op: "local.get", index: 0 });
+  body.push({ op: "global.set", index: currentThisGlobalIdx });
 
-  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
+  let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" }];
 
   for (const entry of entries) {
     const funcTypeDef = mod.types[entry.funcTypeIdx];
 
     const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
-      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
+      const ops: Instr[] = [{ op: "local.get", index: argLocalIdx }];
       if (paramType) {
         if (paramType.kind === "f64") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
-            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "call", funcIdx: unboxIdx });
           }
         } else if (paramType.kind === "i32") {
           const unboxIdx = ctx.funcMap.get("__unbox_number");
           if (unboxIdx !== undefined) {
-            ops.push({ op: "call", funcIdx: unboxIdx } as Instr);
+            ops.push({ op: "call", funcIdx: unboxIdx });
             ops.push({ op: "i32.trunc_f64_s" });
           }
         } else if (needsExternToAnyForClosureParam(paramType)) {
@@ -5116,80 +5105,80 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     // at local i+2, extras are args[closureArity..arity) at locals
     // [closureArity+2 .. arity+2).
     const setupInstrs: Instr[] = [
-      { op: "i32.const", value: entry.closureArity } as Instr,
-      { op: "global.set", index: argcGlobalIdx } as Instr,
+      { op: "i32.const", value: entry.closureArity },
+      { op: "global.set", index: argcGlobalIdx },
     ];
     if (arity > entry.closureArity) {
       const extrasCount = arity - entry.closureArity;
-      setupInstrs.push({ op: "i32.const", value: extrasCount } as Instr);
+      setupInstrs.push({ op: "i32.const", value: extrasCount });
       for (let i = entry.closureArity; i < arity; i++) {
-        setupInstrs.push({ op: "local.get", index: i + 2 } as Instr);
+        setupInstrs.push({ op: "local.get", index: i + 2 });
       }
-      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount } as Instr);
-      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx } as Instr);
-      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+      setupInstrs.push({ op: "array.new_fixed", typeIdx: extrasArrTypeIdx, length: extrasCount });
+      setupInstrs.push({ op: "struct.new", typeIdx: extrasVecTypeIdx });
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx });
     } else {
-      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx } as Instr);
-      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx } as Instr);
+      setupInstrs.push({ op: "ref.null", typeIdx: extrasVecTypeIdx });
+      setupInstrs.push({ op: "global.set", index: extrasArgvGlobalIdx });
     }
 
     const callBody: Instr[] = [
       ...setupInstrs,
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: entry.selfTypeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: entry.selfTypeIdx },
       ...argInstrs,
-      { op: "local.get", index: funcLocal } as Instr,
-      { op: "ref.cast", typeIdx: entry.funcTypeIdx } as Instr,
-      { op: "call_ref", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "local.get", index: funcLocal },
+      { op: "ref.cast", typeIdx: entry.funcTypeIdx },
+      { op: "call_ref", typeIdx: entry.funcTypeIdx },
     ];
 
     if (entry.returnType) {
       if ((ctx.standalone || ctx.wasi) && isAnyValue(entry.returnType, ctx)) {
         const anyToExternIdx = ensureAnyToExternHelper(ctx);
         if (anyToExternIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: anyToExternIdx } as Instr);
+          callBody.push({ op: "call", funcIdx: anyToExternIdx });
         } else {
-          callBody.push({ op: "extern.convert_any" } as Instr);
+          callBody.push({ op: "extern.convert_any" });
         }
       } else if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
-        callBody.push({ op: "extern.convert_any" } as Instr);
+        callBody.push({ op: "extern.convert_any" });
       } else if (entry.returnType.kind === "f64") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" } as Instr);
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "f64.convert_i32_s" });
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i64_s" } as Instr);
-          callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+          callBody.push({ op: "f64.convert_i64_s" });
+          callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
-          callBody.push({ op: "drop" } as Instr);
-          callBody.push({ op: "ref.null.extern" } as Instr);
+          callBody.push({ op: "drop" });
+          callBody.push({ op: "ref.null.extern" });
         }
       }
     } else {
-      callBody.push({ op: "ref.null.extern" } as Instr);
+      callBody.push({ op: "ref.null.extern" });
     }
 
     funcrefDispatch = [
-      { op: "local.get", index: funcLocal } as Instr,
-      { op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr,
+      { op: "local.get", index: funcLocal },
+      { op: "ref.test", typeIdx: entry.funcTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: callBody,
         else: funcrefDispatch,
-      } as Instr,
+      },
     ];
   }
 
@@ -5212,10 +5201,10 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
   // use `anyLocal` is also not safe (externref vs anyref). Add a dedicated
   // result-save slot at index `prevThisLocal + 1`.
   const resultSaveLocal = prevThisLocal + 1;
-  body.push({ op: "local.set", index: resultSaveLocal } as Instr);
-  body.push({ op: "local.get", index: prevThisLocal } as Instr);
-  body.push({ op: "global.set", index: currentThisGlobalIdx } as Instr);
-  body.push({ op: "local.get", index: resultSaveLocal } as Instr);
+  body.push({ op: "local.set", index: resultSaveLocal });
+  body.push({ op: "local.get", index: prevThisLocal });
+  body.push({ op: "global.set", index: currentThisGlobalIdx });
+  body.push({ op: "local.get", index: resultSaveLocal });
 
   mod.functions.push({
     name: exportName,
@@ -5267,21 +5256,17 @@ function emitIsClosureExport(ctx: CodegenContext): void {
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
 
   // body: convert extern→any, then chained ref.test → return 1 on first match.
-  const body: Instr[] = [
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: 1 } as Instr,
-  ];
+  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
   for (const closureType of baseTypeIdxs) {
-    body.push({ op: "local.get", index: 1 } as Instr);
-    body.push({ op: "ref.test", typeIdx: closureType } as Instr);
+    body.push({ op: "local.get", index: 1 });
+    body.push({ op: "ref.test", typeIdx: closureType });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
-    } as Instr);
+      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+    });
   }
-  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "i32.const", value: 0 });
 
   mod.functions.push({
     name: "__is_closure",
@@ -5344,20 +5329,20 @@ function emitClosureArityExport(ctx: CodegenContext): void {
   const funcLocal = 2;
   const body: Instr[] = [
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: anyLocal } as Instr,
+    { op: "any.convert_extern" },
+    { op: "local.set", index: anyLocal },
     ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
   ];
   for (const entry of entries) {
-    body.push({ op: "local.get", index: funcLocal } as Instr);
-    body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx } as Instr);
+    body.push({ op: "local.get", index: funcLocal });
+    body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: entry.closureArity } as Instr, { op: "return" } as Instr],
-    } as Instr);
+      then: [{ op: "i32.const", value: entry.closureArity }, { op: "return" }],
+    });
   }
-  body.push({ op: "i32.const", value: -1 } as Instr);
+  body.push({ op: "i32.const", value: -1 });
 
   mod.functions.push({
     name: "__closure_arity",
@@ -5423,21 +5408,17 @@ function emitIsDataStructExport(ctx: CodegenContext): void {
   const isDataTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_data_struct_type");
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
 
-  const body: Instr[] = [
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: 1 } as Instr,
-  ];
+  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
   for (const dataType of dataTypeIdxs) {
-    body.push({ op: "local.get", index: 1 } as Instr);
-    body.push({ op: "ref.test", typeIdx: dataType } as Instr);
+    body.push({ op: "local.get", index: 1 });
+    body.push({ op: "ref.test", typeIdx: dataType });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
-    } as Instr);
+      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+    });
   }
-  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "i32.const", value: 0 });
 
   mod.functions.push({
     name: "__is_data_struct",
@@ -5503,10 +5484,7 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
   // i32-predicate arm returns `matchValue` on hit. Builds from the ONE shared
   // closure-base-wrapper list (`closure-classifier.ts`).
   const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
-    buildClosureRefTestArms(ctx, anyLocalIdx, [
-      { op: "i32.const", value: matchValue } as Instr,
-      { op: "return" } as Instr,
-    ]);
+    buildClosureRefTestArms(ctx, anyLocalIdx, [{ op: "i32.const", value: matchValue }, { op: "return" }]);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");
@@ -5516,18 +5494,18 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
       tf.locals.push({ name: "$any_temp", type: { kind: "anyref" } });
     }
     tf.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "ref.is_null" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-      } as Instr,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr,
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 },
       ...closureI32Arms(1, 1),
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
     ];
   }
 
@@ -5571,7 +5549,7 @@ function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
     if (tailMatches) {
       const fnArm = buildClosureRefTestArms(ctx, 1, [
         ...stringConstantExternrefInstrs(ctx, "function"),
-        { op: "return" } as Instr,
+        { op: "return" },
       ]);
       b.splice(spliceAt, 0, ...fnArm);
     }
@@ -5750,43 +5728,47 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     const boxResult = (resultType: ValType, instrs: Instr[]) => {
       if (resultType.kind === "f64") {
         const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx });
         else {
-          instrs.push({ op: "drop" } as Instr);
-          instrs.push({ op: "ref.null.extern" } as Instr);
+          instrs.push({ op: "drop" });
+          instrs.push({ op: "ref.null.extern" });
         }
       } else if (resultType.kind === "i32") {
-        instrs.push({ op: "f64.convert_i32_s" } as Instr);
+        instrs.push({ op: "f64.convert_i32_s" });
         const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx });
         else {
-          instrs.push({ op: "drop" } as Instr);
-          instrs.push({ op: "ref.null.extern" } as Instr);
+          instrs.push({ op: "drop" });
+          instrs.push({ op: "ref.null.extern" });
         }
       } else if (resultType.kind === "i64") {
         // i64 (BigInt) — convert to f64 then box, or drop and return null
-        instrs.push({ op: "f64.convert_i64_s" } as Instr);
+        instrs.push({ op: "f64.convert_i64_s" });
         const boxIdx = ctx.funcMap.get("__box_number");
-        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+        if (boxIdx !== undefined) instrs.push({ op: "call", funcIdx: boxIdx });
         else {
-          instrs.push({ op: "drop" } as Instr);
-          instrs.push({ op: "ref.null.extern" } as Instr);
+          instrs.push({ op: "drop" });
+          instrs.push({ op: "ref.null.extern" });
         }
       } else if (resultType.kind === "ref" || resultType.kind === "ref_null") {
-        instrs.push({ op: "extern.convert_any" } as Instr);
+        instrs.push({ op: "extern.convert_any" });
       }
     };
 
     const buildDispatch = (idx: number): Instr[] => {
-      if (idx >= entries.length) return [{ op: "ref.null.extern" } as Instr];
+      if (idx >= entries.length) return [{ op: "ref.null.extern" }];
       const entry = entries[idx]!;
 
       const thenInstrs: Instr[] = [];
       if (entry.mode === "standalone") {
-        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
-          op: "call",
-          funcIdx: entry.funcIdx,
-        } as Instr);
+        thenInstrs.push(
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          {
+            op: "call",
+            funcIdx: entry.funcIdx,
+          },
+        );
         boxResult(entry.resultType, thenInstrs);
       } else if (entry.mode === "closure-extern") {
         // (#1989) externref field holding `extern.convert_any(closureStruct)`.
@@ -5795,9 +5777,9 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
         const ci = entry.closureInfo;
         const closureLocal = 2; // eqref scratch local
         thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
+          { op: "local.get", index: anyLocal },
           { op: "ref.cast", typeIdx: entry.typeIdx },
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx },
           // externref field → anyref → concrete closure ref → eqref scratch.
           // (#2878) `any.convert_extern` yields `anyref`, which is the SUPERtype
           // of the `eqref` scratch local — a bare `local.set` of anyref into an
@@ -5810,21 +5792,21 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           // `closureLocal` below become redundant re-casts of the same concrete
           // type (harmless), and this adds no new trap — that cast already ran
           // unconditionally on the value.
-          { op: "any.convert_extern" } as Instr,
+          { op: "any.convert_extern" },
           { op: "ref.cast", typeIdx: entry.closureTypeIdx },
-          { op: "local.set", index: closureLocal } as Instr,
+          { op: "local.set", index: closureLocal },
           // self-param: the closure struct
-          { op: "local.get", index: closureLocal } as Instr,
+          { op: "local.get", index: closureLocal },
           { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           // funcref from closure field 0
-          { op: "local.get", index: closureLocal } as Instr,
+          { op: "local.get", index: closureLocal },
           { op: "ref.cast", typeIdx: entry.closureTypeIdx },
-          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 },
           { op: "ref.cast", typeIdx: ci.funcTypeIdx },
-          { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
+          { op: "call_ref", typeIdx: ci.funcTypeIdx },
         );
         if (!ci.returnType) {
-          thenInstrs.push({ op: "ref.null.extern" } as Instr);
+          thenInstrs.push({ op: "ref.null.extern" });
         } else {
           boxResult(ci.returnType, thenInstrs);
         }
@@ -5837,20 +5819,20 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
         const closureLocal = 2; // eqref scratch local (the stored method closure)
         const fieldEntry = entry;
         const buildCandidate = (ci: number): Instr[] => {
-          if (ci >= fieldEntry.candidates.length) return [{ op: "ref.null.extern" } as Instr];
+          if (ci >= fieldEntry.candidates.length) return [{ op: "ref.null.extern" }];
           const { closureTypeIdx, closureInfo } = fieldEntry.candidates[ci]!;
           // Body run when BOTH the struct cast and the funcref type match.
           const callInstrs: Instr[] = [
             // self-param: the closure struct (cast is safe — struct ref.test passed)
-            { op: "local.get", index: closureLocal } as Instr,
+            { op: "local.get", index: closureLocal },
             { op: "ref.cast", typeIdx: closureTypeIdx },
             // funcref already validated + stashed in eqrefFuncLocal
-            { op: "local.get", index: eqrefFuncLocal } as Instr,
+            { op: "local.get", index: eqrefFuncLocal },
             { op: "ref.cast", typeIdx: closureInfo.funcTypeIdx },
-            { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
+            { op: "call_ref", typeIdx: closureInfo.funcTypeIdx },
           ];
           if (!closureInfo.returnType) {
-            callInstrs.push({ op: "ref.null.extern" } as Instr);
+            callInstrs.push({ op: "ref.null.extern" });
           } else {
             boxResult(closureInfo.returnType, callInstrs);
           }
@@ -5860,75 +5842,79 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           // func type, so the funcref test is the real discriminator (an
           // unguarded `ref.cast funcTypeIdx` would TRAP otherwise).
           return [
-            { op: "local.get", index: closureLocal } as Instr,
+            { op: "local.get", index: closureLocal },
             { op: "ref.test", typeIdx: closureTypeIdx },
             {
               op: "if",
               blockType: { kind: "val" as const, type: { kind: "externref" as const } },
               then: [
-                { op: "local.get", index: closureLocal } as Instr,
+                { op: "local.get", index: closureLocal },
                 { op: "ref.cast", typeIdx: closureTypeIdx },
-                { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
-                { op: "local.tee", index: eqrefFuncLocal } as Instr,
+                { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 },
+                { op: "local.tee", index: eqrefFuncLocal },
                 { op: "ref.test", typeIdx: closureInfo.funcTypeIdx },
                 {
                   op: "if",
                   blockType: { kind: "val" as const, type: { kind: "externref" as const } },
                   then: callInstrs,
                   else: buildCandidate(ci + 1),
-                } as Instr,
+                },
               ],
               else: buildCandidate(ci + 1),
-            } as Instr,
+            },
           ];
         };
         thenInstrs.push(
-          { op: "local.get", index: anyLocal } as Instr,
+          { op: "local.get", index: anyLocal },
           { op: "ref.cast", typeIdx: entry.typeIdx },
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
-          { op: "local.set", index: closureLocal } as Instr,
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx },
+          { op: "local.set", index: closureLocal },
           ...buildCandidate(0),
         );
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
-        thenInstrs.push({ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx: entry.typeIdx }, {
-          op: "struct.get",
-          typeIdx: entry.typeIdx,
-          fieldIdx: entry.fieldIdx,
-        } as Instr);
+        thenInstrs.push(
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          {
+            op: "struct.get",
+            typeIdx: entry.typeIdx,
+            fieldIdx: entry.fieldIdx,
+          },
+        );
         // The struct.get returns the field type (eqref or ref). Store in eqref local.
         const closureLocal = 2; // eqref local
         thenInstrs.push(
-          { op: "local.set", index: closureLocal } as Instr,
+          { op: "local.set", index: closureLocal },
           // Cast eqref to closure struct type for the self-param
-          { op: "local.get", index: closureLocal } as Instr,
+          { op: "local.get", index: closureLocal },
           { op: "ref.cast", typeIdx: entry.closureTypeIdx },
           // Get funcref from closure field 0
-          { op: "local.get", index: closureLocal } as Instr,
+          { op: "local.get", index: closureLocal },
           { op: "ref.cast", typeIdx: entry.closureTypeIdx },
-          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 },
           { op: "ref.cast", typeIdx: ci.funcTypeIdx },
-          { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
+          { op: "call_ref", typeIdx: ci.funcTypeIdx },
         );
         const retType = ci.returnType ?? { kind: "externref" as const };
         if (!ci.returnType) {
           // void — push null externref
-          thenInstrs.push({ op: "ref.null.extern" } as Instr);
+          thenInstrs.push({ op: "ref.null.extern" });
         } else {
           boxResult(retType, thenInstrs);
         }
       }
 
       return [
-        { op: "local.get", index: anyLocal } as Instr,
+        { op: "local.get", index: anyLocal },
         { op: "ref.test", typeIdx: entry.typeIdx },
         {
           op: "if",
           blockType: { kind: "val" as const, type: { kind: "externref" as const } },
           then: thenInstrs,
           else: buildDispatch(idx + 1),
-        } as Instr,
+        },
       ];
     };
 
@@ -5964,21 +5950,21 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     const currentThisGlobalIdx2 = ensureCurrentThisGlobal(ctx);
 
     const body: Instr[] = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: anyLocal } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: anyLocal },
       // save __current_this, install the receiver
-      { op: "global.get", index: currentThisGlobalIdx2 } as Instr,
-      { op: "local.set", index: prevThisLocal2 } as Instr,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "global.set", index: currentThisGlobalIdx2 } as Instr,
+      { op: "global.get", index: currentThisGlobalIdx2 },
+      { op: "local.set", index: prevThisLocal2 },
+      { op: "local.get", index: 0 },
+      { op: "global.set", index: currentThisGlobalIdx2 },
       // dispatch (leaves result externref on stack) → capture
       ...buildDispatch(0),
-      { op: "local.set", index: tpResultLocal } as Instr,
+      { op: "local.set", index: tpResultLocal },
       // restore __current_this, return the captured result
-      { op: "local.get", index: prevThisLocal2 } as Instr,
-      { op: "global.set", index: currentThisGlobalIdx2 } as Instr,
-      { op: "local.get", index: tpResultLocal } as Instr,
+      { op: "local.get", index: prevThisLocal2 },
+      { op: "global.set", index: currentThisGlobalIdx2 },
+      { op: "local.get", index: tpResultLocal },
     ];
 
     mod.functions.push({
@@ -6037,7 +6023,7 @@ export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop"
   const idx = ctx.numImportFuncs + ctx.mod.functions.length;
   // Placeholder body must match the declared result type.
   const placeholder: Instr[] =
-    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 } as Instr] : [{ op: "ref.null.extern" } as Instr];
+    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 }] : [{ op: "ref.null.extern" }];
   ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
   ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
   ctx.funcMap.set(name, idx);
@@ -6128,32 +6114,32 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // local 0 = externref param, local 1 = anyref converted
     const body: Instr[] = [];
     body.push({ op: "local.get", index: 0 });
-    body.push({ op: "any.convert_extern" } as Instr);
-    body.push({ op: "local.set", index: 1 } as Instr);
+    body.push({ op: "any.convert_extern" });
+    body.push({ op: "local.set", index: 1 });
 
     // Chain of ref.test / ref.cast for each vec type
     let current: Instr[] = [
       // Default: return 0 if no vec type matches
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "return" } as Instr,
+      { op: "i32.const", value: 0 },
+      { op: "return" },
     ];
     for (let i = vecEntries.length - 1; i >= 0; i--) {
       const [, vecTypeIdx] = vecEntries[i]!;
       const thenBranch: Instr[] = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "return" } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6198,14 +6184,14 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     // local 0 = externref param (vec), local 1 = i32 param (index), local 2 = anyref
     const body: Instr[] = [];
     body.push({ op: "local.get", index: 0 });
-    body.push({ op: "any.convert_extern" } as Instr);
-    body.push({ op: "local.set", index: 2 } as Instr);
+    body.push({ op: "any.convert_extern" });
+    body.push({ op: "local.set", index: 2 });
 
     // Chain of ref.test / ref.cast for each vec type
     let current: Instr[] = [
       // Default: return null if no vec type matches
-      { op: "ref.null.extern" } as Instr,
-      { op: "return" } as Instr,
+      { op: "ref.null.extern" },
+      { op: "return" },
     ];
     // Pre-check if __box_number is available (don't add late imports)
     const boxNumIdx = ctx.funcMap.get("__box_number");
@@ -6262,26 +6248,26 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         if (holeMapInVecGet && holeTypeIdxForGet >= 0) {
           const undefInstrs: Instr[] =
             getUndefIdxForGet !== undefined
-              ? [{ op: "call", funcIdx: getUndefIdxForGet } as Instr]
-              : [{ op: "ref.null.extern" } as Instr];
+              ? [{ op: "call", funcIdx: getUndefIdxForGet }]
+              : [{ op: "ref.null.extern" }];
           boxInstrs = [
-            { op: "local.tee", index: 3 } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.test", typeIdx: holeTypeIdxForGet } as Instr,
+            { op: "local.tee", index: 3 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: holeTypeIdxForGet },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "externref" } },
               then: undefInstrs,
-              else: [{ op: "local.get", index: 3 } as Instr],
-            } as Instr,
+              else: [{ op: "local.get", index: 3 }],
+            },
           ];
         } else {
           boxInstrs = [];
         }
       } else if (elemKey === "f64" && boxNumIdx !== undefined) {
-        boxInstrs = [{ op: "call", funcIdx: boxNumIdx } as Instr];
+        boxInstrs = [{ op: "call", funcIdx: boxNumIdx }];
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
-        boxInstrs = [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+        boxInstrs = [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
       } else if (
         (elemKey === "i32_byte" ||
           elemKey === "i32_elem" || // (#2835) Int32/Uint32 element storage — same dynamic read as i32_byte pre-split
@@ -6298,14 +6284,14 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         // for an `any`-typed read of a typed-array vec) reads the packed element
         // zero-extended; the per-VIEW signedness for the typed `a[i]` read site is
         // handled separately in property-access.ts (typedArrayViewSignedness).
-        boxInstrs = [{ op: "f64.convert_i32_u" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+        boxInstrs = [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx }];
       } else if (elemKey === "i64") {
         // i64 (BigInt) is a value type, not a ref type — extern.convert_any expects anyref.
         // Convert i64 -> f64 (lossy for large values) then box, or drop and return null.
         if (boxNumIdx !== undefined) {
-          boxInstrs = [{ op: "f64.convert_i64_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+          boxInstrs = [{ op: "f64.convert_i64_s" }, { op: "call", funcIdx: boxNumIdx }];
         } else {
-          boxInstrs = [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+          boxInstrs = [{ op: "drop" }, { op: "ref.null.extern" }];
         }
       } else if (arrElemIsExternref) {
         // (#2669) A `ref_*` keyed vec (nested arrays/objects, e.g. `number[][]`)
@@ -6315,14 +6301,14 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         // Pass the externref slot through unchanged.
         boxInstrs = [];
       } else {
-        boxInstrs = [{ op: "extern.convert_any" } as Instr];
+        boxInstrs = [{ op: "extern.convert_any" }];
       }
       const thenBranch: Instr[] = [
         // ref.cast to vec type, struct.get data array, then array.get with index
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.get", index: 1 } as Instr, // index
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 }, // index
         // (#2593) Packed i8/i16 elements REQUIRE array.get_u/_s (plain array.get
         // is invalid Wasm on a packed array); read zero-extended in this generic
         // path. (#2835) `i32_byte` (the ArrayBuffer/DataView byte buffer) is now
@@ -6332,19 +6318,19 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         {
           op: elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte" ? "array.get_u" : "array.get",
           typeIdx: arrTypeIdx,
-        } as Instr,
+        },
         ...boxInstrs,
-        { op: "return" } as Instr,
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6411,23 +6397,19 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   {
     const isVecTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__is_vec_type");
     const isVecFuncIdx = ctx.numImportFuncs + mod.functions.length;
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
     for (let i = vecEntries.length - 1; i >= 0; i--) {
       const [, vecTypeIdx] = vecEntries[i]!;
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6445,23 +6427,19 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   {
     const supTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_mut_supported_type");
     const supFuncIdx = ctx.numImportFuncs + mod.functions.length;
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
       const [, vecTypeIdx] = mutEntries[i]!;
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6486,12 +6464,8 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     const pushFuncIdx = ctx.numImportFuncs + mod.functions.length;
     // locals: 2 = anyref converted; per-arm typed locals appended below
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 2 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "i32.const", value: -1 } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 2 }];
+    let current: Instr[] = [{ op: "i32.const", value: -1 }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
       const [elemKey, vecTypeIdx] = mutEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -6512,95 +6486,94 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       // value unboxing per element kind (value param is local 1)
       const valueInstrs: Instr[] =
         elemKey === "externref"
-          ? [{ op: "local.get", index: 1 } as Instr]
+          ? [{ op: "local.get", index: 1 }]
           : elemKey === "f64"
-            ? [{ op: "local.get", index: 1 } as Instr, { op: "call", funcIdx: unboxNumIdx! } as Instr]
-            : [
-                { op: "local.get", index: 1 } as Instr,
-                { op: "call", funcIdx: unboxNumIdx! } as Instr,
-                { op: "i32.trunc_sat_f64_s" } as Instr,
-              ];
+            ? [
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: unboxNumIdx! },
+              ]
+            : [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
       const thenBranch: Instr[] = [
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "local.set", index: vecL } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
         // len
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: lenL } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
         // data + capacity check: cap < len+1 ?
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.tee", index: dataL } as Instr,
-        { op: "array.len" } as Instr,
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "i32.lt_s" } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.tee", index: dataL },
+        { op: "array.len" },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "i32.lt_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // ncap = max((len+1)*2, 4)
-            { op: "local.get", index: lenL } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.shl" } as Instr,
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "local.get", index: lenL } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.shl" } as Instr,
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "i32.gt_s" } as Instr,
-            { op: "select" } as Instr,
-            { op: "local.set", index: ncapL } as Instr,
+            { op: "local.get", index: lenL },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "local.get", index: lenL },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "i32.gt_s" },
+            { op: "select" },
+            { op: "local.set", index: ncapL },
             // ndata = array.new_default(ncap); copy old; vec.data = ndata
-            { op: "local.get", index: ncapL } as Instr,
-            { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-            { op: "local.set", index: ndataL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: dataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: lenL } as Instr,
-            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-            { op: "local.get", index: vecL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "local.set", index: dataL } as Instr,
+            { op: "local.get", index: ncapL },
+            { op: "array.new_default", typeIdx: arrTypeIdx },
+            { op: "local.set", index: ndataL },
+            { op: "local.get", index: ndataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: dataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: lenL },
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+            { op: "local.get", index: vecL },
+            { op: "local.get", index: ndataL },
+            { op: "ref.as_non_null" },
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
+            { op: "local.get", index: ndataL },
+            { op: "local.set", index: dataL },
           ],
-        } as Instr,
+        },
         // data[len] = value
-        { op: "local.get", index: dataL } as Instr,
-        { op: "local.get", index: lenL } as Instr,
+        { op: "local.get", index: dataL },
+        { op: "local.get", index: lenL },
         ...valueInstrs,
-        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx },
         // vec.length = len + 1
-        { op: "local.get", index: vecL } as Instr,
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
         // return len + 1
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "return" } as Instr,
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6633,12 +6606,8 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     const popTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type");
     const popFuncIdx = ctx.numImportFuncs + mod.functions.length;
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "ref.null.extern" }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
       const [elemKey, vecTypeIdx] = mutEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -6661,50 +6630,50 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         elemKey === "externref"
           ? []
           : elemKey === "f64"
-            ? [{ op: "call", funcIdx: boxNumIdx2! } as Instr]
+            ? [{ op: "call", funcIdx: boxNumIdx2! }]
             : isPackedByte
-              ? [{ op: "f64.convert_i32_u" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr]
-              : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr];
+              ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
+              : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
       const thenBranch: Instr[] = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "local.set", index: vecL } as Instr,
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: lenL } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
         // empty → undefined
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: lenL },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        },
         // value = data[len-1] (boxed)
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: isPackedByte ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: isPackedByte ? "array.get_u" : "array.get", typeIdx: arrTypeIdx },
         ...boxInstrs,
         // vec.length = len - 1 (value stays beneath on the stack)
-        { op: "local.get", index: vecL } as Instr,
-        { op: "local.get", index: lenL } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "return" } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -6787,11 +6756,7 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
 
   // local 0 = vec externref, local 1 = idx i32, local 2 = byte i32, local 3 = anyref
-  const body: Instr[] = [
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: 3 } as Instr,
-  ];
+  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 3 }];
 
   let current: Instr[] = [];
   for (let i = vecEntries.length - 1; i >= 0; i--) {
@@ -6801,13 +6766,13 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
     let writeInstrs: Instr[];
     if (elemKey === "f64") {
       writeInstrs = [
-        { op: "local.get", index: 3 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.get", index: 1 } as Instr, // idx
-        { op: "local.get", index: 2 } as Instr, // byte (i32)
-        { op: "f64.convert_i32_u" } as Instr,
-        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 }, // idx
+        { op: "local.get", index: 2 }, // byte (i32)
+        { op: "f64.convert_i32_u" },
+        { op: "array.set", typeIdx: arrTypeIdx },
       ];
     } else if (elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i32_elem") {
       // (#2835) `i32_elem` (Int32/Uint32 element storage, split from `i32_byte`)
@@ -6815,12 +6780,12 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
       // (the i32 slot is wide enough for a byte) — preserves crypto.getRandomValues
       // / wrapExports byte population into Int32/Uint32 vecs unchanged.
       writeInstrs = [
-        { op: "local.get", index: 3 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "local.get", index: 2 } as Instr,
-        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 },
+        { op: "local.get", index: 2 },
+        { op: "array.set", typeIdx: arrTypeIdx },
       ];
     } else {
       // Element types we don't know how to write a byte to (externref,
@@ -6828,14 +6793,14 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
       continue;
     }
     current = [
-      { op: "local.get", index: 3 } as Instr,
-      { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: vecTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [...writeInstrs, { op: "return" } as Instr],
+        then: [...writeInstrs, { op: "return" }],
         else: current,
-      } as Instr,
+      },
     ];
   }
   body.push(...current);
@@ -6927,13 +6892,13 @@ function _emitNewVecF64ExportInner(ctx: CodegenContext): void {
   const arrRefType: ValType = { kind: "ref_null", typeIdx: arrTypeIdx };
   const body: Instr[] = [
     // arr = array.new_default $arr_f64 (len)
-    { op: "local.get", index: 0 } as Instr,
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.set", index: 1 } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 1 },
     // struct.new $Vec[f64] { length: len, data: arr }
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 1 },
+    { op: "struct.new", typeIdx: vecTypeIdx },
   ];
 
   mod.functions.push({
@@ -6980,14 +6945,14 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 1 } as Instr,
+          { op: "local.get", index: 1 },
           { op: "ref.cast", typeIdx: byteVecTypeIdx },
           { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 },
-          { op: "return" } as Instr,
+          { op: "return" },
         ],
         else: [],
       },
-      { op: "i32.const", value: -1 } as Instr,
+      { op: "i32.const", value: -1 },
     ];
     mod.functions.push({
       name: "__dv_byte_len",
@@ -7018,17 +6983,17 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 2 } as Instr,
+          { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx: byteVecTypeIdx },
           { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
-          { op: "local.get", index: 1 } as Instr,
+          { op: "local.get", index: 1 },
           // (#2835) packed i8 backing → unsigned zero-extended byte read.
           { op: "array.get_u", typeIdx: arrTypeIdx },
-          { op: "return" } as Instr,
+          { op: "return" },
         ],
         else: [],
       },
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
     ];
     mod.functions.push({
       name: "__dv_byte_get",
@@ -7059,11 +7024,11 @@ function emitDataViewByteExports(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 3 } as Instr,
+          { op: "local.get", index: 3 },
           { op: "ref.cast", typeIdx: byteVecTypeIdx },
           { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
-          { op: "local.get", index: 1 } as Instr,
-          { op: "local.get", index: 2 } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
           { op: "array.set", typeIdx: arrTypeIdx },
         ],
         else: [],
@@ -7091,21 +7056,21 @@ function buildNestedIfElse(
   const body: Instr[] = [];
 
   // Convert externref to anyref and store
-  body.push({ op: "local.get", index: 0 } as Instr);
-  body.push({ op: "any.convert_extern" } as Instr);
-  body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "local.get", index: 0 });
+  body.push({ op: "any.convert_extern" });
+  body.push({ op: "local.set", index: anyLocal });
 
   // Default return value for the final else
   let defaultVal: Instr;
   let blockRetType: ValType;
   if (returnMode === "f64") {
-    defaultVal = { op: "f64.const", value: 0 } as Instr;
+    defaultVal = { op: "f64.const", value: 0 };
     blockRetType = { kind: "f64" };
   } else if (returnMode === "i32") {
-    defaultVal = { op: "i32.const", value: 0 } as Instr;
+    defaultVal = { op: "i32.const", value: 0 };
     blockRetType = { kind: "i32" };
   } else {
-    defaultVal = { op: "ref.null.extern" } as Instr;
+    defaultVal = { op: "ref.null.extern" };
     blockRetType = { kind: "externref" };
   }
 
@@ -7123,11 +7088,7 @@ function buildNestedIfElse(
       else: current,
     };
 
-    current = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
-      ifInstr,
-    ];
+    current = [{ op: "local.get", index: anyLocal }, { op: "ref.test", typeIdx: entry.typeIdx }, ifInstr];
   }
 
   body.push(...current);
@@ -7145,9 +7106,9 @@ function buildGetterExtract(
   const then: Instr[] = [];
 
   // Cast anyref to the struct type
-  then.push({ op: "local.get", index: anyLocal } as Instr);
-  then.push({ op: "ref.cast", typeIdx: entry.typeIdx } as Instr);
-  then.push({ op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr);
+  then.push({ op: "local.get", index: anyLocal });
+  then.push({ op: "ref.cast", typeIdx: entry.typeIdx });
+  then.push({ op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx });
 
   const ft = entry.fieldType;
 
@@ -7156,10 +7117,10 @@ function buildGetterExtract(
     if (ft.kind === "f64") {
       // Already f64 — nothing to do
     } else if (ft.kind === "i32") {
-      then.push({ op: "f64.convert_i32_s" } as Instr);
+      then.push({ op: "f64.convert_i32_s" });
     } else {
-      then.push({ op: "drop" } as Instr);
-      then.push({ op: "f64.const", value: 0 } as Instr);
+      then.push({ op: "drop" });
+      then.push({ op: "f64.const", value: 0 });
     }
   } else if (returnMode === "i32") {
     // Return i32 directly
@@ -7168,41 +7129,41 @@ function buildGetterExtract(
     } else if (ft.kind === "f64") {
       then.push({ op: "i32.trunc_sat_f64_s" });
     } else {
-      then.push({ op: "drop" } as Instr);
-      then.push({ op: "i32.const", value: 0 } as Instr);
+      then.push({ op: "drop" });
+      then.push({ op: "i32.const", value: 0 });
     }
   } else {
     // Return externref
     if (ft.kind === "f64") {
       if (boxNumIdx !== undefined) {
-        then.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        then.push({ op: "call", funcIdx: boxNumIdx });
       } else {
-        then.push({ op: "drop" } as Instr);
-        then.push({ op: "ref.null.extern" } as Instr);
+        then.push({ op: "drop" });
+        then.push({ op: "ref.null.extern" });
       }
     } else if (ft.kind === "i32" && (ft as { boolean?: true }).boolean && boxBoolIdx !== undefined) {
       // (#1788) Boolean-branded i32 field — box as a JS boolean (not a number)
       // so `typeof o.x === "boolean"` and `o.x === true` hold on a dynamic read.
       // The raw i32 is already on the stack; `__box_boolean(i32) -> externref`.
-      then.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+      then.push({ op: "call", funcIdx: boxBoolIdx });
     } else if (ft.kind === "i32") {
-      then.push({ op: "f64.convert_i32_s" } as Instr);
+      then.push({ op: "f64.convert_i32_s" });
       if (boxNumIdx !== undefined) {
-        then.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        then.push({ op: "call", funcIdx: boxNumIdx });
       } else {
-        then.push({ op: "drop" } as Instr);
-        then.push({ op: "ref.null.extern" } as Instr);
+        then.push({ op: "drop" });
+        then.push({ op: "ref.null.extern" });
       }
     } else if (ft.kind === "i64") {
-      then.push({ op: "drop" } as Instr);
-      then.push({ op: "ref.null.extern" } as Instr);
+      then.push({ op: "drop" });
+      then.push({ op: "ref.null.extern" });
     } else if (ft.kind === "externref" || ft.kind === "ref_extern") {
       // Already externref
     } else if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref" || ft.kind === "eqref") {
-      then.push({ op: "extern.convert_any" } as Instr);
+      then.push({ op: "extern.convert_any" });
     } else {
-      then.push({ op: "drop" } as Instr);
-      then.push({ op: "ref.null.extern" } as Instr);
+      then.push({ op: "drop" });
+      then.push({ op: "ref.null.extern" });
     }
   }
 
@@ -7885,7 +7846,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     name: "__wasi_bump_ptr",
     type: { kind: "i32" },
     mutable: true,
-    init: [{ op: "i32.const", value: 1024 } as Instr],
+    init: [{ op: "i32.const", value: 1024 }],
   });
   ctx.wasiBumpPtrGlobalIdx = bumpGlobalIdx;
 
@@ -7901,7 +7862,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     name: "__lin_u8_arena_ptr",
     type: { kind: "i32" },
     mutable: true,
-    init: [{ op: "i32.const", value: LINEAR_U8_ARENA_START } as Instr],
+    init: [{ op: "i32.const", value: LINEAR_U8_ARENA_START }],
   });
   ctx.linearU8ArenaGlobalIdx = u8ArenaGlobalIdx;
 
@@ -8426,16 +8387,16 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
   function buildI64NsFromMem(outPtr: number): Instr[] {
     return [
       // hi32 << 32
-      { op: "i32.const", value: outPtr + 4 } as Instr,
-      { op: "i32.load", align: 2, offset: 0 } as Instr,
-      { op: "i64.extend_i32_u" } as Instr,
+      { op: "i32.const", value: outPtr + 4 },
+      { op: "i32.load", align: 2, offset: 0 },
+      { op: "i64.extend_i32_u" },
       { op: "i64.const", value: 32n },
-      { op: "i64.shl" } as Instr,
+      { op: "i64.shl" },
       // | lo32
-      { op: "i32.const", value: outPtr } as Instr,
-      { op: "i32.load", align: 2, offset: 0 } as Instr,
-      { op: "i64.extend_i32_u" } as Instr,
-      { op: "i64.or" } as Instr,
+      { op: "i32.const", value: outPtr },
+      { op: "i32.load", align: 2, offset: 0 },
+      { op: "i64.extend_i32_u" },
+      { op: "i64.or" },
     ];
   }
 
@@ -8445,16 +8406,16 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
     ctx.funcMap.set("__wasi_date_now", funcIdx);
     const body: Instr[] = [
       // clock_time_get(CLOCK_REALTIME=0, precision=1_000_000ns=1ms, out_ptr=16) -> errno
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
       { op: "i64.const", value: 1000000n },
-      { op: "i32.const", value: 16 } as Instr,
-      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
-      { op: "drop" } as Instr, // ignore errno
+      { op: "i32.const", value: 16 },
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! },
+      { op: "drop" }, // ignore errno
       ...buildI64NsFromMem(16),
       // i64 ns → f64 ms (signed convert OK: i64 ns range is good for ~292y past 1970)
-      { op: "f64.convert_i64_s" } as Instr,
-      { op: "f64.const", value: 1e6 } as Instr,
-      { op: "f64.div" } as Instr,
+      { op: "f64.convert_i64_s" },
+      { op: "f64.const", value: 1e6 },
+      { op: "f64.div" },
     ];
     ctx.mod.functions.push({
       name: "__wasi_date_now",
@@ -8470,15 +8431,15 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.funcMap.set("__wasi_performance_now", funcIdx);
     const body: Instr[] = [
-      { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
+      { op: "i32.const", value: 1 }, // CLOCK_MONOTONIC
       { op: "i64.const", value: 1000n }, // precision = 1us
-      { op: "i32.const", value: 24 } as Instr,
-      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
-      { op: "drop" } as Instr,
+      { op: "i32.const", value: 24 },
+      { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! },
+      { op: "drop" },
       ...buildI64NsFromMem(24),
-      { op: "f64.convert_i64_s" } as Instr,
-      { op: "f64.const", value: 1e6 } as Instr,
-      { op: "f64.div" } as Instr,
+      { op: "f64.convert_i64_s" },
+      { op: "f64.const", value: 1e6 },
+      { op: "f64.div" },
     ];
     ctx.mod.functions.push({
       name: "__wasi_performance_now",
@@ -8502,29 +8463,29 @@ function emitWasiWriteStringHelper(ctx: CodegenContext): void {
   // import exists in the user module.
   const body: Instr[] = ctx.linkNodeShims
     ? [
-        { op: "i32.const", value: 1 } as Instr, // fd = stdout
-        { op: "local.get", index: 0 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
-        { op: "drop" } as Instr, // drop bytes-written
+        { op: "i32.const", value: 1 }, // fd = stdout
+        { op: "local.get", index: 0 },
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx },
+        { op: "drop" }, // drop bytes-written
       ]
     : [
         // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
         // Store ptr at memory[0] (iovec.buf)
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: 0 },
+        { op: "i32.store", align: 2, offset: 0 },
         // Store len at memory[4] (iovec.buf_len)
-        { op: "i32.const", value: 4 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        { op: "i32.const", value: 4 },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 0 },
         // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
-        { op: "i32.const", value: 1 } as Instr, // fd = stdout
-        { op: "i32.const", value: 0 } as Instr, // iovs pointer
-        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-        { op: "drop" } as Instr, // drop the return value (errno)
+        { op: "i32.const", value: 1 }, // fd = stdout
+        { op: "i32.const", value: 0 }, // iovs pointer
+        { op: "i32.const", value: 1 }, // iovs_len = 1
+        { op: "i32.const", value: 8 }, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx },
+        { op: "drop" }, // drop the return value (errno)
       ];
 
   ctx.mod.functions.push({
@@ -8551,29 +8512,29 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
   // `writeSync(fd=2, ptr, len)` (returns bytes-written → drop).
   const body: Instr[] = ctx.linkNodeShims
     ? [
-        { op: "i32.const", value: 2 } as Instr, // fd = stderr
-        { op: "local.get", index: 0 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
-        { op: "drop" } as Instr, // drop bytes-written
+        { op: "i32.const", value: 2 }, // fd = stderr
+        { op: "local.get", index: 0 },
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx },
+        { op: "drop" }, // drop bytes-written
       ]
     : [
         // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
         // Store ptr at memory[0] (iovec.buf)
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: 0 },
+        { op: "i32.store", align: 2, offset: 0 },
         // Store len at memory[4] (iovec.buf_len)
-        { op: "i32.const", value: 4 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        { op: "i32.const", value: 4 },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 0 },
         // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
-        { op: "i32.const", value: 2 } as Instr, // fd = stderr
-        { op: "i32.const", value: 0 } as Instr, // iovs pointer
-        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-        { op: "drop" } as Instr, // drop the return value (errno)
+        { op: "i32.const", value: 2 }, // fd = stderr
+        { op: "i32.const", value: 0 }, // iovs pointer
+        { op: "i32.const", value: 1 }, // iovs_len = 1
+        { op: "i32.const", value: 8 }, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx },
+        { op: "drop" }, // drop the return value (errno)
       ];
 
   ctx.mod.functions.push({
@@ -8658,11 +8619,11 @@ const LINEAR_U8_ARENA_START = 256 * 1024;
 function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, lenLocalIdx: number): Instr[] {
   if (ctx.linkNodeShims) {
     return [
-      { op: "i32.const", value: fd } as Instr,
-      { op: "i32.const", value: srcConst } as Instr,
-      { op: "local.get", index: lenLocalIdx } as Instr,
-      { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
-      { op: "drop" } as Instr, // drop bytes-written
+      { op: "i32.const", value: fd },
+      { op: "i32.const", value: srcConst },
+      { op: "local.get", index: lenLocalIdx },
+      { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx },
+      { op: "drop" }, // drop bytes-written
     ];
   }
   // #2807 — route the direct-WASI write through the chunked `__wasi_fd_write_all`
@@ -8675,29 +8636,29 @@ function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, le
   const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
   if (writeAllIdx >= 0) {
     return [
-      { op: "i32.const", value: fd } as Instr,
-      { op: "i32.const", value: srcConst } as Instr,
-      { op: "local.get", index: lenLocalIdx } as Instr,
-      { op: "call", funcIdx: writeAllIdx } as Instr,
-      { op: "drop" } as Instr, // drop total bytes-written
+      { op: "i32.const", value: fd },
+      { op: "i32.const", value: srcConst },
+      { op: "local.get", index: lenLocalIdx },
+      { op: "call", funcIdx: writeAllIdx },
+      { op: "drop" }, // drop total bytes-written
     ];
   }
   return [
     // iovec.buf = srcConst at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: srcConst } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: srcConst },
+    { op: "i32.store", align: 2, offset: 0 },
     // iovec.buf_len = len at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: lenLocalIdx } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: 4 },
+    { op: "local.get", index: lenLocalIdx },
+    { op: "i32.store", align: 2, offset: 0 },
     // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    { op: "i32.const", value: fd },
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 1 },
+    { op: "i32.const", value: 8 },
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx },
+    { op: "drop" },
   ];
 }
 
@@ -8742,80 +8703,80 @@ export function ensureWasiFdWriteAllHelper(ctx: CodegenContext): number {
 
   const loopBody: Instr[] = [
     // if (remaining <= 0) break out of the block
-    { op: "local.get", index: REMAINING } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.le_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: REMAINING },
+    { op: "i32.const", value: 0 },
+    { op: "i32.le_s" },
+    { op: "br_if", depth: 1 },
     // chunk = min(remaining, MAX_CHUNK) = remaining < MAX ? remaining : MAX
-    { op: "local.get", index: REMAINING } as Instr,
-    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK } as Instr,
-    { op: "local.get", index: REMAINING } as Instr,
-    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK } as Instr,
-    { op: "i32.lt_s" } as Instr,
-    { op: "select" } as Instr,
-    { op: "local.set", index: CHUNK } as Instr,
+    { op: "local.get", index: REMAINING },
+    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK },
+    { op: "local.get", index: REMAINING },
+    { op: "i32.const", value: WASI_FD_WRITE_MAX_CHUNK },
+    { op: "i32.lt_s" },
+    { op: "select" },
+    { op: "local.set", index: CHUNK },
     // iovec.buf = base at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: BASE } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: BASE },
+    { op: "i32.store", align: 2, offset: 0 },
     // iovec.buf_len = chunk at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: CHUNK } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: 4 },
+    { op: "local.get", index: CHUNK },
+    { op: "i32.store", align: 2, offset: 0 },
     // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "local.get", index: FD } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "local.set", index: ERRNO } as Instr,
+    { op: "local.get", index: FD },
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 1 },
+    { op: "i32.const", value: 8 },
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx },
+    { op: "local.set", index: ERRNO },
     // if (errno != 0) break — return whatever was written so far
-    { op: "local.get", index: ERRNO } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: ERRNO },
+    { op: "br_if", depth: 1 },
     // nw = memory[8]
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
-    { op: "local.set", index: NW } as Instr,
+    { op: "i32.const", value: 8 },
+    { op: "i32.load", align: 2, offset: 0 },
+    { op: "local.set", index: NW },
     // if (nw <= 0) break — no progress, never spin
-    { op: "local.get", index: NW } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.le_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: NW },
+    { op: "i32.const", value: 0 },
+    { op: "i32.le_s" },
+    { op: "br_if", depth: 1 },
     // total += nw
-    { op: "local.get", index: TOTAL } as Instr,
-    { op: "local.get", index: NW } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: TOTAL } as Instr,
+    { op: "local.get", index: TOTAL },
+    { op: "local.get", index: NW },
+    { op: "i32.add" },
+    { op: "local.set", index: TOTAL },
     // base += nw
-    { op: "local.get", index: BASE } as Instr,
-    { op: "local.get", index: NW } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: BASE } as Instr,
+    { op: "local.get", index: BASE },
+    { op: "local.get", index: NW },
+    { op: "i32.add" },
+    { op: "local.set", index: BASE },
     // remaining -= nw
-    { op: "local.get", index: REMAINING } as Instr,
-    { op: "local.get", index: NW } as Instr,
-    { op: "i32.sub" } as Instr,
-    { op: "local.set", index: REMAINING } as Instr,
+    { op: "local.get", index: REMAINING },
+    { op: "local.get", index: NW },
+    { op: "i32.sub" },
+    { op: "local.set", index: REMAINING },
     // continue
-    { op: "br", depth: 0 } as Instr,
+    { op: "br", depth: 0 },
   ];
 
   const body: Instr[] = [
     // base = ptr
-    { op: "local.get", index: PTR } as Instr,
-    { op: "local.set", index: BASE } as Instr,
+    { op: "local.get", index: PTR },
+    { op: "local.set", index: BASE },
     // remaining = len
-    { op: "local.get", index: LEN } as Instr,
-    { op: "local.set", index: REMAINING } as Instr,
+    { op: "local.get", index: LEN },
+    { op: "local.set", index: REMAINING },
     // total = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: TOTAL } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: TOTAL },
     {
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-    } as Instr,
-    { op: "local.get", index: TOTAL } as Instr,
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+    },
+    { op: "local.get", index: TOTAL },
   ];
 
   ctx.mod.functions.push({
@@ -9010,45 +8971,45 @@ export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     // ret = arena_ptr
-    { op: "global.get", index: arenaGlobal } as Instr,
-    { op: "local.set", index: RET } as Instr,
+    { op: "global.get", index: arenaGlobal },
+    { op: "local.set", index: RET },
     // next = align8(ret + len) = (ret + len + 7) & ~7
-    { op: "local.get", index: RET } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 7 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: -8 } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "local.set", index: NEXT } as Instr,
+    { op: "local.get", index: RET },
+    { op: "local.get", index: LEN },
+    { op: "i32.add" },
+    { op: "i32.const", value: 7 },
+    { op: "i32.add" },
+    { op: "i32.const", value: -8 },
+    { op: "i32.and" },
+    { op: "local.set", index: NEXT },
     // if (next > memory.size * PAGE) grow by ceil((next - cur)/PAGE)
-    { op: "local.get", index: NEXT } as Instr,
-    { op: "memory.size" } as Instr,
-    { op: "i32.const", value: PAGE } as Instr,
-    { op: "i32.mul" } as Instr,
-    { op: "i32.gt_u" } as Instr,
+    { op: "local.get", index: NEXT },
+    { op: "memory.size" },
+    { op: "i32.const", value: PAGE },
+    { op: "i32.mul" },
+    { op: "i32.gt_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: NEXT } as Instr,
-        { op: "memory.size" } as Instr,
-        { op: "i32.const", value: PAGE } as Instr,
-        { op: "i32.mul" } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "i32.const", value: PAGE - 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "i32.const", value: PAGE } as Instr,
-        { op: "i32.div_u" } as Instr,
-        { op: "memory.grow" } as Instr,
-        { op: "drop" } as Instr,
+        { op: "local.get", index: NEXT },
+        { op: "memory.size" },
+        { op: "i32.const", value: PAGE },
+        { op: "i32.mul" },
+        { op: "i32.sub" },
+        { op: "i32.const", value: PAGE - 1 },
+        { op: "i32.add" },
+        { op: "i32.const", value: PAGE },
+        { op: "i32.div_u" },
+        { op: "memory.grow" },
+        { op: "drop" },
       ],
-    } as Instr,
+    },
     // arena_ptr = next
-    { op: "local.get", index: NEXT } as Instr,
-    { op: "global.set", index: arenaGlobal } as Instr,
+    { op: "local.get", index: NEXT },
+    { op: "global.set", index: arenaGlobal },
     // return ret
-    { op: "local.get", index: RET } as Instr,
+    { op: "local.get", index: RET },
   ];
 
   ctx.mod.functions.push({
@@ -9142,185 +9103,183 @@ function buildWasiStringEncodeToScratch(
   const { FLAT, LEN, OFF, DATA, I, O, NEED_PAGES, CU, CP, LO, S } = layout;
 
   const storeByte = (offsetFromO: number, value: Instr[]): Instr[] => [
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: O } as Instr,
-    ...(offsetFromO === 0
-      ? []
-      : ([{ op: "i32.const", value: offsetFromO } as Instr, { op: "i32.add" } as Instr] as Instr[])),
-    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+    { op: "local.get", index: O },
+    ...(offsetFromO === 0 ? [] : ([{ op: "i32.const", value: offsetFromO }, { op: "i32.add" }] satisfies Instr[])),
+    { op: "i32.add" },
     ...value,
-    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+    { op: "i32.store8", align: 0, offset: 0 },
   ];
 
   const advanceOutput = (n: number): Instr[] => [
-    { op: "local.get", index: O } as Instr,
-    { op: "i32.const", value: n } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: O } as Instr,
+    { op: "local.get", index: O },
+    { op: "i32.const", value: n },
+    { op: "i32.add" },
+    { op: "local.set", index: O },
   ];
 
   const encodeCurrentCodePoint: Instr[] = [
-    { op: "local.get", index: CP } as Instr,
-    { op: "i32.const", value: 0x80 } as Instr,
-    { op: "i32.lt_u" } as Instr,
+    { op: "local.get", index: CP },
+    { op: "i32.const", value: 0x80 },
+    { op: "i32.lt_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [storeByte(0, [{ op: "local.get", index: CP } as Instr]), ...advanceOutput(1)].flat(),
+      then: [storeByte(0, [{ op: "local.get", index: CP }]), ...advanceOutput(1)].flat(),
       else: [
-        { op: "local.get", index: CP } as Instr,
-        { op: "i32.const", value: 0x800 } as Instr,
-        { op: "i32.lt_u" } as Instr,
+        { op: "local.get", index: CP },
+        { op: "i32.const", value: 0x800 },
+        { op: "i32.lt_u" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             ...storeByte(0, [
-              { op: "local.get", index: CP } as Instr,
-              { op: "i32.const", value: 6 } as Instr,
-              { op: "i32.shr_u" } as Instr,
-              { op: "i32.const", value: 0xc0 } as Instr,
-              { op: "i32.or" } as Instr,
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 6 },
+              { op: "i32.shr_u" },
+              { op: "i32.const", value: 0xc0 },
+              { op: "i32.or" },
             ]),
             ...storeByte(1, [
-              { op: "local.get", index: CP } as Instr,
-              { op: "i32.const", value: 0x3f } as Instr,
-              { op: "i32.and" } as Instr,
-              { op: "i32.const", value: 0x80 } as Instr,
-              { op: "i32.or" } as Instr,
+              { op: "local.get", index: CP },
+              { op: "i32.const", value: 0x3f },
+              { op: "i32.and" },
+              { op: "i32.const", value: 0x80 },
+              { op: "i32.or" },
             ]),
             ...advanceOutput(2),
           ],
           else: [
-            { op: "local.get", index: CP } as Instr,
-            { op: "i32.const", value: 0x10000 } as Instr,
-            { op: "i32.lt_u" } as Instr,
+            { op: "local.get", index: CP },
+            { op: "i32.const", value: 0x10000 },
+            { op: "i32.lt_u" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
                 ...storeByte(0, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 12 } as Instr,
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.const", value: 0xe0 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0xe0 },
+                  { op: "i32.or" },
                 ]),
                 ...storeByte(1, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 6 } as Instr,
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.const", value: 0x3f } as Instr,
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.const", value: 0x80 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "i32.or" },
                 ]),
                 ...storeByte(2, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 0x3f } as Instr,
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.const", value: 0x80 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "i32.or" },
                 ]),
                 ...advanceOutput(3),
               ],
               else: [
                 ...storeByte(0, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 18 } as Instr,
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.const", value: 0xf0 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 18 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0xf0 },
+                  { op: "i32.or" },
                 ]),
                 ...storeByte(1, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 12 } as Instr,
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.const", value: 0x3f } as Instr,
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.const", value: 0x80 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 12 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "i32.or" },
                 ]),
                 ...storeByte(2, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 6 } as Instr,
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.const", value: 0x3f } as Instr,
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.const", value: 0x80 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 6 },
+                  { op: "i32.shr_u" },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "i32.or" },
                 ]),
                 ...storeByte(3, [
-                  { op: "local.get", index: CP } as Instr,
-                  { op: "i32.const", value: 0x3f } as Instr,
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.const", value: 0x80 } as Instr,
-                  { op: "i32.or" } as Instr,
+                  { op: "local.get", index: CP },
+                  { op: "i32.const", value: 0x3f },
+                  { op: "i32.and" },
+                  { op: "i32.const", value: 0x80 },
+                  { op: "i32.or" },
                 ]),
                 ...advanceOutput(4),
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 
   return [
     // flat = __str_flatten(s)
-    { op: "local.get", index: S } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
-    { op: "local.set", index: FLAT } as Instr,
+    { op: "local.get", index: S },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "local.set", index: FLAT },
 
     // len = flat.len (field 0)
-    { op: "local.get", index: FLAT } as Instr,
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: LEN } as Instr,
+    { op: "local.get", index: FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: LEN },
 
     // #1723/#1470: grow linear memory if the staging buffer could overflow.
     // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit.
     //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len*3) / 65536)
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.const", value: 3 } as Instr,
-    { op: "i32.mul" } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 65535 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 16 } as Instr,
-    { op: "i32.shr_u" } as Instr,
-    { op: "local.set", index: NEED_PAGES } as Instr,
-    { op: "local.get", index: NEED_PAGES } as Instr,
-    { op: "memory.size" } as Instr,
-    { op: "i32.gt_u" } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+    { op: "local.get", index: LEN },
+    { op: "i32.const", value: 3 },
+    { op: "i32.mul" },
+    { op: "i32.add" },
+    { op: "i32.const", value: 65535 },
+    { op: "i32.add" },
+    { op: "i32.const", value: 16 },
+    { op: "i32.shr_u" },
+    { op: "local.set", index: NEED_PAGES },
+    { op: "local.get", index: NEED_PAGES },
+    { op: "memory.size" },
+    { op: "i32.gt_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: NEED_PAGES } as Instr,
-        { op: "memory.size" } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "memory.grow" } as Instr,
-        { op: "drop" } as Instr,
+        { op: "local.get", index: NEED_PAGES },
+        { op: "memory.size" },
+        { op: "i32.sub" },
+        { op: "memory.grow" },
+        { op: "drop" },
       ],
-    } as Instr,
+    },
 
     // off = flat.off (field 1)
-    { op: "local.get", index: FLAT } as Instr,
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: OFF } as Instr,
+    { op: "local.get", index: FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: OFF },
 
     // data = flat.data (field 2)
-    { op: "local.get", index: FLAT } as Instr,
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
-    { op: "local.set", index: DATA } as Instr,
+    { op: "local.get", index: FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+    { op: "local.set", index: DATA },
 
     // i = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
     // o = 0 (UTF-8 byte cursor)
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: O } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: O },
 
     // while (i < len) decode one WTF-16 code point and encode it as UTF-8.
     {
@@ -9331,81 +9290,81 @@ function buildWasiStringEncodeToScratch(
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
 
             // cu = data[off + i]; cp = cu; i++
-            { op: "local.get", index: DATA } as Instr,
-            { op: "local.get", index: OFF } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
-            { op: "local.set", index: CU } as Instr,
-            { op: "local.get", index: CU } as Instr,
-            { op: "local.set", index: CP } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
+            { op: "local.get", index: DATA },
+            { op: "local.get", index: OFF },
+            { op: "local.get", index: I },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "local.set", index: CU },
+            { op: "local.get", index: CU },
+            { op: "local.set", index: CP },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
 
             // Combine a high+low surrogate pair into one scalar.
-            { op: "local.get", index: CU } as Instr,
-            { op: "i32.const", value: 0xd800 } as Instr,
-            { op: "i32.ge_u" } as Instr,
-            { op: "local.get", index: CU } as Instr,
-            { op: "i32.const", value: 0xdbff } as Instr,
-            { op: "i32.le_u" } as Instr,
-            { op: "i32.and" } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "i32.lt_s" } as Instr,
-            { op: "i32.and" } as Instr,
+            { op: "local.get", index: CU },
+            { op: "i32.const", value: 0xd800 },
+            { op: "i32.ge_u" },
+            { op: "local.get", index: CU },
+            { op: "i32.const", value: 0xdbff },
+            { op: "i32.le_u" },
+            { op: "i32.and" },
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.lt_s" },
+            { op: "i32.and" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: DATA } as Instr,
-                { op: "local.get", index: OFF } as Instr,
-                { op: "local.get", index: I } as Instr,
-                { op: "i32.add" } as Instr,
-                { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
-                { op: "local.set", index: LO } as Instr,
-                { op: "local.get", index: LO } as Instr,
-                { op: "i32.const", value: 0xdc00 } as Instr,
-                { op: "i32.ge_u" } as Instr,
-                { op: "local.get", index: LO } as Instr,
-                { op: "i32.const", value: 0xdfff } as Instr,
-                { op: "i32.le_u" } as Instr,
-                { op: "i32.and" } as Instr,
+                { op: "local.get", index: DATA },
+                { op: "local.get", index: OFF },
+                { op: "local.get", index: I },
+                { op: "i32.add" },
+                { op: "array.get_u", typeIdx: strDataTypeIdx },
+                { op: "local.set", index: LO },
+                { op: "local.get", index: LO },
+                { op: "i32.const", value: 0xdc00 },
+                { op: "i32.ge_u" },
+                { op: "local.get", index: LO },
+                { op: "i32.const", value: 0xdfff },
+                { op: "i32.le_u" },
+                { op: "i32.and" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
-                    { op: "i32.const", value: 0x10000 } as Instr,
-                    { op: "local.get", index: CU } as Instr,
-                    { op: "i32.const", value: 0xd800 } as Instr,
-                    { op: "i32.sub" } as Instr,
-                    { op: "i32.const", value: 10 } as Instr,
-                    { op: "i32.shl" } as Instr,
-                    { op: "i32.add" } as Instr,
-                    { op: "local.get", index: LO } as Instr,
-                    { op: "i32.const", value: 0xdc00 } as Instr,
-                    { op: "i32.sub" } as Instr,
-                    { op: "i32.add" } as Instr,
-                    { op: "local.set", index: CP } as Instr,
-                    { op: "local.get", index: I } as Instr,
-                    { op: "i32.const", value: 1 } as Instr,
-                    { op: "i32.add" } as Instr,
-                    { op: "local.set", index: I } as Instr,
+                    { op: "i32.const", value: 0x10000 },
+                    { op: "local.get", index: CU },
+                    { op: "i32.const", value: 0xd800 },
+                    { op: "i32.sub" },
+                    { op: "i32.const", value: 10 },
+                    { op: "i32.shl" },
+                    { op: "i32.add" },
+                    { op: "local.get", index: LO },
+                    { op: "i32.const", value: 0xdc00 },
+                    { op: "i32.sub" },
+                    { op: "i32.add" },
+                    { op: "local.set", index: CP },
+                    { op: "local.get", index: I },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: I },
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
 
             ...encodeCurrentCodePoint,
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -9537,21 +9496,21 @@ function ensureWasiStartExnPrinter(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     // A null payload has no string form — skip rendering, still exit via caller.
-    { op: "local.get", index: 0 } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
     // payload (externref) → anyref → __any_to_string yields ref AnyString → stderr.
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "call", funcIdx: anyToStrIdx } as Instr,
-    { op: "call", funcIdx: writeStderrIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "call", funcIdx: anyToStrIdx },
+    { op: "call", funcIdx: writeStderrIdx },
     // Trailing newline: store 0x0A at the shared write scratch and write 1 byte
     // to fd 2 (emitWasiWriteTail handles both the direct-WASI and node-shim path).
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.const", value: 0x0a } as Instr,
-    { op: "i32.store8", align: 0, offset: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "local.set", index: NL_LEN } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+    { op: "i32.const", value: 0x0a },
+    { op: "i32.store8", align: 0, offset: 0 },
+    { op: "i32.const", value: 1 },
+    { op: "local.set", index: NL_LEN },
     ...emitWasiWriteTail(ctx, 2, WASI_WRITE_SCRATCH_START, NL_LEN),
   ];
 
@@ -9609,35 +9568,38 @@ export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
     ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
     // return bytes-written for write(fd, WASI_WRITE_SCRATCH_START, O).
     ...(directWrite
-      ? [
+      ? ([
           // iovec.base = scratch at memory[0]; iovec.len = O at memory[4].
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-          { op: "i32.store", align: 2, offset: 0 } as Instr,
-          { op: "i32.const", value: 4 } as Instr,
-          { op: "local.get", index: layout.O } as Instr,
-          { op: "i32.store", align: 2, offset: 0 } as Instr,
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+          { op: "i32.store", align: 2, offset: 0 },
+          { op: "i32.const", value: 4 },
+          { op: "local.get", index: layout.O },
+          { op: "i32.store", align: 2, offset: 0 },
           // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-          { op: "local.get", index: FD } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.const", value: 8 } as Instr,
-          { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+          { op: "local.get", index: FD },
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 1 },
+          { op: "i32.const", value: 8 },
+          { op: "call", funcIdx: ctx.wasiFdWriteIdx },
           // errno != 0 → 0 bytes; else load nwritten at memory[8].
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "i32.const", value: 0 } as Instr],
-            else: [{ op: "i32.const", value: 8 } as Instr, { op: "i32.load", align: 2, offset: 0 } as Instr],
-          } as Instr,
-        ]
-      : [
+            then: [{ op: "i32.const", value: 0 }],
+            else: [
+              { op: "i32.const", value: 8 },
+              { op: "i32.load", align: 2, offset: 0 },
+            ],
+          },
+        ] satisfies Instr[])
+      : ([
           // writeSync(fd, WASI_WRITE_SCRATCH_START, O) — bytes written.
-          { op: "local.get", index: FD } as Instr,
-          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-          { op: "local.get", index: layout.O } as Instr,
-          { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
-        ]),
+          { op: "local.get", index: FD },
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+          { op: "local.get", index: layout.O },
+          { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx },
+        ] satisfies Instr[])),
   ];
 
   ctx.mod.functions.push({
@@ -9705,9 +9667,9 @@ export function ensureWasiWriteUint8ArrayHelper(
 
   const body: Instr[] = [
     // len = arr.length (field 0)
-    { op: "local.get", index: ARR } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: LEN } as Instr,
+    { op: "local.get", index: ARR },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: LEN },
 
     // #389/#1723: grow linear memory if the staging buffer
     // [WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START+len) would overflow
@@ -9721,38 +9683,38 @@ export function ensureWasiWriteUint8ArrayHelper(
     //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len) / 65536)
     //               = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
     // i32.shr_u keeps the page count non-negative for lengths near 2^31.
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 65535 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 16 } as Instr,
-    { op: "i32.shr_u" } as Instr,
-    { op: "local.set", index: NEED_PAGES } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+    { op: "local.get", index: LEN },
+    { op: "i32.add" },
+    { op: "i32.const", value: 65535 },
+    { op: "i32.add" },
+    { op: "i32.const", value: 16 },
+    { op: "i32.shr_u" },
+    { op: "local.set", index: NEED_PAGES },
     // if (needPages > memory.size) memory.grow(needPages - memory.size)
-    { op: "local.get", index: NEED_PAGES } as Instr,
-    { op: "memory.size" } as Instr,
-    { op: "i32.gt_u" } as Instr,
+    { op: "local.get", index: NEED_PAGES },
+    { op: "memory.size" },
+    { op: "i32.gt_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: NEED_PAGES } as Instr,
-        { op: "memory.size" } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "memory.grow" } as Instr,
-        { op: "drop" } as Instr,
+        { op: "local.get", index: NEED_PAGES },
+        { op: "memory.size" },
+        { op: "i32.sub" },
+        { op: "memory.grow" },
+        { op: "drop" },
       ],
-    } as Instr,
+    },
 
     // data = arr.data (field 1)
-    { op: "local.get", index: ARR } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: DATA } as Instr,
+    { op: "local.get", index: ARR },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: DATA },
 
     // i = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
 
     // while (i < len) mem[SCRATCH+i] = (u8) trunc(data[i]); i++
     {
@@ -9763,31 +9725,31 @@ export function ensureWasiWriteUint8ArrayHelper(
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
 
             // address = SCRATCH_START + i
-            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+            { op: "local.get", index: I },
+            { op: "i32.add" },
 
             // value = data[i] — low byte kept by i32.store8
-            { op: "local.get", index: DATA } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: elemKind === "i8" ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
-            ...(elemKind === "f64" ? ([{ op: "i32.trunc_sat_f64_s" } as Instr] as Instr[]) : []),
+            { op: "local.get", index: DATA },
+            { op: "local.get", index: I },
+            { op: elemKind === "i8" ? "array.get_u" : "array.get", typeIdx: arrTypeIdx },
+            ...(elemKind === "f64" ? ([{ op: "i32.trunc_sat_f64_s" }] satisfies Instr[]) : []),
 
             { op: "i32.store8", align: 0, offset: 0 },
 
             // i++
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
 
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -9857,46 +9819,46 @@ export function ensureWasiWriteArrayBufferHelper(
 
   const body: Instr[] = [
     // len = buf.length (field 0)
-    { op: "local.get", index: BUF } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: LEN } as Instr,
+    { op: "local.get", index: BUF },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: LEN },
 
     // #389/#1723: grow linear memory if the staging buffer would overflow the
     // current memory size (only 3 pages reserved by default). A ~1 MiB
     // ArrayBuffer write to stdout otherwise traps "memory access out of bounds".
     // Mirrors the string-write helper's #1723 guard.
     //   neededPages = (WASI_WRITE_SCRATCH_START + len + 65535) >> 16
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 65535 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 16 } as Instr,
-    { op: "i32.shr_u" } as Instr,
-    { op: "local.set", index: NEED_PAGES } as Instr,
-    { op: "local.get", index: NEED_PAGES } as Instr,
-    { op: "memory.size" } as Instr,
-    { op: "i32.gt_u" } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+    { op: "local.get", index: LEN },
+    { op: "i32.add" },
+    { op: "i32.const", value: 65535 },
+    { op: "i32.add" },
+    { op: "i32.const", value: 16 },
+    { op: "i32.shr_u" },
+    { op: "local.set", index: NEED_PAGES },
+    { op: "local.get", index: NEED_PAGES },
+    { op: "memory.size" },
+    { op: "i32.gt_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: NEED_PAGES } as Instr,
-        { op: "memory.size" } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "memory.grow" } as Instr,
-        { op: "drop" } as Instr,
+        { op: "local.get", index: NEED_PAGES },
+        { op: "memory.size" },
+        { op: "i32.sub" },
+        { op: "memory.grow" },
+        { op: "drop" },
       ],
-    } as Instr,
+    },
 
     // data = buf.data (field 1)
-    { op: "local.get", index: BUF } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: DATA } as Instr,
+    { op: "local.get", index: BUF },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: DATA },
 
     // i = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: I } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
 
     // while (i < len) mem[SCRATCH+i] = (u8) data[i]; i++
     {
@@ -9907,31 +9869,31 @@ export function ensureWasiWriteArrayBufferHelper(
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: I } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
 
             // address = SCRATCH_START + i
-            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: WASI_WRITE_SCRATCH_START },
+            { op: "local.get", index: I },
+            { op: "i32.add" },
 
             // value = data[i] ((#2835) packed i8 byte → unsigned read; low byte
             // kept by i32.store8)
-            { op: "local.get", index: DATA } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: DATA },
+            { op: "local.get", index: I },
+            { op: "array.get_u", typeIdx: arrTypeIdx },
 
             { op: "i32.store8", align: 0, offset: 0 },
 
             // i++
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "local.set", index: I } as Instr,
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
 
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -9983,44 +9945,44 @@ function emitWasiWriteFileSyncHelper(ctx: CodegenContext): void {
     //              oflags=O_CREAT|O_TRUNC(=9), rights_base=FD_WRITE(=64),
     //              rights_inheriting=0, fdflags=0, fd_out=12)
 
-    { op: "i32.const", value: 3 } as Instr, // dirfd = 3 (first preopen)
-    { op: "i32.const", value: 0 } as Instr, // dirflags = 0
-    { op: "local.get", index: 0 } as Instr, // path ptr
-    { op: "local.get", index: 1 } as Instr, // path len
-    { op: "i32.const", value: 9 } as Instr, // oflags = O_CREAT(1) | O_TRUNC(8) = 9
+    { op: "i32.const", value: 3 }, // dirfd = 3 (first preopen)
+    { op: "i32.const", value: 0 }, // dirflags = 0
+    { op: "local.get", index: 0 }, // path ptr
+    { op: "local.get", index: 1 }, // path len
+    { op: "i32.const", value: 9 }, // oflags = O_CREAT(1) | O_TRUNC(8) = 9
     { op: "i64.const", value: 64n }, // rights_base = RIGHT_FD_WRITE(64)
     { op: "i64.const", value: 0n }, // rights_inheriting = 0
-    { op: "i32.const", value: 0 } as Instr, // fdflags = 0
-    { op: "i32.const", value: 12 } as Instr, // fd_out ptr at memory[12]
-    { op: "call", funcIdx: ctx.wasiPathOpenIdx } as Instr,
-    { op: "drop" } as Instr, // drop errno
+    { op: "i32.const", value: 0 }, // fdflags = 0
+    { op: "i32.const", value: 12 }, // fd_out ptr at memory[12]
+    { op: "call", funcIdx: ctx.wasiPathOpenIdx },
+    { op: "drop" }, // drop errno
 
     // 2. Load the opened fd from memory[12]
-    { op: "i32.const", value: 12 } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
-    { op: "local.set", index: 4 } as Instr, // store in local openedFd
+    { op: "i32.const", value: 12 },
+    { op: "i32.load", align: 2, offset: 0 },
+    { op: "local.set", index: 4 }, // store in local openedFd
 
     // 3. Set up iovec for fd_write: iovec at memory[0]
     //    iovec.buf = dataPtr, iovec.buf_len = dataLen
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 2 } as Instr, // dataPtr
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 3 } as Instr, // dataLen
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: 2 }, // dataPtr
+    { op: "i32.store", align: 2, offset: 0 },
+    { op: "i32.const", value: 4 },
+    { op: "local.get", index: 3 }, // dataLen
+    { op: "i32.store", align: 2, offset: 0 },
 
     // 4. Call fd_write(openedFd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "local.get", index: 4 } as Instr, // fd = openedFd
-    { op: "i32.const", value: 0 } as Instr, // iovs pointer
-    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr, // drop errno
+    { op: "local.get", index: 4 }, // fd = openedFd
+    { op: "i32.const", value: 0 }, // iovs pointer
+    { op: "i32.const", value: 1 }, // iovs_len = 1
+    { op: "i32.const", value: 8 }, // nwritten pointer
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx },
+    { op: "drop" }, // drop errno
 
     // 5. Call fd_close(openedFd)
-    { op: "local.get", index: 4 } as Instr, // fd = openedFd
-    { op: "call", funcIdx: ctx.wasiFdCloseIdx } as Instr,
-    { op: "drop" } as Instr, // drop errno
+    { op: "local.get", index: 4 }, // fd = openedFd
+    { op: "call", funcIdx: ctx.wasiFdCloseIdx },
+    { op: "drop" }, // drop errno
   ];
 
   ctx.mod.functions.push({
@@ -10069,45 +10031,45 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
   // Local 1 = timeout_ns (i64) computed once
   const body: Instr[] = [
     // userdata @ 64 = 0 (i64)
-    { op: "i32.const", value: SUB_OFFSET } as Instr,
+    { op: "i32.const", value: SUB_OFFSET },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
 
     // tag @ 72 = 0 (i8 EVENTTYPE_CLOCK) — store 0 over 8 bytes covers tag + pad
-    { op: "i32.const", value: SUB_OFFSET + 8 } as Instr,
+    { op: "i32.const", value: SUB_OFFSET + 8 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
 
     // clockid @ 80 = 1 (CLOCK_MONOTONIC), pad @ 84 = 0 — combined as i64
-    { op: "i32.const", value: SUB_OFFSET + 16 } as Instr,
+    { op: "i32.const", value: SUB_OFFSET + 16 },
     { op: "i64.const", value: 1n },
     { op: "i64.store", align: 3, offset: 0 },
 
     // timeout @ 88 = (i64) ms * 1_000_000
-    { op: "i32.const", value: SUB_OFFSET + 24 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
+    { op: "i32.const", value: SUB_OFFSET + 24 },
+    { op: "local.get", index: 0 },
     { op: "i64.extend_i32_u" },
     { op: "i64.const", value: 1000000n },
     { op: "i64.mul" },
     { op: "i64.store", align: 3, offset: 0 },
 
     // precision @ 96 = 0
-    { op: "i32.const", value: SUB_OFFSET + 32 } as Instr,
+    { op: "i32.const", value: SUB_OFFSET + 32 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
 
     // flags @ 104 = 0 (u16, relative), plus pad — clear 8 bytes
-    { op: "i32.const", value: SUB_OFFSET + 40 } as Instr,
+    { op: "i32.const", value: SUB_OFFSET + 40 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
 
     // poll_oneoff(in=64, out=112, nsubs=1, nevents_out=144) — errno dropped
-    { op: "i32.const", value: SUB_OFFSET } as Instr,
-    { op: "i32.const", value: EVT_OFFSET } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: NEVENTS_OFFSET } as Instr,
-    { op: "call", funcIdx: ctx.wasiPollOneoffIdx } as Instr,
-    { op: "drop" } as Instr,
+    { op: "i32.const", value: SUB_OFFSET },
+    { op: "i32.const", value: EVT_OFFSET },
+    { op: "i32.const", value: 1 },
+    { op: "i32.const", value: NEVENTS_OFFSET },
+    { op: "call", funcIdx: ctx.wasiPollOneoffIdx },
+    { op: "drop" },
   ];
 
   ctx.mod.functions.push({
@@ -10941,11 +10903,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     addStringConstantGlobal(ctx, message);
     const ctorIdx = ctx.funcMap.get(`__new_${errorName}`)!;
     const tagIdx = ensureExnTag(ctx);
-    return [
-      ...stringConstantExternrefInstrs(ctx, message),
-      { op: "call", funcIdx: ctorIdx },
-      { op: "throw", tagIdx } as Instr,
-    ];
+    return [...stringConstantExternrefInstrs(ctx, message), { op: "call", funcIdx: ctorIdx }, { op: "throw", tagIdx }];
   };
 
   // 3. __box_number(f64) -> externref
@@ -11017,7 +10975,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
               blockType: { kind: "empty" },
               then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: strToNumberIdx }, { op: "return" }],
             },
-          ] as Instr[])
+          ] satisfies Instr[])
         : []),
       // not a recognized boxed number → NaN (matches Number(opaque))
       { op: "f64.const", value: NaN },
@@ -11252,7 +11210,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
                 { op: "return" },
               ],
             },
-          ] as Instr[])
+          ] satisfies Instr[])
         : []),
       // any = any.convert_extern(param)
       { op: "local.get", index: 0 },
@@ -11330,7 +11288,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
                 { op: "return" },
               ],
             },
-          ] as Instr[])
+          ] satisfies Instr[])
         : []),
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
@@ -11457,10 +11415,10 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [{ op: "i32.const", value: 0 }, { op: "return" }],
-                } as Instr,
+                },
               ],
             },
-          ] as Instr[])
+          ] satisfies Instr[])
         : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -11499,7 +11457,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
               blockType: { kind: "empty" },
               then: [{ op: "i32.const", value: 0 }, { op: "return" }],
             },
-          ] as Instr[])
+          ] satisfies Instr[])
         : []),
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
@@ -11620,31 +11578,31 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     // params: l=0, r=1 ; locals: la=2 (anyref), ra=3 (anyref)
     const bothTag = (tagIdx: number): Instr[] => [
       { op: "local.get", index: 0 },
-      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "call", funcIdx: tagIdx },
       { op: "local.get", index: 1 },
-      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "call", funcIdx: tagIdx },
       { op: "i32.and" },
     ];
     // Reference-identity arm (else): both refs convert to anyref (locals 2/3);
     // if both are eq heap refs, ref.eq; otherwise unequal.
     const refIdentityArm: Instr[] = [
       { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
       { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
       { op: "i32.and" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
           { op: "local.get", index: 3 },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
           { op: "ref.eq" },
         ],
         else: [{ op: "i32.const", value: 0 }],
-      } as Instr,
+      },
     ];
     // String VALUE equality is NOT inlined here. A boxed-any STRING element
     // compares by content (`["x"].indexOf("x")` must match), which needs a
@@ -11664,10 +11622,10 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     // Materialise the anyref temps (locals 2/3) once, then dispatch string/ref.
     const identityArm: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       { op: "local.get", index: 1 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 3 },
       ...stringOrIdentityArm,
     ];
@@ -11678,13 +11636,13 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "call", funcIdx: toBigIdx },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "call", funcIdx: toBigIdx },
           { op: "i64.eq" },
         ],
         else: elseArm,
-      } as Instr,
+      },
     ];
     const boolArm = (elseArm: Instr[]): Instr[] => [
       ...bothTag(typeofBoolIdx),
@@ -11693,21 +11651,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "call", funcIdx: unboxBoolIdx },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "call", funcIdx: unboxBoolIdx },
           { op: "i32.eq" },
         ],
         else: elseArm,
-      } as Instr,
+      },
     ];
     // numberArm: sameValueZero=true adds a NaN==NaN recovery (a!=a && b!=b).
     const numberArm = (sameValueZero: boolean, elseArm: Instr[]): Instr[] => {
       const cmp: Instr[] = [
         { op: "local.get", index: 0 },
-        { op: "call", funcIdx: unboxNumIdx } as Instr,
+        { op: "call", funcIdx: unboxNumIdx },
         { op: "local.get", index: 1 },
-        { op: "call", funcIdx: unboxNumIdx } as Instr,
+        { op: "call", funcIdx: unboxNumIdx },
       ];
       if (!sameValueZero) {
         cmp.push({ op: "f64.eq" });
@@ -11717,21 +11675,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         cmp.length = 0;
         cmp.push(
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxNumIdx } as Instr,
-          { op: "local.set", index: 4 } as Instr,
+          { op: "call", funcIdx: unboxNumIdx },
+          { op: "local.set", index: 4 },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxNumIdx } as Instr,
-          { op: "local.set", index: 5 } as Instr,
+          { op: "call", funcIdx: unboxNumIdx },
+          { op: "local.set", index: 5 },
           // la == ra
-          { op: "local.get", index: 4 } as Instr,
-          { op: "local.get", index: 5 } as Instr,
+          { op: "local.get", index: 4 },
+          { op: "local.get", index: 5 },
           { op: "f64.eq" },
           // || (la!=la && ra!=ra)
-          { op: "local.get", index: 4 } as Instr,
-          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 4 },
+          { op: "local.get", index: 4 },
           { op: "f64.ne" },
-          { op: "local.get", index: 5 } as Instr,
-          { op: "local.get", index: 5 } as Instr,
+          { op: "local.get", index: 5 },
+          { op: "local.get", index: 5 },
           { op: "f64.ne" },
           { op: "i32.and" },
           { op: "i32.or" },
@@ -11744,7 +11702,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           blockType: { kind: "val", type: { kind: "i32" } },
           then: cmp,
           else: elseArm,
-        } as Instr,
+        },
       ];
     };
 
@@ -11762,7 +11720,7 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [{ op: "i32.const", value: 1 }],
         else: rest,
-      } as Instr,
+      },
     ];
 
     const eqLocals = [

@@ -456,19 +456,19 @@ function patchStructNewInBody(body: Instr[], structTypeIdx: number, newFieldType
 function defaultValueInstrForType(type: ValType): Instr[] {
   switch (type.kind) {
     case "f64":
-      return [{ op: "f64.const", value: 0 } as Instr];
+      return [{ op: "f64.const", value: 0 }];
     case "i32":
-      return [{ op: "i32.const", value: 0 } as Instr];
+      return [{ op: "i32.const", value: 0 }];
     case "externref":
-      return [{ op: "ref.null.extern" } as Instr];
+      return [{ op: "ref.null.extern" }];
     case "ref_null":
-      return [{ op: "ref.null", typeIdx: type.typeIdx } as Instr];
+      return [{ op: "ref.null", typeIdx: type.typeIdx }];
     case "ref":
-      return [{ op: "ref.null", typeIdx: type.typeIdx } as Instr, { op: "ref.as_non_null" } as Instr];
+      return [{ op: "ref.null", typeIdx: type.typeIdx }, { op: "ref.as_non_null" }];
     case "eqref":
       return [{ op: "ref.null.eq" }];
     default:
-      return [{ op: "i32.const", value: 0 } as Instr];
+      return [{ op: "i32.const", value: 0 }];
   }
 }
 

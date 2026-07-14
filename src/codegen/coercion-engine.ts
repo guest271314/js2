@@ -648,7 +648,7 @@ export function emitAnyEqFromExternTemps(
     { op: "local.get", index: tmpRight },
     { op: "call", funcIdx: fromExternIdx },
     { op: "call", funcIdx: anyEqIdx },
-    ...(negate ? [{ op: "i32.eqz" } as Instr] : []),
+    ...(negate ? ([{ op: "i32.eqz" }] satisfies Instr[]) : []),
   ];
 }
 

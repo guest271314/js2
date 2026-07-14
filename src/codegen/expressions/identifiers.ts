@@ -124,7 +124,7 @@ export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, na
     const boxed = fctx.boxedTdzFlags?.get(name);
     if (boxed) {
       fctx.body.push({ op: "local.get", index: boxed.localIdx });
-      fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
     } else {
       fctx.body.push({ op: "local.get", index: flagIdx });
     }
@@ -157,7 +157,7 @@ export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, na
   const boxed = fctx.boxedTdzFlags?.get(name);
   if (boxed) {
     fctx.body.push({ op: "local.get", index: boxed.localIdx });
-    fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
   } else {
     fctx.body.push({ op: "local.get", index: flagIdx });
   }
@@ -166,14 +166,10 @@ export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, na
   if (throwRefErrIdx !== undefined) {
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
-    then = [
-      { op: "global.get", index: strIdx } as Instr,
-      { op: "call", funcIdx: throwRefErrIdx } as Instr,
-      { op: "unreachable" },
-    ];
+    then = [{ op: "global.get", index: strIdx }, { op: "call", funcIdx: throwRefErrIdx }, { op: "unreachable" }];
   } else {
     const tagIdx = ensureExnTag(ctx);
-    then = [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx }];
+    then = [{ op: "ref.null.extern" }, { op: "throw", tagIdx }];
   }
   fctx.body.push({
     op: "if",
@@ -483,13 +479,13 @@ export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, n
   if (throwRefErrIdx !== undefined) {
     addStringConstantGlobal(ctx, msg);
     const strIdx = ctx.stringGlobalMap.get(msg)!;
-    fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-    fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: strIdx });
+    fctx.body.push({ op: "call", funcIdx: throwRefErrIdx });
     fctx.body.push({ op: "unreachable" });
     return;
   }
   const tagIdx = ensureExnTag(ctx);
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
   fctx.body.push({ op: "throw", tagIdx });
 }
 
@@ -566,12 +562,12 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       if (throwRefErrIdx !== undefined) {
         addStringConstantGlobal(ctx, msg);
         const strIdx = ctx.stringGlobalMap.get(msg)!;
-        fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-        fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
+        fctx.body.push({ op: "global.get", index: strIdx });
+        fctx.body.push({ op: "call", funcIdx: throwRefErrIdx });
         fctx.body.push({ op: "unreachable" });
       } else {
         const tagIdx = ensureExnTag(ctx);
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
         fctx.body.push({ op: "throw", tagIdx });
       }
       return { kind: "externref" };
@@ -809,7 +805,7 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       addStringConstantGlobal(ctx, name);
       const strGlobalIdx = ctx.stringGlobalMap.get(name);
       if (strGlobalIdx !== undefined) {
-        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+        fctx.body.push({ op: "global.get", index: strGlobalIdx });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }
@@ -1007,7 +1003,7 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       addStringConstantGlobal(ctx, name);
       const strGlobalIdx = ctx.stringGlobalMap.get(name);
       if (strGlobalIdx !== undefined) {
-        fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
+        fctx.body.push({ op: "global.get", index: strGlobalIdx });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }
@@ -1146,13 +1142,13 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     if (throwRefErrIdx !== undefined) {
       addStringConstantGlobal(ctx, msg);
       const strIdx = ctx.stringGlobalMap.get(msg)!;
-      fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-      fctx.body.push({ op: "call", funcIdx: throwRefErrIdx } as Instr);
+      fctx.body.push({ op: "global.get", index: strIdx });
+      fctx.body.push({ op: "call", funcIdx: throwRefErrIdx });
       fctx.body.push({ op: "unreachable" });
     } else {
       // Fallback: raw exception-tag throw (no JS host to construct a ReferenceError).
       const tagIdx = ensureExnTag(ctx);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "throw", tagIdx });
     }
     return { kind: "externref" };
@@ -1425,7 +1421,7 @@ function emitInstanceofThrowGuard(ctx: CodegenContext, fctx: FunctionContext): v
     blockType: { kind: "empty" },
     then: throwBody,
     else: [],
-  } as Instr);
+  });
   fctx.body.push({ op: "local.get", index: codeLocal });
   // stack out: [i32 0|1]
 }
@@ -1652,7 +1648,7 @@ function emitNativeInstanceOfMembership(
   } else if (leftType.kind !== "externref") {
     coerceType(ctx, fctx, leftType, { kind: "externref" });
   }
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   const anyLocalIdx = allocLocal(fctx, `__io_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
   fctx.body.push({ op: "local.set", index: anyLocalIdx });
   if (typeIdxs.length === 0) {
@@ -1660,10 +1656,10 @@ function emitNativeInstanceOfMembership(
     return { kind: "i32" };
   }
   fctx.body.push({ op: "local.get", index: anyLocalIdx });
-  fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[0]! } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[0]! });
   for (let i = 1; i < typeIdxs.length; i++) {
     fctx.body.push({ op: "local.get", index: anyLocalIdx });
-    fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[i]! } as Instr);
+    fctx.body.push({ op: "ref.test", typeIdx: typeIdxs[i]! });
     fctx.body.push({ op: "i32.or" });
   }
   return { kind: "i32" };
@@ -1820,13 +1816,13 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
       }
       // externref -> anyref, store in temp, ref.test $Error_struct, then read
       // the discriminating field (builtin tag = field 0, user brand = field 4).
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
       const anyLocalIdx = allocLocal(fctx, `__err_instanceof_${fctx.locals.length}`, { kind: "anyref" } as ValType);
       fctx.body.push({ op: "local.set", index: anyLocalIdx });
       const elseBody: Instr[] = [
         { op: "local.get", index: anyLocalIdx },
-        { op: "ref.cast", typeIdx: structIdx } as Instr,
-        { op: "struct.get", typeIdx: structIdx, fieldIdx: brandFieldIdx } as Instr,
+        { op: "ref.cast", typeIdx: structIdx },
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: brandFieldIdx },
       ];
       if (compatTags.length === 1) {
         elseBody.push({ op: "i32.const", value: compatTags[0]! });
@@ -1845,7 +1841,7 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
         }
       }
       fctx.body.push({ op: "local.get", index: anyLocalIdx });
-      fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: structIdx });
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },

@@ -228,10 +228,10 @@ function emitNumericValueDescriptor(ctx: CodegenContext, fctx: FunctionContext, 
   const boxIdx = resolveBoxNumber(ctx, fctx);
   const createIdx = resolveCreateDescriptor(ctx, fctx);
   if (boxIdx === undefined || createIdx === undefined) return false;
-  fctx.body.push({ op: "f64.const", value } as Instr);
-  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
-  fctx.body.push({ op: "i32.const", value: flags } as Instr);
-  fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+  fctx.body.push({ op: "f64.const", value });
+  fctx.body.push({ op: "call", funcIdx: boxIdx });
+  fctx.body.push({ op: "i32.const", value: flags });
+  fctx.body.push({ op: "call", funcIdx: createIdx });
   return true;
 }
 
@@ -261,14 +261,14 @@ export function tryEmitStandaloneBuiltinStaticGopd(
       if (brand === undefined || !emitLazyNativeProtoGet(ctx, fctx, brand)) {
         // No reified proto object for this builtin yet — the attribute
         // assertions (the only shape in the corpus) still pass.
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
       }
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-      fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "call", funcIdx: createIdx });
       return true;
     }
     // Namespaces (Math/JSON/Reflect/Atomics) and Proxy own no "prototype".
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
 
@@ -281,8 +281,8 @@ export function tryEmitStandaloneBuiltinStaticGopd(
     if (createIdx === undefined) return false;
     addStringConstantGlobal(ctx, builtinName);
     fctx.body.push(...stringConstantExternrefInstrs(ctx, builtinName));
-    fctx.body.push({ op: "i32.const", value: FLAG_CONFIGURABLE } as Instr);
-    fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+    fctx.body.push({ op: "i32.const", value: FLAG_CONFIGURABLE });
+    fctx.body.push({ op: "call", funcIdx: createIdx });
     return true;
   }
 
@@ -307,9 +307,9 @@ export function tryEmitStandaloneBuiltinStaticGopd(
     // (#2175 V2-S2) The per-(builtin, method) singleton — the SAME value a
     // plain `<Builtin>.<method>` read yields, so `desc.value === Math.atan2`.
     fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    fctx.body.push({ op: "i32.const", value: FLAG_WRITABLE | FLAG_CONFIGURABLE } as Instr);
-    fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "i32.const", value: FLAG_WRITABLE | FLAG_CONFIGURABLE });
+    fctx.body.push({ op: "call", funcIdx: createIdx });
     return true;
   }
 
@@ -320,7 +320,7 @@ export function tryEmitStandaloneBuiltinStaticGopd(
   // phantom `undefined`. Every other receiver's standard own STRING-keyed
   // surface is fully covered above, so the member is genuinely absent.
   if (builtinName === "Symbol" || builtinName === "RegExp") return false;
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
   return true;
 }
 
@@ -409,7 +409,7 @@ function ensureStandaloneSpeciesGetterClosure(
     const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
     const closureFctx = makeBuiltinClosureFctx(funcName, selfType, userParams, { kind: "externref" });
     // Step 1 (the whole algorithm): Return the this value.
-    closureFctx.body.push({ op: "local.get", index: 1 } as Instr);
+    closureFctx.body.push({ op: "local.get", index: 1 });
     funcIdx = mintDefinedFunc(ctx);
     pushDefinedFunc(ctx, funcIdx, {
       name: funcName,
@@ -471,10 +471,10 @@ export function tryEmitStandaloneBuiltinSpeciesGopd(
   // (#2175 V2-S2) Identity-stable getter singleton — repeated gOPD calls yield
   // the SAME `.get` function object.
   fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
-  fctx.body.push({ op: "extern.convert_any" } as Instr); // get
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
-  fctx.body.push({ op: "i32.const", value: FLAG_CONFIGURABLE } as Instr); // {e:false, c:true}
-  fctx.body.push({ op: "call", funcIdx: createAccIdx } as Instr);
+  fctx.body.push({ op: "extern.convert_any" }); // get
+  fctx.body.push({ op: "ref.null.extern" }); // set = undefined
+  fctx.body.push({ op: "i32.const", value: FLAG_CONFIGURABLE }); // {e:false, c:true}
+  fctx.body.push({ op: "call", funcIdx: createAccIdx });
   return true;
 }
 
@@ -545,25 +545,25 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   });
   const objType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
   if (!objType || typeof objType !== "object") {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
   if (objType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   } else if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "anyref") {
     // Primitive receiver — coerce through externref; the struct ref.test
     // below fails and the arm answers `undefined` (same as the dynamic path).
     coerceType(ctx, fctx, objType, { kind: "externref" });
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   }
-  fctx.body.push({ op: "local.set", index: objAny } as Instr);
+  fctx.body.push({ op: "local.set", index: objAny });
   const keyType = compileExpression(ctx, fctx, arg1, { kind: "externref" });
   if (!keyType || typeof keyType !== "object") {
-    fctx.body.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
     return true;
   }
   if (keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: keyExt } as Instr);
+  fctx.body.push({ op: "local.set", index: keyExt });
 
   // ── Resolve natives AFTER operand lowering (shift-maintained maps). ──────
   const createIdx = resolveCreateDescriptor(ctx, fctx);
@@ -582,7 +582,7 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   ) {
     // Natives unavailable — answer `undefined` (operands are already parked
     // in locals, so the stack is clean; same answer as the dynamic native).
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
   // Strictly-additive fall-through: anything this arm does not positively
@@ -593,10 +593,10 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   // FACTORY, not a shared array — aliasing one Instr[] into two branches
   // double-remaps funcIdx on late-import/DCE shifts.
   const dynFallthrough = (): Instr[] => [
-    { op: "local.get", index: objAny } as Instr,
-    { op: "extern.convert_any" } as Instr,
-    { op: "local.get", index: keyExt } as Instr,
-    { op: "call", funcIdx: dynGopdIdx } as Instr,
+    { op: "local.get", index: objAny },
+    { op: "extern.convert_any" },
+    { op: "local.get", index: keyExt },
+    { op: "call", funcIdx: dynGopdIdx },
   ];
 
   // Per-field flags: shape table + per-variable defineProperty overrides —
@@ -613,72 +613,68 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
 
   // Innermost→outermost: fold the field chain from the last field backwards.
   const externrefBlock = { kind: "val" as const, type: { kind: "externref" } as ValType };
-  let chain: Instr[] = [{ op: "ref.null.extern" } as Instr]; // no field matched → undefined
+  let chain: Instr[] = [{ op: "ref.null.extern" }]; // no field matched → undefined
   for (let i = userFields.length - 1; i >= 0; i--) {
     const { field, fieldIdx } = userFields[i]!;
     const value: Instr[] = [
-      { op: "local.get", index: objAny } as Instr,
-      { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx } as Instr,
+      { op: "local.get", index: objAny },
+      { op: "ref.cast", typeIdx: structTypeIdx },
+      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
     ];
     const ft = field.type;
     if (ft.kind === "f64") {
-      value.push({ op: "call", funcIdx: boxIdx } as Instr);
+      value.push({ op: "call", funcIdx: boxIdx });
     } else if (ft.kind === "i32") {
-      value.push({ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr);
+      value.push({ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxIdx });
     } else if (ft.kind === "i64") {
-      value.push({ op: "f64.convert_i64_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr);
+      value.push({ op: "f64.convert_i64_s" }, { op: "call", funcIdx: boxIdx });
     } else if (ft.kind !== "externref") {
-      value.push({ op: "extern.convert_any" } as Instr);
+      value.push({ op: "extern.convert_any" });
     }
     chain = [
-      { op: "local.get", index: keyStr } as Instr,
-      { op: "ref.as_non_null" } as Instr,
+      { op: "local.get", index: keyStr },
+      { op: "ref.as_non_null" },
       ...nativeStringLiteralInstrs(ctx, field.name),
-      { op: "call", funcIdx: strEqualsIdx } as Instr,
+      { op: "call", funcIdx: strEqualsIdx },
       {
         op: "if",
         blockType: externrefBlock,
-        then: [
-          ...value,
-          { op: "i32.const", value: flagsFor(i, field.name) } as Instr,
-          { op: "call", funcIdx: createIdx } as Instr,
-        ],
+        then: [...value, { op: "i32.const", value: flagsFor(i, field.name) }, { op: "call", funcIdx: createIdx }],
         else: chain,
-      } as Instr,
+      },
     ];
   }
 
   // key = __to_property_key(key); string key + struct receiver → dispatch.
   const keyAny = allocLocal(fctx, `__gopdkd_kany_${fctx.locals.length}`, { kind: "anyref" });
   fctx.body.push(
-    { op: "local.get", index: keyExt } as Instr,
-    { op: "call", funcIdx: tpkIdx } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.tee", index: keyAny } as Instr,
-    { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+    { op: "local.get", index: keyExt },
+    { op: "call", funcIdx: tpkIdx },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: keyAny },
+    { op: "ref.test", typeIdx: anyStrTypeIdx },
     {
       op: "if",
       blockType: externrefBlock,
       then: [
-        { op: "local.get", index: keyAny } as Instr,
-        { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
-        { op: "call", funcIdx: strFlattenIdx } as Instr,
-        { op: "local.set", index: keyStr } as Instr,
-        { op: "local.get", index: objAny } as Instr,
-        { op: "ref.test", typeIdx: structTypeIdx } as Instr,
+        { op: "local.get", index: keyAny },
+        { op: "ref.cast", typeIdx: anyStrTypeIdx },
+        { op: "call", funcIdx: strFlattenIdx },
+        { op: "local.set", index: keyStr },
+        { op: "local.get", index: objAny },
+        { op: "ref.test", typeIdx: structTypeIdx },
         {
           op: "if",
           blockType: externrefBlock,
           then: chain,
           // Runtime value is not the checker-typed struct → dynamic native.
           else: dynFallthrough(),
-        } as Instr,
+        },
       ],
       // Non-string property key after ToPropertyKey (a genuine Symbol; nullish
       // under the legacy regime) — keep today's dynamic-native answer.
       else: dynFallthrough(),
-    } as Instr,
+    },
   );
   return true;
 }

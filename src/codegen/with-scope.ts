@@ -417,12 +417,12 @@ function compileDynamicWithStatement(ctx: CodegenContext, fctx: FunctionContext,
   flushLateImportShifts(ctx, fctx);
   if (isUndefIdx !== undefined) {
     fctx.body.push({ op: "local.get", index: localIdx });
-    fctx.body.push({ op: "call", funcIdx: isUndefIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: isUndefIdx });
     const savedGuard = pushBody(fctx);
     emitThrowTypeError(ctx, fctx, "Cannot convert undefined or null to object");
     const throwArm = fctx.body;
     popBody(fctx, savedGuard);
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm } as Instr);
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm });
   }
 
   // Only body-declared LEXICAL names (let/const/class/catch) + inner-function
@@ -502,13 +502,13 @@ export function emitDynamicWithGet(
   fctx.body.push({ op: "local.get", index: scope.localIdx });
   // Build the key externref + __extern_has call as the condition.
   for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } as ValType },
     then: thenArm,
     else: elseArm,
-  } as Instr);
+  });
   return { kind: "externref" };
 }
 
@@ -559,7 +559,7 @@ export function emitCaptureWithHasBinding(
   }
   fctx.body.push({ op: "local.get", index: scope.localIdx });
   for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx });
   fctx.body.push({ op: "local.set", index: hasLocal });
   return hasLocal;
 }
@@ -606,7 +606,7 @@ export function emitDynamicWithSet(
   fctx.body.push({ op: "local.get", index: scope.localIdx });
   for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
   fctx.body.push({ op: "local.get", index: rhsLocalIdx });
-  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: setIdx });
   const thenArm = fctx.body;
   popBody(fctx, savedThen);
 
@@ -617,7 +617,7 @@ export function emitDynamicWithSet(
     blockType: { kind: "empty" },
     then: thenArm,
     else: elseArm,
-  } as Instr);
+  });
 }
 
 /**
@@ -668,19 +668,19 @@ export function emitDynamicWithDelete(
   const savedThen = pushBody(fctx);
   fctx.body.push({ op: "local.get", index: scope.localIdx });
   for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: delIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: delIdx });
   const thenArm = fctx.body;
   popBody(fctx, savedThen);
 
   fctx.body.push({ op: "local.get", index: scope.localIdx });
   for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
-  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: thenArm,
     else: elseArm,
-  } as Instr);
+  });
   return { kind: "i32" };
 }
 

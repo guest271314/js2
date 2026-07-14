@@ -217,7 +217,7 @@ export function brandCollidingShapeTypes(mod: WasmModule, noBrand?: ReadonlySet<
         if (ins.op === "struct.new" && ins.typeIdx !== undefined) {
           const tgt = brandTarget.get(ins.typeIdx);
           if (tgt !== undefined) {
-            arr.splice(i, 0, { op: "ref.null", typeIdx: tgt } as Instr);
+            arr.splice(i, 0, { op: "ref.null", typeIdx: tgt });
             i++; // skip past the struct.new we just patched
           }
         }

@@ -87,11 +87,11 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // sequence in lower.ts and NEVER reach emitBinary, so the runtime value is
   // always a valid `Instr` -- the cast just states what the call site proves.
   emitBinary(op: IrBinop, out: Instr[]): void {
-    out.push({ op } as Instr);
+    out.push({ op } as Instr); // computed-op
   }
 
   emitUnary(op: IrUnop, out: Instr[]): void {
-    out.push({ op } as Instr);
+    out.push({ op });
   }
 
   emitLocalGet(index: number, out: Instr[]): void {

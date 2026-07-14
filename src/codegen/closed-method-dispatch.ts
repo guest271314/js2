@@ -217,7 +217,7 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
     locals: [],
     // Placeholder; filled by fillClosedMethodDispatch. `unreachable` keeps the
     // stub valid (externref result) if the fill is ever skipped.
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set(name, funcIdx);
@@ -269,7 +269,7 @@ export function reserveClosedMethodDispatchVararg(ctx: CodegenContext, methodNam
     name,
     typeIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set(name, funcIdx);
@@ -370,41 +370,41 @@ function buildEntryArm(
 ): Instr[] {
   const { boxNumIdx, unboxNumIdx, unboxBoolIdx } = ci;
   const arm: Instr[] = [
-    { op: "local.get", index: anyLocalIdx } as Instr,
-    { op: "ref.cast", typeIdx: entry.typeIdx } as Instr, // `this`
+    { op: "local.get", index: anyLocalIdx },
+    { op: "ref.cast", typeIdx: entry.typeIdx }, // `this`
   ];
   for (let a = 0; a < entry.paramTypes.length; a++) {
     const want = entry.paramTypes[a] ?? { kind: "externref" };
     arm.push(...pushArg(a)); // the arg, as externref, onto the stack
     if (want.kind === "f64") {
-      if (unboxNumIdx !== undefined) arm.push({ op: "call", funcIdx: unboxNumIdx } as Instr);
-      else arm.push({ op: "drop" } as Instr, { op: "f64.const", value: 0 } as Instr);
+      if (unboxNumIdx !== undefined) arm.push({ op: "call", funcIdx: unboxNumIdx });
+      else arm.push({ op: "drop" }, { op: "f64.const", value: 0 });
     } else if (want.kind === "i32") {
       if ((want as { boolean?: true }).boolean && unboxBoolIdx !== undefined) {
-        arm.push({ op: "call", funcIdx: unboxBoolIdx } as Instr);
+        arm.push({ op: "call", funcIdx: unboxBoolIdx });
       } else if (unboxNumIdx !== undefined) {
-        arm.push({ op: "call", funcIdx: unboxNumIdx } as Instr);
-        arm.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        arm.push({ op: "call", funcIdx: unboxNumIdx });
+        arm.push({ op: "i32.trunc_sat_f64_s" });
       } else {
-        arm.push({ op: "drop" } as Instr, { op: "i32.const", value: 0 } as Instr);
+        arm.push({ op: "drop" }, { op: "i32.const", value: 0 });
       }
     } else if (want.kind === "ref" || want.kind === "ref_null") {
-      arm.push({ op: "any.convert_extern" } as Instr);
-      arm.push({ op: "ref.cast", typeIdx: (want as { typeIdx: number }).typeIdx } as Instr);
+      arm.push({ op: "any.convert_extern" });
+      arm.push({ op: "ref.cast", typeIdx: (want as { typeIdx: number }).typeIdx });
     }
     // externref param: already externref — no coercion.
   }
-  arm.push({ op: "call", funcIdx: entry.funcIdx } as Instr);
+  arm.push({ op: "call", funcIdx: entry.funcIdx });
   // Box-coerce the result back to externref.
   if (entry.resultType.kind === "ref" || entry.resultType.kind === "ref_null") {
-    arm.push({ op: "extern.convert_any" } as Instr);
+    arm.push({ op: "extern.convert_any" });
   } else if (entry.resultType.kind === "f64") {
-    if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx } as Instr);
-    else arm.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+    if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx });
+    else arm.push({ op: "drop" }, { op: "ref.null.extern" });
   } else if (entry.resultType.kind === "i32") {
-    arm.push({ op: "f64.convert_i32_s" } as Instr);
-    if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx } as Instr);
-    else arm.push({ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr);
+    arm.push({ op: "f64.convert_i32_s" });
+    if (boxNumIdx !== undefined) arm.push({ op: "call", funcIdx: boxNumIdx });
+    else arm.push({ op: "drop" }, { op: "ref.null.extern" });
   }
   // externref result: no coercion.
   return arm;
@@ -451,25 +451,25 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       const argVec: Instr[] = [];
       if (arity > 0 && objVecPushIdx !== undefined) {
         const vecTmp = anyLocalIdx + 1;
-        argVec.push({ op: "call", funcIdx: objVecNewIdx } as Instr);
-        argVec.push({ op: "local.set", index: vecTmp } as Instr);
+        argVec.push({ op: "call", funcIdx: objVecNewIdx });
+        argVec.push({ op: "local.set", index: vecTmp });
         for (let a = 0; a < arity; a++) {
-          argVec.push({ op: "local.get", index: vecTmp } as Instr);
-          argVec.push({ op: "local.get", index: 1 + a } as Instr);
-          argVec.push({ op: "call", funcIdx: objVecPushIdx } as Instr);
+          argVec.push({ op: "local.get", index: vecTmp });
+          argVec.push({ op: "local.get", index: 1 + a });
+          argVec.push({ op: "call", funcIdx: objVecPushIdx });
         }
-        argVec.push({ op: "local.get", index: vecTmp } as Instr);
+        argVec.push({ op: "local.get", index: vecTmp });
       } else {
-        argVec.push({ op: "call", funcIdx: objVecNewIdx } as Instr);
+        argVec.push({ op: "call", funcIdx: objVecNewIdx });
       }
       current = [
-        { op: "local.get", index: 0 } as Instr,
+        { op: "local.get", index: 0 },
         ...stringConstantExternrefInstrs(ctx, methodName),
         ...argVec,
-        { op: "call", funcIdx: methodCallIdx } as Instr,
+        { op: "call", funcIdx: methodCallIdx },
       ];
     } else {
-      current = [{ op: "ref.null.extern" } as Instr];
+      current = [{ op: "ref.null.extern" }];
     }
 
     // (#2903) ITERATOR fallback arm for the eager Iterator-helper methods
@@ -501,43 +501,45 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           methodName === "toArray"
             ? [
                 // `__iter_hof_toArray(recv)` — stepped drain → $ObjVec.
-                { op: "local.get", index: 0 } as Instr,
-                { op: "call", funcIdx: iterHofIdx } as Instr,
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: iterHofIdx },
               ]
             : [
-                { op: "local.get", index: 0 } as Instr, // recv
-                { op: "local.get", index: 1 } as Instr, // cb
-                ...(methodName === "reduce"
+                { op: "local.get", index: 0 }, // recv
+                { op: "local.get", index: 1 }, // cb
+                ...((methodName === "reduce"
                   ? [
-                      ...(arity >= 2 ? [{ op: "local.get", index: 2 } as Instr] : [{ op: "ref.null.extern" } as Instr]), // init
-                      { op: "i32.const", value: arity >= 2 ? 1 : 0 } as Instr, // hasInit
+                      ...((arity >= 2
+                        ? [{ op: "local.get", index: 2 }]
+                        : [{ op: "ref.null.extern" }]) satisfies Instr[]), // init
+                      { op: "i32.const", value: arity >= 2 ? 1 : 0 }, // hasInit
                     ]
-                  : []),
-                { op: "call", funcIdx: iterHofIdx } as Instr,
+                  : []) satisfies Instr[]),
+                { op: "call", funcIdx: iterHofIdx },
               ];
         // isNotIterTarget = null ∨ ref.test $Object ∨ ref.test $__vec_base ∨
         // ref.test $ObjVec — a NULL receiver keeps the legacy open-arm route
         // (`__extern_method_call` answers undefined for null) instead of
         // trapping inside `__iterator`.
         const notIterTest: Instr[] = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: objTypeIdxForIter } as Instr,
-          { op: "i32.or" } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.is_null" },
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: objTypeIdxForIter },
+          { op: "i32.or" },
         ];
         if (ctx.vecBaseTypeIdx >= 0) {
           notIterTest.push(
-            { op: "local.get", index: anyLocalIdx } as Instr,
-            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "local.get", index: anyLocalIdx },
+            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+            { op: "i32.or" },
           );
         }
         if (objVecTypeIdxForIter !== undefined) {
           notIterTest.push(
-            { op: "local.get", index: anyLocalIdx } as Instr,
-            { op: "ref.test", typeIdx: objVecTypeIdxForIter } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "local.get", index: anyLocalIdx },
+            { op: "ref.test", typeIdx: objVecTypeIdxForIter },
+            { op: "i32.or" },
           );
         }
         current = [
@@ -547,7 +549,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             blockType: { kind: "val", type: { kind: "externref" } },
             then: current,
             else: iterCall,
-          } as Instr,
+          },
         ];
       }
     }
@@ -573,32 +575,32 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         objTypeIdxForLazy !== undefined
       ) {
         const lazyCall: Instr[] = [
-          { op: "local.get", index: 0 } as Instr, // recv
-          { op: "local.get", index: 1 } as Instr, // arg0 (mapper/predicate | count)
-          { op: "call", funcIdx: lazyCtorIdx } as Instr,
+          { op: "local.get", index: 0 }, // recv
+          { op: "local.get", index: 1 }, // arg0 (mapper/predicate | count)
+          { op: "call", funcIdx: lazyCtorIdx },
         ];
         // isNotIterTarget = null ∨ $Object ∨ $__vec_base ∨ $ObjVec — a NULL/
         // $Object/vec receiver keeps the legacy route; everything else (iterator
         // carriers) constructs the lazy wrapper.
         const notIterTest: Instr[] = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: objTypeIdxForLazy } as Instr,
-          { op: "i32.or" } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.is_null" },
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: objTypeIdxForLazy },
+          { op: "i32.or" },
         ];
         if (ctx.vecBaseTypeIdx >= 0) {
           notIterTest.push(
-            { op: "local.get", index: anyLocalIdx } as Instr,
-            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "local.get", index: anyLocalIdx },
+            { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+            { op: "i32.or" },
           );
         }
         if (objVecTypeIdxForLazy !== undefined) {
           notIterTest.push(
-            { op: "local.get", index: anyLocalIdx } as Instr,
-            { op: "ref.test", typeIdx: objVecTypeIdxForLazy } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "local.get", index: anyLocalIdx },
+            { op: "ref.test", typeIdx: objVecTypeIdxForLazy },
+            { op: "i32.or" },
           );
         }
         current = [
@@ -608,7 +610,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             blockType: { kind: "val", type: { kind: "externref" } },
             then: current,
             else: lazyCall,
-          } as Instr,
+          },
         ];
       }
     }
@@ -655,37 +657,35 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       const boxNum = ci.boxNumIdx as number;
       // Per-iteration: eq = eqIdx(__extern_get_idx(recv, i), arg0)
       const elemEq: Instr[] = [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "local.get", index: iLocalIdx } as Instr,
-        { op: "call", funcIdx: externGetIdxIdx } as Instr,
-        { op: "local.get", index: 1 } as Instr, // search target (arg0)
-        { op: "call", funcIdx: eqIdx } as Instr,
+        { op: "local.get", index: 0 },
+        { op: "local.get", index: iLocalIdx },
+        { op: "call", funcIdx: externGetIdxIdx },
+        { op: "local.get", index: 1 }, // search target (arg0)
+        { op: "call", funcIdx: eqIdx },
       ];
       // On match: return boxed index (indexOf/lastIndexOf) or boxed-true (includes).
       const onMatch: Instr[] =
         methodName === "includes"
-          ? [
-              { op: "i32.const", value: 1 } as Instr,
-              { op: "call", funcIdx: boxBoolIdx as number } as Instr,
-              { op: "return" } as Instr,
-            ]
-          : [
-              { op: "local.get", index: iLocalIdx } as Instr,
-              { op: "call", funcIdx: boxNum } as Instr,
-              { op: "return" } as Instr,
-            ];
+          ? [{ op: "i32.const", value: 1 }, { op: "call", funcIdx: boxBoolIdx as number }, { op: "return" }]
+          : [{ op: "local.get", index: iLocalIdx }, { op: "call", funcIdx: boxNum }, { op: "return" }];
       // Not-found result (loop fell through): boxed-false / boxed -1.
       const notFound: Instr[] =
         methodName === "includes"
-          ? [{ op: "i32.const", value: 0 } as Instr, { op: "call", funcIdx: boxBoolIdx as number } as Instr]
-          : [{ op: "f64.const", value: -1 } as Instr, { op: "call", funcIdx: boxNum } as Instr];
+          ? [
+              { op: "i32.const", value: 0 },
+              { op: "call", funcIdx: boxBoolIdx as number },
+            ]
+          : [
+              { op: "f64.const", value: -1 },
+              { op: "call", funcIdx: boxNum },
+            ];
 
       const forward = methodName !== "lastIndexOf";
       // len = __extern_length(recv)
       const setLen: Instr[] = [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "call", funcIdx: externLengthIdx } as Instr,
-        { op: "local.set", index: lenLocalIdx } as Instr,
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: externLengthIdx },
+        { op: "local.set", index: lenLocalIdx },
       ];
       // (#3170) `fromIndex` support. The generic `$__vec_base` search arm
       // previously IGNORED the 2nd argument, so `indexOf(x, n)` /
@@ -709,21 +709,24 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       // n = ToIntegerOrInfinity(fromIndex) into __vecfrom.
       const toInteger: Instr[] = hasFromIndex
         ? [
-            { op: "local.get", index: 2 } as Instr, // fromIndex (arg1)
-            { op: "call", funcIdx: ci.unboxNumIdx as number } as Instr,
-            { op: "local.tee", index: nLocalIdx } as Instr,
-            { op: "local.get", index: nLocalIdx } as Instr,
-            { op: "f64.ne" } as Instr, // n !== n ⇒ NaN
+            { op: "local.get", index: 2 }, // fromIndex (arg1)
+            { op: "call", funcIdx: ci.unboxNumIdx as number },
+            { op: "local.tee", index: nLocalIdx },
+            { op: "local.get", index: nLocalIdx },
+            { op: "f64.ne" }, // n !== n ⇒ NaN
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: nLocalIdx } as Instr],
-              else: [
-                { op: "local.get", index: nLocalIdx } as Instr,
-                { op: "f64.trunc" } as Instr, // toward zero
-                { op: "local.set", index: nLocalIdx } as Instr,
+              then: [
+                { op: "f64.const", value: 0 },
+                { op: "local.set", index: nLocalIdx },
               ],
-            } as Instr,
+              else: [
+                { op: "local.get", index: nLocalIdx },
+                { op: "f64.trunc" }, // toward zero
+                { op: "local.set", index: nLocalIdx },
+              ],
+            },
           ]
         : [];
 
@@ -736,77 +739,80 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           ? [
               ...toInteger,
               // k = n≥0 ? n : max(len+n, 0)
-              { op: "local.get", index: nLocalIdx } as Instr,
-              { op: "f64.const", value: 0 } as Instr,
-              { op: "f64.ge" } as Instr,
+              { op: "local.get", index: nLocalIdx },
+              { op: "f64.const", value: 0 },
+              { op: "f64.ge" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "f64" } },
-                then: [{ op: "local.get", index: nLocalIdx } as Instr],
+                then: [{ op: "local.get", index: nLocalIdx }],
                 else: [
-                  { op: "local.get", index: lenLocalIdx } as Instr,
-                  { op: "local.get", index: nLocalIdx } as Instr,
-                  { op: "f64.add" } as Instr,
-                  { op: "f64.const", value: 0 } as Instr,
-                  { op: "f64.max" } as Instr,
+                  { op: "local.get", index: lenLocalIdx },
+                  { op: "local.get", index: nLocalIdx },
+                  { op: "f64.add" },
+                  { op: "f64.const", value: 0 },
+                  { op: "f64.max" },
                 ],
-              } as Instr,
-              { op: "local.set", index: iLocalIdx } as Instr,
+              },
+              { op: "local.set", index: iLocalIdx },
             ]
-          : [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: iLocalIdx } as Instr];
+          : [
+              { op: "f64.const", value: 0 },
+              { op: "local.set", index: iLocalIdx },
+            ];
         loopExitTest = [
-          { op: "local.get", index: iLocalIdx } as Instr,
-          { op: "local.get", index: lenLocalIdx } as Instr,
-          { op: "f64.ge" } as Instr, // i >= len → exit
+          { op: "local.get", index: iLocalIdx },
+          { op: "local.get", index: lenLocalIdx },
+          { op: "f64.ge" }, // i >= len → exit
         ];
         loopStep = [
-          { op: "local.get", index: iLocalIdx } as Instr,
-          { op: "f64.const", value: 1 } as Instr,
-          { op: "f64.add" } as Instr,
-          { op: "local.set", index: iLocalIdx } as Instr,
+          { op: "local.get", index: iLocalIdx },
+          { op: "f64.const", value: 1 },
+          { op: "f64.add" },
+          { op: "local.set", index: iLocalIdx },
         ];
       } else {
         loopInit = hasFromIndex
           ? [
               ...toInteger,
               // k = n≥0 ? min(n, len-1) : len+n
-              { op: "local.get", index: nLocalIdx } as Instr,
-              { op: "f64.const", value: 0 } as Instr,
-              { op: "f64.ge" } as Instr,
+              { op: "local.get", index: nLocalIdx },
+              { op: "f64.const", value: 0 },
+              { op: "f64.ge" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "f64" } },
                 then: [
-                  { op: "local.get", index: nLocalIdx } as Instr,
-                  { op: "local.get", index: lenLocalIdx } as Instr,
-                  { op: "f64.const", value: 1 } as Instr,
-                  { op: "f64.sub" } as Instr,
-                  { op: "f64.min" } as Instr,
+                  { op: "local.get", index: nLocalIdx },
+                  { op: "local.get", index: lenLocalIdx },
+                  { op: "f64.const", value: 1 },
+                  { op: "f64.sub" },
+                  { op: "f64.min" },
                 ],
                 else: [
-                  { op: "local.get", index: lenLocalIdx } as Instr,
-                  { op: "local.get", index: nLocalIdx } as Instr,
-                  { op: "f64.add" } as Instr,
+                  { op: "local.get", index: lenLocalIdx },
+                  { op: "local.get", index: nLocalIdx },
+                  { op: "f64.add" },
                 ],
-              } as Instr,
-              { op: "local.set", index: iLocalIdx } as Instr,
+              },
+              { op: "local.set", index: iLocalIdx },
             ]
           : [
-              { op: "local.get", index: lenLocalIdx } as Instr,
-              { op: "f64.const", value: 1 } as Instr,
-              { op: "f64.sub" } as Instr,
-              { op: "local.set", index: iLocalIdx } as Instr,
+              { op: "local.get", index: lenLocalIdx },
+              { op: "f64.const", value: 1 },
+              { op: "f64.sub" },
+              { op: "local.set", index: iLocalIdx },
             ];
         loopExitTest = [
-          { op: "local.get", index: iLocalIdx } as Instr,
-          { op: "f64.const", value: 0 } as Instr,
-          { op: "f64.lt" } as Instr, // i < 0 → exit
+          { op: "local.get", index: iLocalIdx },
+          { op: "f64.const", value: 0 },
+          { op: "f64.lt" }, // i < 0 → exit
         ];
         loopStep = [
-          { op: "local.get", index: iLocalIdx } as Instr,
-          { op: "f64.const", value: 1 } as Instr,
-          { op: "f64.sub" } as Instr,
-          { op: "local.set", index: iLocalIdx } as Instr,
+          { op: "local.get", index: iLocalIdx },
+          { op: "f64.const", value: 1 },
+          { op: "f64.sub" },
+          { op: "local.set", index: iLocalIdx },
         ];
       }
       // (block $done (loop $scan exitTest br_if $done; if(eq) onMatch; step; br $scan)) notFound
@@ -822,21 +828,21 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
               blockType: { kind: "empty" },
               body: [
                 ...loopExitTest,
-                { op: "br_if", depth: 1 } as Instr, // exit to $done
+                { op: "br_if", depth: 1 }, // exit to $done
                 ...elemEq,
-                { op: "if", blockType: { kind: "empty" }, then: onMatch } as Instr,
+                { op: "if", blockType: { kind: "empty" }, then: onMatch },
                 ...loopStep,
-                { op: "br", depth: 0 } as Instr, // continue $scan
+                { op: "br", depth: 0 }, // continue $scan
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
         ...notFound,
       ];
       current = [
-        { op: "local.get", index: anyLocalIdx } as Instr,
-        { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
-        { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: vecArmBody, else: current } as Instr,
+        { op: "local.get", index: anyLocalIdx },
+        { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+        { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: vecArmBody, else: current },
       ];
     }
 
@@ -870,42 +876,42 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         const pushLenLocalIdx = arity + 1 + locals.length;
         locals.push({ name: "__vpushlen", type: { kind: "i32" } });
         mutArmBody = [
-          { op: "local.get", index: 0 } as Instr, // recv (externref)
-          { op: "local.get", index: 1 } as Instr, // arg0 (externref)
-          { op: "call", funcIdx: vecPushIdx } as Instr,
-          { op: "local.tee", index: pushLenLocalIdx } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "i32.lt_s" } as Instr, // newLen < 0 → unsupported carrier
+          { op: "local.get", index: 0 }, // recv (externref)
+          { op: "local.get", index: 1 }, // arg0 (externref)
+          { op: "call", funcIdx: vecPushIdx },
+          { op: "local.tee", index: pushLenLocalIdx },
+          { op: "i32.const", value: 0 },
+          { op: "i32.lt_s" }, // newLen < 0 → unsupported carrier
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
-            then: [{ op: "ref.null.extern" } as Instr], // undefined (pre-#2927 behavior)
+            then: [{ op: "ref.null.extern" }], // undefined (pre-#2927 behavior)
             else: [
-              { op: "local.get", index: pushLenLocalIdx } as Instr,
-              { op: "f64.convert_i32_s" } as Instr,
-              { op: "call", funcIdx: ci.boxNumIdx } as Instr,
+              { op: "local.get", index: pushLenLocalIdx },
+              { op: "f64.convert_i32_s" },
+              { op: "call", funcIdx: ci.boxNumIdx },
             ],
-          } as Instr,
+          },
         ];
       } else if (methodName === "pop" && vecPopIdx !== undefined) {
         // __vec_pop(recv) -> externref (already-boxed last element; null.extern for
         // an empty OR unsupported-carrier vec — both map to `undefined`, which is
         // exactly the pre-#2927 fall-through result, so no guard is needed).
         mutArmBody = [
-          { op: "local.get", index: 0 } as Instr, // recv (externref)
-          { op: "call", funcIdx: vecPopIdx } as Instr,
+          { op: "local.get", index: 0 }, // recv (externref)
+          { op: "call", funcIdx: vecPopIdx },
         ];
       }
       if (mutArmBody !== undefined) {
         current = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: mutArmBody,
             else: current,
-          } as Instr,
+          },
         ];
       }
     }
@@ -936,24 +942,24 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       ) {
         const isReduceForm = methodName === "reduce" || methodName === "reduceRight";
         const hofCall: Instr[] = [
-          { op: "local.get", index: 0 } as Instr, // recv (externref)
-          { op: "local.get", index: 1 } as Instr, // cb
-          ...(arity >= 2 ? [{ op: "local.get", index: 2 } as Instr] : [{ op: "ref.null.extern" } as Instr]), // thisArg | init
-          ...(isReduceForm ? [{ op: "i32.const", value: arity >= 2 ? 1 : 0 } as Instr] : []), // hasInit
-          { op: "call", funcIdx: hofFuncIdx } as Instr,
+          { op: "local.get", index: 0 }, // recv (externref)
+          { op: "local.get", index: 1 }, // cb
+          ...((arity >= 2 ? [{ op: "local.get", index: 2 }] : [{ op: "ref.null.extern" }]) satisfies Instr[]), // thisArg | init
+          ...((isReduceForm ? [{ op: "i32.const", value: arity >= 2 ? 1 : 0 }] : []) satisfies Instr[]), // hasInit
+          { op: "call", funcIdx: hofFuncIdx },
         ];
         current = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx } as Instr,
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: objVecTypeIdx } as Instr,
-          { op: "i32.or" } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: ctx.vecBaseTypeIdx },
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: objVecTypeIdx },
+          { op: "i32.or" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: hofCall,
             else: current,
-          } as Instr,
+          },
         ];
       }
     }
@@ -972,20 +978,20 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       if ((ctx.standalone || ctx.wasi) && dvHelperIdx !== undefined && ctx.dvWindowTypeIdx >= 0) {
         // Helper signature: recv + (get → offset, le | set → offset, value, le).
         const helperArgs = methodName.startsWith("get") ? 2 : 3;
-        const dvCall: Instr[] = [{ op: "local.get", index: 0 } as Instr];
+        const dvCall: Instr[] = [{ op: "local.get", index: 0 }];
         for (let i = 0; i < helperArgs; i++) {
-          dvCall.push(i < arity ? ({ op: "local.get", index: 1 + i } as Instr) : ({ op: "ref.null.extern" } as Instr));
+          dvCall.push(i < arity ? { op: "local.get", index: 1 + i } : { op: "ref.null.extern" });
         }
-        dvCall.push({ op: "call", funcIdx: dvHelperIdx } as Instr);
+        dvCall.push({ op: "call", funcIdx: dvHelperIdx });
         current = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: ctx.dvWindowTypeIdx } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: ctx.dvWindowTypeIdx },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: dvCall,
             else: current,
-          } as Instr,
+          },
         ];
       }
     }
@@ -1007,57 +1013,57 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         const argVec: Instr[] = [];
         if (arity > 0) {
           const vecTmp = anyLocalIdx + 1; // the __argvec local (declared above)
-          argVec.push({ op: "call", funcIdx: objVecNewIdx as number } as Instr);
-          argVec.push({ op: "local.set", index: vecTmp } as Instr);
+          argVec.push({ op: "call", funcIdx: objVecNewIdx as number });
+          argVec.push({ op: "local.set", index: vecTmp });
           for (let a = 0; a < arity; a++) {
-            argVec.push({ op: "local.get", index: vecTmp } as Instr);
-            argVec.push({ op: "local.get", index: 1 + a } as Instr);
-            argVec.push({ op: "call", funcIdx: objVecPushIdx as number } as Instr);
+            argVec.push({ op: "local.get", index: vecTmp });
+            argVec.push({ op: "local.get", index: 1 + a });
+            argVec.push({ op: "call", funcIdx: objVecPushIdx as number });
           }
-          argVec.push({ op: "local.get", index: vecTmp } as Instr);
+          argVec.push({ op: "local.get", index: vecTmp });
         } else {
-          argVec.push({ op: "call", funcIdx: objVecNewIdx as number } as Instr);
+          argVec.push({ op: "call", funcIdx: objVecNewIdx as number });
         }
         const armBody: Instr[] = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.cast", typeIdx: fe.typeIdx } as Instr,
-          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx } as Instr,
-          { op: "local.tee", index: fnLocalIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.cast", typeIdx: fe.typeIdx },
+          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx },
+          { op: "local.tee", index: fnLocalIdx },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
-            then: [{ op: "ref.null.extern" } as Instr],
+            then: [{ op: "ref.null.extern" }],
             else: [
-              { op: "local.get", index: fnLocalIdx } as Instr,
-              { op: "local.get", index: 0 } as Instr,
+              { op: "local.get", index: fnLocalIdx },
+              { op: "local.get", index: 0 },
               ...argVec,
-              { op: "call", funcIdx: applyClosureIdx } as Instr,
+              { op: "call", funcIdx: applyClosureIdx! },
             ],
-          } as Instr,
+          },
         ];
         current = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: fe.typeIdx } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: fe.typeIdx },
           { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: armBody, else: current },
         ];
       }
     }
 
     for (const entry of entries) {
-      const callAndCoerce = buildEntryArm(ci, anyLocalIdx, entry, (a) => [{ op: "local.get", index: 1 + a } as Instr]);
+      const callAndCoerce = buildEntryArm(ci, anyLocalIdx, entry, (a) => [{ op: "local.get", index: 1 + a }]);
       current = [
-        { op: "local.get", index: anyLocalIdx } as Instr,
-        { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+        { op: "local.get", index: anyLocalIdx },
+        { op: "ref.test", typeIdx: entry.typeIdx },
         { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: callAndCoerce, else: current },
       ];
     }
 
     dispFn.locals = locals;
     dispFn.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: anyLocalIdx } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: anyLocalIdx },
       ...current,
     ];
     void (dispFn as WasmFunction);
@@ -1085,12 +1091,12 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     let current: Instr[] =
       methodCallIdx !== undefined
         ? [
-            { op: "local.get", index: 0 } as Instr,
+            { op: "local.get", index: 0 },
             ...stringConstantExternrefInstrs(ctx, methodName),
-            { op: "local.get", index: argsLocalIdx } as Instr,
-            { op: "call", funcIdx: methodCallIdx } as Instr,
+            { op: "local.get", index: argsLocalIdx },
+            { op: "call", funcIdx: methodCallIdx },
           ]
-        : [{ op: "ref.null.extern" } as Instr];
+        : [{ op: "ref.null.extern" }];
 
     // (#3117) FIELD-stored-closure arms — same as the fixed-arity fill, but the
     // dispatcher's `args` externref forwards to `__apply_closure` unchanged.
@@ -1102,26 +1108,26 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       varargLocals.push({ name: "__fieldfn", type: { kind: "externref" } });
       for (const fe of fieldEntries) {
         const armBody: Instr[] = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.cast", typeIdx: fe.typeIdx } as Instr,
-          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx } as Instr,
-          { op: "local.tee", index: fnLocalIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.cast", typeIdx: fe.typeIdx },
+          { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx },
+          { op: "local.tee", index: fnLocalIdx },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
-            then: [{ op: "ref.null.extern" } as Instr],
+            then: [{ op: "ref.null.extern" }],
             else: [
-              { op: "local.get", index: fnLocalIdx } as Instr,
-              { op: "local.get", index: 0 } as Instr,
-              { op: "local.get", index: argsLocalIdx } as Instr,
-              { op: "call", funcIdx: applyClosureIdx } as Instr,
+              { op: "local.get", index: fnLocalIdx },
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: argsLocalIdx },
+              { op: "call", funcIdx: applyClosureIdx! },
             ],
-          } as Instr,
+          },
         ];
         current = [
-          { op: "local.get", index: anyLocalIdx } as Instr,
-          { op: "ref.test", typeIdx: fe.typeIdx } as Instr,
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: fe.typeIdx },
           { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: armBody, else: current },
         ];
       }
@@ -1133,23 +1139,23 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
       const callAndCoerce =
         externGetIdxIdx !== undefined
           ? buildEntryArm(ci, anyLocalIdx, entry, (a) => [
-              { op: "local.get", index: argsLocalIdx } as Instr,
-              { op: "f64.const", value: a } as Instr,
-              { op: "call", funcIdx: externGetIdxIdx } as Instr,
+              { op: "local.get", index: argsLocalIdx },
+              { op: "f64.const", value: a },
+              { op: "call", funcIdx: externGetIdxIdx },
             ])
           : current;
       current = [
-        { op: "local.get", index: anyLocalIdx } as Instr,
-        { op: "ref.test", typeIdx: entry.typeIdx } as Instr,
+        { op: "local.get", index: anyLocalIdx },
+        { op: "ref.test", typeIdx: entry.typeIdx },
         { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: callAndCoerce, else: current },
       ];
     }
 
     dispFn.locals = varargLocals;
     dispFn.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: anyLocalIdx } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: anyLocalIdx },
       ...current,
     ];
     void (dispFn as WasmFunction);
@@ -1206,58 +1212,58 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
     const peelAnyLocal = 1;
     peelFn.locals = [{ name: "__any", type: { kind: "anyref" } }];
     peelFn.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "ref.is_null" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
-      } as Instr,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: peelAnyLocal } as Instr,
-      { op: "local.get", index: peelAnyLocal } as Instr,
-      { op: "ref.test", typeIdx: anyValueTypeIdx } as Instr,
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: peelAnyLocal },
+      { op: "local.get", index: peelAnyLocal },
+      { op: "ref.test", typeIdx: anyValueTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           // tag 6 (object) → extern.convert_any(refval)
-          { op: "local.get", index: peelAnyLocal } as Instr,
-          { op: "ref.cast", typeIdx: anyValueTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG } as Instr,
-          { op: "i32.const", value: 6 } as Instr,
-          { op: "i32.eq" } as Instr,
+          { op: "local.get", index: peelAnyLocal },
+          { op: "ref.cast", typeIdx: anyValueTypeIdx },
+          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG },
+          { op: "i32.const", value: 6 },
+          { op: "i32.eq" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: peelAnyLocal } as Instr,
-              { op: "ref.cast", typeIdx: anyValueTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_REF } as Instr,
-              { op: "extern.convert_any" } as Instr,
-              { op: "return" } as Instr,
+              { op: "local.get", index: peelAnyLocal },
+              { op: "ref.cast", typeIdx: anyValueTypeIdx },
+              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_REF },
+              { op: "extern.convert_any" },
+              { op: "return" },
             ],
-          } as Instr,
+          },
           // tag 5 (string/extern payload) → externval
-          { op: "local.get", index: peelAnyLocal } as Instr,
-          { op: "ref.cast", typeIdx: anyValueTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG } as Instr,
-          { op: "i32.const", value: 5 } as Instr,
-          { op: "i32.eq" } as Instr,
+          { op: "local.get", index: peelAnyLocal },
+          { op: "ref.cast", typeIdx: anyValueTypeIdx },
+          { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_TAG },
+          { op: "i32.const", value: 5 },
+          { op: "i32.eq" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: peelAnyLocal } as Instr,
-              { op: "ref.cast", typeIdx: anyValueTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_EXT } as Instr,
-              { op: "return" } as Instr,
+              { op: "local.get", index: peelAnyLocal },
+              { op: "ref.cast", typeIdx: anyValueTypeIdx },
+              { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: AV_EXT },
+              { op: "return" },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
-      { op: "local.get", index: 0 } as Instr,
+      },
+      { op: "local.get", index: 0 },
     ];
   }
 
@@ -1267,34 +1273,31 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
   const thenAnyLocalIdx = 3;
   const body: Instr[] = [
     // peeled = __promise_peel_value(value) — classify the RAW payload.
-    { op: "local.get", index: 0 } as Instr,
-    ...(peelIdx !== undefined ? [{ op: "call", funcIdx: peelIdx } as Instr] : []),
-    { op: "local.set", index: peeledLocalIdx } as Instr,
+    { op: "local.get", index: 0 },
+    ...((peelIdx !== undefined ? [{ op: "call", funcIdx: peelIdx }] : []) satisfies Instr[]),
+    { op: "local.set", index: peeledLocalIdx },
     // null externref (JS null / absent) → not a thenable.
-    { op: "local.get", index: peeledLocalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "local.get", index: peeledLocalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-    } as Instr,
-    { op: "local.get", index: peeledLocalIdx } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: anyLocalIdx } as Instr,
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+    },
+    { op: "local.get", index: peeledLocalIdx },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: anyLocalIdx },
   ];
 
   // Shared tail: test the externref left on the stack against the closure
   // base wrappers; 1 on a hit, else 0.
   const closureTest = (loadThen: Instr[]): Instr[] => [
     ...loadThen,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: thenAnyLocalIdx } as Instr,
-    ...buildClosureRefTestArms(ctx, thenAnyLocalIdx, [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "return" } as Instr,
-    ]),
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "return" } as Instr,
+    { op: "any.convert_extern" },
+    { op: "local.set", index: thenAnyLocalIdx },
+    ...buildClosureRefTestArms(ctx, thenAnyLocalIdx, [{ op: "i32.const", value: 1 }, { op: "return" }]),
+    { op: "i32.const", value: 0 },
+    { op: "return" },
   ];
 
   // Closed-struct METHOD arms — a compiled `then` method is always callable.
@@ -1302,13 +1305,13 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
   for (const entry of collectMethodEntries(ctx, "then", null)) {
     if (seenMethodType.has(entry.typeIdx)) continue;
     seenMethodType.add(entry.typeIdx);
-    body.push({ op: "local.get", index: anyLocalIdx } as Instr);
-    body.push({ op: "ref.test", typeIdx: entry.typeIdx } as Instr);
+    body.push({ op: "local.get", index: anyLocalIdx });
+    body.push({ op: "ref.test", typeIdx: entry.typeIdx });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
-    } as Instr);
+      then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+    });
   }
 
   // Closed-struct ACCESSOR arms (#1888 S5c) — MUST run BEFORE the field arms:
@@ -1328,44 +1331,44 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
       const structName = key.slice(0, -"_then".length);
       const structTypeIdx = ctx.structMap.get(structName);
       if (structTypeIdx === undefined) continue;
-      body.push({ op: "local.get", index: anyLocalIdx } as Instr);
-      body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+      body.push({ op: "local.get", index: anyLocalIdx });
+      body.push({ op: "ref.test", typeIdx: structTypeIdx });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "global.get", index: entry.getGlobal } as Instr,
-          { op: "ref.is_null" } as Instr,
-          { op: "i32.eqz" } as Instr,
+          { op: "global.get", index: entry.getGlobal },
+          { op: "ref.is_null" },
+          { op: "i32.eqz" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: closureTest([
               // then = getter.call(value) — §7.3.2 GetV via the S5b driver.
-              { op: "local.get", index: peeledLocalIdx } as Instr,
-              { op: "global.get", index: entry.getGlobal } as Instr,
-              { op: "call", funcIdx: callAccessorGetIdx } as Instr,
+              { op: "local.get", index: peeledLocalIdx },
+              { op: "global.get", index: entry.getGlobal },
+              { op: "call", funcIdx: callAccessorGetIdx },
             ]),
-          } as Instr,
+          },
         ],
-      } as Instr);
+      });
     }
   }
 
   // Closed-struct FIELD arms — `{ then: <value> }`: callable iff the stored
   // value is a closure.
   for (const fe of collectFieldEntries(ctx, "then")) {
-    body.push({ op: "local.get", index: anyLocalIdx } as Instr);
-    body.push({ op: "ref.test", typeIdx: fe.typeIdx } as Instr);
+    body.push({ op: "local.get", index: anyLocalIdx });
+    body.push({ op: "ref.test", typeIdx: fe.typeIdx });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: closureTest([
-        { op: "local.get", index: anyLocalIdx } as Instr,
-        { op: "ref.cast", typeIdx: fe.typeIdx } as Instr,
-        { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx } as Instr,
+        { op: "local.get", index: anyLocalIdx },
+        { op: "ref.cast", typeIdx: fe.typeIdx },
+        { op: "struct.get", typeIdx: fe.typeIdx, fieldIdx: fe.fieldIdx },
       ]),
-    } as Instr);
+    });
   }
 
   // Open `$Object` arm — spec Get (runs accessors; a poisoned getter throws
@@ -1373,20 +1376,20 @@ export function fillPromiseThenableHelpers(ctx: CodegenContext): void {
   const externGetIdx = ctx.funcMap.get("__extern_get");
   const objectTypeIdx = ctx.objectRuntimeTypes?.objectTypeIdx;
   if (externGetIdx !== undefined && objectTypeIdx !== undefined) {
-    body.push({ op: "local.get", index: anyLocalIdx } as Instr);
-    body.push({ op: "ref.test", typeIdx: objectTypeIdx } as Instr);
+    body.push({ op: "local.get", index: anyLocalIdx });
+    body.push({ op: "ref.test", typeIdx: objectTypeIdx });
     body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: closureTest([
-        { op: "local.get", index: peeledLocalIdx } as Instr,
-        ...(stringConstantExternrefInstrs(ctx, "then") as Instr[]),
-        { op: "call", funcIdx: externGetIdx } as Instr,
+        { op: "local.get", index: peeledLocalIdx },
+        ...stringConstantExternrefInstrs(ctx, "then"),
+        { op: "call", funcIdx: externGetIdx },
       ]),
-    } as Instr);
+    });
   }
 
-  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "i32.const", value: 0 });
   predFn.locals = [
     { name: "__peeled", type: { kind: "externref" } },
     { name: "__any", type: { kind: "anyref" } },

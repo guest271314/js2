@@ -91,7 +91,7 @@ export const UNDEF_F64_BITS = 0x7ff00000deadc0den;
 /** Push the undefined-f64 sentinel onto the stack (`i64.const` + reinterpret). */
 export function pushUndefF64(body: Instr[]): void {
   body.push({ op: "i64.const", value: UNDEF_F64_BITS });
-  body.push({ op: "f64.reinterpret_i64" } as Instr);
+  body.push({ op: "f64.reinterpret_i64" });
 }
 
 /**
@@ -100,9 +100,9 @@ export function pushUndefF64(body: Instr[]): void {
  * (NOT `f64.eq`, which is false for any NaN including the sentinel).
  */
 export function emitIsUndefF64(body: Instr[]): void {
-  body.push({ op: "i64.reinterpret_f64" } as Instr);
+  body.push({ op: "i64.reinterpret_f64" });
   body.push({ op: "i64.const", value: UNDEF_F64_BITS });
-  body.push({ op: "i64.eq" } as Instr);
+  body.push({ op: "i64.eq" });
 }
 
 /**
@@ -157,7 +157,7 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
         ctx.undefinedSingleton === true &&
         (ctx.standalone || ctx.nativeStrings) &&
         (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null") &&
-        emit("__any_box_null", [{ op: "drop" } as Instr])
+        emit("__any_box_null", [{ op: "drop" }])
       ) {
         return true;
       }
@@ -171,7 +171,7 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
         ctx.undefinedSingleton === true &&
         (ctx.standalone || ctx.nativeStrings) &&
         (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null" || from.kind === "f64") &&
-        emit("__any_box_undefined", [{ op: "drop" } as Instr])
+        emit("__any_box_undefined", [{ op: "drop" }])
       ) {
         return true;
       }
@@ -223,7 +223,7 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
     ctx.anyStrTypeIdx >= 0 &&
     (from as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx
   ) {
-    return emit("__any_box_string", [{ op: "extern.convert_any" } as Instr]);
+    return emit("__any_box_string", [{ op: "extern.convert_any" }]);
   }
   if (from.kind === "ref" || from.kind === "ref_null") return emit("__any_box_ref");
   return false;

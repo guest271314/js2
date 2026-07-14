@@ -448,12 +448,12 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             // per PR-D2). Computed once into L_CKEY: reused for the replacer call
             // and the recursion key.
             ...(numToStrIdxTJ === undefined
-              ? ([{ op: "ref.null.extern" }] as Instr[])
+              ? ([{ op: "ref.null.extern" }] satisfies Instr[])
               : ([
                   { op: "local.get", index: L_I },
                   { op: "f64.convert_i32_s" },
                   { op: "call", funcIdx: numToStrIdxTJ },
-                ] as Instr[])),
+                ] satisfies Instr[])),
             { op: "local.set", index: L_CKEY },
             // childV = data[i] (anyref). (#2166 PR-D3) If a function replacer is
             // present, transform it first: childV =
@@ -608,7 +608,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
                       },
                     ],
                   },
-                ] as Instr[])),
+                ] satisfies Instr[])),
             // childV = e.value (anyref). (#2166 PR-D3) function replacer:
             //   childV = replacer.call(/*this*/ this object, key, e.value).
             { op: "local.get", index: L_E },
@@ -807,7 +807,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
               },
             ],
           },
-        ] as Instr[])),
+        ] satisfies Instr[])),
     // $Object?
     { op: "local.get", index: L_ANY },
     { op: "ref.test", typeIdx: objectTypeIdx },
@@ -855,7 +855,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
               { op: "return" },
             ],
           },
-        ] as Instr[])
+        ] satisfies Instr[])
       : []),
     // $__box_boolean_struct?
     ...(boxBoolTypeIdx >= 0
@@ -878,7 +878,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
               { op: "return" },
             ],
           },
-        ] as Instr[])
+        ] satisfies Instr[])
       : []),
     // $AnyValue (the parse-path tagged union)?
     { op: "local.get", index: L_ANY },
@@ -1203,8 +1203,8 @@ export function emitJsonParseText(ctx: CodegenContext): number {
     return [
       ...stringConstantExternrefInstrs(ctx, msg),
       { op: "call", funcIdx: ctorIdx },
-      { op: "throw", tagIdx } as Instr,
-      { op: "unreachable" } as Instr,
+      { op: "throw", tagIdx },
+      { op: "unreachable" },
     ];
   };
 
@@ -2515,7 +2515,7 @@ export function emitJsonParseText(ctx: CodegenContext): number {
   // re-visited N times. The JSON round-trip below *expands* every shared
   // reference into an independent copy, so each `typeIdx` operand is remapped
   // exactly once. Bodies hold only plain JSON-safe data (no funcs/cycles).
-  const cloneBody = (b: Instr[]): Instr[] => JSON.parse(JSON.stringify(b)) as Instr[];
+  const cloneBody = (b: Instr[]): Instr[] => JSON.parse(JSON.stringify(b));
 
   pushDefinedFunc(ctx, valueFuncIdx, {
     name: "__json_parse_value",
@@ -2644,8 +2644,8 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
     return [
       ...stringConstantExternrefInstrs(ctx, msg),
       { op: "call", funcIdx: ctorIdx },
-      { op: "throw", tagIdx } as Instr,
-      { op: "unreachable" } as Instr,
+      { op: "throw", tagIdx },
+      { op: "unreachable" },
     ];
   };
 

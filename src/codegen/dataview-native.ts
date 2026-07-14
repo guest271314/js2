@@ -135,67 +135,70 @@ export function emitArrayBufferSlice(
   });
   const recvType = compileExpr(receiver);
   if (recvType && recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
   } else if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
     if ("typeIdx" in recvType && recvType.typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
     }
   } else {
     return null;
   }
-  fctx.body.push({ op: "local.set", index: srcVecLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: srcVecLocal });
 
   // srcLen = src.length (field 0); srcArr = src.data (field 1).
   const srcLenLocal = allocLocal(fctx, `__abs_srclen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: srcLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: srcLenLocal });
   const srcArrLocal = allocLocal(fctx, `__abs_srcarr_${fctx.locals.length}`, {
     kind: "ref",
     typeIdx: arrTypeIdx,
   });
-  fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: srcArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: srcVecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: srcArrLocal });
 
   // begin (default 0). Spec §25.1.5.3 steps 5-7: ToIntegerOrInfinity, then
   // negative = max(srcLen + begin, 0), positive = min(begin, srcLen).
   const beginLocal = allocLocal(fctx, `__abs_begin_${fctx.locals.length}`, { kind: "i32" });
   if (args.length >= 1) {
     compileExpr(args[0]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
-  fctx.body.push({ op: "local.set", index: beginLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: beginLocal });
   emitNormalizeIndex(fctx, beginLocal, srcLenLocal);
 
   // end (default srcLen). Same clamp/negate.
   const endLocal = allocLocal(fctx, `__abs_end_${fctx.locals.length}`, { kind: "i32" });
   if (args.length >= 2) {
     compileExpr(args[1]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-    fctx.body.push({ op: "local.set", index: endLocal } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "local.set", index: endLocal });
     emitNormalizeIndex(fctx, endLocal, srcLenLocal);
   } else {
-    fctx.body.push({ op: "local.get", index: srcLenLocal } as Instr);
-    fctx.body.push({ op: "local.set", index: endLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: srcLenLocal });
+    fctx.body.push({ op: "local.set", index: endLocal });
   }
 
   // sliceLen = max(end - begin, 0)
   const sliceLenLocal = allocLocal(fctx, `__abs_slen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: endLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: beginLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
-  fctx.body.push({ op: "local.set", index: sliceLenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: endLocal });
+  fctx.body.push({ op: "local.get", index: beginLocal });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "local.set", index: sliceLenLocal });
+  fctx.body.push({ op: "local.get", index: sliceLenLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sliceLenLocal } as Instr],
+    then: [
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: sliceLenLocal },
+    ],
     else: [],
   });
 
@@ -204,46 +207,46 @@ export function emitArrayBufferSlice(
     kind: "ref",
     typeIdx: arrTypeIdx,
   });
-  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dstArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sliceLenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: dstArrLocal });
 
   // for (i = 0; i < sliceLen; i++) dstArr[i] = srcArr[begin + i]
   const iLocal = allocLocal(fctx, `__abs_i_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
   const loopBody: Instr[] = [
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: sliceLenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    { op: "local.get", index: dstArrLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: srcArrLocal } as Instr,
-    { op: "local.get", index: beginLocal } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "local.get", index: iLocal },
+    { op: "local.get", index: sliceLenLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
+    { op: "local.get", index: dstArrLocal },
+    { op: "local.get", index: iLocal },
+    { op: "local.get", index: srcArrLocal },
+    { op: "local.get", index: beginLocal },
+    { op: "local.get", index: iLocal },
+    { op: "i32.add" },
     // (#2835) packed i8 src/dst; read unsigned, `array.set` truncates to low byte.
-    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: iLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
+    { op: "array.get_u", typeIdx: arrTypeIdx },
+    { op: "array.set", typeIdx: arrTypeIdx },
+    { op: "local.get", index: iLocal },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: iLocal },
+    { op: "br", depth: 0 },
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 
   // struct.new vec(sliceLen, dstArr); return as externref (matches the
   // externref local that user code declares for the slice() result).
-  fctx.body.push({ op: "local.get", index: sliceLenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "local.get", index: sliceLenLocal });
+  fctx.body.push({ op: "local.get", index: dstArrLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "extern.convert_any" });
   return { kind: "externref" };
 }
 
@@ -275,17 +278,17 @@ export function emitArrayBufferResize(
   // Recover the receiver as anyref, then require it to be a $__resizable_ab.
   const recvType = compileExpr(receiver);
   if (recvType?.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   } else if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
     return null;
   }
   const anyLocal = allocLocal(fctx, `__rabz_any_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal });
 
   // TypeError on a non-resizable receiver (IsFixedLengthArrayBuffer).
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx });
+  fctx.body.push({ op: "i32.eqz" });
   {
     const msg = "TypeError: ArrayBuffer.prototype.resize called on non-resizable buffer";
     addStringConstantGlobal(ctx, msg);
@@ -293,52 +296,55 @@ export function emitArrayBufferResize(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx }],
       else: [],
-    } as Instr);
+    });
   }
 
   // rab = ref.cast $__resizable_ab (the checked receiver).
   const rabLocal = allocLocal(fctx, `__rabz_rab_${fctx.locals.length}`, { kind: "ref", typeIdx: rabTypeIdx });
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: rabTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: rabLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: rabTypeIdx });
+  fctx.body.push({ op: "local.set", index: rabLocal });
 
   // newLen = ToIndex(arg): NaN→0, truncate toward zero.
   const newLenF64 = allocLocal(fctx, `__rabz_nl_f64_${fctx.locals.length}`, { kind: "f64" });
   if (args.length >= 1) {
     compileExpr(args[0]!, { kind: "f64" });
   } else {
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
   }
-  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  fctx.body.push({ op: "local.set", index: newLenF64 });
   // NaN → 0
-  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
-  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
-  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 });
+  fctx.body.push({ op: "local.get", index: newLenF64 });
+  fctx.body.push({ op: "f64.ne" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: newLenF64 } as Instr],
+    then: [
+      { op: "f64.const", value: 0 },
+      { op: "local.set", index: newLenF64 },
+    ],
     else: [],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr);
-  fctx.body.push({ op: "local.set", index: newLenF64 } as Instr);
+  });
+  fctx.body.push({ op: "local.get", index: newLenF64 });
+  fctx.body.push({ op: "f64.trunc" });
+  fctx.body.push({ op: "local.set", index: newLenF64 });
   const newLen = allocLocal(fctx, `__rabz_nl_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: newLenF64 } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: newLen } as Instr);
+  fctx.body.push({ op: "local.get", index: newLenF64 });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: newLen });
 
   // RangeError if newLen < 0 OR newLen > maxByteLength (field 2).
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "i32.gt_s" } as Instr);
-  fctx.body.push({ op: "i32.or" } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "local.get", index: rabLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "i32.gt_s" });
+  fctx.body.push({ op: "i32.or" });
   {
     const msg = "RangeError: ArrayBuffer.prototype.resize length exceeds maxByteLength";
     addStringConstantGlobal(ctx, msg);
@@ -346,46 +352,46 @@ export function emitArrayBufferResize(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+      then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx }],
       else: [],
-    } as Instr);
+    });
   }
 
   // oldLen = min(rab.length, newLen) — bytes to preserve.
   const oldLen = allocLocal(fctx, `__rabz_ol_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: oldLen } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: oldLen });
   const copyLen = allocLocal(fctx, `__rabz_cl_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "local.get", index: oldLen } as Instr);
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
-  fctx.body.push({ op: "select" } as Instr);
-  fctx.body.push({ op: "local.set", index: copyLen } as Instr);
+  fctx.body.push({ op: "local.get", index: oldLen });
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "local.get", index: oldLen });
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: copyLen });
 
   // newArr = new i8[newLen]; array.copy newArr[0..copyLen) ← rab.data[0..copyLen).
   const newArr = allocLocal(fctx, `__rabz_na_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: newArr } as Instr);
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: newArr });
   // array.copy dst dstIdx src srcIdx len
-  fctx.body.push({ op: "local.get", index: newArr } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: copyLen } as Instr);
-  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: newArr });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: rabLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: copyLen });
+  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
 
   // struct.set field1 = newArr; struct.set field0 = newLen (same struct → views observe).
-  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: newArr } as Instr);
-  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.get", index: rabLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: newLen } as Instr);
-  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: rabLocal });
+  fctx.body.push({ op: "local.get", index: newArr });
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.get", index: rabLocal });
+  fctx.body.push({ op: "local.get", index: newLen });
+  fctx.body.push({ op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 });
 
   return null;
 }
@@ -396,34 +402,40 @@ export function emitArrayBufferResize(
  *   else         idx = min(idx, srcLen);
  */
 function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: number): void {
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" });
   const negBranch: Instr[] = [
     // idx = srcLen + idx; if (idx < 0) idx = 0
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "local.get", index: idxLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: idxLocal } as Instr,
-    { op: "local.get", index: idxLocal } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.lt_s" } as Instr,
+    { op: "local.get", index: lenLocal },
+    { op: "local.get", index: idxLocal },
+    { op: "i32.add" },
+    { op: "local.set", index: idxLocal },
+    { op: "local.get", index: idxLocal },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: idxLocal } as Instr],
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: idxLocal },
+      ],
       else: [],
     },
   ];
   const posBranch: Instr[] = [
     // if (idx > srcLen) idx = srcLen
-    { op: "local.get", index: idxLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.gt_s" } as Instr,
+    { op: "local.get", index: idxLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "i32.gt_s" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: idxLocal } as Instr],
+      then: [
+        { op: "local.get", index: lenLocal },
+        { op: "local.set", index: idxLocal },
+      ],
       else: [],
     },
   ];
@@ -515,7 +527,7 @@ function recoverDvBacking(
   const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
   // Normalize the receiver to an anyref-castable `(ref any)` on the stack.
   if (recvType && recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   } else if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
     // already a gc ref
   } else {
@@ -523,37 +535,37 @@ function recoverDvBacking(
   }
   // Stash the anyref in a temp so we can test then cast.
   const anyLocal = allocLocal(fctx, `__dvn_any_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocal });
 
   const winBranch: Instr[] = [
     // buf = (cast $__dv_window).buf ; base = .byteOffset
-    { op: "local.get", index: anyLocal } as Instr,
-    { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: arrLocal } as Instr,
-    { op: "local.get", index: anyLocal } as Instr,
-    { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "local.set", index: baseLocal } as Instr,
+    { op: "local.get", index: anyLocal },
+    { op: "ref.cast", typeIdx: dvWinTypeIdx },
+    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 },
+    { op: "ref.cast", typeIdx: vecTypeIdx },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: arrLocal },
+    { op: "local.get", index: anyLocal },
+    { op: "ref.cast", typeIdx: dvWinTypeIdx },
+    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: baseLocal },
   ];
   if (viewLenLocal >= 0) {
     // viewLen = (cast $__dv_window).byteLength
     winBranch.push(
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 2 } as Instr,
-      { op: "local.set", index: viewLenLocal } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: dvWinTypeIdx },
+      { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 2 },
+      { op: "local.set", index: viewLenLocal },
     );
   }
   if (opts?.bufVecLocal !== undefined) {
     // bufVec = (cast $__dv_window).buf — for the detached-buffer check.
     winBranch.push(
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "local.set", index: opts.bufVecLocal } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: dvWinTypeIdx },
+      { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: opts.bufVecLocal },
     );
   }
   // (#3173) Brand mode: a non-window receiver has no [[DataView]] internal
@@ -564,31 +576,27 @@ function recoverDvBacking(
     ? [...opts.brandThrow]
     : [
         // bare vec: arr = .data ; base = 0
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.set", index: arrLocal } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.set", index: baseLocal } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.set", index: arrLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: baseLocal },
       ];
   if (!opts?.brandThrow && viewLenLocal >= 0) {
     // viewLen = array.len(arr)  (offset-0 view spans the whole backing buffer)
-    vecBranch.push(
-      { op: "local.get", index: arrLocal } as Instr,
-      { op: "array.len" } as Instr,
-      { op: "local.set", index: viewLenLocal } as Instr,
-    );
+    vecBranch.push({ op: "local.get", index: arrLocal }, { op: "array.len" }, { op: "local.set", index: viewLenLocal });
   }
   if (!opts?.brandThrow && opts?.bufVecLocal !== undefined) {
     vecBranch.push(
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-      { op: "local.set", index: opts.bufVecLocal } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: vecTypeIdx },
+      { op: "local.set", index: opts.bufVecLocal },
     );
   }
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: winBranch, else: vecBranch } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: winBranch, else: vecBranch });
   void arrTypeIdx;
   return true;
 }
@@ -672,21 +680,21 @@ function emitDvDetachedCheck(
   vecTypeIdx: number,
   detachedThrow: Instr[],
 ): void {
-  fctx.body.push({ op: "local.get", index: bufVecLocal } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: bufVecLocal });
+  fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "i32.const", value: 1 } as Instr],
+    then: [{ op: "i32.const", value: 1 }],
     else: [
-      { op: "local.get", index: bufVecLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "i32.lt_s" } as Instr,
+      { op: "local.get", index: bufVecLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
     ],
-  } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] } as Instr);
+  });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] });
 }
 
 /**
@@ -793,7 +801,7 @@ function ensureF16DecodeHelper(ctx: CodegenContext): number | undefined {
     { op: "i64.shl" },
     { op: "i64.or" },
     { op: "f64.reinterpret_i64" },
-  ] as Instr[];
+  ];
 
   pushDefinedFunc(ctx, funcIdx, {
     name: helperName,
@@ -850,7 +858,7 @@ function ensureF16EncodeHelper(ctx: CodegenContext): number | undefined {
     { op: "i64.extend_i32_u" },
     { op: "i64.add" },
     { op: "local.set", index: L.m16 },
-  ] as Instr[];
+  ];
 
   const body: Instr[] = [
     // b64 = reinterpret(v); sign = wrap(b64 >> 48) & 0x8000
@@ -1039,7 +1047,7 @@ function ensureF16EncodeHelper(ctx: CodegenContext): number | undefined {
     { op: "local.get", index: L.m16 },
     { op: "i32.wrap_i64" },
     { op: "i32.or" },
-  ] as Instr[];
+  ];
 
   pushDefinedFunc(ctx, funcIdx, {
     name: helperName,
@@ -1128,7 +1136,7 @@ export function emitDataViewAccessor(
     compileExpr(args[0]!, { kind: "f64" });
   } else {
     // ToIndex(undefined) = 0 (§7.1.22 step 1).
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
   }
   fctx.body.push({ op: "local.set", index: reqLocal });
 
@@ -1138,18 +1146,18 @@ export function emitDataViewAccessor(
   // wrongly threw). The range check runs in the f64 domain so ±Infinity / 2^53
   // requests throw at ToIndex time (BEFORE a setter's ToNumber(value) — the
   // index-check-before-value-conversion ordering), not at the bounds check.
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr); // val-if-true: req
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr); // val-if-false: 0
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.eq" } as Instr); // req == req (false only for NaN)
-  fctx.body.push({ op: "select" } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr); // toward zero (−0.9 → −0, not negative)
-  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal }); // val-if-true: req
+  fctx.body.push({ op: "f64.const", value: 0 }); // val-if-false: 0
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "f64.eq" }); // req == req (false only for NaN)
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "f64.trunc" }); // toward zero (−0.9 → −0, not negative)
+  fctx.body.push({ op: "local.set", index: reqLocal });
 
   const getIdxLocal = allocLocal(fctx, `__dvn_gidx_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: getIdxLocal });
 
   // (#2199b) The §24.2.1.2 SetViewValue / §24.2.1.1 GetViewValue throws fire
@@ -1160,24 +1168,24 @@ export function emitDataViewAccessor(
   //     detached-buffer-after-number-value). i64 math for the bounds so a
   //     saturated `getIndex=i32.MAX` + bytes can't overflow.
   const emitIndexThrow = (): void => {
-    fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-    fctx.body.push({ op: "f64.lt" } as Instr); // integer < 0
-    fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-    fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53-1
-    fctx.body.push({ op: "f64.gt" } as Instr); // integer > 2^53-1 (covers +Infinity)
-    fctx.body.push({ op: "i32.or" } as Instr);
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+    fctx.body.push({ op: "local.get", index: reqLocal });
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "f64.lt" }); // integer < 0
+    fctx.body.push({ op: "local.get", index: reqLocal });
+    fctx.body.push({ op: "f64.const", value: 9007199254740991 }); // 2^53-1
+    fctx.body.push({ op: "f64.gt" }); // integer > 2^53-1 (covers +Infinity)
+    fctx.body.push({ op: "i32.or" });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] });
   };
   const emitBoundsThrow = (): void => {
-    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-    fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-    fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) } as Instr);
-    fctx.body.push({ op: "i64.add" } as Instr);
-    fctx.body.push({ op: "local.get", index: viewLenLocal } as Instr);
-    fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-    fctx.body.push({ op: "i64.gt_s" } as Instr); // (getIndex + bytes) > viewLen
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+    fctx.body.push({ op: "local.get", index: getIdxLocal });
+    fctx.body.push({ op: "i64.extend_i32_s" });
+    fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) });
+    fctx.body.push({ op: "i64.add" });
+    fctx.body.push({ op: "local.get", index: viewLenLocal });
+    fctx.body.push({ op: "i64.extend_i32_s" });
+    fctx.body.push({ op: "i64.gt_s" }); // (getIndex + bytes) > viewLen
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] });
   };
   const emitDetachedThrow = (): void => emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
 
@@ -1185,9 +1193,9 @@ export function emitDataViewAccessor(
   // the bounds throw at each call site.
   const offLocal = allocLocal(fctx, `__dvn_off_${fctx.locals.length}`, { kind: "i32" });
   const setOff = (): void => {
-    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: getIdxLocal });
+    fctx.body.push({ op: "local.get", index: baseLocal });
+    fctx.body.push({ op: "i32.add" });
     fctx.body.push({ op: "local.set", index: offLocal });
   };
 
@@ -1216,20 +1224,20 @@ export function emitDataViewAccessor(
     // §7.1.4 ToNumber(Symbol) / §7.1.13 ToBigInt(Symbol) throw TypeError —
     // evaluate the operand for side effects, drop, throw (unary.ts pattern).
     const t = compileExpr(args[1]!);
-    if (t !== null) fctx.body.push({ op: "drop" } as Instr);
+    if (t !== null) fctx.body.push({ op: "drop" });
     emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr); // unreachable stack shape
+    fctx.body.push({ op: "f64.const", value: NaN }); // unreachable stack shape
   } else if (args.length >= 2) {
     compileExpr(args[1]!, { kind: "f64" });
   } else if (acc.int64) {
     // §7.1.13 ToBigInt(undefined) throws TypeError (setBigInt64 no-value-arg).
     const toBigIntThrow = dvTypeErrorThrow(ctx, DV_TOBIGINT_UNDEFINED_MESSAGE);
     fctx.body.push(...toBigIntThrow);
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr); // unreachable stack shape
+    fctx.body.push({ op: "f64.const", value: NaN }); // unreachable stack shape
   } else {
     // ToNumber(undefined) = NaN — integer setters wrap it to 0 in the codec;
     // float setters must genuinely write NaN (no-value-arg.js).
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    fctx.body.push({ op: "f64.const", value: NaN });
   }
   fctx.body.push({ op: "local.set", index: valLocal });
   const leLocal = emitLittleEndianFlag(ctx, fctx, args[2], compileExpr);
@@ -1313,7 +1321,7 @@ export function ensureDvAccessorHelper(ctx: CodegenContext, member: string): num
   const bufVecLocal = allocLocal(fctx, "buf", { kind: "ref_null", typeIdx: vecTypeIdx });
 
   // Brand check + backing recovery (param 0 = recv, externref).
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
   recoverDvBacking(ctx, fctx, { kind: "externref" }, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx, viewLenLocal, {
     brandThrow,
     bufVecLocal,
@@ -1322,30 +1330,30 @@ export function ensureDvAccessorHelper(ctx: CodegenContext, member: string): num
   // ToIndex(a0): externref → f64 (observable ToPrimitive/ToNumber — runs AFTER
   // the brand check, BEFORE the value conversion), then NaN→0, trunc, range.
   const reqLocal = allocLocal(fctx, "req", { kind: "f64" });
-  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "local.get", index: 1 });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.eq" } as Instr);
-  fctx.body.push({ op: "select" } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr);
-  fctx.body.push({ op: "local.set", index: reqLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-  fctx.body.push({ op: "f64.lt" } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr);
-  fctx.body.push({ op: "f64.gt" } as Instr);
-  fctx.body.push({ op: "i32.or" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+  fctx.body.push({ op: "local.set", index: reqLocal });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "f64.eq" });
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "f64.trunc" });
+  fctx.body.push({ op: "local.set", index: reqLocal });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.lt" });
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 });
+  fctx.body.push({ op: "f64.gt" });
+  fctx.body.push({ op: "i32.or" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] });
 
   const getIdxLocal = allocLocal(fctx, "gidx", { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: getIdxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: reqLocal });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: getIdxLocal });
 
   // Setters: numberValue = ToNumber(value) (a1) — observable, after ToIndex.
   // (#3173) BigInt setters: §7.1.13 ToBigInt(undefined) throws TypeError — a
@@ -1353,43 +1361,43 @@ export function ensureDvAccessorHelper(ctx: CodegenContext, member: string): num
   const valLocal = acc.kind === "set" ? allocLocal(fctx, "val", { kind: "f64" }) : -1;
   if (acc.kind === "set") {
     if (toBigIntThrow) {
-      fctx.body.push({ op: "local.get", index: 2 } as Instr);
-      fctx.body.push({ op: "ref.is_null" } as Instr);
-      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: toBigIntThrow, else: [] } as Instr);
+      fctx.body.push({ op: "local.get", index: 2 });
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: toBigIntThrow, else: [] });
     }
-    fctx.body.push({ op: "local.get", index: 2 } as Instr);
+    fctx.body.push({ op: "local.get", index: 2 });
     coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-    fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: valLocal });
   }
 
   // ToBoolean(littleEndian) — last user param; `__is_truthy` handles
   // undefined/null/objects/strings ({} → true, "" → false).
   const leLocal = allocLocal(fctx, "le", { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: userArgs } as Instr);
+  fctx.body.push({ op: "local.get", index: userArgs });
   if (truthyIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: truthyIdx });
   } else {
-    fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: leLocal });
 
   // Detached TypeError → bounds RangeError → absolute offset.
   emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
-  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-  fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) } as Instr);
-  fctx.body.push({ op: "i64.add" } as Instr);
-  fctx.body.push({ op: "local.get", index: viewLenLocal } as Instr);
-  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-  fctx.body.push({ op: "i64.gt_s" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+  fctx.body.push({ op: "local.get", index: getIdxLocal });
+  fctx.body.push({ op: "i64.extend_i32_s" });
+  fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) });
+  fctx.body.push({ op: "i64.add" });
+  fctx.body.push({ op: "local.get", index: viewLenLocal });
+  fctx.body.push({ op: "i64.extend_i32_s" });
+  fctx.body.push({ op: "i64.gt_s" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] });
 
   const offLocal = allocLocal(fctx, "off", { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: getIdxLocal });
+  fctx.body.push({ op: "local.get", index: baseLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: offLocal });
 
   if (acc.kind === "get") {
     emitReadBytes(ctx, fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
@@ -1401,7 +1409,7 @@ export function ensureDvAccessorHelper(ctx: CodegenContext, member: string): num
     emitWriteBytes(ctx, fctx, acc, arrLocal, offLocal, valLocal, leLocal, arrTypeIdx);
     // Setters return undefined — standalone lowers `undefined` to the null
     // externref (`x === undefined` is `ref.is_null`), so this IS undefined.
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -1452,42 +1460,42 @@ export function emitDataViewProtoMemberBody(
     const bufVecLocal = allocLocal(fctx, "buf", { kind: "ref_null", typeIdx: vecTypeIdx });
     const anyLocal = allocLocal(fctx, "any", { kind: "anyref" });
     // Brand: this (param 1) must be a $__dv_window.
-    fctx.body.push({ op: "local.get", index: 1 } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "local.tee", index: anyLocal } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: 1 });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.tee", index: anyLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
-        { op: "local.set", index: winLocal } as Instr,
-        { op: "local.get", index: winLocal } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: bufVecLocal } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: dvWinTypeIdx },
+        { op: "local.set", index: winLocal },
+        { op: "local.get", index: winLocal },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: bufVecLocal },
       ],
       else: brandThrow,
-    } as Instr);
+    });
 
     if (member === "buffer") {
       // §25.3.4.1 — return the ACTUAL viewed buffer (identity; works on detached).
-      fctx.body.push({ op: "local.get", index: bufVecLocal } as Instr);
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "local.get", index: bufVecLocal });
+      fctx.body.push({ op: "extern.convert_any" });
       return resultType;
     }
     // §25.3.4.2/3 — TypeError on detached, else the window field boxed.
     emitDvDetachedCheck(fctx, bufVecLocal, vecTypeIdx, detachedThrow);
-    fctx.body.push({ op: "local.get", index: winLocal } as Instr);
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: member === "byteOffset" ? 1 : 2 } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: winLocal });
+    fctx.body.push({ op: "ref.as_non_null" });
+    fctx.body.push({ op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: member === "byteOffset" ? 1 : 2 });
+    fctx.body.push({ op: "f64.convert_i32_s" });
     if (boxNumIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: boxNumIdx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
     }
     return resultType;
   }
@@ -1497,16 +1505,16 @@ export function emitDataViewProtoMemberBody(
   const acc = DV_ACCESSORS[member]!;
   const helperArgs = acc.kind === "get" ? 2 : 3;
   // this (param 1) + args (params 2..), padded with null extern (undefined).
-  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "local.get", index: 1 });
   for (let i = 0; i < helperArgs; i++) {
     const paramIdx = 2 + i;
     if (paramIdx < fctx.params.length) {
-      fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: paramIdx });
     } else {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
   }
-  fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: helperIdx });
   return resultType;
 }
 
@@ -1547,13 +1555,13 @@ export function tryCompileStandaloneDetachedWrite(
   if (!recvT) return undefined;
   const anyLocal = allocLocal(fctx, `__dvdet_any_${fctx.locals.length}`, { kind: "anyref" });
   if (recvT.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.set", index: anyLocal });
   } else if (recvT.kind === "ref" || recvT.kind === "ref_null") {
-    fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: anyLocal });
   } else {
     // Numeric receiver (defensive) — evaluate RHS and yield it unchanged.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     const vt = compileExpr(value);
     return vt ?? { kind: "i32" };
   }
@@ -1561,51 +1569,51 @@ export function tryCompileStandaloneDetachedWrite(
   // RHS — evaluated for value + truthiness (only a truthy write detaches).
   const valT = compileExpr(value) ?? { kind: "i32" };
   const valLocal = allocLocal(fctx, `__dvdet_val_${fctx.locals.length}`, valT);
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal });
 
   // truthy(value) — i32 non-zero / f64 non-zero-non-NaN / refs count as true.
   const truthy: Instr[] = [];
   if (valT.kind === "i32") {
     truthy.push(
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "local.get", index: valLocal },
+      { op: "i32.eqz" },
       {
         op: "i32.eqz",
-      } as Instr,
+      },
     );
   } else if (valT.kind === "f64") {
     truthy.push(
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.ne" } as Instr,
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "f64.eq" } as Instr,
-      { op: "i32.and" } as Instr,
+      { op: "local.get", index: valLocal },
+      { op: "f64.const", value: 0 },
+      { op: "f64.ne" },
+      { op: "local.get", index: valLocal },
+      { op: "local.get", index: valLocal },
+      { op: "f64.eq" },
+      { op: "i32.and" },
     );
   } else {
-    truthy.push({ op: "i32.const", value: 1 } as Instr);
+    truthy.push({ op: "i32.const", value: 1 });
   }
 
   // if (recv is i32_byte vec && truthy) → struct.set length = -1.
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx });
   fctx.body.push(...truthy);
-  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({ op: "i32.and" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-      { op: "i32.const", value: -1 } as Instr,
-      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: vecTypeIdx },
+      { op: "i32.const", value: -1 },
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
     ],
     else: [],
-  } as Instr);
+  });
 
   // `=` evaluates to the RHS.
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
   return valT;
 }
 
@@ -1633,13 +1641,13 @@ function emitLittleEndianFlag(
       // (#3173) §7.1.2 ToBoolean(f64): false for ±0 AND NaN. A bare `f64.ne 0`
       // wrongly made NaN truthy (NaN != 0).
       const leF64 = allocLocal(fctx, `__dvn_lef_${fctx.locals.length}`, { kind: "f64" });
-      fctx.body.push({ op: "local.tee", index: leF64 } as Instr);
-      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-      fctx.body.push({ op: "f64.ne" } as Instr); // v != 0
-      fctx.body.push({ op: "local.get", index: leF64 } as Instr);
-      fctx.body.push({ op: "local.get", index: leF64 } as Instr);
-      fctx.body.push({ op: "f64.eq" } as Instr); // v == v (false for NaN)
-      fctx.body.push({ op: "i32.and" } as Instr);
+      fctx.body.push({ op: "local.tee", index: leF64 });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.ne" }); // v != 0
+      fctx.body.push({ op: "local.get", index: leF64 });
+      fctx.body.push({ op: "local.get", index: leF64 });
+      fctx.body.push({ op: "f64.eq" }); // v == v (false for NaN)
+      fctx.body.push({ op: "i32.and" });
     } else if (t && t.kind === "externref") {
       // (#3173) ToBoolean on an arbitrary runtime value (`{}` → true,
       // `undefined`/`null`/`0`/`""` → false) — `__is_truthy` resolves to the
@@ -1647,10 +1655,10 @@ function emitLittleEndianFlag(
       const truthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
       if (truthyIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: truthyIdx });
       } else {
-        fctx.body.push({ op: "drop" } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
       }
     } else if (t && (t.kind === "ref" || t.kind === "ref_null")) {
       // (#3173) A GC-ref littleEndian (object literal / AnyValue box / native
@@ -1658,20 +1666,20 @@ function emitLittleEndianFlag(
       // (`{}` → true, `""` → false, boxed 0/NaN → false).
       const truthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       if (truthyIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: truthyIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: truthyIdx });
       } else {
-        fctx.body.push({ op: "drop" } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "i32.const", value: 0 });
       }
     } else if (t && t.kind !== "i32") {
       // Other non-i32 (defensive) — drop and default to big endian.
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "i32.const", value: 0 });
     }
   } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
   fctx.body.push({ op: "local.set", index: leLocal });
   return leLocal;
@@ -1679,19 +1687,19 @@ function emitLittleEndianFlag(
 
 /** Push `arr[off + k]` (unsigned byte 0..255) as i32. */
 function pushByte(fctx: FunctionContext, arrLocal: number, offLocal: number, k: number, arrTypeIdx: number): void {
-  fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: offLocal });
   if (k !== 0) {
-    fctx.body.push({ op: "i32.const", value: k } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "i32.const", value: k });
+    fctx.body.push({ op: "i32.add" });
   }
   // (#2835) Packed `i8` backing → unsigned zero-extended read (plain `array.get`
   // is invalid on a packed array). Result already in [0,255].
-  fctx.body.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "array.get_u", typeIdx: arrTypeIdx });
   // Mask to a byte — `array.get_u` already yields 0..255, but defensively
   // keep only the low 8 bits so sign/overflow can't leak in.
-  fctx.body.push({ op: "i32.const", value: 0xff } as Instr);
-  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0xff });
+  fctx.body.push({ op: "i32.and" });
 }
 
 /**
@@ -1711,13 +1719,13 @@ function emitReadBytes(
     pushByte(fctx, arrLocal, offLocal, 0, arrTypeIdx);
     if (acc.signed) {
       // sign-extend an 8-bit value: (x << 24) >> 24
-      fctx.body.push({ op: "i32.const", value: 24 } as Instr);
-      fctx.body.push({ op: "i32.shl" } as Instr);
-      fctx.body.push({ op: "i32.const", value: 24 } as Instr);
-      fctx.body.push({ op: "i32.shr_s" } as Instr);
-      fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      fctx.body.push({ op: "i32.const", value: 24 });
+      fctx.body.push({ op: "i32.shl" });
+      fctx.body.push({ op: "i32.const", value: 24 });
+      fctx.body.push({ op: "i32.shr_s" });
+      fctx.body.push({ op: "f64.convert_i32_s" });
     } else {
-      fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+      fctx.body.push({ op: "f64.convert_i32_u" });
     }
     return;
   }
@@ -1731,7 +1739,7 @@ function emitReadBytes(
     // for the |v| < 2^63 range the conformance corpus exercises for reads.)
     emitReadI64(fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
     if (!acc.int64) {
-      fctx.body.push({ op: "f64.reinterpret_i64" } as Instr);
+      fctx.body.push({ op: "f64.reinterpret_i64" });
     }
     return;
   }
@@ -1745,32 +1753,32 @@ function emitReadBytes(
     // `__f16_decode` helper (pre-ensured in the accessor prologue).
     const decIdx = ctx.funcMap.get("__f16_decode");
     if (decIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: decIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: decIdx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
     }
     return;
   }
 
   if (acc.float) {
     // Float32: reinterpret the 32-bit pattern, then promote to f64.
-    fctx.body.push({ op: "f32.reinterpret_i32" } as Instr);
-    fctx.body.push({ op: "f64.promote_f32" } as Instr);
+    fctx.body.push({ op: "f32.reinterpret_i32" });
+    fctx.body.push({ op: "f64.promote_f32" });
     return;
   }
 
   if (acc.signed) {
     if (acc.bytes === 2) {
       // sign-extend 16-bit: (x << 16) >> 16
-      fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-      fctx.body.push({ op: "i32.shl" } as Instr);
-      fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-      fctx.body.push({ op: "i32.shr_s" } as Instr);
+      fctx.body.push({ op: "i32.const", value: 16 });
+      fctx.body.push({ op: "i32.shl" });
+      fctx.body.push({ op: "i32.const", value: 16 });
+      fctx.body.push({ op: "i32.shr_s" });
     }
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
   } else {
-    fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_u" });
   }
 }
 
@@ -1792,7 +1800,7 @@ function emitReadI32(
   const beInstrs: Instr[] = [];
   buildIntoBranch(beInstrs, fctx, bytes, arrLocal, offLocal, arrTypeIdx, /*little*/ false);
 
-  fctx.body.push({ op: "local.get", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: leLocal });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
@@ -1816,14 +1824,17 @@ function buildIntoBranch(
   little: boolean,
 ): void {
   const byteAt = (k: number): Instr[] => {
-    const seq: Instr[] = [{ op: "local.get", index: arrLocal } as Instr, { op: "local.get", index: offLocal } as Instr];
+    const seq: Instr[] = [
+      { op: "local.get", index: arrLocal },
+      { op: "local.get", index: offLocal },
+    ];
     if (k !== 0) {
-      seq.push({ op: "i32.const", value: k } as Instr);
-      seq.push({ op: "i32.add" } as Instr);
+      seq.push({ op: "i32.const", value: k });
+      seq.push({ op: "i32.add" });
     }
-    seq.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr); // (#2835) packed i8 byte read
-    seq.push({ op: "i32.const", value: 0xff } as Instr);
-    seq.push({ op: "i32.and" } as Instr);
+    seq.push({ op: "array.get_u", typeIdx: arrTypeIdx }); // (#2835) packed i8 byte read
+    seq.push({ op: "i32.const", value: 0xff });
+    seq.push({ op: "i32.and" });
     return seq;
   };
 
@@ -1832,10 +1843,10 @@ function buildIntoBranch(
     const shift = little ? k * 8 : (bytes - 1 - k) * 8;
     out.push(...byteAt(k));
     if (shift !== 0) {
-      out.push({ op: "i32.const", value: shift } as Instr);
-      out.push({ op: "i32.shl" } as Instr);
+      out.push({ op: "i32.const", value: shift });
+      out.push({ op: "i32.shl" });
     }
-    if (k > 0) out.push({ op: "i32.or" } as Instr);
+    if (k > 0) out.push({ op: "i32.or" });
   }
 }
 
@@ -1852,31 +1863,31 @@ function emitReadI64(
     const out: Instr[] = [];
     const byteAt = (k: number): Instr[] => {
       const seq: Instr[] = [
-        { op: "local.get", index: arrLocal } as Instr,
-        { op: "local.get", index: offLocal } as Instr,
+        { op: "local.get", index: arrLocal },
+        { op: "local.get", index: offLocal },
       ];
       if (k !== 0) {
-        seq.push({ op: "i32.const", value: k } as Instr);
-        seq.push({ op: "i32.add" } as Instr);
+        seq.push({ op: "i32.const", value: k });
+        seq.push({ op: "i32.add" });
       }
-      seq.push({ op: "array.get_u", typeIdx: arrTypeIdx } as Instr); // (#2835) packed i8 byte read
-      seq.push({ op: "i32.const", value: 0xff } as Instr);
-      seq.push({ op: "i32.and" } as Instr);
-      seq.push({ op: "i64.extend_i32_u" } as Instr);
+      seq.push({ op: "array.get_u", typeIdx: arrTypeIdx }); // (#2835) packed i8 byte read
+      seq.push({ op: "i32.const", value: 0xff });
+      seq.push({ op: "i32.and" });
+      seq.push({ op: "i64.extend_i32_u" });
       return seq;
     };
     for (let k = 0; k < 8; k++) {
       const shift = little ? k * 8 : (7 - k) * 8;
       out.push(...byteAt(k));
       if (shift !== 0) {
-        out.push({ op: "i64.const", value: BigInt(shift) } as Instr);
-        out.push({ op: "i64.shl" } as Instr);
+        out.push({ op: "i64.const", value: BigInt(shift) });
+        out.push({ op: "i64.shl" });
       }
-      if (k > 0) out.push({ op: "i64.or" } as Instr);
+      if (k > 0) out.push({ op: "i64.or" });
     }
     return out;
   };
-  fctx.body.push({ op: "local.get", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: leLocal });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i64" } },
@@ -1894,14 +1905,14 @@ function emitStoreByte(
   byte: Instr[],
   arrTypeIdx: number,
 ): void {
-  out.push({ op: "local.get", index: arrLocal } as Instr);
-  out.push({ op: "local.get", index: offLocal } as Instr);
+  out.push({ op: "local.get", index: arrLocal });
+  out.push({ op: "local.get", index: offLocal });
   if (k !== 0) {
-    out.push({ op: "i32.const", value: k } as Instr);
-    out.push({ op: "i32.add" } as Instr);
+    out.push({ op: "i32.const", value: k });
+    out.push({ op: "i32.add" });
   }
   out.push(...byte);
-  out.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
+  out.push({ op: "array.set", typeIdx: arrTypeIdx });
 }
 
 /**
@@ -1930,11 +1941,11 @@ function emitWriteBytes(
       offLocal,
       0,
       [
-        { op: "local.get", index: valLocal } as Instr,
-        { op: "i64.trunc_sat_f64_s" } as Instr,
-        { op: "i32.wrap_i64" } as Instr,
-        { op: "i32.const", value: 0xff } as Instr,
-        { op: "i32.and" } as Instr,
+        { op: "local.get", index: valLocal },
+        { op: "i64.trunc_sat_f64_s" },
+        { op: "i32.wrap_i64" },
+        { op: "i32.const", value: 0xff },
+        { op: "i32.and" },
       ],
       arrTypeIdx,
     );
@@ -1947,26 +1958,26 @@ function emitWriteBytes(
     // bits = i64.trunc_sat_f64_s(val) — the numeric-rep BigInt value truncated
     // toward zero (exact for |v| < 2^53); store 8 bytes either way.
     const bitsLocal = allocLocal(fctx, `__dvn_bits64_${fctx.locals.length}`, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-    fctx.body.push({ op: acc.int64 ? "i64.trunc_sat_f64_s" : "i64.reinterpret_f64" } as Instr);
-    fctx.body.push({ op: "local.set", index: bitsLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: acc.int64 ? "i64.trunc_sat_f64_s" : "i64.reinterpret_f64" });
+    fctx.body.push({ op: "local.set", index: bitsLocal });
     const storeAll = (little: boolean): Instr[] => {
       const out: Instr[] = [];
       for (let k = 0; k < 8; k++) {
         const shift = little ? k * 8 : (7 - k) * 8;
-        const byte: Instr[] = [{ op: "local.get", index: bitsLocal } as Instr];
+        const byte: Instr[] = [{ op: "local.get", index: bitsLocal }];
         if (shift !== 0) {
-          byte.push({ op: "i64.const", value: BigInt(shift) } as Instr);
-          byte.push({ op: "i64.shr_u" } as Instr);
+          byte.push({ op: "i64.const", value: BigInt(shift) });
+          byte.push({ op: "i64.shr_u" });
         }
-        byte.push({ op: "i32.wrap_i64" } as Instr);
-        byte.push({ op: "i32.const", value: 0xff } as Instr);
-        byte.push({ op: "i32.and" } as Instr);
+        byte.push({ op: "i32.wrap_i64" });
+        byte.push({ op: "i32.const", value: 0xff });
+        byte.push({ op: "i32.and" });
         emitStoreByte(out, arrLocal, offLocal, k, byte, arrTypeIdx);
       }
       return out;
     };
-    fctx.body.push({ op: "local.get", index: leLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: leLocal });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
@@ -1978,21 +1989,21 @@ function emitWriteBytes(
 
   // 2 or 4 byte integers (or Float32/Float16) — derive an i32 bit pattern.
   const bitsLocal = allocLocal(fctx, `__dvn_bits32_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
   if (acc.f16) {
     // (#3173) Float16: encode via the minted `__f16_encode` helper
     // (roundTiesToEven directly from the f64 bits — single rounding).
     const encIdx = ctx.funcMap.get("__f16_encode");
     if (encIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: encIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: encIdx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "i32.const", value: 0 });
     }
   } else if (acc.float) {
     // Float32: demote f64→f32, reinterpret to i32 bits.
-    fctx.body.push({ op: "f32.demote_f64" } as Instr);
-    fctx.body.push({ op: "i32.reinterpret_f32" } as Instr);
+    fctx.body.push({ op: "f32.demote_f64" });
+    fctx.body.push({ op: "i32.reinterpret_f32" });
   } else {
     // Integer: the spec (SetValueInBuffer → ToInt{8,16,32}/ToUint{8,16,32}) is
     // MODULAR (`value mod 2^(8*bytes)`), not saturating. `i32.trunc_sat_f64_s`
@@ -2002,27 +2013,27 @@ function emitWriteBytes(
     // `acc.bytes` of those are stored below, giving the correct modular result
     // for 2- and 4-byte signed/unsigned setters across the ±2^53 integer range
     // that conformance exercises.
-    fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-    fctx.body.push({ op: "i32.wrap_i64" } as Instr);
+    fctx.body.push({ op: "i64.trunc_sat_f64_s" });
+    fctx.body.push({ op: "i32.wrap_i64" });
   }
-  fctx.body.push({ op: "local.set", index: bitsLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: bitsLocal });
 
   const storeAll = (little: boolean): Instr[] => {
     const out: Instr[] = [];
     for (let k = 0; k < acc.bytes; k++) {
       const shift = little ? k * 8 : (acc.bytes - 1 - k) * 8;
-      const byte: Instr[] = [{ op: "local.get", index: bitsLocal } as Instr];
+      const byte: Instr[] = [{ op: "local.get", index: bitsLocal }];
       if (shift !== 0) {
-        byte.push({ op: "i32.const", value: shift } as Instr);
-        byte.push({ op: "i32.shr_u" } as Instr);
+        byte.push({ op: "i32.const", value: shift });
+        byte.push({ op: "i32.shr_u" });
       }
-      byte.push({ op: "i32.const", value: 0xff } as Instr);
-      byte.push({ op: "i32.and" } as Instr);
+      byte.push({ op: "i32.const", value: 0xff });
+      byte.push({ op: "i32.and" });
       emitStoreByte(out, arrLocal, offLocal, k, byte, arrTypeIdx);
     }
     return out;
   };
-  fctx.body.push({ op: "local.get", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: leLocal });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
@@ -2091,33 +2102,33 @@ export function pushTaViewEffectiveLen(
   // byte-identical to B1. The tracking indirection is emitted only once a
   // `$__resizable_ab` exists in the module.
   if (ctx.resizableAbTypeIdx < 0) {
-    fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+    fctx.body.push({ op: "local.get", index: tvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 });
     return;
   }
   const { vecTypeIdx } = i32ByteVec(ctx);
   const bytes = taViewDecode(ctx, taViewTypeIdx)?.bytes ?? 1;
   const storedLocal = allocLocal(fctx, `__tav_slen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: tvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.tee", index: storedLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ge_s" });
   const elseInstrs: Instr[] = [
-    { op: "local.get", index: tvLocal } as Instr,
-    { op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr, // buf (ref_null $__vec_i32_byte)
-    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (byte count)
+    { op: "local.get", index: tvLocal },
+    { op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 }, // buf (ref_null $__vec_i32_byte)
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }, // buf.length (byte count)
   ];
   if (bytes !== 1) {
-    elseInstrs.push({ op: "i32.const", value: bytes } as Instr);
-    elseInstrs.push({ op: "i32.div_u" } as Instr);
+    elseInstrs.push({ op: "i32.const", value: bytes });
+    elseInstrs.push({ op: "i32.div_u" });
   }
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "local.get", index: storedLocal } as Instr],
+    then: [{ op: "local.get", index: storedLocal }],
     else: elseInstrs,
-  } as Instr);
+  });
 }
 
 /**
@@ -2146,18 +2157,18 @@ export function emitTaViewConstruct(
   const bufType = compileExpr(bufExpr);
   if (!bufType) return null;
   if (bufType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
   } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
     if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
     }
   } else {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
   const bufLocal = allocLocal(fctx, `__tav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: bufLocal });
 
   // struct.new order = [length, buf, byteOffset]. length field = fixed element
   // count `buf.length / elementSize` (B1/B2). (#3054 C) When the MODULE contains a
@@ -2168,28 +2179,28 @@ export function emitTaViewConstruct(
   // `buf.length` at each read (reflecting a later `rab.resize()`). This extra
   // `ref.test`/`select` is emitted ONLY when a resizable buffer type exists in the
   // module, so a program that uses only fixed buffers is BYTE-IDENTICAL to B1.
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
   if (desc.bytes !== 1) {
-    fctx.body.push({ op: "i32.const", value: desc.bytes } as Instr);
-    fctx.body.push({ op: "i32.div_u" } as Instr);
+    fctx.body.push({ op: "i32.const", value: desc.bytes });
+    fctx.body.push({ op: "i32.div_u" });
   }
   if (ctx.resizableAbTypeIdx >= 0) {
     const rabTypeIdx = ctx.resizableAbTypeIdx;
     // -1 (auto-length sentinel). Wasm `select` yields `cond ? a : b` with `a` the
     // deeper operand (= fixedLen). We want `resizable ? -1 : fixedLen`, so invert
     // the test with `i32.eqz`: cond = !resizable ⇒ select = resizable ? -1 : fixedLen.
-    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-    fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx } as Instr);
-    fctx.body.push({ op: "i32.eqz" } as Instr);
-    fctx.body.push({ op: "select" } as Instr);
+    fctx.body.push({ op: "i32.const", value: -1 });
+    fctx.body.push({ op: "local.get", index: bufLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: rabTypeIdx });
+    fctx.body.push({ op: "i32.eqz" });
+    fctx.body.push({ op: "select" });
   }
   // buf (shared vec ref) — `ref` widens to the field's `ref_null` type.
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal });
   // byteOffset = 0 (B1: offset-0 window).
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx });
   return { kind: "ref_null", typeIdx: taViewTypeIdx };
 }
 
@@ -2214,37 +2225,37 @@ function emitTaViewAddress(
   const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
   // Stash the receiver.
   const tvLocal = allocLocal(fctx, `__tav_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
-  fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: tvLocal });
   // len = the view's CURRENT element count — for the bounds check. Reads field0
   // directly for a fixed view, or derives it live from `buf.length` for an
   // auto-length view over a resizable buffer (#3054 C), so a `rab.resize()` grow
   // widens the in-bounds range and a shrink narrows it.
   const lenLocal = allocLocal(fctx, `__tav_len_${fctx.locals.length}`, { kind: "i32" });
   pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // arr = tv.buf.data  (buf is field1 → ref_null $__vec_i32_byte; .data is its field1)
-  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: tvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
   // idx = ToInt32(indexExpr) — kept for the bounds check.
   const idxLocal = allocLocal(fctx, `__tav_idx_${fctx.locals.length}`, { kind: "i32" });
   const it = compileExpr(indexExpr, { kind: "i32" });
   if (it && it.kind !== "i32") coerceType(ctx, fctx, it, { kind: "i32" });
-  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: idxLocal });
   // off = tv.byteOffset + idx*bytes
-  fctx.body.push({ op: "local.get", index: tvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: tvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.get", index: idxLocal });
   if (bytes !== 1) {
-    fctx.body.push({ op: "i32.const", value: bytes } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "i32.const", value: bytes });
+    fctx.body.push({ op: "i32.mul" });
   }
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: offLocal });
   // little-endian
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
   void arrTypeIdx;
   return { idxLocal, lenLocal };
 }
@@ -2295,15 +2306,15 @@ export function emitTaViewElementGet(
     arrTypeIdx,
   );
   fctx.body = savedBody;
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.lt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "f64" } },
     then: readInstrs,
-    else: [{ op: "f64.const", value: NaN } as Instr],
-  } as Instr);
+    else: [{ op: "f64.const", value: NaN }],
+  });
   return { kind: "f64" };
 }
 
@@ -2345,13 +2356,13 @@ export function emitTaViewElementSet(
     // Uint8Clamped: ToUint8Clamp §7.1.11 — round-half-to-even then clamp [0,255].
     // f64.nearest rounds ties-to-even; f64.max/min clamp; NaN propagates through
     // max/min and `emitWriteBytes` (trunc_sat_f64_s(NaN)=0) → NaN maps to 0.
-    fctx.body.push({ op: "f64.nearest" } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-    fctx.body.push({ op: "f64.max" } as Instr);
-    fctx.body.push({ op: "f64.const", value: 255 } as Instr);
-    fctx.body.push({ op: "f64.min" } as Instr);
+    fctx.body.push({ op: "f64.nearest" });
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "f64.max" });
+    fctx.body.push({ op: "f64.const", value: 255 });
+    fctx.body.push({ op: "f64.min" });
   }
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal });
   // OOB write is a silent no-op (§10.4.5.16 IntegerIndexedElementSet): guard the
   // store on `(unsigned)idx < len` so an out-of-range write doesn't trap.
   const writeInstrs: Instr[] = [];
@@ -2368,12 +2379,12 @@ export function emitTaViewElementSet(
     arrTypeIdx,
   );
   fctx.body = savedBody;
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: writeInstrs } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.lt_u" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: writeInstrs });
   // Assignment is an expression — re-push the coerced value as the result.
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
   return { kind: "f64" };
 }
 
@@ -2422,7 +2433,7 @@ function emitDynDecodeDispatch(
 ): Instr[] {
   // Build bottom-up so each `chain` is referenced exactly once (as the `else` of
   // the next-outer `if`) — no aliased-Instr[] double-remap hazard.
-  let chain: Instr[] = [{ op: "f64.const", value: 0 } as Instr];
+  let chain: Instr[] = [{ op: "f64.const", value: 0 }];
   for (let k = TA_CTOR_KINDS.length - 1; k >= 0; k--) {
     const desc = TA_VIEW_DECODE[TA_CTOR_KINDS[k]!]!;
     const decodeK: Instr[] = [];
@@ -2439,10 +2450,10 @@ function emitDynDecodeDispatch(
     );
     fctx.body = saved;
     chain = [
-      { op: "local.get", index: kindLocal } as Instr,
-      { op: "i32.const", value: k } as Instr,
-      { op: "i32.eq" } as Instr,
-      { op: "if", blockType: { kind: "val", type: { kind: "f64" } }, then: decodeK, else: chain } as Instr,
+      { op: "local.get", index: kindLocal },
+      { op: "i32.const", value: k },
+      { op: "i32.eq" },
+      { op: "if", blockType: { kind: "val", type: { kind: "f64" } }, then: decodeK, else: chain },
     ];
   }
   return chain;
@@ -2478,13 +2489,13 @@ function emitDynEncodeDispatch(
       // then clamp to [0,255]; NaN propagates through max/min and the i64 trunc in
       // emitWriteBytes maps it to 0 (spec: NaN → 0).
       const clampedLocal = allocLocal(fctx, `__dtas_clv_${fctx.locals.length}`, { kind: "f64" });
-      fctx.body.push({ op: "local.get", index: valF64Local } as Instr);
-      fctx.body.push({ op: "f64.nearest" } as Instr);
-      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-      fctx.body.push({ op: "f64.max" } as Instr);
-      fctx.body.push({ op: "f64.const", value: 255 } as Instr);
-      fctx.body.push({ op: "f64.min" } as Instr);
-      fctx.body.push({ op: "local.set", index: clampedLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: valF64Local });
+      fctx.body.push({ op: "f64.nearest" });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.max" });
+      fctx.body.push({ op: "f64.const", value: 255 });
+      fctx.body.push({ op: "f64.min" });
+      fctx.body.push({ op: "local.set", index: clampedLocal });
       valForWrite = clampedLocal;
     }
     emitWriteBytes(
@@ -2499,10 +2510,10 @@ function emitDynEncodeDispatch(
     );
     fctx.body = saved;
     chain = [
-      { op: "local.get", index: kindLocal } as Instr,
-      { op: "i32.const", value: k } as Instr,
-      { op: "i32.eq" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: encodeK, else: chain } as Instr,
+      { op: "local.get", index: kindLocal },
+      { op: "i32.const", value: k },
+      { op: "i32.eq" },
+      { op: "if", blockType: { kind: "empty" }, then: encodeK, else: chain },
     ];
   }
   return chain;
@@ -2533,14 +2544,14 @@ export function emitTaDynViewElementGet(
 
   // Receiver boxed externref is on the stack — stash it (needed by both arms).
   const recvLocal = allocLocal(fctx, `__dtag_recv_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
 
   // Index compiled ONCE → f64 (single evaluation; used by the byte path AND the
   // __extern_get_idx fallback).
   const idxF64 = allocLocal(fctx, `__dtag_idx_${fctx.locals.length}`, { kind: "f64" });
   const it = compileExpr(indexExpr, { kind: "f64" });
   if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+  fctx.body.push({ op: "local.set", index: idxF64 });
 
   // Resolve the fallback / boxing imports up front, then flush the funcIdx shift
   // once (before any body-swap building) so every captured funcIdx stays live.
@@ -2558,14 +2569,14 @@ export function emitTaDynViewElementGet(
     // Defensive: the imports are always registerable in the noJsHost lane (the only
     // lane where a `$__ta_dyn_view` exists), so this is unreachable — but keep the
     // stack balanced if it ever fires.
-    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: recvLocal });
     return { kind: "externref" };
   }
 
   const anyLocal = allocLocal(fctx, `__dtag_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.set", index: anyLocal });
 
   // THEN arm — receiver IS a $__ta_dyn_view: byte-decode on the runtime kind.
   const dvLocal = allocLocal(fctx, `__dtag_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
@@ -2580,65 +2591,65 @@ export function emitTaDynViewElementGet(
   const thenArm: Instr[] = [];
   const saved = fctx.body;
   fctx.body = thenArm;
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+  fctx.body.push({ op: "local.tee", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 }); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // idx (i32) = trunc(idxF64) — a negative / huge index fails the unsigned bounds
   // check below → OOB → undefined (spec IsValidIntegerIndex).
-  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64 });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxI32 });
   // arr = dv.buf.data (buf = field1 → $__vec_i32_byte; .data = its field1).
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
   // off = dv.byteOffset + idx*elemSize(kind).
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
-  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-  fctx.body.push({ op: "i32.mul" } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // little-endian
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 }); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 });
+  fctx.body.push({ op: "local.get", index: esLocal });
+  fctx.body.push({ op: "i32.mul" });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: offLocal });
+  fctx.body.push({ op: "i32.const", value: 1 }); // little-endian
+  fctx.body.push({ op: "local.set", index: leLocal });
   const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, arrTypeIdx);
   const inBounds: Instr[] = [
     ...decodeInstrs,
-    { op: "call", funcIdx: boxNumFn } as Instr,
-    { op: "local.set", index: resultLocal } as Instr,
+    { op: "call", funcIdx: boxNumFn },
+    { op: "local.set", index: resultLocal },
   ];
   // if ((unsigned)idx < len) { box(decode) } else { undefined }
-  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxI32 });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.lt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: inBounds,
-    else: [{ op: "ref.null.extern" } as Instr, { op: "local.set", index: resultLocal } as Instr],
-  } as Instr);
+    else: [{ op: "ref.null.extern" }, { op: "local.set", index: resultLocal }],
+  });
   fctx.body = saved;
 
   // ELSE arm — any other boxed receiver keeps the EXACT existing behavior.
   const elseArm: Instr[] = [
-    { op: "local.get", index: recvLocal } as Instr,
-    { op: "local.get", index: idxF64 } as Instr,
-    { op: "call", funcIdx: getIdxFn } as Instr,
-    { op: "local.set", index: resultLocal } as Instr,
+    { op: "local.get", index: recvLocal },
+    { op: "local.get", index: idxF64 },
+    { op: "call", funcIdx: getIdxFn },
+    { op: "local.set", index: resultLocal },
   ];
 
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
-  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm });
+  fctx.body.push({ op: "local.get", index: resultLocal });
   return { kind: "externref" };
 }
 
@@ -2665,13 +2676,13 @@ export function emitTaDynViewElementSet(
 
   // Receiver boxed externref on the stack → recvLocal.
   const recvLocal = allocLocal(fctx, `__dtas_recv_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
 
   // Index ONCE → f64.
   const idxF64 = allocLocal(fctx, `__dtas_idx_${fctx.locals.length}`, { kind: "f64" });
   const it = compileExpr(indexExpr, { kind: "f64" });
   if (it && it.kind !== "f64") coerceType(ctx, fctx, it, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: idxF64 } as Instr);
+  fctx.body.push({ op: "local.set", index: idxF64 });
 
   // Value ONCE → externref (natural rep for the __extern_set fallback so a
   // non-number plain-array value survives intact; unboxed to f64 for the byte
@@ -2679,15 +2690,15 @@ export function emitTaDynViewElementSet(
   const valExt = allocLocal(fctx, `__dtas_valx_${fctx.locals.length}`, { kind: "externref" });
   const vt = compileExpr(valueExpr, { kind: "externref" });
   if (vt && vt.kind !== "externref") coerceType(ctx, fctx, vt, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: valExt } as Instr);
+  fctx.body.push({ op: "local.set", index: valExt });
 
   // Unbox the value to f64 up front (used only by the dyn-view THEN arm). Doing it
   // here — not inside the body-swapped arm — keeps coerceType's late imports on the
   // main body so no funcIdx shift lands mid-arm.
   const valF64 = allocLocal(fctx, `__dtas_valf_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  fctx.body.push({ op: "local.get", index: valExt });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: valF64 } as Instr);
+  fctx.body.push({ op: "local.set", index: valF64 });
 
   const setFn = ensureLateImport(
     ctx,
@@ -2699,14 +2710,14 @@ export function emitTaDynViewElementSet(
   flushLateImportShifts(ctx, fctx);
   if (setFn === undefined || boxNumFn === undefined) {
     // Defensive (unreachable in the noJsHost lane): keep the value as the result.
-    fctx.body.push({ op: "local.get", index: valExt } as Instr);
+    fctx.body.push({ op: "local.get", index: valExt });
     return { kind: "externref" };
   }
 
   const anyLocal = allocLocal(fctx, `__dtas_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.set", index: anyLocal });
 
   // THEN arm — byte-encode into the shared backing on the runtime kind.
   const dvLocal = allocLocal(fctx, `__dtas_dv_${fctx.locals.length}`, { kind: "ref", typeIdx: dynIdx });
@@ -2721,54 +2732,54 @@ export function emitTaDynViewElementSet(
   const thenArm: Instr[] = [];
   const saved = fctx.body;
   fctx.body = thenArm;
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+  fctx.body.push({ op: "local.tee", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 }); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: idxF64 } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxI32 } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
-  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-  fctx.body.push({ op: "i32.mul" } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: idxF64 });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxI32 });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 }); // byteOffset
+  fctx.body.push({ op: "local.get", index: idxI32 });
+  fctx.body.push({ op: "local.get", index: esLocal });
+  fctx.body.push({ op: "i32.mul" });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: offLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
   const encodeInstrs = emitDynEncodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, valF64, leLocal, arrTypeIdx);
   // OOB write is a silent no-op — guard the encode on `(unsigned)idx < len`.
-  fctx.body.push({ op: "local.get", index: idxI32 } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.lt_u" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: encodeInstrs, else: [] } as Instr);
+  fctx.body.push({ op: "local.get", index: idxI32 });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.lt_u" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: encodeInstrs, else: [] });
   fctx.body = saved;
 
   // ELSE arm — any other boxed receiver keeps the EXACT existing behavior:
   // __extern_set(recv, box(idx), val).
   const elseArm: Instr[] = [
-    { op: "local.get", index: recvLocal } as Instr,
-    { op: "local.get", index: idxF64 } as Instr,
-    { op: "call", funcIdx: boxNumFn } as Instr,
-    { op: "local.get", index: valExt } as Instr,
-    { op: "call", funcIdx: setFn } as Instr,
+    { op: "local.get", index: recvLocal },
+    { op: "local.get", index: idxF64 },
+    { op: "call", funcIdx: boxNumFn },
+    { op: "local.get", index: valExt },
+    { op: "call", funcIdx: setFn },
   ];
 
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenArm, else: elseArm });
   // Assignment is an expression — the value is its result.
-  fctx.body.push({ op: "local.get", index: valExt } as Instr);
+  fctx.body.push({ op: "local.get", index: valExt });
   return { kind: "externref" };
 }
 
@@ -2795,48 +2806,48 @@ function pushTaDynViewInBoundsLen(ctx: CodegenContext, fctx: FunctionContext, dv
   const storedLocal = allocLocal(fctx, `__tdvib_s_${fctx.locals.length}`, { kind: "i32" });
   const availLocal = allocLocal(fctx, `__tdvib_av_${fctx.locals.length}`, { kind: "i32" });
   // availElems = max(0, buf.length - byteOffset) / elemSize.
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr); // buf
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr); // buf.length (bytes)
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr); // byteOffset
-  fctx.body.push({ op: "i32.sub" } as Instr); // availBytes (may be < 0 after a deep shrink)
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 }); // buf
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // buf.length (bytes)
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 }); // byteOffset
+  fctx.body.push({ op: "i32.sub" }); // availBytes (may be < 0 after a deep shrink)
   // clamp availBytes to >= 0. `select` yields `cond ? val1 : val2` (val1 pushed
   // FIRST / deeper), so with val1=0, val2=availBytes, cond=(availBytes<0):
   // (availBytes<0) ? 0 : availBytes.
   const availBytesLocal = allocLocal(fctx, `__tdvib_ab_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.set", index: availBytesLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // val1 (deep) = 0
-  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr); // val2 = availBytes
-  fctx.body.push({ op: "local.get", index: availBytesLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr); // cond = availBytes < 0
-  fctx.body.push({ op: "select" } as Instr); // (availBytes < 0) ? 0 : availBytes
-  fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-  fctx.body.push({ op: "i32.div_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: availLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: availBytesLocal });
+  fctx.body.push({ op: "i32.const", value: 0 }); // val1 (deep) = 0
+  fctx.body.push({ op: "local.get", index: availBytesLocal }); // val2 = availBytes
+  fctx.body.push({ op: "local.get", index: availBytesLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" }); // cond = availBytes < 0
+  fctx.body.push({ op: "select" }); // (availBytes < 0) ? 0 : availBytes
+  fctx.body.push({ op: "local.get", index: esLocal });
+  fctx.body.push({ op: "i32.div_u" });
+  fctx.body.push({ op: "local.set", index: availLocal });
   // storedLen = field0.
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr); // storedLen < 0 → length-tracking
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.tee", index: storedLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" }); // storedLen < 0 → length-tracking
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     // length-tracking: availElems.
-    then: [{ op: "local.get", index: availLocal } as Instr],
+    then: [{ op: "local.get", index: availLocal }],
     // fixed length: storedLen if the window still fits, else 0 (view is OOB). val1=0
     // (deep), val2=storedLen, cond=(storedLen>avail) → (storedLen>avail) ? 0 : storedLen.
     else: [
-      { op: "i32.const", value: 0 } as Instr, // val1 (deep) = 0
-      { op: "local.get", index: storedLocal } as Instr, // val2 = storedLen
-      { op: "local.get", index: storedLocal } as Instr,
-      { op: "local.get", index: availLocal } as Instr,
-      { op: "i32.gt_u" } as Instr, // cond = storedLen > availElems (window overflows buffer)
-      { op: "select" } as Instr, // (storedLen > avail) ? 0 : storedLen
+      { op: "i32.const", value: 0 }, // val1 (deep) = 0
+      { op: "local.get", index: storedLocal }, // val2 = storedLen
+      { op: "local.get", index: storedLocal },
+      { op: "local.get", index: availLocal },
+      { op: "i32.gt_u" }, // cond = storedLen > availElems (window overflows buffer)
+      { op: "select" }, // (storedLen > avail) ? 0 : storedLen
     ],
-  } as Instr);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,9 +2871,9 @@ function emitThrowRangeErrorIf(ctx: CodegenContext, fctx: FunctionContext, msg: 
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx } as Instr],
+    then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx }],
     else: [],
-  } as Instr);
+  });
 }
 
 /**
@@ -2881,33 +2892,36 @@ function emitToIndexI32(
   const f64Local = allocLocal(fctx, `__tav_ti_${fctx.locals.length}`, { kind: "f64" });
   const vt = compileExpr(expr, { kind: "f64" });
   if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.set", index: f64Local });
   // NaN → 0 (v != v is true only for NaN).
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.ne" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: f64Local } as Instr],
+    then: [
+      { op: "f64.const", value: 0 },
+      { op: "local.set", index: f64Local },
+    ],
     else: [],
-  } as Instr);
+  });
   // Truncate toward zero (ToIntegerOrInfinity for finite non-NaN).
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr);
-  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.trunc" });
+  fctx.body.push({ op: "local.set", index: f64Local });
   // RangeError if < 0 or > 2^53-1.
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-  fctx.body.push({ op: "f64.lt" } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53 - 1
-  fctx.body.push({ op: "f64.gt" } as Instr);
-  fctx.body.push({ op: "i32.or" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.lt" });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 }); // 2^53 - 1
+  fctx.body.push({ op: "f64.gt" });
+  fctx.body.push({ op: "i32.or" });
   emitThrowRangeErrorIf(ctx, fctx, rangeErrMsg);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: outLocal });
 }
 
 /**
@@ -2940,24 +2954,24 @@ export function emitTaViewConstructWindowed(
   const bufType = compileExpr(bufExpr);
   if (!bufType) return null;
   if (bufType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
   } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
     if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
     }
   } else {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
   const bufLocal = allocLocal(fctx, `__tavw_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: bufLocal });
 
   // bufByteLen = buf.length (field0 = byte count for an ArrayBuffer vec).
   const bufByteLenLocal = allocLocal(fctx, `__tavw_blen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal });
 
   // byteOffset = ToIndex(offsetExpr).
   const offsetLocal = allocLocal(fctx, `__tavw_off_${fctx.locals.length}`, { kind: "i32" });
@@ -2965,11 +2979,11 @@ export function emitTaViewConstructWindowed(
 
   // byteOffset must be a multiple of the element size (§23.2.5.1 step 11).
   if (elemSize !== 1) {
-    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
-    fctx.body.push({ op: "i32.rem_u" } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.ne" } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "i32.const", value: elemSize });
+    fctx.body.push({ op: "i32.rem_u" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.ne" });
     emitThrowRangeErrorIf(ctx, fctx, `RangeError: start offset of ${viewName} should be a multiple of ${elemSize}`);
   }
 
@@ -2977,49 +2991,49 @@ export function emitTaViewConstructWindowed(
   if (lengthExpr) {
     // Explicit element length. byteOffset + length*elemSize must fit the buffer.
     emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenLocal, "RangeError: Invalid typed array length");
-    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "local.get", index: lenLocal });
     if (elemSize !== 1) {
-      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
-      fctx.body.push({ op: "i32.mul" } as Instr);
+      fctx.body.push({ op: "i32.const", value: elemSize });
+      fctx.body.push({ op: "i32.mul" });
     }
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
-    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal });
+    fctx.body.push({ op: "i32.gt_s" });
     emitThrowRangeErrorIf(ctx, fctx, "RangeError: Invalid typed array length");
   } else {
     // Auto length. byteOffset must not exceed the buffer, and the remaining byte
     // span must be a whole number of elements. length = (bufByteLen - offset)/elemSize.
-    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
-    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal });
+    fctx.body.push({ op: "i32.gt_s" });
     emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset is outside the bounds of the buffer");
     const remLocal = allocLocal(fctx, `__tavw_rem_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-    fctx.body.push({ op: "i32.sub" } as Instr);
-    fctx.body.push({ op: "local.set", index: remLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal });
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "i32.sub" });
+    fctx.body.push({ op: "local.set", index: remLocal });
     if (elemSize !== 1) {
-      fctx.body.push({ op: "local.get", index: remLocal } as Instr);
-      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
-      fctx.body.push({ op: "i32.rem_u" } as Instr);
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-      fctx.body.push({ op: "i32.ne" } as Instr);
+      fctx.body.push({ op: "local.get", index: remLocal });
+      fctx.body.push({ op: "i32.const", value: elemSize });
+      fctx.body.push({ op: "i32.rem_u" });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "i32.ne" });
       emitThrowRangeErrorIf(ctx, fctx, `RangeError: byte length of ${viewName} should be a multiple of ${elemSize}`);
     }
-    fctx.body.push({ op: "local.get", index: remLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: remLocal });
     if (elemSize !== 1) {
-      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
-      fctx.body.push({ op: "i32.div_u" } as Instr);
+      fctx.body.push({ op: "i32.const", value: elemSize });
+      fctx.body.push({ op: "i32.div_u" });
     }
-    fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: lenLocal });
   }
 
   // struct.new $__ta_view {length (elements), buf (shared vec), byteOffset (bytes)}.
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "local.get", index: offsetLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: taViewTypeIdx });
   return { kind: "ref_null", typeIdx: taViewTypeIdx };
 }
 
@@ -3037,10 +3051,10 @@ export function emitTaCtorValue(ctx: CodegenContext, fctx: FunctionContext, name
   const kind = taCtorKindOf(name);
   if (kind < 0) return null;
   const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
-  fctx.body.push({ op: "i32.const", value: kind } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: kind });
+  fctx.body.push({ op: "struct.new", typeIdx: taCtorTypeIdx });
   // Box the struct ref to externref (ref → externref, per coerceType).
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
   return { kind: "externref" };
 }
 
@@ -3064,62 +3078,62 @@ export function emitTaCtorBytesPerElement(
   const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
   const rt = compileRecv();
   if (rt === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   } else if (rt.kind !== "externref") {
     coerceType(ctx, fctx, rt, { kind: "externref" });
   }
   const anyLocal = allocLocal(fctx, `__tac_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.set", index: anyLocal });
   // kind = ref.test $__ta_ctor ? ctor.kind : (ref.test $__ta_dyn_view ? view.kind : -1)
   // — handles BOTH `ctor.BYTES_PER_ELEMENT` (a first-class ctor value) and
   // `view.BYTES_PER_ELEMENT` (a dynamically-constructed view instance, §23.2.3.1).
   const kindLocal = allocLocal(fctx, `__tac_kind_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "local.set", index: kindLocal } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: taCtorTypeIdx },
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: kindLocal },
     ],
     else: [],
-  } as Instr);
+  });
   if (ctx.taDynViewTypeIdx >= 0) {
     const dynIdx = ctx.taDynViewTypeIdx;
-    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: anyLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: dynIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: dynIdx } as Instr,
-        { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr, // kind
-        { op: "local.set", index: kindLocal } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: dynIdx },
+        { op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 }, // kind
+        { op: "local.set", index: kindLocal },
       ],
       else: [],
-    } as Instr);
+    });
   }
   // Map kind → byte width via a select chain (default 0 for a non-ctor receiver).
   // `select` returns val1 (the deeper operand = running result) when cond≠0, so the
   // condition is `kind != k`: (kind != k) ? prevResult : bytes[k] ≡ (kind == k) ?
   // bytes[k] : prevResult.
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // running result = 0 (val1)
+  fctx.body.push({ op: "i32.const", value: 0 }); // running result = 0 (val1)
   for (let k = 0; k < TA_CTOR_KINDS.length; k++) {
-    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
-    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: k } as Instr);
-    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k)
-    fctx.body.push({ op: "select" } as Instr);
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! }); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "i32.const", value: k });
+    fctx.body.push({ op: "i32.ne" }); // cond = (kind != k)
+    fctx.body.push({ op: "select" });
   }
   if (ctx.fast) return { kind: "i32" };
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
@@ -3129,13 +3143,13 @@ export function emitTaCtorBytesPerElement(
  * i32 on the stack; a kind out of range yields 1 (harmless default).
  */
 function pushElemSizeForKind(fctx: FunctionContext, kindLocal: number): void {
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // running result (val1) = 1
+  fctx.body.push({ op: "i32.const", value: 1 }); // running result (val1) = 1
   for (let k = 0; k < TA_CTOR_BYTES.length; k++) {
-    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! } as Instr); // val2 = bytes[k]
-    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: k } as Instr);
-    fctx.body.push({ op: "i32.ne" } as Instr); // cond = (kind != k) → (kind==k) ? bytes[k] : prev
-    fctx.body.push({ op: "select" } as Instr);
+    fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! }); // val2 = bytes[k]
+    fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "i32.const", value: k });
+    fctx.body.push({ op: "i32.ne" }); // cond = (kind != k) → (kind==k) ? bytes[k] : prev
+    fctx.body.push({ op: "select" });
   }
 }
 
@@ -3163,16 +3177,16 @@ export function emitTaViewDynamicByteLength(
   const { vecTypeIdx } = i32ByteVec(ctx);
   const rt = compileRecv();
   if (rt === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   } else if (rt.kind !== "externref") {
     coerceType(ctx, fctx, rt, { kind: "externref" });
   }
   const anyLocal = allocLocal(fctx, `__tvbl_recv_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.set", index: anyLocal });
   const resultLocal = allocLocal(fctx, `__tvbl_res_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: resultLocal });
 
   // $__ta_dyn_view arm: read kind → elemSize; result = elemSize (BYTES_PER_ELEMENT)
   // or effectiveLen × elemSize (byteLength).
@@ -3182,47 +3196,47 @@ export function emitTaViewDynamicByteLength(
   const arm: Instr[] = [];
   const saved = fctx.body;
   fctx.body = arm;
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "local.tee", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr); // kind
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+  fctx.body.push({ op: "local.tee", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 }); // kind
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   if (wantElemSize) {
-    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: esLocal });
+    fctx.body.push({ op: "local.set", index: resultLocal });
   } else {
     pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
-    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: esLocal });
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "local.set", index: resultLocal });
   }
   fctx.body = saved;
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: dynIdx });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] });
 
   // Fallback (byteLength only): a bare ArrayBuffer/DataView vec → its byte length.
   if (!wantElemSize) {
-    fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: anyLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: anyLocal } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: resultLocal } as Instr,
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: resultLocal },
       ],
       else: [],
-    } as Instr);
+    });
   }
 
-  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: resultLocal });
   if (ctx.fast) return { kind: "i32" };
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
@@ -3243,23 +3257,23 @@ function pushTaDynViewEffectiveLen(
   const dynIdx = ctx.taDynViewTypeIdx;
   const { vecTypeIdx } = i32ByteVec(ctx);
   const storedLocal = allocLocal(fctx, `__tdvl_s_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.tee", index: storedLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.tee", index: storedLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "local.get", index: storedLocal } as Instr],
+    then: [{ op: "local.get", index: storedLocal }],
     else: [
-      { op: "local.get", index: dvLocal } as Instr,
-      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr, // buf
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr, // buf.length (bytes)
-      { op: "local.get", index: esLocal } as Instr,
-      { op: "i32.div_u" } as Instr,
+      { op: "local.get", index: dvLocal },
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 }, // buf
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }, // buf.length (bytes)
+      { op: "local.get", index: esLocal },
+      { op: "i32.div_u" },
     ],
-  } as Instr);
+  });
 }
 
 /**
@@ -3293,31 +3307,31 @@ export function emitDynamicTaViewConstruct(
 
   // Result (boxed view) — default null so a non-ctor / unrecoverable buffer declines.
   const resultLocal = allocLocal(fctx, `__dtav_res_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "local.set", index: resultLocal });
 
   // Recover the shared buffer vec struct (mirror emitTaViewConstruct).
   const bufType = compileExpr(bufExpr);
   if (!bufType) return null;
   if (bufType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
   } else if (bufType.kind === "ref" || bufType.kind === "ref_null") {
     if ("typeIdx" in bufType && (bufType as { typeIdx: number }).typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
     }
   } else {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
   const bufLocal = allocLocal(fctx, `__dtav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "local.set", index: bufLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: bufLocal });
 
   // bufByteLen = buf.length (field0).
   const bufByteLenLocal = allocLocal(fctx, `__dtav_blen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: bufByteLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: bufByteLenLocal });
 
   // byteOffset = ToIndex(offsetExpr) (0 when omitted). Element-count length arg is
   // kind-independent, so compute it ONCE (shared across all arms).
@@ -3325,8 +3339,8 @@ export function emitDynamicTaViewConstruct(
   if (offsetExpr) {
     emitToIndexI32(ctx, fctx, offsetExpr, compileExpr, offsetLocal, "RangeError: Invalid typed array offset");
   } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: offsetLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: offsetLocal });
   }
   const lenGiven = lengthExpr !== undefined;
   const lenElemsLocal = allocLocal(fctx, `__dtav_len_${fctx.locals.length}`, { kind: "i32" });
@@ -3337,21 +3351,21 @@ export function emitDynamicTaViewConstruct(
   // kind = ref.test $__ta_ctor ? struct.get 0 : -1  (a non-ctor callee → -1 → the
   // gate below leaves the null result).
   const kindLocal = allocLocal(fctx, `__dtav_kind_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: ctorAnyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
+  fctx.body.push({ op: "local.get", index: ctorAnyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: ctorAnyLocal } as Instr,
-      { op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "local.set", index: kindLocal } as Instr,
+      { op: "local.get", index: ctorAnyLocal },
+      { op: "ref.cast", typeIdx: taCtorTypeIdx },
+      { op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: kindLocal },
     ],
     else: [],
-  } as Instr);
+  });
 
   // Build ONE `$__ta_dyn_view` carrying the runtime kind (B1's per-kind
   // `$__ta_view_<K>` canonicalize together, so a boxed view can't recover its kind
@@ -3363,34 +3377,34 @@ export function emitDynamicTaViewConstruct(
   fctx.body = buildArm;
   // length (field0):
   if (lenGiven) {
-    fctx.body.push({ op: "local.get", index: lenElemsLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenElemsLocal });
   } else if (resizable) {
     // Auto-length over a possibly-resizable buffer → -1 sentinel so the effective
     // length is derived live from `buf.length / elemSize` (length-tracking).
-    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
+    fctx.body.push({ op: "i32.const", value: -1 });
   } else {
     // Fixed auto length = (bufByteLen - offset) / elemSize(kind).
-    fctx.body.push({ op: "local.get", index: bufByteLenLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-    fctx.body.push({ op: "i32.sub" } as Instr);
+    fctx.body.push({ op: "local.get", index: bufByteLenLocal });
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "i32.sub" });
     pushElemSizeForKind(fctx, kindLocal);
-    fctx.body.push({ op: "i32.div_u" } as Instr);
+    fctx.body.push({ op: "i32.div_u" });
   }
   // buf (shared vec ref) + byteOffset + kind.
-  fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: offsetLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
-  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "local.get", index: offsetLocal });
+  fctx.body.push({ op: "local.get", index: kindLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.set", index: resultLocal });
   fctx.body = savedBody;
 
-  fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildArm, else: [] } as Instr);
+  fctx.body.push({ op: "local.get", index: kindLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: buildArm, else: [] });
 
-  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: resultLocal });
   return { kind: "externref" };
 }
 
@@ -3408,33 +3422,36 @@ function emitToIndexI32FromArgLocal(
   rangeErrMsg: string,
 ): void {
   const f64Local = allocLocal(fctx, `__dtac_ti_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "local.get", index: argLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: argLocal });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
+  fctx.body.push({ op: "local.set", index: f64Local });
   // NaN → 0 (v != v is true only for NaN).
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.ne" } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.ne" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: f64Local } as Instr],
+    then: [
+      { op: "f64.const", value: 0 },
+      { op: "local.set", index: f64Local },
+    ],
     else: [],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr);
-  fctx.body.push({ op: "local.set", index: f64Local } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-  fctx.body.push({ op: "f64.lt" } as Instr);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "f64.const", value: 9007199254740991 } as Instr); // 2^53 - 1
-  fctx.body.push({ op: "f64.gt" } as Instr);
-  fctx.body.push({ op: "i32.or" } as Instr);
+  });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.trunc" });
+  fctx.body.push({ op: "local.set", index: f64Local });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.lt" });
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "f64.const", value: 9007199254740991 }); // 2^53 - 1
+  fctx.body.push({ op: "f64.gt" });
+  fctx.body.push({ op: "i32.or" });
   emitThrowRangeErrorIf(ctx, fctx, rangeErrMsg);
-  fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: f64Local });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: outLocal });
 }
 
 /**
@@ -3485,8 +3502,8 @@ export function emitTaDynCtorConstructFromLocals(
   const { vecTypeIdx: byteVecIdx, arrTypeIdx: byteArrIdx } = i32ByteVec(ctx);
 
   const resultLocal = allocLocal(fctx, `__dtac_res_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "local.set", index: resultLocal });
 
   // Shared per-arm locals (function-scoped; each arm fully re-initializes what
   // it reads).
@@ -3506,36 +3523,36 @@ export function emitTaDynCtorConstructFromLocals(
   const savedTa = fctx.body;
   fctx.body = taArm;
 
-  fctx.body.push({ op: "local.get", index: descAnyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: taCtorTypeIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: descAnyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: taCtorTypeIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: taCtorTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr); // little-endian
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
+  fctx.body.push({ op: "i32.const", value: 1 }); // little-endian
+  fctx.body.push({ op: "local.set", index: leLocal });
 
   // Allocate a FRESH ZEROED buffer of dstN elements and publish the view.
   // Reads dstNLocal/esLocal/kindLocal; sets dstBlLocal/dstArrLocal/resultLocal.
   const emitAllocViewFromN = (): void => {
-    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "local.set", index: dstBlLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: dstBlLocal } as Instr);
-    fctx.body.push({ op: "array.new_default", typeIdx: byteArrIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: dstArrLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstNLocal });
+    fctx.body.push({ op: "local.get", index: esLocal });
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "local.set", index: dstBlLocal });
+    fctx.body.push({ op: "local.get", index: dstBlLocal });
+    fctx.body.push({ op: "array.new_default", typeIdx: byteArrIdx });
+    fctx.body.push({ op: "local.set", index: dstArrLocal });
     // view = {length: n, buf: {bl, arr}, byteOffset: 0, kind}
-    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: dstBlLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: byteVecIdx } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: dstNLocal });
+    fctx.body.push({ op: "local.get", index: dstBlLocal });
+    fctx.body.push({ op: "local.get", index: dstArrLocal });
+    fctx.body.push({ op: "ref.as_non_null" });
+    fctx.body.push({ op: "struct.new", typeIdx: byteVecIdx });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "local.set", index: resultLocal });
   };
 
   // Emit `for (i = 0; i < dstN; i++) { encode(kind, dstArr, i*es, pushElemF64(i)) }`.
@@ -3544,52 +3561,52 @@ export function emitTaDynCtorConstructFromLocals(
     const iLocal = allocLocal(fctx, `__dtac_i_${fctx.locals.length}`, { kind: "i32" });
     const vLocal = allocLocal(fctx, `__dtac_v_${fctx.locals.length}`, { kind: "f64" });
     const dstOffLocal = allocLocal(fctx, `__dtac_doff_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: iLocal });
     const loopBody: Instr[] = [];
     const savedLoop = fctx.body;
     fctx.body = loopBody;
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
-    fctx.body.push({ op: "i32.ge_s" } as Instr);
-    fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: dstNLocal });
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "br_if", depth: 1 });
     pushElemF64(iLocal);
-    fctx.body.push({ op: "local.set", index: vLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "local.set", index: dstOffLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: vLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: esLocal });
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "local.set", index: dstOffLocal });
     const dstArrNn = allocLocal(fctx, `__dtac_arrnn_${fctx.locals.length}`, {
       kind: "ref",
       typeIdx: byteArrIdx,
     });
-    fctx.body.push({ op: "local.get", index: dstArrLocal } as Instr);
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
-    fctx.body.push({ op: "local.set", index: dstArrNn } as Instr);
+    fctx.body.push({ op: "local.get", index: dstArrLocal });
+    fctx.body.push({ op: "ref.as_non_null" });
+    fctx.body.push({ op: "local.set", index: dstArrNn });
     fctx.body.push(...emitDynEncodeDispatch(ctx, fctx, kindLocal, dstArrNn, dstOffLocal, vLocal, leLocal, byteArrIdx));
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
-    fctx.body.push({ op: "br", depth: 0 } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: iLocal });
+    fctx.body.push({ op: "br", depth: 0 });
     fctx.body = savedLoop;
     fctx.body.push({
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-    } as Instr);
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+    });
   };
 
   if (argLocals.length === 0) {
     // `new TA()` → 0-length view.
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: dstNLocal });
     emitAllocViewFromN();
   } else {
     const a0AnyLocal = allocLocal(fctx, `__dtac_a0_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-    fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: a0AnyLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: argLocals[0]! });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.set", index: a0AnyLocal });
 
     // ── Count form (the innermost else): n = ToIndex(arg0) → fresh zeroed view.
     const countArm: Instr[] = [];
@@ -3617,35 +3634,38 @@ export function emitTaDynCtorConstructFromLocals(
         const saved = fctx.body;
         fctx.body = objArm;
         const lenF64 = allocLocal(fctx, `__dtac_olen_${fctx.locals.length}`, { kind: "f64" });
-        fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
-        fctx.body.push({ op: "call", funcIdx: externLengthIdx } as Instr);
-        fctx.body.push({ op: "local.set", index: lenF64 } as Instr);
+        fctx.body.push({ op: "local.get", index: argLocals[0]! });
+        fctx.body.push({ op: "call", funcIdx: externLengthIdx });
+        fctx.body.push({ op: "local.set", index: lenF64 });
         // n = max(trunc_sat(len), 0)  — NaN→0 via trunc_sat, negatives clamp.
-        fctx.body.push({ op: "local.get", index: lenF64 } as Instr);
-        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-        fctx.body.push({ op: "i32.lt_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: lenF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        fctx.body.push({ op: "local.set", index: dstNLocal });
+        fctx.body.push({ op: "local.get", index: dstNLocal });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "i32.lt_s" });
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: dstNLocal } as Instr],
+          then: [
+            { op: "i32.const", value: 0 },
+            { op: "local.set", index: dstNLocal },
+          ],
           else: [],
-        } as Instr);
+        });
         emitAllocViewFromN();
         emitCopyLoop((iLocal) => {
-          fctx.body.push({ op: "local.get", index: argLocals[0]! } as Instr);
-          fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-          fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-          fctx.body.push({ op: "call", funcIdx: externGetIdxIdx } as Instr);
+          fctx.body.push({ op: "local.get", index: argLocals[0]! });
+          fctx.body.push({ op: "local.get", index: iLocal });
+          fctx.body.push({ op: "f64.convert_i32_s" });
+          fctx.body.push({ op: "call", funcIdx: externGetIdxIdx });
           coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
         });
         fctx.body = saved;
         chain = [
-          { op: "local.get", index: a0AnyLocal } as Instr,
-          { op: "ref.test", typeIdx: objTypeIdx } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: objArm, else: chain } as Instr,
+          { op: "local.get", index: a0AnyLocal },
+          { op: "ref.test", typeIdx: objTypeIdx },
+          { op: "if", blockType: { kind: "empty" }, then: objArm, else: chain },
         ];
       }
     }
@@ -3665,30 +3685,30 @@ export function emitTaDynCtorConstructFromLocals(
       fctx.body = vecArm;
       const srcVecLocal = allocLocal(fctx, `__dtac_sv_${fctx.locals.length}`, { kind: "ref", typeIdx: vIdx });
       const srcDataLocal = allocLocal(fctx, `__dtac_sd_${fctx.locals.length}`, { kind: "ref", typeIdx: srcArrIdx });
-      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: vIdx } as Instr);
-      fctx.body.push({ op: "local.tee", index: srcVecLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 0 } as Instr);
-      fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: srcVecLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 1 } as Instr);
-      fctx.body.push({ op: "local.set", index: srcDataLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: a0AnyLocal });
+      fctx.body.push({ op: "ref.cast", typeIdx: vIdx });
+      fctx.body.push({ op: "local.tee", index: srcVecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 0 });
+      fctx.body.push({ op: "local.set", index: dstNLocal });
+      fctx.body.push({ op: "local.get", index: srcVecLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: vIdx, fieldIdx: 1 });
+      fctx.body.push({ op: "local.set", index: srcDataLocal });
       emitAllocViewFromN();
       emitCopyLoop((iLocal) => {
-        fctx.body.push({ op: "local.get", index: srcDataLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-        fctx.body.push({ op: "array.get", typeIdx: srcArrIdx } as Instr);
+        fctx.body.push({ op: "local.get", index: srcDataLocal });
+        fctx.body.push({ op: "local.get", index: iLocal });
+        fctx.body.push({ op: "array.get", typeIdx: srcArrIdx });
         if (elemType.kind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+          fctx.body.push({ op: "f64.convert_i32_s" });
         } else if (elemType.kind === "externref") {
           coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
         }
       });
       fctx.body = saved;
       chain = [
-        { op: "local.get", index: a0AnyLocal } as Instr,
-        { op: "ref.test", typeIdx: vIdx } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: vecArm, else: chain } as Instr,
+        { op: "local.get", index: a0AnyLocal },
+        { op: "ref.test", typeIdx: vIdx },
+        { op: "if", blockType: { kind: "empty" }, then: vecArm, else: chain },
       ];
     }
 
@@ -3703,40 +3723,40 @@ export function emitTaDynCtorConstructFromLocals(
       const srcOffLocal = allocLocal(fctx, `__dtac_soff_${fctx.locals.length}`, { kind: "i32" });
       const srcArrLocal = allocLocal(fctx, `__dtac_sarr_${fctx.locals.length}`, { kind: "ref", typeIdx: byteArrIdx });
       const srcBoLocal = allocLocal(fctx, `__dtac_sbo_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-      fctx.body.push({ op: "local.tee", index: srcDvLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
-      fctx.body.push({ op: "local.set", index: srcKindLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: a0AnyLocal });
+      fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+      fctx.body.push({ op: "local.tee", index: srcDvLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+      fctx.body.push({ op: "local.set", index: srcKindLocal });
       pushElemSizeForKind(fctx, srcKindLocal);
-      fctx.body.push({ op: "local.set", index: srcEsLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: srcDvLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-      fctx.body.push({ op: "local.set", index: srcBoLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: srcDvLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
-      fctx.body.push({ op: "local.set", index: srcArrLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: srcEsLocal });
+      fctx.body.push({ op: "local.get", index: srcDvLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+      fctx.body.push({ op: "local.set", index: srcBoLocal });
+      fctx.body.push({ op: "local.get", index: srcDvLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 });
+      fctx.body.push({ op: "local.set", index: srcArrLocal });
       pushTaDynViewInBoundsLen(ctx, fctx, srcDvLocal, srcEsLocal);
-      fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: dstNLocal });
       emitAllocViewFromN();
       emitCopyLoop((iLocal) => {
         // srcOff = srcByteOffset + i*srcEs
-        fctx.body.push({ op: "local.get", index: srcBoLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: srcEsLocal } as Instr);
-        fctx.body.push({ op: "i32.mul" } as Instr);
-        fctx.body.push({ op: "i32.add" } as Instr);
-        fctx.body.push({ op: "local.set", index: srcOffLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: srcBoLocal });
+        fctx.body.push({ op: "local.get", index: iLocal });
+        fctx.body.push({ op: "local.get", index: srcEsLocal });
+        fctx.body.push({ op: "i32.mul" });
+        fctx.body.push({ op: "i32.add" });
+        fctx.body.push({ op: "local.set", index: srcOffLocal });
         fctx.body.push(
           ...emitDynDecodeDispatch(ctx, fctx, srcKindLocal, srcArrLocal, srcOffLocal, leLocal, byteArrIdx),
         );
       });
       fctx.body = saved;
       chain = [
-        { op: "local.get", index: a0AnyLocal } as Instr,
-        { op: "ref.test", typeIdx: dynIdx } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: dvArm, else: chain } as Instr,
+        { op: "local.get", index: a0AnyLocal },
+        { op: "ref.test", typeIdx: dynIdx },
+        { op: "if", blockType: { kind: "empty" }, then: dvArm, else: chain },
       ];
     }
 
@@ -3749,56 +3769,59 @@ export function emitTaDynCtorConstructFromLocals(
       const bufLocal = allocLocal(fctx, `__dtac_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: byteVecIdx });
       const bufBlLocal = allocLocal(fctx, `__dtac_bbl_${fctx.locals.length}`, { kind: "i32" });
       const offLocal = allocLocal(fctx, `__dtac_off_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "local.get", index: a0AnyLocal } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: byteVecIdx } as Instr);
-      fctx.body.push({ op: "local.tee", index: bufLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 0 } as Instr);
-      fctx.body.push({ op: "local.set", index: bufBlLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: a0AnyLocal });
+      fctx.body.push({ op: "ref.cast", typeIdx: byteVecIdx });
+      fctx.body.push({ op: "local.tee", index: bufLocal });
+      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 0 });
+      fctx.body.push({ op: "local.set", index: bufBlLocal });
       if (argLocals.length >= 2) {
         emitToIndexI32FromArgLocal(ctx, fctx, argLocals[1]!, offLocal, "RangeError: Invalid typed array offset");
       } else {
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-        fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: offLocal });
       }
       // Clamp off to the buffer byte length so the fixed auto-length subtraction
       // below can't wrap negative.
-      fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bufBlLocal } as Instr);
-      fctx.body.push({ op: "i32.gt_u" } as Instr);
+      fctx.body.push({ op: "local.get", index: offLocal });
+      fctx.body.push({ op: "local.get", index: bufBlLocal });
+      fctx.body.push({ op: "i32.gt_u" });
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "local.get", index: bufBlLocal } as Instr, { op: "local.set", index: offLocal } as Instr],
+        then: [
+          { op: "local.get", index: bufBlLocal },
+          { op: "local.set", index: offLocal },
+        ],
         else: [],
-      } as Instr);
+      });
       if (argLocals.length >= 3) {
         emitToIndexI32FromArgLocal(ctx, fctx, argLocals[2]!, dstNLocal, "RangeError: Invalid typed array length");
       } else if (ctx.resizableAbTypeIdx >= 0) {
         // Auto-length over a possibly-resizable buffer → -1 length-tracking
         // sentinel (mirrors emitDynamicTaViewConstruct).
-        fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+        fctx.body.push({ op: "i32.const", value: -1 });
+        fctx.body.push({ op: "local.set", index: dstNLocal });
       } else {
-        fctx.body.push({ op: "local.get", index: bufBlLocal } as Instr);
-        fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-        fctx.body.push({ op: "i32.sub" } as Instr);
-        fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-        fctx.body.push({ op: "i32.div_u" } as Instr);
-        fctx.body.push({ op: "local.set", index: dstNLocal } as Instr);
+        fctx.body.push({ op: "local.get", index: bufBlLocal });
+        fctx.body.push({ op: "local.get", index: offLocal });
+        fctx.body.push({ op: "i32.sub" });
+        fctx.body.push({ op: "local.get", index: esLocal });
+        fctx.body.push({ op: "i32.div_u" });
+        fctx.body.push({ op: "local.set", index: dstNLocal });
       }
       // view = {n, sharedBuf, off, kind}
-      fctx.body.push({ op: "local.get", index: dstNLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bufLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: kindLocal } as Instr);
-      fctx.body.push({ op: "struct.new", typeIdx: dynIdx } as Instr);
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
-      fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: dstNLocal });
+      fctx.body.push({ op: "local.get", index: bufLocal });
+      fctx.body.push({ op: "local.get", index: offLocal });
+      fctx.body.push({ op: "local.get", index: kindLocal });
+      fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
+      fctx.body.push({ op: "extern.convert_any" });
+      fctx.body.push({ op: "local.set", index: resultLocal });
       fctx.body = saved;
       chain = [
-        { op: "local.get", index: a0AnyLocal } as Instr,
-        { op: "ref.test", typeIdx: byteVecIdx } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: bufArm, else: chain } as Instr,
+        { op: "local.get", index: a0AnyLocal },
+        { op: "ref.test", typeIdx: byteVecIdx },
+        { op: "if", blockType: { kind: "empty" }, then: bufArm, else: chain },
       ];
     }
 
@@ -3807,10 +3830,10 @@ export function emitTaDynCtorConstructFromLocals(
 
   fctx.body = savedTa;
 
-  fctx.body.push({ op: "local.get", index: descAnyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: taArm, else: [] } as Instr);
-  fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: descAnyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: taCtorTypeIdx });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: taArm, else: [] });
+  fctx.body.push({ op: "local.get", index: resultLocal });
 }
 
 /**
@@ -3891,76 +3914,79 @@ export function ensureTaDynFillHelper(ctx: CodegenContext): number | undefined {
   const offLocal = allocLocal(fctx, "off", { kind: "i32" });
 
   // dv = ref.cast $__ta_dyn_view(any.convert_extern(recv))
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+  fctx.body.push({ op: "local.set", index: dvLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: lenF64Local } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "f64.convert_i32_s" });
+  fctx.body.push({ op: "local.set", index: lenF64Local });
 
   // v = ToNumber(value) — observable coercion, in spec order (value first).
-  fctx.body.push({ op: "local.get", index: 1 } as Instr);
+  fctx.body.push({ op: "local.get", index: 1 });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: vF64Local } as Instr);
+  fctx.body.push({ op: "local.set", index: vF64Local });
 
   // ToIntegerOrInfinity an externref param into idxF64 (NaN→0, trunc toward 0),
   // then resolve the RELATIVE index against len into `outLocal` (i32):
   // idx < 0 ? max(len+idx, 0) : min(idx, len).
   const emitRelativeIndex = (paramIdx: number, outLocal: number): void => {
-    fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: paramIdx });
     coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-    fctx.body.push({ op: "local.set", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "f64.ne" } as Instr);
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: idxF64Local } as Instr],
-      else: [],
-    } as Instr);
-    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "f64.trunc" } as Instr);
-    fctx.body.push({ op: "local.set", index: idxF64Local } as Instr);
-    // relative resolve (all in f64, then trunc_sat to i32)
-    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-    fctx.body.push({ op: "f64.lt" } as Instr);
+    fctx.body.push({ op: "local.set", index: idxF64Local });
+    fctx.body.push({ op: "local.get", index: idxF64Local });
+    fctx.body.push({ op: "local.get", index: idxF64Local });
+    fctx.body.push({ op: "f64.ne" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: lenF64Local } as Instr,
-        { op: "local.get", index: idxF64Local } as Instr,
-        { op: "f64.add" } as Instr,
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "f64.max" } as Instr,
-        { op: "local.set", index: idxF64Local } as Instr,
+        { op: "f64.const", value: 0 },
+        { op: "local.set", index: idxF64Local },
+      ],
+      else: [],
+    });
+    fctx.body.push({ op: "local.get", index: idxF64Local });
+    fctx.body.push({ op: "f64.trunc" });
+    fctx.body.push({ op: "local.set", index: idxF64Local });
+    // relative resolve (all in f64, then trunc_sat to i32)
+    fctx.body.push({ op: "local.get", index: idxF64Local });
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "f64.lt" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: lenF64Local },
+        { op: "local.get", index: idxF64Local },
+        { op: "f64.add" },
+        { op: "f64.const", value: 0 },
+        { op: "f64.max" },
+        { op: "local.set", index: idxF64Local },
       ],
       else: [
-        { op: "local.get", index: idxF64Local } as Instr,
-        { op: "local.get", index: lenF64Local } as Instr,
-        { op: "f64.min" } as Instr,
-        { op: "local.set", index: idxF64Local } as Instr,
+        { op: "local.get", index: idxF64Local },
+        { op: "local.get", index: lenF64Local },
+        { op: "f64.min" },
+        { op: "local.set", index: idxF64Local },
       ],
-    } as Instr);
-    fctx.body.push({ op: "local.get", index: idxF64Local } as Instr);
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-    fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+    });
+    fctx.body.push({ op: "local.get", index: idxF64Local });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "local.set", index: outLocal });
   };
 
   // start: argc >= 2 ? relative(start) : 0.
-  fctx.body.push({ op: "local.get", index: 4 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: 4 });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.ge_s" });
   {
     const startArm: Instr[] = [];
     const saved = fctx.body;
@@ -3971,24 +3997,27 @@ export function ensureTaDynFillHelper(ctx: CodegenContext): number | undefined {
       op: "if",
       blockType: { kind: "empty" },
       then: startArm,
-      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sLocal } as Instr],
-    } as Instr);
+      else: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: sLocal },
+      ],
+    });
   }
 
   // end: (argc >= 3 && end is not undefined/null) ? relative(end) : len.
   // `__nullish_to_null` (when present) normalizes the #2106 $undefined
   // singleton to null so an EXPLICIT `fill(v, s, undefined)` takes the
   // spec's "end is undefined → len" default.
-  fctx.body.push({ op: "local.get", index: 4 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 3 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
-  fctx.body.push({ op: "local.get", index: 3 } as Instr);
+  fctx.body.push({ op: "local.get", index: 4 });
+  fctx.body.push({ op: "i32.const", value: 3 });
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "local.get", index: 3 });
   if (nullishToNullIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: nullishToNullIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: nullishToNullIdx });
   }
-  fctx.body.push({ op: "ref.is_null" } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
-  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({ op: "i32.eqz" });
+  fctx.body.push({ op: "i32.and" });
   {
     const endArm: Instr[] = [];
     const saved = fctx.body;
@@ -3999,54 +4028,57 @@ export function ensureTaDynFillHelper(ctx: CodegenContext): number | undefined {
       op: "if",
       blockType: { kind: "empty" },
       then: endArm,
-      else: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: eLocal } as Instr],
-    } as Instr);
+      else: [
+        { op: "local.get", index: lenLocal },
+        { op: "local.set", index: eLocal },
+      ],
+    });
   }
 
   // arr = dv.buf.data ; bo = dv.byteOffset ; le = 1.
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: boLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
 
   // for (i = s; i < e; i++) encode(kind, arr, bo + i*es, v).
-  fctx.body.push({ op: "local.get", index: sLocal } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sLocal });
+  fctx.body.push({ op: "local.set", index: iLocal });
   {
     const loopBody: Instr[] = [];
     const saved = fctx.body;
     fctx.body = loopBody;
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: eLocal } as Instr);
-    fctx.body.push({ op: "i32.ge_s" } as Instr);
-    fctx.body.push({ op: "br_if", depth: 1 } as Instr);
-    fctx.body.push({ op: "local.get", index: boLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: eLocal });
+    fctx.body.push({ op: "i32.ge_s" });
+    fctx.body.push({ op: "br_if", depth: 1 });
+    fctx.body.push({ op: "local.get", index: boLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "local.get", index: esLocal });
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: offLocal });
     fctx.body.push(...emitDynEncodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, vF64Local, leLocal, byteArrIdx));
-    fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.set", index: iLocal } as Instr);
-    fctx.body.push({ op: "br", depth: 0 } as Instr);
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: iLocal });
+    fctx.body.push({ op: "br", depth: 0 });
     fctx.body = saved;
     fctx.body.push({
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-    } as Instr);
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+    });
   }
 
   // return recv (the view itself — `ta.fill(…) === ta`).
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
 
   pushDefinedFunc(ctx, funcIdx, {
     name: helperName,
@@ -4074,17 +4106,17 @@ function pushTaDynMethodPreamble(
   esLocal: number,
   lenLocal: number,
 ): void {
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dvLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: dynIdx });
+  fctx.body.push({ op: "local.set", index: dvLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   pushTaDynViewInBoundsLen(ctx, fctx, dvLocal, esLocal);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
 }
 
 /**
@@ -4102,47 +4134,50 @@ function pushTaDynRelativeIndex(
   idxF64Scratch: number,
   lenF64: number,
 ): void {
-  fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: paramIdx });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: idxF64Scratch } as Instr);
+  fctx.body.push({ op: "local.set", index: idxF64Scratch });
   // NaN → 0
-  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
-  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
-  fctx.body.push({ op: "f64.ne" } as Instr);
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: idxF64Scratch } as Instr],
-    else: [],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
-  fctx.body.push({ op: "f64.trunc" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxF64Scratch } as Instr);
-  // idx < 0 ? max(len+idx, 0) : min(idx, len)
-  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-  fctx.body.push({ op: "f64.lt" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxF64Scratch });
+  fctx.body.push({ op: "local.get", index: idxF64Scratch });
+  fctx.body.push({ op: "f64.ne" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: lenF64 } as Instr,
-      { op: "local.get", index: idxF64Scratch } as Instr,
-      { op: "f64.add" } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.max" } as Instr,
-      { op: "local.set", index: idxF64Scratch } as Instr,
+      { op: "f64.const", value: 0 },
+      { op: "local.set", index: idxF64Scratch },
+    ],
+    else: [],
+  });
+  fctx.body.push({ op: "local.get", index: idxF64Scratch });
+  fctx.body.push({ op: "f64.trunc" });
+  fctx.body.push({ op: "local.set", index: idxF64Scratch });
+  // idx < 0 ? max(len+idx, 0) : min(idx, len)
+  fctx.body.push({ op: "local.get", index: idxF64Scratch });
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.lt" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: lenF64 },
+      { op: "local.get", index: idxF64Scratch },
+      { op: "f64.add" },
+      { op: "f64.const", value: 0 },
+      { op: "f64.max" },
+      { op: "local.set", index: idxF64Scratch },
     ],
     else: [
-      { op: "local.get", index: idxF64Scratch } as Instr,
-      { op: "local.get", index: lenF64 } as Instr,
-      { op: "f64.min" } as Instr,
-      { op: "local.set", index: idxF64Scratch } as Instr,
+      { op: "local.get", index: idxF64Scratch },
+      { op: "local.get", index: lenF64 },
+      { op: "f64.min" },
+      { op: "local.set", index: idxF64Scratch },
     ],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: idxF64Scratch } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: outLocal } as Instr);
+  });
+  fctx.body.push({ op: "local.get", index: idxF64Scratch });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: outLocal });
 }
 
 function makeTaDynHelperFctx(helperName: string, params: { name: string; type: ValType }[]): FunctionContext {
@@ -4215,14 +4250,14 @@ export function ensureTaDynCopyWithinHelper(ctx: CodegenContext): number | undef
   const nullishToNullIdx = ctx.funcMap.get("__nullish_to_null");
 
   pushTaDynMethodPreamble(ctx, fctx, dynIdx, dvLocal, kindLocal, esLocal, lenLocal);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: lenF64Local } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "f64.convert_i32_s" });
+  fctx.body.push({ op: "local.set", index: lenF64Local });
 
   // to = argc >= 1 ? relative(target) : 0.
-  fctx.body.push({ op: "local.get", index: 4 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: 4 });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.ge_s" });
   {
     const arm: Instr[] = [];
     const saved = fctx.body;
@@ -4233,13 +4268,16 @@ export function ensureTaDynCopyWithinHelper(ctx: CodegenContext): number | undef
       op: "if",
       blockType: { kind: "empty" },
       then: arm,
-      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: toLocal } as Instr],
-    } as Instr);
+      else: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: toLocal },
+      ],
+    });
   }
   // from = argc >= 2 ? relative(start) : 0.
-  fctx.body.push({ op: "local.get", index: 4 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: 4 });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.ge_s" });
   {
     const arm: Instr[] = [];
     const saved = fctx.body;
@@ -4250,18 +4288,21 @@ export function ensureTaDynCopyWithinHelper(ctx: CodegenContext): number | undef
       op: "if",
       blockType: { kind: "empty" },
       then: arm,
-      else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: fromLocal } as Instr],
-    } as Instr);
+      else: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: fromLocal },
+      ],
+    });
   }
   // final = (argc >= 3 && end not undefined/null) ? relative(end) : len.
-  fctx.body.push({ op: "local.get", index: 4 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 3 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
-  fctx.body.push({ op: "local.get", index: 3 } as Instr);
-  if (nullishToNullIdx !== undefined) fctx.body.push({ op: "call", funcIdx: nullishToNullIdx } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
-  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({ op: "local.get", index: 4 });
+  fctx.body.push({ op: "i32.const", value: 3 });
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "local.get", index: 3 });
+  if (nullishToNullIdx !== undefined) fctx.body.push({ op: "call", funcIdx: nullishToNullIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({ op: "i32.eqz" });
+  fctx.body.push({ op: "i32.and" });
   {
     const arm: Instr[] = [];
     const saved = fctx.body;
@@ -4272,68 +4313,71 @@ export function ensureTaDynCopyWithinHelper(ctx: CodegenContext): number | undef
       op: "if",
       blockType: { kind: "empty" },
       then: arm,
-      else: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: finalLocal } as Instr],
-    } as Instr);
+      else: [
+        { op: "local.get", index: lenLocal },
+        { op: "local.set", index: finalLocal },
+      ],
+    });
   }
   // count = min(final - from, len - to).
-  fctx.body.push({ op: "local.get", index: finalLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: fromLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: toLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
+  fctx.body.push({ op: "local.get", index: finalLocal });
+  fctx.body.push({ op: "local.get", index: fromLocal });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: toLocal });
+  fctx.body.push({ op: "i32.sub" });
   // min: select (a<b)?a:b
   {
     const aLocal = allocLocal(fctx, "cwa", { kind: "i32" });
     const bLocal = allocLocal(fctx, "cwb", { kind: "i32" });
-    fctx.body.push({ op: "local.set", index: bLocal } as Instr);
-    fctx.body.push({ op: "local.set", index: aLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: aLocal } as Instr); // val1 (a)
-    fctx.body.push({ op: "local.get", index: bLocal } as Instr); // val2 (b)
-    fctx.body.push({ op: "local.get", index: aLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-    fctx.body.push({ op: "i32.lt_s" } as Instr); // cond a<b
-    fctx.body.push({ op: "select" } as Instr); // a<b ? a : b
-    fctx.body.push({ op: "local.set", index: countLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: bLocal });
+    fctx.body.push({ op: "local.set", index: aLocal });
+    fctx.body.push({ op: "local.get", index: aLocal }); // val1 (a)
+    fctx.body.push({ op: "local.get", index: bLocal }); // val2 (b)
+    fctx.body.push({ op: "local.get", index: aLocal });
+    fctx.body.push({ op: "local.get", index: bLocal });
+    fctx.body.push({ op: "i32.lt_s" }); // cond a<b
+    fctx.body.push({ op: "select" }); // a<b ? a : b
+    fctx.body.push({ op: "local.set", index: countLocal });
   }
 
   // arr = dv.buf.data ; bo = dv.byteOffset.
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: boLocal });
 
   // if (count > 0) array.copy arr (bo+to*es) arr (bo+from*es) (count*es).
   {
     const copyArm: Instr[] = [
-      { op: "local.get", index: arrLocal } as Instr, // dst
-      { op: "local.get", index: boLocal } as Instr, // dstIdx = bo + to*es
-      { op: "local.get", index: toLocal } as Instr,
-      { op: "local.get", index: esLocal } as Instr,
-      { op: "i32.mul" } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.get", index: arrLocal } as Instr, // src
-      { op: "local.get", index: boLocal } as Instr, // srcIdx = bo + from*es
-      { op: "local.get", index: fromLocal } as Instr,
-      { op: "local.get", index: esLocal } as Instr,
-      { op: "i32.mul" } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.get", index: countLocal } as Instr, // len = count*es
-      { op: "local.get", index: esLocal } as Instr,
-      { op: "i32.mul" } as Instr,
-      { op: "array.copy", dstTypeIdx: byteArrIdx, srcTypeIdx: byteArrIdx } as Instr,
+      { op: "local.get", index: arrLocal }, // dst
+      { op: "local.get", index: boLocal }, // dstIdx = bo + to*es
+      { op: "local.get", index: toLocal },
+      { op: "local.get", index: esLocal },
+      { op: "i32.mul" },
+      { op: "i32.add" },
+      { op: "local.get", index: arrLocal }, // src
+      { op: "local.get", index: boLocal }, // srcIdx = bo + from*es
+      { op: "local.get", index: fromLocal },
+      { op: "local.get", index: esLocal },
+      { op: "i32.mul" },
+      { op: "i32.add" },
+      { op: "local.get", index: countLocal }, // len = count*es
+      { op: "local.get", index: esLocal },
+      { op: "i32.mul" },
+      { op: "array.copy", dstTypeIdx: byteArrIdx, srcTypeIdx: byteArrIdx },
     ];
-    fctx.body.push({ op: "local.get", index: countLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.gt_s" } as Instr);
-    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: copyArm, else: [] } as Instr);
+    fctx.body.push({ op: "local.get", index: countLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "i32.gt_s" });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: copyArm, else: [] });
   }
 
   // return recv.
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
   pushDefinedFunc(ctx, funcIdx, { name: helperName, typeIdx, locals: fctx.locals, body: fctx.body, exported: false });
   return funcIdx;
 }
@@ -4393,20 +4437,20 @@ export function ensureTaDynReverseHelper(ctx: CodegenContext): number | undefine
 
   pushTaDynMethodPreamble(ctx, fctx, dynIdx, dvLocal, kindLocal, esLocal, lenLocal);
   // arr = dv.buf.data ; bo = dv.byteOffset.
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: boLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: boLocal });
   // half = len / 2 ; i = 0.
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 2 } as Instr);
-  fctx.body.push({ op: "i32.div_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: halfLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.div_s" });
+  fctx.body.push({ op: "local.set", index: halfLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
 
   // outer: for (i=0; i<half; i++) { j = len-1-i; loOff = bo+i*es; hiOff = bo+j*es;
   //   for (b=0; b<es; b++) { tmp=arr[loOff+b]; arr[loOff+b]=arr[hiOff+b]; arr[hiOff+b]=tmp; } }
@@ -4416,41 +4460,41 @@ export function ensureTaDynReverseHelper(ctx: CodegenContext): number | undefine
       const saved = fctx.body;
       fctx.body = innerBody;
       // b >= es → break inner
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-      fctx.body.push({ op: "i32.ge_s" } as Instr);
-      fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "local.get", index: esLocal });
+      fctx.body.push({ op: "i32.ge_s" });
+      fctx.body.push({ op: "br_if", depth: 1 });
       // tmp = arr[loOff+b]
-      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: loOffLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx } as Instr);
-      fctx.body.push({ op: "local.set", index: tmpLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: arrLocal });
+      fctx.body.push({ op: "local.get", index: loOffLocal });
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx });
+      fctx.body.push({ op: "local.set", index: tmpLocal });
       // arr[loOff+b] = arr[hiOff+b]
-      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: loOffLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: hiOffLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx } as Instr);
-      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: arrLocal });
+      fctx.body.push({ op: "local.get", index: loOffLocal });
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.get", index: arrLocal });
+      fctx.body.push({ op: "local.get", index: hiOffLocal });
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "array.get_u", typeIdx: byteArrIdx });
+      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx });
       // arr[hiOff+b] = tmp
-      fctx.body.push({ op: "local.get", index: arrLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: hiOffLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.get", index: tmpLocal } as Instr);
-      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: arrLocal });
+      fctx.body.push({ op: "local.get", index: hiOffLocal });
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.get", index: tmpLocal });
+      fctx.body.push({ op: "array.set", typeIdx: byteArrIdx });
       // b++
-      fctx.body.push({ op: "local.get", index: bLocal } as Instr);
-      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.set", index: bLocal } as Instr);
-      fctx.body.push({ op: "br", depth: 0 } as Instr);
+      fctx.body.push({ op: "local.get", index: bLocal });
+      fctx.body.push({ op: "i32.const", value: 1 });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.set", index: bLocal });
+      fctx.body.push({ op: "br", depth: 0 });
       fctx.body = saved;
     }
     const outerBody: Instr[] = [];
@@ -4458,55 +4502,55 @@ export function ensureTaDynReverseHelper(ctx: CodegenContext): number | undefine
       const saved = fctx.body;
       fctx.body = outerBody;
       // i >= half → break outer
-      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: halfLocal } as Instr);
-      fctx.body.push({ op: "i32.ge_s" } as Instr);
-      fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "local.get", index: halfLocal });
+      fctx.body.push({ op: "i32.ge_s" });
+      fctx.body.push({ op: "br_if", depth: 1 });
       // j = len-1-i
-      fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-      fctx.body.push({ op: "i32.sub" } as Instr);
-      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-      fctx.body.push({ op: "i32.sub" } as Instr);
-      fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: lenLocal });
+      fctx.body.push({ op: "i32.const", value: 1 });
+      fctx.body.push({ op: "i32.sub" });
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "i32.sub" });
+      fctx.body.push({ op: "local.set", index: jLocal });
       // loOff = bo + i*es ; hiOff = bo + j*es
-      fctx.body.push({ op: "local.get", index: boLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-      fctx.body.push({ op: "i32.mul" } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.set", index: loOffLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: boLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: jLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: esLocal } as Instr);
-      fctx.body.push({ op: "i32.mul" } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.set", index: hiOffLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: boLocal });
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "local.get", index: esLocal });
+      fctx.body.push({ op: "i32.mul" });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.set", index: loOffLocal });
+      fctx.body.push({ op: "local.get", index: boLocal });
+      fctx.body.push({ op: "local.get", index: jLocal });
+      fctx.body.push({ op: "local.get", index: esLocal });
+      fctx.body.push({ op: "i32.mul" });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.set", index: hiOffLocal });
       // b = 0 ; inner loop
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-      fctx.body.push({ op: "local.set", index: bLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "local.set", index: bLocal });
       fctx.body.push({
         op: "block",
         blockType: { kind: "empty" },
-        body: [{ op: "loop", blockType: { kind: "empty" }, body: innerBody } as Instr],
-      } as Instr);
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: innerBody }],
+      });
       // i++
-      fctx.body.push({ op: "local.get", index: iLocal } as Instr);
-      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-      fctx.body.push({ op: "i32.add" } as Instr);
-      fctx.body.push({ op: "local.set", index: iLocal } as Instr);
-      fctx.body.push({ op: "br", depth: 0 } as Instr);
+      fctx.body.push({ op: "local.get", index: iLocal });
+      fctx.body.push({ op: "i32.const", value: 1 });
+      fctx.body.push({ op: "i32.add" });
+      fctx.body.push({ op: "local.set", index: iLocal });
+      fctx.body.push({ op: "br", depth: 0 });
       fctx.body = saved;
     }
     fctx.body.push({
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: outerBody } as Instr],
-    } as Instr);
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: outerBody }],
+    });
   }
 
   // return recv.
-  fctx.body.push({ op: "local.get", index: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: 0 });
   pushDefinedFunc(ctx, funcIdx, { name: helperName, typeIdx, locals: fctx.locals, body: fctx.body, exported: false });
   return funcIdx;
 }
@@ -4538,21 +4582,21 @@ export function emitTaViewAccessor(
   // BYTES_PER_ELEMENT is a compile-time constant — drop the (side-effecting) recv.
   if (propName === "BYTES_PER_ELEMENT") {
     const rt = compileExpr(receiverExpr);
-    if (rt !== null) fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: elemSize } as Instr);
+    if (rt !== null) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: elemSize });
     return ctx.fast ? { kind: "i32" } : { kind: "f64" };
   }
 
   // Compile the receiver (the $__ta_view ref) onto the stack.
   const rt = compileExpr(receiverExpr);
   if (rt?.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: taViewTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: taViewTypeIdx });
   }
 
   if (propName === "buffer") {
     // Object identity: return the shared buffer vec (field1) directly.
-    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 });
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
   if (propName === "byteLength") {
@@ -4565,25 +4609,25 @@ export function emitTaViewAccessor(
         kind: "ref_null",
         typeIdx: taViewTypeIdx,
       });
-      fctx.body.push({ op: "local.set", index: tvLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: tvLocal });
       pushTaViewEffectiveLen(ctx, fctx, tvLocal, taViewTypeIdx);
     } else {
-      fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 0 });
     }
     if (elemSize !== 1) {
-      fctx.body.push({ op: "i32.const", value: elemSize } as Instr);
-      fctx.body.push({ op: "i32.mul" } as Instr);
+      fctx.body.push({ op: "i32.const", value: elemSize });
+      fctx.body.push({ op: "i32.mul" });
     }
-    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
     return ctx.fast ? { kind: "i32" } : { kind: "f64" };
   }
   if (propName === "byteOffset") {
-    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
-    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 });
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
     return ctx.fast ? { kind: "i32" } : { kind: "f64" };
   }
   // Unknown prop — leave the stack balanced and decline.
-  fctx.body.push({ op: "drop" } as Instr);
+  fctx.body.push({ op: "drop" });
   return null;
 }
 
@@ -4619,7 +4663,7 @@ export function emitTaViewToVec(
 
   // view (on stack) → local
   const vLocal = allocLocal(fctx, `__tav_mv_${fctx.locals.length}`, { kind: "ref_null", typeIdx: taViewTypeIdx });
-  fctx.body.push({ op: "local.set", index: vLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: vLocal });
   // len = EFFECTIVE element count, not raw field0. (#3054 C×B3) An auto-length
   // view over a resizable buffer stores a -1 sentinel in field0 (C); reading it
   // raw would de-view -1 elements (empty native copy) and B3's write-back would
@@ -4630,45 +4674,45 @@ export function emitTaViewToVec(
   // length so native-copy-len == write-back-len.
   const lenLocal = allocLocal(fctx, `__tav_mlen_${fctx.locals.length}`, { kind: "i32" });
   pushTaViewEffectiveLen(ctx, fctx, vLocal, taViewTypeIdx);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // arr = view.buf.data ; base = view.byteOffset ; le = 1
   const arrLocal = allocLocal(fctx, `__tav_marr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
   const { vecTypeIdx: bufVecTypeIdx } = i32ByteVec(ctx);
-  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: vLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
   const baseLocal = allocLocal(fctx, `__tav_mbase_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: vLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: vLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: baseLocal });
   const leLocal = allocLocal(fctx, `__tav_mle_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
   // nativeArr = array.new_default(len)
   const nArrLocal = allocLocal(fctx, `__tav_mnarr_${fctx.locals.length}`, { kind: "ref", typeIdx: nativeArrTypeIdx });
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: nativeArrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: nativeArrTypeIdx });
+  fctx.body.push({ op: "local.set", index: nArrLocal });
   // for (i = 0; i < len; i++) nativeArr[i] = coerce(decode(base + i*width))
   const iLocal = allocLocal(fctx, `__tav_mi_${fctx.locals.length}`, { kind: "i32" });
   const offLocal = allocLocal(fctx, `__tav_moff_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
   const isIntArr = nativeElemKind === "i8" || nativeElemKind === "i16" || nativeElemKind === "i32";
   const decodeInstrs: Instr[] = [];
   // offLocal = base + i*width
-  decodeInstrs.push({ op: "local.get", index: baseLocal } as Instr);
-  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: baseLocal });
+  decodeInstrs.push({ op: "local.get", index: iLocal });
   if (desc.bytes !== 1) {
-    decodeInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
-    decodeInstrs.push({ op: "i32.mul" } as Instr);
+    decodeInstrs.push({ op: "i32.const", value: desc.bytes });
+    decodeInstrs.push({ op: "i32.mul" });
   }
-  decodeInstrs.push({ op: "i32.add" } as Instr);
-  decodeInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  decodeInstrs.push({ op: "i32.add" });
+  decodeInstrs.push({ op: "local.set", index: offLocal });
   // nativeArr[i] = <decoded>
-  decodeInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
-  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  decodeInstrs.push({ op: "local.get", index: nArrLocal });
+  decodeInstrs.push({ op: "local.get", index: iLocal });
   // NOTE: emitReadBytes pushes an f64 directly onto fctx.body; capture it by
   // temporarily swapping the body so the read lands inside decodeInstrs.
   const savedBody = fctx.body;
@@ -4683,30 +4727,30 @@ export function emitTaViewToVec(
     bufArrTypeIdx,
   );
   fctx.body = savedBody;
-  if (isIntArr) decodeInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  decodeInstrs.push({ op: "array.set", typeIdx: nativeArrTypeIdx } as Instr);
+  if (isIntArr) decodeInstrs.push({ op: "i32.trunc_sat_f64_s" });
+  decodeInstrs.push({ op: "array.set", typeIdx: nativeArrTypeIdx });
   // i++
-  decodeInstrs.push({ op: "local.get", index: iLocal } as Instr);
-  decodeInstrs.push({ op: "i32.const", value: 1 } as Instr);
-  decodeInstrs.push({ op: "i32.add" } as Instr);
-  decodeInstrs.push({ op: "local.set", index: iLocal } as Instr);
-  decodeInstrs.push({ op: "br", depth: 0 } as Instr);
+  decodeInstrs.push({ op: "local.get", index: iLocal });
+  decodeInstrs.push({ op: "i32.const", value: 1 });
+  decodeInstrs.push({ op: "i32.add" });
+  decodeInstrs.push({ op: "local.set", index: iLocal });
+  decodeInstrs.push({ op: "br", depth: 0 });
   const loopBody: Instr[] = [
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: iLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
     ...decodeInstrs,
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
   // struct.new nativeVec(len, nativeArr)
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: nativeVecTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: nArrLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: nativeVecTypeIdx });
 }
 
 /**
@@ -4766,68 +4810,68 @@ export function emitTaViewWriteBack(
   // module reads raw field0, identical to B3's original bytes.
   const lenLocal = allocLocal(fctx, `__tav_wblen_${fctx.locals.length}`, { kind: "i32" });
   pushTaViewEffectiveLen(ctx, fctx, viewLocalIdx, taViewTypeIdx);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // bufArr = view.buf.data  (buf field1 → $__vec_i32_byte; .data is its field1).
   const bufArrLocal = allocLocal(fctx, `__tav_wbarr_${fctx.locals.length}`, { kind: "ref", typeIdx: bufArrTypeIdx });
-  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: bufArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: viewLocalIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: bufArrLocal });
   // base = view.byteOffset (field2) — non-zero for a windowed view (B2).
   const baseLocal = allocLocal(fctx, `__tav_wbbase_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: viewLocalIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: viewLocalIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: taViewTypeIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: baseLocal });
   // matArr = matLocal.data (native vec field1).
   const matArrLocal = allocLocal(fctx, `__tav_wbmarr_${fctx.locals.length}`, {
     kind: "ref",
     typeIdx: nativeArrTypeIdx,
   });
-  fctx.body.push({ op: "local.get", index: matLocalIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: nativeVecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: matArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: matLocalIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: nativeVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: matArrLocal });
   const leLocal = allocLocal(fctx, `__tav_wble_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
 
   const iLocal = allocLocal(fctx, `__tav_wbi_${fctx.locals.length}`, { kind: "i32" });
   const offLocal = allocLocal(fctx, `__tav_wboff_${fctx.locals.length}`, { kind: "i32" });
   const valLocal = allocLocal(fctx, `__tav_wbval_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
 
   const stepInstrs: Instr[] = [];
   // off = base + i*width
-  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: baseLocal });
+  stepInstrs.push({ op: "local.get", index: iLocal });
   if (desc.bytes !== 1) {
-    stepInstrs.push({ op: "i32.const", value: desc.bytes } as Instr);
-    stepInstrs.push({ op: "i32.mul" } as Instr);
+    stepInstrs.push({ op: "i32.const", value: desc.bytes });
+    stepInstrs.push({ op: "i32.mul" });
   }
-  stepInstrs.push({ op: "i32.add" } as Instr);
-  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  stepInstrs.push({ op: "i32.add" });
+  stepInstrs.push({ op: "local.set", index: offLocal });
   // val = f64(matArr[i]) — read the native element with the TA kind's signedness.
-  stepInstrs.push({ op: "local.get", index: matArrLocal } as Instr);
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: matArrLocal });
+  stepInstrs.push({ op: "local.get", index: iLocal });
   if (nativeElemKind === "f64") {
-    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx });
   } else if (nativeElemKind === "f32") {
-    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
-    stepInstrs.push({ op: "f64.promote_f32" } as Instr);
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx });
+    stepInstrs.push({ op: "f64.promote_f32" });
   } else if (nativeElemKind === "i8" || nativeElemKind === "i16") {
     // PACKED int element (i8/i16): `array.get_s`/`array.get_u` sign/zero-extend
     // the sub-word storage per the view's signedness, then convert to f64.
-    stepInstrs.push({ op: desc.signed ? "array.get_s" : "array.get_u", typeIdx: nativeArrTypeIdx } as Instr);
-    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+    stepInstrs.push({ op: desc.signed ? "array.get_s" : "array.get_u", typeIdx: nativeArrTypeIdx });
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" });
   } else {
     // NON-packed i32 element (Int32/Uint32 `i32_elem`): `array.get_s`/`_u` are
     // illegal on a full-width type — read with plain `array.get`, then apply the
     // signedness at the f64 convert. Uint32 needs `convert_i32_u` so a high-bit-
     // set i32 image maps to the >2^31 double.
-    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx } as Instr);
-    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" } as Instr);
+    stepInstrs.push({ op: "array.get", typeIdx: nativeArrTypeIdx });
+    stepInstrs.push({ op: desc.signed ? "f64.convert_i32_s" : "f64.convert_i32_u" });
   }
-  stepInstrs.push({ op: "local.set", index: valLocal } as Instr);
+  stepInstrs.push({ op: "local.set", index: valLocal });
   // bufArr[off .. off+width] = encode(val)  — same LE engine as element set.
   // emitWriteBytes pushes onto fctx.body, so redirect it into stepInstrs.
   const savedBody = fctx.body;
@@ -4844,23 +4888,23 @@ export function emitTaViewWriteBack(
   );
   fctx.body = savedBody;
   // i++
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
-  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
-  stepInstrs.push({ op: "i32.add" } as Instr);
-  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
-  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal });
+  stepInstrs.push({ op: "i32.const", value: 1 });
+  stepInstrs.push({ op: "i32.add" });
+  stepInstrs.push({ op: "local.set", index: iLocal });
+  stepInstrs.push({ op: "br", depth: 0 });
   const loopBody: Instr[] = [
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: iLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
     ...stepInstrs,
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 }
 
 /**
@@ -4887,47 +4931,43 @@ export function emitTaDynViewValidate(ctx: CodegenContext, fctx: FunctionContext
   const bufLenLocal = allocLocal(fctx, `__tdvv_bl_${fctx.locals.length}`, { kind: "i32" });
   const byteOffLocal = allocLocal(fctx, `__tdvv_bo_${fctx.locals.length}`, { kind: "i32" });
   // kind → elemSize
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   // storedLen = field0
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: storedLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: storedLocal });
   // bufLen = dv.buf.byteLength (buf field1 → $__vec_i32_byte; .length = field0)
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: bufLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: bufLenLocal });
   // byteOffset = field2
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: byteOffLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: byteOffLocal });
   // oob = storedLen >= 0 ? (byteOffset + storedLen*elemSize > bufLen)
   //                      : (byteOffset > bufLen)
-  fctx.body.push({ op: "local.get", index: storedLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: storedLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: [
-      { op: "local.get", index: byteOffLocal } as Instr,
-      { op: "local.get", index: storedLocal } as Instr,
-      { op: "local.get", index: esLocal } as Instr,
-      { op: "i32.mul" } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.get", index: bufLenLocal } as Instr,
-      { op: "i32.gt_s" } as Instr,
+      { op: "local.get", index: byteOffLocal },
+      { op: "local.get", index: storedLocal },
+      { op: "local.get", index: esLocal },
+      { op: "i32.mul" },
+      { op: "i32.add" },
+      { op: "local.get", index: bufLenLocal },
+      { op: "i32.gt_s" },
     ],
-    else: [
-      { op: "local.get", index: byteOffLocal } as Instr,
-      { op: "local.get", index: bufLenLocal } as Instr,
-      { op: "i32.gt_s" } as Instr,
-    ],
-  } as Instr);
+    else: [{ op: "local.get", index: byteOffLocal }, { op: "local.get", index: bufLenLocal }, { op: "i32.gt_s" }],
+  });
   // if (oob) throw TypeError. emitThrowTypeError pushes onto fctx.body → capture it
   // into a then-arm buffer via a body-swap. Keep the outer body registered on
   // fctx.savedBodies for the swap so any late-import shift the throw triggers
@@ -4939,7 +4979,7 @@ export function emitTaDynViewValidate(ctx: CodegenContext, fctx: FunctionContext
   emitThrowTypeError(ctx, fctx, "TypeError: attempting to access out-of-bounds TypedArray");
   fctx.body = saved;
   fctx.savedBodies.pop();
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm, else: [] } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm, else: [] });
 }
 
 /**
@@ -4972,67 +5012,67 @@ export function emitTaDynViewToVec(ctx: CodegenContext, fctx: FunctionContext, d
   const offLocal = allocLocal(fctx, `__tdtv_off_${fctx.locals.length}`, { kind: "i32" });
 
   // kind → elemSize
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 } as Instr);
-  fctx.body.push({ op: "local.set", index: kindLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+  fctx.body.push({ op: "local.set", index: kindLocal });
   pushElemSizeForKind(fctx, kindLocal);
-  fctx.body.push({ op: "local.set", index: esLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: esLocal });
   // len = effective (live, in-bounds) element count.
   pushTaDynViewEffectiveLen(ctx, fctx, dvLocal, kindLocal, esLocal);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // arr = dv.buf.data ; base = dv.byteOffset ; le = 1
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: dvLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 } as Instr);
-  fctx.body.push({ op: "local.set", index: baseLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: leLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "struct.get", typeIdx: bufVecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+  fctx.body.push({ op: "local.get", index: dvLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: baseLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: leLocal });
   // nArr = array.new_default(len)
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: f64ArrIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: nArrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: f64ArrIdx });
+  fctx.body.push({ op: "local.set", index: nArrLocal });
   // for (i=0; i<len; i++) nArr[i] = decode(base + i*elemSize)
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: iLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
   const decodeInstrs = emitDynDecodeDispatch(ctx, fctx, kindLocal, arrLocal, offLocal, leLocal, bufArrTypeIdx);
   const stepInstrs: Instr[] = [];
   // off = base + i*elemSize (runtime elemSize)
-  stepInstrs.push({ op: "local.get", index: baseLocal } as Instr);
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
-  stepInstrs.push({ op: "local.get", index: esLocal } as Instr);
-  stepInstrs.push({ op: "i32.mul" } as Instr);
-  stepInstrs.push({ op: "i32.add" } as Instr);
-  stepInstrs.push({ op: "local.set", index: offLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: baseLocal });
+  stepInstrs.push({ op: "local.get", index: iLocal });
+  stepInstrs.push({ op: "local.get", index: esLocal });
+  stepInstrs.push({ op: "i32.mul" });
+  stepInstrs.push({ op: "i32.add" });
+  stepInstrs.push({ op: "local.set", index: offLocal });
   // nArr[i] = <decode(off) → f64>
-  stepInstrs.push({ op: "local.get", index: nArrLocal } as Instr);
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
+  stepInstrs.push({ op: "local.get", index: nArrLocal });
+  stepInstrs.push({ op: "local.get", index: iLocal });
   stepInstrs.push(...decodeInstrs);
-  stepInstrs.push({ op: "array.set", typeIdx: f64ArrIdx } as Instr);
+  stepInstrs.push({ op: "array.set", typeIdx: f64ArrIdx });
   // i++
-  stepInstrs.push({ op: "local.get", index: iLocal } as Instr);
-  stepInstrs.push({ op: "i32.const", value: 1 } as Instr);
-  stepInstrs.push({ op: "i32.add" } as Instr);
-  stepInstrs.push({ op: "local.set", index: iLocal } as Instr);
-  stepInstrs.push({ op: "br", depth: 0 } as Instr);
+  stepInstrs.push({ op: "local.get", index: iLocal });
+  stepInstrs.push({ op: "i32.const", value: 1 });
+  stepInstrs.push({ op: "i32.add" });
+  stepInstrs.push({ op: "local.set", index: iLocal });
+  stepInstrs.push({ op: "br", depth: 0 });
   const loopBody: Instr[] = [
-    { op: "local.get", index: iLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: iLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
     ...stepInstrs,
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
   // struct.new $__vec_f64(len, nArr)
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: nArrLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: f64VecIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: nArrLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: f64VecIdx });
   return f64VecIdx;
 }
 
@@ -5072,62 +5112,62 @@ export function emitDataViewToWriteScratch(
 
   // Grow linear memory so [scratchStart, scratchStart + len) is addressable.
   const needPagesLocal = allocLocal(fctx, `__dvw_pages_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-  fctx.body.push({ op: "i32.shr_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "memory.size" } as Instr);
-  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({ op: "i32.const", value: scratchStart });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.const", value: 65535 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.const", value: 16 });
+  fctx.body.push({ op: "i32.shr_u" });
+  fctx.body.push({ op: "local.set", index: needPagesLocal });
+  fctx.body.push({ op: "local.get", index: needPagesLocal });
+  fctx.body.push({ op: "memory.size" });
+  fctx.body.push({ op: "i32.gt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: needPagesLocal } as Instr,
-      { op: "memory.size" } as Instr,
-      { op: "i32.sub" } as Instr,
-      { op: "memory.grow" } as Instr,
-      { op: "drop" } as Instr,
+      { op: "local.get", index: needPagesLocal },
+      { op: "memory.size" },
+      { op: "i32.sub" },
+      { op: "memory.grow" },
+      { op: "drop" },
     ],
-  } as Instr);
+  });
 
   // for j in [0, len): scratch[scratchStart + j] = arr[base + j] & 0xff
   const jLocal = allocLocal(fctx, `__dvw_j_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: jLocal });
   const loopBody: Instr[] = [
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "local.get", index: lenLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: jLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
     // addr = scratchStart + j
-    { op: "i32.const", value: scratchStart } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: scratchStart },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
     // value = arr[base + j] & 0xff  ((#2835) packed i8 → unsigned read)
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: baseLocal } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
-    { op: "i32.const", value: 0xff } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "i32.store8", align: 0, offset: 0 } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: jLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
+    { op: "local.get", index: arrLocal },
+    { op: "local.get", index: baseLocal },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
+    { op: "array.get_u", typeIdx: arrTypeIdx },
+    { op: "i32.const", value: 0xff },
+    { op: "i32.and" },
+    { op: "i32.store8", align: 0, offset: 0 },
+    { op: "local.get", index: jLocal },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: jLocal },
+    { op: "br", depth: 0 },
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 
   return lenLocal;
 }
@@ -5181,15 +5221,15 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 1 } as Instr,
+          { op: "local.get", index: 1 },
           { op: "ref.cast", typeIdx: rabTypeIdx },
           { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
-          { op: "f64.convert_i32_s" } as Instr,
-          { op: "return" } as Instr,
+          { op: "f64.convert_i32_s" },
+          { op: "return" },
         ],
         else: [],
       },
-      { op: "f64.const", value: -1 } as Instr,
+      { op: "f64.const", value: -1 },
     ];
     mod.functions.push({
       name: "__ab_max_len",
@@ -5214,11 +5254,11 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
       { op: "local.set", index: 2 },
       { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: rabTypeIdx },
-      { op: "i32.eqz" } as Instr,
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
         else: [],
       },
       { op: "local.get", index: 2 },
@@ -5226,17 +5266,17 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
       { op: "local.set", index: 3 },
       // if newLen < 0 || newLen > maxByteLength (field 2) → status 2 (RangeError)
       { op: "local.get", index: 1 },
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "i32.lt_s" } as Instr,
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
       { op: "local.get", index: 1 },
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 2 },
-      { op: "i32.gt_s" } as Instr,
-      { op: "i32.or" } as Instr,
+      { op: "i32.gt_s" },
+      { op: "i32.or" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 2 } as Instr, { op: "return" } as Instr],
+        then: [{ op: "i32.const", value: 2 }, { op: "return" }],
         else: [],
       },
       // copyLen = min(oldLen = field 0, newLen)
@@ -5246,8 +5286,8 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 0 },
       { op: "local.get", index: 1 },
-      { op: "i32.lt_s" } as Instr,
-      { op: "select" } as Instr,
+      { op: "i32.lt_s" },
+      { op: "select" },
       { op: "local.set", index: 5 },
       // newArr = array.new_default $__arr_i32_byte (newLen)
       { op: "local.get", index: 1 },
@@ -5255,12 +5295,12 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
       { op: "local.set", index: 4 },
       // array.copy newArr[0..copyLen) ← rab.data[0..copyLen)
       { op: "local.get", index: 4 },
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: rabTypeIdx, fieldIdx: 1 },
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
       { op: "local.get", index: 5 },
-      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
       // swap data + length IN PLACE (same struct → views observe the resize)
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
@@ -5268,7 +5308,7 @@ export function emitResizableAbExports(ctx: CodegenContext): void {
       { op: "local.get", index: 3 },
       { op: "local.get", index: 1 },
       { op: "struct.set", typeIdx: rabTypeIdx, fieldIdx: 0 },
-      { op: "i32.const", value: 0 } as Instr,
+      { op: "i32.const", value: 0 },
     ];
     mod.functions.push({
       name: "__rab_resize",

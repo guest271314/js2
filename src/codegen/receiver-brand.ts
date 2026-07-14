@@ -65,9 +65,9 @@ export function emitReceiverBrandCheck(
   // uniformly across externref / ref-struct / primitive-typed receivers.
   if (recvType === null) {
     // Statically void/never receiver — a null anyref misses the test below.
-    fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP } as Instr);
+    fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP });
   } else if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   } else if (
     recvType.kind === "i32" ||
     recvType.kind === "f64" ||
@@ -76,34 +76,34 @@ export function emitReceiverBrandCheck(
   ) {
     // A primitive scalar (or bare funcref) receiver can never be the backing
     // struct — drop it and throw unconditionally.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     emitReceiverBrandThrow(ctx, fctx, spec);
     return;
   }
   // Receiver is now an anyref (or a ref/eqref subtype) on the stack.
   const recvTmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
-  fctx.body.push({ op: "local.tee", index: recvTmp } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: spec.structTypeIdx } as Instr);
+  fctx.body.push({ op: "local.tee", index: recvTmp });
+  fctx.body.push({ op: "ref.test", typeIdx: spec.structTypeIdx });
 
   // Optional kind-tag refinement: pass = structTest && (kind ∈ accept).
   const kindField = spec.kindField;
   if (kindField !== undefined && kindField.accept.length > 0) {
     const readKind: Instr[] = [
-      { op: "local.get", index: recvTmp } as Instr,
-      { op: "ref.cast", typeIdx: spec.structTypeIdx } as Instr, // safe: struct test passed
-      { op: "struct.get", typeIdx: spec.structTypeIdx, fieldIdx: kindField.fieldIdx } as unknown as Instr,
+      { op: "local.get", index: recvTmp },
+      { op: "ref.cast", typeIdx: spec.structTypeIdx }, // safe: struct test passed
+      { op: "struct.get", typeIdx: spec.structTypeIdx, fieldIdx: kindField.fieldIdx },
     ];
     let acceptTest: Instr[];
     if (kindField.accept.length === 1) {
-      acceptTest = [...readKind, { op: "i32.const", value: kindField.accept[0]! } as Instr, { op: "i32.eq" } as Instr];
+      acceptTest = [...readKind, { op: "i32.const", value: kindField.accept[0]! }, { op: "i32.eq" }];
     } else {
       const kindTmp = allocTempLocal(fctx, { kind: "i32" } as ValType);
-      acceptTest = [...readKind, { op: "local.set", index: kindTmp } as Instr];
+      acceptTest = [...readKind, { op: "local.set", index: kindTmp }];
       kindField.accept.forEach((k, i) => {
-        acceptTest.push({ op: "local.get", index: kindTmp } as Instr);
-        acceptTest.push({ op: "i32.const", value: k } as Instr);
-        acceptTest.push({ op: "i32.eq" } as Instr);
-        if (i > 0) acceptTest.push({ op: "i32.or" } as Instr);
+        acceptTest.push({ op: "local.get", index: kindTmp });
+        acceptTest.push({ op: "i32.const", value: k });
+        acceptTest.push({ op: "i32.eq" });
+        if (i > 0) acceptTest.push({ op: "i32.or" });
       });
       releaseTempLocal(fctx, kindTmp);
     }
@@ -111,8 +111,8 @@ export function emitReceiverBrandCheck(
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
       then: acceptTest,
-      else: [{ op: "i32.const", value: 0 } as Instr],
-    } as Instr);
+      else: [{ op: "i32.const", value: 0 }],
+    });
   }
 
   fctx.body.push({
@@ -120,7 +120,7 @@ export function emitReceiverBrandCheck(
     blockType: { kind: "empty" },
     then: [],
     else: [],
-  } as Instr);
+  });
   // Build the throw into the else arm via a temporary body swap so the
   // late-import shift in emitThrowTypeError patches the right buffer (#2604).
   const ifInstr = fctx.body[fctx.body.length - 1] as unknown as { else: Instr[] };
@@ -129,8 +129,8 @@ export function emitReceiverBrandCheck(
   emitThrowTypeError(ctx, fctx, spec.message);
   fctx.body = savedBody;
   // Hit: cast the saved receiver to the concrete backing struct.
-  fctx.body.push({ op: "local.get", index: recvTmp } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: spec.structTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: recvTmp });
+  fctx.body.push({ op: "ref.cast", typeIdx: spec.structTypeIdx });
   releaseTempLocal(fctx, recvTmp);
 }
 
@@ -145,6 +145,6 @@ export function emitReceiverBrandCheck(
  */
 export function emitReceiverBrandThrow(ctx: CodegenContext, fctx: FunctionContext, spec: ReceiverBrandSpec): void {
   emitThrowTypeError(ctx, fctx, spec.message);
-  fctx.body.push({ op: "ref.null", typeIdx: spec.structTypeIdx } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "ref.null", typeIdx: spec.structTypeIdx });
+  fctx.body.push({ op: "ref.as_non_null" });
 }

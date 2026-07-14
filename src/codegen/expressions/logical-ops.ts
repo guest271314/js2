@@ -39,7 +39,7 @@ export function compileLogicalAnd(ctx: CodegenContext, fctx: FunctionContext, ex
     // for the then-branch (RHS path). The else-branch returns the LHS value.
     const resultType = leftType;
     thenInstrs.push(...defaultValueInstrs(resultType));
-    const elseInstrs: Instr[] = [{ op: "local.get", index: tmp } as Instr];
+    const elseInstrs: Instr[] = [{ op: "local.get", index: tmp }];
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: resultType },
@@ -72,7 +72,7 @@ export function compileLogicalAnd(ctx: CodegenContext, fctx: FunctionContext, ex
   }
 
   // Build else-branch (LHS value) with coercion if needed
-  let elseInstrs: Instr[] = [{ op: "local.get", index: tmp } as Instr];
+  let elseInstrs: Instr[] = [{ op: "local.get", index: tmp }];
   if (!valTypesMatch(leftType, resultType)) {
     const coerceBody: Instr[] = [];
     fctx.body = coerceBody;
@@ -115,7 +115,7 @@ export function compileLogicalOr(ctx: CodegenContext, fctx: FunctionContext, exp
   if (!rightType) {
     const resultType = leftType;
     elseInstrs.push(...defaultValueInstrs(resultType));
-    const thenInstrs: Instr[] = [{ op: "local.get", index: tmp } as Instr];
+    const thenInstrs: Instr[] = [{ op: "local.get", index: tmp }];
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: resultType },
@@ -139,7 +139,7 @@ export function compileLogicalOr(ctx: CodegenContext, fctx: FunctionContext, exp
   }
 
   // Build then-branch (LHS value) with coercion if needed
-  let thenInstrs: Instr[] = [{ op: "local.get", index: tmp } as Instr];
+  let thenInstrs: Instr[] = [{ op: "local.get", index: tmp }];
   if (!valTypesMatch(leftType, resultType)) {
     const coerceBody: Instr[] = [];
     fctx.body = coerceBody;
@@ -263,7 +263,7 @@ function finishNullishBranch(
       op: "if",
       blockType: { kind: "val", type: resultKind },
       then: thenInstrs,
-      else: [{ op: "local.get", index: tmp } as Instr],
+      else: [{ op: "local.get", index: tmp }],
     });
     releaseTempLocal(fctx, tmp);
     return resultKind;
@@ -278,7 +278,7 @@ function finishNullishBranch(
       op: "if",
       blockType: { kind: "val", type: resultKind },
       then: thenInstrs,
-      else: [{ op: "local.get", index: tmp } as Instr],
+      else: [{ op: "local.get", index: tmp }],
     });
     releaseTempLocal(fctx, tmp);
     return resultKind;
@@ -308,7 +308,7 @@ function finishNullishBranch(
   }
 
   // Coerce LHS (else branch) to unified type
-  const elseInstrs: Instr[] = [{ op: "local.get", index: tmp } as Instr];
+  const elseInstrs: Instr[] = [{ op: "local.get", index: tmp }];
   const coerceLhsBody: Instr[] = [];
   fctx.body = coerceLhsBody;
   coerceType(ctx, fctx, resultKind, unifiedType);
@@ -377,14 +377,14 @@ function emitMappedArgParamSync(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [] as Instr[],
+    then: [],
     else: [
-      { op: "local.get", index: info.argsLocalIdx } as Instr,
-      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "i32.const", value: argIndex } as Instr,
-      { op: "local.get", index: paramIdx } as Instr,
+      { op: "local.get", index: info.argsLocalIdx },
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 },
+      { op: "i32.const", value: argIndex },
+      { op: "local.get", index: paramIdx },
       ...coerceInstrs,
-      { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+      { op: "array.set", typeIdx: info.arrTypeIdx },
     ],
   });
 
@@ -415,7 +415,7 @@ function emitMappedArgReverseSync(
 
     // Build instructions to convert externref value to param type
     const convertInstrs: Instr[] = [];
-    convertInstrs.push({ op: "local.get", index: valLocal } as Instr);
+    convertInstrs.push({ op: "local.get", index: valLocal });
     if (paramType.kind === "f64") {
       const unboxIdx = ctx.funcMap.get("__unbox_number");
       if (unboxIdx !== undefined) {
@@ -441,8 +441,8 @@ function emitMappedArgReverseSync(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [...convertInstrs, { op: "local.set", index: localIdx } as Instr],
-      else: [] as Instr[],
+      then: [...convertInstrs, { op: "local.set", index: localIdx }],
+      else: [],
     });
   }
 }

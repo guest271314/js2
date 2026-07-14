@@ -146,7 +146,7 @@ export function emitBuiltinConstructorIdentity(
       { op: "call", funcIdx: newObjectIdx },
       { op: "global.set", index: globalIdx },
     ],
-  } as Instr);
+  });
   fctx.body.push({ op: "global.get", index: globalIdx });
   return { kind: "externref" };
 }
@@ -204,9 +204,9 @@ function ensureArrayIsArrayFunc(ctx: CodegenContext): number {
     body.push({ op: "i32.const", value: 0 });
   } else {
     for (let i = 0; i < vecTypeIdxs.length; i++) {
-      body.push({ op: "local.get", index: 1 } as Instr);
-      body.push({ op: "ref.test", typeIdx: vecTypeIdxs[i]! } as Instr);
-      if (i > 0) body.push({ op: "i32.or" } as Instr);
+      body.push({ op: "local.get", index: 1 });
+      body.push({ op: "ref.test", typeIdx: vecTypeIdxs[i]! });
+      if (i > 0) body.push({ op: "i32.or" });
     }
   }
 
@@ -265,7 +265,7 @@ export function emitBuiltinStaticMethodValue(
 function coerceTopToExternref(fctx: FunctionContext, valueType: ValType | null): void {
   if (!valueType || valueType.kind === "externref") return;
   if (valueType.kind === "ref" || valueType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 }
 

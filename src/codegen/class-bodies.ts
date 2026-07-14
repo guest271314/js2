@@ -512,18 +512,18 @@ function emitSetSubclassUserBrand(
   // re-read it without recomputing.
   const anyLocalIdx = allocLocal(fctx, `__err_brand_${fctx.locals.length}`, { kind: "anyref" } as ValType);
   fctx.body.push({ op: "local.get", index: selfLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "local.set", index: anyLocalIdx });
   fctx.body.push({ op: "local.get", index: anyLocalIdx });
-  fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: structIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
       { op: "local.get", index: anyLocalIdx },
-      { op: "ref.cast", typeIdx: structIdx } as Instr,
+      { op: "ref.cast", typeIdx: structIdx },
       { op: "i32.const", value: brand },
-      { op: "struct.set", typeIdx: structIdx, fieldIdx: 4 } as Instr,
+      { op: "struct.set", typeIdx: structIdx, fieldIdx: 4 },
     ],
     else: [],
   });
@@ -2024,13 +2024,13 @@ function compileClassBodiesInner(
         const fnctorFuncIdx = ctx.funcMap.get(fnctorParent);
         if (regIdx !== undefined && fnctorFuncIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: selfLocal });
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
           // F's canonical cached closure — identity-stable with the receiver
           // the top-level `F.prototype = …` write resolved to, so the host
           // lookup reads the SAME sidecar/field slot.
           const closTy = emitCachedFuncClosureAccess(ctx, fctx, fnctorParent, fnctorFuncIdx);
           if (closTy !== null) {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
             const finalRegIdx = ctx.funcMap.get("__register_fnctor_instance") ?? regIdx;
             fctx.body.push({ op: "call", funcIdx: finalRegIdx });
           } else {
@@ -2088,7 +2088,7 @@ function compileClassBodiesInner(
       }
       newBody.push({ op: "local.get", index: newSelfLocal });
       const initIdxNow = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_init`)); // (#1983)
-      newBody.push({ op: "return_call", funcIdx: initIdxNow! } as Instr);
+      newBody.push({ op: "return_call", funcIdx: initIdxNow! });
       func.locals = [{ name: "__self", type: { kind: "ref", typeIdx: structTypeIdx } }];
       func.body = newBody;
     } else {
@@ -2400,7 +2400,10 @@ function compileClassBodiesInner(
         const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
         const catchAllBody: Instr[] =
           getCaughtIdx !== undefined
-            ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+            ? [
+                { op: "call", funcIdx: getCaughtIdx },
+                { op: "local.set", index: pendingThrowLocal },
+              ]
             : [];
         fctx.body.push({
           op: "try",
@@ -2793,7 +2796,7 @@ function emitPromiseSubclassOnHostCtor(
   // the run-on-host-`this` mode.
   const selfLocal = allocLocal(fctx, "__self", { kind: "externref" });
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
-  fctx.body.push({ op: "global.get", index: currentThisGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: currentThisGlobalIdx });
   fctx.body.push({ op: "local.set", index: selfLocal });
   fctx.localMap.set("this", selfLocal);
   ctx.currentFunc = fctx;
@@ -3084,7 +3087,7 @@ export function compileSuperCall(
       op: "array.new_fixed",
       typeIdx: restInfo.arrayTypeIdx,
       length: restArgCount,
-    } as Instr);
+    });
     fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
     actualArgCount = args.length;
   } else if (flatArgs) {

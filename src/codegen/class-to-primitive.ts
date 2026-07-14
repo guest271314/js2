@@ -73,7 +73,7 @@ export function reserveClassToPrimitive(ctx: CodegenContext): number {
     // Placeholder; filled by fillClassToPrimitive in post-processing. The bare
     // `unreachable` keeps the stub valid (externref result) if the fill is ever
     // skipped (e.g. no nominal-struct dispatchers were emitted).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -170,7 +170,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
           op: "if",
           blockType: { kind: "empty" },
           then: [{ op: "local.get", index: L_RV }, { op: "return" }],
-        } as Instr,
+        },
       ];
     };
     fn.locals = [{ name: "rv", type: { kind: "externref" } }];
@@ -181,7 +181,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [...tryDispatcher(callToStringIdx), ...tryDispatcher(callValueOfIdx)],
         else: [...tryDispatcher(callValueOfIdx), ...tryDispatcher(callToStringIdx)],
-      } as Instr,
+      },
       { op: "local.get", index: L_OBJ },
     ];
     return;
@@ -208,11 +208,11 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
     return parts;
   };
 
-  const returnObjectTag: Instr[] = [...stringConstantExternrefInstrs(ctx, OBJECT_TAG), { op: "return" } as Instr];
+  const returnObjectTag: Instr[] = [...stringConstantExternrefInstrs(ctx, OBJECT_TAG), { op: "return" }];
   const throwTypeError: Instr[] = [
     ...stringConstantExternrefInstrs(ctx, TYPE_ERR_MSG),
-    { op: "call", funcIdx: typeErrorCtorIdx } as Instr,
-    { op: "throw", tagIdx: exnTagIdx } as Instr,
+    { op: "call", funcIdx: typeErrorCtorIdx },
+    { op: "throw", tagIdx: exnTagIdx },
   ];
 
   // Call a dispatcher, store into `dst`; if the result is a non-null PRIMITIVE,
@@ -220,7 +220,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
   // to classify by presence afterwards. Absent dispatcher → store null.
   const callAndReturnIfPrimitive = (idx: number | undefined, dst: number): Instr[] => {
     if (idx === undefined) {
-      return [{ op: "ref.null.extern" } as Instr, { op: "local.set", index: dst }];
+      return [{ op: "ref.null.extern" }, { op: "local.set", index: dst }];
     }
     return [
       { op: "local.get", index: L_OBJ },
@@ -239,9 +239,9 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
             op: "if",
             blockType: { kind: "empty" },
             then: [{ op: "local.get", index: dst }, { op: "return" }],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
   };
 
@@ -270,7 +270,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
           then: throwTypeError,
           // toString absent → inherited Object.prototype.toString → "[object Object]"
           else: returnObjectTag,
-        } as Instr,
+        },
       ],
       // valueOf absent → inherited valueOf returns the object (non-primitive)
       else: [
@@ -282,9 +282,9 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
           then: throwTypeError,
           // both absent → fall through to the shared "return input unchanged" tail
           else: [],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 
   // string hint: toString → valueOf. Inherited toString yields the primitive
@@ -304,7 +304,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
       ],
       // toString absent → default Object.prototype.toString
       else: returnObjectTag,
-    } as Instr,
+    },
   ];
 
   fn.locals = [
@@ -318,7 +318,7 @@ export function fillClassToPrimitive(ctx: CodegenContext): void {
       blockType: { kind: "empty" },
       then: stringHint,
       else: numberHint,
-    } as Instr,
+    },
     // Shared tail: reached only when BOTH methods are absent (number hint) —
     // a nominal struct with no valueOf/toString → return the input unchanged,
     // exactly as the pre-#2638 fall-through did (no regression).

@@ -777,7 +777,7 @@ function emitPresizedBufferAlloc(
   if (boundType.kind === "f64") {
     // bound came back as f64 — truncate to i32 (towards zero; the loop test
     // `i < bound` with an integer counter observes the truncated bound).
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else if (boundType.kind !== "i32") {
     // Unexpected type — roll back, keep the doubling buffer.
     rollbackSpeculative(ctx, fctx, snap);
@@ -785,25 +785,25 @@ function emitPresizedBufferAlloc(
   }
   // Stash bound in a temp so we can reference it three times for the clamp.
   const boundTmp = allocLocal(fctx, `__sb_bound_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.set", index: boundTmp } as Instr);
+  fctx.body.push({ op: "local.set", index: boundTmp });
   // clamped = select(bound, 0, bound > 0)  — select pops [a, b, cond], yields
   // a if cond != 0 else b.
-  fctx.body.push({ op: "local.get", index: boundTmp } as Instr); // a = bound
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr); // b = 0
-  fctx.body.push({ op: "local.get", index: boundTmp } as Instr); // bound
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.gt_s" } as Instr); // cond = bound > 0
-  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "local.get", index: boundTmp }); // a = bound
+  fctx.body.push({ op: "i32.const", value: 0 }); // b = 0
+  fctx.body.push({ op: "local.get", index: boundTmp }); // bound
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.gt_s" }); // cond = bound > 0
+  fctx.body.push({ op: "select" });
   // cap = clamped * unitsPerIter
   if (presize.unitsPerIter !== 1) {
-    fctx.body.push({ op: "i32.const", value: presize.unitsPerIter } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
+    fctx.body.push({ op: "i32.const", value: presize.unitsPerIter });
+    fctx.body.push({ op: "i32.mul" });
   }
   // Store cap, then allocate the buffer at that exact length.
-  fctx.body.push({ op: "local.set", index: capLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: capLocalIdx } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: strDataTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: bufLocalIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: capLocalIdx });
+  fctx.body.push({ op: "local.get", index: capLocalIdx });
+  fctx.body.push({ op: "array.new_default", typeIdx: strDataTypeIdx });
+  fctx.body.push({ op: "local.set", index: bufLocalIdx });
   return true;
 }
 
@@ -869,26 +869,26 @@ export function compileStringBuilderAppend(
 
   // Stack on entry: rhs (ref $AnyString)
   // 1. rhs = __str_flatten(rhs) → ref $NativeString. Store in temp local.
-  fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const rhsLocal = allocLocal(fctx, `__sb_rhs_${fctx.locals.length}`, {
     kind: "ref_null",
     typeIdx: flatStrTypeIdx,
   });
-  fctx.body.push({ op: "local.set", index: rhsLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: rhsLocal });
 
   // 2. rhsLen = rhs.len
   const rhsLenLocal = allocLocal(fctx, `__sb_rhsLen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: rhsLocal } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: rhsLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: rhsLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: rhsLenLocal });
 
   // 3. needed = sb.len + rhsLen
   const neededLocal = allocLocal(fctx, `__sb_needed_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: rhsLenLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: neededLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx });
+  fctx.body.push({ op: "local.get", index: rhsLenLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: neededLocal });
 
   // 4. if (needed > sb.cap) grow:
   //      newCap = __str_buf_next_cap(sb.cap, needed)
@@ -909,66 +909,66 @@ export function compileStringBuilderAppend(
       kind: "ref_null",
       typeIdx: strDataTypeIdx,
     });
-    fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: sb.capLocalIdx } as Instr);
-    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: neededLocal });
+    fctx.body.push({ op: "local.get", index: sb.capLocalIdx });
+    fctx.body.push({ op: "i32.gt_s" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
         // sb.cap = __str_buf_next_cap(sb.cap, needed)
-        { op: "local.get", index: sb.capLocalIdx } as Instr,
-        { op: "local.get", index: neededLocal } as Instr,
-        { op: "call", funcIdx: nextCapIdx } as Instr,
-        { op: "local.set", index: sb.capLocalIdx } as Instr,
+        { op: "local.get", index: sb.capLocalIdx },
+        { op: "local.get", index: neededLocal },
+        { op: "call", funcIdx: nextCapIdx },
+        { op: "local.set", index: sb.capLocalIdx },
         // oldBufTmp = sb.buf
-        { op: "local.get", index: sb.bufLocalIdx } as Instr,
-        { op: "local.set", index: oldBufTmp } as Instr,
+        { op: "local.get", index: sb.bufLocalIdx },
+        { op: "local.set", index: oldBufTmp },
         // sb.buf = array.new_default(sb.cap)
-        { op: "local.get", index: sb.capLocalIdx } as Instr,
-        { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-        { op: "local.set", index: sb.bufLocalIdx } as Instr,
+        { op: "local.get", index: sb.capLocalIdx },
+        { op: "array.new_default", typeIdx: strDataTypeIdx },
+        { op: "local.set", index: sb.bufLocalIdx },
         // array.copy(sb.buf, 0, oldBufTmp, 0, sb.len)
-        { op: "local.get", index: sb.bufLocalIdx } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: oldBufTmp } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: sb.lenLocalIdx } as Instr,
-        { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx } as Instr,
+        { op: "local.get", index: sb.bufLocalIdx },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: oldBufTmp },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: sb.lenLocalIdx },
+        { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
       ],
-    } as Instr);
+    });
   }
 
   // 5. array.copy(sb.buf, sb.len, rhs.data, rhs.off, rhsLen)
-  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: rhsLocal } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 2 } as Instr); // data
-  fctx.body.push({ op: "local.get", index: rhsLocal } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 1 } as Instr); // off
-  fctx.body.push({ op: "local.get", index: rhsLenLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx });
+  fctx.body.push({ op: "local.get", index: rhsLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 2 }); // data
+  fctx.body.push({ op: "local.get", index: rhsLocal });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "struct.get", typeIdx: flatStrTypeIdx, fieldIdx: 1 }); // off
+  fctx.body.push({ op: "local.get", index: rhsLenLocal });
   fctx.body.push({
     op: "array.copy",
     dstTypeIdx: strDataTypeIdx,
     srcTypeIdx: strDataTypeIdx,
-  } as Instr);
+  });
 
   // 6. sb.len = needed
-  fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
-  fctx.body.push({ op: "local.set", index: sb.lenLocalIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: neededLocal });
+  fctx.body.push({ op: "local.set", index: sb.lenLocalIdx });
 
   // 7. Invalidate the materialized cache: sb.mat = null. Any prior reader
   //    holds a NativeString that points at a buffer we may have replaced
   //    above — the existing reference remains valid (it was the OLD buf or
   //    the NEW one with stale len), but new reads must rematerialize from
   //    the current (buf, len, off=0) tuple.
-  fctx.body.push({ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: sb.materializedLocalIdx } as Instr);
+  fctx.body.push({ op: "ref.null", typeIdx: anyStrTypeIdx });
+  fctx.body.push({ op: "local.set", index: sb.materializedLocalIdx });
 
   // No result on stack. Caller's discardability check sees null return type.
   void anyStrTypeIdx;
@@ -1013,20 +1013,20 @@ export function emitStringBuilderAppendCodeUnit(
   if (!sb.presized && nextCapIdx < 0) {
     // Defensive: helper must exist (emitted by compileStringBuilderInit).
     // Drop the code unit and bail so codegen continues; validation surfaces it.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return;
   }
 
   // Stack on entry: cu (i32 code unit). Stash it.
   const cuLocal = allocLocal(fctx, `__sb_cu_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.set", index: cuLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: cuLocal });
 
   // needed = sb.len + 1
   const neededLocal = allocLocal(fctx, `__sb_needed1_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: neededLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: neededLocal });
 
   // if (needed > sb.cap) grow — identical doubling policy to the bulk append.
   // #1761: omitted entirely for a presized builder (cap proven sufficient for
@@ -1037,48 +1037,48 @@ export function emitStringBuilderAppendCodeUnit(
       kind: "ref_null",
       typeIdx: strDataTypeIdx,
     });
-    fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: sb.capLocalIdx } as Instr);
-    fctx.body.push({ op: "i32.gt_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: neededLocal });
+    fctx.body.push({ op: "local.get", index: sb.capLocalIdx });
+    fctx.body.push({ op: "i32.gt_s" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: sb.capLocalIdx } as Instr,
-        { op: "local.get", index: neededLocal } as Instr,
-        { op: "call", funcIdx: nextCapIdx } as Instr,
-        { op: "local.set", index: sb.capLocalIdx } as Instr,
-        { op: "local.get", index: sb.bufLocalIdx } as Instr,
-        { op: "local.set", index: oldBufTmp } as Instr,
-        { op: "local.get", index: sb.capLocalIdx } as Instr,
-        { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-        { op: "local.set", index: sb.bufLocalIdx } as Instr,
-        { op: "local.get", index: sb.bufLocalIdx } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: oldBufTmp } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: sb.lenLocalIdx } as Instr,
-        { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx } as Instr,
+        { op: "local.get", index: sb.capLocalIdx },
+        { op: "local.get", index: neededLocal },
+        { op: "call", funcIdx: nextCapIdx },
+        { op: "local.set", index: sb.capLocalIdx },
+        { op: "local.get", index: sb.bufLocalIdx },
+        { op: "local.set", index: oldBufTmp },
+        { op: "local.get", index: sb.capLocalIdx },
+        { op: "array.new_default", typeIdx: strDataTypeIdx },
+        { op: "local.set", index: sb.bufLocalIdx },
+        { op: "local.get", index: sb.bufLocalIdx },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: oldBufTmp },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: sb.lenLocalIdx },
+        { op: "array.copy", dstTypeIdx: strDataTypeIdx, srcTypeIdx: strDataTypeIdx },
       ],
-    } as Instr);
+    });
   }
 
   // sb.buf[sb.len] = cu
-  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx } as Instr);
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: cuLocal } as Instr);
-  fctx.body.push({ op: "array.set", typeIdx: strDataTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.bufLocalIdx });
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "local.get", index: sb.lenLocalIdx });
+  fctx.body.push({ op: "local.get", index: cuLocal });
+  fctx.body.push({ op: "array.set", typeIdx: strDataTypeIdx });
 
   // sb.len = needed
-  fctx.body.push({ op: "local.get", index: neededLocal } as Instr);
-  fctx.body.push({ op: "local.set", index: sb.lenLocalIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: neededLocal });
+  fctx.body.push({ op: "local.set", index: sb.lenLocalIdx });
 
   // sb.mat = null
-  fctx.body.push({ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: sb.materializedLocalIdx } as Instr);
+  fctx.body.push({ op: "ref.null", typeIdx: anyStrTypeIdx });
+  fctx.body.push({ op: "local.set", index: sb.materializedLocalIdx });
 }
 
 /**
@@ -1119,28 +1119,28 @@ export function emitStringBuilderRead(ctx: CodegenContext, fctx: FunctionContext
   //
   // The cache is typed as `ref null $AnyString` so we widen `$NativeString
   // <: $AnyString` when caching, and narrow back on read.
-  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx });
+  fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
       // sb.mat = struct.new $NativeString(sb.len, 0, sb.buf)
-      { op: "local.get", index: sb.lenLocalIdx } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.get", index: sb.bufLocalIdx } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.new", typeIdx: flatStrTypeIdx } as Instr,
-      { op: "local.set", index: sb.materializedLocalIdx } as Instr,
+      { op: "local.get", index: sb.lenLocalIdx },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: sb.bufLocalIdx },
+      { op: "ref.as_non_null" },
+      { op: "struct.new", typeIdx: flatStrTypeIdx },
+      { op: "local.set", index: sb.materializedLocalIdx },
     ],
-  } as Instr);
-  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx } as Instr);
+  });
+  fctx.body.push({ op: "local.get", index: sb.materializedLocalIdx });
   // The cache slot is typed `ref null $AnyString`. Use `ref.cast` (non-null
   // variant) to narrow to `ref $NativeString` so callers that expect
   // `flatStringType(ctx)` (charCodeAt, charAt, ...) can do
   // `struct.get $NativeString.<field>` directly. The `if` block above
   // guarantees the slot is non-null on the fall-through path.
-  fctx.body.push({ op: "ref.cast", typeIdx: flatStrTypeIdx } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: flatStrTypeIdx });
   void anyStrTypeIdx;
   return { kind: "ref", typeIdx: flatStrTypeIdx };
 }

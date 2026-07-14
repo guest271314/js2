@@ -105,7 +105,7 @@ export function tryCompileRawWasiCall(
     // not the raw syscall shape — defer to the generic path.
     if (expr.arguments.length !== 4) return undefined;
     for (const argExpr of expr.arguments) emitI32Arg(ctx, fctx, argExpr);
-    fctx.body.push({ op: "call", funcIdx: importIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: importIdx });
     // The WASI call leaves the errno (i32) on the stack.
     return { kind: "i32" };
   }
@@ -132,9 +132,7 @@ function emitMemAccessor(
     emitI32Arg(ctx, fctx, expr.arguments[0]!); // addr
     emitI32Arg(ctx, fctx, expr.arguments[1]!); // value
     fctx.body.push(
-      callee === "store32"
-        ? ({ op: "i32.store", align: 0, offset: 0 } as Instr)
-        : ({ op: "i32.store8", align: 0, offset: 0 } as Instr),
+      callee === "store32" ? { op: "i32.store", align: 0, offset: 0 } : { op: "i32.store8", align: 0, offset: 0 },
     );
     return VOID_RESULT;
   }
@@ -142,9 +140,7 @@ function emitMemAccessor(
   if (expr.arguments.length !== 1) return undefined;
   emitI32Arg(ctx, fctx, expr.arguments[0]!); // addr
   fctx.body.push(
-    callee === "load32"
-      ? ({ op: "i32.load", align: 0, offset: 0 } as Instr)
-      : ({ op: "i32.load8_u", align: 0, offset: 0 } as Instr),
+    callee === "load32" ? { op: "i32.load", align: 0, offset: 0 } : { op: "i32.load8_u", align: 0, offset: 0 },
   );
   return { kind: "i32" };
 }

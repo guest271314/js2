@@ -199,7 +199,7 @@ export function emitStandalonePromiseFromExecutor(
         ],
       },
     ],
-  } as Instr);
+  });
 
   // 6. Result: the pending/settled $Promise as externref.
   fctx.body.push({ op: "local.get", index: pLocal });
@@ -283,19 +283,19 @@ export function emitStandalonePromiseFromExecutorValue(
   const reasonLocal = allocLocal(fctx, `__pexecv_reason_${fctx.locals.length}`, { kind: "externref" });
   const argsLocal = allocLocal(fctx, `__pexecv_args_${fctx.locals.length}`, { kind: "externref" });
   const tryBody: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: argsLocal } as Instr,
-    { op: "local.get", index: argsLocal } as Instr,
-    { op: "local.get", index: rvLocal } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: argsLocal } as Instr,
-    { op: "local.get", index: rjLocal } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: execLocal } as Instr,
-    { op: "ref.null.extern" } as Instr, // undefined `this`
-    { op: "local.get", index: argsLocal } as Instr,
-    { op: "call", funcIdx: applyClosureIdx } as Instr,
-    { op: "drop" } as Instr, // executor return value is ignored (§27.2.3.1)
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: argsLocal },
+    { op: "local.get", index: argsLocal },
+    { op: "local.get", index: rvLocal },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: argsLocal },
+    { op: "local.get", index: rjLocal },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: execLocal },
+    { op: "ref.null.extern" }, // undefined `this`
+    { op: "local.get", index: argsLocal },
+    { op: "call", funcIdx: applyClosureIdx },
+    { op: "drop" }, // executor return value is ignored (§27.2.3.1)
   ];
   fctx.body.push({
     op: "try",
@@ -305,15 +305,15 @@ export function emitStandalonePromiseFromExecutorValue(
       {
         tagIdx: exnTag,
         body: [
-          { op: "local.set", index: reasonLocal } as Instr,
-          { op: "local.get", index: pLocal } as Instr,
-          { op: "local.get", index: reasonLocal } as Instr,
-          { op: "call", funcIdx: rejectFuncIdx } as Instr,
-          { op: "drop" } as Instr,
+          { op: "local.set", index: reasonLocal },
+          { op: "local.get", index: pLocal },
+          { op: "local.get", index: reasonLocal },
+          { op: "call", funcIdx: rejectFuncIdx },
+          { op: "drop" },
         ],
       },
     ],
-  } as Instr);
+  });
 
   // 5. Result: the pending/settled $Promise as externref.
   fctx.body.push({ op: "local.get", index: pLocal });

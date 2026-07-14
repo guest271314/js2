@@ -141,56 +141,59 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
 
   // (done, value) = __iterator_next(rec); if done → br exit (depth 1 from loop)
   const step: Instr[] = [
-    { op: "local.get", index: L.rec } as Instr,
-    { op: "call", funcIdx: iteratorNextIdx } as Instr,
-    { op: "local.set", index: L.val } as Instr, // value (top of stack)
-    { op: "local.set", index: L.done } as Instr, // done
-    { op: "local.get", index: L.done } as Instr,
-    { op: "br_if", depth: 1 } as Instr, // exhausted ⇒ [[Done]] ⇒ NO IteratorClose (§7.4.9)
+    { op: "local.get", index: L.rec },
+    { op: "call", funcIdx: iteratorNextIdx },
+    { op: "local.set", index: L.val }, // value (top of stack)
+    { op: "local.set", index: L.done }, // done
+    { op: "local.get", index: L.done },
+    { op: "br_if", depth: 1 }, // exhausted ⇒ [[Done]] ⇒ NO IteratorClose (§7.4.9)
   ];
 
   // args = __objvec_new(); [acc,] value, boxNum(counter) — (value, counter) per §27.1.4.
   const buildArgs: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: L.args } as Instr,
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: L.args },
     ...(isReduce
-      ? [
-          { op: "local.get", index: L.args } as Instr,
-          { op: "local.get", index: L.acc } as Instr,
-          { op: "call", funcIdx: objVecPushIdx } as Instr,
-        ]
+      ? ([
+          { op: "local.get", index: L.args },
+          { op: "local.get", index: L.acc },
+          { op: "call", funcIdx: objVecPushIdx },
+        ] satisfies Instr[])
       : []),
-    { op: "local.get", index: L.args } as Instr,
-    { op: "local.get", index: L.val } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: L.args } as Instr,
-    { op: "local.get", index: L.counter } as Instr,
-    { op: "call", funcIdx: boxNumIdx } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "local.get", index: L.args },
+    { op: "local.get", index: L.val },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: L.args },
+    { op: "local.get", index: L.counter },
+    { op: "call", funcIdx: boxNumIdx },
+    { op: "call", funcIdx: objVecPushIdx },
   ];
 
   // res|acc = __apply_closure(cb, undefined, args) — helpers pass undefined this.
   const invoke: Instr[] = [
-    { op: "local.get", index: 1 } as Instr,
-    { op: "ref.null.extern" } as Instr,
-    { op: "local.get", index: L.args } as Instr,
-    { op: "call", funcIdx: applyClosureIdx } as Instr,
-    { op: "local.set", index: isReduce ? L.acc : L.res } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "ref.null.extern" },
+    { op: "local.get", index: L.args },
+    { op: "call", funcIdx: applyClosureIdx },
+    { op: "local.set", index: isReduce ? L.acc : L.res },
   ];
 
   const truthyRes: Instr[] = [
-    { op: "local.get", index: L.res } as Instr,
-    { op: "call", funcIdx: isTruthyIdx } as Instr,
+    { op: "local.get", index: L.res },
+    { op: "call", funcIdx: isTruthyIdx },
   ];
   const boxedBool = (v: 0 | 1): Instr[] => [
-    { op: "i32.const", value: v } as Instr,
-    { op: "call", funcIdx: boxBoolIdx } as Instr,
+    { op: "i32.const", value: v },
+    { op: "call", funcIdx: boxBoolIdx },
   ];
   // IteratorClose on early exit (§27.1.4.3/4/9): a VEC record no-ops; a USER
   // record dispatches the receiver's `return` when it has one.
   const close: Instr[] =
     iteratorReturnIdx !== undefined
-      ? [{ op: "local.get", index: L.rec } as Instr, { op: "call", funcIdx: iteratorReturnIdx } as Instr]
+      ? [
+          { op: "local.get", index: L.rec },
+          { op: "call", funcIdx: iteratorReturnIdx },
+        ]
       : [];
 
   // ── Method-specific per-iteration tail + final (exhausted) result ──
@@ -205,22 +208,22 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...close, { op: "local.get", index: L.val } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [...close, { op: "local.get", index: L.val }, { op: "return" }],
+        },
       ];
-      finalResult = [{ op: "ref.null.extern" } as Instr];
+      finalResult = [{ op: "ref.null.extern" }];
       break;
     case "every":
       perIter = [
         ...buildArgs,
         ...invoke,
         ...truthyRes,
-        { op: "i32.eqz" } as Instr,
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...close, ...boxedBool(0), { op: "return" } as Instr],
-        } as Instr,
+          then: [...close, ...boxedBool(0), { op: "return" }],
+        },
       ];
       finalResult = boxedBool(1);
       break;
@@ -232,54 +235,54 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...close, ...boxedBool(1), { op: "return" } as Instr],
-        } as Instr,
+          then: [...close, ...boxedBool(1), { op: "return" }],
+        },
       ];
       finalResult = boxedBool(0);
       break;
     case "forEach":
       perIter = [...buildArgs, ...invoke];
-      finalResult = [{ op: "ref.null.extern" } as Instr];
+      finalResult = [{ op: "ref.null.extern" }];
       break;
     case "toArray":
       // out.push(value) per step; the $ObjVec is the established boxed-any
       // dynamic array carrier (same as map/filter HOF results, #2379).
       perIter = [
-        { op: "local.get", index: L.out } as Instr,
-        { op: "local.get", index: L.val } as Instr,
-        { op: "call", funcIdx: objVecPushIdx } as Instr,
+        { op: "local.get", index: L.out },
+        { op: "local.get", index: L.val },
+        { op: "call", funcIdx: objVecPushIdx },
       ];
-      finalResult = [{ op: "local.get", index: L.out } as Instr];
+      finalResult = [{ op: "local.get", index: L.out }];
       break;
     default: {
       // reduce — no-initial-value seeds acc from the first step (§27.1.4.8
       // step 4); the callback runs from the second step on.
       perIter = [
-        { op: "local.get", index: L.hasAcc } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: L.hasAcc },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: L.val } as Instr,
-            { op: "local.set", index: L.acc } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "local.set", index: L.hasAcc } as Instr,
+            { op: "local.get", index: L.val },
+            { op: "local.set", index: L.acc },
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: L.hasAcc },
           ],
           else: [...buildArgs, ...invoke],
-        } as Instr,
+        },
       ];
       // Exhausted with no accumulator (empty iterator, no init) → undefined
       // (BOUNDARY: spec TypeError, see header). Else the accumulator.
       finalResult = [
-        { op: "local.get", index: L.hasAcc } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: L.hasAcc },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
-          then: [{ op: "ref.null.extern" } as Instr],
-          else: [{ op: "local.get", index: L.acc } as Instr],
-        } as Instr,
+          then: [{ op: "ref.null.extern" }],
+          else: [{ op: "local.get", index: L.acc }],
+        },
       ];
       break;
     }
@@ -288,10 +291,10 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
   const counterStep: Instr[] = isToArray
     ? []
     : [
-        { op: "local.get", index: L.counter } as Instr,
-        { op: "f64.const", value: 1 } as Instr,
-        { op: "f64.add" } as Instr,
-        { op: "local.set", index: L.counter } as Instr,
+        { op: "local.get", index: L.counter },
+        { op: "f64.const", value: 1 },
+        { op: "f64.add" },
+        { op: "local.set", index: L.counter },
       ];
 
   const body: Instr[] = [
@@ -299,30 +302,36 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
     // the `__iterator` GetIterator ladder for admitted iterable carriers, and
     // the NULL SENTINEL for everything else (a class instance, a string, an
     // arbitrary data struct — receivers the ladder would hard-cast-trap on).
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: iteratorIdx } as Instr,
-    { op: "local.set", index: L.rec } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: iteratorIdx },
+    { op: "local.set", index: L.rec },
     // Null handle → the receiver is not an admissible iterator: answer the
     // legacy `undefined` (exactly the pre-#2903 open-arm miss result) instead
     // of trapping. Spec-wise this SHOULD be a TypeError (no `next`), but the
     // no-throw discipline holds (see the reduce boundary note above).
-    { op: "local.get", index: L.rec } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "local.get", index: L.rec },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-    } as Instr,
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
     ...(isToArray
-      ? [{ op: "call", funcIdx: objVecNewIdx } as Instr, { op: "local.set", index: L.out } as Instr]
-      : [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: L.counter } as Instr]),
+      ? ([
+          { op: "call", funcIdx: objVecNewIdx },
+          { op: "local.set", index: L.out },
+        ] satisfies Instr[])
+      : ([
+          { op: "f64.const", value: 0 },
+          { op: "local.set", index: L.counter },
+        ] satisfies Instr[])),
     ...(isReduce
-      ? [
-          { op: "local.get", index: 3 } as Instr, // hasInit
-          { op: "local.set", index: L.hasAcc } as Instr,
-          { op: "local.get", index: 2 } as Instr, // init (null.extern when absent)
-          { op: "local.set", index: L.acc } as Instr,
-        ]
+      ? ([
+          { op: "local.get", index: 3 }, // hasInit
+          { op: "local.set", index: L.hasAcc },
+          { op: "local.get", index: 2 }, // init (null.extern when absent)
+          { op: "local.set", index: L.acc },
+        ] satisfies Instr[])
       : []),
     {
       op: "block",
@@ -331,10 +340,10 @@ export function ensureNativeIterHof(ctx: CodegenContext, methodName: string): nu
         {
           op: "loop",
           blockType: { kind: "empty" },
-          body: [...step, ...perIter, ...counterStep, { op: "br", depth: 0 } as Instr],
-        } as Instr,
+          body: [...step, ...perIter, ...counterStep, { op: "br", depth: 0 }],
+        },
       ],
-    } as Instr,
+    },
     ...finalResult,
   ];
 
@@ -431,7 +440,10 @@ export function reserveIterHofSteppers(
         { name: "__resAny", type: { kind: "anyref" } },
         { name: "__f64tmp", type: { kind: "f64" } },
       ],
-      body: [{ op: "local.get", index: 0 } as Instr, { op: "call", funcIdx: delegateIdx } as Instr],
+      body: [
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: delegateIdx },
+      ],
       exported: false,
     });
     return funcIdx;
@@ -451,7 +463,7 @@ export function reserveIterHofSteppers(
       { name: "__resAny", type: { kind: "anyref" } },
       { name: "__f64tmp", type: { kind: "f64" } },
     ],
-    body: [{ op: "ref.null.extern" } as Instr],
+    body: [{ op: "ref.null.extern" }],
     exported: false,
   });
   return {
@@ -574,30 +586,30 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
   const F64_TMP = 3;
 
   const convert: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: ANY } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: ANY },
   ];
 
   // Boxed-externref read of `res.value` for elem carrier E.
   const valueRead = (p: (typeof producers)[number]): Instr[] => {
     const read: Instr[] = [
-      { op: "local.get", index: RES_ANY } as Instr,
-      { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr,
+      { op: "local.get", index: RES_ANY },
+      { op: "ref.cast", typeIdx: p.resultTypeIdx },
+      { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD },
     ];
     if (p.elemValType.kind === "externref") return read;
     if (p.elemValType.kind === "f64" && boxNumIdx !== undefined) {
       return [...read, ...sentinelAwareF64BoxInstrs(F64_TMP, boxNumIdx)];
     }
     if (p.elemValType.kind === "i32" && boxNumIdx !== undefined) {
-      return [...read, { op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+      return [...read, { op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
     }
     if (p.elemValType.kind === "ref" || p.elemValType.kind === "ref_null") {
-      return [...read, { op: "extern.convert_any" } as Instr];
+      return [...read, { op: "extern.convert_any" }];
     }
     // Unboxable carrier (defensive): undefined.
-    return [...read, { op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+    return [...read, { op: "drop" }, { op: "ref.null.extern" }];
   };
 
   const openFn = definedFuncAt(ctx, openIdx);
@@ -606,25 +618,25 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
     // Lazy Iterator-helper wrapper → the wrapper IS the handle (pass-through).
     if (lazyArm) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: lazyArm.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "local.get", index: 0 }, { op: "return" }],
+        },
       );
     }
     // Driven generator frame → the frame IS the handle (pass-through).
     for (const p of producers) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: p.stateTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "local.get", index: 0 }, { op: "return" }],
+        },
       );
     }
     // Ladder-admissible carriers → GetIterator. Everything else falls through
@@ -637,20 +649,16 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
     ];
     for (const t of ladderTypeIdxs) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: t } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: t },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: 0 } as Instr,
-            { op: "call", funcIdx: iteratorIdx } as Instr,
-            { op: "return" } as Instr,
-          ],
-        } as Instr,
+          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: iteratorIdx }, { op: "return" }],
+        },
       );
     }
-    openFn.body = [...convert, ...arms, { op: "ref.null.extern" } as Instr];
+    openFn.body = [...convert, ...arms, { op: "ref.null.extern" }];
   }
 
   const nextFn = definedFuncAt(ctx, nextIdx);
@@ -660,48 +668,39 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
     // (which itself drives the wrapper's source via `__iter_hof_next`).
     if (lazyArm) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: lazyArm.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: 0 } as Instr,
-            { op: "call", funcIdx: lazyArm.stepIdx } as Instr,
-            { op: "return" } as Instr,
-          ],
-        } as Instr,
+          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: lazyArm.stepIdx }, { op: "return" }],
+        },
       );
     }
     for (const p of producers) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: p.stateTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: ANY } as Instr,
-            { op: "ref.cast", typeIdx: p.stateTypeIdx } as Instr,
-            { op: "call", funcIdx: p.resumeIdx } as Instr,
-            { op: "local.set", index: RES_ANY } as Instr, // (ref RT) <: anyref
+            { op: "local.get", index: ANY },
+            { op: "ref.cast", typeIdx: p.stateTypeIdx },
+            { op: "call", funcIdx: p.resumeIdx },
+            { op: "local.set", index: RES_ANY }, // (ref RT) <: anyref
             // done
-            { op: "local.get", index: RES_ANY } as Instr,
-            { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr,
+            { op: "local.get", index: RES_ANY },
+            { op: "ref.cast", typeIdx: p.resultTypeIdx },
+            { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: RESULT_DONE_FIELD },
             // value (boxed to externref)
             ...valueRead(p),
-            { op: "return" } as Instr,
+            { op: "return" },
           ],
-        } as Instr,
+        },
       );
     }
-    nextFn.body = [
-      ...convert,
-      ...arms,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "call", funcIdx: iteratorNextIdx } as Instr,
-    ];
+    nextFn.body = [...convert, ...arms, { op: "local.get", index: 0 }, { op: "call", funcIdx: iteratorNextIdx }];
   }
 
   const closeFn = definedFuncAt(ctx, closeIdx);
@@ -710,31 +709,22 @@ export function fillIterHofSteppers(ctx: CodegenContext): void {
     // Lazy Iterator-helper wrapper → close its source via `__lazy_iter_close`.
     if (lazyArm) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: lazyArm.typeIdx } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: lazyArm.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: 0 } as Instr,
-            { op: "call", funcIdx: lazyArm.closeIdx } as Instr,
-            { op: "return" } as Instr,
-          ],
-        } as Instr,
+          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: lazyArm.closeIdx }, { op: "return" }],
+        },
       );
     }
     for (const p of producers) {
       arms.push(
-        { op: "local.get", index: ANY } as Instr,
-        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr] } as Instr,
+        { op: "local.get", index: ANY },
+        { op: "ref.test", typeIdx: p.stateTypeIdx },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
       );
     }
-    closeFn.body = [
-      ...convert,
-      ...arms,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "call", funcIdx: iteratorReturnIdx } as Instr,
-    ];
+    closeFn.body = [...convert, ...arms, { op: "local.get", index: 0 }, { op: "call", funcIdx: iteratorReturnIdx }];
   }
 }

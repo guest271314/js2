@@ -66,7 +66,7 @@ export function emitLocalTdzInit(fctx: FunctionContext, name: string): void {
     // Boxed: load ref cell, push 1, struct.set field 0
     fctx.body.push({ op: "local.get", index: boxed.localIdx });
     fctx.body.push({ op: "i32.const", value: 1 });
-    fctx.body.push({ op: "struct.set", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr);
+    fctx.body.push({ op: "struct.set", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
     return;
   }
   fctx.body.push({ op: "i32.const", value: 1 });
@@ -105,5 +105,5 @@ export function emitTdzCheck(ctx: CodegenContext, fctx: FunctionContext, name: s
  * The exception is still catchable via try/catch.
  */
 function emitTdzErrorString(_ctx: CodegenContext, _name: string): Instr {
-  return { op: "ref.null.extern" } as Instr;
+  return { op: "ref.null.extern" };
 }

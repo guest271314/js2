@@ -118,7 +118,7 @@ function getOrMintFnctorProtoGlobal(ctx: CodegenContext, fnctorName: string): nu
     name: `__fnctor_proto_${fnctorName}`,
     type: { kind: "externref" },
     mutable: true,
-    init: [{ op: "ref.null.extern" } as Instr],
+    init: [{ op: "ref.null.extern" }],
   });
   ctx.fnctorPrototypeObject.set(fnctorName, idx);
   return idx;
@@ -142,15 +142,18 @@ export function emitFnctorProtoGet(ctx: CodegenContext, fctx: FunctionContext, f
   flushLateImportShifts(ctx, fctx);
   if (newObjIdx === undefined) return false;
   const g = getOrMintFnctorProtoGlobal(ctx, fnctorName);
-  fctx.body.push({ op: "global.get", index: g } as Instr);
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "global.get", index: g });
+  fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "call", funcIdx: newObjIdx } as Instr, { op: "global.set", index: g } as Instr],
+    then: [
+      { op: "call", funcIdx: newObjIdx },
+      { op: "global.set", index: g },
+    ],
     else: [],
-  } as Instr);
-  fctx.body.push({ op: "global.get", index: g } as Instr);
+  });
+  fctx.body.push({ op: "global.get", index: g });
   return true;
 }
 
@@ -205,17 +208,17 @@ export function tryCompileFnctorPrototypeAssign(
     } else {
       // `$Object` builder declined — fall back to the ordinary expression path.
       const t = compileExpression(ctx, fctx, value, { kind: "externref" });
-      if (!t) fctx.body.push({ op: "ref.null.extern" } as Instr);
+      if (!t) fctx.body.push({ op: "ref.null.extern" });
       else if (t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
     }
   } else {
     const t = compileExpression(ctx, fctx, value, { kind: "externref" });
-    if (!t) fctx.body.push({ op: "ref.null.extern" } as Instr);
+    if (!t) fctx.body.push({ op: "ref.null.extern" });
     else if (t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
   }
 
   // Stack: [rhs externref]. Store into the prototype global, leaving the value.
-  fctx.body.push({ op: "global.set", index: g } as Instr);
-  fctx.body.push({ op: "global.get", index: g } as Instr);
+  fctx.body.push({ op: "global.set", index: g });
+  fctx.body.push({ op: "global.get", index: g });
   return { kind: "externref" };
 }

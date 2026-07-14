@@ -105,46 +105,46 @@ function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp
         op: "loop",
         blockType: { kind: "empty" },
         body: [
-          { op: "local.get", index: iTmp } as Instr,
-          { op: "local.get", index: aLocal } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
-          { op: "i32.ge_s" } as Instr,
-          { op: "br_if", depth: 1 } as Instr,
-          { op: "local.get", index: aLocal } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
-          { op: "local.get", index: iTmp } as Instr,
-          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-          { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-          { op: "local.set", index: entryTmp } as Instr,
-          { op: "local.get", index: iTmp } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: iTmp } as Instr,
-          { op: "local.get", index: entryTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
-          { op: "i32.const", value: TOMBSTONE_BIT } as Instr,
-          { op: "i32.and" } as Instr,
-          { op: "br_if", depth: 0 } as Instr,
+          { op: "local.get", index: iTmp },
+          { op: "local.get", index: aLocal },
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
+          { op: "i32.ge_s" },
+          { op: "br_if", depth: 1 },
+          { op: "local.get", index: aLocal },
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
+          { op: "local.get", index: iTmp },
+          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
+          { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx },
+          { op: "local.set", index: entryTmp },
+          { op: "local.get", index: iTmp },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: iTmp },
+          { op: "local.get", index: entryTmp },
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
+          { op: "i32.const", value: TOMBSTONE_BIT },
+          { op: "i32.and" },
+          { op: "br_if", depth: 0 },
           ...perEntry,
-          { op: "br", depth: 0 } as Instr,
+          { op: "br", depth: 0 },
         ],
-      } as Instr,
+      },
     ],
-  } as Instr;
+  };
 }
 
 /** entry.value (anyref) onto the stack. */
 function entryValue(ctx: CodegenContext, entryTmp: number): Instr[] {
   return [
-    { op: "local.get", index: entryTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+    { op: "local.get", index: entryTmp },
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
   ];
 }
 
 /** Append an `if (top-of-stack) { throw TypeError(message) }` via the #2604
  *  body-swap so emitThrowTypeError patches the right buffer. */
 function emitThrowTypeErrorIfTrue(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: [] } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: [] });
   const ifInstr = fctx.body[fctx.body.length - 1] as unknown as { then: Instr[] };
   const savedBody = fctx.body;
   fctx.body = ifInstr.then;
@@ -176,30 +176,30 @@ export function ensureGetOrInsertKernels(ctx: CodegenContext): void {
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "local.get", index: 1 },
-      { op: "call", funcIdx: lookupIdx } as Instr,
+      { op: "call", funcIdx: lookupIdx },
       { op: "local.tee", index: 3 },
       { op: "i32.const", value: 0 },
-      { op: "i32.ge_s" } as Instr,
+      { op: "i32.ge_s" },
       {
         op: "if",
         blockType: { kind: "val", type: anyref },
         then: [
           { op: "local.get", index: 0 },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
           { op: "local.get", index: 3 },
-          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-          { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
+          { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx },
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
         ],
         else: [
           { op: "local.get", index: 0 },
           { op: "local.get", index: 1 },
           { op: "local.get", index: 2 },
-          { op: "call", funcIdx: mapSetIdx } as Instr,
+          { op: "call", funcIdx: mapSetIdx },
           { op: "drop" },
           { op: "local.get", index: 2 },
         ],
-      } as Instr,
+      },
     ];
     addKernel(ctx, "__map_get_or_insert", [mref, anyref, anyref], [anyref], [{ name: "idx", type: i32 }], body);
   }
@@ -212,29 +212,29 @@ export function ensureGetOrInsertKernels(ctx: CodegenContext): void {
       boxT >= 0 && boxNumIdx !== undefined
         ? [
             { op: "local.get", index: 0 },
-            { op: "ref.test", typeIdx: boxT } as Instr,
+            { op: "ref.test", typeIdx: boxT },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "anyref" } },
               then: [
                 { op: "local.get", index: 0 },
-                { op: "ref.cast", typeIdx: boxT } as Instr,
-                { op: "struct.get", typeIdx: boxT, fieldIdx: 0 } as unknown as Instr,
+                { op: "ref.cast", typeIdx: boxT },
+                { op: "struct.get", typeIdx: boxT, fieldIdx: 0 },
                 { op: "f64.const", value: 0 },
-                { op: "f64.eq" } as Instr, // true for ±0, false for NaN/others
+                { op: "f64.eq" }, // true for ±0, false for NaN/others
                 {
                   op: "if",
                   blockType: { kind: "val", type: { kind: "anyref" } },
                   then: [
                     { op: "f64.const", value: 0 },
-                    { op: "call", funcIdx: boxNumIdx } as Instr,
-                    { op: "any.convert_extern" } as Instr,
+                    { op: "call", funcIdx: boxNumIdx },
+                    { op: "any.convert_extern" },
                   ],
                   else: [{ op: "local.get", index: 0 }],
-                } as Instr,
+                },
               ],
               else: [{ op: "local.get", index: 0 }],
-            } as Instr,
+            },
           ]
         : [{ op: "local.get", index: 0 }];
     addKernel(ctx, "__canon_key", [{ kind: "anyref" }], [{ kind: "anyref" }], [], body);
@@ -249,8 +249,8 @@ export function ensureGetOrInsertKernels(ctx: CodegenContext): void {
     const pushRejectTest = (typeIdx: number): void => {
       rejectTests.push(
         { op: "local.get", index: 0 },
-        { op: "ref.test", typeIdx } as Instr,
-        ...(rejectTests.length > 0 ? [{ op: "i32.or" } as Instr] : []),
+        { op: "ref.test", typeIdx },
+        ...((rejectTests.length > 0 ? [{ op: "i32.or" }] : []) satisfies Instr[]),
       );
     };
     if (ctx.nativeBoxNumberTypeIdx >= 0) pushRejectTest(ctx.nativeBoxNumberTypeIdx);
@@ -262,13 +262,13 @@ export function ensureGetOrInsertKernels(ctx: CodegenContext): void {
     const avT = ctx.anyValueTypeIdx;
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "ref.is_null" } as Instr,
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [{ op: "i32.const", value: 0 }],
         else: [
-          ...(rejectTests.length > 0
+          ...((rejectTests.length > 0
             ? [
                 ...rejectTests,
                 {
@@ -279,26 +279,26 @@ export function ensureGetOrInsertKernels(ctx: CodegenContext): void {
                     avT >= 0
                       ? [
                           { op: "local.get", index: 0 },
-                          { op: "ref.test", typeIdx: avT } as Instr,
+                          { op: "ref.test", typeIdx: avT },
                           {
                             op: "if",
                             blockType: { kind: "val", type: { kind: "i32" } },
                             then: [
                               { op: "local.get", index: 0 },
-                              { op: "ref.cast", typeIdx: avT } as Instr,
-                              { op: "struct.get", typeIdx: avT, fieldIdx: 0 } as unknown as Instr, // tag
+                              { op: "ref.cast", typeIdx: avT },
+                              { op: "struct.get", typeIdx: avT, fieldIdx: 0 }, // tag
                               { op: "i32.const", value: 6 },
-                              { op: "i32.eq" } as Instr,
+                              { op: "i32.eq" },
                             ],
                             else: [{ op: "i32.const", value: 1 }],
-                          } as Instr,
+                          },
                         ]
                       : [{ op: "i32.const", value: 1 }],
-                } as Instr,
+                },
               ]
-            : [{ op: "i32.const", value: 1 }]),
+            : [{ op: "i32.const", value: 1 }]) satisfies Instr[]),
         ],
-      } as Instr,
+      },
     ];
     addKernel(ctx, "__weak_key_ok", [{ kind: "anyref" }], [{ kind: "i32" }], [], body);
   }
@@ -386,10 +386,10 @@ export function compileCollectionGetOrInsert(
   } else {
     if (recvType === null) return undefined;
     if (recvType.kind === "externref") {
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
     } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
-      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
     } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
       return undefined;
     }
@@ -400,15 +400,15 @@ export function compileCollectionGetOrInsert(
   // Key → anyref, canonicalized (-0 → +0 — both for the lookup and the
   // callback argument; storage normalization also rides __map_set).
   compileCollectionElementArg(ctx, fctx, keyExpr);
-  fctx.body.push({ op: "call", funcIdx: canonIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: canonIdx });
   const kTmp = allocLocal(fctx, `__goi_k_${fctx.locals.length}`, anyref);
   fctx.body.push({ op: "local.set", index: kTmp });
 
   // WeakMap: CanBeHeldWeakly(key) — catchable TypeError on a primitive key.
   if (weakKeys) {
     fctx.body.push({ op: "local.get", index: kTmp });
-    fctx.body.push({ op: "call", funcIdx: weakOkIdx } as Instr);
-    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: weakOkIdx });
+    fctx.body.push({ op: "i32.eqz" });
     emitThrowTypeErrorIfTrue(ctx, fctx, "TypeError: Invalid value used as weak map key");
   }
 
@@ -416,14 +416,14 @@ export function compileCollectionGetOrInsert(
     fctx.body.push({ op: "local.get", index: mTmp });
     fctx.body.push({ op: "local.get", index: kTmp });
     compileCollectionElementArg(ctx, fctx, valueExpr);
-    fctx.body.push({ op: "call", funcIdx: goiIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: goiIdx });
     return anyref;
   }
 
   if (cbKind === "static-noncallable") {
     // §24.1.3.8 step 3: IsCallable(callbackfn) false → TypeError.
     emitThrowTypeError(ctx, fctx, "TypeError: callbackfn is not a function");
-    fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP } as Instr);
+    fctx.body.push({ op: "ref.null", typeIdx: NONE_HEAP });
     return anyref;
   }
 
@@ -447,19 +447,19 @@ export function compileCollectionGetOrInsert(
   // idx = lookup(m, k)
   fctx.body.push({ op: "local.get", index: mTmp });
   fctx.body.push({ op: "local.get", index: kTmp });
-  fctx.body.push({ op: "call", funcIdx: lookupIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: lookupIdx });
   fctx.body.push({ op: "local.tee", index: idxTmp });
   fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push({ op: "i32.ge_s" } as Instr);
+  fctx.body.push({ op: "i32.ge_s" });
 
   // Present arm: entries[idx].value (callback NOT evaluated).
   const presentArm: Instr[] = [
     { op: "local.get", index: mTmp },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
     { op: "local.get", index: idxTmp },
-    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
+    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx },
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
   ];
 
   // Absent arm: v = cb(canonKey); map.set(k, v); v. (call_ref the closure —
@@ -469,57 +469,57 @@ export function compileCollectionGetOrInsert(
   for (let p = 0; p < numParams; p++) {
     if (p === 0) {
       absentArm.push({ op: "local.get", index: kTmp });
-      absentArm.push({ op: "extern.convert_any" } as Instr);
+      absentArm.push({ op: "extern.convert_any" });
     } else {
-      absentArm.push({ op: "ref.null.extern" } as Instr);
+      absentArm.push({ op: "ref.null.extern" });
     }
     absentArm.push(...coercionInstrs(ctx, { kind: "externref" }, closureInfo.paramTypes[p] ?? anyref, fctx));
   }
   absentArm.push({ op: "local.get", index: closureTmp });
-  absentArm.push({ op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr);
+  absentArm.push({ op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 });
   absentArm.push({ op: "local.tee", index: guardFuncTmp });
-  absentArm.push({ op: "ref.test", typeIdx: closureInfo.funcTypeIdx } as Instr);
+  absentArm.push({ op: "ref.test", typeIdx: closureInfo.funcTypeIdx });
   absentArm.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx } as ValType },
     then: [
       { op: "local.get", index: guardFuncTmp },
-      { op: "ref.cast_null", typeIdx: closureInfo.funcTypeIdx } as Instr,
+      { op: "ref.cast_null", typeIdx: closureInfo.funcTypeIdx },
     ],
-    else: [{ op: "ref.null", typeIdx: closureInfo.funcTypeIdx } as Instr],
-  } as Instr);
-  absentArm.push({ op: "ref.as_non_null" } as Instr);
-  absentArm.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
+    else: [{ op: "ref.null", typeIdx: closureInfo.funcTypeIdx }],
+  });
+  absentArm.push({ op: "ref.as_non_null" });
+  absentArm.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
   // Coerce the callback result to anyref.
   const rt = closureInfo.returnType;
   if (rt === null) {
-    absentArm.push({ op: "ref.null", typeIdx: NONE_HEAP } as Instr);
+    absentArm.push({ op: "ref.null", typeIdx: NONE_HEAP });
   } else if (rt.kind === "f64") {
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx !== undefined) {
-      absentArm.push({ op: "call", funcIdx: boxIdx } as Instr);
-      absentArm.push({ op: "any.convert_extern" } as Instr);
+      absentArm.push({ op: "call", funcIdx: boxIdx });
+      absentArm.push({ op: "any.convert_extern" });
     } else {
-      absentArm.push({ op: "drop" }, { op: "ref.null", typeIdx: NONE_HEAP } as Instr);
+      absentArm.push({ op: "drop" }, { op: "ref.null", typeIdx: NONE_HEAP });
     }
   } else if (rt.kind === "i32") {
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx !== undefined) {
-      absentArm.push({ op: "f64.convert_i32_s" } as Instr);
-      absentArm.push({ op: "call", funcIdx: boxIdx } as Instr);
-      absentArm.push({ op: "any.convert_extern" } as Instr);
+      absentArm.push({ op: "f64.convert_i32_s" });
+      absentArm.push({ op: "call", funcIdx: boxIdx });
+      absentArm.push({ op: "any.convert_extern" });
     } else {
-      absentArm.push({ op: "drop" }, { op: "ref.null", typeIdx: NONE_HEAP } as Instr);
+      absentArm.push({ op: "drop" }, { op: "ref.null", typeIdx: NONE_HEAP });
     }
   } else if (rt.kind === "externref") {
-    absentArm.push({ op: "any.convert_extern" } as Instr);
+    absentArm.push({ op: "any.convert_extern" });
   }
   // ref/ref_null/anyref results: already anyref-compatible.
   absentArm.push({ op: "local.set", index: vTmp });
   absentArm.push({ op: "local.get", index: mTmp });
   absentArm.push({ op: "local.get", index: kTmp });
   absentArm.push({ op: "local.get", index: vTmp });
-  absentArm.push({ op: "call", funcIdx: mapSetIdx } as Instr);
+  absentArm.push({ op: "call", funcIdx: mapSetIdx });
   absentArm.push({ op: "drop" });
   absentArm.push({ op: "local.get", index: vTmp });
 
@@ -528,7 +528,7 @@ export function compileCollectionGetOrInsert(
     blockType: { kind: "val", type: anyref },
     then: presentArm,
     else: absentArm,
-  } as Instr);
+  });
   return anyref;
 }
 
@@ -581,7 +581,7 @@ function reserveSetRecFieldGetters(ctx: CodegenContext): boolean {
       [externref],
       [externref],
       [{ name: "__any", type: { kind: "anyref" } }],
-      [{ op: "ref.null.extern" } as Instr],
+      [{ op: "ref.null.extern" }],
     );
   }
   // `__setrec_check_callable(v) -> v` — GetSetRecord steps 8/10 "If
@@ -596,7 +596,7 @@ function reserveSetRecFieldGetters(ctx: CodegenContext): boolean {
     [externref],
     [externref],
     [{ name: "__any", type: { kind: "anyref" } }],
-    [{ op: "local.get", index: 0 } as Instr],
+    [{ op: "local.get", index: 0 }],
   );
   (ctx as CodegenContext & { setRecFieldGettersReserved?: boolean }).setRecFieldGettersReserved = true;
   return true;
@@ -624,11 +624,11 @@ export function fillSetRecFieldGetters(ctx: CodegenContext): void {
     let current: Instr[] =
       externGetIdx !== undefined
         ? [
-            { op: "local.get", index: 0 } as Instr,
+            { op: "local.get", index: 0 },
             ...stringConstantExternrefInstrs(ctx, f),
-            { op: "call", funcIdx: externGetIdx } as Instr,
+            { op: "call", funcIdx: externGetIdx },
           ]
-        : [{ op: "ref.null.extern" } as Instr];
+        : [{ op: "ref.null.extern" }];
 
     for (const [structName, fields] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
@@ -649,35 +649,30 @@ export function fillSetRecFieldGetters(ctx: CodegenContext): void {
       if (fieldIdx < 0) continue;
       const ft = fields[fieldIdx]!.type;
       const read: Instr[] = [
-        { op: "local.get", index: 1 } as Instr, // __any local (set below)
-        { op: "ref.cast", typeIdx } as Instr,
-        { op: "struct.get", typeIdx, fieldIdx } as unknown as Instr,
+        { op: "local.get", index: 1 }, // __any local (set below)
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx },
       ];
       if (ft.kind === "f64") {
         if (boxNumIdx === undefined) continue;
-        read.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        read.push({ op: "call", funcIdx: boxNumIdx });
       } else if (ft.kind === "i32") {
         if (boxNumIdx === undefined) continue;
-        read.push({ op: "f64.convert_i32_s" } as Instr);
-        read.push({ op: "call", funcIdx: boxNumIdx } as Instr);
+        read.push({ op: "f64.convert_i32_s" });
+        read.push({ op: "call", funcIdx: boxNumIdx });
       } else if (ft.kind === "ref" || ft.kind === "ref_null" || ft.kind === "anyref" || ft.kind === "eqref") {
-        read.push({ op: "extern.convert_any" } as Instr);
+        read.push({ op: "extern.convert_any" });
       } else if (ft.kind !== "externref") {
         continue; // unsupported field carrier (i64/v128/funcref)
       }
       current = [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx } as Instr,
-        { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: read, else: current } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx },
+        { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: read, else: current },
       ];
     }
 
-    fn.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr,
-      ...current,
-    ];
+    fn.body = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }, ...current];
   }
 
   // ── `__setrec_check_callable(v) -> v` — the IsCallable gate (steps 8/10) ──
@@ -691,10 +686,10 @@ export function fillSetRecFieldGetters(ctx: CodegenContext): void {
       const throwArm: Instr[] = [];
       emitBrandCheckTypeError(ctx, throwArm, SETREC_CALLABLE_MSG); // idempotent (registered at reserve)
       const body: Instr[] = [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "any.convert_extern" } as Instr,
-        { op: "local.set", index: 1 } as Instr,
-        ...buildClosureRefTestArms(ctx, 1, [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr]),
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: 1 },
+        ...buildClosureRefTestArms(ctx, 1, [{ op: "local.get", index: 0 }, { op: "return" }]),
         ...throwArm,
       ];
       fn.body = body;
@@ -726,26 +721,26 @@ function ensureSetRecSize(ctx: CodegenContext): number | undefined {
     // prim = __to_primitive(size, "number")
     { op: "local.get", index: 0 },
     ...stringConstantExternrefInstrs(ctx, "number"),
-    { op: "call", funcIdx: toPrimIdx } as Instr,
+    { op: "call", funcIdx: toPrimIdx },
     { op: "local.tee", index: 1 },
     // absent/undefined size → TypeError
-    { op: "ref.is_null" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: throwArm } as Instr,
+    { op: "ref.is_null" },
+    { op: "if", blockType: { kind: "empty" }, then: throwArm },
     // BigInt size → TypeError
-    ...(ctx.nativeBigIntTypeIdx >= 0
-      ? ([
+    ...((ctx.nativeBigIntTypeIdx >= 0
+      ? [
           { op: "local.get", index: 1 },
           { op: "any.convert_extern" },
           { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
           { op: "if", blockType: { kind: "empty" }, then: throwArm2 },
-        ] as Instr[])
-      : []),
+        ]
+      : []) satisfies Instr[]),
     // n = __unbox_number(prim); NaN → TypeError
     { op: "local.get", index: 1 },
-    { op: "call", funcIdx: unboxIdx } as Instr,
+    { op: "call", funcIdx: unboxIdx },
     { op: "local.tee", index: 2 },
     { op: "local.get", index: 2 },
-    { op: "f64.ne" } as Instr,
+    { op: "f64.ne" },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -754,7 +749,7 @@ function ensureSetRecSize(ctx: CodegenContext): number | undefined {
         emitBrandCheckTypeError(ctx, arm, "TypeError: invalid size for a set-like argument (NaN)");
         return arm;
       })(),
-    } as Instr,
+    },
     { op: "local.get", index: 2 },
   ];
   return addKernel(
@@ -816,40 +811,40 @@ export function ensureSetAlgebraAnyDispatch(ctx: CodegenContext, methodName: str
   // params: a(0 mref), arg(1 externref). locals: argAny(2), size(3 f64), has(4), keys(5)
   const body: Instr[] = [
     { op: "local.get", index: 1 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: 2 },
-    { op: "ref.test", typeIdx: ctx.mapTypeIdx } as Instr,
+    { op: "ref.test", typeIdx: ctx.mapTypeIdx },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: 0 },
         { op: "local.get", index: 2 },
-        { op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr,
-        { op: "call", funcIdx: nativeIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "ref.cast", typeIdx: ctx.mapTypeIdx },
+        { op: "call", funcIdx: nativeIdx },
+        { op: "return" },
       ],
-    } as Instr,
+    },
     // GetSetRecord: Get(size) → coerce (throws), Get(has), Get(keys) — via the
     // reserved closed-struct-aware field readers (filled at finalize).
     { op: "local.get", index: 1 },
-    { op: "call", funcIdx: fieldSizeIdx } as Instr,
-    { op: "call", funcIdx: sizeIdx } as Instr,
+    { op: "call", funcIdx: fieldSizeIdx },
+    { op: "call", funcIdx: sizeIdx },
     { op: "local.set", index: 3 },
     { op: "local.get", index: 1 },
-    { op: "call", funcIdx: fieldHasIdx } as Instr,
-    { op: "call", funcIdx: checkCallableIdx } as Instr, // step 8 IsCallable(has)
+    { op: "call", funcIdx: fieldHasIdx },
+    { op: "call", funcIdx: checkCallableIdx }, // step 8 IsCallable(has)
     { op: "local.set", index: 4 },
     { op: "local.get", index: 1 },
-    { op: "call", funcIdx: fieldKeysIdx } as Instr,
-    { op: "call", funcIdx: checkCallableIdx } as Instr, // step 10 IsCallable(keys)
+    { op: "call", funcIdx: fieldKeysIdx },
+    { op: "call", funcIdx: checkCallableIdx }, // step 10 IsCallable(keys)
     { op: "local.set", index: 5 },
     { op: "local.get", index: 0 },
     { op: "local.get", index: 1 },
     { op: "local.get", index: 3 },
     { op: "local.get", index: 4 },
     { op: "local.get", index: 5 },
-    { op: "call", funcIdx: setlikeIdx } as Instr,
+    { op: "call", funcIdx: setlikeIdx },
   ];
   return addKernel(
     ctx,
@@ -932,33 +927,33 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
   ];
 
   /** r (non-null use): local.get R + ref.as_non_null. */
-  const getR: Instr[] = [{ op: "local.get", index: R } as Instr, { op: "ref.as_non_null" } as Instr];
+  const getR: Instr[] = [{ op: "local.get", index: R }, { op: "ref.as_non_null" }];
 
   /** `has(entryValue)` → i32 truthiness on the stack. */
   const callHasOnEntry: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
+    { op: "call", funcIdx: objVecNewIdx },
     { op: "local.set", index: ARGVEC },
     { op: "local.get", index: ARGVEC },
     ...entryValue(ctx, ENTRY),
-    { op: "extern.convert_any" } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "extern.convert_any" },
+    { op: "call", funcIdx: objVecPushIdx },
     { op: "local.get", index: HAS },
     { op: "local.get", index: OBJ },
     { op: "local.get", index: ARGVEC },
-    { op: "call", funcIdx: applyIdx } as Instr,
-    { op: "call", funcIdx: isTruthyIdx } as Instr,
+    { op: "call", funcIdx: applyIdx },
+    { op: "call", funcIdx: isTruthyIdx },
   ];
 
   /** Drive `keys()`: iterRec = __iterator(apply(keys, obj, [])); then loop
    *  running `perVal` with the current element in VALANY. `perVal` may
    *  `return` for early exits. */
   const keysLoop = (perVal: Instr[]): Instr[] => [
-    { op: "local.get", index: KEYS } as Instr,
-    { op: "local.get", index: OBJ } as Instr,
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "call", funcIdx: applyIdx } as Instr,
-    { op: "call", funcIdx: iterIdx } as Instr,
-    { op: "local.set", index: ITER } as Instr,
+    { op: "local.get", index: KEYS },
+    { op: "local.get", index: OBJ },
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "call", funcIdx: applyIdx },
+    { op: "call", funcIdx: iterIdx },
+    { op: "local.set", index: ITER },
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -967,34 +962,34 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: ITER } as Instr,
-            { op: "call", funcIdx: nextIdx } as Instr, // → (i32 done, externref val)
-            { op: "local.set", index: VALEXT } as Instr, // top = val
-            { op: "br_if", depth: 1 } as Instr, // done → exit
-            { op: "local.get", index: VALEXT } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "local.set", index: VALANY } as Instr,
+            { op: "local.get", index: ITER },
+            { op: "call", funcIdx: nextIdx }, // → (i32 done, externref val)
+            { op: "local.set", index: VALEXT }, // top = val
+            { op: "br_if", depth: 1 }, // done → exit
+            { op: "local.get", index: VALEXT },
+            { op: "any.convert_extern" },
+            { op: "local.set", index: VALANY },
             ...perVal,
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 
   /** thisSize (f64) onto the stack. */
   const thisSize: Instr[] = [
-    { op: "local.get", index: A } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
-    { op: "f64.convert_i32_s" } as Instr,
+    { op: "local.get", index: A },
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
+    { op: "f64.convert_i32_s" },
   ];
 
   /** r = clone(a) (union with itself — kind SET, dedup no-op). */
   const cloneAIntoR: Instr[] = [
-    { op: "local.get", index: A } as Instr,
-    { op: "local.get", index: A } as Instr,
-    { op: "call", funcIdx: unionIdx } as Instr,
-    { op: "local.set", index: R } as Instr,
+    { op: "local.get", index: A },
+    { op: "local.get", index: A },
+    { op: "call", funcIdx: unionIdx },
+    { op: "local.set", index: R },
   ];
 
   let body: Instr[];
@@ -1005,12 +1000,7 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       result = mref;
       body = [
         ...cloneAIntoR,
-        ...keysLoop([
-          ...getR,
-          { op: "local.get", index: VALANY } as Instr,
-          { op: "call", funcIdx: setAddIdx } as Instr,
-          { op: "drop" } as Instr,
-        ]),
+        ...keysLoop([...getR, { op: "local.get", index: VALANY }, { op: "call", funcIdx: setAddIdx }, { op: "drop" }]),
         ...getR,
       ];
       break;
@@ -1020,25 +1010,15 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       body = [
         ...cloneAIntoR,
         ...keysLoop([
-          { op: "local.get", index: A } as Instr,
-          { op: "local.get", index: VALANY } as Instr,
-          { op: "call", funcIdx: mapHasIdx } as Instr,
+          { op: "local.get", index: A },
+          { op: "local.get", index: VALANY },
+          { op: "call", funcIdx: mapHasIdx },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [
-              ...getR,
-              { op: "local.get", index: VALANY } as Instr,
-              { op: "call", funcIdx: mapDeleteIdx } as Instr,
-              { op: "drop" } as Instr,
-            ],
-            else: [
-              ...getR,
-              { op: "local.get", index: VALANY } as Instr,
-              { op: "call", funcIdx: setAddIdx } as Instr,
-              { op: "drop" } as Instr,
-            ],
-          } as Instr,
+            then: [...getR, { op: "local.get", index: VALANY }, { op: "call", funcIdx: mapDeleteIdx }, { op: "drop" }],
+            else: [...getR, { op: "local.get", index: VALANY }, { op: "call", funcIdx: setAddIdx }, { op: "drop" }],
+          },
         ]),
         ...getR,
       ];
@@ -1049,8 +1029,8 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       body = [
         ...cloneAIntoR,
         ...thisSize,
-        { op: "local.get", index: SIZE } as Instr,
-        { op: "f64.le" } as Instr,
+        { op: "local.get", index: SIZE },
+        { op: "f64.le" },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -1060,22 +1040,17 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [
-                  ...getR,
-                  ...entryValue(ctx, ENTRY),
-                  { op: "call", funcIdx: mapDeleteIdx } as Instr,
-                  { op: "drop" } as Instr,
-                ],
-              } as Instr,
+                then: [...getR, ...entryValue(ctx, ENTRY), { op: "call", funcIdx: mapDeleteIdx }, { op: "drop" }],
+              },
             ]),
           ],
           else: keysLoop([
             ...getR,
-            { op: "local.get", index: VALANY } as Instr,
-            { op: "call", funcIdx: mapDeleteIdx } as Instr,
-            { op: "drop" } as Instr,
+            { op: "local.get", index: VALANY },
+            { op: "call", funcIdx: mapDeleteIdx },
+            { op: "drop" },
           ]),
-        } as Instr,
+        },
         ...getR,
       ];
       break;
@@ -1083,12 +1058,12 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
     case "intersection": {
       result = mref;
       body = [
-        { op: "i32.const", value: COLLECTION_KIND.SET } as Instr,
-        { op: "call", funcIdx: mapNewIdx } as Instr,
-        { op: "local.set", index: R } as Instr,
+        { op: "i32.const", value: COLLECTION_KIND.SET },
+        { op: "call", funcIdx: mapNewIdx },
+        { op: "local.set", index: R },
         ...thisSize,
-        { op: "local.get", index: SIZE } as Instr,
-        { op: "f64.le" } as Instr,
+        { op: "local.get", index: SIZE },
+        { op: "f64.le" },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -1099,32 +1074,22 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [
-                  ...getR,
-                  ...entryValue(ctx, ENTRY),
-                  { op: "call", funcIdx: setAddIdx } as Instr,
-                  { op: "drop" } as Instr,
-                ],
-              } as Instr,
+                then: [...getR, ...entryValue(ctx, ENTRY), { op: "call", funcIdx: setAddIdx }, { op: "drop" }],
+              },
             ]),
           ],
           // arg-keys order: keep keys that are in a (spec result order).
           else: keysLoop([
-            { op: "local.get", index: A } as Instr,
-            { op: "local.get", index: VALANY } as Instr,
-            { op: "call", funcIdx: mapHasIdx } as Instr,
+            { op: "local.get", index: A },
+            { op: "local.get", index: VALANY },
+            { op: "call", funcIdx: mapHasIdx },
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [
-                ...getR,
-                { op: "local.get", index: VALANY } as Instr,
-                { op: "call", funcIdx: setAddIdx } as Instr,
-                { op: "drop" } as Instr,
-              ],
-            } as Instr,
+              then: [...getR, { op: "local.get", index: VALANY }, { op: "call", funcIdx: setAddIdx }, { op: "drop" }],
+            },
           ]),
-        } as Instr,
+        },
         ...getR,
       ];
       break;
@@ -1133,23 +1098,23 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       result = i32;
       body = [
         ...thisSize,
-        { op: "local.get", index: SIZE } as Instr,
-        { op: "f64.gt" } as Instr,
+        { op: "local.get", index: SIZE },
+        { op: "f64.gt" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+        },
         walkEntries(ctx, A, I, ENTRY, [
           ...callHasOnEntry,
-          { op: "i32.eqz" } as Instr,
+          { op: "i32.eqz" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-          } as Instr,
+            then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+          },
         ]),
-        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.const", value: 1 },
       ];
       break;
     }
@@ -1157,25 +1122,25 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       result = i32;
       body = [
         ...thisSize,
-        { op: "local.get", index: SIZE } as Instr,
-        { op: "f64.lt" } as Instr,
+        { op: "local.get", index: SIZE },
+        { op: "f64.lt" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+        },
         ...keysLoop([
-          { op: "local.get", index: A } as Instr,
-          { op: "local.get", index: VALANY } as Instr,
-          { op: "call", funcIdx: mapHasIdx } as Instr,
-          { op: "i32.eqz" } as Instr,
+          { op: "local.get", index: A },
+          { op: "local.get", index: VALANY },
+          { op: "call", funcIdx: mapHasIdx },
+          { op: "i32.eqz" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-          } as Instr,
+            then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+          },
         ]),
-        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.const", value: 1 },
       ];
       break;
     }
@@ -1183,8 +1148,8 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
       result = i32;
       body = [
         ...thisSize,
-        { op: "local.get", index: SIZE } as Instr,
-        { op: "f64.le" } as Instr,
+        { op: "local.get", index: SIZE },
+        { op: "f64.le" },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -1194,22 +1159,22 @@ function ensureSetLikeKernel(ctx: CodegenContext, methodName: string): number | 
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-              } as Instr,
+                then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+              },
             ]),
           ],
           else: keysLoop([
-            { op: "local.get", index: A } as Instr,
-            { op: "local.get", index: VALANY } as Instr,
-            { op: "call", funcIdx: mapHasIdx } as Instr,
+            { op: "local.get", index: A },
+            { op: "local.get", index: VALANY },
+            { op: "call", funcIdx: mapHasIdx },
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr],
-            } as Instr,
+              then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+            },
           ]),
-        } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
+        },
+        { op: "i32.const", value: 1 },
       ];
       break;
     }
@@ -1237,11 +1202,11 @@ export function emitSetAlgebraAnyArgDispatch(
   if (dispIdx === undefined) return undefined;
   // arg → externref.
   if (argType === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   } else if (argType.kind !== "externref") {
     fctx.body.push(...coercionInstrs(ctx, argType, { kind: "externref" }, fctx));
   }
-  fctx.body.push({ op: "call", funcIdx: dispIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: dispIdx });
   return ALGEBRA_METHODS[methodName]!.returnsSet
     ? ({ kind: "ref", typeIdx: ctx.mapTypeIdx } as ValType)
     : ({ kind: "i32" } as ValType);

@@ -129,8 +129,8 @@ function emitDenoReadSync(
 
   // fd 0 in a fresh i32 local (emitFdReadRuntime reads the fd from a local).
   const fdLocal = allocLocal(fctx, `__deno_fd_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: fdLocal });
 
   const nreadLocal = allocLocal(fctx, `__deno_nread_${fctx.locals.length}`, { kind: "i32" });
 
@@ -139,14 +139,14 @@ function emitDenoReadSync(
   const linBuf = getLinearU8Buffer(ctx, fctx, bufExpr);
   if (linBuf) {
     emitFdReadRuntime(fctx, fdLocal, linBuf.ptrLocalIdx, linBuf.lenLocalIdx, syscallIdx, true);
-    fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: nreadLocal });
     return emitBoxCountOrNull(fctx, nreadLocal, boxIdx);
   }
 
   const gc = emitNodeFsResolveGcU8(ctx, fctx, bufExpr);
   if (!gc) {
     // Unrecognizable buffer — report EOF (null) so codegen continues.
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
 
@@ -154,10 +154,10 @@ function emitDenoReadSync(
   // the GC array at offset 0.
   ensureScratchPages(fctx, WASI_STDIN_BUF_START, gc.lenLocal);
   const scratchPtrLocal = allocLocal(fctx, `__deno_rscratch_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START });
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal });
   emitFdReadRuntime(fctx, fdLocal, scratchPtrLocal, gc.lenLocal, syscallIdx, true);
-  fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: nreadLocal });
 
   const offZeroLocal = emitZeroLocal(fctx);
   emitScratchToArrayCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offZeroLocal, WASI_STDIN_BUF_START, nreadLocal);
@@ -180,19 +180,19 @@ function emitDenoWriteSync(
   syscallIdx: number,
 ): InnerResult {
   const fdLocal = allocLocal(fctx, `__deno_fd_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: fd } as Instr);
-  fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: fd });
+  fctx.body.push({ op: "local.set", index: fdLocal });
 
   const linBuf = getLinearU8Buffer(ctx, fctx, bufExpr);
   if (linBuf) {
     emitFdWriteRuntime(ctx, fctx, fdLocal, linBuf.ptrLocalIdx, linBuf.lenLocalIdx, syscallIdx, true);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
   const gc = emitNodeFsResolveGcU8(ctx, fctx, bufExpr);
   if (!gc) {
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
     return { kind: "f64" };
   }
 
@@ -201,18 +201,18 @@ function emitDenoWriteSync(
   emitArrayToScratchCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offZeroLocal, WASI_WRITE_SCRATCH_START, gc.lenLocal);
 
   const scratchPtrLocal = allocLocal(fctx, `__deno_wscratch_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
-  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START });
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal });
   emitFdWriteRuntime(ctx, fctx, fdLocal, scratchPtrLocal, gc.lenLocal, syscallIdx, true);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
 /** Alloc a fresh i32 local set to 0 (the offset for a whole-buffer read/write). */
 function emitZeroLocal(fctx: FunctionContext): number {
   const z = allocLocal(fctx, `__deno_off0_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: z } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: z });
   return z;
 }
 
@@ -223,25 +223,21 @@ function emitZeroLocal(fctx: FunctionContext): number {
  * native `__box_number` func index resolved up-front.
  */
 function emitBoxCountOrNull(fctx: FunctionContext, nreadLocal: number, boxIdx: number | undefined): InnerResult {
-  fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.gt_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: nreadLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.gt_s" });
   const externType: ValType = { kind: "externref" };
   const thenArm: Instr[] =
     boxIdx !== undefined && boxIdx >= 0
-      ? [
-          { op: "local.get", index: nreadLocal } as Instr,
-          { op: "f64.convert_i32_s" } as Instr,
-          { op: "call", funcIdx: boxIdx } as Instr,
-        ]
+      ? [{ op: "local.get", index: nreadLocal }, { op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxIdx }]
       : // Native box unavailable (defensive) — fall back to null so the module
         // still validates (never expected under --target wasi).
-        [{ op: "ref.null.extern" } as Instr];
+        [{ op: "ref.null.extern" }];
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: externType },
     then: thenArm,
-    else: [{ op: "ref.null.extern" } as Instr],
-  } as Instr);
+    else: [{ op: "ref.null.extern" }],
+  });
   return { kind: "externref" };
 }

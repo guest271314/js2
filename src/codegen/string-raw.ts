@@ -97,9 +97,9 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
   const throwTypeError = (message: string): Instr[] => [
     ...externStr(message),
     { op: "call", funcIdx: typeErrorCtorIdx },
-    { op: "throw", tagIdx: exnTagIdx } as Instr,
+    { op: "throw", tagIdx: exnTagIdx },
   ];
-  const nullishNorm = (): Instr[] => (nullishIdx !== undefined ? [{ op: "call", funcIdx: nullishIdx } as Instr] : []);
+  const nullishNorm = (): Instr[] => (nullishIdx !== undefined ? [{ op: "call", funcIdx: nullishIdx }] : []);
 
   // params: 0=template(externref) 1=subs(externref)
   const P_TEMPLATE = 0;
@@ -134,13 +134,13 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
         // §7.1.17 — ToString(Symbol) throws TypeError (nextkey-is-symbol /
         // substitution-symbol test262 forms).
         { op: "local.get", index: L_SEG },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.test", typeIdx: symbolTypeIdx } as Instr,
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: symbolTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: throwTypeError(symbolMessage),
-        } as Instr,
+        },
         { op: "local.get", index: L_SEG },
         { op: "call", funcIdx: externToStringIdx },
         { op: "local.set", index: L_SEG },
@@ -152,19 +152,19 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
           then: litStr("null"),
           else: [
             { op: "local.get", index: L_SEG },
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: anyStrTypeIdx },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 
   // R = concat(R, <segment producer>). FACTORY (used for both literal and
   // substitution appends).
   const appendToR = (producer: () => Instr[]): Instr[] => [
     { op: "local.get", index: L_R },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
     ...producer(),
     { op: "call", funcIdx: strConcatIdx },
     { op: "local.set", index: L_R },
@@ -175,7 +175,7 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
     { op: "local.get", index: P_TEMPLATE },
     ...nullishNorm(),
     { op: "ref.is_null" },
-    { op: "if", blockType: { kind: "empty" }, then: throwTypeError(typeErrorMessage) } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: throwTypeError(typeErrorMessage) },
     // step 5 — raw = Get(template, "raw"); nullish → TypeError.
     { op: "local.get", index: P_TEMPLATE },
     ...externStr("raw"),
@@ -184,7 +184,7 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
     { op: "local.set", index: L_RAW },
     { op: "local.get", index: L_RAW },
     { op: "ref.is_null" },
-    { op: "if", blockType: { kind: "empty" }, then: throwTypeError(typeErrorMessage) } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: throwTypeError(typeErrorMessage) },
     // step 7 — literalCount = ToLength(Get(raw, "length")).
     { op: "local.get", index: L_RAW },
     { op: "call", funcIdx: externLengthIdx },
@@ -196,8 +196,8 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...litStr(""), { op: "return" } as Instr],
-    } as Instr,
+      then: [...litStr(""), { op: "return" }],
+    },
     // step 2 — substitutionCount (the subs $ObjVec's length).
     { op: "local.get", index: P_SUBS },
     { op: "call", funcIdx: externLengthIdx },
@@ -242,7 +242,7 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
                 { op: "call", funcIdx: externGetIdxIdx },
                 ...toStr(),
               ]),
-            } as Instr,
+            },
             // nextIndex += 1
             { op: "local.get", index: L_I },
             { op: "f64.const", value: 1 },
@@ -250,11 +250,11 @@ export function ensureStringRawHelper(ctx: CodegenContext): number {
             { op: "local.set", index: L_I },
             { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     { op: "local.get", index: L_R },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [strRef]);

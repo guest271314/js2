@@ -100,13 +100,13 @@ function emitStrictDeleteCheck(ctx: CodegenContext, fctx: FunctionContext, expr:
   const resLocal = allocLocal(fctx, `__del_res_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.set", index: resLocal });
   fctx.body.push({ op: "local.get", index: resLocal });
-  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "i32.eqz" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
     else: [],
-  } as Instr);
+  });
   fctx.body.push({ op: "local.get", index: resLocal });
 }
 
@@ -193,16 +193,16 @@ function emitStructDeleteOutcome(
   clearField: Instr[],
 ): void {
   fctx.body.push({ op: "local.get", index: resLocal });
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: clearField, else: [] } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: clearField, else: [] });
   if (isStrictContext(expr)) {
     fctx.body.push({ op: "local.get", index: resLocal });
-    fctx.body.push({ op: "i32.eqz" } as Instr);
+    fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
       else: [],
-    } as Instr);
+    });
   }
   fctx.body.push({ op: "local.get", index: resLocal });
 }
@@ -396,13 +396,13 @@ export function compileDeleteExpression(
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
-        then: [] as Instr[],
+        then: [],
         else: [
-          { op: "local.get", index: info.argsLocalIdx } as Instr,
-          { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
-          { op: "i32.const", value: argIndex } as Instr,
-          { op: "local.get", index: undefLocal } as Instr,
-          { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+          { op: "local.get", index: info.argsLocalIdx },
+          { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 },
+          { op: "i32.const", value: argIndex },
+          { op: "local.get", index: undefLocal },
+          { op: "array.set", typeIdx: info.arrTypeIdx },
         ],
       });
       // OrdinaryDelete succeeded → `delete` evaluates to `true`.
@@ -496,7 +496,7 @@ export function compileDeleteExpression(
           // (a) Push receiver as externref + key, then call __delete_property.
           fctx.body.push({ op: "local.get", index: recvLocal });
           if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.name);
           if (!keyResult) {
@@ -582,7 +582,7 @@ export function compileDeleteExpression(
 
           fctx.body.push({ op: "local.get", index: recvLocal });
           if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.argumentExpression);
           if (!keyResult) {
@@ -635,7 +635,7 @@ export function compileDeleteExpression(
       return { kind: "i32" };
     }
     if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     } else if (recvType.kind !== "externref") {
       // Other shapes (f64/i32) — drop and return true; primitives are
       // object-coercible (RequireObjectCoercible passes) and a wrapper has no
@@ -1046,7 +1046,7 @@ export function compileInstanceOf(
         blockType: { kind: "val", type: { kind: "i32" } },
         then: tagCheckBody,
         else: [{ op: "i32.const", value: 0 }], // wrong struct type → false
-      } as Instr,
+      },
     ];
 
     // Emit: (local.get $ref) (ref.is_null) (if (result i32) (then ...) (else ...))
@@ -1450,7 +1450,7 @@ export function compileTypeofExpression(
     const boxIdx = ctx.funcMap.get("__box_boolean");
     if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
   } else if (operandType.kind === "ref" || operandType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 
   fctx.body.push({ op: "call", funcIdx });

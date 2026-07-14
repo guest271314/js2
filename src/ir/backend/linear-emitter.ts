@@ -119,7 +119,7 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
       op: "i32.load",
       align: 2,
       offset: LINEAR_ARRAY_LEN_OFFSET,
-    } as Instr);
+    });
   }
 
   emitVecDataPtr(layout: LinearVecLowering, out: Instr[]): void {
@@ -139,7 +139,7 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
       op: linearLoadOp(layout.elementValType),
       align: stride === 8 ? 3 : 2,
       offset: 0,
-    } as Instr);
+    } as Instr); // computed-op
   }
 
   // #1804 — vec construction is not yet implemented for the linear backend.
@@ -173,11 +173,11 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   // superset of the bare-op `Instr` variants; composite `js.*` bitwise ops are
   // lowered to a multi-op sequence in lower.ts and never reach here.
   emitBinary(op: IrBinop, out: Instr[]): void {
-    out.push({ op } as Instr);
+    out.push({ op } as Instr); // computed-op
   }
 
   emitUnary(op: IrUnop, out: Instr[]): void {
-    out.push({ op } as Instr);
+    out.push({ op });
   }
 
   emitLocalGet(index: number, out: Instr[]): void {

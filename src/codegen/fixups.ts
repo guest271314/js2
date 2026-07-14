@@ -129,7 +129,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
         if (instr.else) fixed += repairBody(instr.else, localTypes, mod);
         break;
       case "try":
-        if (instr.body) fixed += repairBody(instr.body as Instr[], localTypes, mod);
+        if (instr.body) fixed += repairBody(instr.body, localTypes, mod);
         if ((instr as any).catches) {
           for (const c of (instr as any).catches) {
             if (c.body) fixed += repairBody(c.body, localTypes, mod);
@@ -152,7 +152,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
 
     // Pattern 1: ref.null.extern → ref.null $typeIdx
     if (curr.op === "ref.null.extern") {
-      body[i] = { op: "ref.null", typeIdx: structTypeIdx } as Instr;
+      body[i] = { op: "ref.null", typeIdx: structTypeIdx };
       fixed++;
       i += 2;
       continue;
@@ -263,7 +263,7 @@ export function repairBody(body: Instr[], localTypes: ValType[], mod: WasmModule
 
       // Pattern: ref.null.extern → ref.null $typeIdx
       if (refProducer.op === "ref.null.extern") {
-        body[refIdx] = { op: "ref.null", typeIdx: structTypeIdx } as Instr;
+        body[refIdx] = { op: "ref.null", typeIdx: structTypeIdx };
         fixed++;
         i++;
         continue;
@@ -522,7 +522,7 @@ export function fixupStructNewArgCounts(ctx: CodegenContext): void {
       case "externref":
         return [{ op: "ref.null.extern" }];
       case "ref":
-        return [{ op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx }, { op: "ref.as_non_null" } as Instr];
+        return [{ op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx }, { op: "ref.as_non_null" }];
       case "ref_null":
         return [{ op: "ref.null", typeIdx: (type as { typeIdx: number }).typeIdx }];
       default:
@@ -691,7 +691,7 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
       if (instr.op === "array.new_default" && i > 0) {
         const prev = instrs[i - 1]!;
         if (prev.op === "ref.null.extern") {
-          instrs[i - 1] = { op: "i32.const", value: 0 } as Instr;
+          instrs[i - 1] = { op: "i32.const", value: 0 };
         } else {
           let isExternref = false;
           if (prev.op === "local.get") {
@@ -704,10 +704,10 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
           if (isExternref) {
             const unboxIdx = ctx.funcMap.get("__unbox_number");
             if (unboxIdx !== undefined) {
-              instrs.splice(i, 0, { op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr);
+              instrs.splice(i, 0, { op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" });
               i += 2;
             } else {
-              instrs[i - 1] = { op: "i32.const", value: 0 } as Instr;
+              instrs[i - 1] = { op: "i32.const", value: 0 };
             }
           }
         }
@@ -731,13 +731,13 @@ export function fixupStructNewResultCoercion(ctx: CodegenContext): void {
         const localType = getLocalType(func, localIdx);
         if (localType && localType.kind === "externref") {
           // Insert extern.convert_any between struct.new and local.set/tee
-          instrs.splice(i + 1, 0, { op: "extern.convert_any" } as Instr);
+          instrs.splice(i + 1, 0, { op: "extern.convert_any" });
           i++; // skip the inserted instruction
         }
       } else if (next.op === "global.set") {
         const gType = getGlobalType((next as { index: number }).index);
         if (gType && gType.kind === "externref") {
-          instrs.splice(i + 1, 0, { op: "extern.convert_any" } as Instr);
+          instrs.splice(i + 1, 0, { op: "extern.convert_any" });
           i++;
         }
       }

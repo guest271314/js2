@@ -20,7 +20,7 @@ export function getSourcePos(ctx: CodegenContext, node: ts.Node): SourcePos | un
 
 export function attachSourcePos(instr: Instr, sourcePos: SourcePos | undefined): Instr {
   if (sourcePos) {
-    (instr as Instr).sourcePos = sourcePos;
+    instr.sourcePos = sourcePos;
   }
   return instr;
 }

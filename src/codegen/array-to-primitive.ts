@@ -54,7 +54,7 @@ export function reserveArrayToPrimitiveString(ctx: CodegenContext): number {
     // Placeholder; filled by fillArrayToPrimitive in post-processing. The bare
     // `unreachable` keeps the stub valid (externref result) if the fill is ever
     // skipped (e.g. native string helpers unavailable).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -140,7 +140,7 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
             { op: "local.get", index: L_I },
             { op: "local.get", index: L_LEN },
             { op: "i32.ge_s" },
-            { op: "br_if", depth: 1 } as Instr, // → outer block end
+            { op: "br_if", depth: 1 }, // → outer block end
             // if (i > 0) result = __str_concat(result, ",")
             { op: "local.get", index: L_I },
             { op: "i32.const", value: 0 },
@@ -154,7 +154,7 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
                 { op: "call", funcIdx: strConcatIdx },
                 { op: "local.set", index: L_RESULT },
               ],
-            } as Instr,
+            },
             // elem = __extern_get_idx(arr, f64(i))
             { op: "local.get", index: L_ARR },
             { op: "local.get", index: L_I },
@@ -166,8 +166,8 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
             // NON-null externref — test nullish, not bare null, or join would
             // render it as "undefined".
             ...(ctx.funcMap.has("__extern_is_nullish")
-              ? [{ op: "call", funcIdx: ctx.funcMap.get("__extern_is_nullish")! } as Instr]
-              : [{ op: "ref.is_null" } as Instr]),
+              ? ([{ op: "call", funcIdx: ctx.funcMap.get("__extern_is_nullish")! }] satisfies Instr[])
+              : ([{ op: "ref.is_null" }] satisfies Instr[])),
             { op: "i32.eqz" },
             {
               op: "if",
@@ -180,18 +180,18 @@ export function fillArrayToPrimitive(ctx: CodegenContext): void {
                 { op: "call", funcIdx: strConcatIdx },
                 { op: "local.set", index: L_RESULT },
               ],
-            } as Instr,
+            },
             // i++
             { op: "local.get", index: L_I },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: L_I },
             // continue
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     // return extern.convert_any(result)
     { op: "local.get", index: L_RESULT },
     { op: "extern.convert_any" },
