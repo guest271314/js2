@@ -7,6 +7,7 @@
   "codegen/binary-ops.ts": 35,
   "codegen/class-to-primitive.ts": 1,
   "codegen/closed-method-dispatch.ts": 1,
+  "codegen/closure-exports.ts": 4,
   "codegen/collections-es2025.ts": 5,
   "codegen/dataview-native.ts": 5,
   "codegen/declarations/import-collector.ts": 23,
@@ -23,7 +24,7 @@
   "codegen/function-body.ts": 1,
   "codegen/hof-native.ts": 1,
   "codegen/host-import-allowlist.ts": 2,
-  "codegen/index.ts": 8,
+  "codegen/index.ts": 1,
   "codegen/iter-hof-native.ts": 2,
   "codegen/iter-lazy-native.ts": 2,
   "codegen/iterator-native.ts": 2,
@@ -43,6 +44,9 @@
   "codegen/statements/nested-declarations.ts": 2,
   "codegen/string-ops.ts": 19,
   "codegen/string-raw.ts": 2,
+  "codegen/struct-field-exports.ts": 1,
   "codegen/ta-hof-map-filter.ts": 3,
-  "codegen/type-coercion.ts": 32
+  "codegen/type-coercion.ts": 32,
+  "codegen/vec-access-exports.ts": 1,
+  "codegen/wasi.ts": 1
 }
