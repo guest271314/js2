@@ -104,4 +104,38 @@ describe("#3276 compilePropertyAccess decomposition smoke", () => {
       }`),
     ).toBe(8);
   });
+
+  // ---- slice 2 bands ----
+
+  it("private-name read with brand — band tryPrivateIdentifierRead", async () => {
+    expect(
+      await run(`
+      class C { #x = 40; get(): number { return this.#x + 2; } }
+      export function test(): number { return new C().get(); }`),
+    ).toBe(42);
+  });
+
+  it("static class property read — band tryIdentifierNamespaceAndStaticReceiverRead", async () => {
+    expect(
+      await run(`
+      class C { static base = 20; }
+      export function test(): number { return C.base + 22; }`),
+    ).toBe(42);
+  });
+
+  it("super property/getter read — band trySuperAndImportMetaRead", async () => {
+    expect(
+      await run(`
+      class A { get v(): number { return 30; } }
+      class B extends A { get w(): number { return super.v + 12; } }
+      export function test(): number { return new B().w; }`),
+    ).toBe(42);
+  });
+
+  it("Math namespace constant read still resolves (identifier-receiver dispatch)", async () => {
+    expect(
+      await run(`
+      export function test(): number { return Math.max(1, 41) + 1; }`),
+    ).toBe(42);
+  });
 });

@@ -1,7 +1,8 @@
 ---
 id: 3278
 title: "Decompose compileArrowAsClosure — extract capture-analysis / struct-minting / destructuring / construction phases into named phase helpers"
-status: in-progress
+status: done
+completed: 2026-07-14
 sprint: current
 priority: high
 feasibility: hard
@@ -117,5 +118,11 @@ not reproduce the block's state threading → fix or revert.
 - `scripts/prove-emit-identity.mjs check`: **IDENTICAL — 39/39**, control =
   origin/main. tsc 0, LOC-budget OK, biome clean, smoke 10/10.
 
-Both slices ship in PR #3082 (one cohesive decomposition; not stacked, to avoid
-merge-queue ordering fragility).
+Slice 1 landed in PR #3082 (merged to main while Slice 2 was in progress —
+server-side auto-enqueue + merge queue). Slice 2 ships as its own follow-up PR
+(this branch), cleanly cherry-picked onto the Slice-1 main.
+
+**Final state**: all five phase helpers of `compileArrowAsClosure` live in the
+sibling `src/codegen/closures/arrow-phases.ts`; the driver is a thin
+phase-orchestrator. `closures.ts` 3,472 → ~2,814 LOC; the god-function body
+1,311 → 638 LOC. Byte-identity IDENTICAL 39/39 across both slices.
