@@ -18,10 +18,21 @@ loc-budget-allow: ["src/codegen/index.ts", "src/codegen/wasi.ts", "src/codegen/l
 # array-prototype-borrow.ts is a pre-existing un-banked relocation from #3264 (the
 # whole-tree gate false-positives on it until the post-merge baseline refresh banks it);
 # waived here so this PR isn't blocked by another change-set's pending baseline bank.
+# oracle-ratchet-allow lists (1) this change-set's own new modules (verbatim-relocated
+# checker sites: wasi.ts, extern-declarations.ts); and (2) inherited main baseline-lag
+# from concurrent god-file splits merged into this branch — the oracle baseline is not
+# auto-refreshed for increases, so a downstream PR that merges main after those land
+# re-flags files it never touched. Same remedy #3267/#3268 applied; a no-op once the
+# post-merge bank catches up.
 oracle-ratchet-allow:
   - src/codegen/wasi.ts
   - src/codegen/extern-declarations.ts
   - src/codegen/array-prototype-borrow.ts
+  - src/codegen/declarations/import-collector.ts
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/declarations/param-return-inference.ts
+  - src/codegen/declarations/struct-type-registration.ts
+  - src/codegen/expressions/calls.ts
 # (#3272) Verbatim relocation of existing box/unbox/to-string coercion vocabulary out
 # of index.ts into the extracted modules — total coercion-site count conserved, no new
 # hand-rolled matrix (byte-identity IDENTICAL, 39/39).
