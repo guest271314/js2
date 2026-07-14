@@ -16,9 +16,15 @@ assignee: ttraenkler/senior-dev-3271
 # call-sites (getTypeAtLocation/ctx.checker in tryCompileNativeGeneratorResultProperty)
 # unchanged — total src/codegen/ usage is CONSERVED (generators-native.ts drops
 # exactly what the new file gains). Change-scoped allowance, never a whole-tree
-# baseline edit.
+# baseline edit. The array-prototype-borrow.ts / expressions/calls.ts entries are
+# PRE-EXISTING whole-tree drifts NOT touched by this PR (from sibling splits
+# #3264/#3145 whose per-PR allowances don't persist on main); every green PR must
+# re-waive them here since the gate is whole-tree-absolute (see #3131 and memory
+# reference_ci_gate_change_scoped_not_wholetree_absolute) — mirrors #3145.
 oracle-ratchet-allow:
   - src/codegen/generators-native-consumer.ts
+  - src/codegen/array-prototype-borrow.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # refactor(codegen): break up `generators-native.ts` god-file + DRY cleanup
