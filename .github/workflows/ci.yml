@@ -123,12 +123,24 @@ jobs:
         # plan/log/3090-phase0-legacy-delete-list.md.
         run: pnpm run check:dead-exports
 
-      - name: Oracle ratchet (#1930)
-        # Fails when direct TS-checker usage grows under src/codegen/ —
-        # new code must query ctx.oracle (src/checker/oracle.ts). Baseline:
-        # scripts/oracle-ratchet-baseline.json (--update for intentional
-        # reseeds; --update-on-decrease banks improvements).
-        run: pnpm run check:oracle-ratchet
+      - name: Oracle ratchet (#1930/#3273)
+        # CHANGE-SCOPED (#3273, same rework as check:loc-budget /
+        # check:coercion-sites): fails only when THIS change-set grows its NET
+        # (per-field, summed over the changed files) direct-checker count under
+        # src/codegen/ — new code must query ctx.oracle (src/checker/oracle.ts).
+        # A god-file split that relocates existing sites into a new module is
+        # net-neutral and passes; scoping to the change-set's own base (HEAD^1
+        # of the synthetic merge commit — see the checkout's fetch-depth
+        # comment) keeps an unrelated main advance from re-flagging a sibling
+        # split module the PR never touched (the #3069/#3067/#3066 wedge). The
+        # committed baseline (scripts/oracle-ratchet-baseline.json) is NOT read
+        # on this path and PRs must NOT commit changes to it. Intentional net
+        # growth is granted via an `oracle-ratchet-allow:` frontmatter list in
+        # the PR's own plan/issues/*.md file. The origin/main fetch only feeds
+        # the merge-base fallback for non-synthetic checkouts; best-effort.
+        run: |
+          git fetch --no-tags --depth=200 origin main 2>/dev/null || true
+          pnpm run check:oracle-ratchet
 
       - name: LOC-regrowth ratchet (#3102/#3131)
         # CHANGE-SCOPED AND SELF-CONTAINED: fails only when THIS change-set
