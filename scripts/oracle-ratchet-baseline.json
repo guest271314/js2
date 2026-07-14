@@ -291,6 +291,18 @@
       "field": "ctxChecker",
       "extra": 5,
       "reason": "#808: same verbatim import-infra move as the getTypeAtLocation entry \u2014 5 RELOCATED ctx.checker sites, code unchanged, only its module home. Byte-identity IDENTICAL; not new checker coupling."
+    },
+    {
+      "file": "src/codegen/builtin-value-read.ts",
+      "field": "getTypeAtLocation",
+      "extra": 1,
+      "reason": "#3267 relocation from property-access.ts: typedArrayViewSignedness moved verbatim into builtin-value-read.ts (pure god-file split, subtask of #3182). It calls ctx.checker.getTypeAtLocation on the element-access receiver ts.Type to recover the packed-view signedness \u2014 behaviour unchanged (byte-identity IDENTICAL, 39/39 emits), total checker usage conserved (property-access.ts count decreased by the same 1). No new checker debt; a relocation false-positive."
+    },
+    {
+      "file": "src/codegen/builtin-value-read.ts",
+      "field": "ctxChecker",
+      "extra": 1,
+      "reason": "#3267 relocation from property-access.ts: typedArrayViewSignedness moved verbatim into builtin-value-read.ts (pure god-file split, subtask of #3182). It calls ctx.checker.getTypeAtLocation on the element-access receiver ts.Type to recover the packed-view signedness \u2014 behaviour unchanged (byte-identity IDENTICAL, 39/39 emits), total checker usage conserved (property-access.ts count decreased by the same 1). No new checker debt; a relocation false-positive."
     }
   ]
 }
