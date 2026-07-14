@@ -1666,52 +1666,37 @@ export function compileArrowFunction(
   return compileArrowAsClosure(ctx, fctx, arrow);
 }
 
-/** Compile an arrow function as a first-class closure value (Wasm GC struct + funcref) */
-export function compileArrowAsClosure(
+type ArrowClosureCapture = {
+  name: string;
+  type: ValType;
+  localIdx: number;
+  mutable: boolean;
+  alreadyBoxed: boolean;
+  /**
+   * #1177: whether this capture's TDZ flag must be propagated through the
+   * closure (forces value-boxing too — see planClosureCaptures).
+   */
+  hasTdzFlag: boolean;
+};
+
+/**
+ * Phase 1 of compileArrowAsClosure: capture analysis. Scans the arrow /
+ * function-expression body (and its parameter default initializers) for free
+ * variables, decides which must be boxed (written inside the closure, written
+ * in the enclosing scope, or TDZ-flagged), and resolves each to its outer-scope
+ * local slot + type. Also detects the self-recursive const/let binding routed
+ * through `__self`.
+ *
+ * Pure analysis: the only side effect on the caller's `fctx` is seeding
+ * `fctx.tdzFlagLocals` for names whose TDZ slot was recovered by the #1177
+ * block-scope-shadow rescan — preserved because `fctx` is passed by reference.
+ */
+function planClosureCaptures(
   ctx: CodegenContext,
   fctx: FunctionContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
-): ValType | null {
-  const closureId = ctx.closureCounter++;
-  const closureName = `__closure_${closureId}`;
-  const body = arrow.body;
-
-  // Check if this is a generator function expression (function*() { ... })
-  const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
-  if (isGenerator) {
-    ctx.generatorFunctions.add(closureName);
-  }
-  // `isAsync` is still consumed below (generator-create name selection); the
-  // return-type derivation moved into computeClosureWrapperSig.
-  const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
-
-  // 1. Determine arrow parameter types and return type. (#2939) Factored into
-  //    `computeClosureWrapperSig` so the dynamic-dispatch candidate pre-scan
-  //    registers the IDENTICAL wrapper type for inner-scope callbacks. The
-  //    (#585 contextual-void / #2867 Gap-1 / async-unwrap / #1151 binding-pattern
-  //    / #2640 array-callback-widen) logic all lives there now.
-  const { params: arrowParams, returnType: closureReturnTypeInit } = computeClosureWrapperSig(ctx, arrow);
-  let closureReturnType: ValType | null = closureReturnTypeInit;
-
-  // (#2957 phase 2) Async state-machine activation for arrows / function
-  // expressions. `computeClosureWrapperSig` above set `closureReturnType` to the
-  // *unwrapped* awaited type (the legacy synchronous pass-through model), so an
-  // async arrow silently returned a sync value instead of a Promise. Decide
-  // activation NOW — before the lifted func type + closure struct are built —
-  // and, on a match, bake the `externref` (Promise) result into the signature so
-  // the struct's funcref field, the wrapper type, and every call site agree. The
-  // body is emitted by the async machine at the statement-loop point below (see
-  // `asyncDecision` use). Generators have their own async machinery and are
-  // excluded here. The `__self` closure-env param (lifted param 0) is only ever
-  // spilled by the CPS emitter when a live-after-await capture resolves to it;
-  // the canonical single-tail-await (`return await P`) has no live-after set, so
-  // the env param is untouched — richer shapes stay on the legacy path via the
-  // predicate gate.
-  const asyncDecision = isAsync && !isGenerator ? planAsyncClosureActivation(ctx, arrow, /*isAsync*/ true) : null;
-  if (asyncDecision) {
-    closureReturnType = { kind: "externref" };
-  }
-
+  body: ts.ConciseBody,
+): { captures: ArrowClosureCapture[]; selfBindingName: string | undefined } {
   // 2. Analyze captured variables. Use scope-aware collection so that nested
   //    `var` declarations and parameter bindings inside the closure body shadow
   //    outer references — otherwise a closure with its own `var i;` would be
@@ -1994,19 +1979,31 @@ export function compileArrowAsClosure(
     captures.push({ name, type, localIdx, mutable: isMutable, alreadyBoxed, hasTdzFlag });
   }
 
-  // 3. Create struct type: field 0 = funcref, fields 1..N = captured vars
-  //    For mutable captures, the field type is a ref cell (struct { value: T })
-  const closureResults: ValType[] = closureReturnType ? [closureReturnType] : [];
+  return { captures, selfBindingName };
+}
 
-  // For closures with no captures, reuse the shared wrapper struct type from
-  // getOrCreateFuncRefWrapperTypes. This ensures all no-capture closures with
-  // the same signature share the same struct type, enabling consistent call_ref
-  // dispatch when closures are passed as callable parameters (externref).
+/**
+ * Phase 2 of compileArrowAsClosure: capture-struct type minting. Builds the
+ * closure struct type (field 0 = funcref, fields 1..N = capture values, then
+ * TDZ-flag ref-cell fields) and the lifted function type. No-capture /
+ * non-named closures reuse the shared funcref-wrapper struct; captured closures
+ * become a subtype of it so call-site `ref.cast` succeeds. Returns the struct /
+ * func type indices and the lifted parameter list.
+ */
+function mintClosureStructTypes(
+  ctx: CodegenContext,
+  opts: {
+    captures: ArrowClosureCapture[];
+    arrowParams: ValType[];
+    closureResults: ValType[];
+    closureName: string;
+    isNamedFuncExpr: boolean;
+  },
+): { structTypeIdx: number; liftedFuncTypeIdx: number; liftedParams: ValType[] } {
+  const { captures, arrowParams, closureResults, closureName, isNamedFuncExpr } = opts;
   let structTypeIdx: number;
   let liftedFuncTypeIdx: number;
   let liftedParams: ValType[];
-  const isNamedFuncExpr = ts.isFunctionExpression(arrow) && arrow.name;
-
   if (captures.length === 0 && !isNamedFuncExpr) {
     const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults);
     if (wrapperTypes) {
@@ -2080,6 +2077,79 @@ export function compileArrowAsClosure(
       liftedFuncTypeIdx = addFuncType(ctx, liftedParams, closureResults, `${closureName}_type`);
     }
   }
+  return { structTypeIdx, liftedFuncTypeIdx, liftedParams };
+}
+
+/** Compile an arrow function as a first-class closure value (Wasm GC struct + funcref) */
+export function compileArrowAsClosure(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): ValType | null {
+  const closureId = ctx.closureCounter++;
+  const closureName = `__closure_${closureId}`;
+  const body = arrow.body;
+
+  // Check if this is a generator function expression (function*() { ... })
+  const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
+  if (isGenerator) {
+    ctx.generatorFunctions.add(closureName);
+  }
+  // `isAsync` is still consumed below (generator-create name selection); the
+  // return-type derivation moved into computeClosureWrapperSig.
+  const isAsync = arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+
+  // 1. Determine arrow parameter types and return type. (#2939) Factored into
+  //    `computeClosureWrapperSig` so the dynamic-dispatch candidate pre-scan
+  //    registers the IDENTICAL wrapper type for inner-scope callbacks. The
+  //    (#585 contextual-void / #2867 Gap-1 / async-unwrap / #1151 binding-pattern
+  //    / #2640 array-callback-widen) logic all lives there now.
+  const { params: arrowParams, returnType: closureReturnTypeInit } = computeClosureWrapperSig(ctx, arrow);
+  let closureReturnType: ValType | null = closureReturnTypeInit;
+
+  // (#2957 phase 2) Async state-machine activation for arrows / function
+  // expressions. `computeClosureWrapperSig` above set `closureReturnType` to the
+  // *unwrapped* awaited type (the legacy synchronous pass-through model), so an
+  // async arrow silently returned a sync value instead of a Promise. Decide
+  // activation NOW — before the lifted func type + closure struct are built —
+  // and, on a match, bake the `externref` (Promise) result into the signature so
+  // the struct's funcref field, the wrapper type, and every call site agree. The
+  // body is emitted by the async machine at the statement-loop point below (see
+  // `asyncDecision` use). Generators have their own async machinery and are
+  // excluded here. The `__self` closure-env param (lifted param 0) is only ever
+  // spilled by the CPS emitter when a live-after-await capture resolves to it;
+  // the canonical single-tail-await (`return await P`) has no live-after set, so
+  // the env param is untouched — richer shapes stay on the legacy path via the
+  // predicate gate.
+  const asyncDecision = isAsync && !isGenerator ? planAsyncClosureActivation(ctx, arrow, /*isAsync*/ true) : null;
+  if (asyncDecision) {
+    closureReturnType = { kind: "externref" };
+  }
+
+  // 2. Analyze captured variables (referenced/written free vars, outer-write +
+  //    TDZ-flag boxing) and the self-recursive binding — see planClosureCaptures.
+  const { captures, selfBindingName } = planClosureCaptures(ctx, fctx, arrow, body);
+
+  // 3. Create struct type: field 0 = funcref, fields 1..N = captured vars
+  //    For mutable captures, the field type is a ref cell (struct { value: T })
+  const closureResults: ValType[] = closureReturnType ? [closureReturnType] : [];
+
+  // For closures with no captures, reuse the shared wrapper struct type from
+  // getOrCreateFuncRefWrapperTypes. This ensures all no-capture closures with
+  // the same signature share the same struct type, enabling consistent call_ref
+  // dispatch when closures are passed as callable parameters (externref).
+  let structTypeIdx: number;
+  let liftedFuncTypeIdx: number;
+  let liftedParams: ValType[];
+  const isNamedFuncExpr = ts.isFunctionExpression(arrow) && arrow.name;
+
+  ({ structTypeIdx, liftedFuncTypeIdx, liftedParams } = mintClosureStructTypes(ctx, {
+    captures,
+    arrowParams,
+    closureResults,
+    closureName,
+    isNamedFuncExpr: !!isNamedFuncExpr,
+  }));
 
   // 5. Build the lifted function body
   // For no-capture closures using wrapper types, self param is non-null ref.

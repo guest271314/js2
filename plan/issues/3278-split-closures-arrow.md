@@ -81,4 +81,14 @@ not reproduce the block's state threading → fix or revert.
 
 ## Test Results
 
-(filled per slice)
+### Slice 1 — planClosureCaptures + mintClosureStructTypes
+
+- `compileArrowAsClosure`: 1,311 → 966 LOC (−345); two module-private phase
+  helpers extracted (`planClosureCaptures` capture analysis,
+  `mintClosureStructTypes` capture-struct type minting).
+- `scripts/prove-emit-identity.mjs check`: **IDENTICAL — 39/39** (gc/standalone/wasi).
+- `tsc --noEmit`: 0 errors.
+- `tests/issue-3278.test.ts`: 10/10 green (no-capture concise, immutable/mutable
+  captures, outer-write boxing, nested transitive captures, named-funcexpr
+  recursion, self-recursive const arrow, array-destructuring param, default
+  param, generator function-expression).
