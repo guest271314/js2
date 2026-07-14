@@ -23,6 +23,14 @@ related: [3182]
 # is refreshed post-merge on main only, #3131).
 loc-budget-allow:
   - src/codegen/registry/imports.ts
+# Coercion-sites ratchet (#1917/#2108): the moved addUnionImports* /
+# addStringImports code carries hand-written coercion-vocabulary call sites
+# (__host_eq / __str_to_number / __unbox_number / __is_truthy) that are
+# RELOCATED verbatim from index.ts, not newly hand-rolled. Byte-identity is
+# IDENTICAL, so no new coercion matrix was introduced — grant the change-set
+# allowance (baseline json untouched, refreshed post-merge on main only, #3131).
+coercion-sites-allow:
+  - src/codegen/registry/imports.ts
 ---
 
 > **2026-07-12 refresh (#3182 groom, elevated to current/high).** Partially
