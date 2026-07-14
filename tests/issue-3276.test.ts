@@ -162,4 +162,9 @@ describe("#3276 compilePropertyAccess decomposition smoke", () => {
       }`),
     ).toBe(42);
   });
+
+  // Slice 4 (terminal struct-getter / dynamic-member-get block,
+  // finalizeStructAndDynamicMemberGet) is exercised by the "member field read"
+  // and "static class property read" cases above — both resolve through the
+  // terminal `if (typeName)` struct-get / accessor path.
 });

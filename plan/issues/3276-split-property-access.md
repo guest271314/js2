@@ -1,7 +1,8 @@
 ---
 id: 3276
 title: "refactor: decompose compilePropertyAccess (property-access.ts mega-function)"
-status: in-progress
+status: done
+completed: 2026-07-14
 sprint: current
 priority: medium
 horizon: l
@@ -141,3 +142,28 @@ Extracted 4 more cohesive guard bands into `property-access-dispatch.ts`:
 - Smoke test: 13/13 pass.
 - Stacked on slice 2; PR opens once slice 2 merges. Remaining: the terminal
   struct-name resolution + dynamic-member-get block (~800 LOC) as a possible slice 4.
+
+### Slice 4 (stacked on slice 3 — terminal struct-name + dynamic member-get tail) — COMPLETES the decomposition
+
+Extracted the entire terminal tail of `compilePropertyAccess` (the
+`const typeName = resolveStructNameForExpr(...)` block through the final
+`return { kind: "externref" }`) into `finalizeStructAndDynamicMemberGet`. Unlike
+the guard bands, this region ALWAYS returns, so it is a plain tail-extraction —
+the call site is `return finalizeStructAndDynamicMemberGet(...)` (no
+`PA_FALLTHROUGH` sentinel); `typeName`/`accessType`/`accessWasm` become the
+helper's own locals.
+
+- `property-access.ts`: 5573 → 4773 LOC (−800 in slice 4).
+- **`compilePropertyAccess` itself: ~3335 → 96 LOC** — only the preamble
+  (optional-chaining / linear-U8 / `objType`+`propName`), the 15 sentinel-guarded
+  guard-band call blocks, and the single terminal `return finalize(...)` remain.
+- **Cumulative across all 4 slices: property-access.ts 7989 → 4773 LOC (−3216)**;
+  the extracted logic now lives in `property-access-dispatch.ts` (16 named
+  helpers) — a byte-for-byte-neutral reorganization.
+- **Byte-identity: IDENTICAL 39/39** (gc/standalone/wasi). `tsc --noEmit` 0.
+  Gates green: loc-budget, oracle-ratchet (net +0), any-box-sites, coercion-sites
+  (moved `__to_primitive`/`__unbox_number` sites granted via `coercion-sites-allow`),
+  stack-balance, dead-exports, prettier.
+- Smoke test: 13/13 pass.
+- Merge order: slice 2 (#3083) → slice 3 → slice 4. Slice 4 is the completing PR,
+  so it carries `status: done`.
