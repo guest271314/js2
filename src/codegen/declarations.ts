@@ -175,6 +175,48 @@ function restBindingOverridesToExternref(p: ts.ParameterDeclaration): boolean {
   return false;
 }
 
+/**
+ * (#3268) Lower a single non-rest function parameter to its Wasm ValType.
+ * Consolidates the four byte-identical per-parameter lowering blocks
+ * (registerBodyless + collectDeclarations, generator and normal arms):
+ *   1. binding-pattern / rest-binding widen to externref,
+ *   2. default-valued non-null ref → ref_null (caller passes ref.null = "use default"),
+ *   3. implicit-`any` param → infer a concrete type from call sites, else body usage (#1121).
+ */
+function lowerParamType(
+  ctx: CodegenContext,
+  param: ts.ParameterDeclaration,
+  funcName: string,
+  index: number,
+  stmt: ts.FunctionDeclaration,
+  sourceFile: ts.SourceFile,
+): ValType {
+  const paramType = ctx.checker.getTypeAtLocation(param);
+  let wasmType: ValType = bindingPatternParamNeedsWiden(param)
+    ? { kind: "externref" }
+    : restBindingOverridesToExternref(param)
+      ? { kind: "externref" }
+      : resolveWasmType(ctx, paramType);
+  // If the parameter has a default value and is a non-null ref type, widen to
+  // ref_null so callers can pass ref.null as a sentinel for "use default".
+  if (param.initializer && wasmType.kind === "ref") {
+    wasmType = { kind: "ref_null", typeIdx: wasmType.typeIdx };
+  }
+  // If the parameter has no explicit type annotation and resolved to externref
+  // (from `any`), try to infer a concrete type from call sites, then body usage.
+  if (
+    !param.type &&
+    paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
+    (wasmType.kind === "externref" ||
+      (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
+  ) {
+    let inferred = inferParamTypeFromCallSites(ctx, funcName, index, sourceFile);
+    if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, index);
+    if (inferred) wasmType = inferred;
+  }
+  return wasmType;
+}
+
 function containingFunctionOrSource(node: ts.Node): ts.Node | undefined {
   let current: ts.Node | undefined = node.parent;
   while (current) {
@@ -291,26 +333,7 @@ function registerBodylessFunctionDeclaration(
     params = [];
     for (let i = 0; i < stmt.parameters.length; i++) {
       const param = stmt.parameters[i]!;
-      const paramType = ctx.checker.getTypeAtLocation(param);
-      let wasmType: ValType = bindingPatternParamNeedsWiden(param)
-        ? { kind: "externref" }
-        : restBindingOverridesToExternref(param)
-          ? { kind: "externref" }
-          : resolveWasmType(ctx, paramType);
-      if (param.initializer && wasmType.kind === "ref") {
-        wasmType = { kind: "ref_null", typeIdx: wasmType.typeIdx };
-      }
-      if (
-        !param.type &&
-        paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
-        (wasmType.kind === "externref" ||
-          (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
-      ) {
-        let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
-        if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, i);
-        if (inferred) wasmType = inferred;
-      }
-      params.push(wasmType);
+      params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
     }
     const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
     results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }];
@@ -338,26 +361,7 @@ function registerBodylessFunctionDeclaration(
           vecTypeIdx,
         });
       } else {
-        const paramType = ctx.checker.getTypeAtLocation(param);
-        let wasmType: ValType = bindingPatternParamNeedsWiden(param)
-          ? { kind: "externref" }
-          : restBindingOverridesToExternref(param)
-            ? { kind: "externref" }
-            : resolveWasmType(ctx, paramType);
-        if (param.initializer && wasmType.kind === "ref") {
-          wasmType = { kind: "ref_null", typeIdx: wasmType.typeIdx };
-        }
-        if (
-          !param.type &&
-          paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
-          (wasmType.kind === "externref" ||
-            (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
-        ) {
-          let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
-          if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, i);
-          if (inferred) wasmType = inferred;
-        }
-        params.push(wasmType);
+        params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
       }
     }
     const rUnwrapped = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
@@ -741,35 +745,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         params = [];
         for (let i = 0; i < stmt.parameters.length; i++) {
           const param = stmt.parameters[i]!;
-          const paramType = ctx.checker.getTypeAtLocation(param);
-          let wasmType: ValType = bindingPatternParamNeedsWiden(param)
-            ? { kind: "externref" }
-            : restBindingOverridesToExternref(param)
-              ? { kind: "externref" }
-              : resolveWasmType(ctx, paramType);
-          // If the parameter has a default value and is a non-null ref type,
-          // widen to ref_null so callers can pass ref.null as a sentinel for "use default"
-          if (param.initializer && wasmType.kind === "ref") {
-            wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-          }
-          // Infer untyped any params from call sites (same as non-generator path)
-          if (
-            !param.type &&
-            paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
-            (wasmType.kind === "externref" ||
-              (wasmType.kind === "ref_null" &&
-                ctx.anyValueTypeIdx >= 0 &&
-                (wasmType as { typeIdx: number }).typeIdx === ctx.anyValueTypeIdx))
-          ) {
-            let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
-            if (!inferred) {
-              inferred = inferParamTypeFromBody(ctx, stmt, i);
-            }
-            if (inferred) {
-              wasmType = inferred;
-            }
-          }
-          params.push(wasmType);
+          params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
         }
         const nativeGenerator = registerNativeGenerator(ctx, stmt, name, params);
         results = nativeGenerator ? [{ kind: "ref", typeIdx: nativeGenerator.stateTypeIdx }] : [{ kind: "externref" }]; // JS-host fallback returns a Generator object
@@ -800,39 +776,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
               vecTypeIdx,
             });
           } else {
-            const paramType = ctx.checker.getTypeAtLocation(param);
-            let wasmType: ValType = bindingPatternParamNeedsWiden(param)
-              ? { kind: "externref" }
-              : restBindingOverridesToExternref(param)
-                ? { kind: "externref" }
-                : resolveWasmType(ctx, paramType);
-            // If the parameter has a default value and is a non-null ref type,
-            // widen to ref_null so callers can pass ref.null as a sentinel for "use default"
-            if (param.initializer && wasmType.kind === "ref") {
-              wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-            }
-            // If the parameter has no explicit type annotation and resolved to
-            // externref (from `any`), try to infer a concrete type from call sites.
-            if (
-              !param.type &&
-              paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
-              (wasmType.kind === "externref" ||
-                (wasmType.kind === "ref_null" &&
-                  ctx.anyValueTypeIdx >= 0 &&
-                  (wasmType as { typeIdx: number }).typeIdx === ctx.anyValueTypeIdx))
-            ) {
-              let inferred = inferParamTypeFromCallSites(ctx, name, i, sourceFile);
-              // #1121: Body-usage fallback. If no internal callers exist
-              // (e.g. exported entrypoint `function run(n) { return fib(n); }`)
-              // but the body still uses the param numerically, infer f64.
-              if (!inferred) {
-                inferred = inferParamTypeFromBody(ctx, stmt, i);
-              }
-              if (inferred) {
-                wasmType = inferred;
-              }
-            }
-            params.push(wasmType);
+            params.push(lowerParamType(ctx, param, name, i, stmt, sourceFile));
           }
         }
         const r = ctx.checker.getReturnTypeOfSignature(sig);
