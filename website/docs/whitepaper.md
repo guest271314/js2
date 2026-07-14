@@ -13,7 +13,7 @@ That position differs from the two dominant alternatives in the space:
 1. compiling or embedding a JavaScript interpreter inside Wasm
 2. narrowing the language into a TypeScript-like subset or replacement dialect
 
-`js²` is aimed at a harder target: **full ECMAScript language compatibility over time, with TypeScript source compatibility on top**, reached through direct compilation rather than runtime emulation or language reduction. The intended endpoint is not a custom JavaScript sub- or superset; it is mainstream JavaScript semantics defined by ECMAScript and validated through public conformance work, with Test262 used as the current measurement baseline [[2]](https://tc39.es/ecma262/) [[3]](https://github.com/tc39/test262). That matters not only for language purity, but for ecosystem fit: broad compatibility with JavaScript is a cornerstone of compatibility with the wider JavaScript ecosystem, including real-world npm packages and existing application code. The project is still in active development, but it already exposes a public playground, public benchmark and compatibility reporting, and a public ECMAScript conformance milestone of **73.5% Test262 compliance**.
+`js²` is aimed at a harder target: **full ECMAScript language compatibility over time, with TypeScript source compatibility on top**, reached through direct compilation rather than runtime emulation or language reduction. The intended endpoint is not a custom JavaScript sub- or superset; it is mainstream JavaScript semantics defined by ECMAScript and validated through public conformance work, with Test262 used as the current measurement baseline [[2]](https://tc39.es/ecma262/) [[3]](https://github.com/tc39/test262). That matters not only for language purity, but for ecosystem fit: broad compatibility with JavaScript is a cornerstone of compatibility with the wider JavaScript ecosystem, including real-world npm packages and existing application code. The project is still in active development, but it already exposes a public playground, public benchmark and compatibility reporting, and a public ECMAScript conformance milestone of **76.5% Test262 compliance**.
 
 This whitepaper explains the architectural thesis behind the compiler, why WebAssembly GC is the right target, what deployment profile this enables, where the approach fits, and what tradeoffs still remain.
 
@@ -213,7 +213,7 @@ The project tracks ECMAScript compatibility through Test262, the standard confor
 
 The current public milestone is:
 
-- **73.5% Test262 compliance** (31,700 / 43,106 official conformance tests passing in the current public report)
+- **76.5% Test262 compliance** (32,990 / 43,106 official conformance tests passing in the current public report)
 
 That number should be interpreted correctly. It does not mean the compiler is finished or suitable for arbitrary npm workloads today. It means there is already a public, measurable conformance baseline that can improve in a disciplined way toward the broader goal of real ecosystem compatibility.
 
@@ -270,7 +270,7 @@ There are four broad architectures in the JavaScript-to-Wasm space:
 4. **Direct AOT to Wasm GC**  
    The path taken by `js²`: direct compilation, host GC, no embedded engine, Wasm-native types.
 
-As of May 2026, we are not aware of another AOT JavaScript-to-Wasm approach that both aims to implement the full ECMAScript standard and already has production-ready garbage collection. The closest direct-AOT efforts are important, but publicly visible projects either remain experimental, target a narrower language surface, or use core Wasm / linear-memory strategies rather than host-provided WasmGC.
+As of mid-2026, we are not aware of another AOT JavaScript-to-Wasm approach that both aims to implement the full ECMAScript standard and already has production-ready garbage collection. The closest direct-AOT efforts are important, but publicly visible projects either remain experimental, target a narrower language surface, or use core Wasm / linear-memory strategies rather than host-provided WasmGC.
 
 The nearest Wasm-GC direct-compilation analogues we track are JAWSM [[22]](https://github.com/drogus/jawsm), a JavaScript-to-Wasm prototype, and Wasmnizer-ts [[23]](https://github.com/web-devkits/Wasmnizer-ts), a TypeScript-subset-to-WasmGC research compiler from the WAMR / Web DevKit ecosystem. They are useful signals that direct JS/TS-to-WasmGC compilation is an active research direction, but we currently treat them as prototype/subset comparators rather than production competitors for full ECMAScript coverage.
 
@@ -317,7 +317,7 @@ The current tradeoffs are straightforward:
 
 ### 11.1 Conformance is still incomplete
 
-At 73.5% Test262 compliance, the compiler is credible but not complete. There is still significant work to do across language semantics, built-ins, and host-sensitive behaviors.
+At 76.5% Test262 compliance, the compiler is credible but not complete. There is still significant work to do across language semantics, built-ins, and host-sensitive behaviors.
 
 ### 11.2 Wasm GC runtime support is required
 
@@ -401,5 +401,5 @@ The current public milestone is enough to make the direction concrete. The next 
 
 - Project page: [js2.loopdive.com](https://js2.loopdive.com)
 - Playground: [js2.loopdive.com/playground](https://js2.loopdive.com/playground)
-- Repository: [github.com/loopdive/js2wasm](https://github.com/loopdive/js2wasm)
+- Repository: [github.com/loopdive/js2](https://github.com/loopdive/js2)
 - Contact: `js2@loopdive.com`
