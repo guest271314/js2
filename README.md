@@ -81,11 +81,11 @@ npx js2wasm input.ts -o output.wasm
 
 Programmatic API:
 
-> **Breaking change (#1757):** `compile()` (and `compileMulti`, `compileFiles`,
-> `compileToWat`, `compileProject`, `createIncrementalCompiler().compile`) now
-> return a `Promise` — `await` them. This lets the optional Binaryen optimizer
-> load lazily only when `optimize` is requested, without forcing standalone
-> bundles to embed Binaryen (GH #986).
+> The compile functions — `compile`, `compileMulti`, `compileFiles`,
+> `compileToWat`, `compileProject`, and `createIncrementalCompiler().compile` —
+> are async: they return a `Promise`, so `await` them. This keeps the optional
+> Binaryen optimizer out of standalone bundles by loading it lazily only when
+> `optimize` is requested.
 
 ```ts
 import { compile } from "js2wasm";
@@ -191,14 +191,14 @@ avoids the custom-descriptors proposal, which stable Wasmtime does not yet
 accept.
 
 **Do not use `-W all-proposals=y`.** It also enables the **stack-switching**
-proposal, which Wasmtime 44/45 does not support in its compiler configuration —
+proposal, which Wasmtime does not support in its default compiler configuration —
 the runtime then fails at module load with `the wasm_stack_switching feature is
 not supported on this compiler configuration` and exits before running anything,
 regardless of module content (js2wasm output contains zero stack-switching
 opcodes). Stick to the targeted flag set above.
 
-**Minimum version:** Wasmtime **44+** (the first release with a stable WasmGC
-implementation). Older versions reject the GC types.
+**Recommended version:** Wasmtime **46+** — earlier releases either reject the
+GC types or carry WasmGC bugs that can cause memory leaks or poor performance.
 
 Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
 maturing, so compiled output is not guaranteed to run there yet. Browser hosts
@@ -236,7 +236,7 @@ high pass rate is necessary but not sufficient for "runs real JavaScript."
   some methods are missing or only handle the common overloads
 - `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
 - standalone (no-JS-host) mode — actively in progress; host-free conformance
-  (~48% official, see the two-path figures near the top) trails the JS-host path
+  (see the two-path figures near the top) trails the JS-host path
 - getters/setters and other highly dynamic patterns — limited
 
 **Not yet** (intentionally unsupported or out of scope today):
