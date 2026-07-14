@@ -14,16 +14,23 @@ assignee: ttraenkler/senior-dev-loops
 # Relocation-shift ratchet allowances (#3131).
 # for-of-destructuring.ts: this PR's own verbatim extraction (LOC crosses 1500;
 #   the getTypeAtLocation/ctxChecker sites are RELOCATED from loops.ts, total
-#   usage conserved). array-prototype-borrow.ts (#3264) and expressions/calls.ts
-#   (#3267) are pre-existing whole-tree oracle-ratchet drift inherited from
-#   sibling #3182 splits — re-waived here per the established practice (#3267
-#   waives the same way) until the committed baseline is reseeded on main.
+#   usage conserved). The remaining oracle-ratchet-allow entries are pre-existing
+#   WHOLE-TREE drift inherited from sibling #3182 god-file splits that merged
+#   ahead of this one — array-prototype-borrow.ts (#3264), expressions/calls.ts
+#   (#3267), and declarations/{import-collector,object-shape-widening,
+#   param-return-inference,struct-type-registration}.ts (#3268) — each waived
+#   per-PR without reseeding the committed baseline. Re-waived here per the
+#   established practice until the baseline is reseeded on main.
 loc-budget-allow:
   - src/codegen/statements/for-of-destructuring.ts
 oracle-ratchet-allow:
   - src/codegen/statements/for-of-destructuring.ts
   - src/codegen/array-prototype-borrow.ts
   - src/codegen/expressions/calls.ts
+  - src/codegen/declarations/import-collector.ts
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/declarations/param-return-inference.ts
+  - src/codegen/declarations/struct-type-registration.ts
 ---
 
 ## Problem
