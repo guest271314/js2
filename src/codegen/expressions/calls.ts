@@ -6753,6 +6753,145 @@ function compileCallExpression(
       // (e.g. Array.prototype.every.call(Math, ...) rewritten as Math.every(...))
     }
 
+    // (#3148) Standalone/WASI-native BigInt.asIntN(bits, bigint) /
+    // BigInt.asUintN(bits, bigint) — §21.2.2.1 / §21.2.2.2. The generic
+    // member-call path routes `BigInt.*` through the dynamic-shape
+    // `env::__get_builtin` host import, which refuses-loud under standalone
+    // (#1472 Phase B) → 20 hard CEs under built-ins/BigInt/{asIntN,asUintN}/.
+    // Here the modular wrap is lowered to pure i64 ops over the #1644 i64-brand
+    // BigInt rep (`{kind:"i64", bigint:true}`), with NO JS host import. Host
+    // (gc) mode keeps the `__get_builtin` path (which produces a real JS
+    // BigInt), so this arm is gated on no-JS-host.
+    //
+    // Representability note: the i64-brand rep holds only the low 64 bits of a
+    // BigInt, which is exactly what asIntN/asUintN of `bits <= 64` observes, so
+    // those are computed correctly even for source literals wider than 64 bits.
+    // For `bits > 64` we return the value unchanged: asIntN is exact, and
+    // asUintN is exact for non-negative values (a negative value with bits>=64
+    // is inherently not representable in i64 — documented out of scope).
+    if (
+      (ctx.standalone === true || ctx.wasi === true) &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "BigInt" &&
+      (propAccess.name.text === "asIntN" || propAccess.name.text === "asUintN")
+    ) {
+      const isIntN = propAccess.name.text === "asIntN";
+      const bitsArg = expr.arguments[0];
+      const valArg = expr.arguments[1];
+
+      // Step 1 — bits = ? ToIndex(bits). ToNumber → truncate toward zero →
+      // RangeError when < 0 or > 2^53-1. A missing bits argument is
+      // `undefined` ⇒ ToNumber(undefined) = NaN ⇒ ToIntegerOrInfinity = 0.
+      // ToIndex(bits) runs BEFORE ToBigInt(value) (order-of-steps.js): the
+      // bits argument (and its valueOf) is fully evaluated here first.
+      const bitsF64Idx = allocLocal(fctx, `__asN_bits_${fctx.locals.length}`, { kind: "f64" });
+      if (bitsArg !== undefined) {
+        compileExpression(ctx, fctx, bitsArg, { kind: "f64" });
+      } else {
+        fctx.body.push({ op: "f64.const", value: NaN });
+      }
+      // ToIntegerOrInfinity: truncate toward zero (NaN stays NaN; mapped to 0
+      // by the RangeError-free trunc_sat below).
+      fctx.body.push({ op: "f64.trunc" } as Instr);
+      fctx.body.push({ op: "local.tee", index: bitsF64Idx });
+      // RangeError guard: bits < 0 OR bits > 2^53-1. NaN fails both comparisons
+      // (no throw) and is later mapped to 0. ±Infinity is caught (−∞ < 0,
+      // +∞ > 2^53-1).
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.lt" } as Instr);
+      fctx.body.push({ op: "local.get", index: bitsF64Idx });
+      fctx.body.push({ op: "f64.const", value: 9007199254740991 }); // 2^53 - 1
+      fctx.body.push({ op: "f64.gt" } as Instr);
+      fctx.body.push({ op: "i32.or" });
+      {
+        const throwInstrs = buildThrowJsErrorInstrs(
+          ctx,
+          "RangeError",
+          `RangeError: bits must be in the range 0 to 2^53-1 in BigInt.as${isIntN ? "IntN" : "UintN"}`,
+          { flush: fctx },
+        );
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs, else: [] } as Instr);
+      }
+      // bits as an i64 count in [0, 2^53-1]. Signed trunc_sat is exact for this
+      // range and maps NaN→0 (spec: ToIntegerOrInfinity(NaN) = 0).
+      const bitsI64Idx = allocLocal(fctx, `__asN_bitsI_${fctx.locals.length}`, { kind: "i64" });
+      fctx.body.push({ op: "local.get", index: bitsF64Idx });
+      fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "local.set", index: bitsI64Idx });
+
+      // Step 2 — value = ? ToBigInt(value). A missing value argument is
+      // `undefined`, and ToBigInt(undefined) is a TypeError (§7.1.13).
+      if (valArg === undefined) {
+        emitThrowTypeError(ctx, fctx, "TypeError: Cannot convert undefined to a BigInt");
+        // The throw is stack-polymorphic; return the nominal bigint result type.
+        return { kind: "i64", bigint: true };
+      }
+      const valI64Idx = allocLocal(fctx, `__asN_val_${fctx.locals.length}`, { kind: "i64", bigint: true });
+      // Expected-type `{kind:"i64", bigint:true}` drives the ToBigInt coercion:
+      // identity on a bigint, `__to_bigint` on an any/string/boolean/object
+      // carrier (which throws TypeError on undefined/null/symbol/number).
+      compileExpression(ctx, fctx, valArg, { kind: "i64", bigint: true });
+      fctx.body.push({ op: "local.set", index: valI64Idx });
+
+      // Step 3 — modular wrap in i64. The shift/mask forms below are valid only
+      // for 1 <= bits <= 63; bits==0 ⇒ 0n and bits>=64 ⇒ value are special-cased
+      // (Wasm shift counts are taken mod 64, so a raw 64-bits shift would alias
+      // to 0 and mis-handle the boundary).
+      const resultIdx = allocLocal(fctx, `__asN_res_${fctx.locals.length}`, { kind: "i64", bigint: true });
+      const innerElse: Instr[] = isIntN
+        ? [
+            // asIntN: sign-extend bit (bits-1) via (v << (64-bits)) >>_s (64-bits).
+            { op: "local.get", index: valI64Idx },
+            { op: "i64.const", value: 64n },
+            { op: "local.get", index: bitsI64Idx },
+            { op: "i64.sub" } as Instr,
+            { op: "i64.shl" } as Instr,
+            { op: "i64.const", value: 64n },
+            { op: "local.get", index: bitsI64Idx },
+            { op: "i64.sub" } as Instr,
+            { op: "i64.shr_s" } as Instr,
+            { op: "local.set", index: resultIdx },
+          ]
+        : [
+            // asUintN: mask the low `bits` bits via v & ((1 << bits) - 1).
+            { op: "local.get", index: valI64Idx },
+            { op: "i64.const", value: 1n },
+            { op: "local.get", index: bitsI64Idx },
+            { op: "i64.shl" } as Instr,
+            { op: "i64.const", value: 1n },
+            { op: "i64.sub" } as Instr,
+            { op: "i64.and" } as Instr,
+            { op: "local.set", index: resultIdx },
+          ];
+      const geq64Branch: Instr[] = [
+        { op: "local.get", index: bitsI64Idx },
+        { op: "i64.const", value: 64n },
+        { op: "i64.ge_u" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: valI64Idx },
+            { op: "local.set", index: resultIdx },
+          ],
+          else: innerElse,
+        } as Instr,
+      ];
+      fctx.body.push({ op: "local.get", index: bitsI64Idx });
+      fctx.body.push({ op: "i64.eqz" } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i64.const", value: 0n },
+          { op: "local.set", index: resultIdx },
+        ],
+        else: geq64Branch,
+      } as Instr);
+      fctx.body.push({ op: "local.get", index: resultIdx });
+      return { kind: "i64", bigint: true };
+    }
+
     // #2590 — RegExp.escape(s) (ES2025, §22.2.5). A pure string transform that
     // escapes regex-syntax-significant code points. Standalone-only: routing it
     // through the native `__regex_escape` helper avoids leaking the dynamic
