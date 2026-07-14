@@ -15,18 +15,40 @@
  * baseline down step by step until the count outside the engine is ~0 and the
  * grep becomes a hard seal.
  *
- * CHANGE-SCOPED (#3131, same rework as check-loc-budget.mjs): when a git diff
- * base is resolvable (scripts/lib/change-scope.mjs), the gate counts the
- * vocabulary in each changed file at the BASE blob vs the WORKING TREE and
- * fails only when THIS change-set grew a file's count. The committed baseline
- * (scripts/coercion-sites-baseline.json) is NOT consulted on that path — and
- * PRs must NOT commit changes to it (the per-PR bump merge-conflicted with
- * every post-merge refresh promote-baseline pushes to main — the same churn
- * class as the loc-budget baseline). Intentional growth (a reviewed migration
- * step) is granted per change-set via a `coercion-sites-allow:` frontmatter
- * list (repo-relative src paths) in the PR's own plan/issues/*.md file.
- * The committed baseline remains for the no-git fallback and the writer
- * modes; main's post-merge refresh is its sole writer.
+ * CHANGE-SCOPED + NET-PER-VOCABULARY (#3131 scoping, #3279 net rework mirroring
+ * check-oracle-ratchet.mjs #3070/#3273): when a git diff base is resolvable
+ * (scripts/lib/change-scope.mjs), the DEFAULT run judges ONLY this change-set.
+ * For each changed src/codegen(-linear) file it counts the coercion vocabulary
+ * at the BASE blob vs the WORKING TREE, then fails only when the change-set's
+ * NET (per vocabulary token, summed over the changed non-allowed files) count
+ * GREW. The committed baseline (scripts/coercion-sites-baseline.json) is NOT
+ * consulted on that path — and PRs must NOT commit changes to it (the per-PR
+ * bump merge-conflicted with every post-merge refresh promote-baseline pushes
+ * to main — the same churn class as the loc-budget baseline).
+ *
+ *   NET, not per-file (#3279): a byte-identical god-file split relocates
+ *   existing coercion sites out of the source file (−N) and into a NEW sibling
+ *   module (+N). That is net-neutral — no fresh hand-rolled coercion — so it
+ *   must pass. The old per-file "any file's count grew fails" rule flagged the
+ *   new module (0→N) and forced every Wave-B split PR to declare a
+ *   `coercion-sites-allow` for each module it created — a relocation-shift
+ *   false-positive treadmill that repeatedly failed split PRs (e.g. #3076).
+ *   This is exactly the class Dev-Gate already fixed for the oracle-ratchet
+ *   gate in #3070. Netting per vocabulary token passes verbatim relocations
+ *   (each token's removal from the source cancels its addition in the new
+ *   module) while a genuinely-new hand-rolled coercion (a token gains a use
+ *   with no offsetting removal) nets > 0 and still fails. Netting PER TOKEN
+ *   (rather than per grand total) keeps the gate's anti-drift purpose intact:
+ *   swapping one hand-rolled coercion for a NEW kind (remove __is_truthy, add
+ *   __any_to_string) is not masked by the offsetting removal — the new-kind
+ *   token still nets positive and fails.
+ *
+ * Intentional growth (a reviewed migration step) is granted per change-set via
+ * a `coercion-sites-allow:` frontmatter list (repo-relative src paths) in the
+ * PR's own plan/issues/*.md file; allowance-granted files are excluded from the
+ * net entirely (they neither fault nor offset). The committed baseline remains
+ * for the no-git fallback and the writer modes; main's post-merge refresh is
+ * its sole writer.
  *
  * Mechanism otherwise mirrors the IR-fallback ratchet
  * (scripts/check-ir-fallbacks.ts) and the AnyValue box-site gate
@@ -52,7 +74,8 @@
  * never counted.
  *
  * Usage:
- *   node scripts/check-coercion-sites.mjs                    # fail on growth
+ *   node scripts/check-coercion-sites.mjs                    # change-scoped net gate (default)
+ *   node scripts/check-coercion-sites.mjs --all              # whole-tree audit vs committed baseline
  *   node scripts/check-coercion-sites.mjs --update           # write current counts (post-merge/main only)
  *   node scripts/check-coercion-sites.mjs --update-on-decrease
  *   node scripts/check-coercion-sites.mjs --verbose          # print per-file breakdown
@@ -180,6 +203,7 @@ const args = process.argv.slice(2);
 const update = args.includes("--update");
 const updateOnDecrease = args.includes("--update-on-decrease");
 const verbose = args.includes("--verbose");
+const auditAll = args.includes("--all");
 
 const { totals: current, detail } = countSites();
 
@@ -213,10 +237,15 @@ if (update) {
 }
 
 /**
- * Change-scoped gate (#3131): compare each changed file's vocabulary count at
- * the base blob vs the working tree. Only this change-set's own growth can
- * fail; the committed baseline is not involved. Returns false when the diff
- * cannot be computed (caller falls back to the legacy baseline comparison).
+ * Change-scoped gate (#3131 scoping, #3279 net rework mirroring
+ * check-oracle-ratchet.mjs #3070/#3273): for each changed src/codegen file,
+ * count the coercion vocabulary at the base blob vs the working tree, then fail
+ * only when the change-set's NET (per vocabulary token, summed over the changed
+ * non-allowed files) count grew. Only THIS change-set is judged; the committed
+ * baseline is not involved. A byte-identical relocation nets to 0 per token →
+ * pass; a genuinely-new hand-rolled coercion nets > 0 → fail. Returns false
+ * when the diff cannot be computed (caller falls back to the legacy whole-tree
+ * baseline comparison).
  */
 function gateScoped() {
   const { base, how } = resolveChangeBase(REPO_ROOT);
@@ -228,37 +257,56 @@ function gateScoped() {
     .sort();
   const allow = changeSetAllowances(REPO_ROOT, base, "coercion-sites-allow");
 
-  const grown = [];
+  // Per-token net delta across the change-set, EXCLUDING allowance-granted
+  // files (their intentional growth is sanctioned, so it neither faults nor
+  // counts toward the net). A verbatim relocation nets to 0 for every token →
+  // pass; a new hand-rolled coercion with no offsetting removal nets > 0 for
+  // that token → fail.
+  const net = {}; // token -> net delta summed over non-allowed changed files
+  const increases = []; // non-allowed files that grew some token (for the report)
   const granted = [];
+
   for (const p of changed) {
     const key = p.slice("src/".length); // baseline/report keys are src-relative
-    const now = current[key] ?? 0; // deleted file → 0
+    const nowTokens = detail[`${key}::tokens`] || {}; // deleted / dropped-to-zero → {}
     const blob = baseBlob(REPO_ROOT, base, p);
-    const was = blob === undefined ? 0 : countText(blob);
-    if (now <= was) continue;
-    if (allow.has(p)) {
-      granted.push(`  ${key}: ${was} → ${now} granted by ${allow.get(p).join(", ")}`);
-      continue;
-    }
-    const nowTokens = detail[`${key}::tokens`] || {};
     const wasTokens = blob === undefined ? {} : countTokens(blob);
-    const grewTokens = Object.keys(nowTokens)
-      .filter((t) => (nowTokens[t] ?? 0) > (wasTokens[t] ?? 0))
-      .map((t) => `${t} ${wasTokens[t] ?? 0}→${nowTokens[t]}`)
-      .join(", ");
-    grown.push(`  ${key}: ${was} → ${now}${grewTokens ? ` (${grewTokens})` : ""}`);
+    const nowTotal = current[key] ?? 0;
+    const wasTotal = blob === undefined ? 0 : countText(blob);
+    const grewTokens = VOCAB.filter((t) => (nowTokens[t] ?? 0) > (wasTokens[t] ?? 0));
+
+    if (allow.has(p)) {
+      if (grewTokens.length > 0) {
+        granted.push(`  ${key}: ${wasTotal} → ${nowTotal} granted by ${allow.get(p).join(", ")}`);
+      }
+      continue; // sanctioned — excluded from the net
+    }
+
+    for (const t of VOCAB) net[t] = (net[t] ?? 0) + ((nowTokens[t] ?? 0) - (wasTokens[t] ?? 0));
+
+    if (grewTokens.length > 0) {
+      const detailStr = grewTokens.map((t) => `${t} ${wasTokens[t] ?? 0}→${nowTokens[t] ?? 0}`).join(", ");
+      increases.push(`  ${key}: ${wasTotal} → ${nowTotal} (${detailStr})`);
+    }
   }
 
   if (granted.length > 0) {
     console.log("coercion-sites: intentional growth allowed by this change-set's issue file:\n" + granted.join("\n"));
   }
 
-  if (grown.length > 0) {
-    console.error("coercion-sites gate FAILED — new hand-rolled coercion vocabulary outside the engine:");
-    console.error(grown.join("\n"));
+  const grownTokens = VOCAB.filter((t) => (net[t] ?? 0) > 0);
+  if (grownTokens.length > 0) {
     console.error(
-      "\nRoute the coercion through the single coercion engine (#1917 / #2108).\n" +
-        "Do NOT hand-roll a fresh ToString/ToNumber/ToPrimitive/equality matrix.\n" +
+      "coercion-sites gate FAILED — this change-set ADDS hand-rolled coercion vocabulary on net " +
+        `(${grownTokens.map((t) => `${t} +${net[t]}`).join(", ")}).`,
+    );
+    console.error("Files whose coercion vocabulary increased:");
+    console.error(increases.join("\n"));
+    console.error(
+      "\nMoving existing coercion sites between files is net-neutral and passes;\n" +
+        "this change-set grows the total. Route the coercion through the single\n" +
+        "coercion engine (#1917 / #2108). Do NOT hand-roll a fresh\n" +
+        "ToString/ToNumber/ToPrimitive/equality matrix.\n" +
         "See plan/log/analysis-2026-06/03-coercion-engine-spec.md §5.\n" +
         "If this growth is an intentional, reviewed migration step, grant THIS\n" +
         "change-set an allowance: list the repo-relative path(s) under a\n" +
@@ -272,19 +320,28 @@ function gateScoped() {
     process.exit(1);
   }
 
+  const netSummary = VOCAB.filter((t) => (net[t] ?? 0) !== 0)
+    .map((t) => `${t} ${net[t] > 0 ? "+" : ""}${net[t]}`)
+    .join(", ");
   console.log(
-    `coercion-sites gate: OK (no unallowed growth in ${changed.length} changed codegen file(s); base: ${how}).`,
+    `coercion-sites gate: OK (no net vocabulary growth across ${changed.length} changed codegen file(s)` +
+      `${netSummary ? `; net ${netSummary}` : ""}; base: ${how}).`,
   );
   return true;
 }
 
-if (!updateOnDecrease && gateScoped()) {
+// Default path: change-scoped net gate. --update-on-decrease and --all fall
+// through to the legacy whole-tree comparison (the former is a writer/banking
+// mode, the latter an explicit whole-tree audit).
+if (!updateOnDecrease && !auditAll && gateScoped()) {
   process.exit(0);
 }
 
-// Legacy whole-tree comparison against the committed baseline — used when no
-// git base is resolvable, and by --update-on-decrease (a writer mode: the
-// post-merge refresh / local banking; PRs must not commit the result, #3131).
+// Legacy whole-tree comparison against the committed baseline — used by --all
+// (an explicit whole-tree audit), by --update-on-decrease (a writer mode: the
+// post-merge refresh / local banking; PRs must not commit the result, #3131),
+// and as the no-git fallback so the gate never crashes a hook outside a git
+// context.
 let baseline = {};
 try {
   baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf-8"));
@@ -325,4 +382,6 @@ if (shrank.length > 0) {
   }
 }
 
-console.log("coercion-sites gate: OK (no unsanctioned growth vs. baseline).");
+console.log(
+  `coercion-sites gate: OK (whole-tree${auditAll ? " --all" : " — no git base, committed-baseline mode"}) — no unsanctioned growth vs. baseline.`,
+);
