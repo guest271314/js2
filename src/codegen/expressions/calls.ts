@@ -6807,6 +6807,32 @@ function compileCallExpression(
     if (__idResult !== undefined) return __idResult;
   }
 
+  // (#742 slice 5) Tail dispatch — IIFE, super, element-access, call-of-call,
+  // conditional callee, and the graceful fallback. Extracted verbatim to
+  // compileTailDispatch, which always returns (its final fallback is
+  // unconditional), so this is the sole tail return of compileCallExpression.
+  return compileTailDispatch(ctx, fctx, expr, expectedType);
+}
+
+/**
+ * (#742 slice 5) Tail dispatch of compileCallExpression — extracted verbatim.
+ * Handles the remaining callee shapes after the property-access and identifier
+ * arms: the IIFE forms (`(function(){…})()` / `(()=>…)()`), super method calls,
+ * element-access method calls (`obj[expr](…)`), call-of-call chains, a
+ * conditional callee, and finally the graceful fallback (compile callee + args
+ * for side effects, push ref.null.extern) for unrecognized shapes.
+ *
+ * The graceful fallback is unconditional, so this helper ALWAYS returns an
+ * InnerResult — compileCallExpression's tail is therefore a single
+ * `return compileTailDispatch(...)`. `expectedType` is threaded through. Moved
+ * unchanged so the emitted Wasm is byte-identical.
+ */
+function compileTailDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  expectedType?: ValType,
+): InnerResult {
   // Handle IIFE: (function() { ... })() or (() => expr)() — inline the function body
   {
     // Unwrap parenthesized expression to find the function/arrow
