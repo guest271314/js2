@@ -5,8 +5,28 @@
  * This module owns function-type caches plus reusable GC array/vec/ref-cell
  * registrations so leaf modules can depend on a narrow type-registry surface.
  */
-import type { ArrayTypeDef, FuncTypeDef, ValType } from "../../ir/types.js";
+import type { ArrayTypeDef, FieldDef, FuncTypeDef, StructTypeDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
+
+/**
+ * (#3268) Register a WasmGC struct type: append it to `ctx.mod.types` and wire
+ * the name -> typeIdx, typeIdx -> name, and name -> fields lookup tables.
+ * Returns the assigned type index. Consolidates the identical registration
+ * idiom used by the empty-object widening pre-pass and the interface/object
+ * struct registration paths.
+ */
+export function registerStructType(ctx: CodegenContext, name: string, fields: FieldDef[]): number {
+  const typeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    fields,
+  } as StructTypeDef);
+  ctx.structMap.set(name, typeIdx);
+  ctx.typeIdxToStructName.set(typeIdx, name);
+  ctx.structFields.set(name, fields);
+  return typeIdx;
+}
 
 /** Build a cache key for a function type signature (params + results). */
 function funcTypeKey(params: ValType[], results: ValType[]): string {
