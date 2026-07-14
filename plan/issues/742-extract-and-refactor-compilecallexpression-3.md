@@ -14,6 +14,7 @@ priority: high
 #     it (calls.ts loses exactly these; net-zero). Not new hand-rolled coercion.
 loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions/call-builtin-static.ts
 coercion-sites-allow:
   - src/codegen/expressions/call-identifier.ts
 # 2026-07-12 (#3182 groom): elevated medium→high. The EXTRACTION half is done
@@ -142,4 +143,49 @@ gates flag — both net-zero across the tree (a pure relocation), not new code.
 **Next chunks (Wave B, serial)**: the 9k-line property-access method-call arm
 (5632–14712) is the remaining giant — decompose it into per-receiver-family
 helpers; then the super / element-access / conditional / IIFE arms. Issue stays
+`in-progress`.
+
+## Progress — Wave B chunk 2: built-in static-method dispatch (2026-07-14, sendev-waveb)
+
+First cut into the 9k-line **property-access method-call arm**
+(`if (ts.isPropertyAccessExpression(expr.expression))`, calls.ts 5633–14713).
+That arm declares one arm-level local (`propAccess = expr.expression`) plus three
+consumed-immediately `standaloneRegExp*` consts; the namespace static-method
+sub-block does **not** close over any of them, nor over `receiverType` (which is
+only introduced at ~11666, after the block) — so it depends solely on
+`ctx` / `fctx` / `expr` / `propAccess`.
+
+This chunk extracts the **built-in static-method dispatch block** — static method
+calls on the built-in value-type namespaces `Math` / `BigInt` / `Number` /
+`Array` / `String` / `Object` (`Math.max`, `Number.isInteger`, `Array.from`,
+`String.fromCharCode`, `Object.keys`, …), calls.ts lines 6764–9733 (~2,970 LOC),
+ending cleanly right before the `Symbol` arm.
+
+Same two verified steps as chunk 1:
+1. **Same-file** → `compileBuiltinStaticCall(ctx, fctx, expr, propAccess):
+   InnerResult | undefined`. The block's four `return undefined` / bare `return;`
+   statements are all inside **nested arrow closures** (`literalKeyText`,
+   `compileArgAsExternref`), not top-level arm returns — so the `undefined`
+   fall-through sentinel is safe.
+2. **Relocate to sibling** `src/codegen/expressions/call-builtin-static.ts`. Nine
+   `calls.ts` internals are exported to it (`compileMathCall` comes via
+   `./builtins.js`; the exported set is `BUILTIN_CLASS_NAMES`,
+   `compileFromCharCodeFamily`, `compileNumberIsPredicate`,
+   `compileObjectAssignArg`, `isGlobalBuiltinIdentifier`, `staticToBoolean`,
+   `tracesToTypedArrayIntrinsicProto`, plus the already-exported
+   `compileCallExpression` / `compileProtoArg`).
+
+**Result**: `compileCallExpression` ~11,388 → ~8,410 LOC; `calls.ts` 17,462 →
+14,484 LOC; new `call-builtin-static.ts` 3,064 LOC.
+
+**Proof**: `prove-emit-identity` IDENTICAL across all 39 `(file,target)` emits
+after each step; `tsc --noEmit` 0; `check:oracle-ratchet` net-zero;
+`check:coercion-sites` OK (no allowance needed this slice); only `loc-budget`
+flags the new file (allowance added above). Smoke test extended with Math /
+Number / Array / String / Object static-call cases (wasm≡JS).
+
+**Remaining in the property-access arm**: the rest of the namespace statics
+(`Symbol` / `Reflect` / `Promise` / `JSON` / `Date`, ~9736–11665) then the
+receiver-type method dispatch (class methods, Number/BigInt/Boolean wrappers,
+generators, typed arrays, valueOf/toString, ~11666–14712). Issue stays
 `in-progress`.
