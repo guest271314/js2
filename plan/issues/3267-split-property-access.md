@@ -11,6 +11,8 @@ task_type: refactor
 subtask_of: 3182
 area: codegen
 assignee: ttraenkler/senior-dev-split
+oracle-ratchet-allow:
+  - src/codegen/array-prototype-borrow.ts
 ---
 
 ## Scope
@@ -74,3 +76,28 @@ false-positives (usage moved module home, not grew).
 - **coercion-sites** — OK, no allowance needed.
 - **dead-exports (audit-legacy-reachability)** — OK, 0 new.
 - **verdict-oracle-bump** — OK, no verdict-logic files changed.
+
+## Salvage re-merge note (2026-07-14)
+
+This PR went DIRTY as main advanced; re-merged `origin/main` on a salvage branch.
+Two of main's advances interacted with this PR:
+
+1. **#3266** (operator-assignment split) added its own `preauthorized` entries to
+   `scripts/oracle-ratchet-baseline.json`. The merge conflict there was resolved as an
+   **append-only union** — both #3267's `builtin-value-read.ts` entries and #3266's
+   `operator-assignment.ts` entries are kept.
+2. **#3264 / PR #3064** (array-methods → `array-prototype-borrow.ts` split) landed on main
+   using a **self-only `oracle-ratchet-allow:` frontmatter allowance in its own issue
+   file**, and did NOT bank `array-prototype-borrow.ts` into the committed whole-tree
+   baseline (`scripts/oracle-ratchet-baseline.json`). `check:oracle-ratchet` is a
+   **whole-tree** gate that only consults allowances from issue files **in the current
+   change-set's diff** — #3264's issue file is on main (not in my diff), so the gate
+   re-flags `array-prototype-borrow.ts` (4/4 checker sites vs baseline 0) against this
+   PR's post-merge tree. It is #3264 merge-collateral, not growth introduced here.
+   Remedy applied: the change-scoped `oracle-ratchet-allow: array-prototype-borrow.ts`
+   frontmatter above (the gate's documented, conflict-free hatch; task-directed over a
+   whole-tree baseline bump). Byte-identity IDENTICAL (39/39) is unaffected — this PR
+   still emits zero net checker growth. **Systemic note for the tech lead:** every
+   downstream PR that merges main after #3064 hits the same `array-prototype-borrow.ts`
+   flag until main banks it into the committed oracle-ratchet baseline; a one-line
+   post-merge baseline reconciliation on main would clear it queue-wide.
