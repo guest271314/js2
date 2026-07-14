@@ -5,8 +5,8 @@ status: ready
 sprint: current
 created: 2026-07-14
 priority: medium
-feasibility: hard
-model: fable
+feasibility: medium
+model: opus
 horizon: m
 task_type: fix
 area: codegen
@@ -74,5 +74,14 @@ Do NOT add a new host import without a standalone fallback. Behaviour-preserving
 - Sibling issue **#2903** (`ready`, `model: fable`) covers a *different* host-backed leak family
   (`env.__make_callback` for Promise.then/.catch and Iterator helpers) — keep them separate.
 - Feeds the standalone-parity umbrella **#2860**.
-- Tagged `model: fable` / `feasibility: hard` — same hard-standalone class as #2903; the
-  value-rep-aware native equality/coercion is the tricky part.
+- **Tier: `model: opus` / `feasibility: medium`.** Unlike its #2903 sibling, the native
+  primitives this needs already exist — `__any_eq` (native loose-equality, #1134) and
+  `__any_to_string` (native ToString, #1470). So `__host_loose_eq` and `__extern_toString`
+  are mostly a *routing* job: point the remaining standalone arms (e.g. the boolean==string
+  arm at `binary-ops.ts:1030`, already flagged `(#2073)` at :1046) at the existing native
+  helper, `noJsHost`-gated, byte-identity-guarded on the host lane. That's Opus-appropriate
+  refactor work, not novel reasoning.
+- **Scope carve-out:** `__date_format` (native Date-to-string) is the one genuinely harder
+  sub-part and overlaps the standalone Date cluster — do it under / alongside **#3174**
+  (Date-native) rather than block this issue on it. #3261's core deliverable is the two
+  routing fixes (loose-eq + extern-toString).
