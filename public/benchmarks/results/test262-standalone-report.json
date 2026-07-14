@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-14T17:25:13.921Z",
-  "baseline_generated_at": "2026-07-14T17:25:13.921Z",
-  "baseline_sha": "7c0508bdc5d9dd8ff86bf4d88e38b25cf9f55d37",
+  "timestamp": "2026-07-14T18:11:56.564Z",
+  "baseline_generated_at": "2026-07-14T18:11:56.564Z",
+  "baseline_sha": "2877b0603e8f0888546bb885ea938f699a9f7c3e",
   "oracle_version": 3,
   "mode": {
     "target": "standalone",
@@ -1198,14 +1198,14 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 11387,
+    "assertion_fail": 11390,
     "illegal_cast": 572,
     "missing_builtin": 36,
     "missing_dependency": 77,
     "negative_test_fail": 55,
     "null_deref": 340,
     "oob": 49,
-    "other": 4595,
+    "other": 4592,
     "promise_error": 156,
     "range_error": 29,
     "runtime_error": 251,
@@ -1343,8 +1343,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "other": 2854,
-          "assertion_fail": 1049,
+          "other": 2853,
+          "assertion_fail": 1050,
           "wasm_compile": 53,
           "illegal_cast": 2,
           "null_deref": 53,
@@ -1355,8 +1355,8 @@
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-timezone-string-year-zero.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
-          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
+          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: Temporal is not defined",
@@ -1393,15 +1393,15 @@
           "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
           "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
           "test/built-ins/AsyncDisposableStack/prototype/disposed/getter.js",
-          "test/built-ins/DisposableStack/prototype/adopt/puts-value-onDispose-on-top-of-stack.js",
-          "test/built-ins/AsyncDisposableStack/prototype/defer/this-does-not-have-internal-asyncdisposablestate-throws.js"
+          "test/built-ins/DisposableStack/prototype/Symbol.dispose.js",
+          "test/built-ins/DisposableStack/prototype/adopt/puts-value-onDispose-on-top-of-stack.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( typeof descriptor.set, 'undefined', 'typeof descriptor.set is undefined' );",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(disposed[#][#], dispose2, 'Expected dispose2 to be the first onDispose invoked');",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { defer.call({ ['[[AsyncDisposableState]]']: {} }); }, 'Ordinary object without [[AsyncDisposableState]]');"
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(DisposableStack.prototype[Symbol.dispose], DisposableStack.prototype.dispose);",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(disposed[#][#], dispose2, 'Expected dispose2 to be the first onDispose invoked');"
         ]
       },
       {
@@ -1509,15 +1509,15 @@
         },
         "sample_files": [
           "test/built-ins/JSON/stringify/space-wrong-type.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js",
           "test/built-ins/JSON/stringify/space-string.js",
           "test/built-ins/JSON/parse/text-object.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(hint, 'string');"
         ]
@@ -1699,8 +1699,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "other": 122,
-          "assertion_fail": 159,
+          "other": 121,
+          "assertion_fail": 160,
           "type_error": 23,
           "null_deref": 10,
           "runtime_error": 14,
@@ -1708,15 +1708,15 @@
         },
         "sample_files": [
           "test/built-ins/Proxy/getOwnPropertyDescriptor/null-handler.js",
-          "test/built-ins/Proxy/deleteProperty/trap-is-not-callable.js",
           "test/built-ins/Proxy/ownKeys/trap-is-undefined.js",
+          "test/built-ins/Proxy/deleteProperty/trap-is-not-callable.js",
           "test/built-ins/Proxy/has/call-in-prototype-index.js",
           "test/built-ins/Uint8Array/fromHex/illegal-characters.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).; L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal o",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { delete p.attr; });",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(keys[#], \"foo\");",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { delete p.attr; });",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(_handler, handler, 'handler is context');",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct"
         ]
@@ -1821,23 +1821,23 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 269,
           "type_error": 38,
+          "assertion_fail": 269,
           "negative_test_fail": 2,
           "other": 5,
           "range_error": 1,
           "null_deref": 3
         },
         "sample_files": [
-          "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
           "test/built-ins/AsyncGeneratorFunction/instance-name.js",
+          "test/built-ins/AsyncGeneratorFunction/prototype/extensibility.js",
           "test/built-ins/GeneratorFunction/prototype/extensibility.js",
           "test/language/expressions/generators/invoke-as-constructor.js",
           "test/built-ins/AsyncGeneratorPrototype/Symbol.toStringTag.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(AsyncGeneratorFunction.prototype));",
           "type_error:TypeError: Cannot access property on null or undefined at #:#",
+          "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(AsyncGeneratorFunction.prototype));",
           "assertion_fail:returned # — assert ## at L#: assert(Object.isExtensible(GeneratorFunction.prototype));",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { var instance = new g(); });",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(x, #);"
@@ -1964,15 +1964,15 @@
         "sample_files": [
           "test/built-ins/TypedArray/out-of-bounds-has.js",
           "test/built-ins/TypedArray/resizable-buffer-length-tracking-1.js",
-          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/ctors/buffer-arg/defined-length-sab.js",
+          "test/built-ins/TypedArrayConstructors/internals/Set/detached-buffer.js",
           "test/built-ins/TypedArrayConstructors/ctors/typedarray-arg/same-ctor-returns-new-cloned-typedarray.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(i in array);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(ta.length, # / ta.BYTES_PER_ELEMENT);",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(sample[#], undefined, '`sample[#] = #` is undefined');",
           "illegal_cast:L#:## illegal cast [in __closure_2() ← testWithTypedArrayConstructors ← test]",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(sample[#], undefined, '`sample[#] = #` is undefined');",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(typedArray.buffer, sample.buffer);"
         ]
       },
@@ -2204,15 +2204,15 @@
           "null_deref": 3
         },
         "sample_files": [
-          "test/built-ins/parseInt/S15.1.2.2_A4.2_T1.js",
           "test/built-ins/parseInt/S15.1.2.2_A2_T1.js",
+          "test/built-ins/parseInt/S15.1.2.2_A4.2_T1.js",
           "test/language/expressions/equals/bigint-and-number-extremes.js",
           "test/built-ins/parseInt/S15.1.2.2_A7.1_T2.js",
           "test/language/expressions/bitwise-xor/bigint-and-number.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(parseInt(\"#\", #), NaN, 'parseInt(\"#\", #) must return NaN');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(parseInt(\"\\u0009\"), NaN, 'parseInt(\"\\\\u0009\") must return NaN');",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(parseInt(\"#\", #), NaN, 'parseInt(\"#\", #) must return NaN');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( 0x#n == Number.MAX_VALUE, true, 'The result of (0x#",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(parseInt(\"$0x\"), NaN, 'parseInt(\"$0x\") must return NaN');",
           "missing_dependency:L#:## No dependency provided for extern class \"BigInt\""
@@ -2353,8 +2353,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 85,
-          "other": 3,
+          "assertion_fail": 86,
+          "other": 2,
           "null_deref": 5,
           "illegal_cast": 1
         },
@@ -2549,8 +2549,8 @@
         },
         "error_categories": {
           "other": 62,
-          "type_error": 1,
           "assertion_fail": 79,
+          "type_error": 1,
           "promise_error": 5,
           "wasm_compile": 6,
           "negative_test_fail": 13,
@@ -2562,15 +2562,15 @@
         },
         "sample_files": [
           "test/built-ins/Atomics/xor/validate-arraytype-before-index-coercion.js",
-          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/module-code/instn-local-bndng-cls.js",
+          "test/language/module-code/namespace/internals/delete-non-exported.js",
           "test/language/expressions/prefix-decrement/operator-prefix-decrement-x-calls-putvalue-lhs-newvalue--1.js",
           "test/built-ins/Atomics/sub/validate-arraytype-before-index-coercion.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: nonAtomicsFriendlyTypedArrayConstructors is not defined",
-          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
+          "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, () => { count++; --x; count++; });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof D; }, 'binding is created but not initialized');"
         ]
@@ -2606,8 +2606,8 @@
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
           "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
-          "test/built-ins/Promise/all/iter-next-val-err-reject.js",
-          "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js"
+          "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
+          "test/built-ins/Promise/all/iter-next-val-err-reject.js"
         ],
         "sample_signatures": [
           "promise_error:L#:## Promise resolve or reject function is not callable",
