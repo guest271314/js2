@@ -1,9 +1,10 @@
 ---
 id: 3274
-title: "Decompose ensureObjectRuntime: extract descriptor/integrity helper builders (WAVE-B slice 1)"
-status: in-progress
+title: "Decompose ensureObjectRuntime into cohesive sibling modules (WAVE-B, slices 1-3)"
+status: done
 created: 2026-07-14
 updated: 2026-07-14
+completed: 2026-07-14
 priority: high
 feasibility: hard
 horizon: l
@@ -136,6 +137,28 @@ downstream-const entanglement. `object-runtime.ts`: 6,607 → 6,299 LOC;
 `ensureObjectRuntime` now ~3,493. Byte-identity `check` = `IDENTICAL` (39/39);
 `tsc --noEmit` = 0; `tests/issue-3274-slice3.test.ts` (3) green
 (`Object.create(null)` + `getPrototypeOf` exercised natively, zero host imports).
+
+## Deferred — entangled core (future fresh-budget slice)
+
+Slices 1-3 extracted the three cohesive, cleanly-liftable groups
+(descriptor/integrity, enumeration/array-like/object-static, prototype-chain),
+taking `ensureObjectRuntime` from ~7,378 → ~3,493 LOC (~53%). The remaining
+~3,493-LOC core is the **entangled hash-map + boxing substrate**:
+`__obj_hash`, `__key_equals`, `__new_plain_object`, `__obj_find`, `__extern_get`,
+`__obj_insert`, `__obj_grow`, `__extern_set`, `__reflect_set`, `__delete_property`,
+`__new_Number/String/Boolean`, `__objvec_new/push`, `hasOwn`,
+`__propertyIsEnumerable`, `__extern_has`, `__to_primitive`, `__extern_toString`,
+`__obj_index_of_key`, the `__obj_ordered*` builders, `__extern_is_undefined`,
+`__extern_method_call`, plus the `ensureProxyRuntime` tail.
+
+This core is NOT a quick byte-identical lift: it *defines* the cross-cutting
+closures the whole function shares — `emitClassifyKey`, `emitKeyMatch`,
+`emitWrapperBuildTail`, `emitHasOwn`, `withKeyCoercion` — and threads forward
+references (`tpkBodyRef` splice, `__to_property_key`/`__extern_toString` mutual
+dependency). Extracting it byte-identically means also relocating those closures
+and their forward-splice machinery, which is a deliberate design task warranting
+its own architect pass and a fresh budget window. Tracked as a follow-up under
+epic #3182; the three sibling modules created here are the seam it will build on.
 
 ## Acceptance criteria
 
