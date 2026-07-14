@@ -1578,7 +1578,8 @@
           <p>
             The mission of the JS² compiler project is to make WebAssembly a drop-in deployment target for existing
             JavaScript and npm packages, running modules without embedding a JS runtime and enabling more secure,
-            flexible dependency management.
+            flexible dependency management — the direction the project is working toward, not a level of support it
+            offers today.
           </p>
           <p>
             The project is motivated by the idea that JavaScript, despite being a dynamic language, can be compiled
@@ -3761,8 +3762,9 @@ export function run(n) {
             supply-chain attack surface.
           </p>
           <p>
-            The goal is 100% compatibility with the JavaScript and npm ecosystem while adding a module security and
-            module composition layer around compiled units.
+            The goal — a target the project is working toward, not a claim about today — is full compatibility with the
+            JavaScript and npm ecosystem while adding a module security and module composition layer around compiled
+            units.
           </p>
           <p>
             The compiler is being built around a typed intermediate representation (IR) &mdash; a single checked layer
@@ -4027,9 +4029,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
                 <ul>
                   <li>
                     <strong>Following the ECMAScript standard</strong>
-                    as the north star maintains full compatibility with the JS and NPM ecosystem. TypeScript annotations
-                    are only treated as optimization hints where types can be proven, not as ground truth and do not
-                    affect JavaScript runtime behavior.
+                    as the north star is how the project aims for compatibility with the JS and npm ecosystem as it
+                    matures. TypeScript annotations are only treated as optimization hints where types can be proven, not
+                    as ground truth and do not affect JavaScript runtime behavior.
                   </li>
                   <li>
                     <strong>Subsets, supersets, and new languages</strong>
