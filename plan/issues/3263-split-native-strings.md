@@ -1,7 +1,8 @@
 ---
 id: 3263
 title: "Split TextEncoder/TextDecoder helpers out of native-strings.ts god-file"
-status: ready
+status: done
+completed: 2026-07-14
 sprint: current
 priority: high
 feasibility: medium
@@ -42,3 +43,42 @@ is re-pointed to `../text-encoding-native.js` (one import-line edit).
 - Relocation-shift ratchets (loc-budget / oracle-ratchet / coercion-sites /
   dead-exports / verdict-oracle-bump) pass locally with the sanctioned per-issue
   frontmatter allowances (documented below), never a whole-tree baseline edit.
+
+## Result
+
+Pure verbatim move — DONE.
+
+- `src/codegen/native-strings.ts`: 7,461 → 6,811 LOC (−650).
+- `src/codegen/text-encoding-native.ts`: NEW, 668 LOC (18-line header/imports +
+  649-line verbatim block).
+- `src/codegen/expressions/calls.ts`: re-pointed the single external import of
+  `ensureTextEncodingHelpers` to `../text-encoding-native.js` (one import line).
+  `native-strings.ts` imports nothing back → no import cycle.
+- `ensureEncodeIntoResultStruct` stays private in the new module (used only by
+  `ensureTextEncodingHelpers`).
+
+### Acceptance — all green
+
+- `npx tsc --noEmit` → **0 errors**.
+- `npx tsx scripts/prove-emit-identity.mjs check` → **IDENTICAL** (39/39
+  file,target emits across gc / standalone / wasi).
+- **No relocation-shift allowances were required** — the move is fully conserved,
+  so every ratchet passed unchanged:
+  - `check-loc-budget` OK (net +18 LOC, change-scoped vs merge-base)
+  - `check-oracle-ratchet` OK (no checker-call-site growth; the moved code uses
+    no `ctx.checker` / `getTypeAtLocation`)
+  - `check-coercion-sites` OK (no coercion-vocabulary relocation)
+  - `check-dead-exports` OK (0 new; `ensureTextEncodingHelpers` still imported)
+  - `check-verdict-oracle-bump` OK (no verdict-logic files touched)
+  - `check:godfiles`, `check:any-box-sites`, `check:stack-balance` OK
+- Smoke test `tests/issue-3263.test.ts` (4 cases, standalone + wasi) green:
+  compiles `TextEncoder.encode`/`TextDecoder.decode` (emits the relocated
+  `__textencoder_encode` / `__textdecoder_decode_u8` helpers, native path, valid
+  module) and `TextEncoder.encodeInto` (result-struct member resolves via
+  `struct.get`, no `env.__extern_get` host import — #1780 acceptance).
+
+Runtime numeric output for this subsystem is covered by `tests/issue-1780.test.ts`;
+that suite fails IDENTICALLY on the clean origin/main base in this container (a
+pre-existing local WasmGC-execution limitation, unrelated to the move — consistent
+with byte-identity IDENTICAL), so the #3263 smoke test asserts at the compile/emit
+level to stay deterministic locally and in CI.
