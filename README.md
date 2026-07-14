@@ -198,7 +198,7 @@ regardless of module content (js2wasm output contains zero stack-switching
 opcodes). Stick to the targeted flag set above.
 
 **Recommended version:** Wasmtime **46+** — earlier releases either reject the
-GC types or carry WasmGC bugs that can miscompile or mis-handle valid GC modules.
+GC types or carry WasmGC bugs that can cause memory leaks or poor performance.
 
 Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
 maturing, so compiled output is not guaranteed to run there yet. Browser hosts
