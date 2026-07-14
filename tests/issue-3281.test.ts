@@ -9,7 +9,15 @@
 // (src/codegen/expressions/new-super.ts) into
 // `src/codegen/expressions/new-builtin-globals.ts`
 // (`tryCompileBuiltinGlobalNew`, guarded by the `NEW_GLOBAL_FALLTHROUGH`
-// sentinel). The relocation is byte-identical — proved via
+// sentinel).
+//
+// Slice 2 lifted the indexed built-in constructor band (~630 LOC: ArrayBuffer
+// incl. resizable, DataView, Array) VERBATIM into
+// `src/codegen/expressions/new-indexed.ts` (`tryCompileIndexedBuiltinNew`,
+// guarded by `NEW_INDEXED_FALLTHROUGH`), bringing `compileNewExpression` under
+// 1,500 LOC.
+//
+// Both relocations are byte-identical — proved via
 // scripts/prove-emit-identity.mjs (IDENTICAL across all 39 gc/standalone/wasi
 // emits) — so this suite is armor + a reachability check, NOT a behavioural
 // change: it confirms the extracted arms still dispatch end to end.
@@ -51,6 +59,34 @@ describe("#3281 slice 1 — TypedArray ctors survive extraction (standalone-nati
   it("new Float64Array(n) → indexed store/read round-trips", async () => {
     const { result } = await runStandalone("const a = new Float64Array(2); a[0] = 3; a[1] = 4; return a[0] + a[1];");
     expect(result).toBe(7);
+  });
+});
+
+describe("#3281 slice 2 — indexed built-in ctors survive extraction (standalone-native)", () => {
+  it("new ArrayBuffer(n) → byteLength reflects the requested size, zero host imports", async () => {
+    const { result, envImports } = await runStandalone("const b = new ArrayBuffer(8); return b.byteLength;");
+    expect(result).toBe(8);
+    expect(envImports).toEqual([]); // pure native path
+  });
+
+  it("new DataView(buffer) → setInt32/getInt32 round-trips over the backing buffer", async () => {
+    const { result, envImports } = await runStandalone(
+      "const b = new ArrayBuffer(8); const dv = new DataView(b); dv.setInt32(0, 42); return dv.getInt32(0);",
+    );
+    expect(result).toBe(42);
+    expect(envImports).toEqual([]);
+  });
+
+  it("new Array(n) → length reflects the requested size", async () => {
+    const { result } = await runStandalone("const a = new Array(3); return a.length;");
+    expect(result).toBe(3);
+  });
+
+  it("new Array() → push + indexed read round-trips", async () => {
+    const { result } = await runStandalone(
+      "const a: number[] = new Array(); a.push(5); a.push(7); return a[0] + a[1];",
+    );
+    expect(result).toBe(12);
   });
 });
 
