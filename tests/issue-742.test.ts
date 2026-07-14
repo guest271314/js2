@@ -155,3 +155,27 @@ describe("#742 built-in static-method dispatch (compileBuiltinStaticCall)", () =
     );
   });
 });
+
+// Slice 3 (#742 Wave B): the remaining namespace static-method dispatch —
+// Symbol / Reflect / Promise / JSON / Date statics — was moved verbatim out of
+// compileCallExpression's property-access arm into the sibling module
+// call-namespace-static.ts (compileNamespaceStaticCall). These tests pin the
+// behaviour of those moved static-call paths (wasm output must match JS).
+describe("#742 namespace static dispatch (compileNamespaceStaticCall)", () => {
+  it("Symbol.for returns the same registered symbol", async () => {
+    await assertEquivalent(
+      `export function symSame(): number { return Symbol.for("k") === Symbol.for("k") ? 1 : 0; }
+       export function symDiff(): number { return Symbol.for("a") === Symbol.for("b") ? 1 : 0; }`,
+      [
+        { fn: "symSame", args: [] },
+        { fn: "symDiff", args: [] },
+      ],
+    );
+  });
+
+  it("Date.UTC static computes a fixed epoch", async () => {
+    await assertEquivalent(`export function dutc(): number { return Date.UTC(2000, 0, 1); }`, [
+      { fn: "dutc", args: [] },
+    ]);
+  });
+});

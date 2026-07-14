@@ -15,8 +15,10 @@ priority: high
 loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/expressions/call-namespace-static.ts
 coercion-sites-allow:
   - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions/call-namespace-static.ts
 # 2026-07-12 (#3182 groom): elevated medium→high. The EXTRACTION half is done
 # (calls.ts exists, 18,753 LOC — see #803, closed as landed); the live scope is
 # the REFACTOR half: break up compileCallExpression inside
@@ -189,3 +191,42 @@ Number / Array / String / Object static-call cases (wasm≡JS).
 receiver-type method dispatch (class methods, Number/BigInt/Boolean wrappers,
 generators, typed arrays, valueOf/toString, ~11666–14712). Issue stays
 `in-progress`.
+
+## Progress — Wave B chunk 3: namespace static dispatch (2026-07-14, sendev-waveb)
+
+Completes the namespace-static half of the property-access arm. Extracts the
+**remaining namespace static-method dispatch** — `Symbol` / `Reflect` /
+`Promise` / `JSON` / `Date` statics (`Symbol.for`, `Reflect.*`, `Promise.all` /
+`race` / `resolve` / `reject`, `JSON.parse` / `stringify`, `Date.now` / `parse` /
+`UTC`), the block that immediately follows chunk 2's cluster and runs up to the
+receiver-type dispatch (calls.ts 6774–8702 post-chunk-2, ~1,929 LOC, ending right
+before `let receiverType = …` at 8705) — into a new sibling module
+`src/codegen/expressions/call-namespace-static.ts` (`compileNamespaceStaticCall`).
+
+Self-contained on `ctx`/`fctx`/`expr`/`propAccess`: the block references no
+`receiverType`/`receiverClassName` (introduced only after it) and no prelude
+locals; `isPromiseSubclassReceiver` is declared inside the block; its four
+`return undefined`/bare `return;` are all inside nested arrow closures. Same two
+verified steps (same-file → sibling); 9 `calls.ts` internals exported to it
+(`emitDynamicCombinatorArg`, `emitIterableArg`, `emitJsonReplacerAllowList`,
+`isDynamicCombinatorArgEligible`, `resolvePromiseSubclassThisArg`,
+`tryEmitJsonParsePrimitive`, `tryEmitJsonStringifyPrimitive`, plus already-exported
+`compileCallExpression`/`compileProtoArg`).
+
+**Result**: `compileCallExpression` ~8,410 → ~6,480 LOC; `calls.ts` 14,484 →
+12,564 LOC; new `call-namespace-static.ts` 2,028 LOC.
+
+**Proof**: `prove-emit-identity` IDENTICAL across all 39 `(file,target)` emits
+after each step + post-merge; `tsc` 0; `oracle-ratchet` net-zero;
+`loc-budget` + `coercion-sites` (one relocated `__is_truthy` site, net-zero) pass
+with allowances added above. Smoke test extended with Symbol.for / Date.UTC
+cases (wasm≡JS). (A JSON.stringify-of-object equivalence case was dropped — a
+pre-existing object-stringify limitation independent of this relocation, which
+the byte-identity gate already proves neutral.)
+
+**Remaining in the property-access arm**: only the **receiver-type method
+dispatch** now (`receiverType`-keyed: class methods, Number/BigInt/Boolean
+wrapper methods, generators, typed arrays, valueOf/toString, ~8705–end of arm) —
+that section DOES use the arm-level `receiverType`/`receiverClassName` locals, so
+the next slice threads those in (or lifts the `receiverType = …` computation into
+the helper). Issue stays `in-progress`.
