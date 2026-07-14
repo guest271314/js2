@@ -20,6 +20,34 @@ export function adjustRethrowDepth(fctx: FunctionContext, delta: number): void {
 }
 
 /**
+ * Shift every break / continue (and generator-return / catch-rethrow) depth by
+ * `delta` — the bookkeeping that brackets each loop driver's body emit when it
+ * wraps the body in `delta` new structured-control levels (block/loop/body
+ * block). Call with `+n` on enter, `-n` on exit. Extracted from 22 identical
+ * inline copies in loops.ts (#3269 DRY).
+ */
+export function shiftLoopDepths(fctx: FunctionContext, delta: number): void {
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += delta;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += delta;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += delta;
+  adjustRethrowDepth(fctx, delta);
+}
+
+/**
+ * Assemble the canonical `block { loop { <body> } }` wrapper that every loop
+ * driver emits. Returns the outer `block` Instr so callers can push it directly
+ * or wrap it in a `try`/`catch_all` first. Extracted from 11 inline copies in
+ * loops.ts (#3269 DRY).
+ */
+export function blockLoop(body: Instr[]): Instr {
+  return {
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body }],
+  };
+}
+
+/**
  * Collect instructions emitted by `emitFn` into a separate array without
  * appending them to the current `fctx.body`.  This replaces the pervasive
  * "save body / swap / restore" pattern that was duplicated dozens of times.

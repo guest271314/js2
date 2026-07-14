@@ -41,7 +41,7 @@ import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call 
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
 // #2766 — reuse the legacy counted-loop proof predicates (pure AST analysis, no
 // codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
-import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
+import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import {
