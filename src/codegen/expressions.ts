@@ -111,12 +111,12 @@ export { coercionInstrs, defaultValueInstrs, pushDefaultValue, pushParamSentinel
 export { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
 // Re-exports from sub-modules
+export { compileAssignment } from "./expressions/assignment.js";
 export {
-  compileAssignment,
   compileCompoundAssignment,
   compileLogicalAssignment,
   isCompoundAssignment,
-} from "./expressions/assignment.js";
+} from "./expressions/operator-assignment.js";
 export { compileCallExpression, compileIIFE, compileOptionalCallExpression } from "./expressions/calls.js";
 export { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 export { emitThrowString, getFuncParamTypes } from "./expressions/helpers.js";
