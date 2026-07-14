@@ -37,7 +37,7 @@ import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
 import { emitSuperUninitializedThisGuard, emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
-import { emitToPropertyKeyOnce } from "./assignment.js";
+import { emitToPropertyKeyOnce } from "./operator-assignment.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
 import { resolveStructName } from "./misc.js";
 

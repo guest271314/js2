@@ -291,6 +291,18 @@
       "field": "ctxChecker",
       "extra": 5,
       "reason": "#808: same verbatim import-infra move as the getTypeAtLocation entry \u2014 5 RELOCATED ctx.checker sites, code unchanged, only its module home. Byte-identity IDENTICAL; not new checker coupling."
+    },
+    {
+      "file": "src/codegen/expressions/operator-assignment.ts",
+      "field": "getTypeAtLocation",
+      "extra": 15,
+      "reason": "#3266 (subtask of #3182): verbatim move of the operator-assignment subsystem (logical assignment &&=/||=/??= and compound assignment +=/-=/*=/&=/>>= plus string/native-string += fast paths, 22 fns) out of the assignment.ts god-file into this cohesive sibling module. The 15 getTypeAtLocation sites are RELOCATED, not new checker coupling -- emitted-Wasm byte-identity is IDENTICAL (scripts/prove-emit-identity.mjs, 39/39). assignment.ts's count drops by the same amount (21 -> 6)."
+    },
+    {
+      "file": "src/codegen/expressions/operator-assignment.ts",
+      "field": "ctxChecker",
+      "extra": 19,
+      "reason": "#3266 (subtask of #3182): same verbatim operator-assignment move as the getTypeAtLocation entry -- 19 RELOCATED ctx.checker sites, code unchanged, only its module home. Byte-identity IDENTICAL; not new checker coupling. assignment.ts's count drops by the same amount (32 -> 13)."
     }
   ]
 }
