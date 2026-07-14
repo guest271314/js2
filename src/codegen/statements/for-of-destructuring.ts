@@ -56,6 +56,19 @@ import {
 } from "./destructuring.js";
 import { collectInstrs } from "./shared.js";
 
+/**
+ * Emit the "write the destructured local back to its module global" tail —
+ * `if (syncGlobalIdx !== undefined) { local.get targetLocal; global.set … }`.
+ * Extracted from 10 identical inline copies (#3269 DRY). NOT for the
+ * boxed-capture variants that struct.get through the cell first (different shape).
+ */
+function emitGlobalSyncWriteback(fctx: FunctionContext, targetLocal: number, syncGlobalIdx: number | undefined): void {
+  if (syncGlobalIdx !== undefined) {
+    fctx.body.push({ op: "local.get", index: targetLocal });
+    fctx.body.push({ op: "global.set", index: syncGlobalIdx });
+  }
+}
+
 export function compileForOfDestructuring(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -878,10 +891,7 @@ export function compileForOfAssignDestructuring(
         coerceType(ctx, fctx, fieldType, targetType);
       }
       emitCoercedLocalSet(ctx, fctx, targetLocal, effectiveStackType);
-      if (targetSyncGlobalIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: targetLocal });
-        fctx.body.push({ op: "global.set", index: targetSyncGlobalIdx });
-      }
+      emitGlobalSyncWriteback(fctx, targetLocal, targetSyncGlobalIdx);
     }
   } else if (ts.isArrayLiteralExpression(expr)) {
     // for ([x, y] of arr) — elem is a vec struct or tuple struct, extract by index
@@ -941,10 +951,7 @@ export function compileForOfAssignDestructuring(
               fctx.body.push({ op: "local.set", index: oobLocal! });
             });
             fctx.body.push(...instrs);
-            if (oobSyncGlobalIdx !== undefined) {
-              fctx.body.push({ op: "local.get", index: oobLocal });
-              fctx.body.push({ op: "global.set", index: oobSyncGlobalIdx });
-            }
+            emitGlobalSyncWriteback(fctx, oobLocal, oobSyncGlobalIdx);
           }
         }
       }
@@ -998,10 +1005,7 @@ export function compileForOfAssignDestructuring(
                 fctx.body.push({ op: "local.set", index: oobLocal! });
               });
               fctx.body.push(...instrs);
-              if (oobSyncGlobalIdx !== undefined) {
-                fctx.body.push({ op: "local.get", index: oobLocal });
-                fctx.body.push({ op: "global.set", index: oobSyncGlobalIdx });
-              }
+              emitGlobalSyncWriteback(fctx, oobLocal, oobSyncGlobalIdx);
             }
           }
           continue;
@@ -1101,10 +1105,7 @@ export function compileForOfAssignDestructuring(
           fctx.body.push({ op: "local.set", index: targetLocal });
         }
 
-        if (tupleSyncGlobalIdx !== undefined) {
-          fctx.body.push({ op: "local.get", index: targetLocal });
-          fctx.body.push({ op: "global.set", index: tupleSyncGlobalIdx });
-        }
+        emitGlobalSyncWriteback(fctx, targetLocal, tupleSyncGlobalIdx);
       }
     } else {
       // Vec array assignment destructuring
@@ -1342,10 +1343,7 @@ export function compileForOfAssignDestructuring(
           }
         }
 
-        if (vecSyncGlobalIdx !== undefined) {
-          fctx.body.push({ op: "local.get", index: targetLocal });
-          fctx.body.push({ op: "global.set", index: vecSyncGlobalIdx });
-        }
+        emitGlobalSyncWriteback(fctx, targetLocal, vecSyncGlobalIdx);
       }
     }
   }
@@ -1439,10 +1437,7 @@ function emitForOfRestAssignment(
   }
   fctx.body.push({ op: "local.set", index: targetLocal });
 
-  if (restSyncGlobalIdx !== undefined) {
-    fctx.body.push({ op: "local.get", index: targetLocal });
-    fctx.body.push({ op: "global.set", index: restSyncGlobalIdx });
-  }
+  emitGlobalSyncWriteback(fctx, targetLocal, restSyncGlobalIdx);
   return true;
 }
 
@@ -1562,10 +1557,7 @@ function emitVecRestAssignment(
   }
   fctx.body.push({ op: "local.set", index: targetLocal });
 
-  if (restSyncGlobalIdx !== undefined) {
-    fctx.body.push({ op: "local.get", index: targetLocal });
-    fctx.body.push({ op: "global.set", index: restSyncGlobalIdx });
-  }
+  emitGlobalSyncWriteback(fctx, targetLocal, restSyncGlobalIdx);
 }
 
 /**
@@ -1828,10 +1820,7 @@ function compileForOfAssignDestructuringExternref(
       emitCoercedLocalSet(ctx, fctx, targetLocal, { kind: "externref" });
     }
 
-    if (extSyncGlobalIdx !== undefined) {
-      fctx.body.push({ op: "local.get", index: targetLocal });
-      fctx.body.push({ op: "global.set", index: extSyncGlobalIdx });
-    }
+    emitGlobalSyncWriteback(fctx, targetLocal, extSyncGlobalIdx);
   }
 }
 
@@ -1903,10 +1892,7 @@ export function compileForOfIteratorAssignDestructuring(
       // Coerce externref to target local's type and set
       emitCoercedLocalSet(ctx, fctx, targetLocal, { kind: "externref" });
 
-      if (iterObjSyncGlobalIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: targetLocal });
-        fctx.body.push({ op: "global.set", index: iterObjSyncGlobalIdx });
-      }
+      emitGlobalSyncWriteback(fctx, targetLocal, iterObjSyncGlobalIdx);
     }
   } else if (ts.isArrayLiteralExpression(expr)) {
     // for ([x, y] of iterable) — use __extern_get(elem, box(i)) for each element
@@ -2119,10 +2105,7 @@ export function compileForOfIteratorAssignDestructuring(
         emitCoercedLocalSet(ctx, fctx, targetLocal, { kind: "externref" });
       }
 
-      if (iterArrSyncGlobalIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: targetLocal });
-        fctx.body.push({ op: "global.set", index: iterArrSyncGlobalIdx });
-      }
+      emitGlobalSyncWriteback(fctx, targetLocal, iterArrSyncGlobalIdx);
     }
   }
 }
