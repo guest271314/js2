@@ -15,6 +15,10 @@ sprint: current
 subtask_of: 3182
 assignee: ttraenkler/Dev-WaveB-ObjRuntime
 related: [3182, 742, 808]
+loc-budget-allow:
+  - src/codegen/object-runtime-descriptors.ts
+coercion-sites-allow:
+  - src/codegen/object-runtime-descriptors.ts
 ---
 
 # #3274 — Decompose `ensureObjectRuntime` (WAVE-B slice 1: descriptor + integrity)
