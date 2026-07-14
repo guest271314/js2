@@ -8472,7 +8472,26 @@ function compileCallExpression(
               // sentinel global, so a bare `global.get` crashes binary emit.
               addStringConstantGlobal(ctx, propName);
               fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-              const descValType = compileExpression(ctx, fctx, prop.initializer);
+              // (#3253) Under standalone, build a plain inline descriptor object
+              // literal as a native `$Object` so `__obj_define_from_desc`'s
+              // `ref.test $Object` succeeds. A contextually-typed descriptor
+              // literal (its type resolves to `PropertyDescriptor`, a CONCRETE
+              // object type — not `any`) otherwise compiles to a CLOSED struct the
+              // applier rejects, so `value` and the ToBoolean-coerced
+              // writable/enumerable/configurable flags are silently dropped —
+              // e.g. `Object.create(o, {p: {value: 9, configurable: new
+              // Boolean(true)}})` lost the value and read configurable as false.
+              // Mirrors compileObjectAssignArg / compileProtoArg (#2076 / #2580).
+              // `compileObjectLiteralAsExternref` returns null only before any
+              // emit (import unavailable) and skips computed/symbol keys, so a
+              // fall-through to the generic path is side-effect-free.
+              let descValType: ValType | null | undefined;
+              if (ctx.standalone && ts.isObjectLiteralExpression(prop.initializer)) {
+                descValType = compileObjectLiteralAsExternref(ctx, fctx, prop.initializer);
+              }
+              if (descValType === undefined || descValType === null) {
+                descValType = compileExpression(ctx, fctx, prop.initializer);
+              }
               if (!descValType) {
                 fctx.body.push({ op: "ref.null.extern" });
               } else if (descValType.kind !== "externref") {
