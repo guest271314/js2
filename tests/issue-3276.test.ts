@@ -138,4 +138,28 @@ describe("#3276 compilePropertyAccess decomposition smoke", () => {
       export function test(): number { return Math.max(1, 41) + 1; }`),
     ).toBe(42);
   });
+
+  // ---- slice 3 bands ----
+
+  it("generator iterator-result .value / .done — band tryStringLengthIteratorAndExternClassReads", async () => {
+    expect(
+      await run(`
+      function* g(): Generator<number> { yield 41; }
+      export function test(): number {
+        const it = g();
+        const r = it.next();
+        return r.value + (r.done ? 0 : 1);
+      }`),
+    ).toBe(42);
+  });
+
+  it(".length on concatenated string + Math.PI constant — bands tryLengthAndNameReads / tryNamespaceConstantAndSymbolReads", async () => {
+    expect(
+      await run(`
+      export function test(): number {
+        const s = "ab" + "cde";
+        return s.length * 8 + (Math.PI > 3 ? 2 : 0);
+      }`),
+    ).toBe(42);
+  });
 });

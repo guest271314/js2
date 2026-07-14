@@ -121,3 +121,23 @@ Extracted 4 more cohesive guard bands into `property-access-dispatch.ts`:
 - Smoke test: 11/11 pass.
 - Stacked on slice 1's branch; PR opens once slice 1 merges. Remaining for later
   slices: `.length`/`.name`/string/iterator families + terminal struct-name block.
+
+### Slice 3 (stacked on slice 2 — length/name/namespace-constant/string/iterator/extern-class bands)
+
+Extracted 4 more cohesive guard bands into `property-access-dispatch.ts`:
+
+| Helper | Families |
+| --- | --- |
+| `tryPrototypeMethodAndArityReads` | `ClassName.prototype.<method>` cached singleton (#1394), `Math.<method>.length` arity |
+| `tryLengthAndNameReads` | `.length` (native-string value, Function/vec, generic) and `.name` reads |
+| `tryNamespaceConstantAndSymbolReads` | tagged-template `.raw`, `Math`/`Number` constants, `Symbol.*`, symbol `.description` |
+| `tryStringLengthIteratorAndExternClassReads` | String-wrapper `.length`, string `.length`, iterator-result `.value`/`.done`, external-declared-class member |
+
+- `property-access.ts`: 6473 → 5573 LOC (−900 in slice 3; **7989 → 5573 = −2416 cumulative**; `compilePropertyAccess` itself ~3335 → ~900 LOC — only the preamble, the 15 sentinel-guarded call blocks, and the terminal struct-name/dynamic-member block remain inline).
+- New module: ~1800 → ~2700 LOC.
+- **Byte-identity: IDENTICAL 39/39** (gc/standalone/wasi). `tsc --noEmit` 0.
+  Gates green: loc-budget (net +173), oracle-ratchet (net +0), any-box-sites,
+  stack-balance, dead-exports, prettier.
+- Smoke test: 13/13 pass.
+- Stacked on slice 2; PR opens once slice 2 merges. Remaining: the terminal
+  struct-name resolution + dynamic-member-get block (~800 LOC) as a possible slice 4.
