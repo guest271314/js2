@@ -236,7 +236,7 @@ high pass rate is necessary but not sufficient for "runs real JavaScript."
   some methods are missing or only handle the common overloads
 - `Map`, `Set`, `RegExp`, `JSON` — present but not fully spec-complete
 - standalone (no-JS-host) mode — actively in progress; host-free conformance
-  (~48% official, see the two-path figures near the top) trails the JS-host path
+  (see the two-path figures near the top) trails the JS-host path
 - getters/setters and other highly dynamic patterns — limited
 
 **Not yet** (intentionally unsupported or out of scope today):
