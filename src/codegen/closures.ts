@@ -110,6 +110,7 @@ import {
 export { isVecOrArrayRefType, isHostCallbackArgument, isDeferredCallbackArgument };
 import { emitFuncRefAsClosure } from "./closures/funcref-as-closure.js";
 export { emitFuncRefAsClosure };
+import { spliceNullGuarded, emitDefaultReturnValue } from "./closures/param-emit-helpers.js";
 import {
   emitObjectMethodAsClosure,
   finalizeMethodTrampolines,
@@ -892,13 +893,7 @@ export function emitArrowParamDestructuring(
 
     // Close null guard
     fctx.body = savedBodyAPD;
-    if (paramType.kind === "ref_null" && apdInstrs.length > 0) {
-      fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "ref.is_null" });
-      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: apdInstrs });
-    } else {
-      fctx.body.push(...apdInstrs);
-    }
+    spliceNullGuarded(fctx, paramIdx, paramType.kind === "ref_null", apdInstrs);
   } else if (ts.isArrayBindingPattern(param.name)) {
     // Array destructuring: const [a, b] = param
     const pattern = param.name;
@@ -1026,13 +1021,7 @@ export function emitArrowParamDestructuring(
 
     // Close null guard
     fctx.body = savedBodyAPDA;
-    if (paramType.kind === "ref_null" && apdaInstrs.length > 0) {
-      fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "ref.is_null" });
-      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: apdaInstrs });
-    } else {
-      fctx.body.push(...apdaInstrs);
-    }
+    spliceNullGuarded(fctx, paramIdx, paramType.kind === "ref_null", apdaInstrs);
   }
 }
 
@@ -1599,6 +1588,28 @@ export function functionBodyReferencesThis(fn: ts.ArrowFunction | ts.FunctionExp
   return walk(fn.body);
 }
 
+/**
+ * (#3270 dedup) Build the single capture-struct field definition for one
+ * capture. A mutable, not-yet-boxed capture becomes a `(ref null <refcell>)`
+ * field (registering the ref-cell type on first sight); every other capture —
+ * immutable, or mutable-and-already-boxed (whose type IS the ref cell) — keeps
+ * its own type. All capture fields are immutable (the box, not the slot, is
+ * mutated). Shared by the arrow-closure and arrow-callback capture-struct
+ * builders, which open-coded this identical per-capture branch.
+ */
+function buildCaptureFieldDef(
+  ctx: CodegenContext,
+  cap: { name: string; type: ValType; mutable: boolean; alreadyBoxed: boolean },
+): FieldDef {
+  if (cap.mutable && !cap.alreadyBoxed) {
+    // First time boxing: create ref cell type for the capture value type
+    const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
+    return { name: cap.name, type: { kind: "ref_null" as const, typeIdx: refCellTypeIdx }, mutable: false };
+  }
+  // Immutable, or already boxed (capture's type IS the ref cell type already).
+  return { name: cap.name, type: cap.type, mutable: false };
+}
+
 export function compileArrowFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1993,30 +2004,7 @@ export function compileArrowAsClosure(
   } else {
     const structFields = [
       { name: "func", type: { kind: "funcref" as const }, mutable: false },
-      ...captures.map((c) => {
-        if (c.mutable && !c.alreadyBoxed) {
-          // First time boxing: create ref cell type for the capture value type
-          const refCellTypeIdx = getOrRegisterRefCellType(ctx, c.type);
-          return {
-            name: c.name,
-            type: { kind: "ref_null" as const, typeIdx: refCellTypeIdx },
-            mutable: false,
-          };
-        }
-        if (c.mutable && c.alreadyBoxed) {
-          // Already boxed: the capture's type IS the ref cell type already
-          return {
-            name: c.name,
-            type: c.type,
-            mutable: false,
-          };
-        }
-        return {
-          name: c.name,
-          type: c.type,
-          mutable: false,
-        };
-      }),
+      ...captures.map((c) => buildCaptureFieldDef(ctx, c)),
     ];
 
     // #1177: Append a TDZ-flag ref-cell field for every capture that carries
@@ -2441,13 +2429,7 @@ export function compileArrowAsClosure(
               liftedFctx.body.push({ op: "local.set", index: localIdx });
             }
             liftedFctx.body = savedBodyFPAD;
-            if (resolvedParamType.kind === "ref_null" && fpadInstrs.length > 0) {
-              liftedFctx.body.push({ op: "local.get", index: srcParamIdx });
-              liftedFctx.body.push({ op: "ref.is_null" });
-              liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpadInstrs });
-            } else {
-              liftedFctx.body.push(...fpadInstrs);
-            }
+            spliceNullGuarded(liftedFctx, srcParamIdx, resolvedParamType.kind === "ref_null", fpadInstrs);
             handled = true;
           } else if (typeDef.fields.length > 0 && typeDef.fields[0]!.name === "_0") {
             // Tuple struct destructuring: extract positional fields via struct.get
@@ -2469,13 +2451,7 @@ export function compileArrowAsClosure(
               liftedFctx.body.push({ op: "local.set", index: localIdx });
             }
             liftedFctx.body = savedBodyFPAD;
-            if (resolvedParamType.kind === "ref_null" && fpadInstrs.length > 0) {
-              liftedFctx.body.push({ op: "local.get", index: srcParamIdx });
-              liftedFctx.body.push({ op: "ref.is_null" });
-              liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpadInstrs });
-            } else {
-              liftedFctx.body.push(...fpadInstrs);
-            }
+            spliceNullGuarded(liftedFctx, srcParamIdx, resolvedParamType.kind === "ref_null", fpadInstrs);
             handled = true;
           }
         }
@@ -2528,13 +2504,7 @@ export function compileArrowAsClosure(
             liftedFctx.body.push({ op: "local.set", index: localIdx });
           }
           liftedFctx.body = savedBodyFPOD;
-          if (paramType.kind === "ref_null" && fpodInstrs.length > 0) {
-            liftedFctx.body.push({ op: "local.get", index: paramIdx });
-            liftedFctx.body.push({ op: "ref.is_null" });
-            liftedFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: [], else: fpodInstrs });
-          } else {
-            liftedFctx.body.push(...fpodInstrs);
-          }
+          spliceNullGuarded(liftedFctx, paramIdx, paramType.kind === "ref_null", fpodInstrs);
           handled = allFound;
         }
       }
@@ -2851,18 +2821,7 @@ export function compileArrowAsClosure(
   }
 
   // Ensure return value for non-void functions (skip if concise body already left a value)
-  if (closureReturnType && !conciseBodyHasValue) {
-    const lastInstr = liftedFctx.body[liftedFctx.body.length - 1];
-    if (!lastInstr || lastInstr.op !== "return") {
-      if (closureReturnType.kind === "f64") {
-        liftedFctx.body.push({ op: "f64.const", value: 0 });
-      } else if (closureReturnType.kind === "i32") {
-        liftedFctx.body.push({ op: "i32.const", value: 0 });
-      } else if (closureReturnType.kind === "externref") {
-        liftedFctx.body.push({ op: "ref.null.extern" });
-      }
-    }
-  }
+  emitDefaultReturnValue(liftedFctx, closureReturnType, conciseBodyHasValue);
 
   if (savedFunc) ctx.funcStack.pop();
   if (savedFunc) ctx.parentBodiesStack.pop();
@@ -3103,28 +3062,7 @@ export function compileArrowAsCallback(
   let capStructTypeIdx = -1;
   if (captures.length > 0) {
     // Build fields first -- getOrRegisterRefCellType may add types to ctx.mod.types
-    const fields: FieldDef[] = captures.map((cap) => {
-      if (cap.mutable && !cap.alreadyBoxed) {
-        const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
-        return {
-          name: cap.name,
-          type: { kind: "ref_null" as const, typeIdx: refCellTypeIdx },
-          mutable: false,
-        };
-      }
-      if (cap.mutable && cap.alreadyBoxed) {
-        return {
-          name: cap.name,
-          type: cap.type,
-          mutable: false,
-        };
-      }
-      return {
-        name: cap.name,
-        type: cap.type,
-        mutable: false,
-      };
-    });
+    const fields: FieldDef[] = captures.map((cap) => buildCaptureFieldDef(ctx, cap));
     // Set capStructTypeIdx AFTER building fields (which may register new ref cell types)
     capStructTypeIdx = ctx.mod.types.length;
     ctx.mod.types.push({
@@ -3361,18 +3299,7 @@ export function compileArrowAsCallback(
     }
   }
 
-  if (cbReturnType && !exprBodyHasReturnValue) {
-    const lastInstr = cbFctx.body[cbFctx.body.length - 1];
-    if (!lastInstr || lastInstr.op !== "return") {
-      if (cbReturnType.kind === "f64") {
-        cbFctx.body.push({ op: "f64.const", value: 0 });
-      } else if (cbReturnType.kind === "i32") {
-        cbFctx.body.push({ op: "i32.const", value: 0 });
-      } else if (cbReturnType.kind === "externref") {
-        cbFctx.body.push({ op: "ref.null.extern" });
-      }
-    }
-  }
+  emitDefaultReturnValue(cbFctx, cbReturnType, exprBodyHasReturnValue);
 
   if (savedFunc) ctx.funcStack.pop();
   if (savedFunc) ctx.parentBodiesStack.pop();
