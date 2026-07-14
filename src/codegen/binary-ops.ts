@@ -18,12 +18,12 @@ import { ensureAnyFromExternHelper, isAnyValue, undefinedSingletonActive } from 
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { compileAssignment } from "./expressions/assignment.js";
 import {
-  compileAssignment,
   compileCompoundAssignment,
   compileLogicalAssignment,
   isCompoundAssignment,
-} from "./expressions/assignment.js";
+} from "./expressions/operator-assignment.js";
 import {
   emitPrivateBrandPredicate,
   emitThrowTypeError,

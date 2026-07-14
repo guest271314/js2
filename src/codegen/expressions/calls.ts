@@ -283,10 +283,10 @@ import {
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
   ensureStrToCharVecHelper,
-  ensureTextEncodingHelpers,
   nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
+import { ensureTextEncodingHelpers } from "../text-encoding-native.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
 import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import {
