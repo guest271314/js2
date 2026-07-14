@@ -1,7 +1,8 @@
 ---
 id: 3145
 title: "standalone: Atomics.* on non-shared views (the non-SAB subset — ~29 __get_builtin CEs)"
-status: in-progress
+status: done
+completed: 2026-07-14
 assignee: ttraenkler/senior-dev-a7a4
 sprint: current
 priority: medium
@@ -53,3 +54,71 @@ just the recognizer + the throw-on-non-shared branch).
 - The ~29 non-SAB `built-ins/Atomics/*` error-path tests compile + pass on the
   standalone lane; 0 regressions on a passing-test sweep. SAB-dependent tests
   stay skipped (out of scope).
+
+## Implementation (2026-07-14, senior-dev)
+
+**Measured scope.** The "~29" estimate resolved to **19** non-SAB
+`built-ins/Atomics/*` files on current main (the rest genuinely need
+`SharedArrayBuffer`). All 19 were `compile_error`/`fail` in the standalone lane
+before this change. After: **15 pass**, 4 remain non-pass (all pre-existing,
+zero regression). The 4 need orthogonal features, not the Atomics recognizer:
+
+- 3× `notify/retrieve-length-before-index-coercion-*` — assert a `RangeError`
+  **plus** the resizable-ArrayBuffer resize side effect from `index.valueOf()`;
+  needs real resizable-AB + `ValidateAtomicAccess` ordering (separate feature).
+- 1× `waitAsync/bigint/null-bufferdata-throws` — blocked on proper
+  `BigInt64Array` support (#1349, BigInt rep gated on the i64-brand ValType).
+
+**Root cause.** `Atomics.<method>(...)` as a direct call had no dedicated
+standalone lowering, so it fell to the dynamic `env::__get_builtin` shortcut,
+which hard-CEs under `--target standalone` (#1472 Phase B). The first-class
+*value* of `Atomics.<m>` was already handled — #2984 Phase 3
+(`ensureStandaloneBuiltinStaticMethodClosure`) reifies every
+`BUILTIN_STATIC_METHOD_ARITY` member as an identity-stable closure whose body
+throws a catchable TypeError — so `typeof Atomics.waitAsync === 'function'`
+already worked. Only the direct-call path leaked.
+
+**Fix (why this shape).** Host-free targets have **no `SharedArrayBuffer`** and
+no shared-memory atomics backend, so *every* Atomics op runs on a necessarily
+non-shared view. The ES spec (`ValidateIntegerTypedArray`) rejects exactly these
+receivers with a TypeError: float/clamped views for the read-modify-write ops,
+non-`Int32Array`/`BigInt64Array` views for the waitable ops
+(`wait`/`waitAsync`/`notify`), and a detached buffer. So the correct observable
+result for the whole in-scope set is a spec TypeError. The direct CALL now
+degrades to `emitThrowTypeError` — **the same catchable TypeError the #2984
+Phase 3 value closure already throws when invoked**, keeping call and value
+paths observationally identical. The throw fires *before* argument coercion,
+matching the spec ordering the `notify(view, {valueOf(){throw}}, …)` "should not
+evaluate" tests assert.
+
+**Why zero regression.** The compiler arm is gated on `noJsHost(ctx)` (host/gc
+lane untouched — it keeps host `__get_builtin` Atomics) and on the GLOBAL
+`Atomics` binding (`isGlobalBuiltinIdentifier` skips a user `const Atomics =
+…`). No standalone test could have been *passing* through Atomics before (they
+all CE'd), so nothing goes pass→non-pass — the change only flips CE→pass or
+CE→fail. Verified host lane for the Category-A files is fail→fail (unchanged).
+
+### Files
+
+- `src/codegen/expressions/calls.ts` — new `Atomics.<method>(...)` standalone
+  call arm (after the `Math.*` dispatch) + `isGlobalBuiltinIdentifier` helper.
+- `tests/test262-runner.ts` — new `testWithNonAtomicsFriendlyTypedArrayConstructors`
+  harness shim (float+clamped ctors; the 10 Category-A tests use it and its name
+  has no `testWithTypedArrayConstructors` infix, so the existing shim never
+  covered it) behind a dedicated `needsTestNonAtomicsFriendlyTypedArray` gate.
+- `tests/issue-3145.test.ts` — permanent coverage (14 cases: per-op throw,
+  spec-ordering no-coerce, `typeof` value path, local-shadow guard).
+
+## Test Results
+
+- `tests/issue-3145.test.ts` — 14/14 pass.
+- Standalone lane, 19 in-scope files: 15 pass (was 0), 4 non-pass (orthogonal
+  features, pre-existing). Host lane: unchanged (fail→fail), 0 regression.
+
+## Follow-ups (out of scope)
+
+- Resizable-ArrayBuffer + `ValidateAtomicAccess` index/length ordering →
+  the 3 `notify/retrieve-length-before-index-coercion-*` tests.
+- `BigInt64Array` support (#1349) → `waitAsync/bigint/null-bufferdata-throws`.
+- Real shared-memory atomics once `SharedArrayBuffer` is supported (283 SAB
+  Atomics tests currently skip-listed).

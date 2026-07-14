@@ -173,7 +173,7 @@ import {
   ensureStandaloneNativeMethodClosure,
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
-import { pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
+import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import {
   isSymbolSpeciesKeyExpression,
   resolveBuiltinReceiverName,
@@ -3184,6 +3184,20 @@ function isGlobalEvalIdentifier(ident: ts.Identifier, checker: ts.TypeChecker): 
   // Global eval is declared only in .d.ts files. A local shadow has at least one
   // declaration in a non-declaration (.ts) source file.
   return decls.every((d) => d.getSourceFile().isDeclarationFile);
+}
+
+/**
+ * (#3145) True when `ident` refers to a GLOBAL builtin binding (declared only in
+ * ambient .d.ts lib files) that is NOT shadowed by a local or captured variable
+ * in the current function. Gates builtin-namespace call lowerings (e.g.
+ * `Atomics.<m>(...)`) so a user `const Atomics = { … }` never hijacks the
+ * fast path. Mirrors `isGlobalEvalIdentifier` with the extra local/capture
+ * guard the namespace case needs.
+ */
+function isGlobalBuiltinIdentifier(ctx: CodegenContext, fctx: FunctionContext, ident: ts.Identifier): boolean {
+  if (fctx.localMap.has(ident.text)) return false;
+  if (fctx.boxedCaptures?.has(ident.text)) return false;
+  return isGlobalEvalIdentifier(ident, ctx.checker);
 }
 
 /**
@@ -6751,6 +6765,38 @@ function compileCallExpression(
       if (mathResult !== undefined) return mathResult;
       // Unknown Math method — fall through to generic call handling
       // (e.g. Array.prototype.every.call(Math, ...) rewritten as Math.every(...))
+    }
+
+    // (#3145) `Atomics.<method>(...)` in a host-free target (--target
+    // standalone / wasi). Host-free mode has no `SharedArrayBuffer` (it is on
+    // the skip list) and no shared-memory atomics backend, so EVERY Atomics
+    // operation runs on a necessarily non-shared view — which the ES spec
+    // rejects: `ValidateIntegerTypedArray` throws a TypeError for float/clamped
+    // views and for the non-`Int32Array`/`BigInt64Array` views the waitable ops
+    // (`wait`/`waitAsync`/`notify`) require, and a detached buffer is likewise a
+    // TypeError. Rather than leak the dynamic `env::__get_builtin` host import
+    // (the #1472 Phase B refusal that hard-CEs these ~29 error-path tests),
+    // degrade the CALL to a catchable TypeError. This is exactly the behaviour
+    // #2984 Phase 3 already reifies for the first-class Atomics method VALUE
+    // (`const f = Atomics.add; f(v,0,1)` throws when invoked); routing the
+    // direct call here keeps the two paths observationally identical. The throw
+    // fires BEFORE any argument coercion, matching the spec ordering that the
+    // `notify(view, {valueOf(){throw}}, …)` "should not evaluate" tests assert.
+    // Real atomic semantics stay gated on SharedArrayBuffer (out of scope).
+    if (
+      noJsHost(ctx) &&
+      ts.isIdentifier(propAccess.expression) &&
+      propAccess.expression.text === "Atomics" &&
+      isGlobalBuiltinIdentifier(ctx, fctx, propAccess.expression) &&
+      BUILTIN_STATIC_METHOD_ARITY.Atomics?.[propAccess.name.text] !== undefined
+    ) {
+      emitThrowTypeError(
+        ctx,
+        fctx,
+        `Atomics.${propAccess.name.text} requires a shared integer TypedArray, which is unsupported in --target standalone`,
+      );
+      // The throw is stack-polymorphic; return the nominal (any-boundary) type.
+      return { kind: "externref" };
     }
 
     // #2590 — RegExp.escape(s) (ES2025, §22.2.5). A pure string transform that
