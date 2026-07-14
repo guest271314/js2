@@ -17,6 +17,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveChangeBase, changeSetAllowances } from "./lib/change-scope.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCOPE = join(ROOT, "src", "codegen");
@@ -112,14 +113,35 @@ if (verbose) {
 }
 
 if (failures.length > 0) {
-  console.error(
-    `[oracle-ratchet] FAILED — direct checker usage grew in src/codegen/ (${failures.length} file(s)).\n` +
-      `New code must use ctx.oracle (src/checker/oracle.ts, #1930). If this growth is\n` +
-      `genuinely intentional, add a preauthorized entry with a reason, or migrate the\n` +
-      `site to the oracle. Offending files:\n  ` +
-      failures.join("\n  "),
-  );
-  process.exit(1);
+  // Intentional-growth hatch (#3131), same change-scoped frontmatter mechanism
+  // as check:loc-budget / check:coercion-sites: a change-set waives growth for a
+  // file by listing its repo-relative path under an `oracle-ratchet-allow:` key
+  // in the YAML frontmatter of a plan/issues/*.md file THE CHANGE-SET ITSELF
+  // adds or modifies. This keeps god-file splits (which merely RELOCATE existing
+  // checker call-sites verbatim — total usage conserved) from touching the
+  // whole-tree baseline JSON, which re-conflicted every open PR on every main
+  // advance. Only issue files in the diff are consulted (an old allowance on
+  // main grants nothing), so a unique file per PR ⇒ no cross-PR conflicts.
+  const { base } = resolveChangeBase(ROOT);
+  const allow = base ? changeSetAllowances(ROOT, base, "oracle-ratchet-allow") : new Map();
+  const fileOf = (f) => f.slice(0, f.indexOf(":"));
+  const waived = failures.filter((f) => allow.has(fileOf(f)));
+  const remaining = failures.filter((f) => !allow.has(fileOf(f)));
+  for (const w of waived) {
+    console.log(`[oracle-ratchet] waived by change-set allowance (${allow.get(fileOf(w)).join(", ")}): ${w}`);
+  }
+  if (remaining.length > 0) {
+    console.error(
+      `[oracle-ratchet] FAILED — direct checker usage grew in src/codegen/ (${remaining.length} file(s)).\n` +
+        `New code must use ctx.oracle (src/checker/oracle.ts, #1930). If this growth is\n` +
+        `genuinely intentional, migrate the site to the oracle, or — for a verbatim\n` +
+        `relocation (god-file split, total usage conserved) — grant THIS change-set an\n` +
+        `allowance by listing the path(s) under an \`oracle-ratchet-allow:\` key in the\n` +
+        `YAML frontmatter of this PR's own plan/issues/*.md file. Offending files:\n  ` +
+        remaining.join("\n  "),
+    );
+    process.exit(1);
+  }
 }
 
 if (updateOnDecrease && decreased) {
