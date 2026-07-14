@@ -1,7 +1,8 @@
 ---
 id: 3145
 title: "standalone: Atomics.* on non-shared views (the non-SAB subset — ~29 __get_builtin CEs)"
-status: ready
+status: in-progress
+assignee: ttraenkler/senior-dev-a7a4
 sprint: current
 priority: medium
 horizon: m
