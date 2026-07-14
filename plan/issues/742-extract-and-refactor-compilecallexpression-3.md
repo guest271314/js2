@@ -2,10 +2,20 @@
 id: 742
 title: "Extract and refactor compileCallExpression (3,350 lines)"
 status: in-progress
-assignee: ttraenkler/cs-1931
+assignee: ttraenkler/sendev-waveb
 created: 2026-03-17
-updated: 2026-07-12
+updated: 2026-07-14
 priority: high
+# (#742 Wave B, PR by sendev-waveb) The identifier-callee dispatch arm was moved
+# verbatim into the new sibling module call-identifier.ts. Two change-scoped
+# gates flag the NEW file (both net-zero across the tree — a pure relocation):
+#   - loc-budget: call-identifier.ts is a new 2.1k-LOC module (> 1500 threshold).
+#   - coercion-sites: the 7 coercion-vocabulary sites moved out of calls.ts into
+#     it (calls.ts loses exactly these; net-zero). Not new hand-rolled coercion.
+loc-budget-allow:
+  - src/codegen/expressions/call-identifier.ts
+coercion-sites-allow:
+  - src/codegen/expressions/call-identifier.ts
 # 2026-07-12 (#3182 groom): elevated medium→high. The EXTRACTION half is done
 # (calls.ts exists, 18,753 LOC — see #803, closed as landed); the live scope is
 # the REFACTOR half: break up compileCallExpression inside
@@ -80,3 +90,56 @@ pulling self-contained guard/dispatch blocks out of the prelude; then tackle the
 method-dispatch core; finally the table-driven callee registry (re-scope item a).
 Builtin lowerings stay deferred to #2088's per-builtin scaffold (re-scope item b).
 Issue stays `in-progress`.
+
+## Progress — Wave B chunk 1: identifier-callee dispatch (2026-07-14, sendev-waveb)
+
+By this point `compileCallExpression` had grown to **~13,371 lines** (5136–18506
+in `calls.ts`) — the single biggest function in the codebase. Its body is a flat
+sequence of dispatch arms guarded on the *shape* of `expr.expression`
+(property-access → method call; identifier → global/direct call; super; element
+access; conditional; …). Crucially, the only function-scope locals live in the
+**prelude** (`nodeProcessCall`, `_aggCallee`, …) and are consumed immediately —
+**no dispatch arm closes over prelude state**, so each arm depends only on
+`ctx` / `fctx` / `expr` and is cleanly liftable.
+
+This chunk extracts the **identifier-callee dispatch family** — the block that
+handles a bare-identifier callee: node:fs global functions
+(`readFileSync`/`writeFileSync`, WASI + JS-host lowerings), the inline global
+builtins (`parseInt`/`parseFloat`/`isNaN`/`isFinite`/`Array(...)`), and direct
+named-function calls resolved through `funcMap`. That was lines 14714–16717
+(~2,004 LOC), a contiguous run of five `if`-guarded arms.
+
+Done in two verified steps (safety-first, byte-identity gated at each step):
+
+1. **Same-file extraction** → a top-level `compileIdentifierCall(ctx, fctx,
+   expr): InnerResult | undefined`. Verbatim move; the block's implicit
+   fall-through (reaching the arm's end without returning) becomes
+   `return undefined`, and the call site does
+   `const r = compileIdentifierCall(...); if (r !== undefined) return r;`.
+   `undefined` is a safe fall-through sentinel because `InnerResult` never
+   includes it (no `return undefined` / bare `return;` in the moved span).
+2. **Relocate to sibling module** `src/codegen/expressions/call-identifier.ts`.
+   The 14 `calls.ts`-internal symbols the arm needs are exported from `calls.ts`
+   (`emitBoundFunctionCall`, `tryEmitInlineDynamicCall`, the `calleeIsX`
+   predicates, `PATH_BASED_FS_FNS`, …); `calls.ts` imports `compileIdentifierCall`
+   back. The resulting `calls.ts ↔ call-identifier.ts` cycle is lazy
+   (used only inside function bodies) and matches the existing
+   `calls.ts ↔ calls-closures.ts` / `new-super.ts` cycles.
+
+**Result**: `compileCallExpression` ~13,371 → ~11,388 LOC; `calls.ts` 19,435 →
+17,441 LOC; new `call-identifier.ts` 2,105 LOC.
+
+**Byte-identity proof**: `scripts/prove-emit-identity.mjs` — IDENTICAL across all
+39 `(file,target)` emits (gc/standalone/wasi × the 13-file playground corpus)
+after each step. `tsc --noEmit` 0 errors. `check:oracle-ratchet` net-zero
+(`getTypeAtLocation +0`, `ctx.checker +0`). Smoke test:
+`tests/issue-742.test.ts` adds wasm≡JS cases for the moved paths (parseInt
+family, `Array(...)`, direct/recursive named calls).
+
+The two `*-allow` frontmatter keys sanction the *new file* the two change-scoped
+gates flag — both net-zero across the tree (a pure relocation), not new code.
+
+**Next chunks (Wave B, serial)**: the 9k-line property-access method-call arm
+(5632–14712) is the remaining giant — decompose it into per-receiver-family
+helpers; then the super / element-access / conditional / IIFE arms. Issue stays
+`in-progress`.
