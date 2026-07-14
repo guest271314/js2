@@ -1,9 +1,11 @@
 ---
 id: 808
 title: "Extract string/import infrastructure from index.ts → imports.ts"
-status: ready
+status: done
+assignee: ttraenkler/senior-dev
 created: 2026-03-26
-updated: 2026-07-12
+updated: 2026-07-14
+completed: 2026-07-14
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -11,6 +13,16 @@ goal: maintainability
 sprint: current
 subtask_of: 688
 related: [3182]
+# LOC-regrowth ratchet (#3102/#3131): this extraction MOVES ~1.8k LOC of import
+# infrastructure out of the src/codegen/index.ts god-file (15,749 → 13,951) INTO
+# the cohesive src/codegen/registry/imports.ts, which consequently crosses the
+# 1500-LOC threshold (→ ~2,237). This is intentional consolidation (a focused
+# single-purpose registry module, not the index.ts grab-bag); emitted-Wasm
+# byte-identity is proven IDENTICAL (scripts/prove-emit-identity.mjs, 39/39
+# file,target), so it is pure code-movement. Grant the allowance (baseline json
+# is refreshed post-merge on main only, #3131).
+loc-budget-allow:
+  - src/codegen/registry/imports.ts
 ---
 
 > **2026-07-12 refresh (#3182 groom, elevated to current/high).** Partially
