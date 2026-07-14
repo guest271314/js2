@@ -94,6 +94,8 @@
     "check:oracle-ratchet": "node scripts/check-oracle-ratchet.mjs",
     "check:loc-budget": "node scripts/check-loc-budget.mjs",
     "check:dead-exports": "node scripts/audit-legacy-reachability.mjs --check",
+    "check:godfiles": "node scripts/profile-godfiles.mjs --check",
+    "profile:godfiles": "node scripts/profile-godfiles.mjs",
     "gen:ir-adoption": "node scripts/gen-ir-adoption.mjs",
     "check:ir-adoption": "node scripts/gen-ir-adoption.mjs --check",
     "check:stack-balance": "npx tsx scripts/check-stack-balance.ts",

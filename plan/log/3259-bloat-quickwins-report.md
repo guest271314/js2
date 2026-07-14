@@ -93,3 +93,53 @@ the needle.
   can't see those files.
 - If a duplication gate is ever wanted, it must run a tokenizer that doesn't drop
   large files — jscpd@4 as-is would false-green the god-files.
+
+## Follow-up — how to actually inspect the god-files (the tools jscpd can't be)
+
+Since jscpd is blind to the god-files, two file-size-agnostic instruments do the
+real work. Both are now runnable:
+
+### Instrument 1 — `scripts/profile-godfiles.mjs` (`pnpm run profile:godfiles`)
+
+TS-compiler-API profiler: ranks top-level functions by LOC and by **emission
+density** (`op:` Instr-literals per LOC), which classifies the bloat *shape* and
+routes each hotspot to its correct lever. Also gates regressions
+(`pnpm run check:godfiles` — fails on a new mega-function or >40-LOC growth of a
+tracked one; baseline `scripts/godfile-profile-baseline.json`, 62 tracked fns).
+
+**Bloat partition across the 5 god-files (64,261 LOC total):**
+
+| Shape | LOC | Lever |
+|---|---|---|
+| hand-emitted-runtime (high op-density) | **32,272** | self-host **#3256 / #3257 / #3258** |
+| dispatch-hairball (huge LOC, low density) | **17,813** | IR migration **#2855** / legacy-delete **#3090** |
+| orchestration (~0 ops) | 12,661 | leave — not bloat |
+
+Density cleanly separates the shapes: `ensureObjectRuntime` (7,355 LOC, d=0.39),
+`ensureNativeStringHelpers` (4,844 LOC, d=0.46) → self-host; `compileCallExpression`
+(13,202 LOC, d=0.10 — 69% of calls.ts in one function) → dispatch hairball;
+`generateModule`/`registerWasiImports` (d≈0) → orchestration, leave alone.
+
+### Instrument 2 — `audit-legacy-reachability.mjs --json`, filtered to god-files
+
+The existing reachability audit sizes the **#3090 deletion prize inside** the
+god-files — functions reachable *only* through the legacy dispatch pair, which die
+when the IR supersedes their AST kind:
+
+| File | total | legacy-only | shared (runtime) | dead |
+|---|---|---|---|---|
+| `expressions/calls.ts` | 19,250 | **17,604** | 0 | 0 |
+| `array-methods.ts` | 10,153 | **8,954** | 0 | 0 |
+| `native-strings.ts` | 7,457 | 1,203 | 5,988 | 0 |
+| `index.ts` | 15,792 | 391 | 13,008 | 14 |
+| `object-runtime.ts` | 11,609 | 147 | 10,543 | 0 |
+| **totals** | 64,261 | **28,299** | 29,539 | **14** |
+
+Reading: **28,299 LOC is legacy-only** (deletable once the IR owns those kinds —
+#2855/#3090, gated), **29,539 is shared runtime** (not deletable by IR migration —
+only compressible by self-hosting, #3256–#3258), and **only 14 LOC is truly dead**
+(matches the knip finding — nothing free to sweep). The two classifiers agree:
+`calls.ts` is legacy-only *and* a dispatch-hairball → #2855/#3090;
+`object-runtime.ts`/`native-strings.ts` are shared *and* hand-emitted-runtime →
+self-host. **The backlog (#3256–#3258 + #2855/#3090) already targets every
+high-signal hotspot** the profilers surface — no orphan bloat.
