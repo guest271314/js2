@@ -197,8 +197,9 @@ not supported on this compiler configuration` and exits before running anything,
 regardless of module content (js2wasm output contains zero stack-switching
 opcodes). Stick to the targeted flag set above.
 
-**Minimum version:** Wasmtime **44+** (the first release with a stable WasmGC
-implementation). Older versions reject the GC types.
+**Recommended version:** Wasmtime **46+**. WasmGC first stabilized in 44, but
+44 and 45 carry GC bugs that can miscompile or mis-handle valid GC modules — use
+**46 or newer**. Versions older than 44 reject the GC types outright.
 
 Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
 maturing, so compiled output is not guaranteed to run there yet. Browser hosts
