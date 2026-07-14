@@ -1007,26 +1007,13 @@ export function recoverRegExpStructFromExternref(
   thisExternLocal: number,
 ): { regexpLocal: number; structTypeIdx: number } | null {
   const structTypeIdx = ensureStandaloneRegExpStruct(ctx);
-
-  // (#3192 S2) Brand check via the shared `emitReceiverBrandCheck` preamble
-  // (receiver-brand.ts, #3171): it consumes the externref `this` on the stack,
-  // `ref.test $NativeRegExp` (struct-only spec — RegExp has no shared backing
-  // store to disambiguate), throws a *catchable* TypeError on a miss (the
-  // wrong-`this` brand-check the 31 reflective brand-check tests gate on — never
-  // a `ref.cast` trap), and leaves the recovered non-null `(ref $NativeRegExp)`
-  // on the stack. Message preserved verbatim (§22.2.6.4.1 step 2).
+  // (#3192 S2) Brand check via the shared `emitReceiverBrandCheck` (receiver-brand.ts,
+  // #3171): consumes the externref `this`, `ref.test $NativeRegExp` (struct-only
+  // spec), throws a *catchable* TypeError on a miss (§22.2.6.4.1 step 2, message
+  // verbatim — never a `ref.cast` trap) and leaves the recovered struct on the stack.
+  const brandMsg = "Method called on incompatible receiver (RegExp brand check failed)";
   fctx.body.push({ op: "local.get", index: thisExternLocal });
-  emitReceiverBrandCheck(
-    ctx,
-    fctx,
-    { kind: "externref" },
-    {
-      message: "Method called on incompatible receiver (RegExp brand check failed)",
-      structTypeIdx,
-    },
-  );
-
-  // Stash the recovered struct in a typed local (callers read fields via it).
+  emitReceiverBrandCheck(ctx, fctx, { kind: "externref" }, { message: brandMsg, structTypeIdx });
   const reStructType: ValType = { kind: "ref", typeIdx: structTypeIdx };
   const regexpLocal = allocLocal(fctx, `__re_recovered_${fctx.locals.length}`, reStructType);
   fctx.body.push({ op: "local.set", index: regexpLocal });
