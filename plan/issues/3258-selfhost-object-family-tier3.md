@@ -42,6 +42,22 @@ self-host nets negative ONLY if the TS dialect covers ALL elem-kinds).
 - Written verdict on which object-runtime helpers are NOT self-hostable yet
   (dialect-gap) + what dialect work would unblock them.
 
+## Measurement (the profiler is this issue's progress meter)
+
+Use the god-file profiler from #3259 as the acceptance instrument:
+
+- **Before/after:** `pnpm run profile:godfiles` — `object-runtime.ts` is the
+  largest single lever; `ensureObjectRuntime` (baseline 7,355 LOC, d≈0.39,
+  `hand-emitted-runtime`) is 42% of the file, plus `ensureProxyRuntime`
+  (1,338 LOC, d≈0.32) and the `fill*`/`buildOrdered*` groups. Record the
+  per-group LOC delta here and in `plan/self-hosting-scale-up.md`.
+- **Landing proof:** after each helper-group conversion,
+  `node scripts/profile-godfiles.mjs --update` and commit
+  `scripts/godfile-profile-baseline.json` so `pnpm run check:godfiles` ratchets
+  down (fails on regrowth). Helpers left hand-emitted for a dialect-gap stay in
+  the baseline — the written verdict names them.
+- Shape context: `plan/log/3259-bloat-quickwins-report.md`.
+
 ## Non-goals
 
 - Big-bang: convert leaf-first, one helper group per PR, measure each.
