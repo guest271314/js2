@@ -13,6 +13,7 @@ import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import { addStringConstantGlobal, addUnionImports } from "./registry/imports.js";
+import { isSyntheticStructName } from "./emit-helpers.js";
 
 /**
  * Emit exported getter/setter helper functions so the JS runtime can read
@@ -49,13 +50,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
     if (typeIdx === undefined) continue;
 
     // Skip internal/wrapper types
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
 
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -232,13 +227,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
 
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
 
     const shapeId = ctx.shapeIdByStructName.get(structName);
     const shapeFieldIdx = shapeId !== undefined ? fields.findIndex((f) => f && f.name === "$shape") : -1;
@@ -724,13 +713,7 @@ function emitStructFieldNamesExport(
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
 
     const shapeFieldIdx = fields.findIndex((f) => f && f.name === "$shape");
     if (shapeFieldIdx >= 0 && ctx.shapeIdByStructName.has(structName)) {

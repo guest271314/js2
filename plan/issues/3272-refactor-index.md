@@ -10,7 +10,7 @@ task_type: refactor
 subtask_of: 3182
 area: codegen
 assignee: ttraenkler/sendev-godfile
-loc-budget-allow: ["src/codegen/index.ts", "src/codegen/wasi.ts", "src/codegen/linear-type-reservations.ts", "src/codegen/closure-exports.ts", "src/codegen/struct-field-exports.ts", "src/codegen/vec-access-exports.ts", "src/codegen/extern-declarations.ts", "src/codegen/ast-modifiers.ts"]
+loc-budget-allow: ["src/codegen/index.ts", "src/codegen/wasi.ts", "src/codegen/linear-type-reservations.ts", "src/codegen/closure-exports.ts", "src/codegen/struct-field-exports.ts", "src/codegen/vec-access-exports.ts", "src/codegen/extern-declarations.ts", "src/codegen/ast-modifiers.ts", "src/codegen/emit-helpers.ts"]
 ---
 
 # refactor(codegen): break up src/codegen/index.ts god-file + DRY cleanup

@@ -16,6 +16,7 @@ import { buildClosureRefTestArms, collectClosureBaseWrapperTypeIdxs } from "./cl
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { isSyntheticStructName } from "./emit-helpers.js";
 
 /**
  * Emit __call_fn_0 export (#851): call a zero-arg WasmGC closure from JS.
@@ -901,13 +902,7 @@ export function emitIsDataStructExport(ctx: CodegenContext): void {
   const dataTypeIdxs: number[] = [];
   const seen = new Set<number>();
   for (const [structName] of ctx.structFields) {
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined || seen.has(typeIdx)) continue;
     const typeDef = mod.types[typeIdx];

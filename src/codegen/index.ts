@@ -179,6 +179,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
+import { isSyntheticStructName, exportFunc } from "./emit-helpers.js"; // (#3272) DRY helpers
 import {
   hasExportModifier,
   hasDeclareModifier,
@@ -472,17 +473,8 @@ function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
  * without this pattern never set the flag, so they never emit the codec arm.
  */
 function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
-  const TA_NAMES = new Set([
-    "Int8Array",
-    "Uint8Array",
-    "Uint8ClampedArray",
-    "Int16Array",
-    "Uint16Array",
-    "Int32Array",
-    "Uint32Array",
-    "Float32Array",
-    "Float64Array",
-  ]);
+  // (#3272) Reuse the module-level TYPED_ARRAY_NAMES set — identical 9 names.
+  const TA_NAMES = TYPED_ARRAY_NAMES;
   let found = false;
   function walk(node: ts.Node): void {
     if (found) return;
@@ -3331,13 +3323,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
     for (const [structName] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
       if (typeIdx === undefined) continue;
-      if (
-        structName.startsWith("Wrapper") ||
-        structName === "$AnyValue" ||
-        structName.startsWith("__vec_") ||
-        structName.startsWith("__arr_")
-      )
-        continue;
+      if (isSyntheticStructName(structName)) continue;
 
       const methodFullName = `${structName}_${methodSuffix}`;
       const funcIdx = ctx.funcMap.get(methodFullName);
@@ -3461,11 +3447,7 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
  */
 function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number, keys: string[]): void {
   const mod = ctx.mod;
-  const skipStruct = (structName: string): boolean =>
-    structName.startsWith("Wrapper") ||
-    structName === "$AnyValue" ||
-    structName.startsWith("__vec_") ||
-    structName.startsWith("__arr_");
+  const skipStruct = isSyntheticStructName;
 
   type KindEntry = { typeIdx: number; funcIdx: number; resultType: ValType };
   const collect = (nameOf: (structName: string) => string): KindEntry[] => {
@@ -3519,7 +3501,7 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
         body: [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }, ...current],
         exported: true,
       } as WasmFunction);
-      mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+      exportFunc(mod, exportName, funcIdx);
       ctx.funcMap.set(exportName, funcIdx);
     }
 
@@ -3562,7 +3544,7 @@ function emitClassMemberKindExports(ctx: CodegenContext, dispatchTypeIdx: number
         body: [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }, ...current],
         exported: true,
       } as WasmFunction);
-      mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+      exportFunc(mod, exportName, funcIdx);
       ctx.funcMap.set(exportName, funcIdx);
     }
   }
@@ -3622,13 +3604,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   for (const [structName] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
 
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
@@ -3727,7 +3703,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     exported: true,
   } as WasmFunction);
 
-  mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+  exportFunc(mod, exportName, funcIdx);
 }
 
 /**
@@ -3743,13 +3719,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
 function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): boolean {
   const mod = ctx.mod;
   for (const [structName] of ctx.structFields) {
-    if (
-      structName.startsWith("Wrapper") ||
-      structName === "$AnyValue" ||
-      structName.startsWith("__vec_") ||
-      structName.startsWith("__arr_")
-    )
-      continue;
+    if (isSyntheticStructName(structName)) continue;
     const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
     if (funcIdx === undefined) continue;
     const funcDef = definedFuncAt(ctx, funcIdx);
@@ -3831,13 +3801,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     for (const [structName, fields] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
       if (typeIdx === undefined) continue;
-      if (
-        structName.startsWith("Wrapper") ||
-        structName === "$AnyValue" ||
-        structName.startsWith("__vec_") ||
-        structName.startsWith("__arr_")
-      )
-        continue;
+      if (isSyntheticStructName(structName)) continue;
 
       const methodFullName = `${structName}_${methodName}`;
       const fieldIdx = fields.findIndex((f) => f.name === methodName);

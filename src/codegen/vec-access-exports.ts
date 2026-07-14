@@ -18,6 +18,7 @@ import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureHoleType } from "./array-holes.js";
 import { definedFuncAt } from "./func-space.js";
 import { flushLateImportShifts } from "./shared.js";
+import { exportFunc } from "./emit-helpers.js";
 
 /**
  * Emit __vec_get(externref, i32) -> externref and __vec_len(externref) -> i32
@@ -53,7 +54,7 @@ export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop"
   const placeholder: Instr[] =
     kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 }] : [{ op: "ref.null.extern" }];
   ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
-  ctx.mod.exports.push({ name, desc: { kind: "func", index: idx } });
+  exportFunc(ctx.mod, name, idx);
   ctx.funcMap.set(name, idx);
   // Mark that the finalize vec-export pass must run (so the placeholder gets filled
   // even in a module that otherwise wouldn't emit vec helpers).
@@ -448,7 +449,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       body,
       exported: true,
     } as any);
-    mod.exports.push({ name: "__is_vec", desc: { kind: "func", index: isVecFuncIdx } });
+    exportFunc(mod, "__is_vec", isVecFuncIdx);
   }
 
   // __vec_mut_supported(externref) -> i32 (1 = push/pop cover this vec's elem kind)
@@ -478,7 +479,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       body,
       exported: true,
     } as any);
-    mod.exports.push({ name: "__vec_mut_supported", desc: { kind: "func", index: supFuncIdx } });
+    exportFunc(mod, "__vec_mut_supported", supFuncIdx);
   }
 
   // __vec_push(externref vec, externref value) -> i32 (new length, or -1 unsupported)
@@ -623,7 +624,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         body,
         exported: true,
       } as any);
-      mod.exports.push({ name: "__vec_push", desc: { kind: "func", index: pushFuncIdx } });
+      exportFunc(mod, "__vec_push", pushFuncIdx);
       ctx.funcMap.set("__vec_push", pushFuncIdx);
     }
   }
@@ -719,7 +720,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         body,
         exported: true,
       } as any);
-      mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
+      exportFunc(mod, "__vec_pop", popFuncIdx);
       ctx.funcMap.set("__vec_pop", popFuncIdx);
     }
   }
@@ -840,7 +841,7 @@ function _emitVecSetByteExportInner(ctx: CodegenContext): void {
     body,
     exported: true,
   } as any);
-  mod.exports.push({ name: "__vec_set_byte", desc: { kind: "func", index: funcIdx } });
+  exportFunc(mod, "__vec_set_byte", funcIdx);
 }
 
 /**
@@ -936,7 +937,7 @@ function _emitNewVecF64ExportInner(ctx: CodegenContext): void {
     body,
     exported: true,
   } as any);
-  mod.exports.push({ name: "__new_vec_f64", desc: { kind: "func", index: funcIdx } });
+  exportFunc(mod, "__new_vec_f64", funcIdx);
 }
 
 /**
@@ -989,7 +990,7 @@ export function emitDataViewByteExports(ctx: CodegenContext): void {
       body,
       exported: true,
     } as any);
-    mod.exports.push({ name: "__dv_byte_len", desc: { kind: "func", index: funcIdx } });
+    exportFunc(mod, "__dv_byte_len", funcIdx);
   }
 
   // __dv_byte_get(externref, i32) -> i32
@@ -1030,7 +1031,7 @@ export function emitDataViewByteExports(ctx: CodegenContext): void {
       body,
       exported: true,
     } as any);
-    mod.exports.push({ name: "__dv_byte_get", desc: { kind: "func", index: funcIdx } });
+    exportFunc(mod, "__dv_byte_get", funcIdx);
   }
 
   // __dv_byte_set(externref, i32, i32) -> ()
@@ -1069,6 +1070,6 @@ export function emitDataViewByteExports(ctx: CodegenContext): void {
       body,
       exported: true,
     } as any);
-    mod.exports.push({ name: "__dv_byte_set", desc: { kind: "func", index: funcIdx } });
+    exportFunc(mod, "__dv_byte_set", funcIdx);
   }
 }
