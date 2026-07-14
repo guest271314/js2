@@ -19,6 +19,32 @@ area: codegen
 language_feature: compiler-internals
 goal: maintainability
 related: [1095, 1172, 3105]
+# LOC-regrowth ratchet (#3102/#3131): the codemod's cast strip + prettier
+# reflow nets a few LOC in these already-over-threshold god-files. Byte-identity
+# of emitted Wasm is proven IDENTICAL (scripts/prove-emit-identity.mjs), so this
+# is pure formatting drift, not new logic — grant this change-set the allowance
+# (baseline json is refreshed post-merge on main only, #3131).
+loc-budget-allow:
+  - src/codegen/dataview-native.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/closures.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/iterator-native.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/property-access.ts
+  - src/codegen/array-methods.ts
+  - src/codegen/statements/control-flow.ts
+  - src/codegen/statements/nested-declarations.ts
+  - src/codegen/any-helpers.ts
+  - src/codegen/statements/loops.ts
+  - src/codegen/native-strings.ts
+  - src/codegen/async-frame.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/literals.ts
+  - src/codegen/object-ops.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
 ---
 
 # #3107 — Cast-debt codemod (`as Instr` epidemic)
