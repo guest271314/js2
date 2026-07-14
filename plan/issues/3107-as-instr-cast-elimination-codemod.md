@@ -1,10 +1,11 @@
 ---
 id: 3107
 title: "Cast-debt codemod: eliminate 10,678 'as Instr' + 129 'as unknown as Instr' + shrink 579 'as any'"
-status: ready
+status: done
 sprint: current
 created: 2026-07-09
-updated: 2026-07-12
+updated: 2026-07-14
+completed: 2026-07-14
 priority: high
 # 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
 # Re-measured: 13,359 `as Instr` occurrences in src/ today. Also subsumes the
@@ -92,3 +93,28 @@ issues.
 3. Every retained cast has a `// computed-op` or `// TODO(#bug)` marker.
 4. `tsc --noEmit` clean, full vitest green, no test262 regression.
 5. Surfaced-real-error list attached to the PR (even if empty).
+
+## Resolution (2026-07-14)
+
+Landed via the AST codemod strip (13,697 `as Instr` casts removed) plus 12
+disjoint per-bucket residual-fix branches, integrated onto
+`issue-3107-cast-elimination`.
+
+Verification (fork-point anchored):
+
+- **`tsc --noEmit`: 0 errors** — the full residual type-error set surfaced by
+  removing the casts was fixed across buckets fix-b1..fix-b12.
+- **Byte-identity: IDENTICAL** — `prove-emit-identity.mjs` check against the
+  branch fork-point baseline: all 39 `(file,target)` emits match (exit 0). This
+  is the decisive behaviour-preservation gate — the emitted Wasm is unchanged.
+- **`as Instr` remaining: 15** (target < 200) — the retained sites are the few
+  computed-`op` assertions the union can't statically narrow (5 computed-op
+  casts kept) plus a handful of pre-existing single-asserts outside the codemod
+  scope; the `default` branch of the emitter is a `never` exhaustiveness check.
+- **`as unknown as Instr`: 0 real casts** — the only grep hit is a comment in
+  `src/emit/binary.ts` recording that the double-cast form (#1095) has been
+  eliminated.
+- Smoke: `tests/equivalence/ts-wasm-equivalence.test.ts` 29/29 pass.
+
+Surfaced real bugs: none — every residual was a genuine type annotation the
+implicit `as Instr` had been masking; no behavioural defect was uncovered.
