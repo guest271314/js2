@@ -1546,6 +1546,7 @@ function buildPreamble(
   needsDoneForAsyncTest: boolean,
   needsTestTypedArray: boolean,
   needsTestBigIntTypedArray: boolean,
+  needsTestNonAtomicsFriendlyTypedArray: boolean,
   needsAssertThrowsAsync: boolean,
   needsTypedArrayBinding: boolean,
   needsIteratorBinding: boolean,
@@ -2013,6 +2014,31 @@ function testWithBigIntTypedArrayConstructors(fn: any): void {
     __harness_cb_expected = __harness_cb_expected + 1;
     const __ac_before = __assert_count;
     fn(constructors[i], __ta_makeCtorArgBigIntCompat);
+    if (__assert_count === __ac_before) { __harness_cb_dead = __harness_cb_dead + 1; }
+  }
+}`;
+  }
+
+  // (#3145) `testWithNonAtomicsFriendlyTypedArrayConstructors(f)` iterates the
+  // NON-"Atomics friendly" views — the float + Uint8Clamped constructors
+  // (`floatArrayConstructors.concat([Uint8ClampedArray])` in the real
+  // testTypedArray.js). Every `built-ins/Atomics/*/non-shared-int-views-throws`
+  // test wraps `Atomics.<op>(new TA(buffer), …)` in `assert.throws(TypeError,
+  // …)` for each such TA — the op must reject a float/clamped view. The
+  // callback is 1-param (`TA => { … }`); the tests pass extra `null,
+  // ["passthrough"]` selector args which the 1-param shim harmlessly ignores.
+  // The name has no `testWithTypedArrayConstructors` infix so the plain shim
+  // above never covers it — hence its own gate. Vacuity-tracked like the
+  // siblings (snapshot `__assert_count` per invocation).
+  if (needsTestNonAtomicsFriendlyTypedArray) {
+    p += `
+
+function testWithNonAtomicsFriendlyTypedArrayConstructors(fn: any): void {
+  const constructors = [Float32Array, Float64Array, Uint8ClampedArray];
+  for (let i = 0; i < constructors.length; i++) {
+    __harness_cb_expected = __harness_cb_expected + 1;
+    const __ac_before = __assert_count;
+    fn(constructors[i]);
     if (__assert_count === __ac_before) { __harness_cb_dead = __harness_cb_dead + 1; }
   }
 }`;
@@ -2673,6 +2699,11 @@ export function wrapTest(
   // match its `…BigIntTypedArray…` infix, so it needs its own gate + shim.
   const needsTestBigIntTypedArray =
     includes.includes("testTypedArray.js") && /testWithBigIntTypedArrayConstructors/.test(body);
+  // (#3145) The non-Atomics-friendly wrapper ships in the SAME testTypedArray.js
+  // include but its name has no `testWithTypedArrayConstructors` infix, so the
+  // plain-TA regex above never matches — it needs its own gate + shim.
+  const needsTestNonAtomicsFriendlyTypedArray =
+    includes.includes("testTypedArray.js") && /testWithNonAtomicsFriendlyTypedArrayConstructors/.test(body);
 
   // test262's testTypedArray.js include defines `var TypedArray = Object.getPrototypeOf(Int8Array);`
   // as the abstract %TypedArray% intrinsic. Our runtime's Object.getPrototypeOf(Int8Array) does not
@@ -2757,6 +2788,7 @@ export function wrapTest(
     needsDoneForAsyncTest,
     needsTestTypedArray,
     needsTestBigIntTypedArray,
+    needsTestNonAtomicsFriendlyTypedArray,
     needsAssertThrowsAsync,
     needsTypedArrayBinding,
     needsIteratorBinding,
@@ -2793,6 +2825,7 @@ export function wrapTest(
       needsDoneForAsyncTest,
       needsTestTypedArray,
       needsTestBigIntTypedArray,
+      needsTestNonAtomicsFriendlyTypedArray,
       needsAssertThrowsAsync,
       needsTypedArrayBinding,
       needsIteratorBinding,
