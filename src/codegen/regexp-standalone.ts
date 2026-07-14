@@ -60,12 +60,12 @@ import {
 } from "./regex/bytecode.js";
 import { compilePattern, RepeatTooLargeError } from "./regex/compile.js";
 import {
-  emitBrandCheckTypeError,
   emitNativeProtoIdentityReturnUndefined,
   getBuiltinBrand,
   registerNativeProtoBuiltin,
   type NativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { emitReceiverBrandCheck } from "./receiver-brand.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
@@ -1007,26 +1007,15 @@ export function recoverRegExpStructFromExternref(
   thisExternLocal: number,
 ): { regexpLocal: number; structTypeIdx: number } | null {
   const structTypeIdx = ensureStandaloneRegExpStruct(ctx);
-  const anyLocal = allocLocal(fctx, `__re_this_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-  // any.convert_extern(this) → anyref, kept in a local for the ref.test guard.
+  // (#3192 S2) Brand check via the shared `emitReceiverBrandCheck` (receiver-brand.ts,
+  // #3171): consumes the externref `this`, `ref.test $NativeRegExp` (struct-only
+  // spec), throws a *catchable* TypeError on a miss (§22.2.6.4.1 step 2, message
+  // verbatim — never a `ref.cast` trap) and leaves the recovered struct on the stack.
+  const brandMsg = "Method called on incompatible receiver (RegExp brand check failed)";
   fctx.body.push({ op: "local.get", index: thisExternLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: anyLocal });
-
-  // Brand check: ref.test $NativeRegExp. On failure throw a catchable TypeError
-  // (the wrong-`this` brand-check the 31 reflective brand-check tests gate on).
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
-  const throwBody: Instr[] = [];
-  emitBrandCheckTypeError(ctx, throwBody, "Method called on incompatible receiver (RegExp brand check failed)");
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: [] } as Instr);
-
-  // ref.cast to the concrete struct and stash in a typed local.
+  emitReceiverBrandCheck(ctx, fctx, { kind: "externref" }, { message: brandMsg, structTypeIdx });
   const reStructType: ValType = { kind: "ref", typeIdx: structTypeIdx };
   const regexpLocal = allocLocal(fctx, `__re_recovered_${fctx.locals.length}`, reStructType);
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
   fctx.body.push({ op: "local.set", index: regexpLocal });
   return { regexpLocal, structTypeIdx };
 }
