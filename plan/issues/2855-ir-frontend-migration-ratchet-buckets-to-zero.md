@@ -1,7 +1,7 @@
 ---
 id: 2855
 title: "IR front-end migration: ratchet unintended fallback buckets to zero + promote to STRICT_IR_REASONS"
-status: backlog
+status: ready
 sprint: current
 created: 2026-06-30
 updated: 2026-06-30
