@@ -76,8 +76,13 @@ pnpm install
 Compile a file:
 
 ```bash
-npx js2wasm input.ts -o output.wasm
+npx js2wasm input.ts          # writes input.wasm (+ .wat, .d.ts) next to your CWD
+npx js2wasm input.ts -o dist  # -o is an existing output DIRECTORY, not a file
 ```
+
+The compiler derives the output name from the input basename; `-o <dir>` chooses
+the directory to write into (it must already exist). The default (JS-host) build
+also emits an `input.imports.js` helper — see [Compile modes and imports](#compile-modes-and-imports).
 
 Programmatic API:
 
