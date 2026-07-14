@@ -248,19 +248,19 @@
       "file": "src/codegen/generators-native.ts",
       "field": "getTypeAtLocation",
       "extra": 1,
-      "reason": "#2173 slice-2b: isGenericIterableDelegate needs ts.Type property membership to gate a yield* subject as a genuine iterable (a [Symbol.iterator] member — spec GetIterator). ctx.oracle's TypeFact union has no iterability/property-membership query and models iterables inconsistently (ArrayIterator as class, custom {[Symbol.iterator]} as builtin 'Iterable', Map/Set/generator/String each differently), so an oracle-based gate would be fragile and incomplete. Mirrors the existing direct-checker use in nativeGeneratorDelegationName in this same file."
+      "reason": "#2173 slice-2b: isGenericIterableDelegate needs ts.Type property membership to gate a yield* subject as a genuine iterable (a [Symbol.iterator] member \u2014 spec GetIterator). ctx.oracle's TypeFact union has no iterability/property-membership query and models iterables inconsistently (ArrayIterator as class, custom {[Symbol.iterator]} as builtin 'Iterable', Map/Set/generator/String each differently), so an oracle-based gate would be fragile and incomplete. Mirrors the existing direct-checker use in nativeGeneratorDelegationName in this same file."
     },
     {
       "file": "src/codegen/generators-native.ts",
       "field": "ctxChecker",
       "extra": 2,
-      "reason": "#2173 slice-2b: the getTypeAtLocation + getPropertiesOfType pair in isGenericIterableDelegate (see the getTypeAtLocation entry above) — both match the ctx.checker counter."
+      "reason": "#2173 slice-2b: the getTypeAtLocation + getPropertiesOfType pair in isGenericIterableDelegate (see the getTypeAtLocation entry above) \u2014 both match the ctx.checker counter."
     },
     {
       "file": "src/codegen/expressions/calls.ts",
       "field": "getTypeAtLocation",
       "extra": 1,
-      "reason": "#3064: the standalone escape/unescape routing block ToString-coerces its argument via emitToString(ctx, fctx, arg0Type, arg0TsType, 'string') — exactly like the adjacent String()/parseInt/URI blocks. emitToString requires a raw ts.Type; the ctx.oracle abstraction exposes only TypeFact, not the raw ts.Type, so arg0TsType must come from ctx.checker.getTypeAtLocation (consistent with the #3000 precedent and the surrounding direct-checker code in this dispatcher)."
+      "reason": "#3064: the standalone escape/unescape routing block ToString-coerces its argument via emitToString(ctx, fctx, arg0Type, arg0TsType, 'string') \u2014 exactly like the adjacent String()/parseInt/URI blocks. emitToString requires a raw ts.Type; the ctx.oracle abstraction exposes only TypeFact, not the raw ts.Type, so arg0TsType must come from ctx.checker.getTypeAtLocation (consistent with the #3000 precedent and the surrounding direct-checker code in this dispatcher)."
     },
     {
       "file": "src/codegen/expressions/calls.ts",
@@ -272,13 +272,25 @@
       "file": "src/codegen/expressions/calls.ts",
       "field": "ctxChecker",
       "extra": 1,
-      "reason": "#3173: tryEmitNativeProtoReflectiveCall resolves a LIB-MISSING DataView member (getFloat16/setFloat16 — absent from the bundled lib, so no method-signature symbol exists) by tracing the receiver variable back to its `<Builtin>.prototype.<member>` initializer via checker.getSymbolAtLocation(ident).valueDeclaration. ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires. Same shape as the #3172 collections-brand entry above."
+      "reason": "#3173: tryEmitNativeProtoReflectiveCall resolves a LIB-MISSING DataView member (getFloat16/setFloat16 \u2014 absent from the bundled lib, so no method-signature symbol exists) by tracing the receiver variable back to its `<Builtin>.prototype.<member>` initializer via checker.getSymbolAtLocation(ident).valueDeclaration. ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires. Same shape as the #3172 collections-brand entry above."
     },
     {
       "file": "src/codegen/expressions/calls.ts",
       "field": "ctxChecker",
       "extra": 1,
-      "reason": "#3236 Slice 1b: isGeneratorPrototypeReceiver traces the `.call`/`.apply` receiver variable back to its `Object.getPrototypeOf(<genFn>).prototype` / `<genFn>.prototype` initializer NODE via checker.getSymbolAtLocation(ident).valueDeclaration to prove it is the native %GeneratorPrototype% singleton (the receiver is `any`-typed, so no type-fact resolves it). ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires — identical shape to the #3173 DataView entry above."
+      "reason": "#3236 Slice 1b: isGeneratorPrototypeReceiver traces the `.call`/`.apply` receiver variable back to its `Object.getPrototypeOf(<genFn>).prototype` / `<genFn>.prototype` initializer NODE via checker.getSymbolAtLocation(ident).valueDeclaration to prove it is the native %GeneratorPrototype% singleton (the receiver is `any`-typed, so no type-fact resolves it). ctx.oracle exposes node-based TypeFacts, not declaration/initializer NODES, which this static data-flow trace requires \u2014 identical shape to the #3173 DataView entry above."
+    },
+    {
+      "file": "src/codegen/registry/imports.ts",
+      "field": "getTypeAtLocation",
+      "extra": 4,
+      "reason": "#808: verbatim move of the import-collection/registration functions (collectAllSourceImports, addStringImports, addUnionImports, addUnionImportsAsNativeFuncs, addIteratorImports, addArrayIteratorImports, addGeneratorImports, addForInImports, collectUsedExternImports) out of the index.ts god-file into this cohesive registry module. The 4 getTypeAtLocation sites are RELOCATED, not new checker coupling \u2014 emitted-Wasm byte-identity is IDENTICAL (scripts/prove-emit-identity.mjs, 39/39). index.ts's count drops by the same amount."
+    },
+    {
+      "file": "src/codegen/registry/imports.ts",
+      "field": "ctxChecker",
+      "extra": 5,
+      "reason": "#808: same verbatim import-infra move as the getTypeAtLocation entry \u2014 5 RELOCATED ctx.checker sites, code unchanged, only its module home. Byte-identity IDENTICAL; not new checker coupling."
     }
   ]
 }
