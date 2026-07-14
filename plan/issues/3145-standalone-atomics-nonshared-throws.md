@@ -12,6 +12,11 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2984]
 origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
+oracle-ratchet-allow:
+  - src/codegen/expressions/calls.ts
+  - src/codegen/array-prototype-borrow.ts
 ---
 
 # #3145 — standalone Atomics.* on non-shared views (non-SAB subset)
@@ -122,3 +127,35 @@ CE→fail. Verified host lane for the Category-A files is fail→fail (unchanged
 - `BigInt64Array` support (#1349) → `waitAsync/bigint/null-bufferdata-throws`.
 - Real shared-memory atomics once `SharedArrayBuffer` is supported (283 SAB
   Atomics tests currently skip-listed).
+
+## Salvage re-merge note (2026-07-14)
+
+This PR went DIRTY as main advanced; re-merged `origin/main` on a salvage branch.
+
+- **calls.ts dispatch conflict (#3148)** — `origin/main` landed the #3148
+  standalone `BigInt.asIntN`/`asUintN` native-i64 arm in the SAME
+  `src/codegen/expressions/calls.ts` builtin-call dispatch region as this PR's
+  Atomics arm. Resolved by keeping BOTH intercepts as sequential independent
+  `if` blocks (Atomics then BigInt); they gate on different receivers and are
+  both `noJsHost`-gated global-builtin intercepts before the generic
+  `__get_builtin` fallthrough. Scoped tests re-verified green: `issue-3145`
+  (14), `issue-3148` (33), `bigint` (5), `bigint-cross-type` (3) — 55/55.
+- **Change-scoped gate allowances (frontmatter above)** — the re-merge surfaces
+  drift the original green PR didn't need (main's post-merge baseline refresh +
+  new god-file splits):
+  - `loc-budget-allow: calls.ts` — calls.ts is a god-file already over the
+    threshold; this PR's Atomics recognizer + throw arm add +46 LOC (genuine
+    feature code; task-directed loc-budget-allow, not a baseline bump).
+  - `oracle-ratchet-allow: calls.ts` — +1 `ctx.checker` from the Atomics
+    recognizer (`isGlobalBuiltinIdentifier` → `isGlobalEvalIdentifier(ident,
+    ctx.checker)`). This is global-identifier BINDING resolution, which #1930
+    explicitly places OUT of the oracle's scope ("name resolution is out of the
+    oracle's scope"), so the allowance — not an oracle migration — is the
+    correct remedy.
+  - `oracle-ratchet-allow: array-prototype-borrow.ts` — #3264 / PR #3064
+    merge-collateral: that array-methods split landed `array-prototype-borrow.ts`
+    (4/4 checker sites) on main via a self-only frontmatter allowance without
+    banking it into the committed whole-tree oracle-ratchet baseline, so the
+    whole-tree gate re-flags it for every downstream PR. Not growth introduced
+    here. **Systemic note for the tech lead:** a one-line post-merge baseline
+    reconciliation on main would clear this queue-wide.
