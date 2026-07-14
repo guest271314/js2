@@ -155,3 +155,84 @@ describe("#742 built-in static-method dispatch (compileBuiltinStaticCall)", () =
     );
   });
 });
+
+// Slice 3 (#742 Wave B): the remaining namespace static-method dispatch —
+// Symbol / Reflect / Promise / JSON / Date statics — was moved verbatim out of
+// compileCallExpression's property-access arm into the sibling module
+// call-namespace-static.ts (compileNamespaceStaticCall). These tests pin the
+// behaviour of those moved static-call paths (wasm output must match JS).
+describe("#742 namespace static dispatch (compileNamespaceStaticCall)", () => {
+  it("Symbol.for returns the same registered symbol", async () => {
+    await assertEquivalent(
+      `export function symSame(): number { return Symbol.for("k") === Symbol.for("k") ? 1 : 0; }
+       export function symDiff(): number { return Symbol.for("a") === Symbol.for("b") ? 1 : 0; }`,
+      [
+        { fn: "symSame", args: [] },
+        { fn: "symDiff", args: [] },
+      ],
+    );
+  });
+
+  it("Date.UTC static computes a fixed epoch", async () => {
+    await assertEquivalent(`export function dutc(): number { return Date.UTC(2000, 0, 1); }`, [
+      { fn: "dutc", args: [] },
+    ]);
+  });
+});
+
+// Slice 4 (#742 Wave B): the receiver-type method dispatch — the receiverType-
+// keyed tail of compileCallExpression's property-access arm (user-class instance
+// methods, Number wrapper methods, valueOf/toString) — was moved verbatim into
+// the sibling module call-receiver-method.ts (compileReceiverMethodCall). These
+// tests pin the behaviour of those moved method-call paths (wasm ≡ JS).
+describe("#742 receiver-type method dispatch (compileReceiverMethodCall)", () => {
+  it("user-class instance method dispatch", async () => {
+    await assertEquivalent(
+      `class Adder { base: number; constructor(b: number) { this.base = b; } add(x: number): number { return this.base + x; } twice(x: number): number { return this.add(x) + this.add(x); } }
+       export function m1(): number { const a = new Adder(10); return a.add(5); }
+       export function m2(): number { const a = new Adder(3); return a.twice(4); }`,
+      [
+        { fn: "m1", args: [] },
+        { fn: "m2", args: [] },
+      ],
+    );
+  });
+
+  it("Number wrapper methods: toFixed / toString(radix)", async () => {
+    await assertEquivalent(
+      `export function nfix(): number { return (3.14159).toFixed(2) === "3.14" ? 1 : 0; }
+       export function nhex(): number { return (255).toString(16) === "ff" ? 1 : 0; }`,
+      [
+        { fn: "nfix", args: [] },
+        { fn: "nhex", args: [] },
+      ],
+    );
+  });
+});
+
+// Slice 5 (#742 Wave B): the tail dispatch of compileCallExpression — IIFE, super
+// method calls, element-access method calls, call-of-call, conditional callee,
+// and the graceful fallback — was moved verbatim into the sibling module
+// call-tail-dispatch.ts (compileTailDispatch). These tests pin the behaviour of
+// the moved tail paths (wasm ≡ JS).
+describe("#742 tail dispatch (compileTailDispatch)", () => {
+  it("IIFE forms — function-expression and arrow", async () => {
+    await assertEquivalent(
+      `export function iifeFn(): number { return (function () { return 21; })() * 2; }
+       export function iifeArrow(): number { return ((x: number) => x + 1)(41); }`,
+      [
+        { fn: "iifeFn", args: [] },
+        { fn: "iifeArrow", args: [] },
+      ],
+    );
+  });
+
+  it("super method call dispatches to the base class", async () => {
+    await assertEquivalent(
+      `class Base { greet(): number { return 10; } }
+       class Derived extends Base { greet(): number { return super.greet() + 5; } }
+       export function sup(): number { return new Derived().greet(); }`,
+      [{ fn: "sup", args: [] }],
+    );
+  });
+});
