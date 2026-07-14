@@ -28,8 +28,8 @@ const i32: ValType = { kind: "i32" };
 /** Build an i32 WasmGC array from a constant number list via array.new_fixed. */
 function buildConstI32Array(table: readonly number[], arrTypeIdx: number): Instr[] {
   const out: Instr[] = [];
-  for (const v of table) out.push({ op: "i32.const", value: v } as Instr);
-  out.push({ op: "array.new_fixed", typeIdx: arrTypeIdx, length: table.length } as Instr);
+  for (const v of table) out.push({ op: "i32.const", value: v });
+  out.push({ op: "array.new_fixed", typeIdx: arrTypeIdx, length: table.length });
   return out;
 }
 
@@ -95,20 +95,20 @@ export function emitNativeCaseConversion(
       DELTA = 9,
       OFF = 10,
       N = 11;
-    const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-    const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-    const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+    const get = (i: number): Instr => ({ op: "local.get", index: i });
+    const set = (i: number): Instr => ({ op: "local.set", index: i });
+    const c = (value: number): Instr => ({ op: "i32.const", value });
     const runsGet = (idxInstrs: Instr[]): Instr[] => [
       get(RUNS),
       ...idxInstrs,
-      { op: "array.get", typeIdx: i32ArrTypeIdx } as Instr,
+      { op: "array.get", typeIdx: i32ArrTypeIdx },
     ];
     const body: Instr[] = [
       // n = runs.len / 4
       get(RUNS),
-      { op: "array.len" } as Instr,
+      { op: "array.len" },
       c(2),
-      { op: "i32.shr_u" } as Instr, // /4 via >>2
+      { op: "i32.shr_u" }, // /4 via >>2
       set(N),
       // lo=0; hi = tupleCount = runs.len/4
       c(0),
@@ -128,18 +128,18 @@ export function emitNativeCaseConversion(
               // if lo>=hi break
               get(LO),
               get(HI),
-              { op: "i32.ge_u" } as Instr,
-              { op: "br_if", depth: 1 } as Instr,
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
               // mid=(lo+hi)/2 ; midBase=mid*4
               get(LO),
               get(HI),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               c(1),
-              { op: "i32.shr_u" } as Instr,
+              { op: "i32.shr_u" },
               set(MID),
               get(MID),
               c(2),
-              { op: "i32.shl" } as Instr, // *4
+              { op: "i32.shl" }, // *4
               set(BASE),
               // start = runs[midBase]
               ...runsGet([get(BASE)]),
@@ -147,52 +147,52 @@ export function emitNativeCaseConversion(
               // if start > ch: hi=mid else lo=mid+1
               get(START),
               get(CH),
-              { op: "i32.gt_s" } as Instr,
+              { op: "i32.gt_s" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [get(MID), set(HI)],
-                else: [get(MID), c(1), { op: "i32.add" } as Instr, set(LO)],
-              } as Instr,
-              { op: "br", depth: 0 } as Instr,
+                else: [get(MID), c(1), { op: "i32.add" }, set(LO)],
+              },
+              { op: "br", depth: 0 },
             ],
           },
         ],
       },
       // candidate tuple index = lo-1. If lo==0 → no run → return ch.
       get(LO),
-      { op: "i32.eqz" } as Instr,
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [get(CH), { op: "return" } as Instr],
-      } as Instr,
+        then: [get(CH), { op: "return" }],
+      },
       // base = (lo-1)*4
       get(LO),
       c(1),
-      { op: "i32.sub" } as Instr,
+      { op: "i32.sub" },
       c(2),
-      { op: "i32.shl" } as Instr,
+      { op: "i32.shl" },
       set(BASE),
       // load start,count,stride,delta
       ...runsGet([get(BASE)]),
       set(START),
-      ...runsGet([get(BASE), c(1), { op: "i32.add" } as Instr]),
+      ...runsGet([get(BASE), c(1), { op: "i32.add" }]),
       set(COUNT),
-      ...runsGet([get(BASE), c(2), { op: "i32.add" } as Instr]),
+      ...runsGet([get(BASE), c(2), { op: "i32.add" }]),
       set(STRIDE),
-      ...runsGet([get(BASE), c(3), { op: "i32.add" } as Instr]),
+      ...runsGet([get(BASE), c(3), { op: "i32.add" }]),
       set(DELTA),
       // off = ch - start
       get(CH),
       get(START),
-      { op: "i32.sub" } as Instr,
+      { op: "i32.sub" },
       set(OFF),
       // membership: off>=0 always (start<=ch). stride==1 → off<count;
       // stride==2 → off even && off/2<count.
       get(STRIDE),
       c(1),
-      { op: "i32.eq" } as Instr,
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -200,32 +200,32 @@ export function emitNativeCaseConversion(
           // off < count ?
           get(OFF),
           get(COUNT),
-          { op: "i32.lt_u" } as Instr,
+          { op: "i32.lt_u" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [get(CH), get(DELTA), { op: "i32.add" } as Instr, { op: "return" } as Instr],
-          } as Instr,
+            then: [get(CH), get(DELTA), { op: "i32.add" }, { op: "return" }],
+          },
         ],
         else: [
           // stride 2: off even and (off>>1)<count
           get(OFF),
           c(1),
-          { op: "i32.and" } as Instr,
-          { op: "i32.eqz" } as Instr,
+          { op: "i32.and" },
+          { op: "i32.eqz" },
           get(OFF),
           c(1),
-          { op: "i32.shr_u" } as Instr,
+          { op: "i32.shr_u" },
           get(COUNT),
-          { op: "i32.lt_u" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "i32.lt_u" },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [get(CH), get(DELTA), { op: "i32.add" } as Instr, { op: "return" } as Instr],
-          } as Instr,
+            then: [get(CH), get(DELTA), { op: "i32.add" }, { op: "return" }],
+          },
         ],
-      } as Instr,
+      },
       // no mapping
       get(CH),
     ];
@@ -290,22 +290,22 @@ export function emitNativeCaseConversion(
       M = 13,
       FS = 14, // flattened input as the concrete $NativeString struct ref
       SCAN = 15; // findSpecial's scan index (distinct from M, the dest write idx)
-    const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-    const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-    const tee = (i: number): Instr => ({ op: "local.tee", index: i }) as Instr;
-    const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+    const get = (i: number): Instr => ({ op: "local.get", index: i });
+    const set = (i: number): Instr => ({ op: "local.set", index: i });
+    const tee = (i: number): Instr => ({ op: "local.tee", index: i });
+    const c = (value: number): Instr => ({ op: "i32.const", value });
     const specGet = (idxInstrs: Instr[]): Instr[] => [
       get(SPEC),
       ...idxInstrs,
-      { op: "array.get", typeIdx: i32ArrTypeIdx } as Instr,
+      { op: "array.get", typeIdx: i32ArrTypeIdx },
     ];
     // src code unit at index expr (i16, unsigned)
     const srcChar = (idxLocal: number): Instr[] => [
       get(DATA),
       get(OFF),
       get(idxLocal),
-      { op: "i32.add" } as Instr,
-      { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
     ];
     // Find special entry index for ch (linear scan over specN entries of 5 i32);
     // sets SPECHIT = base index (entry*5) or -1. Special tables are tiny
@@ -325,28 +325,28 @@ export function emitNativeCaseConversion(
             body: [
               get(SCAN),
               get(SPECN),
-              { op: "i32.ge_u" } as Instr,
-              { op: "br_if", depth: 1 } as Instr,
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
               // if spec[scan*5] == ch → hit
-              ...specGet([get(SCAN), c(5), { op: "i32.mul" } as Instr]),
+              ...specGet([get(SCAN), c(5), { op: "i32.mul" }]),
               get(CH),
-              { op: "i32.eq" } as Instr,
+              { op: "i32.eq" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
                   get(SCAN),
                   c(5),
-                  { op: "i32.mul" } as Instr,
+                  { op: "i32.mul" },
                   set(SPECHIT),
-                  { op: "br", depth: 2 } as Instr, // break out
+                  { op: "br", depth: 2 }, // break out
                 ],
-              } as Instr,
+              },
               get(SCAN),
               c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               set(SCAN),
-              { op: "br", depth: 0 } as Instr,
+              { op: "br", depth: 0 },
             ],
           },
         ],
@@ -361,34 +361,29 @@ export function emitNativeCaseConversion(
     const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
     const flattenPrelude: Instr[] =
       flattenIdx === undefined
-        ? [get(S), { op: "ref.cast", typeIdx: strTypeIdx } as Instr, set(FS)]
-        : [
-            get(S),
-            { op: "call", funcIdx: flattenIdx } as Instr,
-            { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
-            set(FS),
-          ];
+        ? [get(S), { op: "ref.cast", typeIdx: strTypeIdx }, set(FS)]
+        : [get(S), { op: "call", funcIdx: flattenIdx }, { op: "ref.cast", typeIdx: strTypeIdx }, set(FS)];
 
     const body: Instr[] = [
       ...flattenPrelude,
       // len = fs.len ; sOff = fs.off ; srcData = fs.data
       get(FS),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       set(LEN),
       get(FS),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
       set(OFF),
       get(FS),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
       set(DATA),
       // runs = <table> ; spec = <table> ; specN = spec.len/5
       ...buildConstI32Array(runsTable, i32ArrTypeIdx),
       set(RUNS),
       ...buildConstI32Array(specialTable, i32ArrTypeIdx),
       tee(SPEC),
-      { op: "array.len" } as Instr,
+      { op: "array.len" },
       c(5),
-      { op: "i32.div_u" } as Instr,
+      { op: "i32.div_u" },
       set(SPECN),
       // ── pass 1: outLen ──
       c(0),
@@ -405,8 +400,8 @@ export function emitNativeCaseConversion(
             body: [
               get(I),
               get(LEN),
-              { op: "i32.ge_u" } as Instr,
-              { op: "br_if", depth: 1 } as Instr,
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
               ...srcChar(I),
               set(CH),
               ...findSpecial(),
@@ -414,27 +409,27 @@ export function emitNativeCaseConversion(
               get(OUTLEN),
               get(SPECHIT),
               c(0),
-              { op: "i32.ge_s" } as Instr,
+              { op: "i32.ge_s" },
               {
                 op: "if",
                 blockType: { kind: "val", type: i32 },
-                then: [...specGet([get(SPECHIT), c(1), { op: "i32.add" } as Instr])],
+                then: [...specGet([get(SPECHIT), c(1), { op: "i32.add" }])],
                 else: [c(1)],
-              } as Instr,
-              { op: "i32.add" } as Instr,
+              },
+              { op: "i32.add" },
               set(OUTLEN),
               get(I),
               c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               set(I),
-              { op: "br", depth: 0 } as Instr,
+              { op: "br", depth: 0 },
             ],
           },
         ],
       },
       // outArr = array.new_default(outLen)
       get(OUTLEN),
-      { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+      { op: "array.new_default", typeIdx: strDataTypeIdx },
       set(OUTARR),
       // ── pass 2: fill ──  i=src idx, reuse M as dest idx
       c(0),
@@ -451,14 +446,14 @@ export function emitNativeCaseConversion(
             body: [
               get(I),
               get(LEN),
-              { op: "i32.ge_u" } as Instr,
-              { op: "br_if", depth: 1 } as Instr,
+              { op: "i32.ge_u" },
+              { op: "br_if", depth: 1 },
               ...srcChar(I),
               set(CH),
               ...findSpecial(),
               get(SPECHIT),
               c(0),
-              { op: "i32.ge_s" } as Instr,
+              { op: "i32.ge_s" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
@@ -467,7 +462,7 @@ export function emitNativeCaseConversion(
                   get(SPECHIT),
                   set(SPECBASE),
                   // count = spec[base+1]
-                  ...specGet([get(SPECBASE), c(1), { op: "i32.add" } as Instr]),
+                  ...specGet([get(SPECBASE), c(1), { op: "i32.add" }]),
                   set(CH), // reuse CH as a small loop bound (outLen)
                   c(0),
                   set(OUTLEN), // reuse OUTLEN as inner index
@@ -481,28 +476,22 @@ export function emitNativeCaseConversion(
                         body: [
                           get(OUTLEN),
                           get(CH),
-                          { op: "i32.ge_u" } as Instr,
-                          { op: "br_if", depth: 1 } as Instr,
+                          { op: "i32.ge_u" },
+                          { op: "br_if", depth: 1 },
                           // outArr[M] = spec[base+2+outLen]
                           get(OUTARR),
                           get(M),
-                          ...specGet([
-                            get(SPECBASE),
-                            c(2),
-                            { op: "i32.add" } as Instr,
-                            get(OUTLEN),
-                            { op: "i32.add" } as Instr,
-                          ]),
-                          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+                          ...specGet([get(SPECBASE), c(2), { op: "i32.add" }, get(OUTLEN), { op: "i32.add" }]),
+                          { op: "array.set", typeIdx: strDataTypeIdx },
                           get(M),
                           c(1),
-                          { op: "i32.add" } as Instr,
+                          { op: "i32.add" },
                           set(M),
                           get(OUTLEN),
                           c(1),
-                          { op: "i32.add" } as Instr,
+                          { op: "i32.add" },
                           set(OUTLEN),
-                          { op: "br", depth: 0 } as Instr,
+                          { op: "br", depth: 0 },
                         ],
                       },
                     ],
@@ -514,19 +503,19 @@ export function emitNativeCaseConversion(
                   get(M),
                   get(CH),
                   get(RUNS),
-                  { op: "call", funcIdx: simpleIdx } as Instr,
-                  { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+                  { op: "call", funcIdx: simpleIdx },
+                  { op: "array.set", typeIdx: strDataTypeIdx },
                   get(M),
                   c(1),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   set(M),
                 ],
-              } as Instr,
+              },
               get(I),
               c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               set(I),
-              { op: "br", depth: 0 } as Instr,
+              { op: "br", depth: 0 },
             ],
           },
         ],
@@ -535,7 +524,7 @@ export function emitNativeCaseConversion(
       get(M),
       c(0),
       get(OUTARR),
-      { op: "struct.new", typeIdx: strTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: strTypeIdx },
     ];
     pushDefinedFunc(ctx, funcIdx, {
       name,

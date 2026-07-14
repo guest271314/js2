@@ -379,7 +379,7 @@ export function lowerIrFunctionBody<S>(
         `ir/lower: '${func.name}' uses an op family (loop/try/await) not yet migrated behind the trait — out of the bytecode subset. See plan/issues/1584 §2a.`,
       );
     }
-    return out as Instr[];
+    return out;
   };
   if (func.blocks.length === 0) {
     throw new Error(`ir/lower: function ${func.name} has no blocks`);
@@ -2851,9 +2851,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_FULFILLED,
         });
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" } as Instr);
+        emitter.pushRaw(out, { op: "ref.null.extern" });
         emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" } as Instr);
+        emitter.pushRaw(out, { op: "extern.convert_any" });
         return;
       }
       case "async.throw": {
@@ -2869,9 +2869,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_REJECTED,
         });
         emitValue(instr.reason, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" } as Instr);
+        emitter.pushRaw(out, { op: "ref.null.extern" });
         emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" } as Instr);
+        emitter.pushRaw(out, { op: "extern.convert_any" });
         return;
       }
       case "await": {
@@ -2904,7 +2904,7 @@ export function lowerIrFunctionBody<S>(
         // Assert S = Instr[].
         const wasmOut = requireInstrSink(out);
         emitValue(instr.operand, out);
-        wasmOut.push({ op: "any.convert_extern" } as Instr);
+        wasmOut.push({ op: "any.convert_extern" });
         wasmOut.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
         // The next emit needs a scratch local. Reuse the
         // jsBitwiseTmp pattern: allocate lazily into `locals` and
@@ -2944,14 +2944,14 @@ export function lowerIrFunctionBody<S>(
             op: "struct.get",
             typeIdx: promiseTypeIdx,
             fieldIdx: 1,
-          } as Instr);
+          });
           // #1584 (a4): throw routes through the trait.
           emitter.emitThrow(exnTagIdx, rejectedBranch as unknown as S);
         }
-        rejectedBranch.push({ op: "unreachable" } as Instr);
+        rejectedBranch.push({ op: "unreachable" });
         // PENDING / fall-through marker. Slice 2 (#1373b) replaces with
         // the CPS continuation synthesis once #1326c Phase 1C-B lands.
-        const pendingBranch: Instr[] = [{ op: "unreachable" } as Instr];
+        const pendingBranch: Instr[] = [{ op: "unreachable" }];
         wasmOut.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
         wasmOut.push({ op: "i32.eq" });
         wasmOut.push({
@@ -2959,13 +2959,13 @@ export function lowerIrFunctionBody<S>(
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: [
             { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
           ],
           else: [
             { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
-            { op: "i32.const", value: PROMISE_STATE_REJECTED } as Instr,
-            { op: "i32.eq" } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: PROMISE_STATE_REJECTED },
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: {
@@ -2974,9 +2974,9 @@ export function lowerIrFunctionBody<S>(
               },
               then: rejectedBranch,
               else: pendingBranch,
-            } as Instr,
+            },
           ],
-        } as Instr);
+        });
         return;
       }
     }
@@ -3105,7 +3105,7 @@ export function lowerIrFunctionBody<S>(
   // trailing `unreachable` is needed; a function that didn't would surface the
   // missing terminal downstream, not here.
   if (Array.isArray(body)) {
-    const wasmBody = body as Instr[];
+    const wasmBody = body;
     const last = wasmBody[wasmBody.length - 1];
     if (!last || last.op !== "return") {
       emitter.emitUnreachable(body);

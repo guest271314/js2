@@ -395,37 +395,37 @@ function buildSubscribeBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): Ins
     // dispatch below is uniform (mirrors spec PromiseResolve for a non-thenable).
     { op: "local.get", index: INPUT },
     { op: "any.convert_extern" },
-    { op: "ref.test", typeIdx: ids.promiseTypeIdx } as Instr,
+    { op: "ref.test", typeIdx: ids.promiseTypeIdx },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: INPUT },
         { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: ids.promiseTypeIdx } as Instr,
+        { op: "ref.cast", typeIdx: ids.promiseTypeIdx },
         { op: "local.set", index: P },
       ],
       else: [
         { op: "i32.const", value: PROMISE_STATE_FULFILLED },
         { op: "local.get", index: INPUT },
         { op: "ref.null.extern" },
-        { op: "struct.new", typeIdx: ids.promiseTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: ids.promiseTypeIdx },
         { op: "local.set", index: P },
       ],
-    } as Instr,
+    },
 
     // caps = $CombinatorElemCaps{ state, index } (boxed to externref).
     { op: "local.get", index: STATE },
     { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ids.stateTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ids.stateTypeIdx },
     { op: "local.get", index: INDEX },
-    { op: "struct.new", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "struct.new", typeIdx: ids.elemCapsTypeIdx },
     { op: "extern.convert_any" },
     { op: "local.set", index: CAPS },
 
     // Dispatch on the (possibly already-settled) promise state.
     { op: "local.get", index: P },
-    { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 0 },
     { op: "i32.const", value: PROMISE_STATE_FULFILLED },
     { op: "i32.eq" },
     {
@@ -436,12 +436,12 @@ function buildSubscribeBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): Ins
         { op: "local.get", index: FULFILL_FN },
         { op: "local.get", index: CAPS },
         { op: "local.get", index: P },
-        { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 1 },
         { op: "call", funcIdx: rt.enqueueFuncIdx },
       ],
       else: [
         { op: "local.get", index: P },
-        { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: PROMISE_STATE_REJECTED },
         { op: "i32.eq" },
         {
@@ -452,7 +452,7 @@ function buildSubscribeBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): Ins
             { op: "local.get", index: REJECT_FN },
             { op: "local.get", index: CAPS },
             { op: "local.get", index: P },
-            { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 1 },
             { op: "call", funcIdx: rt.enqueueFuncIdx },
           ],
           else: [
@@ -463,14 +463,14 @@ function buildSubscribeBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): Ins
             { op: "local.get", index: REJECT_FN },
             { op: "local.get", index: CAPS },
             { op: "local.get", index: P },
-            { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 2 } as Instr,
-            { op: "struct.new", typeIdx: cbTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: ids.promiseTypeIdx, fieldIdx: 2 },
+            { op: "struct.new", typeIdx: cbTypeIdx },
             { op: "extern.convert_any" },
-            { op: "struct.set", typeIdx: ids.promiseTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.set", typeIdx: ids.promiseTypeIdx, fieldIdx: 2 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 }
 
@@ -495,28 +495,28 @@ function buildAllFulfillBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): In
   return [
     { op: "local.get", index: CAPS },
     { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx },
     { op: "local.set", index: C },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 },
     { op: "local.set", index: ST },
 
     // results[index] = value
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: VALUE },
-    { op: "array.set", typeIdx: ids.arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: ids.arrTypeIdx },
 
     // remaining -= 1
     { op: "local.get", index: ST },
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
     { op: "i32.const", value: 1 },
     { op: "i32.sub" },
     { op: "local.tee", index: REM },
-    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
 
     // if remaining == 0: fulfill the result promise with the results vec.
     { op: "local.get", index: REM },
@@ -526,18 +526,18 @@ function buildAllFulfillBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT): In
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 },
         // vec = struct.new $vec(length, resultsArr)
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 },
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
+        { op: "struct.new", typeIdx: ids.vecTypeIdx },
         { op: "extern.convert_any" },
         { op: "call", funcIdx: rt.fulfillFuncIdx },
         { op: "drop" },
       ],
-    } as Instr,
+    },
 
     { op: "local.get", index: VALUE },
   ];
@@ -564,13 +564,13 @@ function buildSettleResultBody(ids: CombinatorRuntime, settleFuncIdx: number): I
   return [
     { op: "local.get", index: CAPS },
     { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx },
     { op: "local.set", index: C },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 },
     { op: "local.set", index: ST },
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 },
     { op: "local.get", index: VALUE },
     { op: "call", funcIdx: settleFuncIdx },
     // __promise_fulfill/__promise_reject return the settled value — that is the
@@ -637,28 +637,28 @@ function buildAllSettledBody(
 
     { op: "local.get", index: CAPS },
     { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx },
     { op: "local.set", index: C },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 },
     { op: "local.set", index: ST },
 
     // results[index] = obj
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: OBJ },
-    { op: "array.set", typeIdx: ids.arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: ids.arrTypeIdx },
 
     // remaining -= 1
     { op: "local.get", index: ST },
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
     { op: "i32.const", value: 1 },
     { op: "i32.sub" },
     { op: "local.tee", index: REM },
-    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
 
     // if remaining == 0: FULFILL the aggregate with the results vec (never reject).
     { op: "local.get", index: REM },
@@ -668,17 +668,17 @@ function buildAllSettledBody(
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 },
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 },
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
+        { op: "struct.new", typeIdx: ids.vecTypeIdx },
         { op: "extern.convert_any" },
         { op: "call", funcIdx: rt.fulfillFuncIdx },
         { op: "drop" },
       ],
-    } as Instr,
+    },
 
     { op: "local.get", index: VALUE },
   ];
@@ -702,28 +702,28 @@ function buildAnyRejectBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT, aggE
   return [
     { op: "local.get", index: CAPS },
     { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: ids.elemCapsTypeIdx },
     { op: "local.set", index: C },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 0 },
     { op: "local.set", index: ST },
 
     // errors[index] = reason
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: C },
-    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: ids.elemCapsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: VALUE },
-    { op: "array.set", typeIdx: ids.arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: ids.arrTypeIdx },
 
     // remaining -= 1
     { op: "local.get", index: ST },
     { op: "local.get", index: ST },
-    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
     { op: "i32.const", value: 1 },
     { op: "i32.sub" },
     { op: "local.tee", index: REM },
-    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 } as Instr,
+    { op: "struct.set", typeIdx: ids.stateTypeIdx, fieldIdx: 3 },
 
     // if remaining == 0: reject the aggregate with AggregateError(errorsVec).
     { op: "local.get", index: REM },
@@ -733,18 +733,18 @@ function buildAnyRejectBody(ids: CombinatorRuntime, rt: AsyncDriveRuntimeT, aggE
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 0 },
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 2 },
         { op: "local.get", index: ST },
-        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: ids.stateTypeIdx, fieldIdx: 1 },
+        { op: "struct.new", typeIdx: ids.vecTypeIdx },
         { op: "extern.convert_any" },
         { op: "call", funcIdx: aggErrNewFuncIdx },
         { op: "call", funcIdx: rt.rejectFuncIdx },
         { op: "drop" },
       ],
-    } as Instr,
+    },
 
     { op: "local.get", index: VALUE },
   ];
@@ -786,7 +786,7 @@ function buildNewAggregateErrorBody(
     { op: "ref.null.extern" },
     { op: "i32.const", value: -1 },
     { op: "local.get", index: PROPS },
-    { op: "struct.new", typeIdx: errStructTypeIdx } as Instr,
+    { op: "struct.new", typeIdx: errStructTypeIdx },
     { op: "extern.convert_any" },
   ];
 }
@@ -827,12 +827,12 @@ export function emitStandalonePromiseCombinator(
   fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
   fctx.body.push({ op: "ref.null.extern" });
   fctx.body.push({ op: "ref.null.extern" });
-  fctx.body.push({ op: "struct.new", typeIdx: ids.promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: ids.promiseTypeIdx });
   fctx.body.push({ op: "local.set", index: resultLocal });
 
   // Backing results array (only meaningful for `all`; `race` ignores it).
   fctx.body.push({ op: "i32.const", value: n });
-  fctx.body.push({ op: "array.new_default", typeIdx: ids.arrTypeIdx } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: ids.arrTypeIdx });
   fctx.body.push({ op: "local.set", index: arrLocal });
 
   // $CombinatorState{ resultPromise, resultsArr, length=n, remaining=n }.
@@ -840,7 +840,7 @@ export function emitStandalonePromiseCombinator(
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "i32.const", value: n });
   fctx.body.push({ op: "i32.const", value: n });
-  fctx.body.push({ op: "struct.new", typeIdx: ids.stateTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: ids.stateTypeIdx });
   fctx.body.push({ op: "local.set", index: stateLocal });
 
   if (n === 0) {
@@ -853,7 +853,7 @@ export function emitStandalonePromiseCombinator(
       fctx.body.push({ op: "local.get", index: resultLocal });
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.get", index: arrLocal });
-      fctx.body.push({ op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: ids.vecTypeIdx });
       fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: rt.fulfillFuncIdx });
       fctx.body.push({ op: "drop" });
@@ -861,7 +861,7 @@ export function emitStandalonePromiseCombinator(
       fctx.body.push({ op: "local.get", index: resultLocal });
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.get", index: arrLocal });
-      fctx.body.push({ op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: ids.vecTypeIdx });
       fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "call", funcIdx: ids.aggErrNewFuncIdx! });
       fctx.body.push({ op: "call", funcIdx: rt.rejectFuncIdx });
@@ -873,8 +873,8 @@ export function emitStandalonePromiseCombinator(
       fctx.body.push({ op: "local.get", index: stateLocal });
       fctx.body.push({ op: "extern.convert_any" });
       fctx.body.push({ op: "i32.const", value: i });
-      fctx.body.push({ op: "ref.func", funcIdx: reaction.fulfillIdx } as Instr);
-      fctx.body.push({ op: "ref.func", funcIdx: reaction.rejectIdx } as Instr);
+      fctx.body.push({ op: "ref.func", funcIdx: reaction.fulfillIdx });
+      fctx.body.push({ op: "ref.func", funcIdx: reaction.rejectIdx });
       fctx.body.push({ op: "call", funcIdx: ids.subscribeFuncIdx });
     }
   }
@@ -975,19 +975,19 @@ export function emitStandalonePromiseCombinatorRuntime(
   // array's capacity (`array.len` over-reports after push growth).
   fctx.body.push({ op: "local.get", index: argVecLocal });
   fctx.body.push({ op: "ref.as_non_null" });
-  fctx.body.push({ op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: nLocal });
 
   // Pending result promise.
   fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
   fctx.body.push({ op: "ref.null.extern" });
   fctx.body.push({ op: "ref.null.extern" });
-  fctx.body.push({ op: "struct.new", typeIdx: ids.promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: ids.promiseTypeIdx });
   fctx.body.push({ op: "local.set", index: resultLocal });
 
   // Backing results array sized n (only meaningful for `all`; `race` ignores it).
   fctx.body.push({ op: "local.get", index: nLocal });
-  fctx.body.push({ op: "array.new_default", typeIdx: ids.arrTypeIdx } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: ids.arrTypeIdx });
   fctx.body.push({ op: "local.set", index: arrLocal });
 
   // $CombinatorState{ resultPromise, resultsArr, length=n, remaining=n }.
@@ -995,7 +995,7 @@ export function emitStandalonePromiseCombinatorRuntime(
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "local.get", index: nLocal });
   fctx.body.push({ op: "local.get", index: nLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: ids.stateTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: ids.stateTypeIdx });
   fctx.body.push({ op: "local.set", index: stateLocal });
 
   // (#2922) Dynamic-argument mode: a not-iterable argument settles the result
@@ -1013,7 +1013,7 @@ export function emitStandalonePromiseCombinatorRuntime(
         { op: "call", funcIdx: rt.rejectFuncIdx },
         { op: "drop" },
       ],
-    } as Instr);
+    });
   }
 
   // `Promise.all(<empty>)` / `Promise.allSettled(<empty>)` fulfill immediately
@@ -1032,12 +1032,12 @@ export function emitStandalonePromiseCombinatorRuntime(
         { op: "local.get", index: resultLocal },
         { op: "i32.const", value: 0 },
         { op: "local.get", index: arrLocal },
-        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: ids.vecTypeIdx },
         { op: "extern.convert_any" },
         { op: "call", funcIdx: rt.fulfillFuncIdx },
         { op: "drop" },
       ],
-    } as Instr);
+    });
   } else if (method === "any") {
     fctx.body.push({ op: "local.get", index: nLocal });
     fctx.body.push({ op: "i32.eqz" });
@@ -1048,13 +1048,13 @@ export function emitStandalonePromiseCombinatorRuntime(
         { op: "local.get", index: resultLocal },
         { op: "i32.const", value: 0 },
         { op: "local.get", index: arrLocal },
-        { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: ids.vecTypeIdx },
         { op: "extern.convert_any" },
         { op: "call", funcIdx: ids.aggErrNewFuncIdx! },
         { op: "call", funcIdx: rt.rejectFuncIdx },
         { op: "drop" },
       ],
-    } as Instr);
+    });
   }
 
   // for (i = 0; i < n; i++) __combinator_subscribe(argVec.data[i], state, i,
@@ -1080,14 +1080,14 @@ export function emitStandalonePromiseCombinatorRuntime(
           // element: argVec.data[i] — externref, subscribe's input directly.
           { op: "local.get", index: argVecLocal },
           { op: "ref.as_non_null" },
-          { op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "struct.get", typeIdx: argVecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: iLocal },
-          { op: "array.get", typeIdx: argArrTypeIdx } as Instr,
+          { op: "array.get", typeIdx: argArrTypeIdx },
           { op: "local.get", index: stateLocal },
           { op: "extern.convert_any" },
           { op: "local.get", index: iLocal },
-          { op: "ref.func", funcIdx: reaction.fulfillIdx } as Instr,
-          { op: "ref.func", funcIdx: reaction.rejectIdx } as Instr,
+          { op: "ref.func", funcIdx: reaction.fulfillIdx },
+          { op: "ref.func", funcIdx: reaction.rejectIdx },
           { op: "call", funcIdx: ids.subscribeFuncIdx },
 
           // i++
@@ -1100,7 +1100,7 @@ export function emitStandalonePromiseCombinatorRuntime(
         ],
       },
     ],
-  } as Instr);
+  });
 
   fctx.body.push({ op: "local.get", index: resultLocal });
   fctx.body.push({ op: "extern.convert_any" });
@@ -1161,7 +1161,7 @@ export function ensureCombinatorToVec(ctx: CodegenContext): void {
       { name: "$data", type: arrRefNull },
       { name: "$grow", type: arrRefNull },
     ],
-    body: buildToVecCommonHead(vecTypeIdx).concat([{ op: "ref.null.extern" } as Instr]),
+    body: buildToVecCommonHead(vecTypeIdx).concat([{ op: "ref.null.extern" }]),
     exported: false,
   });
   ctx.funcMap.set("__combinator_to_vec", funcIdx);
@@ -1176,20 +1176,20 @@ export function ensureCombinatorToVec(ctx: CodegenContext): void {
 function buildToVecCommonHead(vecTypeIdx: number): Instr[] {
   return [
     { op: "local.get", index: TOVEC_X },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-    } as Instr,
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
     { op: "local.get", index: TOVEC_X },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: vecTypeIdx },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: TOVEC_X }, { op: "return" } as Instr],
-    } as Instr,
+      then: [{ op: "local.get", index: TOVEC_X }, { op: "return" }],
+    },
   ];
 }
 
@@ -1255,14 +1255,14 @@ export function fillCombinatorToVec(ctx: CodegenContext): void {
     { op: "i32.mul" },
     { op: "local.set", index: TOVEC_CAP },
     { op: "local.get", index: TOVEC_CAP },
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx },
     { op: "local.set", index: TOVEC_GROW },
     { op: "local.get", index: TOVEC_GROW },
     { op: "i32.const", value: 0 },
     { op: "local.get", index: TOVEC_DATA },
     { op: "i32.const", value: 0 },
     { op: "local.get", index: TOVEC_LEN },
-    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
     { op: "local.get", index: TOVEC_GROW },
     { op: "local.set", index: TOVEC_DATA },
   ];
@@ -1271,8 +1271,8 @@ export function fillCombinatorToVec(ctx: CodegenContext): void {
   const hasNextChain: Instr[] = [{ op: "i32.const", value: 0 }];
   for (const tIdx of nextStructTypeIdxs) {
     hasNextChain.push({ op: "local.get", index: TOVEC_X });
-    hasNextChain.push({ op: "any.convert_extern" } as Instr);
-    hasNextChain.push({ op: "ref.test", typeIdx: tIdx } as Instr);
+    hasNextChain.push({ op: "any.convert_extern" });
+    hasNextChain.push({ op: "ref.test", typeIdx: tIdx });
     hasNextChain.push({ op: "i32.or" });
   }
 
@@ -1284,7 +1284,7 @@ export function fillCombinatorToVec(ctx: CodegenContext): void {
     { op: "call", funcIdx: callIteratorIdx },
     { op: "local.set", index: TOVEC_IT },
     { op: "local.get", index: TOVEC_IT },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -1297,16 +1297,16 @@ export function fillCombinatorToVec(ctx: CodegenContext): void {
             { op: "local.get", index: TOVEC_X },
             { op: "local.set", index: TOVEC_IT },
           ],
-          else: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
-        } as Instr,
+          else: [{ op: "ref.null.extern" }, { op: "return" }],
+        },
       ],
-    } as Instr,
+    },
 
     // cap = 4; data = new arr[4]; len = 0
     { op: "i32.const", value: 4 },
     { op: "local.set", index: TOVEC_CAP },
     { op: "local.get", index: TOVEC_CAP },
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx },
     { op: "local.set", index: TOVEC_DATA },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: TOVEC_LEN },
@@ -1339,27 +1339,27 @@ export function fillCombinatorToVec(ctx: CodegenContext): void {
             { op: "local.get", index: TOVEC_LEN },
             { op: "local.get", index: TOVEC_CAP },
             { op: "i32.ge_s" },
-            { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr,
+            { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] },
             // data[len] = value; len++
             { op: "local.get", index: TOVEC_DATA },
             { op: "local.get", index: TOVEC_LEN },
             { op: "local.get", index: TOVEC_VALUE },
-            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "array.set", typeIdx: arrTypeIdx },
             { op: "local.get", index: TOVEC_LEN },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: TOVEC_LEN },
             { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
 
     // return $Vec{len, data} as externref
     { op: "local.get", index: TOVEC_LEN },
     { op: "local.get", index: TOVEC_DATA },
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" },
   ];
 }

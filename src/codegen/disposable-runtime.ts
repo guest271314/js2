@@ -121,7 +121,7 @@ function stackRefNull(ctx: CodegenContext): ValType {
 /** Instrs: convert an externref (top of stack) → (ref null $DisposableStack). */
 function externToStack(ctx: CodegenContext): Instr[] {
   const t = ensureDisposableStackTypes(ctx);
-  return [{ op: "any.convert_extern" } as Instr, { op: "ref.cast_null", typeIdx: t.stackTypeIdx } as Instr];
+  return [{ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: t.stackTypeIdx }];
 }
 
 // ── Helper functions (early-emitted; struct/array ops + error throw only) ─────
@@ -151,15 +151,15 @@ export function ensureDisposableStackNew(ctx: CodegenContext): number {
   const t = ensureDisposableStackTypes(ctx);
   return ensureHelper(ctx, "__disposablestack_new", [], [EXTERNREF], [], () => [
     // disposed = 0
-    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 0 },
     // entries = new $DisposeEntries[INITIAL_CAPACITY] (nulls)
-    { op: "ref.null", typeIdx: t.entryTypeIdx } as Instr,
-    { op: "i32.const", value: INITIAL_CAPACITY } as Instr,
-    { op: "array.new", typeIdx: t.entriesTypeIdx } as Instr,
+    { op: "ref.null", typeIdx: t.entryTypeIdx },
+    { op: "i32.const", value: INITIAL_CAPACITY },
+    { op: "array.new", typeIdx: t.entriesTypeIdx },
     // count = 0
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "struct.new", typeIdx: t.stackTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "struct.new", typeIdx: t.stackTypeIdx },
+    { op: "extern.convert_any" },
   ]);
 }
 
@@ -197,81 +197,81 @@ export function ensureDisposableStackAppend(ctx: CodegenContext): number {
         I = 9;
       const body: Instr[] = [];
       // ds = cast(stack); RequireInternalSlot: null → ReferenceError
-      body.push({ op: "local.get", index: STACK } as Instr);
+      body.push({ op: "local.get", index: STACK });
       body.push(...externToStack(ctx));
-      body.push({ op: "local.tee", index: DS } as Instr);
-      body.push({ op: "ref.is_null" } as Instr);
+      body.push({ op: "local.tee", index: DS });
+      body.push({ op: "ref.is_null" });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack has no [[DisposableState]]"),
         else: [],
-      } as Instr);
+      });
       // if disposed: throw ReferenceError
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack already disposed"),
         else: [],
-      } as Instr);
+      });
       // entries = ds.entries; count = ds.count; cap = len(entries)
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 } as Instr);
-      body.push({ op: "local.tee", index: ENTRIES } as Instr);
-      body.push({ op: "array.len" } as Instr);
-      body.push({ op: "local.set", index: CAP } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 } as Instr);
-      body.push({ op: "local.set", index: COUNT } as Instr);
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 });
+      body.push({ op: "local.tee", index: ENTRIES });
+      body.push({ op: "array.len" });
+      body.push({ op: "local.set", index: CAP });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 });
+      body.push({ op: "local.set", index: COUNT });
       // if count >= cap: grow (new array of cap*2, copy)
-      body.push({ op: "local.get", index: COUNT } as Instr);
-      body.push({ op: "local.get", index: CAP } as Instr);
-      body.push({ op: "i32.ge_s" } as Instr);
+      body.push({ op: "local.get", index: COUNT });
+      body.push({ op: "local.get", index: CAP });
+      body.push({ op: "i32.ge_s" });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: [
           // new = new $DisposeEntries[cap*2]
-          { op: "ref.null", typeIdx: t.entryTypeIdx } as Instr,
-          { op: "local.get", index: CAP } as Instr,
-          { op: "i32.const", value: 2 } as Instr,
-          { op: "i32.mul" } as Instr,
-          { op: "i32.const", value: INITIAL_CAPACITY } as Instr,
-          { op: "i32.add" } as Instr, // +INITIAL guards cap==0
-          { op: "array.new", typeIdx: t.entriesTypeIdx } as Instr,
-          { op: "local.set", index: NEW } as Instr,
+          { op: "ref.null", typeIdx: t.entryTypeIdx },
+          { op: "local.get", index: CAP },
+          { op: "i32.const", value: 2 },
+          { op: "i32.mul" },
+          { op: "i32.const", value: INITIAL_CAPACITY },
+          { op: "i32.add" }, // +INITIAL guards cap==0
+          { op: "array.new", typeIdx: t.entriesTypeIdx },
+          { op: "local.set", index: NEW },
           // copy: array.copy(new, 0, entries, 0, count)
-          { op: "local.get", index: NEW } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "local.get", index: ENTRIES } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "local.get", index: COUNT } as Instr,
-          { op: "array.copy", dstTypeIdx: t.entriesTypeIdx, srcTypeIdx: t.entriesTypeIdx } as Instr,
+          { op: "local.get", index: NEW },
+          { op: "i32.const", value: 0 },
+          { op: "local.get", index: ENTRIES },
+          { op: "i32.const", value: 0 },
+          { op: "local.get", index: COUNT },
+          { op: "array.copy", dstTypeIdx: t.entriesTypeIdx, srcTypeIdx: t.entriesTypeIdx },
           // entries = new; ds.entries = new
-          { op: "local.get", index: NEW } as Instr,
-          { op: "local.set", index: ENTRIES } as Instr,
-          { op: "local.get", index: DS } as Instr,
-          { op: "local.get", index: NEW } as Instr,
-          { op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: NEW },
+          { op: "local.set", index: ENTRIES },
+          { op: "local.get", index: DS },
+          { op: "local.get", index: NEW },
+          { op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 1 },
         ],
         else: [],
-      } as Instr);
+      });
       // entries[count] = new $DisposeEntry(cb, value, kind)
-      body.push({ op: "local.get", index: ENTRIES } as Instr);
-      body.push({ op: "local.get", index: COUNT } as Instr);
-      body.push({ op: "local.get", index: CB } as Instr);
-      body.push({ op: "local.get", index: VALUE } as Instr);
-      body.push({ op: "local.get", index: KIND } as Instr);
-      body.push({ op: "struct.new", typeIdx: t.entryTypeIdx } as Instr);
-      body.push({ op: "array.set", typeIdx: t.entriesTypeIdx } as Instr);
+      body.push({ op: "local.get", index: ENTRIES });
+      body.push({ op: "local.get", index: COUNT });
+      body.push({ op: "local.get", index: CB });
+      body.push({ op: "local.get", index: VALUE });
+      body.push({ op: "local.get", index: KIND });
+      body.push({ op: "struct.new", typeIdx: t.entryTypeIdx });
+      body.push({ op: "array.set", typeIdx: t.entriesTypeIdx });
       // ds.count = count + 1
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "local.get", index: COUNT } as Instr);
-      body.push({ op: "i32.const", value: 1 } as Instr);
-      body.push({ op: "i32.add" } as Instr);
-      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 2 } as Instr);
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "local.get", index: COUNT });
+      body.push({ op: "i32.const", value: 1 });
+      body.push({ op: "i32.add" });
+      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 2 });
       void I;
       return body;
     },
@@ -295,39 +295,39 @@ export function ensureDisposableStackMove(ctx: CodegenContext): number {
       const STACK = 0,
         DS = 1;
       const body: Instr[] = [];
-      body.push({ op: "local.get", index: STACK } as Instr);
+      body.push({ op: "local.get", index: STACK });
       body.push(...externToStack(ctx));
-      body.push({ op: "local.tee", index: DS } as Instr);
-      body.push({ op: "ref.is_null" } as Instr);
+      body.push({ op: "local.tee", index: DS });
+      body.push({ op: "ref.is_null" });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack has no [[DisposableState]]"),
         else: [],
-      } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+      });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack already disposed"),
         else: [],
-      } as Instr);
+      });
       // new stack struct { disposed:0, entries: ds.entries, count: ds.count }
-      body.push({ op: "i32.const", value: 0 } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 } as Instr);
-      body.push({ op: "struct.new", typeIdx: t.stackTypeIdx } as Instr);
-      body.push({ op: "extern.convert_any" } as Instr);
+      body.push({ op: "i32.const", value: 0 });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 });
+      body.push({ op: "struct.new", typeIdx: t.stackTypeIdx });
+      body.push({ op: "extern.convert_any" });
       // mark this disposed: ds.disposed = 1; ds.count = 0
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "i32.const", value: 1 } as Instr);
-      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "i32.const", value: 0 } as Instr);
-      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 2 } as Instr);
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "i32.const", value: 1 });
+      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "i32.const", value: 0 });
+      body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 2 });
       // The new-stack externref built above is still on the value stack (the two
       // struct.set ops consume only DS + their operand), so it is the return value.
       return body;
@@ -355,24 +355,24 @@ export function ensureDisposableStackCheckActive(ctx: CodegenContext): number {
       const STACK = 0,
         DS = 1;
       const body: Instr[] = [];
-      body.push({ op: "local.get", index: STACK } as Instr);
+      body.push({ op: "local.get", index: STACK });
       body.push(...externToStack(ctx));
-      body.push({ op: "local.tee", index: DS } as Instr);
-      body.push({ op: "ref.is_null" } as Instr);
+      body.push({ op: "local.tee", index: DS });
+      body.push({ op: "ref.is_null" });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack has no [[DisposableState]]"),
         else: [],
-      } as Instr);
-      body.push({ op: "local.get", index: DS } as Instr);
-      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+      });
+      body.push({ op: "local.get", index: DS });
+      body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
       body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: buildThrowJsErrorInstrs(ctx, "ReferenceError", "DisposableStack already disposed"),
         else: [],
-      } as Instr);
+      });
       return body;
     },
   );
@@ -408,7 +408,7 @@ export function reserveDisposableStackDisposeDriver(ctx: CodegenContext): number
     name: DISPOSE_DRIVER,
     typeIdx,
     locals: [],
-    body: [{ op: "return" } as Instr],
+    body: [{ op: "return" }],
     exported: false,
   });
   (ctx as unknown as { disposableStackDisposeReserved?: boolean }).disposableStackDisposeReserved = true;
@@ -477,56 +477,56 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
 
   const body: Instr[] = [];
   // ds = cast(stack); if null return
-  body.push({ op: "local.get", index: STACK } as Instr);
+  body.push({ op: "local.get", index: STACK });
   body.push(...externToStack(ctx));
-  body.push({ op: "local.tee", index: DS } as Instr);
-  body.push({ op: "ref.is_null" } as Instr);
-  body.push({ op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr);
+  body.push({ op: "local.tee", index: DS });
+  body.push({ op: "ref.is_null" });
+  body.push({ op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] });
   // if already disposed: return
-  body.push({ op: "local.get", index: DS } as Instr);
-  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
-  body.push({ op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr);
+  body.push({ op: "local.get", index: DS });
+  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
+  body.push({ op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] });
   // ds.disposed = 1
-  body.push({ op: "local.get", index: DS } as Instr);
-  body.push({ op: "i32.const", value: 1 } as Instr);
-  body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+  body.push({ op: "local.get", index: DS });
+  body.push({ op: "i32.const", value: 1 });
+  body.push({ op: "struct.set", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
   // entries = ds.entries; i = ds.count - 1
-  body.push({ op: "local.get", index: DS } as Instr);
-  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 } as Instr);
-  body.push({ op: "local.set", index: ENTRIES } as Instr);
-  body.push({ op: "local.get", index: DS } as Instr);
-  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 } as Instr);
-  body.push({ op: "i32.const", value: 1 } as Instr);
-  body.push({ op: "i32.sub" } as Instr);
-  body.push({ op: "local.set", index: I } as Instr);
+  body.push({ op: "local.get", index: DS });
+  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 1 });
+  body.push({ op: "local.set", index: ENTRIES });
+  body.push({ op: "local.get", index: DS });
+  body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 2 });
+  body.push({ op: "i32.const", value: 1 });
+  body.push({ op: "i32.sub" });
+  body.push({ op: "local.set", index: I });
 
   // LIFO loop
   const loopBody: Instr[] = [];
   // if i < 0 break
-  loopBody.push({ op: "local.get", index: I } as Instr);
-  loopBody.push({ op: "i32.const", value: 0 } as Instr);
-  loopBody.push({ op: "i32.lt_s" } as Instr);
-  loopBody.push({ op: "br_if", depth: 1 } as Instr); // break out of block (depth 1 = enclosing block)
+  loopBody.push({ op: "local.get", index: I });
+  loopBody.push({ op: "i32.const", value: 0 });
+  loopBody.push({ op: "i32.lt_s" });
+  loopBody.push({ op: "br_if", depth: 1 }); // break out of block (depth 1 = enclosing block)
   // entry = entries[i]
-  loopBody.push({ op: "local.get", index: ENTRIES } as Instr);
-  loopBody.push({ op: "local.get", index: I } as Instr);
-  loopBody.push({ op: "array.get", typeIdx: t.entriesTypeIdx } as Instr);
-  loopBody.push({ op: "local.tee", index: ENTRY } as Instr);
+  loopBody.push({ op: "local.get", index: ENTRIES });
+  loopBody.push({ op: "local.get", index: I });
+  loopBody.push({ op: "array.get", typeIdx: t.entriesTypeIdx });
+  loopBody.push({ op: "local.tee", index: ENTRY });
   // if entry != null: dispatch
-  loopBody.push({ op: "ref.is_null" } as Instr);
-  loopBody.push({ op: "i32.eqz" } as Instr);
+  loopBody.push({ op: "ref.is_null" });
+  loopBody.push({ op: "i32.eqz" });
   const dispatch: Instr[] = [];
-  dispatch.push({ op: "local.get", index: ENTRY } as Instr);
-  dispatch.push({ op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 2 } as Instr);
-  dispatch.push({ op: "local.set", index: KIND } as Instr);
+  dispatch.push({ op: "local.get", index: ENTRY });
+  dispatch.push({ op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 2 });
+  dispatch.push({ op: "local.set", index: KIND });
   // Instr helpers for the entry's callback (fieldIdx 0) and captured value (1).
   const entryCb = (): Instr[] => [
-    { op: "local.get", index: ENTRY } as Instr,
-    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.get", index: ENTRY },
+    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 0 },
   ];
   const entryValue = (): Instr[] => [
-    { op: "local.get", index: ENTRY } as Instr,
-    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.get", index: ENTRY },
+    { op: "struct.get", typeIdx: t.entryTypeIdx, fieldIdx: 1 },
   ];
   // Per-kind invocation, each a no-op when its dispatcher is unavailable:
   //   USE   (2): `value[@@dispose]()` → __call_fn_method_0(value, method)
@@ -534,30 +534,28 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   //   DEFER (0): onDispose()          → __call_fn_0(cb)
   const useCall: Instr[] =
     callFnMethod0 !== undefined
-      ? [...entryValue(), ...entryCb(), { op: "call", funcIdx: callFnMethod0 } as Instr, { op: "drop" } as Instr]
+      ? [...entryValue(), ...entryCb(), { op: "call", funcIdx: callFnMethod0 }, { op: "drop" }]
       : [];
   const adoptCall: Instr[] =
-    callFn1 !== undefined
-      ? [...entryCb(), ...entryValue(), { op: "call", funcIdx: callFn1 } as Instr, { op: "drop" } as Instr]
-      : [];
+    callFn1 !== undefined ? [...entryCb(), ...entryValue(), { op: "call", funcIdx: callFn1 }, { op: "drop" }] : [];
   const deferCall: Instr[] =
-    callFn0 !== undefined ? [...entryCb(), { op: "call", funcIdx: callFn0 } as Instr, { op: "drop" } as Instr] : [];
+    callFn0 !== undefined ? [...entryCb(), { op: "call", funcIdx: callFn0 }, { op: "drop" }] : [];
   // if kind == USE → useCall; else if kind == ADOPT → adoptCall; else deferCall.
   const invokeSwitch: Instr[] = [
-    { op: "local.get", index: KIND } as Instr,
-    { op: "i32.const", value: ENTRY_KIND_USE } as Instr,
-    { op: "i32.eq" } as Instr,
+    { op: "local.get", index: KIND },
+    { op: "i32.const", value: ENTRY_KIND_USE },
+    { op: "i32.eq" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: useCall,
       else: [
-        { op: "local.get", index: KIND } as Instr,
-        { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
-        { op: "i32.eq" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: adoptCall, else: deferCall } as Instr,
+        { op: "local.get", index: KIND },
+        { op: "i32.const", value: ENTRY_KIND_ADOPT },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: adoptCall, else: deferCall },
       ],
-    } as Instr,
+    },
   ];
   // (#3234) Run EVERY disposer even if a prior threw (§ DisposeResources). Wrap the
   // invocation in try/catch on the module exception tag ($exn carries the thrown
@@ -568,44 +566,47 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
   const buildSuppressedError: Instr[] = canAggregate
     ? [
         // props = __new_plain_object(); props.error = cur; props.suppressed = pending
-        { op: "call", funcIdx: newPlainObjIdx! } as Instr,
-        { op: "local.set", index: PROPS } as Instr,
-        { op: "local.get", index: PROPS } as Instr,
+        { op: "call", funcIdx: newPlainObjIdx! },
+        { op: "local.set", index: PROPS },
+        { op: "local.get", index: PROPS },
         ...stringConstantExternrefInstrs(ctx, "error"),
-        { op: "local.get", index: CUR } as Instr,
-        { op: "call", funcIdx: externSetIdx! } as Instr,
-        { op: "local.get", index: PROPS } as Instr,
+        { op: "local.get", index: CUR },
+        { op: "call", funcIdx: externSetIdx! },
+        { op: "local.get", index: PROPS },
         ...stringConstantExternrefInstrs(ctx, "suppressed"),
-        { op: "local.get", index: PENDING } as Instr,
-        { op: "call", funcIdx: externSetIdx! } as Instr,
+        { op: "local.get", index: PENDING },
+        { op: "call", funcIdx: externSetIdx! },
         // pending = struct.new $Error_struct{ tag, message "", name, stack null, userClassId -1, props }
-        { op: "i32.const", value: BUILTIN_TYPE_TAGS.SuppressedError } as Instr,
+        { op: "i32.const", value: BUILTIN_TYPE_TAGS.SuppressedError },
         ...stringConstantExternrefInstrs(ctx, ""),
         ...stringConstantExternrefInstrs(ctx, "SuppressedError"),
-        { op: "ref.null.extern" } as Instr,
-        { op: "i32.const", value: -1 } as Instr,
-        { op: "local.get", index: PROPS } as Instr,
-        { op: "struct.new", typeIdx: errStructIdx } as Instr,
-        { op: "extern.convert_any" } as Instr,
-        { op: "local.set", index: PENDING } as Instr,
+        { op: "ref.null.extern" },
+        { op: "i32.const", value: -1 },
+        { op: "local.get", index: PROPS },
+        { op: "struct.new", typeIdx: errStructIdx },
+        { op: "extern.convert_any" },
+        { op: "local.set", index: PENDING },
       ]
     : // Object runtime unavailable (should not happen — reserved at compile time):
       // degrade to last-error-wins so the module stays valid Wasm.
-      [{ op: "local.get", index: CUR } as Instr, { op: "local.set", index: PENDING } as Instr];
+      [
+        { op: "local.get", index: CUR },
+        { op: "local.set", index: PENDING },
+      ];
   const catchHandler: Instr[] = [
-    { op: "local.set", index: CUR } as Instr,
-    { op: "local.get", index: HASPENDING } as Instr,
+    { op: "local.set", index: CUR },
+    { op: "local.get", index: HASPENDING },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: buildSuppressedError,
       else: [
-        { op: "local.get", index: CUR } as Instr,
-        { op: "local.set", index: PENDING } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "local.set", index: HASPENDING } as Instr,
+        { op: "local.get", index: CUR },
+        { op: "local.set", index: PENDING },
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: HASPENDING },
       ],
-    } as Instr,
+    },
   ];
   dispatch.push({
     op: "try",
@@ -613,31 +614,34 @@ export function fillDisposableStackDisposeDriver(ctx: CodegenContext): void {
     body: invokeSwitch,
     catches: [{ tagIdx: exnTag, body: catchHandler }],
     catchAll: undefined,
-  } as Instr);
-  loopBody.push({ op: "if", blockType: { kind: "empty" }, then: dispatch, else: [] } as Instr);
+  });
+  loopBody.push({ op: "if", blockType: { kind: "empty" }, then: dispatch, else: [] });
   // i = i - 1; continue
-  loopBody.push({ op: "local.get", index: I } as Instr);
-  loopBody.push({ op: "i32.const", value: 1 } as Instr);
-  loopBody.push({ op: "i32.sub" } as Instr);
-  loopBody.push({ op: "local.set", index: I } as Instr);
-  loopBody.push({ op: "br", depth: 0 } as Instr); // continue loop
+  loopBody.push({ op: "local.get", index: I });
+  loopBody.push({ op: "i32.const", value: 1 });
+  loopBody.push({ op: "i32.sub" });
+  loopBody.push({ op: "local.set", index: I });
+  loopBody.push({ op: "br", depth: 0 }); // continue loop
 
   // block { loop { ... } }
   body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 
   // (#3234) After all disposers ran: if any error was accumulated, rethrow the
   // final completion (the outermost SuppressedError, or the single error as-is).
-  body.push({ op: "local.get", index: HASPENDING } as Instr);
+  body.push({ op: "local.get", index: HASPENDING });
   body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "local.get", index: PENDING } as Instr, { op: "throw", tagIdx: exnTag } as Instr],
+    then: [
+      { op: "local.get", index: PENDING },
+      { op: "throw", tagIdx: exnTag },
+    ],
     else: [],
-  } as Instr);
+  });
 
   driverFn.body = body;
 }
@@ -700,26 +704,29 @@ export function tryCompileNativeDisposableStackAnyMethodCall(
   const recvLocal = allocLocal(fctx, `__ds_anyrecv_${fctx.locals.length}`, EXTERNREF);
   const rt = compileExpression(ctx, fctx, propAccess.expression);
   if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
 
   // if ref.test $DisposableStack(recv): native dispose ; else TypeError.
   // `ref.test (ref $DisposableStack)` is 0 for null and for a non-matching ref,
   // so a null/undefined or wrong-type receiver lands in the TypeError arm —
   // matching RequireInternalSlot without ever emitting the host import.
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: driver } as Instr],
+    then: [
+      { op: "local.get", index: recvLocal },
+      { op: "call", funcIdx: driver },
+    ],
     else: buildThrowJsErrorInstrs(
       ctx,
       "TypeError",
       "DisposableStack.prototype.dispose requires a DisposableStack receiver",
       { flush: fctx },
     ),
-  } as Instr);
+  });
 
   // `dispose()` returns undefined. In a VALUE position (`assert.sameValue(
   // s.dispose(), undefined)` — returns-undefined.js) hand back the canonical
@@ -785,15 +792,15 @@ function compileNativeDisposableStackAnyCallbackMethod(
   const recvLocal = allocLocal(fctx, `__ds_anyrecv_${fctx.locals.length}`, EXTERNREF);
   const rt = compileExpression(ctx, fctx, propAccess.expression);
   if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
 
   // `ref.test (ref $DisposableStack)` is 0 for null and for a non-matching ref, so
   // a null/undefined/wrong-type receiver lands in the TypeError arm — matching
   // RequireInternalSlot without ever emitting the host import.
   const brandTest = (): Instr[] => [
-    { op: "local.get", index: recvLocal } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.test", typeIdx: t.stackTypeIdx } as Instr,
+    { op: "local.get", index: recvLocal },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: t.stackTypeIdx },
   ];
   const guardMsg = `DisposableStack.prototype.${methodName} requires a DisposableStack receiver`;
 
@@ -802,8 +809,8 @@ function compileNativeDisposableStackAnyCallbackMethod(
     // Eval callback → cbLocal (after receiver — call-site order).
     const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
     if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: cbLocal });
     // Guard TypeError registers the last late import + flushes fctx; fetch the
     // append funcIdx AFTER so the bake is post-shift.
     const elseThrow = buildThrowJsErrorInstrs(ctx, "TypeError", guardMsg, { flush: fctx });
@@ -813,14 +820,14 @@ function compileNativeDisposableStackAnyCallbackMethod(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: recvLocal } as Instr,
-        { op: "local.get", index: cbLocal } as Instr,
-        { op: "ref.null.extern" } as Instr, // value = null
-        { op: "i32.const", value: ENTRY_KIND_DEFER } as Instr,
-        { op: "call", funcIdx: appendIdx } as Instr,
+        { op: "local.get", index: recvLocal },
+        { op: "local.get", index: cbLocal },
+        { op: "ref.null.extern" }, // value = null
+        { op: "i32.const", value: ENTRY_KIND_DEFER },
+        { op: "call", funcIdx: appendIdx },
       ],
       else: elseThrow,
-    } as Instr);
+    });
     // `defer()` returns undefined (VOID in statement position; the canonical
     // undefined value via `emitUndefined` in value position — so `=== undefined`
     // compares equal, matching Slice 1 `dispose`). The guarded `if` is already in
@@ -838,12 +845,12 @@ function compileNativeDisposableStackAnyCallbackMethod(
     // adopt(value, onDispose) — eval value then onDispose; return value.
     const valueLocal = allocLocal(fctx, `__ds_val_${fctx.locals.length}`, EXTERNREF);
     if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: valueLocal });
     const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
     if (args[1]) compileArgAsExternref(ctx, fctx, args[1]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: cbLocal });
     const elseThrow = buildThrowJsErrorInstrs(ctx, "TypeError", guardMsg, { flush: fctx });
     const appendIdx = ctx.funcMap.get("__disposablestack_append")!;
     fctx.body.push(...brandTest());
@@ -851,17 +858,17 @@ function compileNativeDisposableStackAnyCallbackMethod(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: recvLocal } as Instr,
-        { op: "local.get", index: cbLocal } as Instr,
-        { op: "local.get", index: valueLocal } as Instr,
-        { op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr,
-        { op: "call", funcIdx: appendIdx } as Instr,
+        { op: "local.get", index: recvLocal },
+        { op: "local.get", index: cbLocal },
+        { op: "local.get", index: valueLocal },
+        { op: "i32.const", value: ENTRY_KIND_ADOPT },
+        { op: "call", funcIdx: appendIdx },
       ],
       else: elseThrow,
-    } as Instr);
+    });
     // adopt returns the value (§12.3.3.4 step 5). The throw arm is unreachable, so
     // the post-`if` `value` is the sole result on both statement/value positions.
-    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: valueLocal });
     return { kind: "externref" };
   }
 
@@ -895,8 +902,8 @@ function compileNativeDisposableStackAnyUse(
 
   // Eval value → valueLocal (after receiver — call-site order).
   if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-  else fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+  else fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "local.set", index: valueLocal });
 
   // Register every late import BEFORE the final flush: the append/check helpers
   // (→ `__new_ReferenceError`), the object substrate (`__extern_get`), and
@@ -917,7 +924,7 @@ function compileNativeDisposableStackAnyUse(
   if (externGetIdx === undefined || boxSymIdx === undefined || isUndefinedIdx === undefined) {
     // Substrate unavailable (should not happen once ensureObjectRuntime ran) —
     // keep the body balanced: value was evaluated for side effects; return it.
-    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: valueLocal });
     return { kind: "externref" };
   }
 
@@ -925,25 +932,25 @@ function compileNativeDisposableStackAnyUse(
   // (mirrors the typed use path — cover both the boxed-undefined and the
   // undefined-singleton regimes).
   const nullishOf = (localIdx: number): Instr[] => [
-    { op: "local.get", index: localIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "local.get", index: localIdx } as Instr,
-    { op: "call", funcIdx: isUndefinedIdx } as Instr,
-    { op: "i32.or" } as Instr,
+    { op: "local.get", index: localIdx },
+    { op: "ref.is_null" },
+    { op: "local.get", index: localIdx },
+    { op: "call", funcIdx: isUndefinedIdx },
+    { op: "i32.or" },
   ];
 
   // Hit arm: disposed-throw check, then GetDisposeMethod + conditional append.
   const hit: Instr[] = [];
-  hit.push({ op: "local.get", index: recvLocal } as Instr);
-  hit.push({ op: "call", funcIdx: checkIdx } as Instr);
+  hit.push({ op: "local.get", index: recvLocal });
+  hit.push({ op: "call", funcIdx: checkIdx });
 
   // if !nullish(value): method = __extern_get(value, __box_symbol(13)); validate; append.
   const nonNullishBody: Instr[] = [];
-  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
-  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: externGetIdx } as Instr);
-  nonNullishBody.push({ op: "local.set", index: methodLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: valueLocal });
+  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID });
+  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx });
+  nonNullishBody.push({ op: "call", funcIdx: externGetIdx });
+  nonNullishBody.push({ op: "local.set", index: methodLocal });
   nonNullishBody.push(...nullishOf(methodLocal));
   nonNullishBody.push({
     op: "if",
@@ -952,22 +959,22 @@ function compileNativeDisposableStackAnyUse(
       flush: fctx,
     }),
     else: [],
-  } as Instr);
-  nonNullishBody.push({ op: "local.get", index: recvLocal } as Instr);
-  nonNullishBody.push({ op: "local.get", index: methodLocal } as Instr);
-  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
-  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: appendIdx } as Instr);
+  });
+  nonNullishBody.push({ op: "local.get", index: recvLocal });
+  nonNullishBody.push({ op: "local.get", index: methodLocal });
+  nonNullishBody.push({ op: "local.get", index: valueLocal });
+  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE });
+  nonNullishBody.push({ op: "call", funcIdx: appendIdx });
 
   hit.push(...nullishOf(valueLocal));
-  hit.push({ op: "i32.eqz" } as Instr);
-  hit.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] } as Instr);
+  hit.push({ op: "i32.eqz" });
+  hit.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] });
 
   fctx.body.push(...brandTest());
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: hit, else: elseThrow } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: hit, else: elseThrow });
 
   // Return value.
-  fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valueLocal });
   return { kind: "externref" };
 }
 
@@ -1003,7 +1010,7 @@ export function tryCompileNativeDisposableStackAnyDisposedGet(
   const recvLocal = allocLocal(fctx, `__ds_dget_${fctx.locals.length}`, EXTERNREF);
   const rt = compileExpression(ctx, fctx, receiver);
   if (rt !== null && rt.kind !== "externref") coerceType(ctx, fctx, rt, EXTERNREF);
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
 
   // Register the boxing + dynamic-read helpers AFTER the receiver's own imports
   // settle, then flush late-import index shifts against this body before baking
@@ -1015,33 +1022,33 @@ export function tryCompileNativeDisposableStackAnyDisposedGet(
   if (boxBoolIdx === undefined || externGetIdx === undefined) {
     // Substrate unavailable — hand back `undefined` (null externref) rather than
     // an unbalanced body. (Should not happen once ensureObjectRuntime ran.)
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
   addStringConstantGlobal(ctx, "disposed");
 
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.test", typeIdx: t.stackTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: EXTERNREF },
     then: [
       // Native DisposableStack → box the i32 disposed flag as a boolean externref.
-      { op: "local.get", index: recvLocal } as Instr,
+      { op: "local.get", index: recvLocal },
       ...externToStack(ctx),
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "call", funcIdx: boxBoolIdx } as Instr,
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 },
+      { op: "call", funcIdx: boxBoolIdx },
     ],
     else: [
       // Not a DisposableStack → the generic dynamic property read (`$Object`
       // sidecar), so a user object's own `.disposed` property still resolves.
-      { op: "local.get", index: recvLocal } as Instr,
+      { op: "local.get", index: recvLocal },
       ...stringConstantExternrefInstrs(ctx, "disposed"),
-      { op: "call", funcIdx: externGetIdx } as Instr,
+      { op: "call", funcIdx: externGetIdx },
     ],
-  } as Instr);
+  });
   return { kind: "externref" };
 }
 
@@ -1065,14 +1072,14 @@ export function tryCompileNativeDisposableStackMethodCall(
   if (methodName === "dispose") {
     const driver = reserveDisposableStackDisposeDriver(ctx);
     compileExpression(ctx, fctx, propAccess.expression); // stack externref
-    fctx.body.push({ op: "call", funcIdx: driver } as Instr);
+    fctx.body.push({ op: "call", funcIdx: driver });
     return VOID_RESULT;
   }
 
   if (methodName === "move") {
     const moveIdx = ensureDisposableStackMove(ctx);
     compileExpression(ctx, fctx, propAccess.expression); // stack externref
-    fctx.body.push({ op: "call", funcIdx: moveIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: moveIdx });
     return EXTERNREF;
   }
 
@@ -1082,16 +1089,16 @@ export function tryCompileNativeDisposableStackMethodCall(
     // append arg order (stack, cb, value, kind) is independent of eval order.
     const stackLocal = allocLocal(fctx, `__ds_stack_${fctx.locals.length}`, EXTERNREF);
     compileExpression(ctx, fctx, propAccess.expression);
-    fctx.body.push({ op: "local.set", index: stackLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: stackLocal });
     const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
     if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: stackLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: cbLocal } as Instr);
-    fctx.body.push({ op: "ref.null.extern" } as Instr); // value = null
-    fctx.body.push({ op: "i32.const", value: ENTRY_KIND_DEFER } as Instr);
-    fctx.body.push({ op: "call", funcIdx: appendIdx } as Instr);
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: cbLocal });
+    fctx.body.push({ op: "local.get", index: stackLocal });
+    fctx.body.push({ op: "local.get", index: cbLocal });
+    fctx.body.push({ op: "ref.null.extern" }); // value = null
+    fctx.body.push({ op: "i32.const", value: ENTRY_KIND_DEFER });
+    fctx.body.push({ op: "call", funcIdx: appendIdx });
     return VOID_RESULT;
   }
 
@@ -1100,21 +1107,21 @@ export function tryCompileNativeDisposableStackMethodCall(
     // adopt(value, onDispose) — eval value then onDispose; return value.
     const stackLocal = allocLocal(fctx, `__ds_stack_${fctx.locals.length}`, EXTERNREF);
     compileExpression(ctx, fctx, propAccess.expression);
-    fctx.body.push({ op: "local.set", index: stackLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: stackLocal });
     const valueLocal = allocLocal(fctx, `__ds_val_${fctx.locals.length}`, EXTERNREF);
     if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: valueLocal });
     const cbLocal = allocLocal(fctx, `__ds_cb_${fctx.locals.length}`, EXTERNREF);
     if (args[1]) compileArgAsExternref(ctx, fctx, args[1]);
-    else fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "local.set", index: cbLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: stackLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: cbLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: ENTRY_KIND_ADOPT } as Instr);
-    fctx.body.push({ op: "call", funcIdx: appendIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: valueLocal } as Instr); // return value
+    else fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "local.set", index: cbLocal });
+    fctx.body.push({ op: "local.get", index: stackLocal });
+    fctx.body.push({ op: "local.get", index: cbLocal });
+    fctx.body.push({ op: "local.get", index: valueLocal });
+    fctx.body.push({ op: "i32.const", value: ENTRY_KIND_ADOPT });
+    fctx.body.push({ op: "call", funcIdx: appendIdx });
+    fctx.body.push({ op: "local.get", index: valueLocal }); // return value
     return EXTERNREF;
   }
 
@@ -1172,14 +1179,14 @@ function compileNativeDisposableStackUse(
 
   // Eval receiver → stackLocal; disposed-throw check FIRST (spec steps 2–3).
   compileExpression(ctx, fctx, propAccess.expression);
-  fctx.body.push({ op: "local.set", index: stackLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: stackLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: checkIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: stackLocal });
+  fctx.body.push({ op: "local.get", index: stackLocal });
+  fctx.body.push({ op: "call", funcIdx: checkIdx });
 
   // Eval value → valueLocal.
   if (args[0]) compileArgAsExternref(ctx, fctx, args[0]);
-  else fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: valueLocal } as Instr);
+  else fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "local.set", index: valueLocal });
 
   // Resolve the runtime helpers (registered by ensureObjectRuntime). `__box_symbol`
   // + `__extern_is_undefined` are ensured as (native, in standalone) late imports;
@@ -1194,7 +1201,7 @@ function compileNativeDisposableStackUse(
   // the stack consistent (value evaluated for its side effects) and return value
   // rather than emit an unbalanced body.
   if (boxSymIdx === undefined || externGetIdx === undefined || isUndefinedIdx === undefined) {
-    fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: valueLocal });
     return EXTERNREF;
   }
 
@@ -1204,22 +1211,22 @@ function compileNativeDisposableStackUse(
   // present `ref.is_null` (JS null / ref.null.extern) with `__extern_is_undefined`
   // (the boxed/singleton undefined) so both regimes are covered.
   const nullishOf = (localIdx: number): Instr[] => [
-    { op: "local.get", index: localIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "local.get", index: localIdx } as Instr,
-    { op: "call", funcIdx: isUndefinedIdx } as Instr,
-    { op: "i32.or" } as Instr,
+    { op: "local.get", index: localIdx },
+    { op: "ref.is_null" },
+    { op: "local.get", index: localIdx },
+    { op: "call", funcIdx: isUndefinedIdx },
+    { op: "i32.or" },
   ];
   const typeErr = (msg: string): Instr[] => buildThrowJsErrorInstrs(ctx, "TypeError", msg, { flush: fctx });
 
   // if !nullish(value): read method, validate, append.
   const nonNullishBody: Instr[] = [];
   // method = __extern_get(value, __box_symbol(SYMBOL_DISPOSE_ID)) — read ONCE.
-  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
-  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: externGetIdx } as Instr);
-  nonNullishBody.push({ op: "local.set", index: methodLocal } as Instr);
+  nonNullishBody.push({ op: "local.get", index: valueLocal });
+  nonNullishBody.push({ op: "i32.const", value: SYMBOL_DISPOSE_ID });
+  nonNullishBody.push({ op: "call", funcIdx: boxSymIdx });
+  nonNullishBody.push({ op: "call", funcIdx: externGetIdx });
+  nonNullishBody.push({ op: "local.set", index: methodLocal });
   // if nullish(method): TypeError (non-object receiver OR missing/null @@dispose).
   nonNullishBody.push(...nullishOf(methodLocal));
   nonNullishBody.push({
@@ -1227,20 +1234,20 @@ function compileNativeDisposableStackUse(
     blockType: { kind: "empty" },
     then: typeErr("DisposableStack.prototype.use: value is not disposable"),
     else: [],
-  } as Instr);
+  });
   // append entry{cb: method, value, kind: USE}
-  nonNullishBody.push({ op: "local.get", index: stackLocal } as Instr);
-  nonNullishBody.push({ op: "local.get", index: methodLocal } as Instr);
-  nonNullishBody.push({ op: "local.get", index: valueLocal } as Instr);
-  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE } as Instr);
-  nonNullishBody.push({ op: "call", funcIdx: appendIdx } as Instr);
+  nonNullishBody.push({ op: "local.get", index: stackLocal });
+  nonNullishBody.push({ op: "local.get", index: methodLocal });
+  nonNullishBody.push({ op: "local.get", index: valueLocal });
+  nonNullishBody.push({ op: "i32.const", value: ENTRY_KIND_USE });
+  nonNullishBody.push({ op: "call", funcIdx: appendIdx });
 
   fctx.body.push(...nullishOf(valueLocal));
-  fctx.body.push({ op: "i32.eqz" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] } as Instr);
+  fctx.body.push({ op: "i32.eqz" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: nonNullishBody, else: [] });
 
   // Return value.
-  fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valueLocal });
   return EXTERNREF;
 }
 
@@ -1265,7 +1272,7 @@ export function tryCompileNativeDisposableStackDisposedGet(
   }
   // struct.get disposed (fieldIdx 0) — a null receiver here would trap; the
   // getter is only reached on a real DisposableStack instance (brand-typed).
-  fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "ref.as_non_null" });
+  fctx.body.push({ op: "struct.get", typeIdx: t.stackTypeIdx, fieldIdx: 0 });
   return { kind: "i32" } as ValType;
 }

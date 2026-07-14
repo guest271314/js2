@@ -278,17 +278,20 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
         // object via `as any` cannot be represented by the struct-typed `new`
         // result and so resolves to `this` (the non-trapping behaviour).
         if (exprType.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
         }
         const overrideTmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "local.tee", index: overrideTmp });
-        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: fctx.returnType as ValType },
-          then: [{ op: "local.get", index: overrideTmp } as Instr, { op: "ref.cast", typeIdx: structTypeIdx } as Instr],
-          else: [{ op: "local.get", index: selfIdx } as Instr],
-        } as Instr);
+          then: [
+            { op: "local.get", index: overrideTmp },
+            { op: "ref.cast", typeIdx: structTypeIdx },
+          ],
+          else: [{ op: "local.get", index: selfIdx }],
+        });
       } else {
         // A non-ref operand slipped through (e.g. f64/i32 from `as any`) —
         // discard and return `this`.
@@ -920,29 +923,29 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
     const rAny = allocLocal(fctx, `__sweq_r_${fctx.locals.length}`, { kind: "anyref" });
     const identityArm: Instr[] = [
       { op: "local.get", index: lAny },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
       { op: "local.get", index: rAny },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-      { op: "i32.and" } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
+      { op: "i32.and" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: lAny },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
           { op: "local.get", index: rAny },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
-          { op: "ref.eq" } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
+          { op: "ref.eq" },
         ],
         else: [{ op: "i32.const", value: 0 }],
-      } as Instr,
+      },
     ];
     const refArm: Instr[] = [
       { op: "local.get", index: lTmp },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: lAny },
       { op: "local.get", index: rTmp },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: rAny },
     ];
     let stringArmEmitted = false;
@@ -954,24 +957,24 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
         stringArmEmitted = true;
         refArm.push(
           { op: "local.get", index: lAny },
-          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
           { op: "local.get", index: rAny },
-          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [
               { op: "local.get", index: lAny },
-              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
               { op: "call", funcIdx: flattenIdx },
               { op: "local.get", index: rAny },
-              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
               { op: "call", funcIdx: flattenIdx },
               { op: "call", funcIdx: strEqIdx },
             ],
             else: identityArm,
-          } as Instr,
+          },
         );
       }
     }
@@ -979,10 +982,10 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
 
     fctx.body.push(
       { op: "local.get", index: lTmp },
-      { op: "call", funcIdx: typeofNum } as Instr,
+      { op: "call", funcIdx: typeofNum },
       { op: "local.get", index: rTmp },
-      { op: "call", funcIdx: typeofNum } as Instr,
-      { op: "i32.and" } as Instr,
+      { op: "call", funcIdx: typeofNum },
+      { op: "i32.and" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
@@ -991,14 +994,14 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
           { op: "call", funcIdx: unboxNum },
           { op: "local.get", index: rTmp },
           { op: "call", funcIdx: unboxNum },
-          { op: "f64.eq" } as Instr,
+          { op: "f64.eq" },
         ],
         else: [
           { op: "local.get", index: lTmp },
-          { op: "call", funcIdx: typeofBool } as Instr,
+          { op: "call", funcIdx: typeofBool },
           { op: "local.get", index: rTmp },
-          { op: "call", funcIdx: typeofBool } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "call", funcIdx: typeofBool },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
@@ -1007,14 +1010,14 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
               { op: "call", funcIdx: unboxBool },
               { op: "local.get", index: rTmp },
               { op: "call", funcIdx: unboxBool },
-              { op: "i32.eq" } as Instr,
+              { op: "i32.eq" },
             ],
             else: [
               { op: "local.get", index: lTmp },
-              { op: "call", funcIdx: typeofBigint } as Instr,
+              { op: "call", funcIdx: typeofBigint },
               { op: "local.get", index: rTmp },
-              { op: "call", funcIdx: typeofBigint } as Instr,
-              { op: "i32.and" } as Instr,
+              { op: "call", funcIdx: typeofBigint },
+              { op: "i32.and" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
@@ -1023,14 +1026,14 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
                   { op: "call", funcIdx: toBigint },
                   { op: "local.get", index: rTmp },
                   { op: "call", funcIdx: toBigint },
-                  { op: "i64.eq" } as Instr,
+                  { op: "i64.eq" },
                 ],
                 else: refArm,
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     );
     return;
   }
@@ -1048,10 +1051,14 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
   const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
   const typeofNumIdx = ctx.funcMap.get("__typeof_number");
   const unboxIdx = ctx.funcMap.get("__unbox_number");
-  fctx.body.push({ op: "local.get", index: lTmp }, { op: "local.get", index: rTmp }, {
-    op: "call",
-    funcIdx: finalHostEqIdx!,
-  } as Instr);
+  fctx.body.push(
+    { op: "local.get", index: lTmp },
+    { op: "local.get", index: rTmp },
+    {
+      op: "call",
+      funcIdx: finalHostEqIdx!,
+    },
+  );
   if (typeofNumIdx !== undefined && unboxIdx !== undefined) {
     // Wrap: host_eq || (bothNumbers && unbox-eq).
     fctx.body.push({
@@ -1060,10 +1067,10 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
       then: [{ op: "i32.const", value: 1 }],
       else: [
         { op: "local.get", index: lTmp },
-        { op: "call", funcIdx: typeofNumIdx } as Instr,
+        { op: "call", funcIdx: typeofNumIdx },
         { op: "local.get", index: rTmp },
-        { op: "call", funcIdx: typeofNumIdx } as Instr,
-        { op: "i32.and" } as Instr,
+        { op: "call", funcIdx: typeofNumIdx },
+        { op: "i32.and" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
@@ -1072,12 +1079,12 @@ function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: nu
             { op: "call", funcIdx: unboxIdx },
             { op: "local.get", index: rTmp },
             { op: "call", funcIdx: unboxIdx },
-            { op: "f64.eq" } as Instr,
+            { op: "f64.eq" },
           ],
           else: [{ op: "i32.const", value: 0 }],
-        } as Instr,
+        },
       ],
-    } as Instr);
+    });
   }
 }
 

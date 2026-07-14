@@ -95,7 +95,7 @@ export function tryCompileNativeWeakRefNew(
         ? { kind: "i32", boolean: true }
         : t;
   coerceType(ctx, fctx, branded, { kind: "externref" });
-  fctx.body.push({ op: "struct.new", typeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx });
   return { kind: "ref", typeIdx } as ValType;
 }
 
@@ -120,13 +120,13 @@ export function tryCompileNativeWeakRefDeref(
   const recvType = compileExpression(ctx, fctx, propAccess.expression);
   if (recvType === null) return undefined;
   if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx });
   } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
-    fctx.body.push({ op: "ref.cast", typeIdx } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx });
   } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== typeIdx) {
     return undefined;
   }
-  fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 0 });
   return { kind: "externref" } as ValType;
 }

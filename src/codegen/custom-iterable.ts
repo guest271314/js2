@@ -115,7 +115,7 @@ export function emitDrainCustomIterableToVec(
   // indices, so they must be registered + flushed before we emit the drive's
   // `call __iterator_next` (whose funcIdx would otherwise be stale). (#1749)
   const valueCoerce = collectInstrs(fctx, () => {
-    fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
     coerceType(ctx, fctx, { kind: "externref" }, elemType);
   });
   flushLateImportShifts(ctx, fctx);
@@ -124,67 +124,67 @@ export function emitDrainCustomIterableToVec(
   const driveNextIdx = ctx.funcMap.get("__iterator_next") ?? nextIdx;
 
   // iter = __iterator(extern(obj))
-  fctx.body.push({ op: "local.get", index: iterableLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: iterableLocal });
   coerceType(ctx, fctx, iterableType, { kind: "externref" });
-  fctx.body.push({ op: "call", funcIdx: driveIterIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: iterLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: driveIterIdx });
+  fctx.body.push({ op: "local.set", index: iterLocal });
 
   // cap = 4; data = new arr[cap]; len = 0
-  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-  fctx.body.push({ op: "local.set", index: capLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 4 });
+  fctx.body.push({ op: "local.set", index: capLocal });
+  fctx.body.push({ op: "local.get", index: capLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: dataLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: lenLocal });
 
   // grow: cap *= 2; grow = new arr[cap]; array.copy grow[0..len] = data; data = grow
   const growInstrs = collectInstrs(fctx, () => {
-    fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 2 } as Instr);
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "local.set", index: capLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: growLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-    fctx.body.push({ op: "local.set", index: dataLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: capLocal });
+    fctx.body.push({ op: "i32.const", value: 2 });
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "local.set", index: capLocal });
+    fctx.body.push({ op: "local.get", index: capLocal });
+    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+    fctx.body.push({ op: "local.set", index: growLocal });
+    fctx.body.push({ op: "local.get", index: growLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.get", index: dataLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
+    fctx.body.push({ op: "local.get", index: growLocal });
+    fctx.body.push({ op: "local.set", index: dataLocal });
   });
 
   // loop body: (done, val) = __iterator_next(iter); if done break; grow if full;
   // data[len] = coerce(val); len++.
   const loopBody: Instr[] = [];
-  loopBody.push({ op: "local.get", index: iterLocal } as Instr);
-  loopBody.push({ op: "call", funcIdx: driveNextIdx } as Instr);
-  loopBody.push({ op: "local.set", index: valLocal } as Instr); // value (top of multi-value)
-  loopBody.push({ op: "local.set", index: doneLocal } as Instr); // done (below)
-  loopBody.push({ op: "local.get", index: doneLocal } as Instr);
-  loopBody.push({ op: "br_if", depth: 1 } as Instr); // done → break
-  loopBody.push({ op: "local.get", index: lenLocal } as Instr);
-  loopBody.push({ op: "local.get", index: capLocal } as Instr);
-  loopBody.push({ op: "i32.ge_s" } as Instr);
-  loopBody.push({ op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr);
-  loopBody.push({ op: "local.get", index: dataLocal } as Instr);
-  loopBody.push({ op: "local.get", index: lenLocal } as Instr);
+  loopBody.push({ op: "local.get", index: iterLocal });
+  loopBody.push({ op: "call", funcIdx: driveNextIdx });
+  loopBody.push({ op: "local.set", index: valLocal }); // value (top of multi-value)
+  loopBody.push({ op: "local.set", index: doneLocal }); // done (below)
+  loopBody.push({ op: "local.get", index: doneLocal });
+  loopBody.push({ op: "br_if", depth: 1 }); // done → break
+  loopBody.push({ op: "local.get", index: lenLocal });
+  loopBody.push({ op: "local.get", index: capLocal });
+  loopBody.push({ op: "i32.ge_s" });
+  loopBody.push({ op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] });
+  loopBody.push({ op: "local.get", index: dataLocal });
+  loopBody.push({ op: "local.get", index: lenLocal });
   for (const instr of valueCoerce) loopBody.push(instr);
-  loopBody.push({ op: "array.set", typeIdx: arrTypeIdx } as Instr);
-  loopBody.push({ op: "local.get", index: lenLocal } as Instr);
-  loopBody.push({ op: "i32.const", value: 1 } as Instr);
-  loopBody.push({ op: "i32.add" } as Instr);
-  loopBody.push({ op: "local.set", index: lenLocal } as Instr);
-  loopBody.push({ op: "br", depth: 0 } as Instr); // continue
+  loopBody.push({ op: "array.set", typeIdx: arrTypeIdx });
+  loopBody.push({ op: "local.get", index: lenLocal });
+  loopBody.push({ op: "i32.const", value: 1 });
+  loopBody.push({ op: "i32.add" });
+  loopBody.push({ op: "local.set", index: lenLocal });
+  loopBody.push({ op: "br", depth: 0 }); // continue
 
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 
   // Trim `data` to exactly `len`. The growable buffer is over-allocated (its
   // `array.len` is the doubled capacity, ≥ len), but the canonical `$vec`
@@ -194,19 +194,19 @@ export function emitDrainCustomIterableToVec(
   // out-of-range elements as default-fill values instead of `undefined`
   // (breaking binding defaults like `const [a, b, c, d = 99] = obj`). Copy the
   // live prefix into a right-sized array.
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: growLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: dataLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: growLocal });
+  fctx.body.push({ op: "local.get", index: growLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
 
   // struct.new $vec { len, trimmed-data } — leave ref $vec on the stack.
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: growLocal } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: growLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
   return true;
 }

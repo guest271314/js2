@@ -209,53 +209,49 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
   const INNER = 9;
 
   const cast = (): Instr[] => [
-    { op: "local.get", index: HANY } as Instr,
-    { op: "ref.cast", typeIdx: helperTypeIdx } as Instr,
+    { op: "local.get", index: HANY },
+    { op: "ref.cast", typeIdx: helperTypeIdx },
   ];
-  const doneReturn: Instr[] = [
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "ref.null.extern" } as Instr,
-    { op: "return" } as Instr,
-  ];
+  const doneReturn: Instr[] = [{ op: "i32.const", value: 1 }, { op: "ref.null.extern" }, { op: "return" }];
   // (done, val) = __iter_hof_next(src); if done → return (done, null).
   const pullStep: Instr[] = [
-    { op: "local.get", index: SRC } as Instr,
-    { op: "call", funcIdx: nextIdx } as Instr,
-    { op: "local.set", index: VAL } as Instr,
-    { op: "local.set", index: DONE } as Instr,
-    { op: "local.get", index: DONE } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: doneReturn } as Instr,
+    { op: "local.get", index: SRC },
+    { op: "call", funcIdx: nextIdx },
+    { op: "local.set", index: VAL },
+    { op: "local.set", index: DONE },
+    { op: "local.get", index: DONE },
+    { op: "if", blockType: { kind: "empty" }, then: doneReturn },
   ];
   // args = [val, box(st)].
   const buildArgs: Instr[] = [
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: ARGS } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "local.get", index: VAL } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "local.get", index: ST } as Instr,
-    { op: "call", funcIdx: boxNumIdx } as Instr,
-    { op: "call", funcIdx: objVecPushIdx } as Instr,
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: ARGS },
+    { op: "local.get", index: ARGS },
+    { op: "local.get", index: VAL },
+    { op: "call", funcIdx: objVecPushIdx },
+    { op: "local.get", index: ARGS },
+    { op: "local.get", index: ST },
+    { op: "call", funcIdx: boxNumIdx },
+    { op: "call", funcIdx: objVecPushIdx },
   ];
   // res = __apply_closure(helper.fn, undefined, args).
   const invoke: Instr[] = [
     ...cast(),
-    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FN } as Instr,
-    { op: "ref.null.extern" } as Instr,
-    { op: "local.get", index: ARGS } as Instr,
-    { op: "call", funcIdx: applyClosureIdx } as Instr,
-    { op: "local.set", index: RES } as Instr,
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_FN },
+    { op: "ref.null.extern" },
+    { op: "local.get", index: ARGS },
+    { op: "call", funcIdx: applyClosureIdx },
+    { op: "local.set", index: RES },
   ];
   // st += 1; persist to struct.
   const bumpCounter: Instr[] = [
-    { op: "local.get", index: ST } as Instr,
-    { op: "f64.const", value: 1 } as Instr,
-    { op: "f64.add" } as Instr,
-    { op: "local.set", index: ST } as Instr,
+    { op: "local.get", index: ST },
+    { op: "f64.const", value: 1 },
+    { op: "f64.add" },
+    { op: "local.set", index: ST },
     ...cast(),
-    { op: "local.get", index: ST } as Instr,
-    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE } as Instr,
+    { op: "local.get", index: ST },
+    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE },
   ];
 
   const mapArm: Instr[] = [
@@ -263,9 +259,9 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
     ...buildArgs,
     ...invoke,
     ...bumpCounter,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: RES } as Instr,
-    { op: "return" } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: RES },
+    { op: "return" },
   ];
 
   const filterArm: Instr[] = [
@@ -277,42 +273,38 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
         ...buildArgs,
         ...invoke,
         ...bumpCounter,
-        { op: "local.get", index: RES } as Instr,
-        { op: "call", funcIdx: isTruthyIdx } as Instr,
+        { op: "local.get", index: RES },
+        { op: "call", funcIdx: isTruthyIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: VAL } as Instr,
-            { op: "return" } as Instr,
-          ],
-        } as Instr,
-        { op: "br", depth: 0 } as Instr,
+          then: [{ op: "i32.const", value: 0 }, { op: "local.get", index: VAL }, { op: "return" }],
+        },
+        { op: "br", depth: 0 },
       ],
-    } as Instr,
+    },
   ];
 
   const takeArm: Instr[] = [
     // st <= 0 ⇒ IteratorClose(src) + done.
-    { op: "local.get", index: ST } as Instr,
-    { op: "f64.const", value: 0 } as Instr,
-    { op: "f64.le" } as Instr,
+    { op: "local.get", index: ST },
+    { op: "f64.const", value: 0 },
+    { op: "f64.le" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: SRC } as Instr, { op: "call", funcIdx: closeIdx } as Instr, ...doneReturn],
-    } as Instr,
+      then: [{ op: "local.get", index: SRC }, { op: "call", funcIdx: closeIdx }, ...doneReturn],
+    },
     ...pullStep,
     // st -= 1; persist.
     ...cast(),
-    { op: "local.get", index: ST } as Instr,
-    { op: "f64.const", value: 1 } as Instr,
-    { op: "f64.sub" } as Instr,
-    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: VAL } as Instr,
-    { op: "return" } as Instr,
+    { op: "local.get", index: ST },
+    { op: "f64.const", value: 1 },
+    { op: "f64.sub" },
+    { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: VAL },
+    { op: "return" },
   ];
 
   const dropArm: Instr[] = [
@@ -326,28 +318,28 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: ST } as Instr,
-            { op: "f64.const", value: 0 } as Instr,
-            { op: "f64.le" } as Instr,
-            { op: "br_if", depth: 1 } as Instr, // done skipping → exit block
+            { op: "local.get", index: ST },
+            { op: "f64.const", value: 0 },
+            { op: "f64.le" },
+            { op: "br_if", depth: 1 }, // done skipping → exit block
             ...pullStep,
             // st -= 1; persist.
-            { op: "local.get", index: ST } as Instr,
-            { op: "f64.const", value: 1 } as Instr,
-            { op: "f64.sub" } as Instr,
-            { op: "local.set", index: ST } as Instr,
+            { op: "local.get", index: ST },
+            { op: "f64.const", value: 1 },
+            { op: "f64.sub" },
+            { op: "local.set", index: ST },
             ...cast(),
-            { op: "local.get", index: ST } as Instr,
-            { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE } as Instr,
-            { op: "br", depth: 0 } as Instr,
+            { op: "local.get", index: ST },
+            { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_STATE },
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     ...pullStep,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: VAL } as Instr,
-    { op: "return" } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: VAL },
+    { op: "return" },
   ];
 
   // flatMap (§27.1.4.6): drain the current `inner` iterator fully before pulling
@@ -361,38 +353,34 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
       body: [
         // inner = helper.inner
         ...cast(),
-        { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
-        { op: "local.set", index: INNER } as Instr,
+        { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_INNER },
+        { op: "local.set", index: INNER },
         // if inner != null: try to step it
-        { op: "local.get", index: INNER } as Instr,
-        { op: "ref.is_null" } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "local.get", index: INNER },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: INNER } as Instr,
-            { op: "call", funcIdx: nextIdx } as Instr,
-            { op: "local.set", index: VAL } as Instr,
-            { op: "local.set", index: DONE } as Instr,
+            { op: "local.get", index: INNER },
+            { op: "call", funcIdx: nextIdx },
+            { op: "local.set", index: VAL },
+            { op: "local.set", index: DONE },
             // inner yielded → return (0, val)
-            { op: "local.get", index: DONE } as Instr,
-            { op: "i32.eqz" } as Instr,
+            { op: "local.get", index: DONE },
+            { op: "i32.eqz" },
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [
-                { op: "i32.const", value: 0 } as Instr,
-                { op: "local.get", index: VAL } as Instr,
-                { op: "return" } as Instr,
-              ],
-            } as Instr,
+              then: [{ op: "i32.const", value: 0 }, { op: "local.get", index: VAL }, { op: "return" }],
+            },
             // inner exhausted → clear it
             ...cast(),
-            { op: "ref.null.extern" } as Instr,
-            { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
+            { op: "ref.null.extern" },
+            { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER },
           ],
-        } as Instr,
+        },
         // pull next outer value
         ...pullStep,
         // res = mapper(val, counter); counter++
@@ -407,58 +395,58 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
         // the trap is our no-throw-boundary approximation — the mapper is
         // required to return an iterable).
         ...cast(),
-        { op: "local.get", index: RES } as Instr,
-        { op: "call", funcIdx: iteratorIdx } as Instr,
-        { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER } as Instr,
+        { op: "local.get", index: RES },
+        { op: "call", funcIdx: iteratorIdx },
+        { op: "struct.set", typeIdx: helperTypeIdx, fieldIdx: F_INNER },
         // loop to drain the freshly-opened inner
-        { op: "br", depth: 0 } as Instr,
+        { op: "br", depth: 0 },
       ],
-    } as Instr,
+    },
   ];
 
   const stepBody: Instr[] = [
-    { op: "local.get", index: P } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: HANY } as Instr,
+    { op: "local.get", index: P },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: HANY },
     // src = helper.src
     ...cast(),
-    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_SRC } as Instr,
-    { op: "local.set", index: SRC } as Instr,
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_SRC },
+    { op: "local.set", index: SRC },
     // null source ⇒ empty iterator.
-    { op: "local.get", index: SRC } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: doneReturn } as Instr,
+    { op: "local.get", index: SRC },
+    { op: "ref.is_null" },
+    { op: "if", blockType: { kind: "empty" }, then: doneReturn },
     // kind / st
     ...cast(),
-    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_KIND } as Instr,
-    { op: "local.set", index: KIND_L } as Instr,
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_KIND },
+    { op: "local.set", index: KIND_L },
     ...cast(),
-    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_STATE } as Instr,
-    { op: "local.set", index: ST } as Instr,
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_STATE },
+    { op: "local.set", index: ST },
     // if kind==map
-    { op: "local.get", index: KIND_L } as Instr,
-    { op: "i32.eqz" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: mapArm } as Instr,
+    { op: "local.get", index: KIND_L },
+    { op: "i32.eqz" },
+    { op: "if", blockType: { kind: "empty" }, then: mapArm },
     // if kind==filter
-    { op: "local.get", index: KIND_L } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: filterArm } as Instr,
+    { op: "local.get", index: KIND_L },
+    { op: "i32.const", value: 1 },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: filterArm },
     // if kind==take
-    { op: "local.get", index: KIND_L } as Instr,
-    { op: "i32.const", value: 2 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: takeArm } as Instr,
+    { op: "local.get", index: KIND_L },
+    { op: "i32.const", value: 2 },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: takeArm },
     // if kind==drop
-    { op: "local.get", index: KIND_L } as Instr,
-    { op: "i32.const", value: 3 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: dropArm } as Instr,
+    { op: "local.get", index: KIND_L },
+    { op: "i32.const", value: 3 },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: dropArm },
     // if kind==flatMap
-    { op: "local.get", index: KIND_L } as Instr,
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: flatMapArm } as Instr,
+    { op: "local.get", index: KIND_L },
+    { op: "i32.const", value: 4 },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: flatMapArm },
     // fallthrough: unknown kind ⇒ done.
     ...doneReturn,
   ];
@@ -486,19 +474,22 @@ function ensureLazyStepper(ctx: CodegenContext, deps: LazyDeps): void {
 
   // __lazy_iter_close(helperExt) → IteratorClose(src) when non-null.
   const closeBody: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: helperTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_SRC } as Instr,
-    { op: "local.set", index: 1 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "i32.eqz" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: helperTypeIdx },
+    { op: "struct.get", typeIdx: helperTypeIdx, fieldIdx: F_SRC },
+    { op: "local.set", index: 1 },
+    { op: "local.get", index: 1 },
+    { op: "ref.is_null" },
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: 1 } as Instr, { op: "call", funcIdx: closeIdx } as Instr],
-    } as Instr,
+      then: [
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: closeIdx },
+      ],
+    },
   ];
   const closeTypeIdx = addFuncType(ctx, [{ kind: "externref" }], []);
   const lazyCloseIdx = mintDefinedFunc(ctx);
@@ -522,40 +513,43 @@ function emitLazyConstructor(ctx: CodegenContext, methodName: string, deps: Lazy
   // Locals: 0 recv, 1 arg, 2 src (externref), 3 cnt (f64).
   const body: Instr[] = [
     // src = __iter_hof_open(recv)
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: openIdx } as Instr,
-    { op: "local.set", index: 2 } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: openIdx },
+    { op: "local.set", index: 2 },
   ];
   if (isCount) {
     // cnt = floor(ToNumber(arg)); clamp NaN/negative → 0.
     body.push(
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: unboxNumIdx } as Instr,
-      { op: "f64.floor" } as Instr,
-      { op: "local.set", index: 3 } as Instr,
-      { op: "local.get", index: 3 } as Instr,
-      { op: "f64.const", value: 0 } as Instr,
-      { op: "f64.lt" } as Instr,
-      { op: "local.get", index: 3 } as Instr,
-      { op: "local.get", index: 3 } as Instr,
-      { op: "f64.ne" } as Instr, // NaN
-      { op: "i32.or" } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: unboxNumIdx },
+      { op: "f64.floor" },
+      { op: "local.set", index: 3 },
+      { op: "local.get", index: 3 },
+      { op: "f64.const", value: 0 },
+      { op: "f64.lt" },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 3 },
+      { op: "f64.ne" }, // NaN
+      { op: "i32.or" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "f64.const", value: 0 } as Instr, { op: "local.set", index: 3 } as Instr],
-      } as Instr,
+        then: [
+          { op: "f64.const", value: 0 },
+          { op: "local.set", index: 3 },
+        ],
+      },
     );
   }
   // struct.new $LazyIterHelper { kind, src, fn, state, inner:null }
   body.push(
-    { op: "i32.const", value: kind } as Instr, // kind
-    { op: "local.get", index: 2 } as Instr, // src
-    isCount ? ({ op: "ref.null.extern" } as Instr) : ({ op: "local.get", index: 1 } as Instr), // fn
-    isCount ? ({ op: "local.get", index: 3 } as Instr) : ({ op: "f64.const", value: 0 } as Instr), // state
-    { op: "ref.null.extern" } as Instr, // inner
-    { op: "struct.new", typeIdx: helperTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "i32.const", value: kind }, // kind
+    { op: "local.get", index: 2 }, // src
+    isCount ? { op: "ref.null.extern" } : { op: "local.get", index: 1 }, // fn
+    isCount ? { op: "local.get", index: 3 } : { op: "f64.const", value: 0 }, // state
+    { op: "ref.null.extern" }, // inner
+    { op: "struct.new", typeIdx: helperTypeIdx },
+    { op: "extern.convert_any" },
   );
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
@@ -600,28 +594,20 @@ export function fillLazyIterLadderArms(ctx: CodegenContext): void {
     const fn = definedFuncAt(ctx, idx);
     if (!fn) return;
     fn.body = [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: helperTypeIdx } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: thenBody } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: helperTypeIdx },
+      { op: "if", blockType: { kind: "empty" }, then: thenBody },
       ...fn.body,
     ];
   };
 
   // __iterator(obj) → obj (the wrapper is its own iterator).
-  prepend("__iterator", [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr]);
+  prepend("__iterator", [{ op: "local.get", index: 0 }, { op: "return" }]);
   // __iterator_next(rec) → __lazy_iter_step(rec) (multivalue i32,externref).
-  prepend("__iterator_next", [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: stepIdx } as Instr,
-    { op: "return" } as Instr,
-  ]);
+  prepend("__iterator_next", [{ op: "local.get", index: 0 }, { op: "call", funcIdx: stepIdx }, { op: "return" }]);
   // __iterator_return(rec) → __lazy_iter_close(rec).
-  prepend("__iterator_return", [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: closeIdx } as Instr,
-    { op: "return" } as Instr,
-  ]);
+  prepend("__iterator_return", [{ op: "local.get", index: 0 }, { op: "call", funcIdx: closeIdx }, { op: "return" }]);
   // __iterator_rest(rec) → __array_from_iter_n(rec, -1) — the bulk drain used by
   // `Array.from(...)` / `[...wrapper]`. `__iterator_rest`'s vec body would hard-
   // cast the wrapper to `$IterRec`; delegate to the element-wise drainer (which
@@ -629,10 +615,10 @@ export function fillLazyIterLadderArms(ctx: CodegenContext): void {
   const afinIdx = ctx.funcMap.get("__array_from_iter_n");
   if (afinIdx !== undefined) {
     prepend("__iterator_rest", [
-      { op: "local.get", index: 0 } as Instr,
-      { op: "f64.const", value: -1 } as Instr,
-      { op: "call", funcIdx: afinIdx } as Instr,
-      { op: "return" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "f64.const", value: -1 },
+      { op: "call", funcIdx: afinIdx },
+      { op: "return" },
     ]);
   }
 }

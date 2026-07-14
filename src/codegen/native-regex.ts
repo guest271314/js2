@@ -325,7 +325,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     { op: "local.get", index: PC },
     { op: "i32.const", value: 3 },
     { op: "i32.mul" },
-    ...(k === 0 ? [] : [{ op: "i32.const", value: k } as Instr, { op: "i32.add" } as Instr]),
+    ...(k === 0 ? [] : [{ op: "i32.const", value: k }, { op: "i32.add" }]),
     { op: "array.get", typeIdx: i32Arr },
   ];
 
@@ -812,7 +812,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     return [
       // baseEq: sp == (eol ? slen : 0)
       { op: "local.get", index: SP },
-      eol ? ({ op: "local.get", index: SLEN } as Instr) : ({ op: "i32.const", value: 0 } as Instr),
+      eol ? { op: "local.get", index: SLEN } : { op: "i32.const", value: 0 },
       { op: "i32.eq" },
       // | (a != 0 && multilineEq)
       { op: "local.get", index: A },
@@ -845,8 +845,8 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     return [
       // inBounds = eol ? (sp < slen) : (sp > 0)
       { op: "local.get", index: SP },
-      eol ? ({ op: "local.get", index: SLEN } as Instr) : ({ op: "i32.const", value: 0 } as Instr),
-      eol ? ({ op: "i32.lt_s" } as Instr) : ({ op: "i32.gt_s" } as Instr),
+      eol ? { op: "local.get", index: SLEN } : { op: "i32.const", value: 0 },
+      eol ? { op: "i32.lt_s" } : { op: "i32.gt_s" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
@@ -856,7 +856,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
           { op: "local.get", index: SOFF },
           { op: "local.get", index: SP },
           { op: "i32.add" },
-          ...(eol ? [] : [{ op: "i32.const", value: 1 } as Instr, { op: "i32.sub" } as Instr]),
+          ...(eol ? [] : [{ op: "i32.const", value: 1 }, { op: "i32.sub" }]),
           { op: "array.get_u", typeIdx: strDataIdx },
           { op: "local.set", index: CH },
           ...isLineTerm(CH),
@@ -1846,10 +1846,10 @@ export function ensureRegexCaptureArray(ctx: CodegenContext): number {
             {
               op: "if",
               blockType: { kind: "val", type: nstrElemType },
-              then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+              then: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
               else: [
                 { op: "local.get", index: SUBJ },
-                { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+                { op: "ref.cast", typeIdx: strTypeIdx },
                 { op: "local.get", index: CSTART },
                 { op: "local.get", index: CEND },
                 { op: "call", funcIdx: substringIdx },
@@ -2004,7 +2004,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
         { op: "local.get", index: NEWARR },
         { op: "local.set", index: RARR },
       ],
-    } as Instr,
+    },
     // resultArr[resultLen] = part
     { op: "local.get", index: RARR },
     { op: "local.get", index: RLEN },
@@ -2030,12 +2030,12 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     ...appendPart(),
     { op: "local.get", index: RLEN },
     { op: "local.get", index: LIM },
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: returnVec(),
-    } as Instr,
+    },
   ];
 
   const callSearchAt = (posLocal: number): Instr[] => [
@@ -2093,7 +2093,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
           blockType: { kind: "empty" },
           then: returnVec(),
           else: [{ op: "local.get", index: SUBJ }, { op: "local.set", index: PART }, ...appendPart(), ...returnVec()],
-        } as Instr,
+        },
       ],
     },
     // p = 0; q = 0
@@ -2196,14 +2196,14 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
                         {
                           op: "if",
                           blockType: { kind: "val", type: nstrElemType },
-                          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+                          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
                           else: [
                             { op: "local.get", index: SUBJ },
                             { op: "local.get", index: CS },
                             { op: "local.get", index: CE },
                             { op: "call", funcIdx: substringIdx },
                           ],
-                        } as Instr,
+                        },
                         { op: "local.set", index: PART },
                         ...appendCapped(),
                         { op: "local.get", index: GI },
@@ -2226,10 +2226,10 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
                   blockType: { kind: "val", type: { kind: "i32" } },
                   then: [{ op: "local.get", index: MSTART }, { op: "i32.const", value: 1 }, { op: "i32.add" }],
                   else: [{ op: "local.get", index: MEND }],
-                } as Instr,
+                },
                 { op: "local.set", index: Q },
               ],
-            } as Instr,
+            },
             { op: "br", depth: 0 },
           ],
         },
@@ -2477,7 +2477,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "ref_null", typeIdx: matchVecTypeIdx } },
-      then: [{ op: "ref.null", typeIdx: matchVecTypeIdx } as Instr],
+      then: [{ op: "ref.null", typeIdx: matchVecTypeIdx }],
       else: [
         { op: "local.get", index: RLEN },
         { op: "local.get", index: RARR },
@@ -2488,11 +2488,11 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
         // result is a flat array of matched strings, not a capture object, so
         // neither named-groups nor `d`-flag indices apply per-element here.
         // The `groups`/`indices` fields are externref → push null externref.
-        { op: "ref.null.extern" } as Instr,
-        { op: "ref.null.extern" } as Instr,
+        { op: "ref.null.extern" },
+        { op: "ref.null.extern" },
         { op: "struct.new", typeIdx: matchVecTypeIdx },
       ],
-    } as Instr,
+    },
   ];
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -2887,7 +2887,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        ...flush([{ op: "local.get", index: I } as Instr]),
+        ...flush([{ op: "local.get", index: I }]),
         // append the '$' itself: substring(repl, i, i+1)
         ...appendReplChar(),
         ...advance(2),
@@ -2901,11 +2901,8 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            ...flush([{ op: "local.get", index: I } as Instr]),
-            ...appendSubject(
-              capsAt([{ op: "i32.const", value: 0 } as Instr]),
-              capsAt([{ op: "i32.const", value: 1 } as Instr]),
-            ),
+            ...flush([{ op: "local.get", index: I }]),
+            ...appendSubject(capsAt([{ op: "i32.const", value: 0 }]), capsAt([{ op: "i32.const", value: 1 }])),
             ...advance(2),
           ],
           else: [
@@ -2917,11 +2914,8 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                ...flush([{ op: "local.get", index: I } as Instr]),
-                ...appendSubject(
-                  [{ op: "i32.const", value: 0 } as Instr],
-                  capsAt([{ op: "i32.const", value: 0 } as Instr]),
-                ),
+                ...flush([{ op: "local.get", index: I }]),
+                ...appendSubject([{ op: "i32.const", value: 0 }], capsAt([{ op: "i32.const", value: 0 }])),
                 ...advance(2),
               ],
               else: [
@@ -2933,10 +2927,8 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
-                    ...flush([{ op: "local.get", index: I } as Instr]),
-                    ...appendSubject(capsAt([{ op: "i32.const", value: 1 } as Instr]), [
-                      { op: "local.get", index: SLEN } as Instr,
-                    ]),
+                    ...flush([{ op: "local.get", index: I }]),
+                    ...appendSubject(capsAt([{ op: "i32.const", value: 1 }]), [{ op: "local.get", index: SLEN }]),
                     ...advance(2),
                   ],
                   else: digitArm(),
@@ -3005,7 +2997,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
               { op: "i32.add" },
               { op: "i32.const", value: 2 },
               { op: "i32.add" },
-              { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+              { op: "array.get_u", typeIdx: strDataIdx },
               { op: "local.set", index: C },
               ...isDigit(C),
               {
@@ -3068,20 +3060,16 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              ...flush([{ op: "local.get", index: I } as Instr]),
+              ...flush([{ op: "local.get", index: I }]),
               // cs = caps[2*grp]; ce = caps[2*grp+1]
-              ...capsAt([
-                { op: "local.get", index: GRP } as Instr,
-                { op: "i32.const", value: 2 } as Instr,
-                { op: "i32.mul" } as Instr,
-              ]),
+              ...capsAt([{ op: "local.get", index: GRP }, { op: "i32.const", value: 2 }, { op: "i32.mul" }]),
               { op: "local.set", index: CS },
               ...capsAt([
-                { op: "local.get", index: GRP } as Instr,
-                { op: "i32.const", value: 2 } as Instr,
-                { op: "i32.mul" } as Instr,
-                { op: "i32.const", value: 1 } as Instr,
-                { op: "i32.add" } as Instr,
+                { op: "local.get", index: GRP },
+                { op: "i32.const", value: 2 },
+                { op: "i32.mul" },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
               ]),
               { op: "local.set", index: CE },
               // Unmatched capture (cs < 0) → empty expansion.
@@ -3091,10 +3079,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: appendSubject(
-                  [{ op: "local.get", index: CS } as Instr],
-                  [{ op: "local.get", index: CE } as Instr],
-                ),
+                then: appendSubject([{ op: "local.get", index: CS }], [{ op: "local.get", index: CE }]),
               },
               // i += consume; seg = i
               { op: "local.get", index: I },
@@ -3152,7 +3137,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
   function namedGroupArm(): Instr[] {
     return [
       // Flush pending literal up to the '$'.
-      ...flush([{ op: "local.get", index: I } as Instr]),
+      ...flush([{ op: "local.get", index: I }]),
       // nameEnd = indexOf('>', from = i+2)
       { op: "local.get", index: I },
       { op: "i32.const", value: 2 },
@@ -3184,7 +3169,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
               { op: "local.get", index: ROFF },
               { op: "local.get", index: NAMEEND },
               { op: "i32.add" },
-              { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+              { op: "array.get_u", typeIdx: strDataIdx },
               { op: "i32.const", value: 0x3e },
               { op: "i32.eq" },
               { op: "br_if", depth: 1 },
@@ -3294,7 +3279,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
                               { op: "local.get", index: K },
                               { op: "i32.add" },
                               { op: "i32.add" },
-                              { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+                              { op: "array.get_u", typeIdx: strDataIdx },
                               { op: "i32.ne" },
                               {
                                 op: "if",
@@ -3353,18 +3338,14 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
             blockType: { kind: "empty" },
             then: [
               // cs = caps[2*grp]; ce = caps[2*grp+1]
-              ...capsAt([
-                { op: "local.get", index: GRP } as Instr,
-                { op: "i32.const", value: 2 } as Instr,
-                { op: "i32.mul" } as Instr,
-              ]),
+              ...capsAt([{ op: "local.get", index: GRP }, { op: "i32.const", value: 2 }, { op: "i32.mul" }]),
               { op: "local.set", index: CS },
               ...capsAt([
-                { op: "local.get", index: GRP } as Instr,
-                { op: "i32.const", value: 2 } as Instr,
-                { op: "i32.mul" } as Instr,
-                { op: "i32.const", value: 1 } as Instr,
-                { op: "i32.add" } as Instr,
+                { op: "local.get", index: GRP },
+                { op: "i32.const", value: 2 },
+                { op: "i32.mul" },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
               ]),
               { op: "local.set", index: CE },
               // if cs >= 0: append (unmatched named group → empty string).
@@ -3374,10 +3355,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: appendSubject(
-                  [{ op: "local.get", index: CS } as Instr],
-                  [{ op: "local.get", index: CE } as Instr],
-                ),
+                then: appendSubject([{ op: "local.get", index: CS }], [{ op: "local.get", index: CE }]),
               },
             ],
           },
@@ -3395,22 +3373,22 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
   const body: Instr[] = [
     // rdata/roff/rlen from the flattened repl ($NativeString view).
     { op: "local.get", index: REPL },
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: strTypeIdx },
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     { op: "local.set", index: RDATA },
     { op: "local.get", index: REPL },
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: strTypeIdx },
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     { op: "local.set", index: ROFF },
     { op: "local.get", index: REPL },
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "ref.cast", typeIdx: strTypeIdx },
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
     { op: "local.set", index: RLEN },
     // result = ""; i = 0; seg = 0
     { op: "i32.const", value: 0 },
     { op: "i32.const", value: 0 },
     { op: "i32.const", value: 0 },
-    { op: "array.new_default", typeIdx: strDataIdx } as Instr,
+    { op: "array.new_default", typeIdx: strDataIdx },
     { op: "struct.new", typeIdx: strTypeIdx },
     { op: "local.set", index: RESULT },
     { op: "i32.const", value: 0 },
@@ -3435,7 +3413,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
             { op: "local.get", index: ROFF },
             { op: "local.get", index: I },
             { op: "i32.add" },
-            { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+            { op: "array.get_u", typeIdx: strDataIdx },
             { op: "local.set", index: C },
             // '$' with at least one unit after it?
             { op: "local.get", index: C },
@@ -3458,7 +3436,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
                 { op: "i32.add" },
                 { op: "i32.const", value: 1 },
                 { op: "i32.add" },
-                { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+                { op: "array.get_u", typeIdx: strDataIdx },
                 { op: "local.set", index: D1 },
                 ...dollarDispatch,
               ],
@@ -3475,7 +3453,7 @@ export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
       ],
     },
     // Flush the trailing literal segment and return.
-    ...flush([{ op: "local.get", index: RLEN } as Instr]),
+    ...flush([{ op: "local.get", index: RLEN }]),
     { op: "local.get", index: RESULT },
   ];
 
@@ -3551,26 +3529,31 @@ export function ensureRegexFlagsStr(ctx: CodegenContext): number {
   const body: Instr[] = [
     // buf = array.new_default(8); n = 0
     { op: "i32.const", value: 8 },
-    { op: "array.new_default", typeIdx: strDataIdx } as Instr,
+    { op: "array.new_default", typeIdx: strDataIdx },
     { op: "local.set", index: BUF },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: N },
   ];
   for (const [bit, codeUnit] of SPEC_ORDER) {
-    body.push({ op: "local.get", index: FLAGS }, { op: "i32.const", value: bit }, { op: "i32.and" }, {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: BUF },
-        { op: "local.get", index: N },
-        { op: "i32.const", value: codeUnit },
-        { op: "array.set", typeIdx: strDataIdx } as Instr,
-        { op: "local.get", index: N },
-        { op: "i32.const", value: 1 },
-        { op: "i32.add" },
-        { op: "local.set", index: N },
-      ],
-    } as Instr);
+    body.push(
+      { op: "local.get", index: FLAGS },
+      { op: "i32.const", value: bit },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: BUF },
+          { op: "local.get", index: N },
+          { op: "i32.const", value: codeUnit },
+          { op: "array.set", typeIdx: strDataIdx },
+          { op: "local.get", index: N },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: N },
+        ],
+      },
+    );
   }
   // struct.new $NativeString(len=n, off=0, data=buf)
   body.push(

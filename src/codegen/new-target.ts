@@ -80,7 +80,7 @@ export function ensureNewTargetGlobal(ctx: CodegenContext): number {
  */
 export function emitNewTargetClassId(ctx: CodegenContext, body: Instr[]): void {
   const idx = ensureNewTargetGlobal(ctx);
-  body.push({ op: "global.get", index: idx } as Instr);
+  body.push({ op: "global.get", index: idx });
 }
 
 /**
@@ -93,5 +93,5 @@ export function emitSetNewTargetBeforeCall(ctx: CodegenContext, body: Instr[], c
   const globalIdx = ensureNewTargetGlobal(ctx);
   const classId = getOrAssignClassNewTargetId(ctx, className);
   body.push({ op: "i32.const", value: classId });
-  body.push({ op: "global.set", index: globalIdx } as Instr);
+  body.push({ op: "global.set", index: globalIdx });
 }

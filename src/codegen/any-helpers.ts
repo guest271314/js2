@@ -64,7 +64,7 @@ export function ensureAnyValueType(ctx: CodegenContext): void {
         { op: "ref.null", typeIdx: EQ_HEAP_TYPE }, // refval
         { op: "ref.null.extern" }, // externval
         { op: "struct.new", typeIdx: anyTypeIdx },
-      ] as Instr[],
+      ],
     });
     ctx.undefinedGlobalIdx = globalIdx;
   }
@@ -83,7 +83,7 @@ export function emitUndefinedSingleton(ctx: CodegenContext, fctx: FunctionContex
     ensureAnyValueType(ctx);
     if (ctx.undefinedGlobalIdx === undefined) return false;
   }
-  fctx.body.push({ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: ctx.undefinedGlobalIdx });
   return true;
 }
 
@@ -107,7 +107,7 @@ export function undefinedSingletonActive(ctx: CodegenContext): boolean {
 export function emitUndefinedExtern(ctx: CodegenContext, fctx: FunctionContext): boolean {
   if (!undefinedSingletonActive(ctx)) return false;
   if (!emitUndefinedSingleton(ctx, fctx)) return false;
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
   return true;
 }
 
@@ -123,7 +123,7 @@ export function undefinedExternInstrs(ctx: CodegenContext): Instr[] | undefined 
     ensureAnyValueType(ctx);
     if (ctx.undefinedGlobalIdx === undefined) return undefined;
   }
-  return [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr, { op: "extern.convert_any" } as Instr];
+  return [{ op: "global.get", index: ctx.undefinedGlobalIdx }, { op: "extern.convert_any" }];
 }
 
 /**
@@ -163,14 +163,14 @@ export function buildIsUndefinedExternBody(
               { op: "i64.eq" },
             ],
             else: [{ op: "i32.const", value: 0 }],
-          } as Instr,
+          },
         ]
-      : [{ op: "i32.const", value: 0 } as Instr];
+      : [{ op: "i32.const", value: 0 }];
   return [
     // any = any.convert_extern(v)  (null externref → null anyref: both
     // ref.tests below answer 0, so null → NOT undefined, as required.)
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: scratchAnyLocal },
     { op: "ref.test", typeIdx: anyTypeIdx },
     {
@@ -184,7 +184,7 @@ export function buildIsUndefinedExternBody(
         { op: "i32.eq" },
       ],
       else: boxedNumArm,
-    } as Instr,
+    },
   ];
 }
 
@@ -207,10 +207,10 @@ export function emitIsUndefinedSingletonExternAt(
   if (ctx.anyValueTypeIdx < 0) ensureAnyValueType(ctx);
   if (ctx.anyValueTypeIdx < 0) return false;
   const t = ctx.anyValueTypeIdx;
-  fctx.body.push({ op: "local.get", index: externLocalIdx } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.tee", index: scratchAnyIdx } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: t } as Instr);
+  fctx.body.push({ op: "local.get", index: externLocalIdx });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.tee", index: scratchAnyIdx });
+  fctx.body.push({ op: "ref.test", typeIdx: t });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
@@ -222,7 +222,7 @@ export function emitIsUndefinedSingletonExternAt(
       { op: "i32.eq" },
     ],
     else: [{ op: "i32.const", value: 0 }],
-  } as Instr);
+  });
   return true;
 }
 
@@ -297,7 +297,7 @@ export function emitWrapperValueOfFunctions(ctx: CodegenContext): void {
       body: [
         { op: "local.get", index: 0 },
         { op: "struct.get", typeIdx: ctx.wrapperNumberTypeIdx, fieldIdx: 0 },
-      ] as Instr[],
+      ],
       exported: false,
     });
     ctx.funcMap.set("WrapperNumber_valueOf", funcIdx);
@@ -319,7 +319,7 @@ export function emitWrapperValueOfFunctions(ctx: CodegenContext): void {
       body: [
         { op: "local.get", index: 0 },
         { op: "struct.get", typeIdx: ctx.wrapperStringTypeIdx, fieldIdx: 0 },
-      ] as Instr[],
+      ],
       exported: false,
     });
     ctx.funcMap.set("WrapperString_valueOf", funcIdx);
@@ -341,7 +341,7 @@ export function emitWrapperValueOfFunctions(ctx: CodegenContext): void {
       body: [
         { op: "local.get", index: 0 },
         { op: "struct.get", typeIdx: ctx.wrapperBooleanTypeIdx, fieldIdx: 0 },
-      ] as Instr[],
+      ],
       exported: false,
     });
     ctx.funcMap.set("WrapperBoolean_valueOf", funcIdx);
@@ -412,7 +412,7 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHon
         { op: "struct.new", typeIdx: anyTypeIdx },
       ]
     : honest && ctx.undefinedGlobalIdx !== undefined
-      ? [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr]
+      ? [{ op: "global.get", index: ctx.undefinedGlobalIdx }]
       : [
           { op: "i32.const", value: 1 },
           { op: "i32.const", value: 0 },
@@ -438,10 +438,10 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHon
             { op: "struct.new", typeIdx: anyTypeIdx },
             { op: "return" },
           ],
-        } as Instr,
+        },
         // Other GC (eq-castable) reference → tag 6 object, identity in refval.
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+        { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -450,12 +450,12 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHon
             { op: "i32.const", value: 0 },
             { op: "f64.const", value: 0 },
             { op: "local.get", index: 1 },
-            { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+            { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
             { op: "ref.null.extern" },
             { op: "struct.new", typeIdx: anyTypeIdx },
             { op: "return" },
           ],
-        } as Instr,
+        },
         // Non-eq host-opaque extern → tag 6 with the externref parked.
         { op: "i32.const", value: 6 },
         { op: "i32.const", value: 0 },
@@ -479,7 +479,7 @@ export function ensureAnyFromExternHelper(ctx: CodegenContext, opts?: { forceHon
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...nullAny, { op: "return" } as Instr],
+      then: [...nullAny, { op: "return" }],
     },
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
@@ -582,27 +582,27 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
     // short-circuits. `null`/non-eq values fail `ref.test (ref eq)` and fall
     // through (so `null === null` etc. stay handled by `__any_strict_eq`).
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: 2 },
-    { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+    { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
     { op: "local.get", index: 1 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: 3 },
-    { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
+    { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
     { op: "i32.and" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: 2 },
-        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
         { op: "local.get", index: 3 },
-        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
-        { op: "ref.eq" } as Instr,
+        { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.eq" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 1 }, { op: "return" } as Instr],
+          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
         },
       ],
     },
@@ -616,7 +616,7 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
     // fall through — the classification keeps them unequal, matching
     // `1n === 1` → false.
     ...(ctx.nativeBigIntTypeIdx >= 0
-      ? ([
+      ? [
           { op: "local.get", index: 2 },
           { op: "ref.test", typeIdx: ctx.nativeBigIntTypeIdx },
           { op: "local.get", index: 3 },
@@ -636,7 +636,7 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
               { op: "return" },
             ],
           },
-        ] as Instr[])
+        ]
       : []),
     // Primitive comparison (numbers unified via f64.eq, strings by content,
     // booleans, null/undefined by tag) for everything the fast path didn't match.
@@ -691,16 +691,16 @@ export function ensureExternSameValueZeroHelper(ctx: CodegenContext): number | u
   const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
   // Returns 1 if `local.get idx`'s $AnyValue is a NaN number (tag 2/3 + f64 self-ne).
   const isNanNumber = (idx: number): Instr[] => [
-    { op: "local.get", index: idx } as Instr,
-    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 } as Instr, // tag
-    { op: "i32.const", value: 3 } as Instr,
-    { op: "i32.eq" } as Instr, // f64-number tag (NaN only lives in the f64 field)
-    { op: "local.get", index: idx } as Instr,
-    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 } as Instr, // f64 val
-    { op: "local.get", index: idx } as Instr,
-    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 } as Instr,
-    { op: "f64.ne" } as Instr, // x !== x  ⇒ NaN
-    { op: "i32.and" } as Instr,
+    { op: "local.get", index: idx },
+    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 }, // tag
+    { op: "i32.const", value: 3 },
+    { op: "i32.eq" }, // f64-number tag (NaN only lives in the f64 field)
+    { op: "local.get", index: idx },
+    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 }, // f64 val
+    { op: "local.get", index: idx },
+    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+    { op: "f64.ne" }, // x !== x  ⇒ NaN
+    { op: "i32.and" },
   ];
   const body: Instr[] = [
     // if (strict_eq) return 1
@@ -817,7 +817,7 @@ export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined
     // extern-wrapped tag-1 `$AnyValue` IS the regime's undefined representation
     // (all predicates are tag-keyed, not identity-keyed).
     ...(undefinedSingletonActive(ctx)
-      ? ([
+      ? [
           { op: "local.get", index: 1 },
           { op: "i32.eqz" },
           {
@@ -825,7 +825,7 @@ export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined
             blockType: { kind: "empty" },
             then: [{ op: "ref.null.extern" }, { op: "return" }],
           },
-        ] as Instr[])
+        ]
       : []),
     // Tags 0 (null), 1 (undefined), 5 (string), 6 (GC ref): keep the WHOLE
     // $AnyValue box wrapped via extern.convert_any. Standalone/WASI has no host
@@ -942,11 +942,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   const tag5StringEqThen = (): Instr[] => {
     if (strEqualsIdx >= 0) {
       return [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-        { op: "call", funcIdx: strEqualsIdx } as Instr,
+        { op: "local.get", index: 0 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+        { op: "call", funcIdx: strEqualsIdx },
       ];
     }
     if (canNativeStrEq) {
@@ -963,33 +963,33 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
       // carried this guard; #1888's recoverNative refactor dropped it.) Recover
       // each field-4 once into the anyA/anyB scratch locals (4/5).
       const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
-        { op: "local.get", index: operandIdx } as Instr,
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-        { op: "any.convert_extern" } as Instr,
-        { op: "local.set", index: scratchIdx } as Instr,
+        { op: "local.get", index: operandIdx },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+        { op: "any.convert_extern" },
+        { op: "local.set", index: scratchIdx },
       ];
       const castFlatten = (scratchIdx: number): Instr[] => [
-        { op: "local.get", index: scratchIdx } as Instr,
-        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-        { op: "call", funcIdx: nativeStrFlattenIdx } as Instr,
+        { op: "local.get", index: scratchIdx },
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+        { op: "call", funcIdx: nativeStrFlattenIdx },
       ];
       return [
         ...recoverAny(0, 4),
         ...recoverAny(1, 5),
-        { op: "local.get", index: 4 } as Instr,
-        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-        { op: "local.get", index: 5 } as Instr,
-        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-        { op: "i32.and" } as Instr,
+        { op: "local.get", index: 4 },
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+        { op: "local.get", index: 5 },
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+        { op: "i32.and" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
-          else: [{ op: "i32.const", value: 0 } as Instr],
-        } as Instr,
+          then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx }],
+          else: [{ op: "i32.const", value: 0 }],
+        },
       ];
     }
-    return [{ op: "i32.const", value: 0 } as Instr];
+    return [{ op: "i32.const", value: 0 }];
   };
 
   // (#2141 S2/S3, #2626 — flag-gated, OFF by default) The three-way tag-5
@@ -1022,22 +1022,22 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     if (!ctx.tag5ValueEqClassifier || !(ctx.standalone === true || ctx.wasi === true)) return tag5StringEqThen();
     if (!canNativeStrEq && ctx.anyStrTypeIdx >= 0) return tag5StringEqThen();
     const recoverAny = (operandIdx: number, scratchIdx: number): Instr[] => [
-      { op: "local.get", index: operandIdx } as Instr,
-      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: scratchIdx } as Instr,
+      { op: "local.get", index: operandIdx },
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: scratchIdx },
     ];
     const castFlatten = (scratchIdx: number): Instr[] => [
-      { op: "local.get", index: scratchIdx } as Instr,
-      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-      { op: "call", funcIdx: nativeStrFlattenIdx } as Instr,
+      { op: "local.get", index: scratchIdx },
+      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+      { op: "call", funcIdx: nativeStrFlattenIdx },
     ];
     const bothTest = (typeIdx: number): Instr[] => [
-      { op: "local.get", index: 4 } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
-      { op: "local.get", index: 5 } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
-      { op: "i32.and" } as Instr,
+      { op: "local.get", index: 4 },
+      { op: "ref.test", typeIdx },
+      { op: "local.get", index: 5 },
+      { op: "ref.test", typeIdx },
+      { op: "i32.and" },
     ];
     const EQ = -19;
     const objectArm: Instr[] = [
@@ -1046,14 +1046,14 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
-          { op: "local.get", index: 4 } as Instr,
-          { op: "ref.cast", typeIdx: EQ } as Instr,
-          { op: "local.get", index: 5 } as Instr,
-          { op: "ref.cast", typeIdx: EQ } as Instr,
-          { op: "ref.eq" } as Instr,
+          { op: "local.get", index: 4 },
+          { op: "ref.cast", typeIdx: EQ },
+          { op: "local.get", index: 5 },
+          { op: "ref.cast", typeIdx: EQ },
+          { op: "ref.eq" },
         ],
-        else: [{ op: "i32.const", value: 0 } as Instr],
-      } as Instr,
+        else: [{ op: "i32.const", value: 0 }],
+      },
     ];
     // String arm only when the module HAS a string type (see gate note above);
     // a string-free module cannot carry $AnyString payloads in tag-5 boxes.
@@ -1063,9 +1063,9 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
-            then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr],
+            then: [...castFlatten(4), ...castFlatten(5), { op: "call", funcIdx: nativeStrEqualsIdx }],
             else: objectArm,
-          } as Instr,
+          },
         ]
       : objectArm;
     // Numeric arm requires the native $BoxedNumber type (always registered in
@@ -1080,14 +1080,14 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
               then: [
-                { op: "local.get", index: 0 } as Instr,
-                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
-                { op: "local.get", index: 1 } as Instr,
-                { op: "call", funcIdx: toF64IdxFwd() } as Instr,
-                { op: "f64.eq" } as Instr,
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: toF64IdxFwd() },
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: toF64IdxFwd() },
+                { op: "f64.eq" },
               ],
               else: stringArm,
-            } as Instr,
+            },
           ]
         : stringArm;
     return [...recoverAny(0, 4), ...recoverAny(1, 5), ...numericArm];
@@ -1231,7 +1231,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // tag-correct) observe null≠undefined; the non-nullish arms stay
   // byte-equivalent to `__any_box_string`.
   if (undefinedSingletonActive(ctx) && ctx.undefinedGlobalIdx !== undefined) {
-    const undefBoxInstrs: Instr[] = [{ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr];
+    const undefBoxInstrs: Instr[] = [{ op: "global.get", index: ctx.undefinedGlobalIdx }];
     addHelper(
       "__any_box_extern_s1",
       [{ kind: "externref" }],
@@ -1272,11 +1272,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               op: "if",
               blockType: { kind: "empty" },
               then: [{ op: "local.get", index: 1 }, { op: "ref.cast", typeIdx: anyTypeIdx }, { op: "return" }],
-            } as Instr,
+            },
           ],
         },
         ...(ctx.nativeBoxNumberTypeIdx >= 0
-          ? ([
+          ? [
               // UNDEF_F64-sentinel $BoxedNumber → undefined (tag-1 singleton).
               { op: "local.get", index: 1 },
               { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
@@ -1293,11 +1293,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                   {
                     op: "if",
                     blockType: { kind: "empty" },
-                    then: [...undefBoxInstrs.map((i) => ({ ...i }) as Instr), { op: "return" } as Instr],
-                  } as Instr,
+                    then: [...undefBoxInstrs.map((i) => ({ ...i })), { op: "return" }],
+                  },
                 ],
-              } as Instr,
-            ] as Instr[])
+              },
+            ]
           : []),
         // legacy tag-5 wrap (byte-equivalent to __any_box_string)
         { op: "i32.const", value: 5 },
@@ -1511,7 +1511,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               // helpers stay BoxedNumber-blind on purpose — see the NOTE in
               // type-coercion.ts (#1888 regression −788).
               ...(ctx.nativeBoxNumberTypeIdx >= 0
-                ? ([
+                ? [
                     { op: "local.get", index: 1 },
                     { op: "i32.const", value: 5 },
                     { op: "i32.eq" },
@@ -1559,7 +1559,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 // box's f64val (always 0) made every dispatched
                                 // boolean numerically 0. Same gate style as #1888.
                                 ctx.nativeBoxBooleanTypeIdx >= 0
-                                  ? ([
+                                  ? [
                                       { op: "local.get", index: 2 },
                                       { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
                                       {
@@ -1576,14 +1576,14 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                           { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
                                         ],
                                       },
-                                    ] as Instr[])
-                                  : ([
+                                    ]
+                                  : [
                                       { op: "local.get", index: 0 },
                                       { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
-                                    ] as Instr[]),
+                                    ],
                             },
                           ],
-                        } as Instr,
+                        },
                       ],
                       else: [
                         // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
@@ -1591,12 +1591,12 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                         { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
                       ],
                     },
-                  ] as Instr[])
-                : ([
+                  ]
+                : [
                     // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
                     { op: "local.get", index: 0 },
                     { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
-                  ] as Instr[])),
+                  ]),
             ],
           },
         ],
@@ -1639,22 +1639,25 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // bare f64 on the stack. Only called where `strToNumIdx >= 0`.
   const tag5ToNumber = (opIdx: number): Instr[] => {
     const strToNum: Instr[] = [
-      { op: "local.get", index: opIdx } as Instr,
-      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-      { op: "call", funcIdx: strToNumIdx } as Instr,
+      { op: "local.get", index: opIdx },
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+      { op: "call", funcIdx: strToNumIdx },
     ];
     if (ctx.nativeBoxNumberTypeIdx < 0) return strToNum;
     return [
-      { op: "local.get", index: opIdx } as Instr,
-      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
+      { op: "local.get", index: opIdx },
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "f64" } },
-        then: [{ op: "local.get", index: opIdx } as Instr, { op: "call", funcIdx: toF64Idx } as Instr],
+        then: [
+          { op: "local.get", index: opIdx },
+          { op: "call", funcIdx: toF64Idx },
+        ],
         else: strToNum,
-      } as Instr,
+      },
     ];
   };
 
@@ -1703,13 +1706,16 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
       then: [
         { op: "local.get", index: paramIdx },
         { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 }, // refval (eqref)
-        { op: "extern.convert_any" } as Instr,
-        { op: "call", funcIdx: externToStringIdx } as Instr,
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "extern.convert_any" },
+        { op: "call", funcIdx: externToStringIdx },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
       ],
-      else: [{ op: "local.get", index: paramIdx }, { op: "call", funcIdx: anyToStringIdx } as Instr],
-    } as Instr,
+      else: [
+        { op: "local.get", index: paramIdx },
+        { op: "call", funcIdx: anyToStringIdx },
+      ],
+    },
   ];
 
   // Build a fresh copy of the numeric instructions every time this is called.
@@ -1753,7 +1759,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         { op: "f64.add" },
         { op: "call", funcIdx: boxF64Idx },
       ],
-    } as Instr,
+    },
   ];
 
   const concatArm: Instr[] = anyAddCanConcat
@@ -1765,8 +1771,8 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
         ...opToAnyString(0),
         ...opToAnyString(1),
-        { op: "call", funcIdx: strConcatIdx } as Instr,
-        { op: "extern.convert_any" } as Instr,
+        { op: "call", funcIdx: strConcatIdx },
+        { op: "extern.convert_any" },
         { op: "struct.new", typeIdx: anyTypeIdx },
       ]
     : // No concat support (e.g. fast mode): the stringy `then` arm can never be
@@ -1802,19 +1808,19 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // alias `if` arms — the in-place index-shift double-remap hazard).
   const stringyOperand = (opIdx: number, tagLocal: number): Instr[] => {
     const tag6Test = (): Instr[] => [
-      { op: "local.get", index: tagLocal } as Instr,
-      { op: "i32.const", value: 6 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: tagLocal },
+      { op: "i32.const", value: 6 },
+      { op: "i32.eq" },
     ];
     if (ctx.nativeBoxNumberTypeIdx < 0) {
       // Legacy shape: tag==5 || tag==6 (byte-identical when no boxed-number
       // carrier type exists, e.g. host/fast mode builds of this helper).
       return [
-        { op: "local.get", index: tagLocal } as Instr,
-        { op: "i32.const", value: 5 } as Instr,
-        { op: "i32.eq" } as Instr,
+        { op: "local.get", index: tagLocal },
+        { op: "i32.const", value: 5 },
+        { op: "i32.eq" },
         ...tag6Test(),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
       ];
     }
     // tag==5 → stringy iff field-4 is NOT a boxed number/boolean carrier AND
@@ -1832,40 +1838,40 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     // collapse (#2106). Genuine tag-5 strings always carry a non-null
     // externval, so the guard is precise.
     const notBoxedPrimitive: Instr[] = [
-      { op: "local.get", index: opIdx } as Instr,
-      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.tee", index: 4 } as Instr,
-      { op: "ref.is_null" } as Instr,
+      { op: "local.get", index: opIdx },
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 4 },
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         // Null externval: a boxed nullish carrier — NOT a string.
         then: [{ op: "i32.const", value: 0 }],
         else: [
-          { op: "local.get", index: 4 } as Instr,
-          { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
+          { op: "local.get", index: 4 },
+          { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
           ...(ctx.nativeBoxBooleanTypeIdx >= 0
-            ? ([
+            ? [
                 { op: "local.get", index: 4 },
                 { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
                 { op: "i32.or" },
-              ] as Instr[])
+              ]
             : []),
-          { op: "i32.eqz" } as Instr,
+          { op: "i32.eqz" },
         ],
-      } as Instr,
+      },
     ];
     return [
-      { op: "local.get", index: tagLocal } as Instr,
-      { op: "i32.const", value: 5 } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: tagLocal },
+      { op: "i32.const", value: 5 },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: notBoxedPrimitive,
         else: tag6Test(),
-      } as Instr,
+      },
     ];
   };
 
@@ -1899,7 +1905,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         // — see the `buildNumericArm` note above on why in-place index-shift
         // passes corrupt shared `if` arms.
         else: buildNumericArm(),
-      } as Instr,
+      },
     ],
     [
       { name: "tagA", type: { kind: "i32" } },
@@ -1939,7 +1945,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
             { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
             { op: "local.get", index: 1 },
             { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
-            { op: i32op } as Instr,
+            { op: i32op },
             { op: "call", funcIdx: boxI32Idx },
           ],
           else: [
@@ -1948,7 +1954,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
             { op: "call", funcIdx: toF64Idx },
             { op: "local.get", index: 1 },
             { op: "call", funcIdx: toF64Idx },
-            { op: f64op } as Instr,
+            { op: f64op },
             { op: "call", funcIdx: boxF64Idx },
           ],
         },
@@ -2387,41 +2393,41 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                 ? (() => {
                     const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type
                     const recoverRefPayload = (opIdx: number, dstLocal: number): Instr[] => [
-                      { op: "local.get", index: opIdx } as Instr,
-                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 } as Instr, // refval (eqref)
-                      { op: "local.tee", index: dstLocal } as Instr,
-                      { op: "ref.is_null" } as Instr,
+                      { op: "local.get", index: opIdx },
+                      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 }, // refval (eqref)
+                      { op: "local.tee", index: dstLocal },
+                      { op: "ref.is_null" },
                       {
                         op: "if",
                         blockType: { kind: "empty" },
                         then: [
-                          { op: "local.get", index: opIdx } as Instr,
-                          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr, // externval (externref)
-                          { op: "any.convert_extern" } as Instr,
-                          { op: "local.set", index: dstLocal } as Instr,
+                          { op: "local.get", index: opIdx },
+                          { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 }, // externval (externref)
+                          { op: "any.convert_extern" },
+                          { op: "local.set", index: dstLocal },
                         ],
-                      } as Instr,
+                      },
                     ];
                     return [
                       ...recoverRefPayload(0, 4),
                       ...recoverRefPayload(1, 5),
-                      { op: "local.get", index: 4 } as Instr,
-                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
-                      { op: "local.get", index: 5 } as Instr,
-                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr,
-                      { op: "i32.and" } as Instr,
+                      { op: "local.get", index: 4 },
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
+                      { op: "local.get", index: 5 },
+                      { op: "ref.test", typeIdx: EQ_HEAP_TYPE },
+                      { op: "i32.and" },
                       {
                         op: "if",
                         blockType: { kind: "val", type: { kind: "i32" } },
                         then: [
-                          { op: "local.get", index: 4 } as Instr,
-                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
-                          { op: "local.get", index: 5 } as Instr,
-                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
-                          { op: "ref.eq" } as Instr,
+                          { op: "local.get", index: 4 },
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                          { op: "local.get", index: 5 },
+                          { op: "ref.cast", typeIdx: EQ_HEAP_TYPE },
+                          { op: "ref.eq" },
                         ],
-                        else: [{ op: "i32.const", value: 0 } as Instr],
-                      } as Instr,
+                        else: [{ op: "i32.const", value: 0 }],
+                      },
                     ];
                   })()
                 : [{ op: "i32.const", value: 0 }],
@@ -2547,7 +2553,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         { op: "call", funcIdx: toF64Idx },
         { op: "local.get", index: 1 },
         { op: "call", funcIdx: toF64Idx },
-        { op: f64op } as Instr,
+        { op: f64op },
       ],
     );
   }

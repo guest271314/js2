@@ -566,10 +566,10 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
     // null-extern is safe.
     const catchAll: Instr[] = [
       { op: "i32.const", value: PROMISE_STATE_REJECTED },
-      { op: "ref.null.extern" } as Instr,
       { op: "ref.null.extern" },
-      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
-      { op: "extern.convert_any" } as Instr,
+      { op: "ref.null.extern" },
+      { op: "struct.new", typeIdx: promiseTypeIdx },
+      { op: "extern.convert_any" },
     ];
     fctx.body.push({
       op: "try",
@@ -586,8 +586,8 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
   if (rejectIdx === undefined || getCaughtIdx === undefined) return;
   const inner = fctx.body.splice(start);
   const catchAll: Instr[] = [
-    { op: "call", funcIdx: getCaughtIdx } as Instr,
-    { op: "call", funcIdx: rejectIdx } as Instr,
+    { op: "call", funcIdx: getCaughtIdx },
+    { op: "call", funcIdx: rejectIdx },
   ];
   fctx.body.push({
     op: "try",
@@ -1081,7 +1081,7 @@ function compileExpressionInner(
       // and top-level strict `this` (#873/#895-fixed) are unaffected — those
       // either bind `this` via a local or do not set `readsCurrentThis`.
       const thisTmp = allocTempLocal(fctx, { kind: "externref" });
-      fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx } as Instr);
+      fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx });
       fctx.body.push({ op: "local.tee", index: thisTmp });
       fctx.body.push({ op: "ref.is_null" });
       const elseBody: Instr[] = [{ op: "local.get", index: thisTmp }];

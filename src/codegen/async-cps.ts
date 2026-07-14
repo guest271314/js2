@@ -1617,14 +1617,14 @@ export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
     if (srcType !== null && srcType !== undefined) {
       coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
     } else {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
     const iterIdx = ensureAsyncIterator(ctx, fctx);
     if (iterIdx === undefined) {
       // Only reachable if the native iterator runtime is unavailable (not the
       // standalone/wasi drive lane this planner runs on); leave iter null.
       fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: L.iter });
       return;
     }
@@ -1639,7 +1639,7 @@ export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
     const nextIdx = ctx.funcMap.get("__iterator_next");
     if (nextIdx === undefined) {
       // Native iterator runtime absent — deliver done=1 so the loop exits.
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: L.value });
       fctx.body.push({ op: "i32.const", value: 1 });
       fctx.body.push({ op: "local.set", index: L.done });
@@ -1904,7 +1904,7 @@ export function planForAwaitAsyncCfg(
     if (srcType !== null && srcType !== undefined) {
       coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
     } else {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
     fctx.body.push({ op: "local.set", index: L.iter });
   };
@@ -1919,7 +1919,7 @@ export function planForAwaitAsyncCfg(
       // Unreachable: the drive gate (`forAwaitAsyncNeedsDrive`) required the
       // helper to be registered. Emit a null promise so the suspend delivers it
       // plainly (SENT = null → done read below faults to 1 → the loop exits).
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: L.p });
       return;
     }
@@ -1944,9 +1944,9 @@ export function planForAwaitAsyncCfg(
     if (L.done === -1) L.done = allocLocal(fctx, "__asyncgen_done", { kind: "i32" });
     // L.done = (SENT as IteratorResult).done
     fctx.body.push({ op: "local.get", index: aresSlot });
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx });
+    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD });
     fctx.body.push({ op: "local.set", index: L.done });
     // x = (SENT as IteratorResult).value  (bound BEFORE the body leads run)
     const xType: ValType = binding.type
@@ -1954,9 +1954,9 @@ export function planForAwaitAsyncCfg(
       : { kind: "externref" };
     const xSlot = fctx.localMap.get(binding.name) ?? allocLocal(fctx, binding.name, xType);
     fctx.body.push({ op: "local.get", index: aresSlot });
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx } as Instr);
-    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx });
+    fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD });
     coerceType(ctx, fctx, { kind: "externref" }, xType);
     fctx.body.push({ op: "local.set", index: xSlot });
   };

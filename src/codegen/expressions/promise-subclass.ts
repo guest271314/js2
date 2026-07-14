@@ -105,7 +105,7 @@ export function emitPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionConte
   // `-1` sentinel, which would bake `global.get -1` and fail binary emit. Fall
   // to the inline-materializing `compileStringLiteral` for the sentinel.
   if (nameIdx !== undefined && nameIdx >= 0) {
-    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: nameIdx });
   } else {
     compileStringLiteral(ctx, fctx, resolved);
   }
@@ -148,7 +148,7 @@ function emitRegisterPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionCont
   addStringConstantGlobal(ctx, resolved);
   const nameIdx = ctx.stringGlobalMap.get(resolved);
   if (nameIdx !== undefined && nameIdx >= 0) {
-    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: nameIdx });
   } else {
     compileStringLiteral(ctx, fctx, resolved);
   }
@@ -162,15 +162,15 @@ function emitRegisterPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionCont
   if (closureType === null) {
     // Could not materialize (defensive) — drop the name we already pushed and
     // bail so the stack stays balanced.
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return;
   }
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
 
   // Re-resolve the register import idx as well (emitFuncRefAsClosure adds a
   // defined function but no import, so no shift — still, be defensive).
   const registerIdxNow = ctx.funcMap.get(registerName) ?? registerIdx;
-  fctx.body.push({ op: "call", funcIdx: registerIdxNow } as Instr);
+  fctx.body.push({ op: "call", funcIdx: registerIdxNow });
 }
 
 /**

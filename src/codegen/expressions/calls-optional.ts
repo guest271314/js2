@@ -62,7 +62,7 @@ export function compileOptionalCallExpression(
       flushLateImportShifts(ctx, fctx);
       fctx.body.push({ op: "local.get", index: tmp });
       fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-      fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "i32.or" });
     }
   }
 
@@ -115,7 +115,7 @@ export function compileOptionalCallExpression(
       }
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "local.get", index: tmp });
-        if (objType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        if (objType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
         const paramTypes = getFuncParamTypes(ctx, funcIdx);
         for (let i = 0; i < expr.arguments.length; i++) {
           compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]);
@@ -138,7 +138,7 @@ export function compileOptionalCallExpression(
       const funcIdx = ctx.funcMap.get(fullName);
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "local.get", index: tmp });
-        if (objType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        if (objType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
         const paramTypes = getFuncParamTypes(ctx, funcIdx);
         for (let i = 0; i < expr.arguments.length; i++) {
           compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]);

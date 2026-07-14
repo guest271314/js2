@@ -865,8 +865,8 @@ function emitThrowRegExpSyntaxError(ctx: CodegenContext, fctx: FunctionContext, 
   const tagIdx = ensureExnTag(ctx);
   for (const instr of stringConstantExternrefInstrs(ctx, message)) fctx.body.push(instr);
   fctx.body.push({ op: "call", funcIdx: ctorIdx });
-  fctx.body.push({ op: "throw", tagIdx } as Instr);
-  fctx.body.push({ op: "unreachable" } as Instr);
+  fctx.body.push({ op: "throw", tagIdx });
+  fctx.body.push({ op: "unreachable" });
   return { kind: "ref", typeIdx: ensureStandaloneRegExpStruct(ctx) };
 }
 
@@ -964,8 +964,8 @@ function loadStandaloneRegExpStruct(
       return null;
     }
     const typeIdx = ensureStandaloneRegExpStruct(ctx);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx });
     storedRegexpType = { kind: "ref", typeIdx };
   }
   if (!isStandaloneRegExpValue(ctx, storedRegexpType)) {
@@ -976,7 +976,7 @@ function loadStandaloneRegExpStruct(
   const reStructType: ValType = { kind: "ref", typeIdx: storedRegexpType.typeIdx };
   const regexpLocal = allocLocal(fctx, `__re_${fctx.locals.length}`, reStructType);
   if (storedRegexpType.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({ op: "local.set", index: regexpLocal });
   return { regexpLocal, structTypeIdx: storedRegexpType.typeIdx };
@@ -1010,23 +1010,23 @@ export function recoverRegExpStructFromExternref(
   const anyLocal = allocLocal(fctx, `__re_this_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
   // any.convert_extern(this) → anyref, kept in a local for the ref.test guard.
   fctx.body.push({ op: "local.get", index: thisExternLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "local.set", index: anyLocal });
 
   // Brand check: ref.test $NativeRegExp. On failure throw a catchable TypeError
   // (the wrong-`this` brand-check the 31 reflective brand-check tests gate on).
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
+  fctx.body.push({ op: "i32.eqz" });
   const throwBody: Instr[] = [];
   emitBrandCheckTypeError(ctx, throwBody, "Method called on incompatible receiver (RegExp brand check failed)");
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: [] } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody, else: [] });
 
   // ref.cast to the concrete struct and stash in a typed local.
   const reStructType: ValType = { kind: "ref", typeIdx: structTypeIdx };
   const regexpLocal = allocLocal(fctx, `__re_recovered_${fctx.locals.length}`, reStructType);
-  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: anyLocal });
+  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
   fctx.body.push({ op: "local.set", index: regexpLocal });
   return { regexpLocal, structTypeIdx };
 }
@@ -1078,7 +1078,7 @@ function emitRegexSearchCall(
   // --- input: flatten the subject string ---
   const inputType = compileExpression(ctx, fctx, inputExpr, nativeStringType(ctx));
   if (inputType?.kind === "ref_null") {
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
   }
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const inputLocal = allocLocal(fctx, `__re_input_${fctx.locals.length}`, {
@@ -1091,7 +1091,7 @@ function emitRegexSearchCall(
   // PROGRESS empty-loop guards (#1959); they ride along in the caps array.
   const capsLocal = allocLocal(fctx, `__re_caps_${fctx.locals.length}`, { kind: "ref", typeIdx: i32Arr });
   pushNSlots(fctx, regexpLocal, structTypeIdx);
-  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr });
   fctx.body.push({ op: "local.set", index: capsLocal });
 
   // sticky = (flags & RE_FLAG_Y) != 0
@@ -1126,7 +1126,7 @@ function emitRegexSearchCall(
     // trunc_sat: NaN→0 (= ToLength(NaN)); huge values saturate and the search
     // loop's `start > slen` check yields the spec's no-match result. Negative
     // values clamp to 0 inside __regex_search, matching ToLength.
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else {
     fctx.body.push({ op: "i32.const", value: 0 });
   }
@@ -1150,8 +1150,8 @@ function emitRegexSearchCall(
         { op: "f64.convert_i32_s" },
       ],
       else: [{ op: "f64.const", value: 0 }],
-    } as Instr);
-    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+    });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX });
     fctx.body.push({ op: "local.get", index: matchedTmp });
   }
   return { regexpLocal, inputLocal, capsLocal, structTypeIdx };
@@ -1235,20 +1235,20 @@ function pushCaptureValueExternref(
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: [{ op: "ref.null.extern" } as Instr],
+    then: [{ op: "ref.null.extern" }],
     else: [
-      { op: "local.get", index: subjectLocal } as Instr,
-      { op: "local.get", index: capsLocal } as Instr,
-      { op: "i32.const", value: 2 * idx } as Instr,
-      { op: "array.get", typeIdx: i32Arr } as Instr,
-      { op: "local.get", index: capsLocal } as Instr,
-      { op: "i32.const", value: 2 * idx + 1 } as Instr,
-      { op: "array.get", typeIdx: i32Arr } as Instr,
-      { op: "call", funcIdx: substringIdx } as Instr,
+      { op: "local.get", index: subjectLocal },
+      { op: "local.get", index: capsLocal },
+      { op: "i32.const", value: 2 * idx },
+      { op: "array.get", typeIdx: i32Arr },
+      { op: "local.get", index: capsLocal },
+      { op: "i32.const", value: 2 * idx + 1 },
+      { op: "array.get", typeIdx: i32Arr },
+      { op: "call", funcIdx: substringIdx },
       // native string ref → externref
       ...coercedNstrToExternref(ctx, fctx, nstr),
     ],
-  } as Instr);
+  });
 }
 
 /** Produce the instrs that coerce a native-string ref already on the stack to
@@ -1281,7 +1281,7 @@ function emitRegexGroupsObjectExternref(
   i32Arr: number,
 ): void {
   if (groupNames.size === 0) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
   const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
@@ -1293,7 +1293,7 @@ function emitRegexGroupsObjectExternref(
   );
   flushLateImportShifts(ctx, fctx);
   if (newObjIdx === undefined || setIdx === undefined) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
   const objLocal = allocLocal(fctx, `__re_groups_${fctx.locals.length}`, { kind: "externref" });
@@ -1329,7 +1329,7 @@ function emitRegexIndicesArrayExternref(
   i32Arr: number,
 ): void {
   if (!hasD) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
   const { newIdx, pushIdx } = ensureObjVecBuilders(ctx);
@@ -1347,9 +1347,9 @@ function emitRegexIndicesArrayExternref(
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
-      then: [{ op: "ref.null.extern" } as Instr],
+      then: [{ op: "ref.null.extern" }],
       else: [...buildIndexPairExternref(ctx, fctx, g, capsLocal, i32Arr, newIdx, pushIdx)],
-    } as Instr);
+    });
     fctx.body.push({ op: "call", funcIdx: pushIdx });
   }
   fctx.body.push({ op: "local.get", index: outerLocal });
@@ -1461,8 +1461,8 @@ function emitRegexExecArrayCall(
     fctx.body.push({ op: "local.get", index: groupsLocal });
     fctx.body.push({ op: "local.get", index: indicesLocal });
   } else {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "ref.null.extern" });
   }
   fctx.body.push({ op: "call", funcIdx: captureArrayIdx });
 
@@ -1471,8 +1471,8 @@ function emitRegexExecArrayCall(
     op: "if",
     blockType: { kind: "val", type: { kind: "ref_null", typeIdx: nstrVecTypeIdx } },
     then: thenBody,
-    else: [{ op: "ref.null", typeIdx: nstrVecTypeIdx } as Instr],
-  } as Instr);
+    else: [{ op: "ref.null", typeIdx: nstrVecTypeIdx }],
+  });
   return { kind: "ref_null", typeIdx: nstrVecTypeIdx };
 }
 
@@ -1593,7 +1593,7 @@ function emitStandaloneRegExpSearchCore(
       { op: "f64.convert_i32_s" },
     ],
     else: [{ op: "f64.const", value: -1 }],
-  } as Instr);
+  });
   return { kind: "f64" };
 }
 
@@ -1678,7 +1678,7 @@ function emitStandaloneRegExpMatchCore(
     const { regexpLocal, structTypeIdx } = loaded;
 
     const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
-    if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
     fctx.body.push({ op: "call", funcIdx: flattenIdx });
     const subjLocal = allocLocal(fctx, `__re_gm_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
     fctx.body.push({ op: "local.set", index: subjLocal });
@@ -1704,7 +1704,7 @@ function emitStandaloneRegExpMatchCore(
     // lastIndex = 0 (net effect of the spec's exec loop on a global regex).
     fctx.body.push({ op: "local.get", index: regexpLocal });
     fctx.body.push({ op: "f64.const", value: 0 });
-    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX });
     return { kind: "ref_null", typeIdx: matchVecTypeIdx };
   }
 
@@ -1795,7 +1795,7 @@ function emitStandaloneRegExpMatchAllCore(
   const { regexpLocal, structTypeIdx } = loaded;
 
   const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
-  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const subjLocal = allocLocal(fctx, `__re_gma_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
   fctx.body.push({ op: "local.set", index: subjLocal });
@@ -1822,7 +1822,7 @@ function emitStandaloneRegExpMatchAllCore(
   // the global-match net effect and keep a subsequent reuse well-defined.
   fctx.body.push({ op: "local.get", index: regexpLocal });
   fctx.body.push({ op: "f64.const", value: 0 });
-  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX });
   return { kind: "ref", typeIdx: outerVecTypeIdx };
 }
 
@@ -1942,14 +1942,14 @@ function emitStandaloneRegExpReplaceCore(
 
   // --- subject: flatten the subject string ---
   const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
-  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const subjLocal = allocLocal(fctx, `__re_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
   fctx.body.push({ op: "local.set", index: subjLocal });
 
   // --- replacement: flatten ---
   const replType = compileExpression(ctx, fctx, replExpr, nativeStringType(ctx));
-  if (replType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  if (replType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const replLocal = allocLocal(fctx, `__re_repl_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
   fctx.body.push({ op: "local.set", index: replLocal });
@@ -2085,7 +2085,7 @@ function emitStandaloneRegExpSplitCore(
   const { regexpLocal, structTypeIdx } = loaded;
 
   const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
-  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const subjLocal = allocLocal(fctx, `__re_split_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
   fctx.body.push({ op: "local.set", index: subjLocal });
@@ -2117,7 +2117,7 @@ function emitStandaloneRegExpSplitCore(
     if (limType.kind === "f64") {
       // ToUint32: trunc-sat then wrap — saturating trunc + i32 reinterpret
       // matches ToUint32 for the integer limits tests exercise.
-      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     } else if (limType.kind !== "i32") {
       reportStandaloneRegExpUnsupported(ctx, limitExpr, `${diag} with non-numeric limits`);
       return null;
@@ -2341,13 +2341,13 @@ export function emitStandaloneRegExpToStringFromExpr(
   ensureNativeStringHelpers(ctx);
   const flagsStrIdx = ensureRegexFlagsStr(ctx);
   const srcInstrs: Instr[] = [
-    { op: "local.get", index: regexpLocal } as Instr,
-    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_SOURCE } as Instr,
+    { op: "local.get", index: regexpLocal },
+    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_SOURCE },
   ];
   const flagsInstrs: Instr[] = [
-    { op: "local.get", index: regexpLocal } as Instr,
-    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_FLAGS } as Instr,
-    { op: "call", funcIdx: flagsStrIdx } as Instr,
+    { op: "local.get", index: regexpLocal },
+    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_FLAGS },
+    { op: "call", funcIdx: flagsStrIdx },
   ];
   // (("/" ++ source) ++ "/") ++ flags
   let acc = repr.concat(repr.literal("/"), srcInstrs);
@@ -2435,7 +2435,7 @@ export function emitRegExpTestFromLocals(
   // caps = array.new_default(2 * nGroups + nScratch)
   const capsLocal = allocLocal(fctx, `__re_tcaps_${fctx.locals.length}`, { kind: "ref", typeIdx: i32Arr });
   pushNSlots(fctx, regexpLocal, structTypeIdx);
-  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: i32Arr });
   fctx.body.push({ op: "local.set", index: capsLocal });
 
   // sticky = (flags & RE_FLAG_Y) != 0
@@ -2577,7 +2577,7 @@ function emitRegExpProtoMemberBody(
         addStringConstantGlobal(ctx, "");
         protoResult = stringConstantExternrefInstrs(ctx, "");
       } else {
-        protoResult = [{ op: "ref.null.extern" } as Instr];
+        protoResult = [{ op: "ref.null.extern" }];
       }
       emitNativeProtoIdentityReturnUndefined(ctx, fctx, brand, 1, protoResult);
     }
@@ -2597,13 +2597,13 @@ function emitRegExpProtoMemberBody(
     // via `__box_number`.
     const fieldType = emitRegExpReflectionFieldRead(ctx, fctx, member, regexpLocal, structTypeIdx);
     if (fieldType.kind === "ref" || fieldType.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       return { kind: "externref" };
     }
     if (fieldType.kind === "i32") {
       const boxBoolIdx = ensureLateImport(ctx, "__box_boolean", [{ kind: "i32" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      if (boxBoolIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxBoolIdx } as Instr);
+      if (boxBoolIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
       return { kind: "externref" };
     }
     if (fieldType.kind === "f64") {
@@ -2641,7 +2641,7 @@ function emitRegExpProtoMemberBody(
   // emit a spec-shaped placeholder result so the closure type is well-formed and
   // the reflective READ + brand recovery compile cleanly. These return an
   // externref (null) until their engine body lands.
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
   return { kind: "externref" };
 }
 
@@ -2657,11 +2657,11 @@ function flattenExternrefArgToString(ctx: CodegenContext, fctx: FunctionContext,
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const subjLocal = allocLocal(fctx, `__re_arg_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
   // externref arg → anyref → ref $AnyString → __str_flatten → ref $NativeString.
-  fctx.body.push({ op: "local.get", index: paramIdx } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: paramIdx });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: anyStrTypeIdx });
   if (flattenIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: flattenIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx });
   }
   fctx.body.push({ op: "local.set", index: subjLocal });
   return subjLocal;
@@ -2704,7 +2704,7 @@ export function tryCompileStandaloneRegExpLastIndexWrite(
   }
   const tmp = allocLocal(fctx, `__re_lastindex_${fctx.locals.length}`, { kind: "f64" });
   fctx.body.push({ op: "local.tee", index: tmp });
-  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX });
   fctx.body.push({ op: "local.get", index: tmp });
   return { kind: "f64" };
 }
@@ -2748,13 +2748,13 @@ export function tryCompileStandaloneRegExpMatchResultRead(
     return null;
   }
   if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: matchVecIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: matchVecIdx });
   } else if (recvType.kind === "ref" || recvType.kind === "ref_null") {
     if (recvType.typeIdx !== matchVecIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: matchVecIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: matchVecIdx });
     } else if (recvType.kind === "ref_null") {
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" });
     }
   } else {
     reportStandaloneRegExpUnsupported(

@@ -136,16 +136,16 @@ export function maybeCaptureArrayProtoOverride(
       name: `__array_proto_${memberKey === "@@iterator" ? "iterator" : memberKey}_override`,
       type: { kind: "externref" },
       mutable: true,
-      init: [{ op: "ref.null.extern" } as Instr],
+      init: [{ op: "ref.null.extern" }],
     });
   }
   // Stack: [closure-ref]. Convert to externref (if not already) and tee into the
   // global, leaving the externref on the stack as the assignment value.
   if (closureType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
-  fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
-  fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: globalIdx });
+  fctx.body.push({ op: "global.get", index: globalIdx });
 
   // Record into protoOverrides (funcIdx/funcTypeIdx unused by the global-driven
   // path; kept 0/-1 placeholders for the table shape).
@@ -203,7 +203,7 @@ function reserveProtoIteratorDriver(ctx: CodegenContext): number {
     // Placeholder; filled by fillProtoIteratorDriver in post-processing. A bare
     // `unreachable` keeps the stub valid (externref result) if the fill is ever
     // skipped (no arity-0 closure ⇒ driver unreferenced anyway).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -238,13 +238,13 @@ export function fillProtoIteratorDriver(ctx: CodegenContext): void {
     // No arity-0 closure dispatcher emitted (no qualifying closure) — the driver
     // is unreachable from any live read-drive in that case, but keep a valid
     // body so the module verifies: return undefined (null externref).
-    driverFn.body = [{ op: "ref.null.extern" } as Instr];
+    driverFn.body = [{ op: "ref.null.extern" }];
     return;
   }
   driverFn.body = [
-    { op: "local.get", index: 0 } as Instr, // thisVal (array-as-this)
-    { op: "local.get", index: 1 } as Instr, // override closure
-    { op: "call", funcIdx: callMethod0 } as Instr,
+    { op: "local.get", index: 0 }, // thisVal (array-as-this)
+    { op: "local.get", index: 1 }, // override closure
+    { op: "call", funcIdx: callMethod0 },
     // result (iterator externref) stays on the stack as the return value
   ];
 }
@@ -276,12 +276,12 @@ export function emitArrayProtoIteratorDrive(
 ): number {
   const driverIdx = reserveProtoIteratorDriver(ctx);
   // Stack: [vec-ref]. Convert to the array-as-`this` externref.
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
   // Push the override closure.
-  fctx.body.push({ op: "global.get", index: overrideGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: overrideGlobalIdx });
   // Drive: __drive_proto_iterator(array, closure) -> iterator externref.
-  fctx.body.push({ op: "call", funcIdx: driverIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: driverIdx });
   const iterLocal = allocLocal(fctx, `__cpr_iter_${fctx.locals.length}`, { kind: "externref" } as ValType);
-  fctx.body.push({ op: "local.set", index: iterLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: iterLocal });
   return iterLocal;
 }

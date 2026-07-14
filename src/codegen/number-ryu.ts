@@ -163,7 +163,7 @@ function ensureRyuTables(ctx: CodegenContext): { invIdx: number; powIdx: number;
   let invLocal = findGlobal(ctx, RYU_INV_GLOBAL);
   if (invLocal < 0) {
     const inv = buildInvSplit();
-    const init: Instr[] = inv.map((v) => ({ op: "i64.const", value: v }) as Instr);
+    const init: Instr[] = inv.map((v) => ({ op: "i64.const", value: v }));
     init.push({ op: "array.new_fixed", typeIdx: arrType, length: inv.length });
     invLocal = ctx.mod.globals.length;
     ctx.mod.globals.push({ name: RYU_INV_GLOBAL, type: arrRef, mutable: false, init });
@@ -171,7 +171,7 @@ function ensureRyuTables(ctx: CodegenContext): { invIdx: number; powIdx: number;
   let powLocal = findGlobal(ctx, RYU_POW_GLOBAL);
   if (powLocal < 0) {
     const pw = buildSplit();
-    const init: Instr[] = pw.map((v) => ({ op: "i64.const", value: v }) as Instr);
+    const init: Instr[] = pw.map((v) => ({ op: "i64.const", value: v }));
     init.push({ op: "array.new_fixed", typeIdx: arrType, length: pw.length });
     powLocal = ctx.mod.globals.length;
     ctx.mod.globals.push({ name: RYU_POW_GLOBAL, type: arrRef, mutable: false, init });

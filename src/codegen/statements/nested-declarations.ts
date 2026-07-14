@@ -724,7 +724,10 @@ export function compileNestedFunctionDeclaration(
       const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
       const catchAllBody: Instr[] =
         getCaughtIdx !== undefined
-          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+          ? [
+              { op: "call", funcIdx: getCaughtIdx },
+              { op: "local.set", index: pendingThrowLocal },
+            ]
           : [];
       liftedFctx.body.push({
         op: "try",
@@ -972,7 +975,7 @@ export function compileNestedFunctionDeclaration(
       name: funcName,
       typeIdx: funcTypeIdx,
       locals: [] as Array<{ name: string; type: ValType }>,
-      body: [] as Instr[],
+      body: [],
       exported: false,
     };
     pushDefinedFunc(ctx, reservedFuncIdx, reservedEntry);
@@ -1126,7 +1129,10 @@ export function compileNestedFunctionDeclaration(
       const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
       const catchAllBody: Instr[] =
         getCaughtIdx !== undefined
-          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+          ? [
+              { op: "call", funcIdx: getCaughtIdx },
+              { op: "local.set", index: pendingThrowLocal },
+            ]
           : [];
       liftedFctx.body.push({
         op: "try",
@@ -1803,11 +1809,11 @@ export function hoistFunctionDeclarations(
           const failedEntry = failedIdx !== undefined ? definedFuncAt(ctx, failedIdx) : undefined;
           if (reservedEntry) {
             reservedEntry.locals = [];
-            reservedEntry.body = [{ op: "unreachable" } as Instr];
+            reservedEntry.body = [{ op: "unreachable" }];
           } else {
             if (failedEntry) {
               failedEntry.locals = [];
-              failedEntry.body = [{ op: "unreachable" } as Instr];
+              failedEntry.body = [{ op: "unreachable" }];
             }
             ctx.funcMap.delete(funcName);
             ctx.nestedFuncCaptures.delete(funcName);
@@ -1968,7 +1974,7 @@ function emitDefaultParamInit(
       flushLateImportShifts(ctx, liftedFctx);
       liftedFctx.body.push({ op: "local.get", index: paramIdx });
       if (undefIdx !== undefined) {
-        liftedFctx.body.push({ op: "call", funcIdx: undefIdx } as Instr);
+        liftedFctx.body.push({ op: "call", funcIdx: undefIdx });
       } else {
         // Fallback (standalone mode): ref.is_null is imprecise — treats null
         // as undefined.
@@ -2036,7 +2042,7 @@ export function ensureExtrasArgvGlobal(ctx: CodegenContext): { globalIdx: number
     name: "__extras_argv",
     type: { kind: "ref_null", typeIdx: vti },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: vti } as Instr],
+    init: [{ op: "ref.null", typeIdx: vti }],
   });
   ctx.extrasArgvGlobalIdx = globalIdx;
   ctx.extrasArgvVecTypeIdx = vti;
@@ -2071,10 +2077,10 @@ export function cacheParamDefaultArgc(ctx: CodegenContext, fctx: FunctionContext
   if (fctx.argcCachedLocal !== undefined) return fctx.argcCachedLocal;
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   const argcLocal = allocLocal(fctx, "__argc_default", { kind: "i32" });
-  fctx.body.push({ op: "global.get", index: argcGlobalIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: argcLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: argcGlobalIdx });
+  fctx.body.push({ op: "local.set", index: argcLocal });
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx });
   fctx.argcCachedLocal = argcLocal;
   return argcLocal;
 }
@@ -2084,13 +2090,13 @@ export function paramDefaultNeedsArgc(type: ValType | undefined): boolean {
 }
 
 export function emitParamDefaultArgMissingCheck(fctx: FunctionContext, argcLocal: number, argIndex: number): void {
-  fctx.body.push({ op: "local.get", index: argcLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "i32.ne" } as Instr);
-  fctx.body.push({ op: "local.get", index: argcLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: argIndex } as Instr);
-  fctx.body.push({ op: "i32.le_s" } as Instr);
-  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({ op: "local.get", index: argcLocal });
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "i32.ne" });
+  fctx.body.push({ op: "local.get", index: argcLocal });
+  fctx.body.push({ op: "i32.const", value: argIndex });
+  fctx.body.push({ op: "i32.le_s" });
+  fctx.body.push({ op: "i32.and" });
 }
 
 export function emitF64ParamSentinelCheck(fctx: FunctionContext, paramIdx: number): void {
@@ -2109,8 +2115,8 @@ export function maybeSetArgcForKnownCall(
 ): void {
   if (!ctx.funcUsesArguments.has(funcName) && !ctx.funcOptionalParams.has(funcName)) return;
   const argcGlobalIdx = ensureArgcGlobal(ctx);
-  fctx.body.push({ op: "i32.const", value: Math.min(actualArgCount, paramCount) } as Instr);
-  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  fctx.body.push({ op: "i32.const", value: Math.min(actualArgCount, paramCount) });
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx });
 }
 
 /**
@@ -2130,7 +2136,7 @@ export function ensureCurrentThisGlobal(ctx: CodegenContext): number {
     name: "__current_this",
     type: { kind: "externref" },
     mutable: true,
-    init: [{ op: "ref.null.extern" } as Instr],
+    init: [{ op: "ref.null.extern" }],
   });
   ctx.currentThisGlobalIdx = globalIdx;
   return globalIdx;
@@ -2169,7 +2175,7 @@ export function emitSetExtrasArgv(
       if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
       else fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
     } else if (t.kind === "ref" || t.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
   };
 
@@ -2209,17 +2215,15 @@ export function emitSetExtrasArgv(
       // Box a vec element of the given kind to externref (extras are externref).
       const boxVecElem = (elemKind: ValType["kind"]): Instr[] => {
         if (elemKind === "f64") {
-          return boxIdx !== undefined
-            ? [{ op: "call", funcIdx: boxIdx } as Instr]
-            : [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+          return boxIdx !== undefined ? [{ op: "call", funcIdx: boxIdx }] : [{ op: "drop" }, { op: "ref.null.extern" }];
         }
         if (elemKind === "i32" || elemKind === "i8" || elemKind === "i16") {
           return boxIdx !== undefined
-            ? [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr]
-            : [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+            ? [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxIdx }]
+            : [{ op: "drop" }, { op: "ref.null.extern" }];
         }
         if (elemKind === "ref" || elemKind === "ref_null") {
-          return [{ op: "extern.convert_any" } as Instr];
+          return [{ op: "extern.convert_any" }];
         }
         // externref element — already correct.
         return [];
@@ -2233,8 +2237,8 @@ export function emitSetExtrasArgv(
         | { kind: "spread"; srcLocal: number; lenLocal: number };
       const slots: Slot[] = [];
       const totalLenLocal = allocLocal(fctx, `__xa_total_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-      fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "local.set", index: totalLenLocal });
 
       for (let i = startIdx; i < args.length; i++) {
         const arg = args[i]!;
@@ -2260,18 +2264,18 @@ export function emitSetExtrasArgv(
           if (st && (st.kind === "ref" || st.kind === "ref_null") && isTuple && tupleDef) {
             // Inline tuple-literal spread: static arity, read each field directly.
             const tupLocal = allocLocal(fctx, `__xa_tup_${fctx.locals.length}`, st);
-            fctx.body.push({ op: "local.set", index: tupLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: tupLocal });
             for (let fi = 0; fi < tupleDef.fields.length; fi++) {
-              fctx.body.push({ op: "local.get", index: tupLocal } as Instr);
-              if (st.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
-              fctx.body.push({ op: "struct.get", typeIdx: stTypeIdx, fieldIdx: fi } as Instr);
+              fctx.body.push({ op: "local.get", index: tupLocal });
+              if (st.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
+              fctx.body.push({ op: "struct.get", typeIdx: stTypeIdx, fieldIdx: fi });
               const valLocal = allocLocal(fctx, `__xa_tv_${fctx.locals.length}`, { kind: "externref" });
               fctx.body.push(...boxVecElem(tupleDef.fields[fi]!.type.kind));
-              fctx.body.push({ op: "local.set", index: valLocal } as Instr);
-              fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-              fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-              fctx.body.push({ op: "i32.add" } as Instr);
-              fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+              fctx.body.push({ op: "local.set", index: valLocal });
+              fctx.body.push({ op: "local.get", index: totalLenLocal });
+              fctx.body.push({ op: "i32.const", value: 1 });
+              fctx.body.push({ op: "i32.add" });
+              fctx.body.push({ op: "local.set", index: totalLenLocal });
               slots.push({ kind: "single", valLocal });
             }
             continue;
@@ -2279,25 +2283,25 @@ export function emitSetExtrasArgv(
           if (st && (st.kind === "ref" || st.kind === "ref_null") && vecInfo) {
             const vecTi = (st as { typeIdx: number }).typeIdx;
             const vecLocal = allocLocal(fctx, `__xa_vec_${fctx.locals.length}`, st);
-            fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: vecLocal });
             const lenLocal = allocLocal(fctx, `__xa_vlen_${fctx.locals.length}`, { kind: "i32" });
             // len = (vec != null) ? vec.length : 0
-            fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-            fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({ op: "local.get", index: vecLocal });
+            fctx.body.push({ op: "ref.is_null" });
             fctx.body.push({
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
-              then: [{ op: "i32.const", value: 0 } as Instr],
+              then: [{ op: "i32.const", value: 0 }],
               else: [
-                { op: "local.get", index: vecLocal } as Instr,
-                { op: "ref.as_non_null" } as Instr,
-                { op: "struct.get", typeIdx: vecTi, fieldIdx: 0 } as Instr,
+                { op: "local.get", index: vecLocal },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: vecTi, fieldIdx: 0 },
               ],
-            } as Instr);
-            fctx.body.push({ op: "local.tee", index: lenLocal } as Instr);
-            fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-            fctx.body.push({ op: "i32.add" } as Instr);
-            fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+            });
+            fctx.body.push({ op: "local.tee", index: lenLocal });
+            fctx.body.push({ op: "local.get", index: totalLenLocal });
+            fctx.body.push({ op: "i32.add" });
+            fctx.body.push({ op: "local.set", index: totalLenLocal });
             slots.push({
               kind: "vec",
               vecLocal,
@@ -2315,64 +2319,64 @@ export function emitSetExtrasArgv(
             // here. Drop the value and treat as a single slot (best effort; the
             // static path would have done the same).
             const valLocal = allocLocal(fctx, `__xa_val_${fctx.locals.length}`, { kind: "externref" });
-            fctx.body.push({ op: "local.set", index: valLocal } as Instr);
-            fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-            fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-            fctx.body.push({ op: "i32.add" } as Instr);
-            fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: valLocal });
+            fctx.body.push({ op: "local.get", index: totalLenLocal });
+            fctx.body.push({ op: "i32.const", value: 1 });
+            fctx.body.push({ op: "i32.add" });
+            fctx.body.push({ op: "local.set", index: totalLenLocal });
             slots.push({ kind: "single", valLocal });
             continue;
           }
-          fctx.body.push({ op: "call", funcIdx: iterFn } as Instr);
+          fctx.body.push({ op: "call", funcIdx: iterFn });
           const srcLocal = allocLocal(fctx, `__xa_src_${fctx.locals.length}`, { kind: "externref" });
-          fctx.body.push({ op: "local.set", index: srcLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: srcLocal });
           const lenLocal = allocLocal(fctx, `__xa_len_${fctx.locals.length}`, { kind: "i32" });
-          fctx.body.push({ op: "local.get", index: srcLocal } as Instr);
-          fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
-          fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-          fctx.body.push({ op: "local.tee", index: lenLocal } as Instr);
-          fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-          fctx.body.push({ op: "i32.add" } as Instr);
-          fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: srcLocal });
+          fctx.body.push({ op: "call", funcIdx: lenFn });
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          fctx.body.push({ op: "local.tee", index: lenLocal });
+          fctx.body.push({ op: "local.get", index: totalLenLocal });
+          fctx.body.push({ op: "i32.add" });
+          fctx.body.push({ op: "local.set", index: totalLenLocal });
           slots.push({ kind: "spread", srcLocal, lenLocal });
         } else {
           const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
           coerceTopToExternref(t);
           const valLocal = allocLocal(fctx, `__xa_val_${fctx.locals.length}`, { kind: "externref" });
-          fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+          fctx.body.push({ op: "local.set", index: valLocal });
           // total += 1
-          fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-          fctx.body.push({ op: "i32.add" } as Instr);
-          fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: totalLenLocal });
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "i32.add" });
+          fctx.body.push({ op: "local.set", index: totalLenLocal });
           slots.push({ kind: "single", valLocal });
         }
       }
 
       // arr = array.new_default(total); fill via a running write index.
       const arrTmp = allocLocal(fctx, `__xa_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: ati });
-      fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-      fctx.body.push({ op: "array.new_default", typeIdx: ati } as Instr);
-      fctx.body.push({ op: "local.set", index: arrTmp } as Instr);
+      fctx.body.push({ op: "local.get", index: totalLenLocal });
+      fctx.body.push({ op: "array.new_default", typeIdx: ati });
+      fctx.body.push({ op: "local.set", index: arrTmp });
       const wIdx = allocLocal(fctx, `__xa_w_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-      fctx.body.push({ op: "local.set", index: wIdx } as Instr);
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "local.set", index: wIdx });
 
       for (const slot of slots) {
         if (slot.kind === "single") {
-          fctx.body.push({ op: "local.get", index: arrTmp } as Instr);
-          fctx.body.push({ op: "local.get", index: wIdx } as Instr);
-          fctx.body.push({ op: "local.get", index: slot.valLocal } as Instr);
-          fctx.body.push({ op: "array.set", typeIdx: ati } as Instr);
-          fctx.body.push({ op: "local.get", index: wIdx } as Instr);
-          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-          fctx.body.push({ op: "i32.add" } as Instr);
-          fctx.body.push({ op: "local.set", index: wIdx } as Instr);
+          fctx.body.push({ op: "local.get", index: arrTmp });
+          fctx.body.push({ op: "local.get", index: wIdx });
+          fctx.body.push({ op: "local.get", index: slot.valLocal });
+          fctx.body.push({ op: "array.set", typeIdx: ati });
+          fctx.body.push({ op: "local.get", index: wIdx });
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "i32.add" });
+          fctx.body.push({ op: "local.set", index: wIdx });
         } else if (slot.kind === "vec") {
           // Loop i in [0, len): arr[wIdx++] = box(vec.data[i])
           const sIdx = allocLocal(fctx, `__xa_vi_${fctx.locals.length}`, { kind: "i32" });
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-          fctx.body.push({ op: "local.set", index: sIdx } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.set", index: sIdx });
           fctx.body.push({
             op: "block",
             blockType: { kind: "empty" },
@@ -2381,42 +2385,42 @@ export function emitSetExtrasArgv(
                 op: "loop",
                 blockType: { kind: "empty" },
                 body: [
-                  { op: "local.get", index: sIdx } as Instr,
-                  { op: "local.get", index: slot.lenLocal } as Instr,
-                  { op: "i32.ge_s" } as Instr,
-                  { op: "br_if", depth: 1 } as Instr,
+                  { op: "local.get", index: sIdx },
+                  { op: "local.get", index: slot.lenLocal },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
                   // arr[wIdx] = box(vec.data[sIdx])
-                  { op: "local.get", index: arrTmp } as Instr,
-                  { op: "local.get", index: wIdx } as Instr,
-                  { op: "local.get", index: slot.vecLocal } as Instr,
-                  { op: "ref.as_non_null" } as Instr,
-                  { op: "struct.get", typeIdx: slot.vecTi, fieldIdx: 1 } as Instr,
-                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "local.get", index: arrTmp },
+                  { op: "local.get", index: wIdx },
+                  { op: "local.get", index: slot.vecLocal },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: slot.vecTi, fieldIdx: 1 },
+                  { op: "local.get", index: sIdx },
                   ...(slot.elemKind === "i8" || slot.elemKind === "i16"
-                    ? [{ op: "array.get_s", typeIdx: slot.arrTi } as Instr]
-                    : [{ op: "array.get", typeIdx: slot.arrTi } as Instr]),
+                    ? [{ op: "array.get_s", typeIdx: slot.arrTi }]
+                    : [{ op: "array.get", typeIdx: slot.arrTi }]),
                   ...boxVecElem(slot.elemKind),
-                  { op: "array.set", typeIdx: ati } as Instr,
+                  { op: "array.set", typeIdx: ati },
                   // wIdx++
-                  { op: "local.get", index: wIdx } as Instr,
-                  { op: "i32.const", value: 1 } as Instr,
-                  { op: "i32.add" } as Instr,
-                  { op: "local.set", index: wIdx } as Instr,
+                  { op: "local.get", index: wIdx },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: wIdx },
                   // sIdx++
-                  { op: "local.get", index: sIdx } as Instr,
-                  { op: "i32.const", value: 1 } as Instr,
-                  { op: "i32.add" } as Instr,
-                  { op: "local.set", index: sIdx } as Instr,
-                  { op: "br", depth: 0 } as Instr,
+                  { op: "local.get", index: sIdx },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: sIdx },
+                  { op: "br", depth: 0 },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr);
+          });
         } else {
           // Loop i in [0, len): arr[wIdx++] = __extern_get_idx(src, i)
           const sIdx = allocLocal(fctx, `__xa_si_${fctx.locals.length}`, { kind: "i32" });
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-          fctx.body.push({ op: "local.set", index: sIdx } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.set", index: sIdx });
           fctx.body.push({
             op: "block",
             blockType: { kind: "empty" },
@@ -2425,41 +2429,41 @@ export function emitSetExtrasArgv(
                 op: "loop",
                 blockType: { kind: "empty" },
                 body: [
-                  { op: "local.get", index: sIdx } as Instr,
-                  { op: "local.get", index: slot.lenLocal } as Instr,
-                  { op: "i32.ge_s" } as Instr,
-                  { op: "br_if", depth: 1 } as Instr,
+                  { op: "local.get", index: sIdx },
+                  { op: "local.get", index: slot.lenLocal },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
                   // arr[wIdx] = __extern_get_idx(src, f64(sIdx))
-                  { op: "local.get", index: arrTmp } as Instr,
-                  { op: "local.get", index: wIdx } as Instr,
-                  { op: "local.get", index: slot.srcLocal } as Instr,
-                  { op: "local.get", index: sIdx } as Instr,
-                  { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: getFn } as Instr,
-                  { op: "array.set", typeIdx: ati } as Instr,
+                  { op: "local.get", index: arrTmp },
+                  { op: "local.get", index: wIdx },
+                  { op: "local.get", index: slot.srcLocal },
+                  { op: "local.get", index: sIdx },
+                  { op: "f64.convert_i32_s" },
+                  { op: "call", funcIdx: getFn },
+                  { op: "array.set", typeIdx: ati },
                   // wIdx++
-                  { op: "local.get", index: wIdx } as Instr,
-                  { op: "i32.const", value: 1 } as Instr,
-                  { op: "i32.add" } as Instr,
-                  { op: "local.set", index: wIdx } as Instr,
+                  { op: "local.get", index: wIdx },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: wIdx },
                   // sIdx++
-                  { op: "local.get", index: sIdx } as Instr,
-                  { op: "i32.const", value: 1 } as Instr,
-                  { op: "i32.add" } as Instr,
-                  { op: "local.set", index: sIdx } as Instr,
-                  { op: "br", depth: 0 } as Instr,
+                  { op: "local.get", index: sIdx },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: sIdx },
+                  { op: "br", depth: 0 },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr);
+          });
         }
       }
 
       // struct.new __vec_externref(total, arr) → __extras_argv
-      fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: arrTmp } as Instr);
-      fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
-      fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: totalLenLocal });
+      fctx.body.push({ op: "local.get", index: arrTmp });
+      fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
+      fctx.body.push({ op: "global.set", index: globalIdx });
       return;
     }
     // Helpers unavailable — fall through to the static path (best effort).
@@ -2478,7 +2482,7 @@ export function emitSetExtrasArgv(
   fctx.body.push({ op: "i32.const", value: extrasCount });
   fctx.body.push({ op: "local.get", index: arrTmp });
   fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: globalIdx });
 }
 
 /**
@@ -2526,31 +2530,34 @@ export function emitArgumentsVecBody(
   // and clear __argc before initializer expressions can make nested calls; when
   // present, reuse that local so `arguments` observes the same call.
   if (fctx.argcCachedLocal !== undefined) {
-    fctx.body.push({ op: "local.get", index: fctx.argcCachedLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: fctx.argcCachedLocal });
   } else {
-    fctx.body.push({ op: "global.get", index: argcGlobalIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: argcGlobalIdx });
   }
   fctx.body.push({ op: "local.tee", index: argcLocal });
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "i32.eq" } as Instr);
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "i32.eq" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "i32.const", value: numArgs } as Instr, { op: "local.set", index: argcLocal } as Instr],
+    then: [
+      { op: "i32.const", value: numArgs },
+      { op: "local.set", index: argcLocal },
+    ],
     else: [],
-  } as Instr);
+  });
   if (fctx.argcCachedLocal === undefined) {
     // Clear __argc so nested calls don't see stale data.
-    fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-    fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+    fctx.body.push({ op: "i32.const", value: -1 });
+    fctx.body.push({ op: "global.set", index: argcGlobalIdx });
   }
 
   // Consume the extras global: read it and immediately clear so nested calls
   // don't see stale data.
-  fctx.body.push({ op: "global.get", index: extrasGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.get", index: extrasGlobalIdx });
   fctx.body.push({ op: "local.set", index: extrasLocal });
-  fctx.body.push({ op: "ref.null", typeIdx: vti } as Instr);
-  fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+  fctx.body.push({ op: "ref.null", typeIdx: vti });
+  fctx.body.push({ op: "global.set", index: extrasGlobalIdx });
 
   // extrasLen = extrasLocal != null ? extrasLocal.length : 0
   fctx.body.push({ op: "local.get", index: extrasLocal });
@@ -2558,13 +2565,13 @@ export function emitArgumentsVecBody(
   fctx.body.push({
     op: "if",
     blockType: { kind: "val" as const, type: { kind: "i32" } },
-    then: [{ op: "i32.const", value: 0 } as Instr],
+    then: [{ op: "i32.const", value: 0 }],
     else: [
-      { op: "local.get", index: extrasLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vti, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: extrasLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vti, fieldIdx: 0 },
     ],
-  } as Instr);
+  });
   fctx.body.push({ op: "local.set", index: extrasLenLocal });
 
   // totalLen = argc + extrasLen (argc = actual call-site args, not formal params)
@@ -2575,7 +2582,7 @@ export function emitArgumentsVecBody(
 
   // arr = array.new_default(totalLen)
   fctx.body.push({ op: "local.get", index: totalLenLocal });
-  fctx.body.push({ op: "array.new_default", typeIdx: ati } as Instr);
+  fctx.body.push({ op: "array.new_default", typeIdx: ati });
   fctx.body.push({ op: "local.set", index: arrTmp });
 
   // Fill formals: arr[i] = box(param[i + paramOffset])
@@ -2584,42 +2591,42 @@ export function emitArgumentsVecBody(
   // than numArgs and unguarded writes would be OOB.
   for (let i = 0; i < numArgs; i++) {
     const thenInstrs: Instr[] = [];
-    thenInstrs.push({ op: "local.get", index: arrTmp } as Instr);
-    thenInstrs.push({ op: "i32.const", value: i } as Instr);
-    thenInstrs.push({ op: "local.get", index: i + paramOffset } as Instr);
+    thenInstrs.push({ op: "local.get", index: arrTmp });
+    thenInstrs.push({ op: "i32.const", value: i });
+    thenInstrs.push({ op: "local.get", index: i + paramOffset });
     const pt = paramTypes[i]!;
     if (pt.kind === "f64") {
       const boxIdx = ctx.funcMap.get("__box_number");
       if (boxIdx !== undefined) {
-        thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+        thenInstrs.push({ op: "call", funcIdx: boxIdx });
       } else {
-        thenInstrs.push({ op: "drop" } as Instr);
-        thenInstrs.push({ op: "ref.null.extern" } as Instr);
+        thenInstrs.push({ op: "drop" });
+        thenInstrs.push({ op: "ref.null.extern" });
       }
     } else if (pt.kind === "i32") {
-      thenInstrs.push({ op: "f64.convert_i32_s" } as Instr);
+      thenInstrs.push({ op: "f64.convert_i32_s" });
       const boxIdx = ctx.funcMap.get("__box_number");
       if (boxIdx !== undefined) {
-        thenInstrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+        thenInstrs.push({ op: "call", funcIdx: boxIdx });
       } else {
-        thenInstrs.push({ op: "drop" } as Instr);
-        thenInstrs.push({ op: "ref.null.extern" } as Instr);
+        thenInstrs.push({ op: "drop" });
+        thenInstrs.push({ op: "ref.null.extern" });
       }
     } else if (pt.kind === "ref" || pt.kind === "ref_null") {
-      thenInstrs.push({ op: "extern.convert_any" } as Instr);
+      thenInstrs.push({ op: "extern.convert_any" });
     }
-    thenInstrs.push({ op: "array.set", typeIdx: ati } as Instr);
+    thenInstrs.push({ op: "array.set", typeIdx: ati });
 
     // Emit: if (i < argc) { ...thenInstrs }
-    fctx.body.push({ op: "i32.const", value: i } as Instr);
+    fctx.body.push({ op: "i32.const", value: i });
     fctx.body.push({ op: "local.get", index: argcLocal });
-    fctx.body.push({ op: "i32.lt_s" } as Instr);
+    fctx.body.push({ op: "i32.lt_s" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: thenInstrs,
       else: [],
-    } as Instr);
+    });
   }
 
   // If extras is non-null, copy extras into arr starting at offset numArgs.
@@ -2630,16 +2637,16 @@ export function emitArgumentsVecBody(
     blockType: { kind: "empty" },
     then: [],
     else: [
-      { op: "local.get", index: arrTmp } as Instr,
-      { op: "i32.const", value: numArgs } as Instr,
-      { op: "local.get", index: extrasLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: vti, fieldIdx: 1 } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.get", index: extrasLenLocal } as Instr,
-      { op: "array.copy", dstTypeIdx: ati, srcTypeIdx: ati } as Instr,
+      { op: "local.get", index: arrTmp },
+      { op: "i32.const", value: numArgs },
+      { op: "local.get", index: extrasLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: vti, fieldIdx: 1 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: extrasLenLocal },
+      { op: "array.copy", dstTypeIdx: ati, srcTypeIdx: ati },
     ],
-  } as Instr);
+  });
 
   // vec = { length: totalLen, data: arr }
   fctx.body.push({ op: "local.get", index: totalLenLocal });
@@ -2653,8 +2660,8 @@ export function emitArgumentsVecBody(
   const registerArgsIdx = ctx.funcMap.get("__register_arguments");
   if (registerArgsIdx !== undefined && !ctx.standalone && !ctx.wasi) {
     fctx.body.push({ op: "local.get", index: argsLocal });
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    fctx.body.push({ op: "call", funcIdx: registerArgsIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "call", funcIdx: registerArgsIdx });
   }
 }
 

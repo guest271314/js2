@@ -146,24 +146,24 @@ export function ensureDateStruct(ctx: CodegenContext): number {
  */
 function emitPackedYear(out: Instr[], tmpLocal: number): void {
   // tmp = packed
-  out.push({ op: "local.tee", index: tmpLocal } as Instr);
+  out.push({ op: "local.tee", index: tmpLocal });
   // q = packed / 10000  (trunc toward zero)
-  out.push({ op: "i64.const", value: 10000n } as Instr, { op: "i64.div_s" } as Instr);
+  out.push({ op: "i64.const", value: 10000n }, { op: "i64.div_s" });
   // if packed < 0 and packed % 10000 != 0, subtract 1 to floor.
   // correction = (packed % 10000 != 0) && (packed < 0) ? 1 : 0
   out.push(
     // q is on the stack; compute the correction and subtract it.
-    { op: "local.get", index: tmpLocal } as Instr, // packed
-    { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.rem_s" } as Instr, // packed % 10000
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ne" } as Instr, // hasRem (i32)
-    { op: "local.get", index: tmpLocal } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.lt_s" } as Instr, // isNeg (i32)
-    { op: "i32.and" } as Instr, // correction (i32: 0/1)
-    { op: "i64.extend_i32_s" } as Instr,
-    { op: "i64.sub" } as Instr, // q - correction = floor(packed/10000)
+    { op: "local.get", index: tmpLocal }, // packed
+    { op: "i64.const", value: 10000n },
+    { op: "i64.rem_s" }, // packed % 10000
+    { op: "i64.const", value: 0n },
+    { op: "i64.ne" }, // hasRem (i32)
+    { op: "local.get", index: tmpLocal },
+    { op: "i64.const", value: 0n },
+    { op: "i64.lt_s" }, // isNeg (i32)
+    { op: "i32.and" }, // correction (i32: 0/1)
+    { op: "i64.extend_i32_s" },
+    { op: "i64.sub" }, // q - correction = floor(packed/10000)
   );
 }
 
@@ -175,14 +175,14 @@ function emitPackedYear(out: Instr[], tmpLocal: number): void {
  */
 function emitPackedMmdd(out: Instr[], tmpLocal: number, yearTmp: number): void {
   emitPackedYear(out, tmpLocal); // floor year on stack; packed in tmpLocal
-  out.push({ op: "local.set", index: yearTmp } as Instr);
+  out.push({ op: "local.set", index: yearTmp });
   // mmdd = packed - year*10000
   out.push(
-    { op: "local.get", index: tmpLocal } as Instr,
-    { op: "local.get", index: yearTmp } as Instr,
-    { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
+    { op: "local.get", index: tmpLocal },
+    { op: "local.get", index: yearTmp },
+    { op: "i64.const", value: 10000n },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
   );
 }
 
@@ -208,163 +208,151 @@ function ensureDateCivilHelper(ctx: CodegenContext): number {
 
   // z += 719468  (shift epoch from 1970-01-01 to 0000-03-01)
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i64.const", value: 719468n } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.set", index: 0 } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i64.const", value: 719468n },
+    { op: "i64.add" },
+    { op: "local.set", index: 0 },
   );
 
   // era = (z >= 0 ? z : z - 146096) / 146097
   // We use i64.div_s which floors toward zero, so we need the adjustment
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ge_s" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i64.const", value: 0n },
+    { op: "i64.ge_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [{ op: "local.get", index: 0 } as Instr],
-      else: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: 146096n } as Instr,
-        { op: "i64.sub" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 0 }],
+      else: [{ op: "local.get", index: 0 }, { op: "i64.const", value: 146096n }, { op: "i64.sub" }],
     },
-    { op: "i64.const", value: 146097n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: 1 } as Instr, // era
+    { op: "i64.const", value: 146097n },
+    { op: "i64.div_s" },
+    { op: "local.set", index: 1 }, // era
   );
 
   // doe = z - era * 146097  (day of era, [0, 146096])
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i64.const", value: 146097n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: 2 } as Instr, // doe
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 1 },
+    { op: "i64.const", value: 146097n },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: 2 }, // doe
   );
 
   // yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365
   body.push(
-    { op: "local.get", index: 2 } as Instr, // doe
-    { op: "local.get", index: 2 } as Instr,
-    { op: "i64.const", value: 1460n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.get", index: 2 } as Instr,
-    { op: "i64.const", value: 36524n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.get", index: 2 } as Instr,
-    { op: "i64.const", value: 146096n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "i64.const", value: 365n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: 3 } as Instr, // yoe
+    { op: "local.get", index: 2 }, // doe
+    { op: "local.get", index: 2 },
+    { op: "i64.const", value: 1460n },
+    { op: "i64.div_s" },
+    { op: "i64.sub" },
+    { op: "local.get", index: 2 },
+    { op: "i64.const", value: 36524n },
+    { op: "i64.div_s" },
+    { op: "i64.add" },
+    { op: "local.get", index: 2 },
+    { op: "i64.const", value: 146096n },
+    { op: "i64.div_s" },
+    { op: "i64.sub" },
+    { op: "i64.const", value: 365n },
+    { op: "i64.div_s" },
+    { op: "local.set", index: 3 }, // yoe
   );
 
   // y = yoe + era * 400
   body.push(
-    { op: "local.get", index: 3 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i64.const", value: 400n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.set", index: 6 } as Instr, // y (still March-based)
+    { op: "local.get", index: 3 },
+    { op: "local.get", index: 1 },
+    { op: "i64.const", value: 400n },
+    { op: "i64.mul" },
+    { op: "i64.add" },
+    { op: "local.set", index: 6 }, // y (still March-based)
   );
 
   // doy = doe - (365*yoe + yoe/4 - yoe/100)
   body.push(
-    { op: "local.get", index: 2 } as Instr, // doe
-    { op: "i64.const", value: 365n } as Instr,
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i64.const", value: 4n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: 4 } as Instr, // doy
+    { op: "local.get", index: 2 }, // doe
+    { op: "i64.const", value: 365n },
+    { op: "local.get", index: 3 },
+    { op: "i64.mul" },
+    { op: "local.get", index: 3 },
+    { op: "i64.const", value: 4n },
+    { op: "i64.div_s" },
+    { op: "i64.add" },
+    { op: "local.get", index: 3 },
+    { op: "i64.const", value: 100n },
+    { op: "i64.div_s" },
+    { op: "i64.sub" },
+    { op: "i64.sub" },
+    { op: "local.set", index: 4 }, // doy
   );
 
   // mp = (5*doy + 2) / 153
   body.push(
-    { op: "i64.const", value: 5n } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "i64.const", value: 153n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: 5 } as Instr, // mp
+    { op: "i64.const", value: 5n },
+    { op: "local.get", index: 4 },
+    { op: "i64.mul" },
+    { op: "i64.const", value: 2n },
+    { op: "i64.add" },
+    { op: "i64.const", value: 153n },
+    { op: "i64.div_s" },
+    { op: "local.set", index: 5 }, // mp
   );
 
   // d = doy - (153*mp + 2)/5 + 1
   body.push(
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i64.const", value: 153n } as Instr,
-    { op: "local.get", index: 5 } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "i64.const", value: 5n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "i64.const", value: 1n } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.set", index: 8 } as Instr, // d
+    { op: "local.get", index: 4 },
+    { op: "i64.const", value: 153n },
+    { op: "local.get", index: 5 },
+    { op: "i64.mul" },
+    { op: "i64.const", value: 2n },
+    { op: "i64.add" },
+    { op: "i64.const", value: 5n },
+    { op: "i64.div_s" },
+    { op: "i64.sub" },
+    { op: "i64.const", value: 1n },
+    { op: "i64.add" },
+    { op: "local.set", index: 8 }, // d
   );
 
   // m = mp < 10 ? mp + 3 : mp - 9
   body.push(
-    { op: "local.get", index: 5 } as Instr,
-    { op: "i64.const", value: 10n } as Instr,
-    { op: "i64.lt_s" } as Instr,
+    { op: "local.get", index: 5 },
+    { op: "i64.const", value: 10n },
+    { op: "i64.lt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [
-        { op: "local.get", index: 5 } as Instr,
-        { op: "i64.const", value: 3n } as Instr,
-        { op: "i64.add" } as Instr,
-      ],
-      else: [
-        { op: "local.get", index: 5 } as Instr,
-        { op: "i64.const", value: 9n } as Instr,
-        { op: "i64.sub" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 5 }, { op: "i64.const", value: 3n }, { op: "i64.add" }],
+      else: [{ op: "local.get", index: 5 }, { op: "i64.const", value: 9n }, { op: "i64.sub" }],
     },
-    { op: "local.set", index: 7 } as Instr, // m (1-12)
+    { op: "local.set", index: 7 }, // m (1-12)
   );
 
   // y += (m <= 2) ? 1 : 0
   body.push(
-    { op: "local.get", index: 6 } as Instr,
-    { op: "local.get", index: 7 } as Instr,
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.le_s" } as Instr,
-    { op: "i64.extend_i32_s" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.set", index: 6 } as Instr, // y (adjusted)
+    { op: "local.get", index: 6 },
+    { op: "local.get", index: 7 },
+    { op: "i64.const", value: 2n },
+    { op: "i64.le_s" },
+    { op: "i64.extend_i32_s" },
+    { op: "i64.add" },
+    { op: "local.set", index: 6 }, // y (adjusted)
   );
 
   // return y * 10000 + m * 100 + d
   body.push(
-    { op: "local.get", index: 6 } as Instr,
-    { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "local.get", index: 7 } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.get", index: 8 } as Instr,
-    { op: "i64.add" } as Instr,
+    { op: "local.get", index: 6 },
+    { op: "i64.const", value: 10000n },
+    { op: "i64.mul" },
+    { op: "local.get", index: 7 },
+    { op: "i64.const", value: 100n },
+    { op: "i64.mul" },
+    { op: "i64.add" },
+    { op: "local.get", index: 8 },
+    { op: "i64.add" },
   );
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -408,104 +396,92 @@ export function ensureDateDaysFromCivilHelper(ctx: CodegenContext): number {
 
   // y -= (m <= 2) ? 1 : 0
   body.push(
-    { op: "local.get", index: 0 } as Instr, // y
-    { op: "local.get", index: 1 } as Instr, // m
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.le_s" } as Instr,
-    { op: "i64.extend_i32_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: 0 } as Instr, // y adjusted
+    { op: "local.get", index: 0 }, // y
+    { op: "local.get", index: 1 }, // m
+    { op: "i64.const", value: 2n },
+    { op: "i64.le_s" },
+    { op: "i64.extend_i32_s" },
+    { op: "i64.sub" },
+    { op: "local.set", index: 0 }, // y adjusted
   );
 
   // era = (y >= 0 ? y : y - 399) / 400
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ge_s" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i64.const", value: 0n },
+    { op: "i64.ge_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [{ op: "local.get", index: 0 } as Instr],
-      else: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: 399n } as Instr,
-        { op: "i64.sub" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 0 }],
+      else: [{ op: "local.get", index: 0 }, { op: "i64.const", value: 399n }, { op: "i64.sub" }],
     },
-    { op: "i64.const", value: 400n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: 3 } as Instr, // era
+    { op: "i64.const", value: 400n },
+    { op: "i64.div_s" },
+    { op: "local.set", index: 3 }, // era
   );
 
   // yoe = y - era * 400
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i64.const", value: 400n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: 4 } as Instr, // yoe
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 3 },
+    { op: "i64.const", value: 400n },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: 4 }, // yoe
   );
 
   // doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1
   body.push(
-    { op: "i64.const", value: 153n } as Instr,
-    { op: "local.get", index: 1 } as Instr, // m
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.gt_s" } as Instr,
+    { op: "i64.const", value: 153n },
+    { op: "local.get", index: 1 }, // m
+    { op: "i64.const", value: 2n },
+    { op: "i64.gt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i64.const", value: 3n } as Instr,
-        { op: "i64.sub" } as Instr,
-      ],
-      else: [
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i64.const", value: 9n } as Instr,
-        { op: "i64.add" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 1 }, { op: "i64.const", value: 3n }, { op: "i64.sub" }],
+      else: [{ op: "local.get", index: 1 }, { op: "i64.const", value: 9n }, { op: "i64.add" }],
     },
-    { op: "i64.mul" } as Instr,
-    { op: "i64.const", value: 2n } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "i64.const", value: 5n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.get", index: 2 } as Instr, // d
-    { op: "i64.add" } as Instr,
-    { op: "i64.const", value: 1n } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: 5 } as Instr, // doy
+    { op: "i64.mul" },
+    { op: "i64.const", value: 2n },
+    { op: "i64.add" },
+    { op: "i64.const", value: 5n },
+    { op: "i64.div_s" },
+    { op: "local.get", index: 2 }, // d
+    { op: "i64.add" },
+    { op: "i64.const", value: 1n },
+    { op: "i64.sub" },
+    { op: "local.set", index: 5 }, // doy
   );
 
   // doe = yoe * 365 + yoe/4 - yoe/100 + doy
   body.push(
-    { op: "local.get", index: 4 } as Instr, // yoe
-    { op: "i64.const", value: 365n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i64.const", value: 4n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.get", index: 5 } as Instr,
-    { op: "i64.add" } as Instr,
-    { op: "local.set", index: 6 } as Instr, // doe
+    { op: "local.get", index: 4 }, // yoe
+    { op: "i64.const", value: 365n },
+    { op: "i64.mul" },
+    { op: "local.get", index: 4 },
+    { op: "i64.const", value: 4n },
+    { op: "i64.div_s" },
+    { op: "i64.add" },
+    { op: "local.get", index: 4 },
+    { op: "i64.const", value: 100n },
+    { op: "i64.div_s" },
+    { op: "i64.sub" },
+    { op: "local.get", index: 5 },
+    { op: "i64.add" },
+    { op: "local.set", index: 6 }, // doe
   );
 
   // return era * 146097 + doe - 719468
   body.push(
-    { op: "local.get", index: 3 } as Instr, // era
-    { op: "i64.const", value: 146097n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "local.get", index: 6 } as Instr, // doe
-    { op: "i64.add" } as Instr,
-    { op: "i64.const", value: 719468n } as Instr,
-    { op: "i64.sub" } as Instr,
+    { op: "local.get", index: 3 }, // era
+    { op: "i64.const", value: 146097n },
+    { op: "i64.mul" },
+    { op: "local.get", index: 6 }, // doe
+    { op: "i64.add" },
+    { op: "i64.const", value: 719468n },
+    { op: "i64.sub" },
   );
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -575,67 +551,63 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
 
   // buf = array.new_default(27)
   body.push(
-    { op: "i32.const", value: 27 } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-    { op: "local.set", index: L_BUF } as Instr,
+    { op: "i32.const", value: 27 },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: L_BUF },
   );
   // pos = 0
-  body.push({ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: L_POS } as Instr);
+  body.push({ op: "i32.const", value: 0 }, { op: "local.set", index: L_POS });
 
   // days = floor(ts / MS_PER_DAY)  (floor division, ts may be negative)
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ge_s" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i64.const", value: 0n },
+    { op: "i64.ge_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 0 }, { op: "i64.const", value: MS_PER_DAY }, { op: "i64.div_s" }],
       else: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
-        { op: "i64.sub" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
+        { op: "local.get", index: 0 },
+        { op: "i64.const", value: MS_PER_DAY - 1n },
+        { op: "i64.sub" },
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.div_s" },
       ],
-    } as unknown as Instr,
-    { op: "local.set", index: L_DAYS } as Instr,
+    },
+    { op: "local.set", index: L_DAYS },
   );
 
   // msOfDay = ts - days * MS_PER_DAY   (always in [0, MS_PER_DAY) given floored days)
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: L_DAYS } as Instr,
-    { op: "i64.const", value: MS_PER_DAY } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: L_MSDAY } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: L_DAYS },
+    { op: "i64.const", value: MS_PER_DAY },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: L_MSDAY },
   );
 
   // packed = civil_from_days(days); year = floor(packed / 10000). Negative-year
   // safe: replace $packed with the always-positive low part (month*100+day)
   // so the month/day extraction below works with plain truncating div/rem.
   body.push(
-    { op: "local.get", index: L_DAYS } as Instr,
-    { op: "call", funcIdx: civilIdx } as Instr,
-    { op: "local.set", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_DAYS },
+    { op: "call", funcIdx: civilIdx },
+    { op: "local.set", index: L_PACKED },
   );
   // year = floor(packed / 10000)  (uses L_TMP as scratch)
-  body.push({ op: "local.get", index: L_PACKED } as Instr);
+  body.push({ op: "local.get", index: L_PACKED });
   emitPackedYear(body, L_TMP);
-  body.push({ op: "local.set", index: L_YEAR } as Instr);
+  body.push({ op: "local.set", index: L_YEAR });
   // packed = packed - year*10000  (month*100+day, always positive)
   body.push(
-    { op: "local.get", index: L_PACKED } as Instr,
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_PACKED },
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.const", value: 10000n },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: L_PACKED },
   );
 
   /**
@@ -643,14 +615,14 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
    */
   const writeChar = (ch: number): void => {
     body.push(
-      { op: "local.get", index: L_BUF } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: ch } as Instr,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.set", index: L_POS } as Instr,
+      { op: "local.get", index: L_BUF },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: ch },
+      { op: "array.set", typeIdx: strDataTypeIdx },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: L_POS },
     );
   };
 
@@ -665,26 +637,26 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
     // (value / 10^(width-1-d)) % 10 and store '0' + digit.
     for (let d = 0; d < width; d++) {
       const div = 10n ** BigInt(width - 1 - d);
-      body.push({ op: "local.get", index: L_BUF } as Instr, { op: "local.get", index: L_POS } as Instr);
+      body.push({ op: "local.get", index: L_BUF }, { op: "local.get", index: L_POS });
       // digit = (src / div) % 10
-      body.push({ op: "local.get", index: srcLocal } as Instr);
+      body.push({ op: "local.get", index: srcLocal });
       if (div !== 1n) {
-        body.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+        body.push({ op: "i64.const", value: div }, { op: "i64.div_s" });
       }
       body.push(
-        { op: "i64.const", value: 10n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i32.wrap_i64" } as Instr,
-        { op: "i32.const", value: 0x30 } as Instr, // '0'
-        { op: "i32.add" } as Instr,
-        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+        { op: "i64.const", value: 10n },
+        { op: "i64.rem_s" },
+        { op: "i32.wrap_i64" },
+        { op: "i32.const", value: 0x30 }, // '0'
+        { op: "i32.add" },
+        { op: "array.set", typeIdx: strDataTypeIdx },
       );
       // pos += 1
       body.push(
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "local.set", index: L_POS } as Instr,
+        { op: "local.get", index: L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_POS },
       );
     }
   };
@@ -692,13 +664,13 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
   // --- Year field ---
   // If 0 <= year <= 9999: 4 digits. Else: sign + 6 digits (extended form).
   body.push(
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ge_s" } as Instr,
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.const", value: 9999n } as Instr,
-    { op: "i64.le_s" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.const", value: 0n },
+    { op: "i64.ge_s" },
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.const", value: 9999n },
+    { op: "i64.le_s" },
+    { op: "i32.and" },
   );
   // The year width depends on a runtime branch, so the two digit-writing
   // sequences are precomputed into separate arrays and emitted as the then/else
@@ -708,79 +680,71 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
   // 4-digit: writeDigits(year, 4) replicated inline into buf4.
   for (let d = 0; d < 4; d++) {
     const div = 10n ** BigInt(3 - d);
+    buf4Push({ op: "local.get", index: L_BUF }, { op: "local.get", index: L_POS }, { op: "local.get", index: L_YEAR });
+    if (div !== 1n) buf4Push({ op: "i64.const", value: div }, { op: "i64.div_s" });
     buf4Push(
-      { op: "local.get", index: L_BUF } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "local.get", index: L_YEAR } as Instr,
-    );
-    if (div !== 1n) buf4Push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
-    buf4Push(
-      { op: "i64.const", value: 10n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "i32.wrap_i64" } as Instr,
-      { op: "i32.const", value: 0x30 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.set", index: L_POS } as Instr,
+      { op: "i64.const", value: 10n },
+      { op: "i64.rem_s" },
+      { op: "i32.wrap_i64" },
+      { op: "i32.const", value: 0x30 },
+      { op: "i32.add" },
+      { op: "array.set", typeIdx: strDataTypeIdx },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: L_POS },
     );
   }
   // extended: sign char + abs(year) into L_TMP, 6 digits
   const buf6: Instr[] = [];
   // sign = year < 0 ? '-' : '+'
   buf6.push(
-    { op: "local.get", index: L_BUF } as Instr,
-    { op: "local.get", index: L_POS } as Instr,
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.lt_s" } as Instr,
+    { op: "local.get", index: L_BUF },
+    { op: "local.get", index: L_POS },
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.const", value: 0n },
+    { op: "i64.lt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
-      then: [{ op: "i32.const", value: 0x2d } as Instr], // '-'
-      else: [{ op: "i32.const", value: 0x2b } as Instr], // '+'
-    } as unknown as Instr,
-    { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-    { op: "local.get", index: L_POS } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: L_POS } as Instr,
+      then: [{ op: "i32.const", value: 0x2d }], // '-'
+      else: [{ op: "i32.const", value: 0x2b }], // '+'
+    },
+    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "local.get", index: L_POS },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: L_POS },
   );
   // tmp = abs(year) = (year < 0) ? -year : year
   // select(a, b, cond) returns `a` when cond != 0, else `b`. So a = -year
   // (used when year < 0), b = year (used when year >= 0).
   buf6.push(
-    { op: "i64.const", value: 0n } as Instr, // a: 0 - year ...
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.sub" } as Instr, //                  ... = -year
-    { op: "local.get", index: L_YEAR } as Instr, // b: year
-    { op: "local.get", index: L_YEAR } as Instr, // cond: year < 0
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.lt_s" } as Instr,
-    { op: "select" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "i64.const", value: 0n }, // a: 0 - year ...
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.sub" }, //                  ... = -year
+    { op: "local.get", index: L_YEAR }, // b: year
+    { op: "local.get", index: L_YEAR }, // cond: year < 0
+    { op: "i64.const", value: 0n },
+    { op: "i64.lt_s" },
+    { op: "select" },
+    { op: "local.set", index: L_TMP },
   );
   for (let d = 0; d < 6; d++) {
     const div = 10n ** BigInt(5 - d);
+    buf6.push({ op: "local.get", index: L_BUF }, { op: "local.get", index: L_POS }, { op: "local.get", index: L_TMP });
+    if (div !== 1n) buf6.push({ op: "i64.const", value: div }, { op: "i64.div_s" });
     buf6.push(
-      { op: "local.get", index: L_BUF } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "local.get", index: L_TMP } as Instr,
-    );
-    if (div !== 1n) buf6.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
-    buf6.push(
-      { op: "i64.const", value: 10n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "i32.wrap_i64" } as Instr,
-      { op: "i32.const", value: 0x30 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.set", index: L_POS } as Instr,
+      { op: "i64.const", value: 10n },
+      { op: "i64.rem_s" },
+      { op: "i32.wrap_i64" },
+      { op: "i32.const", value: 0x30 },
+      { op: "i32.add" },
+      { op: "array.set", typeIdx: strDataTypeIdx },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: L_POS },
     );
   }
   body.push({
@@ -788,26 +752,26 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
     blockType: { kind: "empty" },
     then: buf4,
     else: buf6,
-  } as unknown as Instr);
+  });
 
   // month (1-12): packed/100 % 100 -> tmp, 2 digits
   body.push(
-    { op: "local.get", index: L_PACKED } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_PACKED },
+    { op: "i64.const", value: 100n },
+    { op: "i64.div_s" },
+    { op: "i64.const", value: 100n },
+    { op: "i64.rem_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeChar(0x2d); // '-'
   writeDigits(L_TMP, 2);
 
   // day: packed % 100 -> tmp, 2 digits
   body.push(
-    { op: "local.get", index: L_PACKED } as Instr,
-    { op: "i64.const", value: 100n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_PACKED },
+    { op: "i64.const", value: 100n },
+    { op: "i64.rem_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeChar(0x2d); // '-'
   writeDigits(L_TMP, 2);
@@ -816,54 +780,54 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
 
   // hours = msOfDay / 3600000
   body.push(
-    { op: "local.get", index: L_MSDAY } as Instr,
-    { op: "i64.const", value: 3600000n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_MSDAY },
+    { op: "i64.const", value: 3600000n },
+    { op: "i64.div_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeDigits(L_TMP, 2);
   writeChar(0x3a); // ':'
 
   // minutes = (msOfDay / 60000) % 60
   body.push(
-    { op: "local.get", index: L_MSDAY } as Instr,
-    { op: "i64.const", value: 60000n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.const", value: 60n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_MSDAY },
+    { op: "i64.const", value: 60000n },
+    { op: "i64.div_s" },
+    { op: "i64.const", value: 60n },
+    { op: "i64.rem_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeDigits(L_TMP, 2);
   writeChar(0x3a); // ':'
 
   // seconds = (msOfDay / 1000) % 60
   body.push(
-    { op: "local.get", index: L_MSDAY } as Instr,
-    { op: "i64.const", value: 1000n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "i64.const", value: 60n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_MSDAY },
+    { op: "i64.const", value: 1000n },
+    { op: "i64.div_s" },
+    { op: "i64.const", value: 60n },
+    { op: "i64.rem_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeDigits(L_TMP, 2);
   writeChar(0x2e); // '.'
 
   // milliseconds = msOfDay % 1000
   body.push(
-    { op: "local.get", index: L_MSDAY } as Instr,
-    { op: "i64.const", value: 1000n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "local.set", index: L_TMP } as Instr,
+    { op: "local.get", index: L_MSDAY },
+    { op: "i64.const", value: 1000n },
+    { op: "i64.rem_s" },
+    { op: "local.set", index: L_TMP },
   );
   writeDigits(L_TMP, 3);
   writeChar(0x5a); // 'Z'
 
   // return struct.new $NativeString(len = pos, off = 0, data = buf)
   body.push(
-    { op: "local.get", index: L_POS } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: L_BUF } as Instr,
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
+    { op: "local.get", index: L_POS },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: L_BUF },
+    { op: "struct.new", typeIdx: strTypeIdx },
   );
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -945,92 +909,88 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
 
   // Buffer sized for the longest format (toString ~ 64 code units). 72 is safe.
   body.push(
-    { op: "i32.const", value: 72 } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
-    { op: "local.set", index: L_BUF } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: L_POS } as Instr,
+    { op: "i32.const", value: 72 },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: L_BUF },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_POS },
   );
 
   // days = floor(ts / MS_PER_DAY)  (floor division, ts may be negative)
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i64.const", value: 0n } as Instr,
-    { op: "i64.ge_s" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i64.const", value: 0n },
+    { op: "i64.ge_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i64" } },
-      then: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
-      ],
+      then: [{ op: "local.get", index: 0 }, { op: "i64.const", value: MS_PER_DAY }, { op: "i64.div_s" }],
       else: [
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
-        { op: "i64.sub" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
+        { op: "local.get", index: 0 },
+        { op: "i64.const", value: MS_PER_DAY - 1n },
+        { op: "i64.sub" },
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.div_s" },
       ],
-    } as unknown as Instr,
-    { op: "local.set", index: L_DAYS } as Instr,
+    },
+    { op: "local.set", index: L_DAYS },
   );
 
   // msOfDay = ts - days * MS_PER_DAY
   body.push(
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: L_DAYS } as Instr,
-    { op: "i64.const", value: MS_PER_DAY } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: L_MSDAY } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: L_DAYS },
+    { op: "i64.const", value: MS_PER_DAY },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: L_MSDAY },
   );
 
   // packed = civil_from_days(days); year = floor(packed / 10000). Negative-year
   // safe: replace $packed with the always-positive low part (month*100+day) so
   // the setMonthIdx/setDay extractions below work with truncating div/rem.
   body.push(
-    { op: "local.get", index: L_DAYS } as Instr,
-    { op: "call", funcIdx: civilIdx } as Instr,
-    { op: "local.set", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_DAYS },
+    { op: "call", funcIdx: civilIdx },
+    { op: "local.set", index: L_PACKED },
   );
   // year = floor(packed / 10000)  (uses L_TMP as scratch)
-  body.push({ op: "local.get", index: L_PACKED } as Instr);
+  body.push({ op: "local.get", index: L_PACKED });
   emitPackedYear(body, L_TMP);
-  body.push({ op: "local.set", index: L_YEAR } as Instr);
+  body.push({ op: "local.set", index: L_YEAR });
   // packed = packed - year*10000  (month*100+day, always positive)
   body.push(
-    { op: "local.get", index: L_PACKED } as Instr,
-    { op: "local.get", index: L_YEAR } as Instr,
-    { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.mul" } as Instr,
-    { op: "i64.sub" } as Instr,
-    { op: "local.set", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_PACKED },
+    { op: "local.get", index: L_YEAR },
+    { op: "i64.const", value: 10000n },
+    { op: "i64.mul" },
+    { op: "i64.sub" },
+    { op: "local.set", index: L_PACKED },
   );
 
   // dow = ((days % 7) + 4 + 7) % 7   (epoch day 0 = Thursday = 4)
   body.push(
-    { op: "local.get", index: L_DAYS } as Instr,
-    { op: "i64.const", value: 7n } as Instr,
-    { op: "i64.rem_s" } as Instr,
-    { op: "i32.wrap_i64" } as Instr,
-    { op: "i32.const", value: 4 + 7 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.const", value: 7 } as Instr,
-    { op: "i32.rem_s" } as Instr,
-    { op: "local.set", index: L_DOW } as Instr,
+    { op: "local.get", index: L_DAYS },
+    { op: "i64.const", value: 7n },
+    { op: "i64.rem_s" },
+    { op: "i32.wrap_i64" },
+    { op: "i32.const", value: 4 + 7 },
+    { op: "i32.add" },
+    { op: "i32.const", value: 7 },
+    { op: "i32.rem_s" },
+    { op: "local.set", index: L_DOW },
   );
 
   const writeChar = (ch: number): void => {
     body.push(
-      { op: "local.get", index: L_BUF } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: ch } as Instr,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.set", index: L_POS } as Instr,
+      { op: "local.get", index: L_BUF },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: ch },
+      { op: "array.set", typeIdx: strDataTypeIdx },
+      { op: "local.get", index: L_POS },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: L_POS },
     );
   };
   const writeLiteral = (s: string): void => {
@@ -1040,20 +1000,20 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
   const writeDigits = (srcLocal: number, width: number): void => {
     for (let d = 0; d < width; d++) {
       const div = 10n ** BigInt(width - 1 - d);
-      body.push({ op: "local.get", index: L_BUF } as Instr, { op: "local.get", index: L_POS } as Instr);
-      body.push({ op: "local.get", index: srcLocal } as Instr);
-      if (div !== 1n) body.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+      body.push({ op: "local.get", index: L_BUF }, { op: "local.get", index: L_POS });
+      body.push({ op: "local.get", index: srcLocal });
+      if (div !== 1n) body.push({ op: "i64.const", value: div }, { op: "i64.div_s" });
       body.push(
-        { op: "i64.const", value: 10n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i32.wrap_i64" } as Instr,
-        { op: "i32.const", value: 0x30 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "local.set", index: L_POS } as Instr,
+        { op: "i64.const", value: 10n },
+        { op: "i64.rem_s" },
+        { op: "i32.wrap_i64" },
+        { op: "i32.const", value: 0x30 },
+        { op: "i32.add" },
+        { op: "array.set", typeIdx: strDataTypeIdx },
+        { op: "local.get", index: L_POS },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_POS },
       );
     }
   };
@@ -1066,14 +1026,14 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
       const out: Instr[] = [];
       for (const ch of s) {
         out.push(
-          { op: "local.get", index: L_BUF } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "i32.const", value: ch.charCodeAt(0) } as Instr,
-          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: L_POS } as Instr,
+          { op: "local.get", index: L_BUF },
+          { op: "local.get", index: L_POS },
+          { op: "i32.const", value: ch.charCodeAt(0) },
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: L_POS },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: L_POS },
         );
       }
       return out;
@@ -1083,10 +1043,10 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
     let chain: Instr[] = litInstrs(names[0]!);
     for (let i = 1; i < names.length; i++) {
       chain = [
-        { op: "local.get", index: idxLocal } as Instr,
-        { op: "i32.const", value: i } as Instr,
-        { op: "i32.eq" } as Instr,
-        { op: "if", blockType: { kind: "empty" }, then: litInstrs(names[i]!), else: chain } as unknown as Instr,
+        { op: "local.get", index: idxLocal },
+        { op: "i32.const", value: i },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: litInstrs(names[i]!), else: chain },
       ];
     }
     body.push(...chain);
@@ -1096,23 +1056,23 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
   const setMonthIdx = (): void => {
     // monthIdx (0..11) = packed/100 % 100 - 1
     body.push(
-      { op: "local.get", index: L_PACKED } as Instr,
-      { op: "i64.const", value: 100n } as Instr,
-      { op: "i64.div_s" } as Instr,
-      { op: "i64.const", value: 100n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "i64.const", value: 1n } as Instr,
-      { op: "i64.sub" } as Instr,
-      { op: "i32.wrap_i64" } as Instr,
-      { op: "local.set", index: L_I32 } as Instr,
+      { op: "local.get", index: L_PACKED },
+      { op: "i64.const", value: 100n },
+      { op: "i64.div_s" },
+      { op: "i64.const", value: 100n },
+      { op: "i64.rem_s" },
+      { op: "i64.const", value: 1n },
+      { op: "i64.sub" },
+      { op: "i32.wrap_i64" },
+      { op: "local.set", index: L_I32 },
     );
   };
   const setDay = (): void => {
     body.push(
-      { op: "local.get", index: L_PACKED } as Instr,
-      { op: "i64.const", value: 100n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "local.set", index: L_TMP } as Instr,
+      { op: "local.get", index: L_PACKED },
+      { op: "i64.const", value: 100n },
+      { op: "i64.rem_s" },
+      { op: "local.set", index: L_TMP },
     );
   };
   const writeYear = (): void => {
@@ -1126,35 +1086,35 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
     //
     // Emit `-` if year < 0.
     body.push(
-      { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.lt_s" } as Instr,
+      { op: "local.get", index: L_YEAR },
+      { op: "i64.const", value: 0n },
+      { op: "i64.lt_s" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: L_BUF } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "i32.const", value: 0x2d } as Instr, // '-'
-          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: L_POS } as Instr,
+          { op: "local.get", index: L_BUF },
+          { op: "local.get", index: L_POS },
+          { op: "i32.const", value: 0x2d }, // '-'
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: L_POS },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: L_POS },
         ],
-      } as unknown as Instr,
+      },
     );
     // L_TMP = abs(year)
     body.push(
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.sub" } as Instr, // -year
-      { op: "local.get", index: L_YEAR } as Instr, // year
-      { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.lt_s" } as Instr, // year < 0 ?
-      { op: "select" } as Instr, // abs(year)
-      { op: "local.set", index: L_TMP } as Instr,
+      { op: "i64.const", value: 0n },
+      { op: "local.get", index: L_YEAR },
+      { op: "i64.sub" }, // -year
+      { op: "local.get", index: L_YEAR }, // year
+      { op: "local.get", index: L_YEAR },
+      { op: "i64.const", value: 0n },
+      { op: "i64.lt_s" }, // year < 0 ?
+      { op: "select" }, // abs(year)
+      { op: "local.set", index: L_TMP },
     );
     // Choose width: 4 (|y|<=9999), 5 (<=99999), else 6 (spec max year 275760).
     const writeWidth = (w: number): Instr[] => {
@@ -1162,72 +1122,72 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
       for (let d = 0; d < w; d++) {
         const div = 10n ** BigInt(w - 1 - d);
         out.push(
-          { op: "local.get", index: L_BUF } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "local.get", index: L_TMP } as Instr,
+          { op: "local.get", index: L_BUF },
+          { op: "local.get", index: L_POS },
+          { op: "local.get", index: L_TMP },
         );
-        if (div !== 1n) out.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+        if (div !== 1n) out.push({ op: "i64.const", value: div }, { op: "i64.div_s" });
         out.push(
-          { op: "i64.const", value: 10n } as Instr,
-          { op: "i64.rem_s" } as Instr,
-          { op: "i32.wrap_i64" } as Instr,
-          { op: "i32.const", value: 0x30 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-          { op: "local.get", index: L_POS } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: L_POS } as Instr,
+          { op: "i64.const", value: 10n },
+          { op: "i64.rem_s" },
+          { op: "i32.wrap_i64" },
+          { op: "i32.const", value: 0x30 },
+          { op: "i32.add" },
+          { op: "array.set", typeIdx: strDataTypeIdx },
+          { op: "local.get", index: L_POS },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: L_POS },
         );
       }
       return out;
     };
     // if abs <= 9999: 4 digits; else if abs <= 99999: 5 digits; else 6 digits.
     body.push(
-      { op: "local.get", index: L_TMP } as Instr,
-      { op: "i64.const", value: 9999n } as Instr,
-      { op: "i64.le_s" } as Instr,
+      { op: "local.get", index: L_TMP },
+      { op: "i64.const", value: 9999n },
+      { op: "i64.le_s" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: writeWidth(4),
         else: [
-          { op: "local.get", index: L_TMP } as Instr,
-          { op: "i64.const", value: 99999n } as Instr,
-          { op: "i64.le_s" } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: writeWidth(5), else: writeWidth(6) } as unknown as Instr,
+          { op: "local.get", index: L_TMP },
+          { op: "i64.const", value: 99999n },
+          { op: "i64.le_s" },
+          { op: "if", blockType: { kind: "empty" }, then: writeWidth(5), else: writeWidth(6) },
         ],
-      } as unknown as Instr,
+      },
     );
   };
   // hh:mm:ss into the buffer.
   const writeTimeHMS = (): void => {
     // hours = msOfDay / 3600000
     body.push(
-      { op: "local.get", index: L_MSDAY } as Instr,
-      { op: "i64.const", value: 3600000n } as Instr,
-      { op: "i64.div_s" } as Instr,
-      { op: "local.set", index: L_TMP } as Instr,
+      { op: "local.get", index: L_MSDAY },
+      { op: "i64.const", value: 3600000n },
+      { op: "i64.div_s" },
+      { op: "local.set", index: L_TMP },
     );
     writeDigits(L_TMP, 2);
     writeChar(0x3a);
     body.push(
-      { op: "local.get", index: L_MSDAY } as Instr,
-      { op: "i64.const", value: 60000n } as Instr,
-      { op: "i64.div_s" } as Instr,
-      { op: "i64.const", value: 60n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "local.set", index: L_TMP } as Instr,
+      { op: "local.get", index: L_MSDAY },
+      { op: "i64.const", value: 60000n },
+      { op: "i64.div_s" },
+      { op: "i64.const", value: 60n },
+      { op: "i64.rem_s" },
+      { op: "local.set", index: L_TMP },
     );
     writeDigits(L_TMP, 2);
     writeChar(0x3a);
     body.push(
-      { op: "local.get", index: L_MSDAY } as Instr,
-      { op: "i64.const", value: 1000n } as Instr,
-      { op: "i64.div_s" } as Instr,
-      { op: "i64.const", value: 60n } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "local.set", index: L_TMP } as Instr,
+      { op: "local.get", index: L_MSDAY },
+      { op: "i64.const", value: 1000n },
+      { op: "i64.div_s" },
+      { op: "i64.const", value: 60n },
+      { op: "i64.rem_s" },
+      { op: "local.set", index: L_TMP },
     );
     writeDigits(L_TMP, 2);
   };
@@ -1299,9 +1259,9 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
   const armDefault = buildArm(2);
 
   const eqMode = (m: number): Instr[] => [
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.const", value: m } as Instr,
-    { op: "i32.eq" } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: m },
+    { op: "i32.eq" },
   ];
   // if mode==1 -> UTC
   // elif mode==3||7 -> Date
@@ -1309,13 +1269,13 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
   // elif mode==8 -> LocaleTime
   // else -> default (2/6)
   const dateChain: Instr[] = [
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.const", value: 3 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.const", value: 7 } as Instr,
-    { op: "i32.eq" } as Instr,
-    { op: "i32.or" } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 3 },
+    { op: "i32.eq" },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 7 },
+    { op: "i32.eq" },
+    { op: "i32.or" },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -1333,25 +1293,25 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
               blockType: { kind: "empty" },
               then: armLocaleTime,
               else: armDefault,
-            } as unknown as Instr,
+            },
           ],
-        } as unknown as Instr,
+        },
       ],
-    } as unknown as Instr,
+    },
   ];
   body.push(...eqMode(1), {
     op: "if",
     blockType: { kind: "empty" },
     then: armUTC,
     else: dateChain,
-  } as unknown as Instr);
+  });
 
   // return struct.new $NativeString(len = pos, off = 0, data = buf)
   body.push(
-    { op: "local.get", index: L_POS } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: L_BUF } as Instr,
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
+    { op: "local.get", index: L_POS },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: L_BUF },
+    { op: "struct.new", typeIdx: strTypeIdx },
   );
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -1409,18 +1369,18 @@ export function emitDateZeroArgGetterFromTsLocal(
    *  callback should emit instructions that consume the i64 timestamp
    *  on the stack and produce an f64 result. */
   const wrapWithInvalidDateGuard = (emitArithmetic: () => void): ValType => {
-    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({ op: "local.get", index: tsLocal });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+    fctx.body.push({ op: "i64.eq" });
     const savedBody = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: tsLocal });
     emitArithmetic();
     const elseInstrs = fctx.body;
     popBody(fctx, savedBody);
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
+      then: [{ op: "f64.const", value: NaN }],
       else: elseInstrs,
     });
     return { kind: "f64" };
@@ -1430,15 +1390,15 @@ export function emitDateZeroArgGetterFromTsLocal(
     // hours = ((timestamp % 86400000) + 86400000) % 86400000 / 3600000
     return wrapWithInvalidDateGuard(() =>
       fctx.body.push(
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.add" },
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_HOUR },
+        { op: "i64.div_s" },
+        { op: "f64.convert_i64_s" },
       ),
     );
   }
@@ -1447,15 +1407,15 @@ export function emitDateZeroArgGetterFromTsLocal(
     // minutes = ((timestamp % 3600000) + 3600000) % 3600000 / 60000
     return wrapWithInvalidDateGuard(() =>
       fctx.body.push(
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_HOUR } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: MS_PER_HOUR },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_HOUR },
+        { op: "i64.add" },
+        { op: "i64.const", value: MS_PER_HOUR },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_MINUTE },
+        { op: "i64.div_s" },
+        { op: "f64.convert_i64_s" },
       ),
     );
   }
@@ -1464,15 +1424,15 @@ export function emitDateZeroArgGetterFromTsLocal(
     // seconds = ((timestamp % 60000) + 60000) % 60000 / 1000
     return wrapWithInvalidDateGuard(() =>
       fctx.body.push(
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: MS_PER_MINUTE },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_MINUTE },
+        { op: "i64.add" },
+        { op: "i64.const", value: MS_PER_MINUTE },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_SECOND },
+        { op: "i64.div_s" },
+        { op: "f64.convert_i64_s" },
       ),
     );
   }
@@ -1481,13 +1441,13 @@ export function emitDateZeroArgGetterFromTsLocal(
     // ms = ((timestamp % 1000) + 1000) % 1000
     return wrapWithInvalidDateGuard(() =>
       fctx.body.push(
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: MS_PER_SECOND } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: MS_PER_SECOND },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: MS_PER_SECOND },
+        { op: "i64.add" },
+        { op: "i64.const", value: MS_PER_SECOND },
+        { op: "i64.rem_s" },
+        { op: "f64.convert_i64_s" },
       ),
     );
   }
@@ -1497,17 +1457,17 @@ export function emitDateZeroArgGetterFromTsLocal(
   if (methodName === "getDay" || methodName === "getUTCDay") {
     return wrapWithInvalidDateGuard(() =>
       fctx.body.push(
-        { op: "i64.const", value: MS_PER_DAY } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "i64.const", value: 4n } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.add" } as Instr,
-        { op: "i64.const", value: 7n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: MS_PER_DAY },
+        { op: "i64.div_s" },
+        { op: "i64.const", value: 4n },
+        { op: "i64.add" },
+        { op: "i64.const", value: 7n },
+        { op: "i64.rem_s" },
+        { op: "i64.const", value: 7n },
+        { op: "i64.add" },
+        { op: "i64.const", value: 7n },
+        { op: "i64.rem_s" },
+        { op: "f64.convert_i64_s" },
       ),
     );
   }
@@ -1535,30 +1495,26 @@ export function emitDateZeroArgGetterFromTsLocal(
   /** Emit floor-div(ts, MS_PER_DAY) -> days, then civil_from_days(days). */
   const emitDaysToCivil = (): void => {
     const tempTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.set", index: tempTs } as Instr);
+    fctx.body.push({ op: "local.set", index: tempTs });
     fctx.body.push(
-      { op: "local.get", index: tempTs } as Instr,
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.ge_s" } as Instr,
+      { op: "local.get", index: tempTs },
+      { op: "i64.const", value: 0n },
+      { op: "i64.ge_s" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i64" } },
-        then: [
-          { op: "local.get", index: tempTs } as Instr,
-          { op: "i64.const", value: MS_PER_DAY } as Instr,
-          { op: "i64.div_s" } as Instr,
-        ],
+        then: [{ op: "local.get", index: tempTs }, { op: "i64.const", value: MS_PER_DAY }, { op: "i64.div_s" }],
         else: [
-          { op: "local.get", index: tempTs } as Instr,
-          { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
-          { op: "i64.sub" } as Instr,
-          { op: "i64.const", value: MS_PER_DAY } as Instr,
-          { op: "i64.div_s" } as Instr,
+          { op: "local.get", index: tempTs },
+          { op: "i64.const", value: MS_PER_DAY - 1n },
+          { op: "i64.sub" },
+          { op: "i64.const", value: MS_PER_DAY },
+          { op: "i64.div_s" },
         ],
       },
     );
     releaseTempLocal(fctx, tempTs);
-    fctx.body.push({ op: "call", funcIdx: civilIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: civilIdx });
   };
 
   if (methodName === "getFullYear" || methodName === "getUTCFullYear") {
@@ -1567,7 +1523,7 @@ export function emitDateZeroArgGetterFromTsLocal(
       const tmp = allocTempLocal(fctx, { kind: "i64" });
       emitPackedYear(fctx.body, tmp); // floor(packed/10000)
       releaseTempLocal(fctx, tmp);
-      fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+      fctx.body.push({ op: "f64.convert_i64_s" });
     });
   }
 
@@ -1580,9 +1536,9 @@ export function emitDateZeroArgGetterFromTsLocal(
       emitPackedYear(fctx.body, tmp); // floor(packed/10000) → full year (i64)
       releaseTempLocal(fctx, tmp);
       fctx.body.push(
-        { op: "i64.const", value: 1900n } as Instr,
-        { op: "i64.sub" } as Instr, // year - 1900
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: 1900n },
+        { op: "i64.sub" }, // year - 1900
+        { op: "f64.convert_i64_s" },
       );
     });
   }
@@ -1596,11 +1552,11 @@ export function emitDateZeroArgGetterFromTsLocal(
       releaseTempLocal(fctx, tmp);
       releaseTempLocal(fctx, yTmp);
       fctx.body.push(
-        { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.div_s" } as Instr, // month (1-12)
-        { op: "i64.const", value: 1n } as Instr,
-        { op: "i64.sub" } as Instr, // 0-based
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: 100n },
+        { op: "i64.div_s" }, // month (1-12)
+        { op: "i64.const", value: 1n },
+        { op: "i64.sub" }, // 0-based
+        { op: "f64.convert_i64_s" },
       );
     });
   }
@@ -1614,9 +1570,9 @@ export function emitDateZeroArgGetterFromTsLocal(
       releaseTempLocal(fctx, tmp);
       releaseTempLocal(fctx, yTmp);
       fctx.body.push(
-        { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.rem_s" } as Instr, // day (1-31)
-        { op: "f64.convert_i64_s" } as Instr,
+        { op: "i64.const", value: 100n },
+        { op: "i64.rem_s" }, // day (1-31)
+        { op: "f64.convert_i64_s" },
       );
     });
   }
@@ -1686,11 +1642,11 @@ export function emitDateProtoMemberBody(ctx: CodegenContext, fctx: FunctionConte
   // ── [[DateValue]]-brand preamble ────────────────────────────────────────
   // this (param 1, externref) → anyref; throw TypeError if not a $Date struct.
   const anyTmp = allocTempLocal(fctx, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: 1 } as Instr);
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.tee", index: anyTmp } as Instr);
-  fctx.body.push({ op: "ref.test", typeIdx: dateTypeIdx } as Instr);
-  fctx.body.push({ op: "i32.eqz" } as Instr);
+  fctx.body.push({ op: "local.get", index: 1 });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "local.tee", index: anyTmp });
+  fctx.body.push({ op: "ref.test", typeIdx: dateTypeIdx });
+  fctx.body.push({ op: "i32.eqz" });
   const savedThrow = pushBody(fctx);
   // §thisTimeValue step 2: no [[DateValue]] internal slot → TypeError.
   emitThrowTypeError(ctx, fctx, "Date.prototype method called on a non-Date receiver");
@@ -1701,38 +1657,38 @@ export function emitDateProtoMemberBody(ctx: CodegenContext, fctx: FunctionConte
     blockType: { kind: "empty" },
     then: throwInstrs,
     else: [],
-  } as unknown as Instr);
+  });
 
   // Genuine Date: read [[DateValue]] (field 0, i64) into tsLocal.
   const tsLocal = allocTempLocal(fctx, { kind: "i64" });
-  fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-  fctx.body.push({ op: "ref.cast", typeIdx: dateTypeIdx } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: tsLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: anyTmp });
+  fctx.body.push({ op: "ref.cast", typeIdx: dateTypeIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: dateTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: tsLocal });
   releaseTempLocal(fctx, anyTmp);
 
   // ── Compute the getter → f64 on the stack ───────────────────────────────
   if (member === "getTime" || member === "valueOf") {
     // §21.4.4.10 / §21.4.4.44: Invalid Date → NaN, else the ms timestamp.
-    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
-    fctx.body.push({ op: "i64.const", value: SENTINEL } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({ op: "local.get", index: tsLocal });
+    fctx.body.push({ op: "i64.const", value: SENTINEL });
+    fctx.body.push({ op: "i64.eq" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
-      else: [{ op: "local.get", index: tsLocal } as Instr, { op: "f64.convert_i64_s" } as Instr],
+      then: [{ op: "f64.const", value: NaN }],
+      else: [{ op: "local.get", index: tsLocal }, { op: "f64.convert_i64_s" }],
     });
   } else if (member === "getTimezoneOffset") {
     // §21.4.4.7: UTC-only runtime → 0 for a valid Date, NaN for Invalid Date.
-    fctx.body.push({ op: "local.get", index: tsLocal } as Instr);
-    fctx.body.push({ op: "i64.const", value: SENTINEL } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({ op: "local.get", index: tsLocal });
+    fctx.body.push({ op: "i64.const", value: SENTINEL });
+    fctx.body.push({ op: "i64.eq" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
-      else: [{ op: "f64.const", value: 0 } as Instr],
+      then: [{ op: "f64.const", value: NaN }],
+      else: [{ op: "f64.const", value: 0 }],
     });
   } else {
     const g = emitDateZeroArgGetterFromTsLocal(ctx, fctx, member, tsLocal);
@@ -1748,7 +1704,7 @@ export function emitDateProtoMemberBody(ctx: CodegenContext, fctx: FunctionConte
   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   if (boxIdx === undefined) return null;
-  fctx.body.push({ op: "call", funcIdx: boxIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: boxIdx });
   return { kind: "externref" };
 }
 
@@ -1834,14 +1790,14 @@ function compileDateMethodCall(
       fieldIdx: 0,
     });
     const tsLocal = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.tee", index: tsLocal } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({ op: "local.tee", index: tsLocal });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+    fctx.body.push({ op: "i64.eq" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
-      else: [{ op: "local.get", index: tsLocal } as Instr, { op: "f64.convert_i64_s" } as Instr],
+      then: [{ op: "f64.const", value: NaN }],
+      else: [{ op: "local.get", index: tsLocal }, { op: "f64.convert_i64_s" }],
     });
     releaseTempLocal(fctx, tsLocal);
     return { kind: "f64" };
@@ -1857,13 +1813,13 @@ function compileDateMethodCall(
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+    fctx.body.push({ op: "i64.eq" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "f64.const", value: NaN } as Instr],
-      else: [{ op: "f64.const", value: 0 } as Instr],
+      then: [{ op: "f64.const", value: NaN }],
+      else: [{ op: "f64.const", value: 0 }],
     });
     return { kind: "f64" };
   }
@@ -1873,52 +1829,52 @@ function compileDateMethodCall(
   if (methodName === "setTime") {
     // Stack: [dateRef]
     const tempRef = allocTempLocal(fctx, dateRefType);
-    fctx.body.push({ op: "local.set", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.set", index: tempRef });
 
     if (callExpr.arguments.length >= 1) {
       // Evaluate arg to f64 (ToNumber; may throw on Symbol per §7.1.4).
       const tempArg = allocTempLocal(fctx, { kind: "f64" });
       compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "f64" });
-      fctx.body.push({ op: "local.set", index: tempArg } as Instr);
+      fctx.body.push({ op: "local.set", index: tempArg });
 
       // isInvalid = (arg != arg)  // NaN
       //          OR (f64.abs(arg) > 8.64e15)  // TimeClip out-of-range / ±Inf
-      fctx.body.push({ op: "local.get", index: tempArg } as Instr);
-      fctx.body.push({ op: "local.get", index: tempArg } as Instr);
+      fctx.body.push({ op: "local.get", index: tempArg });
+      fctx.body.push({ op: "local.get", index: tempArg });
       fctx.body.push({ op: "f64.ne" });
-      fctx.body.push({ op: "local.get", index: tempArg } as Instr);
+      fctx.body.push({ op: "local.get", index: tempArg });
       fctx.body.push({ op: "f64.abs" });
-      fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
-      fctx.body.push({ op: "f64.gt" } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "f64.const", value: 8.64e15 });
+      fctx.body.push({ op: "f64.gt" });
+      fctx.body.push({ op: "i32.or" });
 
       // then: write sentinel, push NaN
       const savedThen = pushBody(fctx);
-      fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+      fctx.body.push({ op: "local.get", index: tempRef });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
       fctx.body.push({
         op: "struct.set",
         typeIdx: dateTypeIdx,
         fieldIdx: 0,
       });
-      fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+      fctx.body.push({ op: "f64.const", value: NaN });
       const thenInstrs = fctx.body;
       popBody(fctx, savedThen);
 
       // else: trunc to i64, write, return as f64
       const savedElse = pushBody(fctx);
-      fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-      fctx.body.push({ op: "local.get", index: tempArg } as Instr);
-      fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "local.get", index: tempRef });
+      fctx.body.push({ op: "local.get", index: tempArg });
+      fctx.body.push({ op: "i64.trunc_sat_f64_s" });
       const tempNewTs = allocTempLocal(fctx, { kind: "i64" });
-      fctx.body.push({ op: "local.tee", index: tempNewTs } as Instr);
+      fctx.body.push({ op: "local.tee", index: tempNewTs });
       fctx.body.push({
         op: "struct.set",
         typeIdx: dateTypeIdx,
         fieldIdx: 0,
       });
-      fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-      fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+      fctx.body.push({ op: "local.get", index: tempNewTs });
+      fctx.body.push({ op: "f64.convert_i64_s" });
       releaseTempLocal(fctx, tempNewTs);
       const elseInstrs = fctx.body;
       popBody(fctx, savedElse);
@@ -1933,14 +1889,14 @@ function compileDateMethodCall(
       releaseTempLocal(fctx, tempArg);
     } else {
       // setTime() with no arg → NaN (Invalid Date)
-      fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+      fctx.body.push({ op: "local.get", index: tempRef });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
       fctx.body.push({
         op: "struct.set",
         typeIdx: dateTypeIdx,
         fieldIdx: 0,
       });
-      fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+      fctx.body.push({ op: "f64.const", value: NaN });
     }
     releaseTempLocal(fctx, tempRef);
     return { kind: "f64" };
@@ -1993,19 +1949,19 @@ function compileDateMethodCall(
     const args = callExpr.arguments;
     // Stack: [dateRef]
     const tempRef = allocTempLocal(fctx, dateRefType);
-    fctx.body.push({ op: "local.set", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.set", index: tempRef });
 
     // Read curTs FIRST — observable ordering: the receiver's [[DateValue]]
     // is sampled before any user code in arg ToNumber callbacks runs
     // (test262 `date-value-read-before-tonumber-when-date-is-valid.js`).
     const tempCurTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
     fctx.body.push({
       op: "struct.get",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "local.set", index: tempCurTs } as Instr);
+    fctx.body.push({ op: "local.set", index: tempCurTs });
 
     // Identify which positional arg maps to each component.
     // setMilliseconds(ms)        → unitsForArgs = [ms]
@@ -2021,8 +1977,8 @@ function compileDateMethodCall(
     // missing entirely (`d.setHours()`), the receiver's first parameter is
     // `undefined` and ToNumber(undefined) = NaN, so seed the flag.
     const tempAnyInvalid = allocTempLocal(fctx, { kind: "i32" });
-    fctx.body.push({ op: "i32.const", value: args.length === 0 ? 1 : 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: tempAnyInvalid } as Instr);
+    fctx.body.push({ op: "i32.const", value: args.length === 0 ? 1 : 0 });
+    fctx.body.push({ op: "local.set", index: tempAnyInvalid });
 
     const argLocals: Partial<Record<"h" | "m" | "s" | "ms", number>> = {};
     for (let i = 0; i < unitsForArgs.length && i < args.length; i++) {
@@ -2033,27 +1989,27 @@ function compileDateMethodCall(
       // externref / struct refs / strings; the centralized __unbox_number
       // funnel handles valueOf / @@toPrimitive / Symbol-throw (#1434).
       compileExpression(ctx, fctx, args[i]!, { kind: "f64" });
-      fctx.body.push({ op: "local.set", index: local } as Instr);
+      fctx.body.push({ op: "local.set", index: local });
       // invalid_i = (x != x) | (f64.abs(x) > 8.64e15)
-      fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "local.get", index: local } as Instr);
+      fctx.body.push({ op: "local.get", index: local });
+      fctx.body.push({ op: "local.get", index: local });
       fctx.body.push({ op: "f64.ne" });
-      fctx.body.push({ op: "local.get", index: local } as Instr);
+      fctx.body.push({ op: "local.get", index: local });
       fctx.body.push({ op: "f64.abs" });
-      fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
-      fctx.body.push({ op: "f64.gt" } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
-      fctx.body.push({ op: "local.get", index: tempAnyInvalid } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
-      fctx.body.push({ op: "local.set", index: tempAnyInvalid } as Instr);
+      fctx.body.push({ op: "f64.const", value: 8.64e15 });
+      fctx.body.push({ op: "f64.gt" });
+      fctx.body.push({ op: "i32.or" });
+      fctx.body.push({ op: "local.get", index: tempAnyInvalid });
+      fctx.body.push({ op: "i32.or" });
+      fctx.body.push({ op: "local.set", index: tempAnyInvalid });
     }
 
     // isInvalid = (curTs == sentinel) | anyInvalid
-    fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.eq" } as Instr);
-    fctx.body.push({ op: "local.get", index: tempAnyInvalid } as Instr);
-    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurTs });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+    fctx.body.push({ op: "i64.eq" });
+    fctx.body.push({ op: "local.get", index: tempAnyInvalid });
+    fctx.body.push({ op: "i32.or" });
 
     // then-branch: the time-value result is NaN → push NaN. Write the
     // Invalid-Date sentinel ONLY when the receiver was still VALID before
@@ -2066,19 +2022,19 @@ function compileDateMethodCall(
     // re-set it, and clobbering it back to the sentinel violates the spec
     // (test262 date-value-read-before-tonumber-when-date-is-invalid).
     const savedThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-    fctx.body.push({ op: "i64.ne" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurTs });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+    fctx.body.push({ op: "i64.ne" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: tempRef } as Instr,
-        { op: "i64.const", value: -9223372036854775808n } as Instr,
-        { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.get", index: tempRef },
+        { op: "i64.const", value: -9223372036854775808n },
+        { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 },
       ],
-    } as unknown as Instr);
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    });
+    fctx.body.push({ op: "f64.const", value: NaN });
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
 
@@ -2088,107 +2044,107 @@ function compileDateMethodCall(
     // ms_of_day = ((curTs mod MS_PER_DAY) + MS_PER_DAY) mod MS_PER_DAY
     const tempMsOfDay = allocTempLocal(fctx, { kind: "i64" });
     fctx.body.push(
-      { op: "local.get", index: tempCurTs } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.add" } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "local.set", index: tempMsOfDay } as Instr,
+      { op: "local.get", index: tempCurTs },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.rem_s" },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.add" },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.rem_s" },
+      { op: "local.set", index: tempMsOfDay },
     );
 
     // day_ms = curTs - ms_of_day
     const tempDayMs = allocTempLocal(fctx, { kind: "i64" });
     fctx.body.push(
-      { op: "local.get", index: tempCurTs } as Instr,
-      { op: "local.get", index: tempMsOfDay } as Instr,
-      { op: "i64.sub" } as Instr,
-      { op: "local.set", index: tempDayMs } as Instr,
+      { op: "local.get", index: tempCurTs },
+      { op: "local.get", index: tempMsOfDay },
+      { op: "i64.sub" },
+      { op: "local.set", index: tempDayMs },
     );
 
     // Push i64 component value: from arg (already coerced) or from current ms_of_day.
     const pushComponent = (unit: "h" | "m" | "s" | "ms") => {
       const argLocal = argLocals[unit];
       if (argLocal !== undefined) {
-        fctx.body.push({ op: "local.get", index: argLocal } as Instr);
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: argLocal });
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
         return;
       }
       // Extract from tempMsOfDay.
-      fctx.body.push({ op: "local.get", index: tempMsOfDay } as Instr);
+      fctx.body.push({ op: "local.get", index: tempMsOfDay });
       if (unit === "ms") {
-        fctx.body.push({ op: "i64.const", value: MS_PER_SECOND } as Instr, { op: "i64.rem_s" } as Instr);
+        fctx.body.push({ op: "i64.const", value: MS_PER_SECOND }, { op: "i64.rem_s" });
       } else if (unit === "s") {
         fctx.body.push(
-          { op: "i64.const", value: MS_PER_SECOND } as Instr,
-          { op: "i64.div_s" } as Instr,
-          { op: "i64.const", value: 60n } as Instr,
-          { op: "i64.rem_s" } as Instr,
+          { op: "i64.const", value: MS_PER_SECOND },
+          { op: "i64.div_s" },
+          { op: "i64.const", value: 60n },
+          { op: "i64.rem_s" },
         );
       } else if (unit === "m") {
         fctx.body.push(
-          { op: "i64.const", value: MS_PER_MINUTE } as Instr,
-          { op: "i64.div_s" } as Instr,
-          { op: "i64.const", value: 60n } as Instr,
-          { op: "i64.rem_s" } as Instr,
+          { op: "i64.const", value: MS_PER_MINUTE },
+          { op: "i64.div_s" },
+          { op: "i64.const", value: 60n },
+          { op: "i64.rem_s" },
         );
       } else {
-        fctx.body.push({ op: "i64.const", value: MS_PER_HOUR } as Instr, { op: "i64.div_s" } as Instr);
+        fctx.body.push({ op: "i64.const", value: MS_PER_HOUR }, { op: "i64.div_s" });
       }
     };
 
     // newTs = day_ms + h*MS_PER_HOUR + m*MS_PER_MINUTE + s*MS_PER_SECOND + ms
-    fctx.body.push({ op: "local.get", index: tempDayMs } as Instr);
+    fctx.body.push({ op: "local.get", index: tempDayMs });
     pushComponent("h");
-    fctx.body.push({ op: "i64.const", value: MS_PER_HOUR } as Instr);
-    fctx.body.push({ op: "i64.mul" } as Instr);
-    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "i64.const", value: MS_PER_HOUR });
+    fctx.body.push({ op: "i64.mul" });
+    fctx.body.push({ op: "i64.add" });
     pushComponent("m");
-    fctx.body.push({ op: "i64.const", value: MS_PER_MINUTE } as Instr);
-    fctx.body.push({ op: "i64.mul" } as Instr);
-    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "i64.const", value: MS_PER_MINUTE });
+    fctx.body.push({ op: "i64.mul" });
+    fctx.body.push({ op: "i64.add" });
     pushComponent("s");
-    fctx.body.push({ op: "i64.const", value: MS_PER_SECOND } as Instr);
-    fctx.body.push({ op: "i64.mul" } as Instr);
-    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "i64.const", value: MS_PER_SECOND });
+    fctx.body.push({ op: "i64.mul" });
+    fctx.body.push({ op: "i64.add" });
     pushComponent("ms");
-    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "i64.add" });
 
     const tempNewTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.set", index: tempNewTs } as Instr);
+    fctx.body.push({ op: "local.set", index: tempNewTs });
 
     // TimeClip (§21.4.1.31): if |newTs| > 8.64e15 ms → sentinel + NaN
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: 8640000000000000n } as Instr);
-    fctx.body.push({ op: "i64.gt_s" } as Instr);
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: -8640000000000000n } as Instr);
-    fctx.body.push({ op: "i64.lt_s" } as Instr);
-    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "i64.const", value: 8640000000000000n });
+    fctx.body.push({ op: "i64.gt_s" });
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "i64.const", value: -8640000000000000n });
+    fctx.body.push({ op: "i64.lt_s" });
+    fctx.body.push({ op: "i32.or" });
 
     const savedClipThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
     fctx.body.push({
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    fctx.body.push({ op: "f64.const", value: NaN });
     const clipThenInstrs = fctx.body;
     popBody(fctx, savedClipThen);
 
     const savedClipElse = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
+    fctx.body.push({ op: "local.get", index: tempNewTs });
     fctx.body.push({
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "f64.convert_i64_s" });
     const clipElseInstrs = fctx.body;
     popBody(fctx, savedClipElse);
 
@@ -2245,17 +2201,17 @@ function compileDateMethodCall(
 
     // Stack: [dateRef]
     const tempRef = allocTempLocal(fctx, dateRefType);
-    fctx.body.push({ op: "local.set", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.set", index: tempRef });
 
     // Read curTs FIRST.
     const tempCurTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
     fctx.body.push({
       op: "struct.get",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "local.set", index: tempCurTs } as Instr);
+    fctx.body.push({ op: "local.set", index: tempCurTs });
 
     // Mapping: setDate(d) → [d], setMonth(mo, d?) → [mo, d],
     // setFullYear(y, mo?, d?) → [y, mo, d], setYear(y) → [y]
@@ -2265,8 +2221,8 @@ function compileDateMethodCall(
 
     // Coerce all args left-to-right. If START arg is missing, ToNumber(undefined)=NaN.
     const tempAnyInvalid = allocTempLocal(fctx, { kind: "i32" });
-    fctx.body.push({ op: "i32.const", value: args.length === 0 ? 1 : 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: tempAnyInvalid } as Instr);
+    fctx.body.push({ op: "i32.const", value: args.length === 0 ? 1 : 0 });
+    fctx.body.push({ op: "local.set", index: tempAnyInvalid });
 
     const argLocals: Partial<Record<"y" | "mo" | "d", number>> = {};
     for (let i = 0; i < unitsForArgs.length && i < args.length; i++) {
@@ -2274,39 +2230,39 @@ function compileDateMethodCall(
       const local = allocTempLocal(fctx, { kind: "f64" });
       argLocals[unit] = local;
       compileExpression(ctx, fctx, args[i]!, { kind: "f64" });
-      fctx.body.push({ op: "local.set", index: local } as Instr);
+      fctx.body.push({ op: "local.set", index: local });
       // invalid_i = (x != x) | (f64.abs(x) > 8.64e15)
-      fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "local.get", index: local } as Instr);
+      fctx.body.push({ op: "local.get", index: local });
+      fctx.body.push({ op: "local.get", index: local });
       fctx.body.push({ op: "f64.ne" });
-      fctx.body.push({ op: "local.get", index: local } as Instr);
+      fctx.body.push({ op: "local.get", index: local });
       fctx.body.push({ op: "f64.abs" });
-      fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
-      fctx.body.push({ op: "f64.gt" } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
-      fctx.body.push({ op: "local.get", index: tempAnyInvalid } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
-      fctx.body.push({ op: "local.set", index: tempAnyInvalid } as Instr);
+      fctx.body.push({ op: "f64.const", value: 8.64e15 });
+      fctx.body.push({ op: "f64.gt" });
+      fctx.body.push({ op: "i32.or" });
+      fctx.body.push({ op: "local.get", index: tempAnyInvalid });
+      fctx.body.push({ op: "i32.or" });
+      fctx.body.push({ op: "local.set", index: tempAnyInvalid });
     }
 
     // Legacy setYear: if 0 <= y <= 99, y += 1900 (§B.2.3.5).
     if (isLegacySetYear && argLocals.y !== undefined) {
       const yLocal = argLocals.y;
-      fctx.body.push({ op: "local.get", index: yLocal } as Instr);
-      fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-      fctx.body.push({ op: "f64.ge" } as Instr);
-      fctx.body.push({ op: "local.get", index: yLocal } as Instr);
-      fctx.body.push({ op: "f64.const", value: 99 } as Instr);
-      fctx.body.push({ op: "f64.le" } as Instr);
-      fctx.body.push({ op: "i32.and" } as Instr);
+      fctx.body.push({ op: "local.get", index: yLocal });
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "f64.ge" });
+      fctx.body.push({ op: "local.get", index: yLocal });
+      fctx.body.push({ op: "f64.const", value: 99 });
+      fctx.body.push({ op: "f64.le" });
+      fctx.body.push({ op: "i32.and" });
       const savedY = pushBody(fctx);
-      fctx.body.push({ op: "local.get", index: yLocal } as Instr);
-      fctx.body.push({ op: "f64.const", value: 1900 } as Instr);
-      fctx.body.push({ op: "f64.add" } as Instr);
+      fctx.body.push({ op: "local.get", index: yLocal });
+      fctx.body.push({ op: "f64.const", value: 1900 });
+      fctx.body.push({ op: "f64.add" });
       const yThenInstrs = fctx.body;
       popBody(fctx, savedY);
       const savedYElse = pushBody(fctx);
-      fctx.body.push({ op: "local.get", index: yLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: yLocal });
       const yElseInstrs = fctx.body;
       popBody(fctx, savedYElse);
       fctx.body.push({
@@ -2315,18 +2271,18 @@ function compileDateMethodCall(
         then: yThenInstrs,
         else: yElseInstrs,
       });
-      fctx.body.push({ op: "local.set", index: yLocal } as Instr);
+      fctx.body.push({ op: "local.set", index: yLocal });
     }
 
     // For setFullYear: an Invalid Date receiver is re-validated by setting
     // t to +0. So sentinelCurTs no longer poisons the result.
     // For other calendar setters: sentinel curTs → return NaN.
-    fctx.body.push({ op: "local.get", index: tempAnyInvalid } as Instr);
+    fctx.body.push({ op: "local.get", index: tempAnyInvalid });
     if (!isSetFullYear) {
-      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-      fctx.body.push({ op: "i64.eq" } as Instr);
-      fctx.body.push({ op: "i32.or" } as Instr);
+      fctx.body.push({ op: "local.get", index: tempCurTs });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+      fctx.body.push({ op: "i64.eq" });
+      fctx.body.push({ op: "i32.or" });
     }
 
     // then-branch: invalid → NaN.
@@ -2343,28 +2299,28 @@ function compileDateMethodCall(
     // (test262 date-value-read-before-tonumber-when-date-is-invalid).
     const savedThen = pushBody(fctx);
     if (isSetFullYear) {
-      fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+      fctx.body.push({ op: "local.get", index: tempRef });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
       fctx.body.push({
         op: "struct.set",
         typeIdx: dateTypeIdx,
         fieldIdx: 0,
       });
     } else {
-      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-      fctx.body.push({ op: "i64.ne" } as Instr);
+      fctx.body.push({ op: "local.get", index: tempCurTs });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+      fctx.body.push({ op: "i64.ne" });
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: tempRef } as Instr,
-          { op: "i64.const", value: -9223372036854775808n } as Instr,
-          { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "local.get", index: tempRef },
+          { op: "i64.const", value: -9223372036854775808n },
+          { op: "struct.set", typeIdx: dateTypeIdx, fieldIdx: 0 },
         ],
-      } as unknown as Instr);
+      });
     }
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    fctx.body.push({ op: "f64.const", value: NaN });
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
 
@@ -2374,15 +2330,15 @@ function compileDateMethodCall(
     // For setFullYear with Invalid Date, treat curTs as 0 (re-validate).
     const tempEffTs = allocTempLocal(fctx, { kind: "i64" });
     if (isSetFullYear) {
-      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-      fctx.body.push({ op: "i64.eq" } as Instr);
+      fctx.body.push({ op: "local.get", index: tempCurTs });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+      fctx.body.push({ op: "i64.eq" });
       const savedReval = pushBody(fctx);
-      fctx.body.push({ op: "i64.const", value: 0n } as Instr);
+      fctx.body.push({ op: "i64.const", value: 0n });
       const revalThen = fctx.body;
       popBody(fctx, savedReval);
       const savedRevalElse = pushBody(fctx);
-      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
+      fctx.body.push({ op: "local.get", index: tempCurTs });
       const revalElse = fctx.body;
       popBody(fctx, savedRevalElse);
       fctx.body.push({
@@ -2391,43 +2347,43 @@ function compileDateMethodCall(
         then: revalThen,
         else: revalElse,
       });
-      fctx.body.push({ op: "local.set", index: tempEffTs } as Instr);
+      fctx.body.push({ op: "local.set", index: tempEffTs });
     } else {
-      fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
-      fctx.body.push({ op: "local.set", index: tempEffTs } as Instr);
+      fctx.body.push({ op: "local.get", index: tempCurTs });
+      fctx.body.push({ op: "local.set", index: tempEffTs });
     }
 
     // ms_of_day from tempEffTs (preserved into the new date).
     const tempMsOfDay = allocTempLocal(fctx, { kind: "i64" });
     fctx.body.push(
-      { op: "local.get", index: tempEffTs } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.add" } as Instr,
-      { op: "i64.const", value: MS_PER_DAY } as Instr,
-      { op: "i64.rem_s" } as Instr,
-      { op: "local.set", index: tempMsOfDay } as Instr,
+      { op: "local.get", index: tempEffTs },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.rem_s" },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.add" },
+      { op: "i64.const", value: MS_PER_DAY },
+      { op: "i64.rem_s" },
+      { op: "local.set", index: tempMsOfDay },
     );
 
     // curDays = floor(tempEffTs / MS_PER_DAY), then civil_from_days.
     const civilIdx = ensureDateCivilHelper(ctx);
     const tempCurDays = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempEffTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: 0n } as Instr);
-    fctx.body.push({ op: "i64.ge_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempEffTs });
+    fctx.body.push({ op: "i64.const", value: 0n });
+    fctx.body.push({ op: "i64.ge_s" });
     const savedFlrThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempEffTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: MS_PER_DAY } as Instr);
-    fctx.body.push({ op: "i64.div_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempEffTs });
+    fctx.body.push({ op: "i64.const", value: MS_PER_DAY });
+    fctx.body.push({ op: "i64.div_s" });
     const flrThenInstrs = fctx.body;
     popBody(fctx, savedFlrThen);
     const savedFlrElse = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempEffTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: MS_PER_DAY - 1n } as Instr);
-    fctx.body.push({ op: "i64.sub" } as Instr);
-    fctx.body.push({ op: "i64.const", value: MS_PER_DAY } as Instr);
-    fctx.body.push({ op: "i64.div_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempEffTs });
+    fctx.body.push({ op: "i64.const", value: MS_PER_DAY - 1n });
+    fctx.body.push({ op: "i64.sub" });
+    fctx.body.push({ op: "i64.const", value: MS_PER_DAY });
+    fctx.body.push({ op: "i64.div_s" });
     const flrElseInstrs = fctx.body;
     popBody(fctx, savedFlrElse);
     fctx.body.push({
@@ -2436,74 +2392,74 @@ function compileDateMethodCall(
       then: flrThenInstrs,
       else: flrElseInstrs,
     });
-    fctx.body.push({ op: "local.set", index: tempCurDays } as Instr);
+    fctx.body.push({ op: "local.set", index: tempCurDays });
 
     // packed = civil_from_days(curDays)  (year*10000 + month*100 + day, month 1-12)
     const tempPacked = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempCurDays } as Instr);
-    fctx.body.push({ op: "call", funcIdx: civilIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: tempPacked } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurDays });
+    fctx.body.push({ op: "call", funcIdx: civilIdx });
+    fctx.body.push({ op: "local.set", index: tempPacked });
 
     // Extract curY, curMo (1-based), curD from packed. Negative-year safe:
     // curY = floor(packed/10000); curMmdd = packed - curY*10000 ∈ [101, 1231];
     // curMo = curMmdd/100; curD = curMmdd%100 (see emitPackedYear/emitPackedMmdd).
     const tempCurY = allocTempLocal(fctx, { kind: "i64" });
     const tempMmddScratch = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempPacked } as Instr);
+    fctx.body.push({ op: "local.get", index: tempPacked });
     emitPackedYear(fctx.body, tempMmddScratch); // floor year on stack
-    fctx.body.push({ op: "local.set", index: tempCurY } as Instr);
+    fctx.body.push({ op: "local.set", index: tempCurY });
 
     // curMmdd = packed - curY*10000  (always positive)
     const tempCurMmdd = allocTempLocal(fctx, { kind: "i64" });
     fctx.body.push(
-      { op: "local.get", index: tempPacked } as Instr,
-      { op: "local.get", index: tempCurY } as Instr,
-      { op: "i64.const", value: 10000n } as Instr,
-      { op: "i64.mul" } as Instr,
-      { op: "i64.sub" } as Instr,
-      { op: "local.set", index: tempCurMmdd } as Instr,
+      { op: "local.get", index: tempPacked },
+      { op: "local.get", index: tempCurY },
+      { op: "i64.const", value: 10000n },
+      { op: "i64.mul" },
+      { op: "i64.sub" },
+      { op: "local.set", index: tempCurMmdd },
     );
     releaseTempLocal(fctx, tempMmddScratch);
 
     const tempCurMo = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempCurMmdd } as Instr);
-    fctx.body.push({ op: "i64.const", value: 100n } as Instr);
-    fctx.body.push({ op: "i64.div_s" } as Instr);
-    fctx.body.push({ op: "local.set", index: tempCurMo } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurMmdd });
+    fctx.body.push({ op: "i64.const", value: 100n });
+    fctx.body.push({ op: "i64.div_s" });
+    fctx.body.push({ op: "local.set", index: tempCurMo });
 
     const tempCurD = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempCurMmdd } as Instr);
-    fctx.body.push({ op: "i64.const", value: 100n } as Instr);
-    fctx.body.push({ op: "i64.rem_s" } as Instr);
-    fctx.body.push({ op: "local.set", index: tempCurD } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurMmdd });
+    fctx.body.push({ op: "i64.const", value: 100n });
+    fctx.body.push({ op: "i64.rem_s" });
+    fctx.body.push({ op: "local.set", index: tempCurD });
 
     // Push new component value (i64): from arg or from current.
     // Note: JS month is 0-based, but our helper uses 1-based. So when the
     // user supplies a month arg we add 1 here.
     const pushNewY = () => {
       if (argLocals.y !== undefined) {
-        fctx.body.push({ op: "local.get", index: argLocals.y } as Instr);
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: argLocals.y });
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
       } else {
-        fctx.body.push({ op: "local.get", index: tempCurY } as Instr);
+        fctx.body.push({ op: "local.get", index: tempCurY });
       }
     };
     const pushNewMo1Based = () => {
       if (argLocals.mo !== undefined) {
-        fctx.body.push({ op: "local.get", index: argLocals.mo } as Instr);
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
-        fctx.body.push({ op: "i64.const", value: 1n } as Instr);
-        fctx.body.push({ op: "i64.add" } as Instr);
+        fctx.body.push({ op: "local.get", index: argLocals.mo });
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
+        fctx.body.push({ op: "i64.const", value: 1n });
+        fctx.body.push({ op: "i64.add" });
       } else {
-        fctx.body.push({ op: "local.get", index: tempCurMo } as Instr);
+        fctx.body.push({ op: "local.get", index: tempCurMo });
       }
     };
     const pushNewD = () => {
       if (argLocals.d !== undefined) {
-        fctx.body.push({ op: "local.get", index: argLocals.d } as Instr);
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "local.get", index: argLocals.d });
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
       } else {
-        fctx.body.push({ op: "local.get", index: tempCurD } as Instr);
+        fctx.body.push({ op: "local.get", index: tempCurD });
       }
     };
 
@@ -2512,47 +2468,47 @@ function compileDateMethodCall(
     pushNewY();
     pushNewMo1Based();
     pushNewD();
-    fctx.body.push({ op: "call", funcIdx: daysFromCivilIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: daysFromCivilIdx });
     // newTs = newDays * MS_PER_DAY + msOfDay
-    fctx.body.push({ op: "i64.const", value: MS_PER_DAY } as Instr);
-    fctx.body.push({ op: "i64.mul" } as Instr);
-    fctx.body.push({ op: "local.get", index: tempMsOfDay } as Instr);
-    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "i64.const", value: MS_PER_DAY });
+    fctx.body.push({ op: "i64.mul" });
+    fctx.body.push({ op: "local.get", index: tempMsOfDay });
+    fctx.body.push({ op: "i64.add" });
 
     const tempNewTs = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.set", index: tempNewTs } as Instr);
+    fctx.body.push({ op: "local.set", index: tempNewTs });
 
     // TimeClip: |newTs| > 8.64e15 → sentinel + NaN
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: 8640000000000000n } as Instr);
-    fctx.body.push({ op: "i64.gt_s" } as Instr);
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "i64.const", value: -8640000000000000n } as Instr);
-    fctx.body.push({ op: "i64.lt_s" } as Instr);
-    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "i64.const", value: 8640000000000000n });
+    fctx.body.push({ op: "i64.gt_s" });
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "i64.const", value: -8640000000000000n });
+    fctx.body.push({ op: "i64.lt_s" });
+    fctx.body.push({ op: "i32.or" });
 
     const savedClipThen = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-    fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
+    fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
     fctx.body.push({
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+    fctx.body.push({ op: "f64.const", value: NaN });
     const clipThenInstrs = fctx.body;
     popBody(fctx, savedClipThen);
 
     const savedClipElse = pushBody(fctx);
-    fctx.body.push({ op: "local.get", index: tempRef } as Instr);
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
+    fctx.body.push({ op: "local.get", index: tempRef });
+    fctx.body.push({ op: "local.get", index: tempNewTs });
     fctx.body.push({
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
     });
-    fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
-    fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+    fctx.body.push({ op: "local.get", index: tempNewTs });
+    fctx.body.push({ op: "f64.convert_i64_s" });
     const clipElseInstrs = fctx.body;
     popBody(fctx, savedClipElse);
 
@@ -2608,7 +2564,7 @@ function compileDateMethodCall(
   // by `new Date(NaN)` in `new-super.ts`. No legitimate JS timestamp can
   // reach this magnitude (valid range is ±8.64e15 ms).
   const tsLocalShared = allocTempLocal(fctx, { kind: "i64" });
-  fctx.body.push({ op: "local.set", index: tsLocalShared } as Instr);
+  fctx.body.push({ op: "local.set", index: tsLocalShared });
   // Stack: []
 
   // (#3219) The zero-arg time-of-day + calendar getters now live in the shared
@@ -2649,18 +2605,21 @@ function compileDateMethodCall(
         // toISOString throws RangeError on Invalid Date (§21.4.4.36);
         // toJSON returns null on Invalid Date (§21.4.4.45 — toISOString skipped).
         fctx.body.push(
-          { op: "local.get", index: tsLocalShared } as Instr,
-          { op: "i64.const", value: -9223372036854775808n } as Instr,
-          { op: "i64.eq" } as Instr,
+          { op: "local.get", index: tsLocalShared },
+          { op: "i64.const", value: -9223372036854775808n },
+          { op: "i64.eq" },
         );
         if (methodName === "toJSON") {
           // if invalid -> ref.null any (null); else build ISO string.
           fctx.body.push({
             op: "if",
             blockType: { kind: "val", type: { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx } },
-            then: [{ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr],
-            else: [{ op: "local.get", index: tsLocalShared } as Instr, { op: "call", funcIdx: isoIdx } as Instr],
-          } as unknown as Instr);
+            then: [{ op: "ref.null", typeIdx: ctx.anyStrTypeIdx }],
+            else: [
+              { op: "local.get", index: tsLocalShared },
+              { op: "call", funcIdx: isoIdx },
+            ],
+          });
           releaseTempLocal(fctx, tsLocalShared);
           return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
         }
@@ -2677,8 +2636,8 @@ function compileDateMethodCall(
           blockType: { kind: "empty" },
           then: thenThrow,
           else: [],
-        } as unknown as Instr);
-        fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr, { op: "call", funcIdx: isoIdx } as Instr);
+        });
+        fctx.body.push({ op: "local.get", index: tsLocalShared }, { op: "call", funcIdx: isoIdx });
         releaseTempLocal(fctx, tsLocalShared);
         return anyStrType;
       }
@@ -2693,9 +2652,9 @@ function compileDateMethodCall(
         const anyStrType: ValType = { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
         // if ts == i64-MIN (Invalid Date) -> "Invalid Date", else build format.
         fctx.body.push(
-          { op: "local.get", index: tsLocalShared } as Instr,
-          { op: "i64.const", value: -9223372036854775808n } as Instr,
-          { op: "i64.eq" } as Instr,
+          { op: "local.get", index: tsLocalShared },
+          { op: "i64.const", value: -9223372036854775808n },
+          { op: "i64.eq" },
         );
         const invalidArm: Instr[] = [];
         {
@@ -2709,11 +2668,11 @@ function compileDateMethodCall(
           blockType: { kind: "val", type: anyStrType },
           then: invalidArm,
           else: [
-            { op: "local.get", index: tsLocalShared } as Instr,
-            { op: "i32.const", value: mode } as Instr,
-            { op: "call", funcIdx: fmtStrIdx } as Instr,
+            { op: "local.get", index: tsLocalShared },
+            { op: "i32.const", value: mode },
+            { op: "call", funcIdx: fmtStrIdx },
           ],
-        } as unknown as Instr);
+        });
         releaseTempLocal(fctx, tsLocalShared);
         return anyStrType;
       }
@@ -2726,14 +2685,14 @@ function compileDateMethodCall(
     // Date receiver (§21.4.4.45 → toISOString is skipped when ToNumber is not
     // finite). Branch on the sentinel and return ref.null externref.
     if (methodName === "toJSON") {
-      fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr);
-      fctx.body.push({ op: "i64.const", value: -9223372036854775808n } as Instr);
-      fctx.body.push({ op: "i64.eq" } as Instr);
-      const thenInstrs: Instr[] = [{ op: "ref.null.extern" } as Instr];
+      fctx.body.push({ op: "local.get", index: tsLocalShared });
+      fctx.body.push({ op: "i64.const", value: -9223372036854775808n });
+      fctx.body.push({ op: "i64.eq" });
+      const thenInstrs: Instr[] = [{ op: "ref.null.extern" }];
       const elseInstrs: Instr[] = [
-        { op: "local.get", index: tsLocalShared } as Instr,
-        { op: "i32.const", value: mode } as Instr,
-        { op: "call", funcIdx: fmtIdx } as Instr,
+        { op: "local.get", index: tsLocalShared },
+        { op: "i32.const", value: mode },
+        { op: "call", funcIdx: fmtIdx },
       ];
       fctx.body.push({
         op: "if",
@@ -2745,16 +2704,16 @@ function compileDateMethodCall(
       return { kind: "externref" };
     }
 
-    fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr);
-    fctx.body.push({ op: "i32.const", value: mode } as Instr);
-    fctx.body.push({ op: "call", funcIdx: fmtIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: tsLocalShared });
+    fctx.body.push({ op: "i32.const", value: mode });
+    fctx.body.push({ op: "call", funcIdx: fmtIdx });
     releaseTempLocal(fctx, tsLocalShared);
     return { kind: "externref" };
   }
 
   // Shouldn't reach here. Timestamp was saved to a local; nothing to drop.
   releaseTempLocal(fctx, tsLocalShared);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 });
   return { kind: "f64" };
 }
 
@@ -2806,8 +2765,8 @@ function compileConsoleCallWasi(
   const writeStr = (offset: number, length: number): void => {
     const idx = ctx.funcMap.get(helperName);
     if (idx === undefined) return;
-    fctx.body.push({ op: "i32.const", value: offset } as Instr);
-    fctx.body.push({ op: "i32.const", value: length } as Instr);
+    fctx.body.push({ op: "i32.const", value: offset });
+    fctx.body.push({ op: "i32.const", value: length });
     fctx.body.push({ op: "call", funcIdx: idx });
   };
 
@@ -2895,8 +2854,8 @@ function emitWasiValueToStdout(
   const writeStr = (offset: number, length: number): void => {
     const idx = ctx.funcMap.get(writeStringName);
     if (idx === undefined) return;
-    fctx.body.push({ op: "i32.const", value: offset } as Instr);
-    fctx.body.push({ op: "i32.const", value: length } as Instr);
+    fctx.body.push({ op: "i32.const", value: offset });
+    fctx.body.push({ op: "i32.const", value: length });
     fctx.body.push({ op: "call", funcIdx: idx });
   };
 
@@ -2911,7 +2870,7 @@ function emitWasiValueToStdout(
     if (writeF64Idx >= 0) {
       fctx.body.push({ op: "call", funcIdx: writeF64Idx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
     }
   } else if (exprType.kind === "i32") {
     // Boolean or i32: write "true"/"false" or the integer
@@ -2919,7 +2878,7 @@ function emitWasiValueToStdout(
     if (writeI32Idx >= 0) {
       fctx.body.push({ op: "call", funcIdx: writeI32Idx });
     } else {
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
     }
   } else if (
     (exprType.kind === "ref" || exprType.kind === "ref_null") &&
@@ -2949,20 +2908,20 @@ function emitWasiValueToStdout(
     // it to NativeString. Flatten inside the helper collapses any rope.
     const refKind = exprType.kind;
     if (refKind === "ref_null") {
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" });
     }
     const writeAnyIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
     if (writeAnyIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: writeAnyIdx } as Instr);
+      fctx.body.push({ op: "call", funcIdx: writeAnyIdx });
     } else {
       // Helper unavailable (no native strings) — fall back to placeholder.
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       const placeholder = wasiAllocStringData(ctx, "[object]");
       writeStr(placeholder.offset, placeholder.length);
     }
   } else {
     // For other types (externref, etc.), just drop and write a placeholder
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     const placeholder = wasiAllocStringData(ctx, "[object]");
     writeStr(placeholder.offset, placeholder.length);
   }
@@ -3025,51 +2984,47 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
     // buf_start = WASI_ITOA_SCRATCH (#1724). MUST NOT be the bump pointer
     // (=1024), which aliases the string-literal data segments — see the
     // WASI_ITOA_SCRATCH doc comment for the full root cause.
-    { op: "i32.const", value: WASI_ITOA_SCRATCH } as Instr,
-    { op: "local.set", index: bufStartLocal } as Instr,
+    { op: "i32.const", value: WASI_ITOA_SCRATCH },
+    { op: "local.set", index: bufStartLocal },
     // buf_pos = buf_start + 11 (write digits right-to-left, max 11 digits + sign)
-    { op: "local.get", index: bufStartLocal } as Instr,
-    { op: "i32.const", value: 11 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: bufPosLocal } as Instr,
+    { op: "local.get", index: bufStartLocal },
+    { op: "i32.const", value: 11 },
+    { op: "i32.add" },
+    { op: "local.set", index: bufPosLocal },
 
     // Check if value == 0
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.eqz" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
         // Write "0" directly
-        { op: "local.get", index: bufPosLocal } as Instr,
-        { op: "i32.const", value: 48 } as Instr, // '0'
-        { op: "i32.store8", align: 0, offset: 0 } as Instr,
-        { op: "local.get", index: bufPosLocal } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "call", funcIdx: writeStringIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "local.get", index: bufPosLocal },
+        { op: "i32.const", value: 48 }, // '0'
+        { op: "i32.store8", align: 0, offset: 0 },
+        { op: "local.get", index: bufPosLocal },
+        { op: "i32.const", value: 1 },
+        { op: "call", funcIdx: writeStringIdx },
+        { op: "return" },
       ],
     },
 
     // Check if negative
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.lt_s" } as Instr,
-    { op: "local.set", index: isNegLocal } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    { op: "local.set", index: isNegLocal },
 
     // absVal = is_neg ? -value : value
-    { op: "local.get", index: isNegLocal } as Instr,
+    { op: "local.get", index: isNegLocal },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
-      then: [
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: 0 } as Instr,
-        { op: "i32.sub" } as Instr,
-      ],
-      else: [{ op: "local.get", index: 0 } as Instr],
+      then: [{ op: "i32.const", value: 0 }, { op: "local.get", index: 0 }, { op: "i32.sub" }],
+      else: [{ op: "local.get", index: 0 }],
     },
-    { op: "local.set", index: absValLocal } as Instr,
+    { op: "local.set", index: absValLocal },
 
     // Loop: extract digits right to left
     {
@@ -3081,55 +3036,55 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
           blockType: { kind: "empty" },
           body: [
             // if absVal == 0, break
-            { op: "local.get", index: absValLocal } as Instr,
-            { op: "i32.eqz" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "local.get", index: absValLocal },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
 
             // digit = absVal % 10
-            { op: "local.get", index: absValLocal } as Instr,
-            { op: "i32.const", value: 10 } as Instr,
-            { op: "i32.rem_u" } as Instr,
-            { op: "local.set", index: tmpLocal } as Instr,
+            { op: "local.get", index: absValLocal },
+            { op: "i32.const", value: 10 },
+            { op: "i32.rem_u" },
+            { op: "local.set", index: tmpLocal },
 
             // absVal = absVal / 10
-            { op: "local.get", index: absValLocal } as Instr,
-            { op: "i32.const", value: 10 } as Instr,
-            { op: "i32.div_u" } as Instr,
-            { op: "local.set", index: absValLocal } as Instr,
+            { op: "local.get", index: absValLocal },
+            { op: "i32.const", value: 10 },
+            { op: "i32.div_u" },
+            { op: "local.set", index: absValLocal },
 
             // buf_pos--
-            { op: "local.get", index: bufPosLocal } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.sub" } as Instr,
-            { op: "local.set", index: bufPosLocal } as Instr,
+            { op: "local.get", index: bufPosLocal },
+            { op: "i32.const", value: 1 },
+            { op: "i32.sub" },
+            { op: "local.set", index: bufPosLocal },
 
             // memory[buf_pos] = digit + '0'
-            { op: "local.get", index: bufPosLocal } as Instr,
-            { op: "local.get", index: tmpLocal } as Instr,
-            { op: "i32.const", value: 48 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.store8", align: 0, offset: 0 } as Instr,
+            { op: "local.get", index: bufPosLocal },
+            { op: "local.get", index: tmpLocal },
+            { op: "i32.const", value: 48 },
+            { op: "i32.add" },
+            { op: "i32.store8", align: 0, offset: 0 },
 
             // continue loop
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
     },
 
     // If negative, prepend '-'
-    { op: "local.get", index: isNegLocal } as Instr,
+    { op: "local.get", index: isNegLocal },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: bufPosLocal } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.sub" } as Instr,
-        { op: "local.set", index: bufPosLocal } as Instr,
-        { op: "local.get", index: bufPosLocal } as Instr,
-        { op: "i32.const", value: 45 } as Instr, // '-'
-        { op: "i32.store8", align: 0, offset: 0 } as Instr,
+        { op: "local.get", index: bufPosLocal },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: "local.set", index: bufPosLocal },
+        { op: "local.get", index: bufPosLocal },
+        { op: "i32.const", value: 45 }, // '-'
+        { op: "i32.store8", align: 0, offset: 0 },
       ],
     },
 
@@ -3145,13 +3100,13 @@ function ensureWasiWriteI32Helper(ctx: CodegenContext, useStderr: boolean = fals
     // after the number, e.g. "17i" instead of "17"). The 0 special-case writes
     // its single byte at +11 via an early return and is unaffected; negatives
     // are also correct (e.g. -17 → buf_pos at the '-', length = 3).
-    { op: "local.get", index: bufPosLocal } as Instr,
-    { op: "local.get", index: bufStartLocal } as Instr,
-    { op: "i32.const", value: 11 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.get", index: bufPosLocal } as Instr,
-    { op: "i32.sub" } as Instr,
-    { op: "call", funcIdx: writeStringIdx } as Instr,
+    { op: "local.get", index: bufPosLocal },
+    { op: "local.get", index: bufStartLocal },
+    { op: "i32.const", value: 11 },
+    { op: "i32.add" },
+    { op: "local.get", index: bufPosLocal },
+    { op: "i32.sub" },
+    { op: "call", funcIdx: writeStringIdx },
   );
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -3201,54 +3156,54 @@ function ensureWasiWriteF64Helper(ctx: CodegenContext, useStderr: boolean = fals
 
   const body: Instr[] = [
     // Check NaN: value != value
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "f64.ne" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 0 },
+    { op: "f64.ne" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "i32.const", value: nanData.offset } as Instr,
-        { op: "i32.const", value: nanData.length } as Instr,
-        { op: "call", funcIdx: writeStringIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "i32.const", value: nanData.offset },
+        { op: "i32.const", value: nanData.length },
+        { op: "call", funcIdx: writeStringIdx },
+        { op: "return" },
       ],
     },
 
     // Check positive infinity
-    { op: "local.get", index: 0 } as Instr,
-    { op: "f64.const", value: Infinity } as Instr,
-    { op: "f64.eq" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "f64.const", value: Infinity },
+    { op: "f64.eq" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "i32.const", value: infData.offset } as Instr,
-        { op: "i32.const", value: infData.length } as Instr,
-        { op: "call", funcIdx: writeStringIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "i32.const", value: infData.offset },
+        { op: "i32.const", value: infData.length },
+        { op: "call", funcIdx: writeStringIdx },
+        { op: "return" },
       ],
     },
 
     // Check negative infinity
-    { op: "local.get", index: 0 } as Instr,
-    { op: "f64.const", value: -Infinity } as Instr,
-    { op: "f64.eq" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "f64.const", value: -Infinity },
+    { op: "f64.eq" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "i32.const", value: negInfData.offset } as Instr,
-        { op: "i32.const", value: negInfData.length } as Instr,
-        { op: "call", funcIdx: writeStringIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "i32.const", value: negInfData.offset },
+        { op: "i32.const", value: negInfData.length },
+        { op: "call", funcIdx: writeStringIdx },
+        { op: "return" },
       ],
     },
 
     // Normal number: truncate to i32 and print
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.trunc_sat_f64_s" } as Instr,
-    { op: "call", funcIdx: writeI32Idx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "i32.trunc_sat_f64_s" },
+    { op: "call", funcIdx: writeI32Idx },
   ];
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -3309,36 +3264,32 @@ function compileMathCall(
       kind: "f64",
     });
     compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
-    fctx.body.push({ op: "local.tee", index: xLocal } as Instr);
-    fctx.body.push({ op: "f64.floor" } as Instr);
-    fctx.body.push({ op: "local.set", index: floorLocal } as Instr);
+    fctx.body.push({ op: "local.tee", index: xLocal });
+    fctx.body.push({ op: "f64.floor" });
+    fctx.body.push({ op: "local.set", index: floorLocal });
     // frac = x - floor(x)
-    fctx.body.push({ op: "local.get", index: xLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: floorLocal } as Instr);
-    fctx.body.push({ op: "f64.sub" } as Instr);
+    fctx.body.push({ op: "local.get", index: xLocal });
+    fctx.body.push({ op: "local.get", index: floorLocal });
+    fctx.body.push({ op: "f64.sub" });
     // frac >= 0.5 ? ceil(x) : floor(x)
-    fctx.body.push({ op: "f64.const", value: 0.5 } as Instr);
-    fctx.body.push({ op: "f64.ge" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0.5 });
+    fctx.body.push({ op: "f64.ge" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [{ op: "local.get", index: xLocal } as Instr, { op: "f64.ceil" } as Instr],
-      else: [{ op: "local.get", index: floorLocal } as Instr],
-    } as Instr);
-    fctx.body.push({ op: "local.tee", index: rLocal } as Instr);
+      then: [{ op: "local.get", index: xLocal }, { op: "f64.ceil" }],
+      else: [{ op: "local.get", index: floorLocal }],
+    });
+    fctx.body.push({ op: "local.tee", index: rLocal });
     // If result == 0, use copysign(0, x) to preserve -0
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-    fctx.body.push({ op: "f64.eq" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "f64.eq" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
-      then: [
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "local.get", index: xLocal } as Instr,
-        { op: "f64.copysign" },
-      ],
-      else: [{ op: "local.get", index: rLocal } as Instr],
-    } as Instr);
+      then: [{ op: "f64.const", value: 0 }, { op: "local.get", index: xLocal }, { op: "f64.copysign" }],
+      else: [{ op: "local.get", index: rLocal }],
+    });
     return { kind: "f64" };
   }
 
@@ -3352,7 +3303,7 @@ function compileMathCall(
   // → generic call handling (which resolves `Math.hasOwnProperty` correctly).
   if (Object.hasOwn(nativeUnary, method) && expr.arguments.length >= 1) {
     compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
-    fctx.body.push({ op: nativeUnary[method]! } as Instr);
+    fctx.body.push({ op: nativeUnary[method]! });
     return { kind: "f64" };
   }
 
@@ -3365,10 +3316,10 @@ function compileMathCall(
     if (toU32Idx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toU32Idx });
     } else {
-      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     }
-    fctx.body.push({ op: "i32.clz" } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "i32.clz" });
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
@@ -3379,16 +3330,16 @@ function compileMathCall(
     if (toU32Idx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toU32Idx });
     } else {
-      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     }
     compileExpression(ctx, fctx, expr.arguments[1]!, f64Hint);
     if (toU32Idx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toU32Idx });
     } else {
-      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     }
-    fctx.body.push({ op: "i32.mul" } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "i32.mul" });
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
@@ -3405,7 +3356,7 @@ function compileMathCall(
     fctx.body.push({ op: "local.tee", index: tmp });
     // NaN check: x !== x
     fctx.body.push({ op: "local.get", index: tmp });
-    fctx.body.push({ op: "f64.ne" } as Instr);
+    fctx.body.push({ op: "f64.ne" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
@@ -3416,9 +3367,9 @@ function compileMathCall(
       else: [
         // x == 0 check (true for both +0 and -0)
         { op: "local.get", index: tmp },
-        { op: "f64.abs" } as Instr,
+        { op: "f64.abs" },
         { op: "f64.const", value: 0 },
-        { op: "f64.eq" } as Instr,
+        { op: "f64.eq" },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "f64" } },
@@ -3441,8 +3392,8 @@ function compileMathCall(
   // Math.fround(x) → f64.promote_f32(f32.demote_f64(x))
   if (method === "fround" && expr.arguments.length >= 1) {
     compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
-    fctx.body.push({ op: "f32.demote_f64" } as Instr);
-    fctx.body.push({ op: "f64.promote_f32" } as Instr);
+    fctx.body.push({ op: "f32.demote_f64" });
+    fctx.body.push({ op: "f64.promote_f32" });
     return { kind: "f64" };
   }
 
@@ -3454,7 +3405,7 @@ function compileMathCall(
     }
     if (expr.arguments.length === 1) {
       compileExpression(ctx, fctx, expr.arguments[0]!, f64Hint);
-      fctx.body.push({ op: "f64.abs" } as Instr);
+      fctx.body.push({ op: "f64.abs" });
       return { kind: "f64" };
     }
     // 2+ args: spec says if any arg is +-Infinity → +Infinity, else sqrt(sum of squares)
@@ -3470,12 +3421,12 @@ function compileMathCall(
     // Check if any arg is +-Infinity: abs(x) == +Inf
     // Build: abs(a0)==Inf || abs(a1)==Inf || ...
     for (let i = 0; i < hypotLocals.length; i++) {
-      fctx.body.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      fctx.body.push({ op: "f64.abs" } as Instr);
+      fctx.body.push({ op: "local.get", index: hypotLocals[i]! });
+      fctx.body.push({ op: "f64.abs" });
       fctx.body.push({ op: "f64.const", value: Infinity });
-      fctx.body.push({ op: "f64.eq" } as Instr);
+      fctx.body.push({ op: "f64.eq" });
       if (i > 0) {
-        fctx.body.push({ op: "i32.or" } as Instr);
+        fctx.body.push({ op: "i32.or" });
       }
     }
     // if any is Inf, return +Infinity, else the scaled sum-of-squares (#2060).
@@ -3490,41 +3441,41 @@ function compileMathCall(
     const mLocal = allocLocal(fctx, `__hypot_m_${fctx.locals.length}`, { kind: "f64" });
     const elseBlock: Instr[] = [];
     // m = max(|a0|, |a1|, ...) via f64.max over the absolute values.
-    elseBlock.push({ op: "local.get", index: hypotLocals[0]! } as Instr);
-    elseBlock.push({ op: "f64.abs" } as Instr);
+    elseBlock.push({ op: "local.get", index: hypotLocals[0]! });
+    elseBlock.push({ op: "f64.abs" });
     for (let i = 1; i < hypotLocals.length; i++) {
-      elseBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      elseBlock.push({ op: "f64.abs" } as Instr);
+      elseBlock.push({ op: "local.get", index: hypotLocals[i]! });
+      elseBlock.push({ op: "f64.abs" });
       elseBlock.push({ op: "f64.max" });
     }
-    elseBlock.push({ op: "local.set", index: mLocal } as Instr);
+    elseBlock.push({ op: "local.set", index: mLocal });
 
     // Guard m == 0 → 0; else m * sqrt(Σ (aᵢ/m)²).
-    elseBlock.push({ op: "local.get", index: mLocal } as Instr);
+    elseBlock.push({ op: "local.get", index: mLocal });
     elseBlock.push({ op: "f64.const", value: 0 });
-    elseBlock.push({ op: "f64.eq" } as Instr);
+    elseBlock.push({ op: "f64.eq" });
     const scaledBlock: Instr[] = [];
     for (let i = 0; i < hypotLocals.length; i++) {
-      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
-      scaledBlock.push({ op: "f64.div" } as Instr);
-      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
-      scaledBlock.push({ op: "f64.div" } as Instr);
-      scaledBlock.push({ op: "f64.mul" } as Instr);
+      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! });
+      scaledBlock.push({ op: "local.get", index: mLocal });
+      scaledBlock.push({ op: "f64.div" });
+      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! });
+      scaledBlock.push({ op: "local.get", index: mLocal });
+      scaledBlock.push({ op: "f64.div" });
+      scaledBlock.push({ op: "f64.mul" });
     }
     for (let i = 1; i < hypotLocals.length; i++) {
-      scaledBlock.push({ op: "f64.add" } as Instr);
+      scaledBlock.push({ op: "f64.add" });
     }
-    scaledBlock.push({ op: "f64.sqrt" } as Instr);
-    scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
-    scaledBlock.push({ op: "f64.mul" } as Instr);
+    scaledBlock.push({ op: "f64.sqrt" });
+    scaledBlock.push({ op: "local.get", index: mLocal });
+    scaledBlock.push({ op: "f64.mul" });
     elseBlock.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
       then: [{ op: "f64.const", value: 0 }],
       else: scaledBlock,
-    } as Instr);
+    });
 
     fctx.body.push({
       op: "if",
@@ -3596,7 +3547,7 @@ function compileMathCall(
       fctx.body.push({
         op: "f64.const",
         value: method === "min" ? Infinity : -Infinity,
-      } as Instr);
+      });
       return { kind: "f64" };
     }
 
@@ -3619,7 +3570,7 @@ function compileMathCall(
       for (const arg of expr.arguments) {
         if (!isStaticNaN(ctx, arg)) {
           compileExpression(ctx, fctx, arg, f64Hint);
-          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: "drop" });
         }
       }
       fctx.body.push({ op: "f64.const", value: NaN });
@@ -3688,13 +3639,13 @@ function compileMathCall(
         // isNaN check: local.get, local.get, f64.ne (x !== x)
         { op: "local.get", index: argLocals[i]! },
         { op: "local.get", index: argLocals[i]! },
-        { op: "f64.ne" } as Instr,
+        { op: "f64.ne" },
         {
           op: "if",
           blockType: f64Block,
           then: [{ op: "local.get", index: argLocals[i]! }],
           else: innerBody,
-        } as Instr,
+        },
       ];
     }
 
@@ -3757,18 +3708,21 @@ function compileMathMinMaxSpread(
     fctx.body.push({ op: "local.tee", index: vTmp });
     // isNaN(v): v !== v
     fctx.body.push({ op: "local.get", index: vTmp });
-    fctx.body.push({ op: "f64.ne" } as Instr);
+    fctx.body.push({ op: "f64.ne" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: nanLocal } as Instr],
-      else: [
-        { op: "local.get", index: accLocal } as Instr,
-        { op: "local.get", index: vTmp } as Instr,
-        { op: wasmOp } as Instr,
-        { op: "local.set", index: accLocal } as Instr,
+      then: [
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: nanLocal },
       ],
-    } as Instr);
+      else: [
+        { op: "local.get", index: accLocal },
+        { op: "local.get", index: vTmp },
+        { op: wasmOp },
+        { op: "local.set", index: accLocal },
+      ],
+    });
     releaseTempLocal(fctx, vTmp);
   };
 
@@ -3798,18 +3752,18 @@ function compileMathMinMaxSpread(
 
     const loopBody: Instr[] = [
       // len = vec.length
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "local.set", index: lenLocal } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: lenLocal },
       // data = vec.data
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "local.set", index: dataLocal } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: dataLocal },
       // idx = 0
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: idxLocal } as Instr,
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: idxLocal },
       {
         op: "block",
         blockType: { kind: "empty" },
@@ -3819,44 +3773,44 @@ function compileMathMinMaxSpread(
             blockType: { kind: "empty" },
             body: [
               // if (idx >= len) break
-              { op: "local.get", index: idxLocal } as Instr,
-              { op: "local.get", index: lenLocal } as Instr,
-              { op: "i32.ge_s" } as Instr,
-              { op: "br_if", depth: 1 } as Instr,
+              { op: "local.get", index: idxLocal },
+              { op: "local.get", index: lenLocal },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
               // push data[idx] as f64, fold
-              { op: "local.get", index: dataLocal } as Instr,
-              { op: "local.get", index: idxLocal } as Instr,
-              { op: "array.get", typeIdx: info.arrTypeIdx } as Instr,
-              ...(info.elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+              { op: "local.get", index: dataLocal },
+              { op: "local.get", index: idxLocal },
+              { op: "array.get", typeIdx: info.arrTypeIdx },
+              ...(info.elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" }] : []),
               ...buildFoldInstrs(fctx, accLocal, nanLocal, wasmOp),
               // idx++
-              { op: "local.get", index: idxLocal } as Instr,
-              { op: "i32.const", value: 1 } as Instr,
-              { op: "i32.add" } as Instr,
-              { op: "local.set", index: idxLocal } as Instr,
-              { op: "br", depth: 0 } as Instr,
+              { op: "local.get", index: idxLocal },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: idxLocal },
+              { op: "br", depth: 0 },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
 
     // Guard the whole loop on non-null vec (null array → contributes nothing).
     fctx.body.push({ op: "local.get", index: vecLocal });
-    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [],
       else: loopBody,
-    } as Instr);
+    });
   }
 
   // result = sawNaN ? NaN : acc
   fctx.body.push({ op: "f64.const", value: NaN });
   fctx.body.push({ op: "local.get", index: accLocal });
   fctx.body.push({ op: "local.get", index: nanLocal });
-  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "select" });
   return { kind: "f64" };
 }
 
@@ -3873,20 +3827,23 @@ function buildFoldInstrs(
 ): Instr[] {
   const vTmp = allocTempLocal(fctx, { kind: "f64" });
   const instrs: Instr[] = [
-    { op: "local.tee", index: vTmp } as Instr,
-    { op: "local.get", index: vTmp } as Instr,
-    { op: "f64.ne" } as Instr,
+    { op: "local.tee", index: vTmp },
+    { op: "local.get", index: vTmp },
+    { op: "f64.ne" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: nanLocal } as Instr],
-      else: [
-        { op: "local.get", index: accLocal } as Instr,
-        { op: "local.get", index: vTmp } as Instr,
-        { op: wasmOp } as Instr,
-        { op: "local.set", index: accLocal } as Instr,
+      then: [
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: nanLocal },
       ],
-    } as Instr,
+      else: [
+        { op: "local.get", index: accLocal },
+        { op: "local.get", index: vTmp },
+        { op: wasmOp },
+        { op: "local.set", index: accLocal },
+      ],
+    },
   ];
   releaseTempLocal(fctx, vTmp);
   return instrs;

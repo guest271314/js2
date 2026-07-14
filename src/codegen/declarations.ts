@@ -3546,23 +3546,23 @@ function defaultReturnInstrs(returnType: ValType | undefined): Instr[] {
     case "f64":
       return [{ op: "f64.const", value: 0 }];
     case "f32":
-      return [{ op: "f32.const", value: 0 } as Instr];
+      return [{ op: "f32.const", value: 0 }];
     case "i32":
       return [{ op: "i32.const", value: 0 }];
     case "i64":
       return [{ op: "i64.const", value: 0n }];
     case "externref":
     case "ref_extern":
-      return [{ op: "ref.null.extern" } as Instr];
+      return [{ op: "ref.null.extern" }];
     case "eqref":
     case "anyref":
-      return [{ op: "ref.null.eq" } as Instr];
+      return [{ op: "ref.null.eq" }];
     case "funcref":
-      return [{ op: "ref.null.func" } as Instr];
+      return [{ op: "ref.null.func" }];
     case "ref_null":
       return [{ op: "ref.null", typeIdx: returnType.typeIdx }];
     case "ref":
-      return [{ op: "ref.null", typeIdx: returnType.typeIdx }, { op: "ref.as_non_null" } as Instr];
+      return [{ op: "ref.null", typeIdx: returnType.typeIdx }, { op: "ref.as_non_null" }];
     default:
       return [{ op: "i32.const", value: 0 }];
   }

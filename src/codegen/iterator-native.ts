@@ -344,11 +344,11 @@ interface ObjCarrierDeps {
  */
 function emptyArgsVecInstrs(types: IterRuntimeTypes): Instr[] {
   return [
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "array.new_default", typeIdx: types.arrTypeIdx } as Instr,
-    { op: "struct.new", typeIdx: types.vecTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "array.new_default", typeIdx: types.arrTypeIdx },
+    { op: "struct.new", typeIdx: types.vecTypeIdx },
+    { op: "extern.convert_any" },
   ];
 }
 
@@ -540,7 +540,7 @@ export function ensureIterStepScratchGlobal(ctx: CodegenContext): number {
     name: "__j2w_iter_step_value",
     type: { kind: "externref" },
     mutable: true,
-    init: [{ op: "ref.null.extern" } as Instr],
+    init: [{ op: "ref.null.extern" }],
   });
   iterScratchGlobalIdxByCtx.set(ctx, globalIdx);
   return globalIdx;
@@ -681,12 +681,12 @@ export function ensureNativeArrayFromMapped(ctx: CodegenContext): number | undef
   // __array_from_mapped(source, mapFn, thisArg) =
   //   __hof_map(__array_from_iter_n(source, -1), mapFn, thisArg)
   const body: Instr[] = [
-    { op: "local.get", index: 0 } as Instr, // source
-    { op: "f64.const", value: -1 } as Instr, // unbounded drain
-    { op: "call", funcIdx: afinIdx } as Instr, // → normalized array-like carrier
-    { op: "local.get", index: 1 } as Instr, // mapFn (raw GC closure externref)
-    { op: "local.get", index: 2 } as Instr, // thisArg (externref | null)
-    { op: "call", funcIdx: hofMapIdx } as Instr, // → $ObjVec externref
+    { op: "local.get", index: 0 }, // source
+    { op: "f64.const", value: -1 }, // unbounded drain
+    { op: "call", funcIdx: afinIdx }, // → normalized array-like carrier
+    { op: "local.get", index: 1 }, // mapFn (raw GC closure externref)
+    { op: "local.get", index: 2 }, // thisArg (externref | null)
+    { op: "call", funcIdx: hofMapIdx }, // → $ObjVec externref
   ];
 
   const typeIdx = addFuncType(
@@ -736,43 +736,43 @@ function buildArrayFromIterNBody(
 
   // Build an empty `__vec_externref` and convert to externref.
   const emptyVec: Instr[] = [
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" },
   ];
 
   // Grow: cap *= 2; grow = new array[cap]; array.copy grow[0..len]=data[0..len]; data = grow.
   const growInstrs: Instr[] = [
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i32.const", value: 2 } as Instr,
-    { op: "i32.mul" } as Instr,
-    { op: "local.set", index: 4 } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.set", index: 7 } as Instr,
-    { op: "local.get", index: 7 } as Instr, // dst
-    { op: "i32.const", value: 0 } as Instr, // dstOffset
-    { op: "local.get", index: 6 } as Instr, // src
-    { op: "i32.const", value: 0 } as Instr, // srcOffset
-    { op: "local.get", index: 5 } as Instr, // len
-    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-    { op: "local.get", index: 7 } as Instr,
-    { op: "local.set", index: 6 } as Instr,
+    { op: "local.get", index: 4 },
+    { op: "i32.const", value: 2 },
+    { op: "i32.mul" },
+    { op: "local.set", index: 4 },
+    { op: "local.get", index: 4 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 7 },
+    { op: "local.get", index: 7 }, // dst
+    { op: "i32.const", value: 0 }, // dstOffset
+    { op: "local.get", index: 6 }, // src
+    { op: "i32.const", value: 0 }, // srcOffset
+    { op: "local.get", index: 5 }, // len
+    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+    { op: "local.get", index: 7 },
+    { op: "local.set", index: 6 },
   ];
 
   const loopBody: Instr[] = [
     // Bounded break: if (limit >= 0) && (len >= limit) → IteratorClose + break.
     // Depth accounting: inside the `if.then` below, 0 = the if, 1 = the loop,
     // 2 = the outer block — so the break out of the drain is `br 2`.
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "local.get", index: 5 } as Instr,
-    { op: "local.get", index: 3 } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "local.get", index: 3 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.ge_s" },
+    { op: "local.get", index: 5 },
+    { op: "local.get", index: 3 },
+    { op: "i32.ge_s" },
+    { op: "i32.and" },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -781,53 +781,52 @@ function buildArrayFromIterNBody(
         // iterator breaks via the done-branch below without reaching the
         // bound) → IteratorClose per §8.5.2/§13.15.5.2.
         ...(iteratorReturnIdx !== undefined
-          ? [{ op: "local.get", index: 2 } as Instr, { op: "call", funcIdx: iteratorReturnIdx } as Instr]
+          ? [
+              { op: "local.get", index: 2 },
+              { op: "call", funcIdx: iteratorReturnIdx },
+            ]
           : []),
-        { op: "br", depth: 2 } as Instr,
+        { op: "br", depth: 2 },
       ],
       else: [],
-    } as Instr,
+    },
     // (done, value) = __iterator_next(iter)
-    { op: "local.get", index: 2 } as Instr,
-    { op: "call", funcIdx: iteratorNextIdx } as Instr,
-    { op: "local.set", index: 9 } as Instr, // value (top of stack)
-    { op: "local.set", index: 8 } as Instr, // done
+    { op: "local.get", index: 2 },
+    { op: "call", funcIdx: iteratorNextIdx },
+    { op: "local.set", index: 9 }, // value (top of stack)
+    { op: "local.set", index: 8 }, // done
     // if done → break (exhausted ⇒ [[Done]] true ⇒ NO IteratorClose, §7.4.9)
-    { op: "local.get", index: 8 } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: 8 },
+    { op: "br_if", depth: 1 },
     // grow if len == cap
-    { op: "local.get", index: 5 } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] } as Instr,
+    { op: "local.get", index: 5 },
+    { op: "local.get", index: 4 },
+    { op: "i32.ge_s" },
+    { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] },
     // data[len] = value
-    { op: "local.get", index: 6 } as Instr,
-    { op: "local.get", index: 5 } as Instr,
-    { op: "local.get", index: 9 } as Instr,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.get", index: 6 },
+    { op: "local.get", index: 5 },
+    { op: "local.get", index: 9 },
+    { op: "array.set", typeIdx: arrTypeIdx },
     // len++
-    { op: "local.get", index: 5 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: 5 } as Instr,
-    { op: "br", depth: 0 } as Instr,
+    { op: "local.get", index: 5 },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: 5 },
+    { op: "br", depth: 0 },
   ];
 
   // Drainability guard: canDrain = ref.test $Vec ∨ (ref.test each user-iterable
   // struct). Everything else passes through unchanged (#2904 rationale above).
   const drainTest: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: 10 } as Instr,
-    { op: "local.get", index: 10 } as Instr,
-    { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: 10 },
+    { op: "local.get", index: 10 },
+    { op: "ref.test", typeIdx: vecTypeIdx },
   ];
   for (const t of extraDrainTypeIdxs) {
-    drainTest.push(
-      { op: "local.get", index: 10 } as Instr,
-      { op: "ref.test", typeIdx: t } as Instr,
-      { op: "i32.or" } as Instr,
-    );
+    drainTest.push({ op: "local.get", index: 10 }, { op: "ref.test", typeIdx: t }, { op: "i32.or" });
   }
   if (objGuard) {
     // (#3119) ∨ truthy(__extern_get(src, @@iterator)) — the post-hoc
@@ -836,62 +835,62 @@ function buildArrayFromIterNBody(
     // pass-through. `@@iterator` is well-known symbol id 1 (#2866 `$Symbol`
     // carrier, id-compared in `__obj_find`).
     drainTest.push(
-      { op: "local.get", index: 0 } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "call", funcIdx: objGuard.boxSymbolIdx } as Instr,
-      { op: "call", funcIdx: objGuard.externGetIdx } as Instr,
-      { op: "call", funcIdx: objGuard.isTruthyIdx } as Instr,
-      { op: "i32.or" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "i32.const", value: 1 },
+      { op: "call", funcIdx: objGuard.boxSymbolIdx },
+      { op: "call", funcIdx: objGuard.externGetIdx },
+      { op: "call", funcIdx: objGuard.isTruthyIdx },
+      { op: "i32.or" },
     );
   }
 
   return [
     // null/undefined guard → return empty vec (host `_arrayFromIter(null) → []`).
-    { op: "local.get", index: 0 } as Instr,
-    { op: "ref.is_null" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...emptyVec, { op: "return" } as Instr], else: [] } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    { op: "if", blockType: { kind: "empty" }, then: [...emptyVec, { op: "return" }], else: [] },
     ...drainTest,
-    { op: "i32.eqz" } as Instr,
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: 0 } as Instr, { op: "return" } as Instr],
+      then: [{ op: "local.get", index: 0 }, { op: "return" }],
       else: [],
-    } as Instr,
+    },
     // iter = __iterator(obj)  (a `$Vec` or a user-iterable closed struct)
-    { op: "local.get", index: 0 } as Instr,
-    { op: "call", funcIdx: iteratorIdx } as Instr,
-    { op: "local.set", index: 2 } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: iteratorIdx },
+    { op: "local.set", index: 2 },
     // limit = (n < 0) ? -1 : trunc_sat(n)
-    { op: "local.get", index: 1 } as Instr,
-    { op: "f64.const", value: 0 } as Instr,
-    { op: "f64.lt" } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "f64.const", value: 0 },
+    { op: "f64.lt" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
-      then: [{ op: "i32.const", value: -1 } as Instr],
-      else: [{ op: "local.get", index: 1 } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr],
-    } as Instr,
-    { op: "local.set", index: 3 } as Instr,
+      then: [{ op: "i32.const", value: -1 }],
+      else: [{ op: "local.get", index: 1 }, { op: "i32.trunc_sat_f64_s" }],
+    },
+    { op: "local.set", index: 3 },
     // cap = 4; data = array.new_default(4); len = 0
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.set", index: 4 } as Instr,
-    { op: "local.get", index: 4 } as Instr,
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.set", index: 6 } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.set", index: 5 } as Instr,
+    { op: "i32.const", value: 4 },
+    { op: "local.set", index: 4 },
+    { op: "local.get", index: 4 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 6 },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: 5 },
     // drain loop
     {
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-    } as Instr,
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+    },
     // return $Vec{len, data} as externref
-    { op: "local.get", index: 5 } as Instr,
-    { op: "local.get", index: 6 } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "local.get", index: 5 },
+    { op: "local.get", index: 6 },
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" },
   ];
 }
 
@@ -1007,21 +1006,21 @@ export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined
       // copy loop of its own.
       strArm.push(
         { op: "local.get", index: 0 },
-        { op: "any.convert_extern" } as Instr,
+        { op: "any.convert_extern" },
         { op: "local.tee", index: 7 },
-        { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+        { op: "ref.test", typeIdx: anyStrTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             { op: "local.get", index: 7 },
             { op: "ref.cast", typeIdx: anyStrTypeIdx },
-            { op: "call", funcIdx: charVecGeom.funcIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
+            { op: "call", funcIdx: charVecGeom.funcIdx },
+            { op: "extern.convert_any" },
             { op: "local.set", index: 0 },
           ],
           else: [],
-        } as Instr,
+        },
       );
     }
   }
@@ -1030,21 +1029,24 @@ export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined
     ...strArm,
     // len = i32(__extern_length(src))  (null / non-indexable → 0 → empty vec)
     { op: "local.get", index: 0 },
-    { op: "call", funcIdx: lenIdx } as Instr,
-    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "call", funcIdx: lenIdx },
+    { op: "i32.trunc_sat_f64_s" },
     { op: "local.set", index: 3 },
     // s = max(0, trunc(start))
     { op: "local.get", index: 1 },
-    { op: "i32.trunc_sat_f64_s" } as Instr,
+    { op: "i32.trunc_sat_f64_s" },
     { op: "local.tee", index: 2 },
     { op: "i32.const", value: 0 },
     { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 2 } as Instr],
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: 2 },
+      ],
       else: [],
-    } as Instr,
+    },
     // n = max(0, len - s)
     { op: "local.get", index: 3 },
     { op: "local.get", index: 2 },
@@ -1055,9 +1057,12 @@ export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: 4 } as Instr],
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: 4 },
+      ],
       else: [],
-    } as Instr,
+    },
     // out = array.new_default(n)
     { op: "local.get", index: 4 },
     { op: "array.new_default", typeIdx: arrTypeIdx },
@@ -1078,30 +1083,30 @@ export function ensureNativeExternSlice(ctx: CodegenContext): number | undefined
             { op: "i32.ge_s" },
             { op: "br_if", depth: 1 },
             { op: "local.get", index: 6 },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: 5 },
             { op: "local.get", index: 0 },
             { op: "local.get", index: 2 },
             { op: "local.get", index: 5 },
             { op: "i32.add" },
             { op: "f64.convert_i32_s" },
-            { op: "call", funcIdx: getIdxIdx } as Instr,
-            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "call", funcIdx: getIdxIdx },
+            { op: "array.set", typeIdx: arrTypeIdx },
             { op: "local.get", index: 5 },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: 5 },
             { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     // return $Vec{n, out} as externref
     { op: "local.get", index: 4 },
     { op: "local.get", index: 6 },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
     { op: "struct.new", typeIdx: vecTypeIdx },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
@@ -1197,8 +1202,8 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
         sgetDoneIdx: ctx.funcMap.get("__sget_done"),
         sgetNextIdx: ctx.funcMap.get("__sget_next"),
         sgetReturnIdx: ctx.funcMap.get("__sget_return"),
-        keyInstrs: (name: string) => [...nativeStringLiteralInstrs(ctx, name), { op: "extern.convert_any" } as Instr],
-        missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr],
+        keyInstrs: (name: string) => [...nativeStringLiteralInstrs(ctx, name), { op: "extern.convert_any" }],
+        missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
       };
     }
   }
@@ -1296,18 +1301,18 @@ export function fillNativeIteratorLateArms(ctx: CodegenContext): void {
     if (ctx.anyStrTypeIdx >= 0) {
       stringArm.push(
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-            { op: "call", funcIdx: charVecGeom.funcIdx } as Instr,
-            { op: "local.set", index: 1 } as Instr,
+            { op: "local.get", index: 1 },
+            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+            { op: "call", funcIdx: charVecGeom.funcIdx },
+            { op: "local.set", index: 1 },
           ],
           else: [],
-        } as Instr,
+        },
       );
     }
   }
@@ -1511,31 +1516,31 @@ function buildIteratorReturnBody(
           blockType: { kind: "empty" },
           then: [
             ...sgDeps.producers.flatMap((p): Instr[] => [
-              { op: "local.get", index: 1 } as Instr,
-              { op: "ref.cast", typeIdx: iterRecTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+              { op: "local.get", index: 1 },
+              { op: "ref.cast", typeIdx: iterRecTypeIdx },
+              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+              { op: "any.convert_extern" },
+              { op: "ref.test", typeIdx: p.stateTypeIdx },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  { op: "local.get", index: 1 } as Instr,
-                  { op: "ref.cast", typeIdx: iterRecTypeIdx } as Instr,
-                  { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
-                  { op: "any.convert_extern" } as Instr,
-                  { op: "ref.cast", typeIdx: p.stateTypeIdx } as Instr,
-                  { op: "i32.const", value: p.doneState } as Instr,
-                  { op: "struct.set", typeIdx: p.stateTypeIdx, fieldIdx: GENSTATE_STATE_FIELD } as Instr,
-                  { op: "return" } as Instr,
+                  { op: "local.get", index: 1 },
+                  { op: "ref.cast", typeIdx: iterRecTypeIdx },
+                  { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+                  { op: "any.convert_extern" },
+                  { op: "ref.cast", typeIdx: p.stateTypeIdx },
+                  { op: "i32.const", value: p.doneState },
+                  { op: "struct.set", typeIdx: p.stateTypeIdx, fieldIdx: GENSTATE_STATE_FIELD },
+                  { op: "return" },
                 ],
                 else: [],
-              } as Instr,
+              },
             ]),
-            { op: "return" } as Instr,
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ]
     : [];
   // (#3075) kind == HOSTGEN → IteratorClose via the host `__gen_return`
@@ -1554,16 +1559,16 @@ function buildIteratorReturnBody(
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: 1 } as Instr,
-              { op: "ref.cast", typeIdx: iterRecTypeIdx } as Instr,
-              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
-              { op: "ref.null.extern" } as Instr,
-              { op: "call", funcIdx: hostDeps.genReturnIdx } as Instr,
-              { op: "drop" } as Instr,
-              { op: "return" } as Instr,
+              { op: "local.get", index: 1 },
+              { op: "ref.cast", typeIdx: iterRecTypeIdx },
+              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+              { op: "ref.null.extern" },
+              { op: "call", funcIdx: hostDeps.genReturnIdx },
+              { op: "drop" },
+              { op: "return" },
             ],
             else: [],
-          } as Instr,
+          },
         ]
       : [];
   // (#3119) kind == OBJ → property-read close. Placed BEFORE the USER-kind
@@ -1587,40 +1592,43 @@ function buildIteratorReturnBody(
             { op: "local.tee", index: 2 },
             { op: "call", funcIdx: objDeps.isTruthyIdx },
             { op: "i32.eqz" },
-            { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+            { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
             // ret = Get(userIter, "return") — carrier-branched like the step
             // arm's `next` read; miss/undefined → no-op (§7.4.9 step 4
             // NormalCompletion).
             { op: "local.get", index: 2 },
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.test", typeIdx: objDeps.objectTypeIdx } as Instr,
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: objDeps.objectTypeIdx },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "externref" } },
               then: [
-                { op: "local.get", index: 2 } as Instr,
+                { op: "local.get", index: 2 },
                 ...objDeps.keyInstrs("return"),
-                { op: "call", funcIdx: objDeps.externGetIdx } as Instr,
+                { op: "call", funcIdx: objDeps.externGetIdx },
               ],
               else:
                 objDeps.sgetReturnIdx !== undefined
-                  ? [{ op: "local.get", index: 2 } as Instr, { op: "call", funcIdx: objDeps.sgetReturnIdx } as Instr]
+                  ? [
+                      { op: "local.get", index: 2 },
+                      { op: "call", funcIdx: objDeps.sgetReturnIdx },
+                    ]
                   : objDeps.missInstrs(),
-            } as Instr,
+            },
             { op: "local.tee", index: 3 },
             { op: "call", funcIdx: objDeps.isTruthyIdx },
             { op: "i32.eqz" },
-            { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+            { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
             // __apply_closure(ret, userIter, []) — drop the result.
             { op: "local.get", index: 3 },
             { op: "local.get", index: 2 },
             ...emptyArgsVecInstrs(types),
             { op: "call", funcIdx: objDeps.applyClosureIdx },
             { op: "drop" },
-            { op: "return" } as Instr,
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ]
     : [];
   // USER close (closed-struct `__call_return` dispatch) — only when the
@@ -1635,29 +1643,29 @@ function buildIteratorReturnBody(
           { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
           { op: "i32.const", value: ITER_KIND_USER },
           { op: "i32.ne" },
-          { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
           // userIter = rec.userIter; null → no-op.
           { op: "local.get", index: 1 },
           { op: "ref.cast", typeIdx: iterRecTypeIdx },
           { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
           { op: "local.tee", index: 2 },
-          { op: "ref.is_null" } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+          { op: "ref.is_null" },
+          { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
           // __call_return(userIter) — drop the result ({done} carrier or null when
           // the struct has no `return` method; the dispatcher returns null then).
           { op: "local.get", index: 2 },
-          { op: "call", funcIdx: callReturnIdx } as Instr,
+          { op: "call", funcIdx: callReturnIdx },
           { op: "drop" },
         ]
       : [];
   return [
     // recAny = any.convert_extern(recExt); not an $IterRec → no-op return.
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: 1 },
-    { op: "ref.test", typeIdx: iterRecTypeIdx } as Instr,
+    { op: "ref.test", typeIdx: iterRecTypeIdx },
     { op: "i32.eqz" },
-    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" } as Instr], else: [] } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }], else: [] },
     ...genStateClose,
     ...hostClose,
     ...objClose,
@@ -1724,21 +1732,21 @@ function buildIteratorBody(
   const genStateArm: Instr[] = sgDeps
     ? sgDeps.producers.flatMap((p): Instr[] => [
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        { op: "ref.test", typeIdx: p.stateTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "i32.const", value: ITER_KIND_GENSTATE } as Instr,
-            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: 0 } as Instr,
-            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "return" } as Instr,
+            { op: "i32.const", value: ITER_KIND_GENSTATE },
+            { op: "ref.null", typeIdx: vecTypeIdx },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: 0 },
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ])
     : [];
 
@@ -1752,21 +1760,21 @@ function buildIteratorBody(
   const asyncGenArm: Instr[] = agDeps
     ? agDeps.producers.flatMap((p): Instr[] => [
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+        { op: "ref.test", typeIdx: p.stateTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "i32.const", value: ITER_KIND_ASYNCGEN } as Instr,
-            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: 0 } as Instr,
-            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "return" } as Instr,
+            { op: "i32.const", value: ITER_KIND_ASYNCGEN },
+            { op: "ref.null", typeIdx: vecTypeIdx },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: 0 },
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ])
     : [];
   // VEC arm: $IterRec{VEC, vec, 0, userIter:null}. Field order/arity is
@@ -1784,9 +1792,9 @@ function buildIteratorBody(
     { op: "local.get", index: 1 },
     { op: "ref.cast", typeIdx: vecTypeIdx },
     { op: "i32.const", value: 0 },
-    { op: "ref.null.extern" } as Instr,
+    { op: "ref.null.extern" },
     { op: "struct.new", typeIdx: iterRecTypeIdx },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   ];
 
   // (#3075) HOSTGEN arm — a HOST-created external (legacy eager-buffer
@@ -1801,29 +1809,29 @@ function buildIteratorBody(
   const hostArm: Instr[] = hostDeps
     ? [
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: HEAP_TYPE_STRUCT } as Instr,
+        { op: "ref.test", typeIdx: HEAP_TYPE_STRUCT },
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: HEAP_TYPE_ARRAY } as Instr,
-        { op: "i32.or" } as Instr,
+        { op: "ref.test", typeIdx: HEAP_TYPE_ARRAY },
+        { op: "i32.or" },
         { op: "local.get", index: 1 },
-        { op: "ref.test", typeIdx: HEAP_TYPE_I31 } as Instr,
-        { op: "i32.or" } as Instr,
+        { op: "ref.test", typeIdx: HEAP_TYPE_I31 },
+        { op: "i32.or" },
         { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // $IterRec{HOSTGEN, vec:null, idx:0, userIter: obj (param 0)}
-            { op: "i32.const", value: ITER_KIND_HOSTGEN } as Instr,
-            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: 0 } as Instr,
-            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "return" } as Instr,
+            { op: "i32.const", value: ITER_KIND_HOSTGEN },
+            { op: "ref.null", typeIdx: vecTypeIdx },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: 0 },
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ]
     : [];
 
@@ -1841,10 +1849,10 @@ function buildIteratorBody(
         // iterFn = __extern_get(obj, __box_symbol(1))  (@@iterator, #2866)
         { op: "local.get", index: 0 },
         { op: "i32.const", value: 1 },
-        { op: "call", funcIdx: objDeps.boxSymbolIdx } as Instr,
-        { op: "call", funcIdx: objDeps.externGetIdx } as Instr,
+        { op: "call", funcIdx: objDeps.boxSymbolIdx },
+        { op: "call", funcIdx: objDeps.externGetIdx },
         { op: "local.tee", index: 2 },
-        { op: "call", funcIdx: objDeps.isTruthyIdx } as Instr,
+        { op: "call", funcIdx: objDeps.isTruthyIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -1853,39 +1861,39 @@ function buildIteratorBody(
             { op: "local.get", index: 2 },
             { op: "local.get", index: 0 },
             ...emptyArgsVecInstrs(types),
-            { op: "call", funcIdx: objDeps.applyClosureIdx } as Instr,
+            { op: "call", funcIdx: objDeps.applyClosureIdx },
             { op: "local.set", index: 2 },
             // $IterRec{OBJ, vec:null, idx:0, userIter:iterObj}
             { op: "i32.const", value: ITER_KIND_OBJ },
-            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
+            { op: "ref.null", typeIdx: vecTypeIdx },
             { op: "i32.const", value: 0 },
             { op: "local.get", index: 2 },
             { op: "struct.new", typeIdx: iterRecTypeIdx },
-            { op: "extern.convert_any" } as Instr,
-            { op: "return" } as Instr,
+            { op: "extern.convert_any" },
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
         // (#3146) next-property fallback: obj itself is the iterator.
         { op: "local.get", index: 0 },
         ...objDeps.keyInstrs("next"),
-        { op: "call", funcIdx: objDeps.externGetIdx } as Instr,
-        { op: "call", funcIdx: objDeps.isTruthyIdx } as Instr,
+        { op: "call", funcIdx: objDeps.externGetIdx },
+        { op: "call", funcIdx: objDeps.isTruthyIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // $IterRec{OBJ, vec:null, idx:0, userIter:obj}
-            { op: "i32.const", value: ITER_KIND_OBJ } as Instr,
-            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: 0 } as Instr,
-            { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "return" } as Instr,
+            { op: "i32.const", value: ITER_KIND_OBJ },
+            { op: "ref.null", typeIdx: vecTypeIdx },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: 0 },
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "return" },
           ],
           else: [],
-        } as Instr,
+        },
       ]
     : [];
 
@@ -1897,19 +1905,19 @@ function buildIteratorBody(
         // the subject is then its own iterator (bare `{next()}` carrier).
         ...(deps.callIteratorIdx !== undefined
           ? [
-              { op: "local.get", index: 0 } as Instr,
-              { op: "call", funcIdx: deps.callIteratorIdx } as Instr,
-              { op: "local.tee", index: 2 } as Instr,
-              { op: "ref.is_null" } as Instr,
+              { op: "local.get", index: 0 },
+              { op: "call", funcIdx: deps.callIteratorIdx },
+              { op: "local.tee", index: 2 },
+              { op: "ref.is_null" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "externref" } },
                 // No @@iterator → obj is itself the iterator (has `next`).
-                then: [{ op: "local.get", index: 0 } as Instr],
-                else: [{ op: "local.get", index: 2 } as Instr],
-              } as Instr,
+                then: [{ op: "local.get", index: 0 }],
+                else: [{ op: "local.get", index: 2 }],
+              },
             ]
-          : [{ op: "local.get", index: 0 } as Instr]),
+          : [{ op: "local.get", index: 0 }]),
         { op: "local.set", index: 2 },
         // (#3146) kind selection: a closed iterable's `@@iterator` can return
         // a PLAIN-`$Object` iterator (closure-property `next`/`return`) — the
@@ -1918,23 +1926,23 @@ function buildIteratorBody(
         // USER kind (closed-struct type-switch dispatch).
         ...(objDeps
           ? [
-              { op: "local.get", index: 2 } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.test", typeIdx: objDeps.objectTypeIdx } as Instr,
+              { op: "local.get", index: 2 },
+              { op: "any.convert_extern" },
+              { op: "ref.test", typeIdx: objDeps.objectTypeIdx },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
-                then: [{ op: "i32.const", value: ITER_KIND_OBJ } as Instr],
-                else: [{ op: "i32.const", value: ITER_KIND_USER } as Instr],
-              } as Instr,
+                then: [{ op: "i32.const", value: ITER_KIND_OBJ }],
+                else: [{ op: "i32.const", value: ITER_KIND_USER }],
+              },
             ]
-          : [{ op: "i32.const", value: ITER_KIND_USER } as Instr]),
+          : [{ op: "i32.const", value: ITER_KIND_USER }]),
         // $IterRec{kind, vec:null, idx:0, userIter}
-        { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
+        { op: "ref.null", typeIdx: vecTypeIdx },
         { op: "i32.const", value: 0 },
         { op: "local.get", index: 2 },
         { op: "struct.new", typeIdx: iterRecTypeIdx },
-        { op: "extern.convert_any" } as Instr,
+        { op: "extern.convert_any" },
       ]
     : tailCallIteratorIdx !== undefined && objDeps
       ? [
@@ -1942,35 +1950,35 @@ function buildIteratorBody(
           // `@@iterator` dispatcher + OBJ arms exist. Resolve the iterable;
           // an `$Object` iterator routes through the OBJ property arms, any
           // other shape falls to the legacy hard cast below.
-          { op: "local.get", index: 0 } as Instr,
-          { op: "call", funcIdx: tailCallIteratorIdx } as Instr,
-          { op: "local.tee", index: 2 } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: tailCallIteratorIdx },
+          { op: "local.tee", index: 2 },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
-            then: [{ op: "local.get", index: 0 } as Instr],
-            else: [{ op: "local.get", index: 2 } as Instr],
-          } as Instr,
-          { op: "local.set", index: 2 } as Instr,
-          { op: "local.get", index: 2 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.test", typeIdx: objDeps.objectTypeIdx } as Instr,
+            then: [{ op: "local.get", index: 0 }],
+            else: [{ op: "local.get", index: 2 }],
+          },
+          { op: "local.set", index: 2 },
+          { op: "local.get", index: 2 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: objDeps.objectTypeIdx },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
               // $IterRec{OBJ, vec:null, idx:0, userIter}
-              { op: "i32.const", value: ITER_KIND_OBJ } as Instr,
-              { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
-              { op: "i32.const", value: 0 } as Instr,
-              { op: "local.get", index: 2 } as Instr,
-              { op: "struct.new", typeIdx: iterRecTypeIdx } as Instr,
-              { op: "extern.convert_any" } as Instr,
-              { op: "return" } as Instr,
+              { op: "i32.const", value: ITER_KIND_OBJ },
+              { op: "ref.null", typeIdx: vecTypeIdx },
+              { op: "i32.const", value: 0 },
+              { op: "local.get", index: 2 },
+              { op: "struct.new", typeIdx: iterRecTypeIdx },
+              { op: "extern.convert_any" },
+              { op: "return" },
             ],
             else: [],
-          } as Instr,
+          },
           ...buildVecArm(),
         ]
       : // USER carrier not filled — preserve the legacy hard cast so the failure
@@ -1982,13 +1990,13 @@ function buildIteratorBody(
   return [
     // objAny = any.convert_extern(obj)
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "local.tee", index: 1 },
     { op: "ref.test", typeIdx: vecTypeIdx },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...buildVecArm(), { op: "return" } as Instr],
+      then: [...buildVecArm(), { op: "return" }],
       else: [],
     },
     ...familyArms,
@@ -2056,7 +2064,7 @@ function collectVecFamilyCarriers(ctx: CodegenContext, types: IterRuntimeTypes):
     // array-of-arrays GetIterator) an `illegal cast`.
     if (boxOps === null && (arrDef.element.kind === "ref" || arrDef.element.kind === "ref_null")) {
       const ti = (arrDef.element as { typeIdx: number }).typeIdx;
-      if (ti >= 0) boxOps = [{ op: "extern.convert_any" } as Instr];
+      if (ti >= 0) boxOps = [{ op: "extern.convert_any" }];
     }
     if (boxOps === null) continue; // no proven boxing — keep the loud-trap tail
     seen.add(vecTypeIdx);
@@ -2097,7 +2105,7 @@ function buildVecFamilyArms(ctx: CodegenContext, types: IterRuntimeTypes): Instr
   for (const carrier of collectVecFamilyCarriers(ctx, types)) {
     arms.push(
       { op: "local.get", index: 1 },
-      { op: "ref.test", typeIdx: carrier.typeIdx } as Instr,
+      { op: "ref.test", typeIdx: carrier.typeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -2127,7 +2135,7 @@ function buildVecFamilyArms(ctx: CodegenContext, types: IterRuntimeTypes): Instr
                   { op: "i32.ge_s" },
                   { op: "br_if", depth: 1 },
                   { op: "local.get", index: 5 },
-                  { op: "ref.as_non_null" } as Instr,
+                  { op: "ref.as_non_null" },
                   { op: "local.get", index: 3 },
                   { op: "local.get", index: 1 },
                   { op: "ref.cast", typeIdx: carrier.typeIdx },
@@ -2135,30 +2143,30 @@ function buildVecFamilyArms(ctx: CodegenContext, types: IterRuntimeTypes): Instr
                   { op: "local.get", index: 3 },
                   { op: "array.get", typeIdx: carrier.arrTypeIdx },
                   ...carrier.boxOps.map((instr) => ({ ...instr })),
-                  { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+                  { op: "array.set", typeIdx: arrTypeIdx },
                   { op: "local.get", index: 3 },
                   { op: "i32.const", value: 1 },
                   { op: "i32.add" },
                   { op: "local.set", index: 3 },
                   { op: "br", depth: 0 },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
           // return $IterRec{VEC, $Vec{len, out}, 0, null} as externref
           { op: "i32.const", value: ITER_KIND_VEC },
           { op: "local.get", index: 4 },
           { op: "local.get", index: 5 },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.new", typeIdx: vecTypeIdx },
           { op: "i32.const", value: 0 },
-          { op: "ref.null.extern" } as Instr,
+          { op: "ref.null.extern" },
           { op: "struct.new", typeIdx: iterRecTypeIdx },
-          { op: "extern.convert_any" } as Instr,
-          { op: "return" } as Instr,
+          { op: "extern.convert_any" },
+          { op: "return" },
         ],
         else: [],
-      } as Instr,
+      },
     );
   }
   return arms;
@@ -2209,16 +2217,16 @@ function buildIteratorNextBody(
     { op: "local.set", index: 3 },
     // done = (vec == null) | (i >= vec.length)
     { op: "local.get", index: 2 },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     { op: "local.get", index: 3 },
     { op: "local.get", index: 2 },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
     { op: "i32.ge_s" },
     { op: "i32.or" },
     { op: "local.set", index: 4 },
     // value default = undefined-extern
-    { op: "ref.null.extern" } as Instr,
+    { op: "ref.null.extern" },
     { op: "local.set", index: 5 },
     // if (!done) { value = vec.data[i]; rec.idx = i + 1; }
     { op: "local.get", index: 4 },
@@ -2228,7 +2236,7 @@ function buildIteratorNextBody(
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: 2 },
-        { op: "ref.as_non_null" } as Instr,
+        { op: "ref.as_non_null" },
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
         { op: "local.get", index: 3 },
         { op: "array.get", typeIdx: arrTypeIdx },
@@ -2237,7 +2245,7 @@ function buildIteratorNextBody(
         { op: "local.get", index: 3 },
         { op: "i32.const", value: 1 },
         { op: "i32.add" },
-        { op: "struct.set", typeIdx: iterRecTypeIdx, fieldIdx: 2 } as Instr,
+        { op: "struct.set", typeIdx: iterRecTypeIdx, fieldIdx: 2 },
       ],
       else: [],
     },
@@ -2249,7 +2257,7 @@ function buildIteratorNextBody(
     return [
       // rec = cast(any.convert_extern(recExt))
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "ref.cast", typeIdx: iterRecTypeIdx },
       { op: "local.set", index: 1 },
       ...vecStep,
@@ -2270,20 +2278,23 @@ function buildIteratorNextBody(
         // res = __gen_next(rec.userIter)
         { op: "local.get", index: 1 },
         { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
-        { op: "call", funcIdx: hostDeps.genNextIdx } as Instr,
+        { op: "call", funcIdx: hostDeps.genNextIdx },
         { op: "local.set", index: 6 },
         // done = __gen_result_done(res)
         { op: "local.get", index: 6 },
-        { op: "call", funcIdx: hostDeps.genResultDoneIdx } as Instr,
+        { op: "call", funcIdx: hostDeps.genResultDoneIdx },
         { op: "local.set", index: 4 },
         // value = done ? undefined : __gen_result_value(res)
         { op: "local.get", index: 4 },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
-          then: [{ op: "ref.null.extern" } as Instr],
-          else: [{ op: "local.get", index: 6 } as Instr, { op: "call", funcIdx: hostDeps.genResultValueIdx } as Instr],
-        } as Instr,
+          then: [{ op: "ref.null.extern" }],
+          else: [
+            { op: "local.get", index: 6 },
+            { op: "call", funcIdx: hostDeps.genResultValueIdx },
+          ],
+        },
         { op: "local.set", index: 5 },
       ]
     : [];
@@ -2298,8 +2309,8 @@ function buildIteratorNextBody(
           // done = ToBoolean(__extern_get(res, "done"))
           { op: "local.get", index: 6 },
           ...od.keyInstrs("done"),
-          { op: "call", funcIdx: od.externGetIdx } as Instr,
-          { op: "call", funcIdx: od.isTruthyIdx } as Instr,
+          { op: "call", funcIdx: od.externGetIdx },
+          { op: "call", funcIdx: od.isTruthyIdx },
           { op: "local.set", index: 4 },
           // value = done ? undefined : __extern_get(res, "value")
           { op: "local.get", index: 4 },
@@ -2307,12 +2318,8 @@ function buildIteratorNextBody(
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: od.missInstrs(),
-            else: [
-              { op: "local.get", index: 6 },
-              ...od.keyInstrs("value"),
-              { op: "call", funcIdx: od.externGetIdx } as Instr,
-            ],
-          } as Instr,
+            else: [{ op: "local.get", index: 6 }, ...od.keyInstrs("value"), { op: "call", funcIdx: od.externGetIdx }],
+          },
           { op: "local.set", index: 5 },
         ];
         // res is a closed struct (`{value, done}` literal pre-shape) → the
@@ -2322,16 +2329,19 @@ function buildIteratorNextBody(
           od.sgetDoneIdx !== undefined && od.sgetValueIdx !== undefined
             ? [
                 { op: "local.get", index: 6 },
-                { op: "call", funcIdx: od.sgetDoneIdx } as Instr,
-                { op: "call", funcIdx: od.isTruthyIdx } as Instr,
+                { op: "call", funcIdx: od.sgetDoneIdx },
+                { op: "call", funcIdx: od.isTruthyIdx },
                 { op: "local.set", index: 4 },
                 { op: "local.get", index: 4 },
                 {
                   op: "if",
                   blockType: { kind: "val", type: { kind: "externref" } },
                   then: od.missInstrs(),
-                  else: [{ op: "local.get", index: 6 }, { op: "call", funcIdx: od.sgetValueIdx } as Instr],
-                } as Instr,
+                  else: [
+                    { op: "local.get", index: 6 },
+                    { op: "call", funcIdx: od.sgetValueIdx },
+                  ],
+                },
                 { op: "local.set", index: 5 },
               ]
             : [
@@ -2347,53 +2357,53 @@ function buildIteratorNextBody(
           // closure) reads through the `__sget_next` field getter.
           { op: "local.get", index: 1 },
           { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.test", typeIdx: od.objectTypeIdx } as Instr,
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: od.objectTypeIdx },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: [
-              { op: "local.get", index: 1 } as Instr,
-              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
+              { op: "local.get", index: 1 },
+              { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
               ...od.keyInstrs("next"),
-              { op: "call", funcIdx: od.externGetIdx } as Instr,
+              { op: "call", funcIdx: od.externGetIdx },
             ],
             else:
               od.sgetNextIdx !== undefined
                 ? [
-                    { op: "local.get", index: 1 } as Instr,
-                    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
-                    { op: "call", funcIdx: od.sgetNextIdx } as Instr,
+                    { op: "local.get", index: 1 },
+                    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+                    { op: "call", funcIdx: od.sgetNextIdx },
                   ]
                 : od.missInstrs(),
-          } as Instr,
+          },
           // res = __apply_closure(next, rec.userIter, [])
           { op: "local.get", index: 1 },
           { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
           ...emptyArgsVecInstrs(types),
-          { op: "call", funcIdx: od.applyClosureIdx } as Instr,
+          { op: "call", funcIdx: od.applyClosureIdx },
           { op: "local.set", index: 6 },
           // Falsy res (undefined/null — `next` missing/uncallable, bridge
           // degrade) → done=1, never spin.
           { op: "local.get", index: 6 },
-          { op: "call", funcIdx: od.isTruthyIdx } as Instr,
+          { op: "call", funcIdx: od.isTruthyIdx },
           { op: "i32.eqz" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "i32.const", value: 1 } as Instr,
-              { op: "local.set", index: 4 } as Instr,
+              { op: "i32.const", value: 1 },
+              { op: "local.set", index: 4 },
               ...od.missInstrs(),
-              { op: "local.set", index: 5 } as Instr,
+              { op: "local.set", index: 5 },
             ],
             else: [
-              { op: "local.get", index: 6 } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.test", typeIdx: od.objectTypeIdx } as Instr,
-              { op: "if", blockType: { kind: "empty" }, then: readObjArm, else: readStructArm } as Instr,
+              { op: "local.get", index: 6 },
+              { op: "any.convert_extern" },
+              { op: "ref.test", typeIdx: od.objectTypeIdx },
+              { op: "if", blockType: { kind: "empty" }, then: readObjArm, else: readStructArm },
             ],
-          } as Instr,
+          },
         ];
       })()
     : [];
@@ -2405,7 +2415,7 @@ function buildIteratorNextBody(
         { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: ITER_KIND_OBJ },
         { op: "i32.eq" },
-        { op: "if", blockType: { kind: "empty" }, then: objStep, else: vecStep } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: objStep, else: vecStep },
       ]
     : vecStep;
 
@@ -2427,60 +2437,60 @@ function buildIteratorNextBody(
           blockType: { kind: "empty" },
           body: [
             ...agDeps.producers.flatMap((p): Instr[] => [
-              { op: "local.get", index: 6 } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+              { op: "local.get", index: 6 },
+              { op: "any.convert_extern" },
+              { op: "ref.test", typeIdx: p.stateTypeIdx },
               {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  { op: "local.get", index: 6 } as Instr,
-                  { op: "call", funcIdx: p.nextIdx } as Instr,
-                  { op: "local.set", index: 6 } as Instr,
-                  { op: "br", depth: 1 } as Instr,
+                  { op: "local.get", index: 6 },
+                  { op: "call", funcIdx: p.nextIdx },
+                  { op: "local.set", index: 6 },
+                  { op: "br", depth: 1 },
                 ],
                 else: [],
-              } as Instr,
+              },
             ]),
             // No producer matched — an ASYNCGEN record only wraps matched
             // frames, so this is unreachable by construction.
-            { op: "unreachable" } as Instr,
+            { op: "unreachable" },
           ],
-        } as Instr,
+        },
         // Require the next()-promise FULFILLED (await-free producers settle
         // synchronously inside the kick; pending ⇒ loud trap).
         { op: "local.get", index: 6 },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_STATE } as Instr,
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx },
+        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_STATE },
         { op: "i32.const", value: PROMISE_STATE_FULFILLED },
         { op: "i32.ne" },
-        { op: "if", blockType: { kind: "empty" }, then: [{ op: "unreachable" } as Instr], else: [] } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "unreachable" }], else: [] },
         // res := promise.value (the $IteratorResult, boxed externref)
         { op: "local.get", index: 6 },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_VALUE } as Instr,
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: agDeps.promiseTypeIdx },
+        { op: "struct.get", typeIdx: agDeps.promiseTypeIdx, fieldIdx: PROMISE_FIELD_VALUE },
         { op: "local.set", index: 6 },
         // done = result.done
         { op: "local.get", index: 6 },
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: agDeps.resultTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE } as Instr,
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: agDeps.resultTypeIdx },
+        { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE },
         { op: "local.set", index: 4 },
         // value = done ? undefined : result.value
         { op: "local.get", index: 4 },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
-          then: [{ op: "ref.null.extern" } as Instr],
+          then: [{ op: "ref.null.extern" }],
           else: [
-            { op: "local.get", index: 6 } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.cast", typeIdx: agDeps.resultTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE } as Instr,
+            { op: "local.get", index: 6 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: agDeps.resultTypeIdx },
+            { op: "struct.get", typeIdx: agDeps.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE },
           ],
-        } as Instr,
+        },
         { op: "local.set", index: 5 },
       ]
     : [];
@@ -2498,10 +2508,10 @@ function buildIteratorNextBody(
     ? (() => {
         const valueRead = (p: SyncGenCarrierDeps["producers"][number]): Instr[] => {
           const read: Instr[] = [
-            { op: "local.get", index: 6 } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE } as Instr,
+            { op: "local.get", index: 6 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: p.resultTypeIdx },
+            { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_VALUE },
           ];
           if (p.elemValType.kind === "externref") return read;
           if (p.elemValType.kind === "f64" && sgDeps.boxNumIdx !== undefined) {
@@ -2511,75 +2521,75 @@ function buildIteratorNextBody(
             // `sentinelAwareF64BoxInstrs` recipe (generators-native.ts).
             return [
               ...read,
-              { op: "local.tee", index: sgDeps.f64TmpIdx } as Instr,
-              { op: "i64.reinterpret_f64" } as Instr,
-              { op: "i64.const", value: UNDEF_F64_BITS } as Instr,
-              { op: "i64.eq" } as Instr,
+              { op: "local.tee", index: sgDeps.f64TmpIdx },
+              { op: "i64.reinterpret_f64" },
+              { op: "i64.const", value: UNDEF_F64_BITS },
+              { op: "i64.eq" },
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "externref" } },
-                then: [{ op: "ref.null.extern" } as Instr],
+                then: [{ op: "ref.null.extern" }],
                 else: [
-                  { op: "local.get", index: sgDeps.f64TmpIdx } as Instr,
-                  { op: "call", funcIdx: sgDeps.boxNumIdx } as Instr,
+                  { op: "local.get", index: sgDeps.f64TmpIdx },
+                  { op: "call", funcIdx: sgDeps.boxNumIdx },
                 ],
-              } as Instr,
+              },
             ];
           }
           if (p.elemValType.kind === "i32" && sgDeps.boxNumIdx !== undefined) {
-            return [...read, { op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: sgDeps.boxNumIdx } as Instr];
+            return [...read, { op: "f64.convert_i32_s" }, { op: "call", funcIdx: sgDeps.boxNumIdx }];
           }
           if (p.elemValType.kind === "ref" || p.elemValType.kind === "ref_null") {
-            return [...read, { op: "extern.convert_any" } as Instr];
+            return [...read, { op: "extern.convert_any" }];
           }
           // Unboxable carrier (defensive): undefined.
-          return [...read, { op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+          return [...read, { op: "drop" }, { op: "ref.null.extern" }];
         };
         return [
           // res := rec.userIter (the frame externref)
-          { op: "local.get", index: 1 } as Instr,
-          { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 } as Instr,
-          { op: "local.set", index: 6 } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+          { op: "local.set", index: 6 },
           {
             op: "block",
             blockType: { kind: "empty" },
             body: [
               ...sgDeps.producers.flatMap((p): Instr[] => [
-                { op: "local.get", index: 6 } as Instr,
-                { op: "any.convert_extern" } as Instr,
-                { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+                { op: "local.get", index: 6 },
+                { op: "any.convert_extern" },
+                { op: "ref.test", typeIdx: p.stateTypeIdx },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
                     // res := extern(resume(cast(frame)))  — the {value, done} result
-                    { op: "local.get", index: 6 } as Instr,
-                    { op: "any.convert_extern" } as Instr,
-                    { op: "ref.cast", typeIdx: p.stateTypeIdx } as Instr,
-                    { op: "call", funcIdx: p.resumeIdx } as Instr,
-                    { op: "extern.convert_any" } as Instr,
-                    { op: "local.set", index: 6 } as Instr,
+                    { op: "local.get", index: 6 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: p.stateTypeIdx },
+                    { op: "call", funcIdx: p.resumeIdx },
+                    { op: "extern.convert_any" },
+                    { op: "local.set", index: 6 },
                     // done = res.done
-                    { op: "local.get", index: 6 } as Instr,
-                    { op: "any.convert_extern" } as Instr,
-                    { op: "ref.cast", typeIdx: p.resultTypeIdx } as Instr,
-                    { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE } as Instr,
-                    { op: "local.set", index: 4 } as Instr,
+                    { op: "local.get", index: 6 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: p.resultTypeIdx },
+                    { op: "struct.get", typeIdx: p.resultTypeIdx, fieldIdx: AGEN_RESULT_FIELD_DONE },
+                    { op: "local.set", index: 4 },
                     // value = box_elem(res.value) — a done result's value field
                     // already holds the canonical absent marker (UNDEF_F64
                     // sentinel / null ref), which the boxing canonicalizes to
                     // the null externref.
                     ...valueRead(p),
-                    { op: "local.set", index: 5 } as Instr,
-                    { op: "br", depth: 1 } as Instr,
+                    { op: "local.set", index: 5 },
+                    { op: "br", depth: 1 },
                   ],
                   else: [],
-                } as Instr,
+                },
               ]),
               // No producer matched — unreachable by construction.
-              { op: "unreachable" } as Instr,
+              { op: "unreachable" },
             ],
-          } as Instr,
+          },
         ];
       })()
     : [];
@@ -2595,7 +2605,7 @@ function buildIteratorNextBody(
         { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: ITER_KIND_GENSTATE },
         { op: "i32.eq" },
-        { op: "if", blockType: { kind: "empty" }, then: genStateStep, else: wrapped } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: genStateStep, else: wrapped },
       ];
     }
     if (agDeps) {
@@ -2604,7 +2614,7 @@ function buildIteratorNextBody(
         { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: ITER_KIND_ASYNCGEN },
         { op: "i32.eq" },
-        { op: "if", blockType: { kind: "empty" }, then: asyncGenStep, else: wrapped } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: asyncGenStep, else: wrapped },
       ];
     }
     if (hostDeps) {
@@ -2613,7 +2623,7 @@ function buildIteratorNextBody(
         { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: ITER_KIND_HOSTGEN },
         { op: "i32.eq" },
-        { op: "if", blockType: { kind: "empty" }, then: hostStep, else: wrapped } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: hostStep, else: wrapped },
       ];
     }
     return wrapped;
@@ -2624,7 +2634,7 @@ function buildIteratorNextBody(
     return [
       // rec = cast(any.convert_extern(recExt))
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "ref.cast", typeIdx: iterRecTypeIdx },
       { op: "local.set", index: 1 },
       ...withHostDispatch(vecOrObjStep),
@@ -2646,58 +2656,61 @@ function buildIteratorNextBody(
   const userReadStructArm: Instr[] =
     deps.sgetDoneIdx !== undefined && deps.sgetValueIdx !== undefined
       ? [
-          { op: "local.get", index: 6 } as Instr,
-          { op: "call", funcIdx: deps.sgetDoneIdx } as Instr,
-          { op: "call", funcIdx: deps.isTruthyIdx } as Instr,
-          { op: "local.set", index: 4 } as Instr,
-          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 6 },
+          { op: "call", funcIdx: deps.sgetDoneIdx },
+          { op: "call", funcIdx: deps.isTruthyIdx },
+          { op: "local.set", index: 4 },
+          { op: "local.get", index: 4 },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
-            then: [{ op: "ref.null.extern" } as Instr],
-            else: [{ op: "local.get", index: 6 } as Instr, { op: "call", funcIdx: deps.sgetValueIdx } as Instr],
-          } as Instr,
-          { op: "local.set", index: 5 } as Instr,
+            then: [{ op: "ref.null.extern" }],
+            else: [
+              { op: "local.get", index: 6 },
+              { op: "call", funcIdx: deps.sgetValueIdx },
+            ],
+          },
+          { op: "local.set", index: 5 },
         ]
       : [
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "local.set", index: 4 } as Instr,
-          { op: "ref.null.extern" } as Instr,
-          { op: "local.set", index: 5 } as Instr,
+          { op: "i32.const", value: 1 },
+          { op: "local.set", index: 4 },
+          { op: "ref.null.extern" },
+          { op: "local.set", index: 5 },
         ];
   const userReadObjArm: Instr[] = objDeps
     ? [
-        { op: "local.get", index: 6 } as Instr,
+        { op: "local.get", index: 6 },
         ...objDeps.keyInstrs("done"),
-        { op: "call", funcIdx: objDeps.externGetIdx } as Instr,
-        { op: "call", funcIdx: objDeps.isTruthyIdx } as Instr,
-        { op: "local.set", index: 4 } as Instr,
-        { op: "local.get", index: 4 } as Instr,
+        { op: "call", funcIdx: objDeps.externGetIdx },
+        { op: "call", funcIdx: objDeps.isTruthyIdx },
+        { op: "local.set", index: 4 },
+        { op: "local.get", index: 4 },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } },
           then: objDeps.missInstrs(),
           else: [
-            { op: "local.get", index: 6 } as Instr,
+            { op: "local.get", index: 6 },
             ...objDeps.keyInstrs("value"),
-            { op: "call", funcIdx: objDeps.externGetIdx } as Instr,
+            { op: "call", funcIdx: objDeps.externGetIdx },
           ],
-        } as Instr,
-        { op: "local.set", index: 5 } as Instr,
+        },
+        { op: "local.set", index: 5 },
       ]
     : [];
   const userStep: Instr[] = [
     // res = __call_next(rec.userIter)
     { op: "local.get", index: 1 },
     { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
-    { op: "call", funcIdx: deps.callNextIdx } as Instr,
+    { op: "call", funcIdx: deps.callNextIdx },
     { op: "local.set", index: 6 },
     ...(objDeps
       ? [
-          { op: "local.get", index: 6 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.test", typeIdx: objDeps.objectTypeIdx } as Instr,
-          { op: "if", blockType: { kind: "empty" }, then: userReadObjArm, else: userReadStructArm } as Instr,
+          { op: "local.get", index: 6 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: objDeps.objectTypeIdx },
+          { op: "if", blockType: { kind: "empty" }, then: userReadObjArm, else: userReadStructArm },
         ]
       : userReadStructArm),
   ];
@@ -2705,7 +2718,7 @@ function buildIteratorNextBody(
   return [
     // rec = cast(any.convert_extern(recExt))
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: iterRecTypeIdx },
     { op: "local.set", index: 1 },
     // (#3075: outermost kind==HOSTGEN dispatch when filled)
@@ -2767,7 +2780,7 @@ function buildIteratorRestBodyWithUserArm(
           body: [
             // (done, value) = __iterator_next(recExt)
             { op: "local.get", index: 0 },
-            { op: "call", funcIdx: iteratorNextIdx } as Instr,
+            { op: "call", funcIdx: iteratorNextIdx },
             { op: "local.set", index: 8 },
             { op: "local.set", index: 7 },
             { op: "local.get", index: 7 },
@@ -2780,63 +2793,63 @@ function buildIteratorRestBodyWithUserArm(
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: 4 } as Instr,
-                { op: "i32.const", value: 2 } as Instr,
-                { op: "i32.mul" } as Instr,
-                { op: "local.set", index: 4 } as Instr,
-                { op: "local.get", index: 4 } as Instr,
-                { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-                { op: "local.set", index: 9 } as Instr,
-                { op: "local.get", index: 9 } as Instr,
-                { op: "i32.const", value: 0 } as Instr,
-                { op: "local.get", index: 5 } as Instr,
-                { op: "i32.const", value: 0 } as Instr,
-                { op: "local.get", index: 6 } as Instr,
-                { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-                { op: "local.get", index: 9 } as Instr,
-                { op: "local.set", index: 5 } as Instr,
+                { op: "local.get", index: 4 },
+                { op: "i32.const", value: 2 },
+                { op: "i32.mul" },
+                { op: "local.set", index: 4 },
+                { op: "local.get", index: 4 },
+                { op: "array.new_default", typeIdx: arrTypeIdx },
+                { op: "local.set", index: 9 },
+                { op: "local.get", index: 9 },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: 5 },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: 6 },
+                { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+                { op: "local.get", index: 9 },
+                { op: "local.set", index: 5 },
               ],
               else: [],
-            } as Instr,
+            },
             // out[j] = value; j++
             { op: "local.get", index: 5 },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: 6 },
             { op: "local.get", index: 8 },
-            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "array.set", typeIdx: arrTypeIdx },
             { op: "local.get", index: 6 },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: 6 },
             { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     // return $Vec{j, out} as externref
     { op: "local.get", index: 6 },
     { op: "local.get", index: 5 },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
     { op: "struct.new", typeIdx: vecTypeIdx },
-    { op: "extern.convert_any" } as Instr,
-    { op: "return" } as Instr,
+    { op: "extern.convert_any" },
+    { op: "return" },
   ];
 
   return [
     // rec = cast(recExt)
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: iterRecTypeIdx },
     { op: "local.set", index: 1 },
     // USER/OBJ record → step-to-exhaustion drain
     ...stepKinds.flatMap((kind, i): Instr[] => [
-      { op: "local.get", index: 1 } as Instr,
-      { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: kind } as Instr,
-      { op: "i32.eq" } as Instr,
-      ...(i > 0 ? [{ op: "i32.or" } as Instr] : []),
+      { op: "local.get", index: 1 },
+      { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: kind },
+      { op: "i32.eq" },
+      ...(i > 0 ? [{ op: "i32.or" }] : []),
     ]),
-    { op: "if", blockType: { kind: "empty" }, then: userDrain, else: [] } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: userDrain, else: [] },
     // VEC record → the existing tail-copy, reading rec from local 1
     { op: "local.get", index: 1 },
     ...buildIteratorRestVecTail(iterRecTypeIdx, vecTypeIdx, arrTypeIdx),
@@ -2852,7 +2865,7 @@ function buildIteratorRestBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
   return [
     // rec = cast(recExt)
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
+    { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: iterRecTypeIdx },
     { op: "local.tee", index: 1 },
     ...buildIteratorRestVecTail(iterRecTypeIdx, vecTypeIdx, arrTypeIdx),
@@ -2875,14 +2888,14 @@ function buildIteratorRestVecTail(iterRecTypeIdx: number, vecTypeIdx: number, ar
     { op: "local.set", index: 3 },
     // len = (vec == null) ? 0 : vec.length
     { op: "local.get", index: 2 },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } },
       then: [{ op: "i32.const", value: 0 }],
       else: [
         { op: "local.get", index: 2 },
-        { op: "ref.as_non_null" } as Instr,
+        { op: "ref.as_non_null" },
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
       ],
     },
@@ -2920,14 +2933,14 @@ function buildIteratorRestVecTail(iterRecTypeIdx: number, vecTypeIdx: number, ar
             { op: "br_if", depth: 1 },
             // out[j] = vec.data[i]
             { op: "local.get", index: 5 },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: 6 },
             { op: "local.get", index: 2 },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
             { op: "local.get", index: 3 },
             { op: "array.get", typeIdx: arrTypeIdx },
-            { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+            { op: "array.set", typeIdx: arrTypeIdx },
             // i++ ; j++
             { op: "local.get", index: 3 },
             { op: "i32.const", value: 1 },
@@ -2945,8 +2958,8 @@ function buildIteratorRestVecTail(iterRecTypeIdx: number, vecTypeIdx: number, ar
     // result vec = $vecExtern{ length: j, data: out }
     { op: "local.get", index: 6 },
     { op: "local.get", index: 5 },
-    { op: "ref.as_non_null" } as Instr,
+    { op: "ref.as_non_null" },
     { op: "struct.new", typeIdx: vecTypeIdx },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   ];
 }

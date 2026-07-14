@@ -224,7 +224,7 @@ export function ensureTimsortHelper(
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [L(0), { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }],
         else: [{ op: "local.get", index: dataL }, { op: "array.len" }],
-      } as Instr,
+      },
       { op: "f64.convert_i32_s" },
       { op: "call", funcIdx: shTimsortIdx },
     ],

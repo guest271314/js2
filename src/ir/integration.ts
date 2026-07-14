@@ -2146,7 +2146,7 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         // native-string re-tag arm and the honestAnyBoxing flag behavior.
         // The refinement hint maps onto boxToAny's jsType hint verbatim —
         // same "never override representation" contract.
-        const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+        const shim = { body: [] } as unknown as FunctionContext;
         if (!boxToAny(ctx, shim, from, jsTagToStaticType(hint))) {
           throw new Error(
             `ir/integration: no canonical boxing arm for operand kind "${from.kind}" — ` +
@@ -2368,7 +2368,7 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       // `addUnionImports` already ran in `preregisterDynamicSupport` (which
       // registers `__unbox_number`), so the internal `addUnionImports` here
       // finds it by name and adds nothing — no import shift mid-emission.
-      const shim = { body: [] as Instr[] } as unknown as FunctionContext;
+      const shim = { body: [] } as unknown as FunctionContext;
       emitCoercionToNumber(ctx, shim, { kind: "externref" });
       return shim.body;
     },

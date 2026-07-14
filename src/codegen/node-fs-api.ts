@@ -89,7 +89,7 @@ export function tryCompileNodeProcessCall(
       // Match the GC Uint8Array write path's contract: push `1` (write
       // succeeded) and return i32, so the expression-statement wrapper drops it
       // exactly like the GC path. (#1886)
-      fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+      fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     }
   }
@@ -100,16 +100,16 @@ export function tryCompileNodeProcessCall(
     flushLateImportShifts(ctx, fctx);
     if (compiled && ctx.nativeStrTypeIdx >= 0) {
       if (compiled.kind === "ref_null") {
-        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        fctx.body.push({ op: "ref.as_non_null" });
       }
       const writeStrIdx = ensureWasiWriteAnyStringHelper(ctx, useStderr);
       if (writeStrIdx >= 0) {
-        fctx.body.push({ op: "call", funcIdx: writeStrIdx } as Instr);
-        fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+        fctx.body.push({ op: "call", funcIdx: writeStrIdx });
+        fctx.body.push({ op: "i32.const", value: 1 });
         return { kind: "i32" };
       }
     }
-    if (compiled) fctx.body.push({ op: "drop" } as Instr);
+    if (compiled) fctx.body.push({ op: "drop" });
     return VOID_RESULT;
   }
 
@@ -128,12 +128,12 @@ export function tryCompileNodeProcessCall(
   if (argType) {
     if (argType.kind === "ref_null") {
       if ("typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
-        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
       } else {
-        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        fctx.body.push({ op: "ref.as_non_null" });
       }
     } else if (argType.kind === "ref" && "typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
     }
   }
 
@@ -141,11 +141,11 @@ export function tryCompileNodeProcessCall(
     ? ensureWasiWriteArrayBufferHelper(ctx, vecTypeIdx, useStderr)
     : ensureWasiWriteUint8ArrayHelper(ctx, vecTypeIdx, useStderr);
   if (helperIdx >= 0) {
-    fctx.body.push({ op: "call", funcIdx: helperIdx } as Instr);
-    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+    fctx.body.push({ op: "call", funcIdx: helperIdx });
+    fctx.body.push({ op: "i32.const", value: 1 });
     return { kind: "i32" };
   }
-  if (argType) fctx.body.push({ op: "drop" } as Instr);
+  if (argType) fctx.body.push({ op: "drop" });
   return VOID_RESULT;
 }
 
@@ -346,35 +346,35 @@ export function emitFdReadRuntime(
   direct: boolean,
 ): void {
   if (!direct) {
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: fdLocal });
+    fctx.body.push({ op: "local.get", index: ptrLocal });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "call", funcIdx: sinkIdx });
     return;
   }
   // Build the iovec { base=ptr, len } at WASI_READSYNC_IOV_OFFSET.
-  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET } as Instr);
-  fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET + 4 } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET });
+  fctx.body.push({ op: "local.get", index: ptrLocal });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET + 4 });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
   // errno = fd_read(fd, iovs=IOV, iovs_len=1, nread=NREAD)
-  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET } as Instr);
-  fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: fdLocal });
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET });
+  fctx.body.push({ op: "call", funcIdx: sinkIdx });
   // errno on the stack: if non-zero, push 0 bytes; else load nread.
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "i32.const", value: 0 } as Instr],
+    then: [{ op: "i32.const", value: 0 }],
     else: [
-      { op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET } as Instr,
-      { op: "i32.load", align: 2, offset: 0 } as Instr,
+      { op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET },
+      { op: "i32.load", align: 2, offset: 0 },
     ],
-  } as Instr);
+  });
 }
 
 /**
@@ -397,10 +397,10 @@ export function emitFdWriteRuntime(
   direct: boolean,
 ): void {
   if (!direct) {
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: fdLocal });
+    fctx.body.push({ op: "local.get", index: ptrLocal });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "call", funcIdx: sinkIdx });
     return;
   }
   // #2807 — write via the chunked `__wasi_fd_write_all` helper so a ≥128 MiB
@@ -410,32 +410,35 @@ export function emitFdWriteRuntime(
   // when the helper is unavailable.
   const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
   if (writeAllIdx >= 0) {
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeAllIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: fdLocal });
+    fctx.body.push({ op: "local.get", index: ptrLocal });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "call", funcIdx: writeAllIdx });
     return;
   }
   // iovec.base = ptr at memory[0]; iovec.len = len at memory[4].
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: ptrLocal });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
+  fctx.body.push({ op: "i32.const", value: 4 });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
   // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+  fctx.body.push({ op: "local.get", index: fdLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.const", value: 8 });
+  fctx.body.push({ op: "call", funcIdx: sinkIdx });
   // errno on the stack: non-zero → 0 bytes; else load nwritten at memory[8].
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
-    then: [{ op: "i32.const", value: 0 } as Instr],
-    else: [{ op: "i32.const", value: 8 } as Instr, { op: "i32.load", align: 2, offset: 0 } as Instr],
-  } as Instr);
+    then: [{ op: "i32.const", value: 0 }],
+    else: [
+      { op: "i32.const", value: 8 },
+      { op: "i32.load", align: 2, offset: 0 },
+    ],
+  });
 }
 
 /**
@@ -457,21 +460,21 @@ export function emitFdWriteRuntime(
  */
 function emitClampI32(fctx: FunctionContext, valLocal: number, hiLocal: number): void {
   // val = max(val, 0)  ==  select(val, 0, val > 0)
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.gt_s" } as Instr);
-  fctx.body.push({ op: "select" } as Instr);
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.gt_s" });
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: valLocal });
   // val = min(val, hi)  ==  select(val, hi, val < hi)
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: hiLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: hiLocal } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr);
-  fctx.body.push({ op: "select" } as Instr);
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "local.get", index: hiLocal });
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "local.get", index: hiLocal });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "select" });
+  fctx.body.push({ op: "local.set", index: valLocal });
 }
 
 function emitNodeFsOffsetLength(
@@ -500,11 +503,11 @@ function emitNodeFsOffsetLength(
   const explicitOffset = offsetExpr !== undefined;
   if (offsetExpr) {
     compileExpression(ctx, fctx, offsetExpr, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: offLocal });
 
   // #2045 C.7 — clamp an EXPLICIT offset into [0, bufLen] so a too-large or
   // negative offset can never address past the buffer. The default (absent)
@@ -524,13 +527,13 @@ function emitNodeFsOffsetLength(
   const explicitLength = lengthExpr !== undefined;
   if (lengthExpr) {
     compileExpression(ctx, fctx, lengthExpr, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else {
-    fctx.body.push({ op: "local.get", index: bufLenLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.sub" } as Instr);
+    fctx.body.push({ op: "local.get", index: bufLenLocal });
+    fctx.body.push({ op: "local.get", index: offLocal });
+    fctx.body.push({ op: "i32.sub" });
   }
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
 
   // #2045 C.7 — clamp an EXPLICIT length into [0, bufLen - offset] so
   // `offset + length` can never exceed the buffer (the same soundness invariant
@@ -541,10 +544,10 @@ function emitNodeFsOffsetLength(
   // from the already-clamped offset (offset <= bufLen ⇒ bufLen - offset >= 0).
   if (explicitLength) {
     const capLocal = allocLocal(fctx, `__nodefs_cap_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "local.get", index: bufLenLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.sub" } as Instr);
-    fctx.body.push({ op: "local.set", index: capLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: bufLenLocal });
+    fctx.body.push({ op: "local.get", index: offLocal });
+    fctx.body.push({ op: "i32.sub" });
+    fctx.body.push({ op: "local.set", index: capLocal });
     emitClampI32(fctx, lenLocal, capLocal);
   }
 
@@ -605,30 +608,30 @@ export function emitNodeFsResolveGcU8(
   let vecTypeIdx: number;
   if ((bufType.kind === "ref" || bufType.kind === "ref_null") && "typeIdx" in bufType) {
     vecTypeIdx = bufType.typeIdx;
-    if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
   } else if (bufType.kind === "externref") {
     const canonical = canonicalUint8VecTypeIdx(ctx);
     if (canonical === undefined) {
-      fctx.body.push({ op: "drop" } as Instr);
+      fctx.body.push({ op: "drop" });
       return null;
     }
     vecTypeIdx = canonical;
     // externref → anyref → (ref $vec). ref.cast traps iff the receiver is not the
     // Uint8Array vec, matching the TS type contract for the buffer argument.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
   } else {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
   const vecDef = ctx.mod.types[vecTypeIdx];
   if (!vecDef || vecDef.kind !== "struct" || vecDef.fields.length < 2) {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) {
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "drop" });
     return null;
   }
 
@@ -636,30 +639,30 @@ export function emitNodeFsResolveGcU8(
     kind: "ref",
     typeIdx: vecTypeIdx,
   });
-  fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: vecLocal });
   // element length = vec.length (field 0)
   const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, {
     kind: "i32",
   });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: vecLocal });
   fctx.body.push({
     op: "struct.get",
     typeIdx: vecTypeIdx,
     fieldIdx: 0,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  });
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // backing i8 array = vec.data (field 1)
   const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, {
     kind: "ref",
     typeIdx: arrTypeIdx,
   });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: vecLocal });
   fctx.body.push({
     op: "struct.get",
     typeIdx: vecTypeIdx,
     fieldIdx: 1,
-  } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+  });
+  fctx.body.push({ op: "local.set", index: arrLocal });
 
   return { arrLocal, arrTypeIdx, lenLocal };
 }
@@ -670,8 +673,8 @@ function emitNodeFsFd(ctx: CodegenContext, fctx: FunctionContext, fdExpr: ts.Exp
     kind: "i32",
   });
   compileExpression(ctx, fctx, fdExpr, { kind: "f64" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: fdLocal });
   return fdLocal;
 }
 
@@ -699,19 +702,19 @@ function emitNodeFsReadSync(
     const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
     // dst = ptr + off
     const dstLocal = allocLocal(fctx, `__nodefs_rdst_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.set", index: dstLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx });
+    fctx.body.push({ op: "local.get", index: offLocal });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: dstLocal });
     emitFdReadRuntime(fctx, fdLocal, dstLocal, lenLocal, sinkIdx, direct);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
   const gc = emitNodeFsResolveGcU8(ctx, fctx, expr.arguments[1]!);
   if (!gc) {
     // Not a recognizable buffer — emit 0 (no bytes read) so codegen continues.
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
     return { kind: "f64" };
   }
   const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
@@ -722,19 +725,19 @@ function emitNodeFsReadSync(
 
   // nread = read(fd, WASI_STDIN_BUF_START, length)  [shim call or direct fd_read]
   const scratchPtrLocal = allocLocal(fctx, `__nodefs_rscratch_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START });
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal });
   const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, {
     kind: "i32",
   });
   emitFdReadRuntime(fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
-  fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: nreadLocal });
 
   // Copy buf_dest[off + j] = scratch[j] for j in [0, nread).
   emitScratchToArrayCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_STDIN_BUF_START, nreadLocal);
 
-  fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "local.get", index: nreadLocal });
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
@@ -782,18 +785,18 @@ function emitNodeFsWriteSync(
     const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
     // src = ptr + off
     const srcLocal = allocLocal(fctx, `__nodefs_wsrc_${fctx.locals.length}`, { kind: "i32" });
-    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.set", index: srcLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx });
+    fctx.body.push({ op: "local.get", index: offLocal });
+    fctx.body.push({ op: "i32.add" });
+    fctx.body.push({ op: "local.set", index: srcLocal });
     emitFdWriteRuntime(ctx, fctx, fdLocal, srcLocal, lenLocal, sinkIdx, direct);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
   const gc = emitNodeFsResolveGcU8(ctx, fctx, expr.arguments[1]!);
   if (!gc) {
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 });
     return { kind: "f64" };
   }
   const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
@@ -806,10 +809,10 @@ function emitNodeFsWriteSync(
 
   // nwritten = write(fd, WASI_WRITE_SCRATCH_START, length)  [shim or direct]
   const scratchPtrLocal = allocLocal(fctx, `__nodefs_wscratch_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
-  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START });
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal });
   emitFdWriteRuntime(ctx, fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
@@ -856,24 +859,24 @@ function emitNodeFsWriteSyncString(ctx: CodegenContext, fctx: FunctionContext, e
   const writeStrFdIdx = ensureWasiWriteAnyStringFdHelper(ctx);
   if (compiled && ctx.nativeStrTypeIdx >= 0 && writeStrFdIdx >= 0) {
     if (compiled.kind === "ref_null") {
-      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+      fctx.body.push({ op: "ref.as_non_null" });
     }
     // Stash the string ref, push (str, fd), call, convert byte count to f64.
     const strLocal = allocLocal(fctx, `__nodefs_wstr_${fctx.locals.length}`, {
       kind: "ref",
       typeIdx: ctx.nativeStrTypeIdx,
     });
-    fctx.body.push({ op: "local.set", index: strLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: strLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeStrFdIdx } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "local.set", index: strLocal });
+    fctx.body.push({ op: "local.get", index: strLocal });
+    fctx.body.push({ op: "local.get", index: fdLocal });
+    fctx.body.push({ op: "call", funcIdx: writeStrFdIdx });
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
   // Native-string runtime unavailable — drop the compiled string and report 0.
-  if (compiled) fctx.body.push({ op: "drop" } as Instr);
-  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  if (compiled) fctx.body.push({ op: "drop" });
+  fctx.body.push({ op: "f64.const", value: 0 });
   return { kind: "f64" };
 }
 
@@ -900,45 +903,45 @@ function emitNodeFsWriteSyncDataView(
   const lenLocal = emitDataViewToWriteScratch(ctx, fctx, recvType, WASI_WRITE_SCRATCH_START);
   if (lenLocal < 0) {
     // Couldn't resolve the DataView backing — drop the operand and report 0.
-    if (recvType) fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    if (recvType) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "f64.const", value: 0 });
     return { kind: "f64" };
   }
 
   // nwritten = write(fd, WASI_WRITE_SCRATCH_START, viewLen)  [shim or direct]
   const scratchPtrLocal = allocLocal(fctx, `__nodefs_dvscratch_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
-  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START });
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal });
   emitFdWriteRuntime(ctx, fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
 /** Grow linear memory so [scratchStart, scratchStart + lenLocal) is addressable. */
 export function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLocal: number): void {
   const needPagesLocal = allocLocal(fctx, `__nodefs_pages_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-  fctx.body.push({ op: "i32.shr_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "memory.size" } as Instr);
-  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({ op: "i32.const", value: scratchStart });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.const", value: 65535 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.const", value: 16 });
+  fctx.body.push({ op: "i32.shr_u" });
+  fctx.body.push({ op: "local.set", index: needPagesLocal });
+  fctx.body.push({ op: "local.get", index: needPagesLocal });
+  fctx.body.push({ op: "memory.size" });
+  fctx.body.push({ op: "i32.gt_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      { op: "local.get", index: needPagesLocal } as Instr,
-      { op: "memory.size" } as Instr,
-      { op: "i32.sub" } as Instr,
-      { op: "memory.grow" } as Instr,
-      { op: "drop" } as Instr,
+      { op: "local.get", index: needPagesLocal },
+      { op: "memory.size" },
+      { op: "i32.sub" },
+      { op: "memory.grow" },
+      { op: "drop" },
     ],
-  } as Instr);
+  });
 }
 
 /** for j in [0, countLocal): dest[off + j] = scratch[scratchStart + j] (i8 array). */
@@ -953,34 +956,34 @@ export function emitScratchToArrayCopy(
   const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, {
     kind: "i32",
   });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: jLocal });
   const loopBody: Instr[] = [
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "local.get", index: countLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: offLocal } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "local.get", index: jLocal },
+    { op: "local.get", index: countLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
+    { op: "local.get", index: arrLocal },
+    { op: "local.get", index: offLocal },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
     // value = scratch[scratchStart + j]
-    { op: "i32.const", value: scratchStart } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: jLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
+    { op: "i32.const", value: scratchStart },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
+    { op: "i32.load8_u", align: 0, offset: 0 },
+    { op: "array.set", typeIdx: arrTypeIdx },
+    { op: "local.get", index: jLocal },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: jLocal },
+    { op: "br", depth: 0 },
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 }
 
 /** for j in [0, countLocal): scratch[scratchStart + j] = src[off + j] (i8 array). */
@@ -995,33 +998,33 @@ export function emitArrayToScratchCopy(
   const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, {
     kind: "i32",
   });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: jLocal });
   const loopBody: Instr[] = [
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "local.get", index: countLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: jLocal },
+    { op: "local.get", index: countLocal },
+    { op: "i32.ge_s" },
+    { op: "br_if", depth: 1 },
     // addr = scratchStart + j
-    { op: "i32.const", value: scratchStart } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: scratchStart },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
     // value = src[off + j]  (array.get_u on i8 array)
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: offLocal } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
-    { op: "i32.store8", align: 0, offset: 0 } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: jLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
+    { op: "local.get", index: arrLocal },
+    { op: "local.get", index: offLocal },
+    { op: "local.get", index: jLocal },
+    { op: "i32.add" },
+    { op: "array.get_u", typeIdx: arrTypeIdx },
+    { op: "i32.store8", align: 0, offset: 0 },
+    { op: "local.get", index: jLocal },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: jLocal },
+    { op: "br", depth: 0 },
   ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
 }

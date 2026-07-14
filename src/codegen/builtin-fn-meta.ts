@@ -261,9 +261,9 @@ export function pushBuiltinFnClosureValueInstrs(
   closure: { type: { kind: "ref"; typeIdx: number }; funcIdx: number },
 ): Instr[] {
   const isMeta = ctx.builtinFnMetaByTypeIdx?.has(closure.type.typeIdx) ?? false;
-  const instrs: Instr[] = [{ op: "ref.func", funcIdx: closure.funcIdx } as Instr];
-  if (isMeta) instrs.push({ op: "i32.const", value: 0 } as Instr);
-  instrs.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  const instrs: Instr[] = [{ op: "ref.func", funcIdx: closure.funcIdx }];
+  if (isMeta) instrs.push({ op: "i32.const", value: 0 });
+  instrs.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
   return instrs;
 }
 
@@ -309,20 +309,20 @@ export function pushBuiltinFnSingletonValueInstrs(
       // (ref null <structType>) — starts null, set once on first read.
       type: { kind: "ref_null", typeIdx },
       mutable: true,
-      init: [{ op: "ref.null", typeIdx } as Instr],
+      init: [{ op: "ref.null", typeIdx }],
     });
     ctx.builtinFnSingletonGlobalByTypeIdx.set(typeIdx, globalIdx);
   }
 
   return [
-    { op: "global.get", index: globalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: globalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...pushBuiltinFnClosureValueInstrs(ctx, closure), { op: "global.set", index: globalIdx } as Instr],
-    } as Instr,
-    { op: "global.get", index: globalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
+      then: [...pushBuiltinFnClosureValueInstrs(ctx, closure), { op: "global.set", index: globalIdx }],
+    },
+    { op: "global.get", index: globalIdx },
+    { op: "ref.as_non_null" },
   ];
 }

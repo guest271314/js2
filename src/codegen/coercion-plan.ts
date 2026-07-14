@@ -87,9 +87,9 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
 
   // ── numeric ↔ numeric (lossless arithmetic conversions) ──
   if (fromK === "i32" && toK === "f64") return { instrs: [{ op: "f64.convert_i32_s" }] };
-  if (fromK === "f64" && toK === "i32") return { instrs: [{ op: "i32.trunc_sat_f64_s" } as Instr] };
+  if (fromK === "f64" && toK === "i32") return { instrs: [{ op: "i32.trunc_sat_f64_s" }] };
   if (fromK === "i64" && toK === "f64") return { instrs: [{ op: "f64.convert_i64_s" }] };
-  if (fromK === "f64" && toK === "i64") return { instrs: [{ op: "i64.trunc_sat_f64_s" } as Instr] };
+  if (fromK === "f64" && toK === "i64") return { instrs: [{ op: "i64.trunc_sat_f64_s" }] };
   if (fromK === "i32" && toK === "i64") return { instrs: [{ op: "i64.extend_i32_s" }] };
   if (fromK === "i64" && toK === "i32") return { instrs: [{ op: "i32.wrap_i64" }] };
 
@@ -114,11 +114,11 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
   }
   if (isExternKind(from.kind) && toK === "i32") {
     if (unboxNumberIdx === null) return null;
-    return { instrs: [{ op: "call", funcIdx: unboxNumberIdx }, { op: "i32.trunc_sat_f64_s" } as Instr] };
+    return { instrs: [{ op: "call", funcIdx: unboxNumberIdx }, { op: "i32.trunc_sat_f64_s" }] };
   }
   if (isExternKind(from.kind) && toK === "i64") {
     if (unboxNumberIdx === null) return null;
-    return { instrs: [{ op: "call", funcIdx: unboxNumberIdx }, { op: "i64.trunc_sat_f64_s" } as Instr] };
+    return { instrs: [{ op: "call", funcIdx: unboxNumberIdx }, { op: "i64.trunc_sat_f64_s" }] };
   }
 
   // ── ref/ref_null/eqref/anyref → number: extern.convert_any then unbox ──
@@ -137,18 +137,14 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
       // (ToNumber(object-without-valueOf) is NaN per §7.1.4).
       return { instrs: [{ op: "drop" }, { op: "f64.const", value: NaN }], lossy: true };
     }
-    return { instrs: [{ op: "extern.convert_any" } as Instr, { op: "call", funcIdx: unboxNumberIdx }] };
+    return { instrs: [{ op: "extern.convert_any" }, { op: "call", funcIdx: unboxNumberIdx }] };
   }
   if (anyHierarchyFrom && toK === "i32") {
     if (unboxNumberIdx === null) {
       return { instrs: [{ op: "drop" }, { op: "i32.const", value: 0 }], lossy: true };
     }
     return {
-      instrs: [
-        { op: "extern.convert_any" } as Instr,
-        { op: "call", funcIdx: unboxNumberIdx },
-        { op: "i32.trunc_sat_f64_s" } as Instr,
-      ],
+      instrs: [{ op: "extern.convert_any" }, { op: "call", funcIdx: unboxNumberIdx }, { op: "i32.trunc_sat_f64_s" }],
     };
   }
 
@@ -160,12 +156,12 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
     (from.kind === "ref" || from.kind === "ref_null" || from.kind === "eqref" || from.kind === "anyref") &&
     isExternKind(to.kind)
   ) {
-    return { instrs: [{ op: "extern.convert_any" } as Instr] };
+    return { instrs: [{ op: "extern.convert_any" }] };
   }
 
   // ── externref → anyref: any.convert_extern (anyref IS the exact target) ──
   if (isExternKind(from.kind) && toK === "anyref") {
-    return { instrs: [{ op: "any.convert_extern" } as Instr] };
+    return { instrs: [{ op: "any.convert_extern" }] };
   }
 
   // ── externref → eqref: any.convert_extern + narrowing ref.cast to `eq` ──
@@ -181,7 +177,7 @@ export function coercionPlan(from: ValType, to: ValType, helpers: CoercionHelper
   if (isExternKind(from.kind) && toK === "eqref") {
     const EQ_HEAP_TYPE = -19;
     return {
-      instrs: [{ op: "any.convert_extern" } as Instr, { op: "ref.cast_null", typeIdx: EQ_HEAP_TYPE } as Instr],
+      instrs: [{ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: EQ_HEAP_TYPE }],
     };
   }
 

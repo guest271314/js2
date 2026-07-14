@@ -43,7 +43,7 @@ export type JsErrorKind = "TypeError" | "RangeError" | "ReferenceError" | "Synta
 export function buildThrowStringInstrs(ctx: CodegenContext, message: string): Instr[] {
   addStringConstantGlobal(ctx, message);
   const tagIdx = ensureExnTag(ctx);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
+  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }];
 }
 
 /**
@@ -103,9 +103,9 @@ export function buildThrowJsErrorInstrs(
   // If the constructor isn't available, the message externref is still on the
   // stack — degrade to throwing a string. Both paths produce the same tag.
   if (ctorIdx !== undefined) {
-    instrs.push({ op: "call", funcIdx: ctorIdx } as Instr);
+    instrs.push({ op: "call", funcIdx: ctorIdx });
   }
-  instrs.push({ op: "throw", tagIdx } as Instr);
+  instrs.push({ op: "throw", tagIdx });
   return instrs;
 }
 

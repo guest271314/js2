@@ -90,13 +90,13 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
   const L_DAYS = 20;
   const L_HASTIME = 21;
 
-  const getI = (l: number): Instr => ({ op: "local.get", index: l }) as Instr;
-  const setI = (l: number): Instr => ({ op: "local.set", index: l }) as Instr;
-  const i32c = (v: number): Instr => ({ op: "i32.const", value: v }) as Instr;
-  const i64c = (v: bigint): Instr => ({ op: "i64.const", value: v }) as Instr;
+  const getI = (l: number): Instr => ({ op: "local.get", index: l });
+  const setI = (l: number): Instr => ({ op: "local.set", index: l });
+  const i32c = (v: number): Instr => ({ op: "i32.const", value: v });
+  const i64c = (v: bigint): Instr => ({ op: "i64.const", value: v });
 
   // c = data[i]  (no bounds check; callers guard i<len first via guarded blocks)
-  const loadC: Instr[] = [getI(L_DATA), getI(L_I), { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr, setI(L_C)];
+  const loadC: Instr[] = [getI(L_DATA), getI(L_I), { op: "array.get_u", typeIdx: strDataTypeIdx }, setI(L_C)];
 
   /**
    * readDigits(n, dest): read exactly `n` decimal digits starting at `i` into
@@ -111,7 +111,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
       out.push(
         getI(L_I),
         getI(L_LEN),
-        { op: "i32.ge_s" } as Instr,
+        { op: "i32.ge_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -121,11 +121,11 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
             // if c < '0' || c > '9' -> fail; else acc = acc*10 + (c-'0'); i++
             getI(L_C),
             i32c(C_ZERO),
-            { op: "i32.lt_s" } as Instr,
+            { op: "i32.lt_s" },
             getI(L_C),
             i32c(C_NINE),
-            { op: "i32.gt_s" } as Instr,
-            { op: "i32.or" } as Instr,
+            { op: "i32.gt_s" },
+            { op: "i32.or" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -133,21 +133,21 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               else: [
                 getI(L_ACC),
                 i64c(10n),
-                { op: "i64.mul" } as Instr,
+                { op: "i64.mul" },
                 getI(L_C),
                 i32c(C_ZERO),
-                { op: "i32.sub" } as Instr,
-                { op: "i64.extend_i32_s" } as Instr,
-                { op: "i64.add" } as Instr,
+                { op: "i32.sub" },
+                { op: "i64.extend_i32_s" },
+                { op: "i64.add" },
                 setI(L_ACC),
                 getI(L_I),
                 i32c(1),
-                { op: "i32.add" } as Instr,
+                { op: "i32.add" },
                 setI(L_I),
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       );
     }
     out.push(getI(L_ACC), setI(dest));
@@ -158,7 +158,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
   const expectChar = (code: number): Instr[] => [
     getI(L_I),
     getI(L_LEN),
-    { op: "i32.lt_s" } as Instr,
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -166,42 +166,41 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
         ...loadC,
         getI(L_C),
         i32c(code),
-        { op: "i32.eq" } as Instr,
+        { op: "i32.eq" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I)],
+          then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I)],
           else: [i32c(1), setI(L_FAIL)],
-        } as Instr,
+        },
       ],
       else: [i32c(1), setI(L_FAIL)],
-    } as Instr,
+    },
   ];
 
   // peekIs(code) leaves i32 bool on stack: (i<len) && data[i]==code
   const peekIs = (code: number): Instr[] => [
     getI(L_I),
     getI(L_LEN),
-    { op: "i32.lt_s" } as Instr,
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: i32 },
-      then: [...loadC, getI(L_C), i32c(code), { op: "i32.eq" } as Instr],
+      then: [...loadC, getI(L_C), i32c(code), { op: "i32.eq" }],
       else: [i32c(0)],
-    } as Instr,
+    },
   ];
 
   // guard(body): run `body` only while no parse error has been recorded, so a
   // failure short-circuits the remaining stages and leaves the accumulators
   // well-defined. Emits `if (!fail) { … }`.
-  const guard = (inner: Instr[]): Instr =>
-    ({
-      op: "if",
-      blockType: { kind: "empty" },
-      then: inner,
-    }) as Instr;
+  const guard = (inner: Instr[]): Instr => ({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: inner,
+  });
   // guard prelude: push `!fail` before the if.
-  const guarded = (inner: Instr[]): Instr[] => [getI(L_FAIL), { op: "i32.eqz" } as Instr, guard(inner)];
+  const guarded = (inner: Instr[]): Instr[] => [getI(L_FAIL), { op: "i32.eqz" }, guard(inner)];
 
   // ── RFC2822 / toString-form helpers (#2164 Date.parse extension) ──────────
   // skipSpaces(): advance `i` over any run of ASCII spaces (0x20). A `loop`
@@ -219,10 +218,10 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I), { op: "br", depth: 0 } as Instr],
-        } as Instr,
+          then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I), { op: "br", depth: 0 }],
+        },
       ],
-    } as Instr,
+    },
   ];
   // monthFromName(): read 3 letters at `i` (case-insensitive), set L_MONTH to
   // 1–12, advance `i` by 3. On no-match set fail. Implemented as a chain of
@@ -236,18 +235,18 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
     //   a = c + 32        (used when isUpper)
     getI(L_C),
     i32c(32),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     //   b = c             (used otherwise)
     getI(L_C),
     //   cond = (c >= 'A') && (c <= 'Z')
     getI(L_C),
     i32c(65),
-    { op: "i32.ge_s" } as Instr,
+    { op: "i32.ge_s" },
     getI(L_C),
     i32c(90),
-    { op: "i32.le_s" } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "select" } as Instr,
+    { op: "i32.le_s" },
+    { op: "i32.and" },
+    { op: "select" },
     setI(reg),
   ];
   // Read the char at i+k into L_C (no advance). Guarded by caller ensuring
@@ -256,8 +255,8 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
     getI(L_DATA),
     getI(L_I),
     i32c(k),
-    { op: "i32.add" } as Instr,
-    { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+    { op: "i32.add" },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
     setI(L_C),
   ];
   // m0/m1/m2 lowercased month-name letters reuse L_TZH/L_TZM/L_DAYS-adjacent
@@ -270,21 +269,21 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
   const monthMatch = (a: number, b: number, c: number, monthNo: number, elseArm: Instr[]): Instr[] => [
     getI(L_M0),
     i32c(a),
-    { op: "i32.eq" } as Instr,
+    { op: "i32.eq" },
     getI(L_M1),
     i32c(b),
-    { op: "i32.eq" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.eq" },
+    { op: "i32.and" },
     getI(L_M2),
     i32c(c),
-    { op: "i32.eq" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.eq" },
+    { op: "i32.and" },
     {
       op: "if",
       blockType: { kind: "empty" },
       then: [i64c(BigInt(monthNo)), setI(L_MONTH)],
       else: elseArm,
-    } as Instr,
+    },
   ];
   // matchMonthName(): requires i+3<=len; lowercases the 3 chars; matches one of
   // the 12 names; advances i by 3 on success, sets fail on no match.
@@ -293,9 +292,9 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
       // bounds: i+3 <= len
       getI(L_I),
       i32c(3),
-      { op: "i32.add" } as Instr,
+      { op: "i32.add" },
       getI(L_LEN),
-      { op: "i32.gt_s" } as Instr,
+      { op: "i32.gt_s" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -376,16 +375,16 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
             ),
           ),
           // advance i by 3 only if matched (fail stays 0)
-          ...guarded([getI(L_I), i32c(3), { op: "i32.add" } as Instr, setI(L_I)]),
+          ...guarded([getI(L_I), i32c(3), { op: "i32.add" }, setI(L_I)]),
         ],
-      } as Instr,
+      },
     ]),
   ];
   // peekLetter(): (i<len) && isAlpha(data[i]) — leaves i32 bool on stack.
   const peekLetter: Instr[] = [
     getI(L_I),
     getI(L_LEN),
-    { op: "i32.lt_s" } as Instr,
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: i32 },
@@ -393,22 +392,22 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
         ...loadC,
         getI(L_C),
         i32c(65),
-        { op: "i32.ge_s" } as Instr,
+        { op: "i32.ge_s" },
         getI(L_C),
         i32c(90),
-        { op: "i32.le_s" } as Instr,
-        { op: "i32.and" } as Instr,
+        { op: "i32.le_s" },
+        { op: "i32.and" },
         getI(L_C),
         i32c(97),
-        { op: "i32.ge_s" } as Instr,
+        { op: "i32.ge_s" },
         getI(L_C),
         i32c(122),
-        { op: "i32.le_s" } as Instr,
-        { op: "i32.and" } as Instr,
-        { op: "i32.or" } as Instr,
+        { op: "i32.le_s" },
+        { op: "i32.and" },
+        { op: "i32.or" },
       ],
       else: [i32c(0)],
-    } as Instr,
+    },
   ];
   // readDigits1or2(dest): read one or two digits into `dest` (day-of-month).
   const readDigits1or2 = (dest: number): Instr[] => [
@@ -418,7 +417,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
     ...guarded([
       getI(L_I),
       getI(L_LEN),
-      { op: "i32.lt_s" } as Instr,
+      { op: "i32.lt_s" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -426,52 +425,52 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           ...loadC,
           getI(L_C),
           i32c(C_ZERO),
-          { op: "i32.ge_s" } as Instr,
+          { op: "i32.ge_s" },
           getI(L_C),
           i32c(C_NINE),
-          { op: "i32.le_s" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "i32.le_s" },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
               getI(dest),
               i64c(10n),
-              { op: "i64.mul" } as Instr,
+              { op: "i64.mul" },
               getI(L_C),
               i32c(C_ZERO),
-              { op: "i32.sub" } as Instr,
-              { op: "i64.extend_i32_s" } as Instr,
-              { op: "i64.add" } as Instr,
+              { op: "i32.sub" },
+              { op: "i64.extend_i32_s" },
+              { op: "i64.add" },
               setI(dest),
               getI(L_I),
               i32c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               setI(L_I),
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ]),
   ];
 
   const body: Instr[] = [
     // flatten
     getI(0),
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
     setI(L_FLAT),
     getI(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     setI(L_DATA),
     getI(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     setI(L_I), // i = off
     getI(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
     getI(L_I),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     setI(L_LEN), // len = off + len
     // field defaults: month=1 day=1 rest=0, sign=+1, tz offset 0
     i64c(1n),
@@ -518,12 +517,12 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
       then: [
         getI(L_I),
         i32c(1),
-        { op: "i32.add" } as Instr,
+        { op: "i32.add" },
         setI(L_I),
         ...readDigits(6, L_YEAR),
         getI(L_YEAR),
         getI(L_SIGN),
-        { op: "i64.mul" } as Instr,
+        { op: "i64.mul" },
         setI(L_YEAR),
       ],
       else: [
@@ -534,21 +533,21 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           then: [
             getI(L_I),
             i32c(1),
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             setI(L_I),
             i64c(-1n),
             setI(L_SIGN),
             ...readDigits(6, L_YEAR),
             getI(L_YEAR),
             getI(L_SIGN),
-            { op: "i64.mul" } as Instr,
+            { op: "i64.mul" },
             setI(L_YEAR),
           ],
           // plain 4-digit year
           else: [...readDigits(4, L_YEAR)],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   );
 
   // --- optional -MM ---
@@ -561,7 +560,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
         then: [
           getI(L_I),
           i32c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           setI(L_I),
           ...readDigits(2, L_MONTH),
           // optional -DD
@@ -569,10 +568,10 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I), ...readDigits(2, L_DAY)],
-          } as Instr,
+            then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I), ...readDigits(2, L_DAY)],
+          },
         ],
-      } as Instr,
+      },
     ]),
   );
 
@@ -581,7 +580,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
     ...guarded([
       ...peekIs(C_T),
       ...peekIs(C_t),
-      { op: "i32.or" } as Instr,
+      { op: "i32.or" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -590,7 +589,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           setI(L_HASTIME),
           getI(L_I),
           i32c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           setI(L_I),
           ...readDigits(2, L_HOUR),
           ...expectChar(C_COLON),
@@ -603,7 +602,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
             then: [
               getI(L_I),
               i32c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               setI(L_I),
               ...readDigits(2, L_SEC),
               // optional .sss (read exactly 3 digits)
@@ -611,20 +610,20 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I), ...readDigits(3, L_MS)],
-              } as Instr,
+                then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I), ...readDigits(3, L_MS)],
+              },
             ],
-          } as Instr,
+          },
           // optional timezone: Z | ±HH:mm
           ...peekIs(C_Z),
           {
             op: "if",
             blockType: { kind: "empty" },
-            then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I)],
+            then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I)],
             else: [
               ...peekIs(C_PLUS),
               ...peekIs(C_MINUS),
-              { op: "i32.or" } as Instr,
+              { op: "i32.or" },
               {
                 op: "if",
                 blockType: { kind: "empty" },
@@ -636,21 +635,21 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
                     blockType: { kind: "val", type: i64 },
                     then: [i64c(-1n)],
                     else: [i64c(1n)],
-                  } as Instr,
+                  },
                   setI(L_TZSIGN),
                   getI(L_I),
                   i32c(1),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   setI(L_I),
                   ...readDigits(2, L_TZH),
                   ...expectChar(C_COLON),
                   ...readDigits(2, L_TZM),
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ]),
   );
 
@@ -674,7 +673,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
       // require a digit to start a time field
       getI(L_I),
       getI(L_LEN),
-      { op: "i32.lt_s" } as Instr,
+      { op: "i32.lt_s" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -682,11 +681,11 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           ...loadC,
           getI(L_C),
           i32c(C_ZERO),
-          { op: "i32.ge_s" } as Instr,
+          { op: "i32.ge_s" },
           getI(L_C),
           i32c(C_NINE),
-          { op: "i32.le_s" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "i32.le_s" },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "empty" },
@@ -700,13 +699,13 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
                 {
                   op: "if",
                   blockType: { kind: "empty" },
-                  then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I), ...readDigits(2, L_SEC)],
-                } as Instr,
+                  then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I), ...readDigits(2, L_SEC)],
+                },
               ]),
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ]),
   ];
   // Optional explicit ±HHMM offset (after GMT/UTC or standalone). Sets tzSign /
@@ -733,12 +732,12 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
                 {
                   op: "if",
                   blockType: { kind: "empty" },
-                  then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I), { op: "br", depth: 0 } as Instr],
-                } as Instr,
+                  then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I), { op: "br", depth: 0 }],
+                },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       ]),
       // optional ±HHMM
       ...guarded([
@@ -748,7 +747,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           blockType: { kind: "val", type: i32 },
           then: [i32c(1)],
           else: [...peekIs(C_MINUS)],
-        } as Instr,
+        },
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -760,11 +759,11 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               blockType: { kind: "val", type: i64 },
               then: [i64c(-1n)],
               else: [i64c(1n)],
-            } as Instr,
+            },
             setI(L_TZSIGN),
             getI(L_I),
             i32c(1),
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             setI(L_I),
             ...readDigits(2, L_TZH),
             // optional ':' then mm
@@ -773,12 +772,12 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               {
                 op: "if",
                 blockType: { kind: "empty" },
-                then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I)],
-              } as Instr,
+                then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I)],
+              },
             ]),
             ...readDigits(2, L_TZM),
           ],
-        } as Instr,
+        },
       ]),
     ]),
   ];
@@ -805,9 +804,9 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
           // space-then-letter test; a too-short token defaults to "not weekday".
           getI(L_I),
           i32c(4),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           getI(L_LEN),
-          { op: "i32.le_s" } as Instr,
+          { op: "i32.le_s" },
           {
             op: "if",
             blockType: { kind: "val", type: i32 },
@@ -816,44 +815,44 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               getI(L_DATA),
               getI(L_I),
               i32c(3),
-              { op: "i32.add" } as Instr,
-              { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataTypeIdx },
               setI(L_C),
               // isComma = c3 == ','
               getI(L_C),
               i32c(C_COMMA),
-              { op: "i32.eq" } as Instr,
+              { op: "i32.eq" },
               // spaceThenLetter = (c3 == ' ') && isAlpha(data[i+4])
               getI(L_C),
               i32c(C_SPACE),
-              { op: "i32.eq" } as Instr,
+              { op: "i32.eq" },
               // load c4 into L_C and test alpha
               getI(L_DATA),
               getI(L_I),
               i32c(4),
-              { op: "i32.add" } as Instr,
-              { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataTypeIdx },
               setI(L_C),
               getI(L_C),
               i32c(65),
-              { op: "i32.ge_s" } as Instr,
+              { op: "i32.ge_s" },
               getI(L_C),
               i32c(90),
-              { op: "i32.le_s" } as Instr,
-              { op: "i32.and" } as Instr,
+              { op: "i32.le_s" },
+              { op: "i32.and" },
               getI(L_C),
               i32c(97),
-              { op: "i32.ge_s" } as Instr,
+              { op: "i32.ge_s" },
               getI(L_C),
               i32c(122),
-              { op: "i32.le_s" } as Instr,
-              { op: "i32.and" } as Instr,
-              { op: "i32.or" } as Instr, // isAlpha(c4)
-              { op: "i32.and" } as Instr, // (c3==' ') && isAlpha(c4)
-              { op: "i32.or" } as Instr, // isComma || spaceThenLetter
+              { op: "i32.le_s" },
+              { op: "i32.and" },
+              { op: "i32.or" }, // isAlpha(c4)
+              { op: "i32.and" }, // (c3==' ') && isAlpha(c4)
+              { op: "i32.or" }, // isComma || spaceThenLetter
             ],
             else: [i32c(0)],
-          } as Instr,
+          },
           {
             op: "if",
             blockType: { kind: "empty" },
@@ -861,7 +860,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
               // skip the 3 weekday letters
               getI(L_I),
               i32c(3),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               setI(L_I),
               // optional comma
               ...guarded([
@@ -869,14 +868,14 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
                 {
                   op: "if",
                   blockType: { kind: "empty" },
-                  then: [getI(L_I), i32c(1), { op: "i32.add" } as Instr, setI(L_I)],
-                } as Instr,
+                  then: [getI(L_I), i32c(1), { op: "i32.add" }, setI(L_I)],
+                },
               ]),
               ...skipSpaces,
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ]),
     // Now at either `DD Mon YYYY` (digit-first, toUTCString) or `Mon DD YYYY`
     // (letter-first, toString/toDateString).
@@ -889,7 +888,7 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
         then: [...matchMonthName, ...skipSpaces, ...readDigits1or2(L_DAY), ...skipSpaces, ...readDigits(4, L_YEAR)],
         // digit-first: DD Mon YYYY
         else: [...readDigits1or2(L_DAY), ...skipSpaces, ...matchMonthName, ...skipSpaces, ...readDigits(4, L_YEAR)],
-      } as Instr,
+      },
     ]),
     ...parseHMSOptional,
     ...parseTZOptional,
@@ -905,19 +904,19 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
     blockType: { kind: "empty" },
     then: rfcArm,
     else: isoArm,
-  } as Instr);
+  });
 
   // --- require we consumed the whole string (i == len) ---
   body.push(
     ...guarded([
       getI(L_I),
       getI(L_LEN),
-      { op: "i32.ne" } as Instr,
+      { op: "i32.ne" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [i32c(1), setI(L_FAIL)],
-      } as Instr,
+      },
     ]),
   );
 
@@ -925,12 +924,12 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
   const rangeFail = (l: number, lo: bigint, hi: bigint): Instr[] => [
     getI(l),
     i64c(lo),
-    { op: "i64.lt_s" } as Instr,
+    { op: "i64.lt_s" },
     getI(l),
     i64c(hi),
-    { op: "i64.gt_s" } as Instr,
-    { op: "i32.or" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [i32c(1), setI(L_FAIL)] } as Instr,
+    { op: "i64.gt_s" },
+    { op: "i32.or" },
+    { op: "if", blockType: { kind: "empty" }, then: [i32c(1), setI(L_FAIL)] },
   ];
   body.push(
     ...guarded([
@@ -949,44 +948,44 @@ export function emitNativeDateParse(ctx: CodegenContext): void {
   body.push(getI(L_FAIL), {
     op: "if",
     blockType: { kind: "val", type: f64 },
-    then: [{ op: "f64.const", value: NaN } as Instr],
+    then: [{ op: "f64.const", value: NaN }],
     else: [
       getI(L_YEAR),
       getI(L_MONTH),
       getI(L_DAY),
-      { op: "call", funcIdx: daysFromCivilIdx } as Instr,
+      { op: "call", funcIdx: daysFromCivilIdx },
       setI(L_DAYS),
       getI(L_DAYS),
       i64c(86400000n),
-      { op: "i64.mul" } as Instr,
+      { op: "i64.mul" },
       getI(L_HOUR),
       i64c(3600000n),
-      { op: "i64.mul" } as Instr,
-      { op: "i64.add" } as Instr,
+      { op: "i64.mul" },
+      { op: "i64.add" },
       getI(L_MIN),
       i64c(60000n),
-      { op: "i64.mul" } as Instr,
-      { op: "i64.add" } as Instr,
+      { op: "i64.mul" },
+      { op: "i64.add" },
       getI(L_SEC),
       i64c(1000n),
-      { op: "i64.mul" } as Instr,
-      { op: "i64.add" } as Instr,
+      { op: "i64.mul" },
+      { op: "i64.add" },
       getI(L_MS),
-      { op: "i64.add" } as Instr,
+      { op: "i64.add" },
       // subtract timezone offset: tzSign * (tzH*3600000 + tzM*60000)
       getI(L_TZSIGN),
       getI(L_TZH),
       i64c(3600000n),
-      { op: "i64.mul" } as Instr,
+      { op: "i64.mul" },
       getI(L_TZM),
       i64c(60000n),
-      { op: "i64.mul" } as Instr,
-      { op: "i64.add" } as Instr,
-      { op: "i64.mul" } as Instr,
-      { op: "i64.sub" } as Instr,
-      { op: "f64.convert_i64_s" } as Instr,
+      { op: "i64.mul" },
+      { op: "i64.add" },
+      { op: "i64.mul" },
+      { op: "i64.sub" },
+      { op: "f64.convert_i64_s" },
     ],
-  } as Instr);
+  });
 
   pushDefinedFunc(ctx, funcIdx, {
     typeIdx,

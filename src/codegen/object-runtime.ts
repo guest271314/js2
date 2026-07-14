@@ -231,7 +231,7 @@ export function emitStandaloneObjectConstructor(ctx: CodegenContext, argCount: n
   // Ignore the (already side-effect-evaluated) constructor arguments and return
   // a fresh native plain object. `return_call` keeps the tail position so no
   // extra frame is retained.
-  const body: Instr[] = [{ op: "return_call", funcIdx: newPlainObjectIdx } as Instr];
+  const body: Instr[] = [{ op: "return_call", funcIdx: newPlainObjectIdx }];
   pushDefinedFunc(ctx, funcIdx, { name: "__new_Object", typeIdx, locals: [], body, exported: false });
 }
 
@@ -306,9 +306,9 @@ export function emitStandaloneVecBuiltinConstructor(ctx: CodegenContext, importN
   const body: Instr[] = [
     { op: "i32.const", value: 0 }, // length = 0
     { op: "i32.const", value: 0 }, // backing capacity = 0 (identity-only, no growth)
-    { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-    { op: "struct.new", typeIdx: vecTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" },
   ];
   pushDefinedFunc(ctx, funcIdx, { name: importName, typeIdx, locals: [], body, exported: false });
 }
@@ -593,7 +593,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     [{ kind: "externref" }],
     [{ kind: "i32" }],
     [{ name: "any", type: { kind: "anyref" } }],
-    [{ op: "i32.const", value: 0 } as Instr],
+    [{ op: "i32.const", value: 0 }],
   );
   ctx.externIsArrayReserved = true;
 
@@ -645,28 +645,28 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       [{ kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
       bfnMetaLocals,
-      [{ op: "ref.null.extern" } as Instr],
+      [{ op: "ref.null.extern" }],
     );
     registerNative(
       "__builtinfn_gopd",
       [{ kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
       [{ name: "v", type: { kind: "externref" } as ValType }],
-      [{ op: "ref.null.extern" } as Instr],
+      [{ op: "ref.null.extern" }],
     );
     registerNative(
       "__builtinfn_delete",
       [{ kind: "externref" }, { kind: "externref" }],
       [{ kind: "i32" }],
       bfnMetaLocals,
-      [{ op: "i32.const", value: 0 } as Instr],
+      [{ op: "i32.const", value: 0 }],
     );
     registerNative(
       "__builtinfn_push_ownnames",
       [{ kind: "externref" }, { kind: "externref" }],
       [{ kind: "i32" }],
       [{ name: "any", type: { kind: "anyref" } as ValType }],
-      [{ op: "i32.const", value: 0 } as Instr],
+      [{ op: "i32.const", value: 0 }],
     );
   }
   const bfnGetMetaIdx = ctx.standalone ? ctx.funcMap.get("__builtinfn_get_meta") : undefined;
@@ -719,7 +719,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       },
       // else if (boxed number) return number_toString(__unbox_number(key))
       ...(boxNumTypeIdx >= 0
-        ? ([
+        ? [
             { op: "local.get", index: 1 },
             { op: "ref.test", typeIdx: boxNumTypeIdx },
             {
@@ -732,7 +732,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 { op: "return" },
               ],
             },
-          ] as Instr[])
+          ]
         : []),
       // #2042 R2 — object-key arm. A computed access with an OBJECT key
       // (`obj[{valueOf:()=>2}]`) reaches here as a `$Object` externref; the
@@ -771,9 +771,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     toPropertyKeyIdx === undefined
       ? body
       : [
-          { op: "local.get", index: keyParamIdx } as Instr,
-          { op: "call", funcIdx: toPropertyKeyIdx } as Instr,
-          { op: "local.set", index: keyParamIdx } as Instr,
+          { op: "local.get", index: keyParamIdx },
+          { op: "call", funcIdx: toPropertyKeyIdx },
+          { op: "local.set", index: keyParamIdx },
           ...body,
         ];
 
@@ -796,7 +796,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "any.convert_extern" },
       { op: "local.tee", index: 7 },
       ...(symbolKeysEnabled
-        ? ([
+        ? [
             { op: "ref.test", typeIdx: symbolTypeIdx },
             {
               op: "if",
@@ -810,7 +810,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 { op: "return" },
               ],
             },
-          ] as Instr[])
+          ]
         : []),
       // str = flatten(cast<$AnyString>(keyAny))
       { op: "local.get", index: 7 },
@@ -977,7 +977,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     { op: "any.convert_extern" },
     { op: "local.set", index: searchAnyLocal },
     ...(symbolKeysEnabled
-      ? ([
+      ? [
           { op: "local.get", index: searchAnyLocal },
           { op: "ref.test", typeIdx: symbolTypeIdx },
           { op: "local.tee", index: isSymLocal },
@@ -999,15 +999,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.set", index: fkeyLocal },
             ],
           },
-        ] as Instr[])
-      : ([
+        ]
+      : [
           { op: "i32.const", value: 0 },
           { op: "local.set", index: isSymLocal },
           { op: "local.get", index: searchAnyLocal },
           { op: "ref.cast", typeIdx: anyStrTypeIdx },
           { op: "call", funcIdx: strFlattenIdx },
           { op: "local.set", index: fkeyLocal },
-        ] as Instr[])),
+        ]),
   ];
 
   // (#2866) Leave an i32 (1/0) on the stack: does `entryLocal`'s (non-null) key
@@ -1185,13 +1185,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // A FACTORY, not a shared array — the miss appears in three branches and
     // shared Instr objects get double-remapped by finalize walks (see
     // `reference_shared_instr_object_dce_double_remap`).
-    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
     const body: Instr[] = [
       // (#2896) Builtin-fn metadata arm: `fn[key]` for key "name"/"length" on a
       // builtin function value answers its spec metadata (host-free). Non-meta
       // receivers/keys fall through unchanged (the helper returns null).
       ...(bfnGetMetaIdx !== undefined
-        ? ([
+        ? [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 1 },
             { op: "call", funcIdx: bfnGetMetaIdx },
@@ -1203,7 +1203,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               blockType: { kind: "empty" },
               then: [{ op: "local.get", index: 6 }, { op: "return" }],
             },
-          ] as Instr[])
+          ]
         : []),
       // any = any.convert_extern(obj)
       { op: "local.get", index: 0 },
@@ -1215,7 +1215,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [...getMiss(), { op: "return" } as Instr],
+        then: [...getMiss(), { op: "return" }],
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 4 },
@@ -1270,7 +1270,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       {
                         op: "if",
                         blockType: { kind: "empty" },
-                        then: [...getMiss(), { op: "return" } as Instr],
+                        then: [...getMiss(), { op: "return" }],
                       },
                       // return __call_accessor_get(obj /*param 0*/, getter)
                       { op: "local.get", index: 0 },
@@ -1340,7 +1340,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [{ op: "i32.const", value: 1 }],
             else: s1IsUndefTail,
-          } as Instr,
+          },
         ],
       );
       // (#2106 S1, flag-only) __nullish_to_null(externref) -> externref —
@@ -1359,13 +1359,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         [],
         [
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: isNullishIdx } as Instr,
+          { op: "call", funcIdx: isNullishIdx },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: [{ op: "ref.null.extern" }],
             else: [{ op: "local.get", index: 0 }],
-          } as Instr,
+          },
         ],
       );
     }
@@ -2088,7 +2088,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // properties are configurable, §10.2.9) and reports success. Other
       // receivers/keys fall through (the helper returns 0).
       ...(bfnDeleteIdx !== undefined
-        ? ([
+        ? [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 1 },
             { op: "call", funcIdx: bfnDeleteIdx },
@@ -2097,7 +2097,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               blockType: { kind: "empty" },
               then: [{ op: "i32.const", value: 1 }, { op: "return" }],
             },
-          ] as Instr[])
+          ]
         : []),
       // any = any.convert_extern(obj) ; if !ref.test $Object → return 1 (no-op success)
       { op: "local.get", index: 0 },
@@ -2361,7 +2361,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // builtin function value (until deleted). get_meta returns non-null
       // exactly when the own property exists.
       ...(bfnGetMetaIdx !== undefined
-        ? ([
+        ? [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 1 },
             { op: "call", funcIdx: bfnGetMetaIdx },
@@ -2372,7 +2372,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               blockType: { kind: "empty" },
               then: [{ op: "i32.const", value: 1 }, { op: "return" }],
             },
-          ] as Instr[])
+          ]
         : []),
       // any = any.convert_extern(obj); if !ref.test $Object → 0
       { op: "local.get", index: 0 },
@@ -2632,7 +2632,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const throwTypeError = (): Instr[] => [
       ...stringExtern(typeErrorMessage),
       { op: "call", funcIdx: typeErrorCtorIdx },
-      { op: "throw", tagIdx: exnTagIdx } as Instr,
+      { op: "throw", tagIdx: exnTagIdx },
     ];
 
     const isStringHint: Instr[] = [
@@ -2658,9 +2658,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "call", funcIdx: strEqualsIdx },
             ],
             else: [{ op: "i32.const", value: 0 }],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
 
     // (#2106 S1) Normalize the method lookup back to the legacy null-keyed
@@ -2670,13 +2670,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // of PR #2025's 948 "Cannot convert object to primitive value" CEs.
     const s1ToPrimNorm: Instr[] = (() => {
       const idx = ctx.funcMap.get("__nullish_to_null");
-      return idx !== undefined ? [{ op: "call", funcIdx: idx } as Instr] : [];
+      return idx !== undefined ? [{ op: "call", funcIdx: idx }] : [];
     })();
     const tryOrdinaryMethod = (name: "valueOf" | "toString", defaultObjectToStringOnMissing: boolean): Instr[] => [
       { op: "local.get", index: 0 },
       ...stringExtern(name),
       { op: "call", funcIdx: externGetIdx },
-      ...s1ToPrimNorm.map((i) => ({ ...i }) as Instr),
+      ...s1ToPrimNorm.map((i) => ({ ...i })),
       { op: "local.tee", index: L_METHOD },
       { op: "ref.is_null" },
       {
@@ -2692,7 +2692,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [...stringExtern("[object Object]"), { op: "return" }],
-              } as Instr,
+              },
             ]
           : [],
         else: [
@@ -2708,9 +2708,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "local.set", index: L_RESULT },
               ...returnIfPrimitive(L_RESULT),
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
 
     const body: Instr[] = [
@@ -2742,7 +2742,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: arrayToPrimIdx }, { op: "return" }],
-                } as Instr,
+                },
                 // (#2638) A nominal CLASS instance is neither `$Object` nor `$Vec`.
                 // Route it through `__class_to_primitive(obj, stringHint)`, which
                 // calls the per-struct `__call_valueOf`/`__call_toString`
@@ -2753,10 +2753,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 // with no user ToPrimitive — today's behaviour, no regression).
                 ...(classToPrimIdx >= 0
                   ? [
-                      { op: "local.get", index: 0 } as Instr,
+                      { op: "local.get", index: 0 },
                       ...isStringHint,
-                      { op: "call", funcIdx: classToPrimIdx } as Instr,
-                      { op: "local.set", index: L_RESULT } as Instr,
+                      { op: "call", funcIdx: classToPrimIdx },
+                      { op: "local.set", index: L_RESULT },
                       ...returnIfPrimitive(L_RESULT),
                     ]
                   : []),
@@ -2803,9 +2803,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "extern.convert_any" },
               { op: "return" },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
       ...isStringHint,
       {
         op: "if",
@@ -2840,7 +2840,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         // (#2106 S1) under the singleton regime a null externref IS JS null →
         // ToString = "null" (§7.1.17). Legacy keeps the null pass-through
         // (downstream __any_to_string renders its residual arm).
-        then: undefinedSingletonActive(ctx) ? [...stringExtern("null")] : [{ op: "ref.null.extern" } as Instr],
+        then: undefinedSingletonActive(ctx) ? [...stringExtern("null")] : [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 0 },
           { op: "any.convert_extern" },
@@ -2850,9 +2850,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             blockType: { kind: "val", type: { kind: "externref" } },
             then: [{ op: "local.get", index: 0 }, ...stringExtern("string"), { op: "call", funcIdx: toPrimitiveIdx }],
             else: [{ op: "local.get", index: 0 }],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
       { op: "any.convert_extern" },
       { op: "call", funcIdx: anyToStringIdx },
       { op: "extern.convert_any" },
@@ -2888,7 +2888,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             { op: "local.get", index: 1 },
             { op: "ref.test", typeIdx: symbolTypeIdx },
             { op: "i32.eqz" },
-            { op: "if", blockType: { kind: "empty" }, then: toStringArm } as Instr,
+            { op: "if", blockType: { kind: "empty" }, then: toStringArm },
           ]
         : // no Symbol keys in play → ToString every remaining key unconditionally
           toStringArm;
@@ -3501,7 +3501,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   // enumerable check — omitted for __obj_ordered_all (#2042 S3)
                   ...(includeNonEnum
                     ? []
-                    : ([
+                    : [
                         { op: "local.get", index: 4 },
                         { op: "ref.as_non_null" },
                         { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
@@ -3510,19 +3510,19 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                         { op: "i32.eqz" },
                         { op: "i32.eqz" },
                         { op: "i32.and" },
-                      ] as Instr[])),
+                      ]),
                   // (#2866) AND is-string-key: exclude `$Symbol` keys from the
                   // string-key enumeration order (Object.keys/values/entries/
                   // getOwnPropertyNames/for-in/JSON — §10.1.11.1 lists string keys
                   // here; symbols come only from getOwnPropertySymbols).
                   ...(symbolKeysEnabled
-                    ? ([
+                    ? [
                         { op: "local.get", index: 4 },
                         { op: "ref.as_non_null" },
                         { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
                         { op: "ref.test", typeIdx: anyStrTypeIdx },
                         { op: "i32.and" },
-                      ] as Instr[])
+                      ]
                     : []),
                   {
                     op: "if",
@@ -4275,7 +4275,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                         // min(trunc, 2^53-1)
                         { op: "local.get", index: 3 },
                         { op: "f64.const", value: MAX_SAFE },
-                        { op: "f64.min" } as Instr,
+                        { op: "f64.min" },
                       ],
                     },
                   ],
@@ -4283,7 +4283,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               ],
               else: [{ op: "f64.const", value: 0 }],
             },
-          ] as Instr[];
+          ];
         })()
       : [{ op: "f64.const", value: 0 }];
     // (#2186) `$__vec_base` arm: a real array literal / array result boxed to
@@ -4308,7 +4308,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "f64.convert_i32_s" },
               { op: "return" },
             ],
-          } as Instr,
+          },
         ]
       : [];
     const body: Instr[] = [
@@ -4373,7 +4373,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // (#2106 S1) OOB / non-indexable miss = undefined under the singleton
       // regime (`arr[oob] === undefined`), consistent with the `$Object` arm
       // which delegates to the (flipped) `__extern_get`. Legacy: null.
-      missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr],
+      missInstrs: () => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
     });
     registerNative(
       "__extern_get_idx",
@@ -4649,7 +4649,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "i32.and" },
               { op: "return" },
             ],
-          } as Instr,
+          },
         ]
       : [];
     const body: Instr[] = [
@@ -4907,31 +4907,31 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // params: a=0, b=1 ; locals: aa=2 (anyref), ba=3 (anyref)
     const bothTag = (tagIdx: number): Instr[] => [
       { op: "local.get", index: 0 },
-      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "call", funcIdx: tagIdx },
       { op: "local.get", index: 1 },
-      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "call", funcIdx: tagIdx },
       { op: "i32.and" },
     ];
     // Reference identity over the WasmGC `eq` heap (the anyref temps are already
     // materialised in locals 2/3 by `identityArm`'s preamble below).
     const refIdentityArm: Instr[] = [
       { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
       { op: "local.get", index: 3 },
-      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "ref.test", typeIdx: EQ_HEAP },
       { op: "i32.and" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
           { op: "local.get", index: 3 },
-          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.cast", typeIdx: EQ_HEAP },
           { op: "ref.eq" },
         ],
         else: [{ op: "i32.const", value: 0 }],
-      } as Instr,
+      },
     ];
     // String SameValue = value equality (flatten both, __str_equals); else ref
     // identity. `__str_flatten`/`__str_equals` are resolved at the top of this
@@ -4941,32 +4941,32 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       strFlattenIdx !== undefined && strEqualsIdx !== undefined && anyStrTypeIdx >= 0
         ? [
             { op: "local.get", index: 2 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "ref.test", typeIdx: anyStrTypeIdx },
             { op: "local.get", index: 3 },
-            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "ref.test", typeIdx: anyStrTypeIdx },
             { op: "i32.and" },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } },
               then: [
                 { op: "local.get", index: 2 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
-                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                { op: "call", funcIdx: strFlattenIdx },
                 { op: "local.get", index: 3 },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
-                { op: "call", funcIdx: strFlattenIdx } as Instr,
-                { op: "call", funcIdx: strEqualsIdx } as Instr,
+                { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                { op: "call", funcIdx: strFlattenIdx },
+                { op: "call", funcIdx: strEqualsIdx },
               ],
               else: refIdentityArm,
-            } as Instr,
+            },
           ]
         : refIdentityArm;
     const identityArm: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 2 },
       { op: "local.get", index: 1 },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.set", index: 3 },
       ...stringOrIdentityArm,
     ];
@@ -4977,13 +4977,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "call", funcIdx: toBigIdx },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "call", funcIdx: toBigIdx },
           { op: "i64.eq" },
         ],
         else: elseArm,
-      } as Instr,
+      },
     ];
     const boolArm = (elseArm: Instr[]): Instr[] => [
       ...bothTag(typeofBoolIdx),
@@ -4992,13 +4992,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "call", funcIdx: unboxBoolIdx },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "call", funcIdx: unboxBoolIdx },
           { op: "i32.eq" },
         ],
         else: elseArm,
-      } as Instr,
+      },
     ];
     const numberArm = (elseArm: Instr[]): Instr[] => [
       ...bothTag(typeofNumIdx),
@@ -5008,15 +5008,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           // SameValue numbers: compare f64 bit patterns (NaN==NaN, +0!=-0).
           { op: "local.get", index: 0 },
-          { op: "call", funcIdx: unboxNumIdx } as Instr,
-          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "call", funcIdx: unboxNumIdx },
+          { op: "i64.reinterpret_f64" },
           { op: "local.get", index: 1 },
-          { op: "call", funcIdx: unboxNumIdx } as Instr,
-          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "call", funcIdx: unboxNumIdx },
+          { op: "i64.reinterpret_f64" },
           { op: "i64.eq" },
         ],
         else: elseArm,
-      } as Instr,
+      },
     ];
     const nullArm = (rest: Instr[]): Instr[] => [
       { op: "local.get", index: 0 },
@@ -5029,7 +5029,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [{ op: "i32.const", value: 1 }],
         else: rest,
-      } as Instr,
+      },
     ];
     registerNative(
       "__object_is",
@@ -5101,7 +5101,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       return [
         ...stringConstantExternrefInstrs(ctx, message),
         { op: "call", funcIdx: s4TypeErrorCtorIdx },
-        { op: "throw", tagIdx: s4ExnTagIdx } as Instr,
+        { op: "throw", tagIdx: s4ExnTagIdx },
       ];
     };
     // `(hf & valueBit) != 0` as an i32 0/1.
@@ -5145,7 +5145,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             op: "if",
             blockType: { kind: "empty" },
             then: s4Throw("TypeError: Cannot define property, object is not extensible"),
-          } as Instr,
+          },
         ],
         // current exists: §10.1.6.3 step 4 — if current is non-configurable, gate
         // the forbidden transitions.
@@ -5172,7 +5172,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 then: s4Throw(
                   "TypeError: Cannot redefine property: configurable attribute of a non-configurable property",
                 ),
-              } as Instr,
+              },
               // 4.b: Desc specifies enumerable that differs from current → reject.
               ...hfBit(HOST_ENUMERABLE_SPECIFIED),
               {
@@ -5188,9 +5188,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     then: s4Throw(
                       "TypeError: Cannot redefine property: enumerable attribute of a non-configurable property",
                     ),
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
               // 4.c: data↔accessor conversion. This is the DATA define path; if the
               // current entry is an accessor, converting it to data is forbidden.
               ...eflBit(FLAG_ACCESSOR),
@@ -5200,7 +5200,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 then: s4Throw(
                   "TypeError: Cannot redefine property: cannot convert a non-configurable accessor to a data property",
                 ),
-              } as Instr,
+              },
               // 4.d: both data, current non-writable (FLAG_WRITABLE clear) → reject
               // a writable:true request OR a value change (SameValue).
               ...eflBit(FLAG_WRITABLE),
@@ -5219,7 +5219,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     then: s4Throw(
                       "TypeError: Cannot redefine property: writable attribute of a non-configurable, non-writable property",
                     ),
-                  } as Instr,
+                  },
                   // value change: Desc has a value (hasValue) AND
                   // !SameValue(descValue, e.value) → reject.
                   ...hfBit(HOST_HAS_VALUE),
@@ -5232,22 +5232,22 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       { op: "local.get", index: 11 },
                       { op: "ref.as_non_null" },
                       { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-                      { op: "extern.convert_any" } as Instr,
+                      { op: "extern.convert_any" },
                       { op: "call", funcIdx: s4ObjectIsIdx },
                       { op: "i32.eqz" },
                       {
                         op: "if",
                         blockType: { kind: "empty" },
                         then: s4Throw("TypeError: Cannot assign to read only property of a non-configurable property"),
-                      } as Instr,
+                      },
                     ],
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
 
     const body: Instr[] = [
@@ -5377,9 +5377,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       { op: "ref.null", typeIdx: NONE_HEAP },
                       { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
                     ],
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
               // converting accessor→data: clear the stale get/set slots.
               ...eflBit(FLAG_ACCESSOR),
               {
@@ -5395,14 +5395,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "ref.null", typeIdx: NONE_HEAP },
                   { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
           // merged in place — return O.
           { op: "local.get", index: 0 },
           { op: "return" },
         ],
-      } as Instr,
+      },
       // load = o.count + o.tombstones ; cap = o.props.len ; grow at LF 0.7
       { op: "local.get", index: 4 },
       { op: "ref.as_non_null" },
@@ -5537,7 +5537,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       return [
         ...stringConstantExternrefInstrs(ctx, message),
         { op: "call", funcIdx: accTypeErrorCtorIdx },
-        { op: "throw", tagIdx: accExnTagIdx } as Instr,
+        { op: "throw", tagIdx: accExnTagIdx },
       ];
     };
     // `(hf & bit) != 0` / `(efl & bit) != 0` as i32 0/1.
@@ -5636,7 +5636,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 then: accThrow(
                   "TypeError: Cannot redefine property: configurable attribute of a non-configurable property",
                 ),
-              } as Instr,
+              },
               // 7.b enumerable flip requested
               ...accHfBit(ACC_HOST_ENUMERABLE_SPECIFIED),
               {
@@ -5652,9 +5652,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     then: accThrow(
                       "TypeError: Cannot redefine property: enumerable attribute of a non-configurable property",
                     ),
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
               // 7.c current is a data property → data→accessor conversion forbidden
               ...accEflBit(FLAG_ACCESSOR),
               { op: "i32.eqz" },
@@ -5664,7 +5664,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 then: accThrow(
                   "TypeError: Cannot redefine property: cannot convert a non-configurable data property to an accessor",
                 ),
-              } as Instr,
+              },
               // 7.d/e [[Get]]/[[Set]] change (SameValue) forbidden
               { op: "local.get", index: 14 },
               {
@@ -5675,16 +5675,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "local.get", index: 12 },
                   { op: "ref.as_non_null" },
                   { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
-                  { op: "extern.convert_any" } as Instr,
+                  { op: "extern.convert_any" },
                   { op: "call", funcIdx: accObjectIsIdx },
                   { op: "i32.eqz" },
                   {
                     op: "if",
                     blockType: { kind: "empty" },
                     then: accThrow("TypeError: Cannot redefine property: get attribute of a non-configurable property"),
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
               { op: "local.get", index: 15 },
               {
                 op: "if",
@@ -5694,18 +5694,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   { op: "local.get", index: 12 },
                   { op: "ref.as_non_null" },
                   { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
-                  { op: "extern.convert_any" } as Instr,
+                  { op: "extern.convert_any" },
                   { op: "call", funcIdx: accObjectIsIdx },
                   { op: "i32.eqz" },
                   {
                     op: "if",
                     blockType: { kind: "empty" },
                     then: accThrow("TypeError: Cannot redefine property: set attribute of a non-configurable property"),
-                  } as Instr,
+                  },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
           // merge flags: spec = (hf >> 3) & 6 (E/C only — accessors carry no W)
           // nf = (efl & ~0x0F) | ((efl & 6 & ~spec) | (hf & spec)) | FLAG_ACCESSOR
           // (locals 7/8 are scratch here; this path returns before grow uses them)
@@ -5750,7 +5750,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "any.convert_extern" },
               { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
             ],
-          } as Instr,
+          },
           { op: "local.get", index: 15 },
           {
             op: "if",
@@ -5762,7 +5762,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "any.convert_extern" },
               { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
             ],
-          } as Instr,
+          },
           // converting data→accessor: the data value slot dies.
           ...accEflBit(FLAG_ACCESSOR),
           { op: "i32.eqz" },
@@ -5775,12 +5775,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "ref.null", typeIdx: NONE_HEAP },
               { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
             ],
-          } as Instr,
+          },
           // merged in place — return O.
           { op: "local.get", index: 0 },
           { op: "return" },
         ],
-      } as Instr,
+      },
       // NEW key on a non-extensible object → TypeError (§10.1.6.3 step 2,
       // matches the data-path preflight; previously a silent no-op).
       { op: "local.get", index: 5 },
@@ -5959,10 +5959,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const L_GETTER = 20;
     const L_SETTER = 21;
 
-    const keyRef = (key: string): Instr[] => [
-      ...nativeStringLiteralInstrs(ctx, key),
-      { op: "extern.convert_any" } as Instr,
-    ];
+    const keyRef = (key: string): Instr[] => [...nativeStringLiteralInstrs(ctx, key), { op: "extern.convert_any" }];
     const hasField = (key: string): Instr[] => [
       { op: "local.get", index: L_RAW_DESC },
       ...keyRef(key),
@@ -5974,9 +5971,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "call", funcIdx: externGetIdx },
       // (#2106 S1) normalize missing/undefined descriptor fields back to the
       // legacy null convention so downstream null-keyed logic is unchanged.
-      ...(ctx.funcMap.has("__nullish_to_null")
-        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
-        : []),
+      ...(ctx.funcMap.has("__nullish_to_null") ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] : []),
     ];
     const setFlag = (bit: number): Instr[] => [
       { op: "local.get", index: L_FLAGS },
@@ -5989,7 +5984,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       return [
         ...stringConstantExternrefInstrs(ctx, message),
         { op: "call", funcIdx: typeErrorCtorIdx },
-        { op: "throw", tagIdx: exnTagIdx } as Instr,
+        { op: "throw", tagIdx: exnTagIdx },
       ];
     };
     const throwUnsupported = (): Instr[] =>
@@ -6006,10 +6001,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [
           ...(marksData
-            ? ([
+            ? [
                 { op: "i32.const", value: 1 },
                 { op: "local.set", index: L_HAS_DATA },
-              ] as Instr[])
+              ]
             : []),
           ...setFlag(specifiedBit),
           ...getField(key),
@@ -6018,9 +6013,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             op: "if",
             blockType: { kind: "empty" },
             then: setFlag(valueBit),
-          } as Instr,
+          },
         ],
-      } as Instr,
+      },
     ];
 
     // (#2992 S3) get/set: mark hasAccessor + the half's "specified" bit
@@ -6049,7 +6044,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "local.set", index: L_HAS_ACCESSOR },
           ...setFlag(specifiedBit),
           ...(dpUndefTagTypeIdx >= 0
-            ? ([
+            ? [
                 ...rawField(key),
                 { op: "local.set", index: localIdx },
                 { op: "local.get", index: localIdx },
@@ -6067,7 +6062,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     { op: "i32.eq" },
                   ],
                   else: [{ op: "i32.const", value: 0 }],
-                } as Instr,
+                },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -6079,7 +6074,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwAccessor(),
-                    } as Instr,
+                    },
                     { op: "local.get", index: localIdx },
                     { op: "call", funcIdx: typeofFunctionIdx },
                     { op: "i32.eqz" },
@@ -6087,11 +6082,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwAccessor(),
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
-              ] as Instr[])
-            : ([
+                },
+              ]
+            : [
                 ...getField(key),
                 { op: "local.tee", index: localIdx },
                 { op: "ref.is_null" },
@@ -6107,12 +6102,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwAccessor(),
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
-              ] as Instr[])),
+                },
+              ]),
         ],
-      } as Instr,
+      },
     ];
 
     const body: Instr[] = [
@@ -6463,10 +6458,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const L_GETTER = 9;
     const L_SETTER = 10;
 
-    const keyRef = (key: string): Instr[] => [
-      ...nativeStringLiteralInstrs(ctx, key),
-      { op: "extern.convert_any" } as Instr,
-    ];
+    const keyRef = (key: string): Instr[] => [...nativeStringLiteralInstrs(ctx, key), { op: "extern.convert_any" }];
     const hasField = (key: string): Instr[] => [
       { op: "local.get", index: L_DESC },
       ...keyRef(key),
@@ -6478,9 +6470,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "call", funcIdx: externGetIdx },
       // (#2106 S1) normalize missing/undefined descriptor fields back to the
       // legacy null convention so downstream null-keyed logic is unchanged.
-      ...(ctx.funcMap.has("__nullish_to_null")
-        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
-        : []),
+      ...(ctx.funcMap.has("__nullish_to_null") ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] : []),
     ];
     const setFlag = (bit: number): Instr[] => [
       { op: "local.get", index: L_FLAGS },
@@ -6493,7 +6483,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       return [
         ...stringConstantExternrefInstrs(ctx, message),
         { op: "call", funcIdx: typeErrorCtorIdx },
-        { op: "throw", tagIdx: exnTagIdx } as Instr,
+        { op: "throw", tagIdx: exnTagIdx },
       ];
     };
     // ToBoolean(getField(key)) → set valueBit; always set hasData when marksData.
@@ -6507,16 +6497,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         then: [
           ...setFlag(specifiedBit),
           ...(marksData
-            ? ([
+            ? [
                 { op: "i32.const", value: 1 },
                 { op: "local.set", index: L_HAS_DATA },
-              ] as Instr[])
+              ]
             : []),
           ...getField(key),
           { op: "call", funcIdx: isTruthyIdx },
-          { op: "if", blockType: { kind: "empty" }, then: setFlag(valueBit) } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: setFlag(valueBit) },
         ],
-      } as Instr,
+      },
     ];
     // (#2992 S3) get/set: mark hasAccessor + the half's "specified" bit
     // (8 = [[Get]], 9 = [[Set]]) so `__defineProperty_accessor` can MERGE a
@@ -6548,7 +6538,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "local.set", index: L_HAS_ACCESSOR },
           ...setFlag(specifiedBit),
           ...(undefTagTypeIdx >= 0
-            ? ([
+            ? [
                 ...rawField(key),
                 { op: "local.set", index: localIdx },
                 // tag-1 $AnyValue box (the undefined singleton)?
@@ -6567,7 +6557,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     { op: "i32.eq" },
                   ],
                   else: [{ op: "i32.const", value: 0 }],
-                } as Instr,
+                },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -6579,7 +6569,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwTypeError("TypeError: Getter/setter must be a function"),
-                    } as Instr,
+                    },
                     { op: "local.get", index: localIdx },
                     { op: "call", funcIdx: typeofFunctionIdx },
                     { op: "i32.eqz" },
@@ -6587,11 +6577,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwTypeError("TypeError: Getter/setter must be a function"),
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
-              ] as Instr[])
-            : ([
+                },
+              ]
+            : [
                 ...getField(key),
                 { op: "local.tee", index: localIdx },
                 { op: "ref.is_null" },
@@ -6607,12 +6597,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       op: "if",
                       blockType: { kind: "empty" },
                       then: throwTypeError("TypeError: Getter/setter must be a function"),
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
-              ] as Instr[])),
+                },
+              ]),
         ],
-      } as Instr,
+      },
     ];
 
     const body: Instr[] = [
@@ -6792,7 +6782,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 6 }, // desc (externref)
       // key: native string → externref
       ...nativeStringLiteralInstrs(ctx, key),
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       ...valueInstrs,
       { op: "call", funcIdx: externSetIdx },
     ];
@@ -6898,7 +6888,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 { op: "ref.as_non_null" },
                 { op: "local.get", index: L_KIDX },
                 { op: "call", funcIdx: charAtIdx as number },
-                { op: "extern.convert_any" } as Instr,
+                { op: "extern.convert_any" },
               ],
               1,
             ),
@@ -6915,7 +6905,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // The helper is filled at finalize; non-meta receivers return null and
       // fall through to the `$Object` path below.
       ...(bfnGopdIdx !== undefined
-        ? ([
+        ? [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 1 },
             { op: "call", funcIdx: bfnGopdIdx },
@@ -6927,7 +6917,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               blockType: { kind: "empty" },
               then: [{ op: "local.get", index: 6 }, { op: "return" }],
             },
-          ] as Instr[])
+          ]
         : []),
       // any = any.convert_extern(obj) ; if !$Object → return undefined (null)
       { op: "local.get", index: 0 },
@@ -6977,14 +6967,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             { op: "local.get", index: 4 },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
-            { op: "extern.convert_any" } as Instr,
+            { op: "extern.convert_any" },
           ]),
           // desc.set = extern.convert_any(e.set)
           ...setKey("set", [
             { op: "local.get", index: 4 },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
-            { op: "extern.convert_any" } as Instr,
+            { op: "extern.convert_any" },
           ]),
         ],
         // data: { value, writable }
@@ -6994,7 +6984,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             { op: "local.get", index: 4 },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 },
-            { op: "extern.convert_any" } as Instr,
+            { op: "extern.convert_any" },
           ]),
           // desc.writable = box(fl & FLAG_WRITABLE)
           ...setKey("writable", boolAttr(FLAG_WRITABLE)),
@@ -7064,7 +7054,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const setKeyCd = (key: string, valueInstrs: Instr[]): Instr[] => [
       { op: "local.get", index: 2 },
       ...nativeStringLiteralInstrs(ctx, key),
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       ...valueInstrs,
       { op: "call", funcIdx: externSetCdIdx },
     ];
@@ -7126,7 +7116,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const setKeyAcc = (key: string, valueInstrs: Instr[]): Instr[] => [
       { op: "local.get", index: 3 },
       ...nativeStringLiteralInstrs(ctx, key),
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       ...valueInstrs,
       { op: "call", funcIdx: externSetCdIdx },
     ];
@@ -7185,7 +7175,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       // keys are ["length", "name"] in spec order (minus deleted ones). The
       // filled helper pushes them into the vec and returns 1 on a hit.
       ...(bfnPushOwnNamesIdx !== undefined
-        ? ([
+        ? [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 7 },
             { op: "call", funcIdx: bfnPushOwnNamesIdx },
@@ -7194,7 +7184,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               blockType: { kind: "empty" },
               then: [{ op: "local.get", index: 7 }, { op: "return" }],
             },
-          ] as Instr[])
+          ]
         : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -7583,9 +7573,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     { op: "i64.eq" },
                   ],
                   else: [{ op: "i32.const", value: 0 }],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
           ]
         : [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
   );
@@ -7633,7 +7623,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           // (#2106 S1) a missing method resolves to the undefined singleton —
           // normalize to null so __apply_closure keeps its legacy null path.
           ...(ctx.funcMap.has("__nullish_to_null")
-            ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+            ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }]
             : []),
           // __apply_closure(m, recv, args)
           { op: "local.get", index: 0 },
@@ -7734,7 +7724,7 @@ export function ensureWrapperStringValueHelper(ctx: CodegenContext): number {
         {
           op: "if",
           blockType: { kind: "val", type: anyStrRefNull },
-          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
           else: [
             // confirm the entry is the internal slot (FLAG_INTERNAL)
             { op: "local.get", index: 2 },
@@ -7759,16 +7749,16 @@ export function ensureWrapperStringValueHelper(ctx: CodegenContext): number {
                     { op: "local.get", index: 3 },
                     { op: "ref.cast", typeIdx: anyStrTypeIdx },
                   ],
-                  else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
-                } as Instr,
+                  else: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
+                },
               ],
-              else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
-            } as Instr,
+              else: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
+            },
           ],
-        } as Instr,
+        },
       ],
-      else: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
-    } as Instr,
+      else: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
+    },
   ];
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyStrRefNull]);
@@ -7870,7 +7860,7 @@ function ensureProxyRuntime(
   const throwRevoked = (): Instr[] => [
     ...stringConstantExternrefInstrs(ctx, revokedMsg),
     { op: "call", funcIdx: typeErrorCtorIdx },
-    { op: "throw", tagIdx: exnTagIdx } as Instr,
+    { op: "throw", tagIdx: exnTagIdx },
   ];
 
   // (#1355 Slice E) §10.5.11 step 8 / CreateListFromArrayLike (§7.3.18 step 2):
@@ -7882,7 +7872,7 @@ function ensureProxyRuntime(
   const throwNotListObject = (): Instr[] => [
     ...stringConstantExternrefInstrs(ctx, notListObjectMsg),
     { op: "call", funcIdx: typeErrorCtorIdx },
-    { op: "throw", tagIdx: exnTagIdx } as Instr,
+    { op: "throw", tagIdx: exnTagIdx },
   ];
 
   // Reserve the open-`any` closure-call bridge `__apply_closure` (filled at
@@ -7936,7 +7926,7 @@ function ensureProxyRuntime(
       // Placeholder; filled by fillProxyDispatch. A bare `unreachable` keeps the
       // stub valid (externref result) if the fill is ever skipped (no closure of
       // the needed arity ⇒ no real trap could have been installed ⇒ unused).
-      body: [{ op: "unreachable" } as Instr],
+      body: [{ op: "unreachable" }],
       exported: false,
     });
     ctx.funcMap.set(name, funcIdx);
@@ -7994,13 +7984,13 @@ function ensureProxyRuntime(
       // handler
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       // trap closure
       { op: "local.get", index: 4 },
       // target
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       // key
       { op: "local.get", index: 1 },
     ];
@@ -8034,7 +8024,7 @@ function ensureProxyRuntime(
       // if p.revoked: throw TypeError
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
       // trap = p.ptraps==null ? null : p.ptraps.<field>
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -8042,14 +8032,14 @@ function ensureProxyRuntime(
       {
         op: "if",
         blockType: { kind: "val", type: externref },
-        then: [{ op: "ref.null.extern" } as Instr],
+        then: [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 3 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
         ],
-      } as Instr,
+      },
       { op: "local.set", index: 4 },
       // if trap == null: forward to ordinary op on target
       { op: "local.get", index: 4 },
@@ -8062,7 +8052,7 @@ function ensureProxyRuntime(
               // __extern_set(target, key, value) -> (void) ; push undefined
               { op: "local.get", index: 3 },
               { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-              { op: "extern.convert_any" } as Instr,
+              { op: "extern.convert_any" },
               { op: "local.get", index: 1 },
               { op: "local.get", index: 2 },
               { op: "call", funcIdx: forwardIdx },
@@ -8076,7 +8066,7 @@ function ensureProxyRuntime(
                 // so the dispatch result stays uniform externref.
                 { op: "local.get", index: 3 },
                 { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-                { op: "extern.convert_any" } as Instr,
+                { op: "extern.convert_any" },
                 { op: "local.get", index: 1 },
                 { op: "call", funcIdx: forwardIdx },
                 { op: "call", funcIdx: ctx.funcMap.get("__box_boolean")! },
@@ -8085,13 +8075,13 @@ function ensureProxyRuntime(
                 // __extern_get(target, key) -> externref
                 { op: "local.get", index: 3 },
                 { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-                { op: "extern.convert_any" } as Instr,
+                { op: "extern.convert_any" },
                 { op: "local.get", index: 1 },
                 { op: "call", funcIdx: forwardIdx },
               ],
         // trap present → invoke it through the closure-call bridge driver.
         else: trapArm,
-      } as Instr,
+      },
     ];
     return body;
   };
@@ -8116,13 +8106,13 @@ function ensureProxyRuntime(
       // handler
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       // trap closure
       { op: "local.get", index: 3 },
       // target
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
     ];
     if (isSet) {
       trapArm.push({ op: "local.get", index: 1 }); // proto arg
@@ -8136,7 +8126,7 @@ function ensureProxyRuntime(
           // OrdinarySetPrototypeOf, which succeeded since we just performed it).
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-          { op: "extern.convert_any" } as Instr,
+          { op: "extern.convert_any" },
           { op: "local.get", index: 1 },
           { op: "call", funcIdx: forwardIdx },
           { op: "drop" },
@@ -8146,7 +8136,7 @@ function ensureProxyRuntime(
           // __getPrototypeOf(target) -> externref
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-          { op: "extern.convert_any" } as Instr,
+          { op: "extern.convert_any" },
           { op: "call", funcIdx: forwardIdx },
         ];
 
@@ -8159,7 +8149,7 @@ function ensureProxyRuntime(
       // if p.revoked: throw TypeError
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
       // trap = p.ptraps==null ? null : p.ptraps.<field>
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -8167,14 +8157,14 @@ function ensureProxyRuntime(
       {
         op: "if",
         blockType: { kind: "val", type: externref },
-        then: [{ op: "ref.null.extern" } as Instr],
+        then: [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
         ],
-      } as Instr,
+      },
       { op: "local.set", index: 3 },
       // if trap == null: forward to ordinary op on target ; else invoke trap.
       { op: "local.get", index: 3 },
@@ -8184,7 +8174,7 @@ function ensureProxyRuntime(
         blockType: { kind: "val", type: externref },
         then: forwardArm,
         else: trapArm,
-      } as Instr,
+      },
     ];
   };
 
@@ -8207,11 +8197,11 @@ function ensureProxyRuntime(
     const trapArm: Instr[] = [
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "call", funcIdx: driverIdx },
     ];
     const forwardArm: Instr[] = forwardReturnsI32
@@ -8219,7 +8209,7 @@ function ensureProxyRuntime(
           // __object_isExtensible(target) -> i32 ; box to a boolean any.
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-          { op: "extern.convert_any" } as Instr,
+          { op: "extern.convert_any" },
           { op: "call", funcIdx: forwardIdx },
           { op: "call", funcIdx: ctx.funcMap.get("__box_boolean")! },
         ]
@@ -8228,7 +8218,7 @@ function ensureProxyRuntime(
           // as a truthy success token.
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-          { op: "extern.convert_any" } as Instr,
+          { op: "extern.convert_any" },
           { op: "call", funcIdx: forwardIdx },
           { op: "drop" },
           { op: "local.get", index: 0 },
@@ -8240,21 +8230,21 @@ function ensureProxyRuntime(
       { op: "local.set", index: 2 },
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
       { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "val", type: externref },
-        then: [{ op: "ref.null.extern" } as Instr],
+        then: [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
         ],
-      } as Instr,
+      },
       { op: "local.set", index: 3 },
       { op: "local.get", index: 3 },
       { op: "ref.is_null" },
@@ -8263,7 +8253,7 @@ function ensureProxyRuntime(
         blockType: { kind: "val", type: externref },
         then: forwardArm,
         else: trapArm,
-      } as Instr,
+      },
     ];
   };
 
@@ -8300,11 +8290,11 @@ function ensureProxyRuntime(
       // result = driver(handler, trap, target)
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "call", funcIdx: callOwnKeysIdx },
       // Stash the result in the trap local (reused — its prior value is dead here)
       // so we can both type-check and return it. trap local (3) is externref.
@@ -8324,7 +8314,7 @@ function ensureProxyRuntime(
       { op: "local.get", index: 3 },
       { op: "call", funcIdx: isObjectStrIdx },
       { op: "i32.or" },
-      { op: "if", blockType: { kind: "empty" }, then: throwNotListObject() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwNotListObject() },
       // result is an Object → return it.
       { op: "local.get", index: 3 },
     ];
@@ -8332,7 +8322,7 @@ function ensureProxyRuntime(
       // __object_keys / __getOwnPropertyNames (target) -> externref ($ObjVec)
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "call", funcIdx: forwardIdx },
     ];
     return [
@@ -8344,7 +8334,7 @@ function ensureProxyRuntime(
       // if p.revoked: throw TypeError
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
       // trap = p.ptraps==null ? null : p.ptraps.ownKeys
       { op: "local.get", index: 2 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -8352,14 +8342,14 @@ function ensureProxyRuntime(
       {
         op: "if",
         blockType: { kind: "val", type: externref },
-        then: [{ op: "ref.null.extern" } as Instr],
+        then: [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 2 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_OWNKEYS },
         ],
-      } as Instr,
+      },
       { op: "local.set", index: 3 },
       { op: "local.get", index: 3 },
       { op: "ref.is_null" },
@@ -8368,7 +8358,7 @@ function ensureProxyRuntime(
         blockType: { kind: "val", type: externref },
         then: forwardArm,
         else: trapArm,
-      } as Instr,
+      },
     ];
   };
 
@@ -8396,13 +8386,13 @@ function ensureProxyRuntime(
       // handler
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       // trap closure
       { op: "local.get", index: 4 },
       // target
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       // key
       { op: "local.get", index: 1 },
       // desc (unchanged externref)
@@ -8413,7 +8403,7 @@ function ensureProxyRuntime(
       // __obj_define_from_desc(target, key, desc) -> externref
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-      { op: "extern.convert_any" } as Instr,
+      { op: "extern.convert_any" },
       { op: "local.get", index: 1 },
       { op: "local.get", index: 2 },
       { op: "call", funcIdx: forwardIdx },
@@ -8427,7 +8417,7 @@ function ensureProxyRuntime(
       // if p.revoked: throw TypeError
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
       // trap = p.ptraps==null ? null : p.ptraps.defineProperty
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -8435,14 +8425,14 @@ function ensureProxyRuntime(
       {
         op: "if",
         blockType: { kind: "val", type: externref },
-        then: [{ op: "ref.null.extern" } as Instr],
+        then: [{ op: "ref.null.extern" }],
         else: [
           { op: "local.get", index: 3 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_DEFINE },
         ],
-      } as Instr,
+      },
       { op: "local.set", index: 4 },
       // if trap == null: forward; else invoke trap
       { op: "local.get", index: 4 },
@@ -8452,7 +8442,7 @@ function ensureProxyRuntime(
         blockType: { kind: "val", type: externref },
         then: forwardArm,
         else: trapArm,
-      } as Instr,
+      },
     ];
   };
 
@@ -8628,7 +8618,7 @@ function ensureProxyRuntime(
     // if p.revoked: throw TypeError
     { op: "local.get", index: 3 },
     { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-    { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+    { op: "if", blockType: { kind: "empty" }, then: throwRevoked() },
     // trap = p.ptraps==null ? null : p.ptraps.apply
     { op: "local.get", index: 3 },
     { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -8636,14 +8626,14 @@ function ensureProxyRuntime(
     {
       op: "if",
       blockType: { kind: "val", type: externref },
-      then: [{ op: "ref.null.extern" } as Instr],
+      then: [{ op: "ref.null.extern" }],
       else: [
         { op: "local.get", index: 3 },
         { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
-        { op: "ref.as_non_null" } as Instr,
+        { op: "ref.as_non_null" },
         { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_APPLY },
       ],
-    } as Instr,
+    },
     { op: "local.set", index: 4 },
     // if trap == null: forward Call(target, thisArg, args); else invoke trap
     { op: "local.get", index: 4 },
@@ -8655,7 +8645,7 @@ function ensureProxyRuntime(
         // __apply_closure(target, thisArg, argsVec)
         { op: "local.get", index: 3 },
         { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-        { op: "extern.convert_any" } as Instr,
+        { op: "extern.convert_any" },
         { op: "local.get", index: 1 },
         { op: "local.get", index: 2 },
         { op: "call", funcIdx: applyClosureIdx },
@@ -8664,16 +8654,16 @@ function ensureProxyRuntime(
         // driver(handler, trap, target, thisArg, argArray)
         { op: "local.get", index: 3 },
         { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
-        { op: "extern.convert_any" } as Instr,
+        { op: "extern.convert_any" },
         { op: "local.get", index: 4 },
         { op: "local.get", index: 3 },
         { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-        { op: "extern.convert_any" } as Instr,
+        { op: "extern.convert_any" },
         { op: "local.get", index: 1 },
         { op: "local.get", index: 2 },
         { op: "call", funcIdx: callApplyIdx },
       ],
-    } as Instr,
+    },
   ]);
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
@@ -8701,7 +8691,7 @@ function ensureProxyRuntime(
     const throwNotObject = (): Instr[] => [
       ...stringConstantExternrefInstrs(ctx, notObjectMsg),
       { op: "call", funcIdx: typeErrorCtorIdx },
-      { op: "throw", tagIdx: exnTagIdx } as Instr,
+      { op: "throw", tagIdx: exnTagIdx },
     ];
     // readTrap(name) → __extern_get(handler, "name") (undefined → dispatch nulls).
     const readTrap = (name: string): Instr[] => [
@@ -8710,21 +8700,19 @@ function ensureProxyRuntime(
       { op: "call", funcIdx: externGetIdx },
       // (#2106 S1) a missing trap resolves to the undefined singleton —
       // normalize to null so the trap-dispatch null checks keep working.
-      ...(ctx.funcMap.has("__nullish_to_null")
-        ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
-        : []),
+      ...(ctx.funcMap.has("__nullish_to_null") ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] : []),
     ];
     const proxyCreateBody: Instr[] = [
       // if target == null → throw
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "ref.is_null" },
-      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() },
       // if handler == null → throw
       { op: "local.get", index: 1 },
       { op: "any.convert_extern" },
       { op: "ref.is_null" },
-      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() },
       // read the traps off the (open) handler. (#1355) deleteProperty appended.
       ...readTrap("get"),
       { op: "local.set", index: 2 },
@@ -8753,9 +8741,9 @@ function ensureProxyRuntime(
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       // ptraps = struct.new $ProxyTraps
       //   (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT,isextT,prevextT,ownKeysT)
       { op: "local.get", index: 2 },
@@ -8770,10 +8758,10 @@ function ensureProxyRuntime(
       { op: "local.get", index: 11 },
       { op: "local.get", index: 12 },
       { op: "local.get", index: 13 },
-      { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: proxyTrapsTypeIdx },
       { op: "i32.const", value: 0 }, // revoked = 0
-      { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
-      { op: "extern.convert_any" } as Instr,
+      { op: "struct.new", typeIdx: proxyTypeIdx },
+      { op: "extern.convert_any" },
     ];
     registerNative(
       "__proxy_create",
@@ -8811,11 +8799,11 @@ function ensureProxyRuntime(
       // null out target/handler/traps (§28.2.2.1.1 RevocableProxy revoke).
       { op: "local.get", index: 1 },
       { op: "ref.null.extern" },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
       { op: "local.get", index: 1 },
       { op: "ref.null.extern" },
-      { op: "any.convert_extern" } as Instr,
+      { op: "any.convert_extern" },
       { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
       { op: "local.get", index: 1 },
       { op: "ref.null", typeIdx: proxyTrapsTypeIdx },
@@ -8871,7 +8859,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: getDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     getBody.unshift(...guard);
   }
@@ -8894,7 +8882,7 @@ function ensureProxyRuntime(
           { op: "drop" },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     setBody.unshift(...guard);
   }
@@ -8921,7 +8909,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: isTruthyIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     hasBody.unshift(...guard);
   }
@@ -8949,7 +8937,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: isTruthyIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     deleteBody.unshift(...guard);
   }
@@ -8975,7 +8963,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: gopdDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     gopdBody.unshift(...guard);
   }
@@ -9000,7 +8988,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: gpoDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     gpoBody.unshift(...guard);
   }
@@ -9028,7 +9016,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: spoDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     spoBody.unshift(...guard);
   }
@@ -9054,7 +9042,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: isTruthyIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     isextBody.unshift(...guard);
   }
@@ -9080,7 +9068,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: prevextDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     prevextBody.unshift(...guard);
   }
@@ -9106,7 +9094,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: ownKeysKeysDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     objectKeysBody.unshift(...guard);
   }
@@ -9132,7 +9120,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: ownKeysNamesDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     ownNamesBody.unshift(...guard);
   }
@@ -9163,7 +9151,7 @@ function ensureProxyRuntime(
           { op: "call", funcIdx: defineDispatchIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     objDefineBody.unshift(...guard);
   }
@@ -9217,7 +9205,7 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
     if (applyClosureIdx === undefined || objVecNewIdx === undefined || objVecPushIdx === undefined) {
       // Closure bridge / objvec builders absent (no standalone closure in the
       // module) → no trap could have been installed; keep a valid stub body.
-      driverFn.body = [{ op: "ref.null.extern" } as Instr];
+      driverFn.body = [{ op: "ref.null.extern" }];
       return;
     }
     // params: 0=handler 1=trap 2..(argCount+1)=trap args. vec local index =
@@ -9225,19 +9213,19 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
     const vecLocal = argCount + 2;
     driverFn.locals = [{ name: "vec", type: externref }];
     const body: Instr[] = [
-      { op: "call", funcIdx: objVecNewIdx } as Instr, // vec = __objvec_new()
-      { op: "local.set", index: vecLocal } as Instr,
+      { op: "call", funcIdx: objVecNewIdx }, // vec = __objvec_new()
+      { op: "local.set", index: vecLocal },
     ];
     for (let a = 0; a < argCount; a++) {
-      body.push({ op: "local.get", index: vecLocal } as Instr);
-      body.push({ op: "local.get", index: 2 + a } as Instr);
-      body.push({ op: "call", funcIdx: objVecPushIdx } as Instr); // __objvec_push(vec, arg_a)
+      body.push({ op: "local.get", index: vecLocal });
+      body.push({ op: "local.get", index: 2 + a });
+      body.push({ op: "call", funcIdx: objVecPushIdx }); // __objvec_push(vec, arg_a)
     }
     // return __apply_closure(trap, handler, vec)
-    body.push({ op: "local.get", index: 1 } as Instr); // trap
-    body.push({ op: "local.get", index: 0 } as Instr); // handler (recv → this)
-    body.push({ op: "local.get", index: vecLocal } as Instr); // args vec
-    body.push({ op: "call", funcIdx: applyClosureIdx } as Instr);
+    body.push({ op: "local.get", index: 1 }); // trap
+    body.push({ op: "local.get", index: 0 }); // handler (recv → this)
+    body.push({ op: "local.get", index: vecLocal }); // args vec
+    body.push({ op: "call", funcIdx: applyClosureIdx });
     driverFn.body = body;
   };
   fill(PROXY_CALL_GET, 3); // (target, key, receiver)
@@ -9378,7 +9366,7 @@ export function ensureObjectGroupBy(ctx: CodegenContext): number {
             // (#2106 S1) group-absent = undefined singleton → normalize to
             // null so the presence check below keeps its legacy shape.
             ...(ctx.funcMap.has("__nullish_to_null")
-              ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! } as Instr]
+              ? [{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }]
               : []),
             { op: "local.set", index: 7 },
             // if group is null → group = __objvec_new(); __extern_set(out, key, group)
@@ -9498,8 +9486,8 @@ export function ensureExternRestObject(ctx: CodegenContext): number {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [{ op: "local.get", index: 2 } as Instr, { op: "return" } as Instr],
-    } as Instr,
+      then: [{ op: "local.get", index: 2 }, { op: "return" }],
+    },
     // keys = __object_keys(obj)
     { op: "local.get", index: 0 },
     { op: "call", funcIdx: objectKeysIdx },
@@ -9539,14 +9527,14 @@ export function ensureExternRestObject(ctx: CodegenContext): number {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: 2 } as Instr,
-                { op: "local.get", index: 6 } as Instr,
-                { op: "local.get", index: 0 } as Instr,
-                { op: "local.get", index: 6 } as Instr,
-                { op: "call", funcIdx: externGetIdx } as Instr,
-                { op: "call", funcIdx: externSetIdx } as Instr,
+                { op: "local.get", index: 2 },
+                { op: "local.get", index: 6 },
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: 6 },
+                { op: "call", funcIdx: externGetIdx },
+                { op: "call", funcIdx: externSetIdx },
               ],
-            } as Instr,
+            },
             // i++
             { op: "local.get", index: 5 },
             { op: "i32.const", value: 1 },
@@ -9605,7 +9593,7 @@ export function reserveApplyClosure(ctx: CodegenContext): number {
     locals: [],
     // Placeholder; filled by fillApplyClosure. A bare `unreachable` keeps the
     // stub valid (externref result) if the fill is ever skipped.
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set("__apply_closure", funcIdx);
@@ -9656,20 +9644,20 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   if (externLengthIdx === undefined || externGetIdxArr === undefined) {
     // Dependencies absent (object runtime not emitted after all) — keep a valid
     // body that returns undefined so the module verifies.
-    bridgeFn.body = [{ op: "ref.null.extern" } as Instr];
+    bridgeFn.body = [{ op: "ref.null.extern" }];
     return;
   }
 
   // S1 undefined sentinel: every non-dispatchable case (arity > 4, or a missing
   // arity-N dispatcher) returns undefined rather than throwing. S2 replaces
   // these with spec-correct TypeError throws once the late-shift is fixed.
-  const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" } as Instr];
+  const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" }];
 
   // Locals: 0=fn 1=recv 2=args (params); 3=n(i32)
   const ARG_OF = (k: number): Instr[] => [
-    { op: "local.get", index: 2 } as Instr,
-    { op: "f64.const", value: k } as Instr,
-    { op: "call", funcIdx: externGetIdxArr } as Instr,
+    { op: "local.get", index: 2 },
+    { op: "f64.const", value: k },
+    { op: "call", funcIdx: externGetIdxArr },
   ];
 
   // Build the arity dispatch from the bottom up (n>4 → undefined), each arm
@@ -9686,9 +9674,12 @@ export function fillApplyClosure(ctx: CodegenContext): void {
       return undefinedSentinel();
     }
     // __call_fn_method_N(recv, fn, arg0..arg{N-1})
-    const ops: Instr[] = [{ op: "local.get", index: 1 } as Instr, { op: "local.get", index: 0 } as Instr];
+    const ops: Instr[] = [
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 0 },
+    ];
     for (let k = 0; k < n; k++) ops.push(...ARG_OF(k));
-    ops.push({ op: "call", funcIdx: idx } as Instr);
+    ops.push({ op: "call", funcIdx: idx });
     return ops;
   };
 
@@ -9696,24 +9687,24 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   let dispatch: Instr[] = armUnsupported;
   for (let n = 4; n >= 0; n--) {
     dispatch = [
-      { op: "local.get", index: 3 } as Instr,
-      { op: "i32.const", value: n } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "i32.const", value: n },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: buildArm(n),
         else: dispatch,
-      } as Instr,
+      },
     ];
   }
 
   // n = i32(__extern_length(args)); dispatch.
   const body: Instr[] = [
-    { op: "local.get", index: 2 } as Instr,
-    { op: "call", funcIdx: externLengthIdx } as Instr,
-    { op: "i32.trunc_f64_s" } as Instr,
-    { op: "local.set", index: 3 } as Instr,
+    { op: "local.get", index: 2 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "i32.trunc_f64_s" },
+    { op: "local.set", index: 3 },
     ...dispatch,
   ];
 
@@ -9730,20 +9721,20 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   const proxyGuardTypeIdx = ctx.objectRuntimeTypes?.proxyTypeIdx;
   if (proxyApplyIdx !== undefined && proxyGuardTypeIdx !== undefined) {
     body.unshift(
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: proxyGuardTypeIdx } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyGuardTypeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "local.get", index: 1 } as Instr,
-          { op: "local.get", index: 2 } as Instr,
-          { op: "call", funcIdx: proxyApplyIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: proxyApplyIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
     );
   }
 
@@ -9778,67 +9769,67 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     // for (k = 0; k < len(src); k++) objvec_push(merged, get_idx(src, k))
     const copyLoop = (): Instr[] => {
       const loopBody: Instr[] = [
-        { op: "local.get", index: kLocal } as Instr,
-        { op: "local.get", index: lenLocal } as Instr,
-        { op: "f64.ge" } as Instr,
-        { op: "br_if", depth: 1 } as Instr,
-        { op: "local.get", index: mergedLocal } as Instr,
-        { op: "local.get", index: srcLocal } as Instr,
-        { op: "local.get", index: kLocal } as Instr,
-        { op: "call", funcIdx: externGetIdxArr } as Instr,
-        { op: "call", funcIdx: objVecPushIdx2 } as Instr,
-        { op: "local.get", index: kLocal } as Instr,
-        { op: "f64.const", value: 1 } as Instr,
-        { op: "f64.add" } as Instr,
-        { op: "local.set", index: kLocal } as Instr,
-        { op: "br", depth: 0 } as Instr,
+        { op: "local.get", index: kLocal },
+        { op: "local.get", index: lenLocal },
+        { op: "f64.ge" },
+        { op: "br_if", depth: 1 },
+        { op: "local.get", index: mergedLocal },
+        { op: "local.get", index: srcLocal },
+        { op: "local.get", index: kLocal },
+        { op: "call", funcIdx: externGetIdxArr },
+        { op: "call", funcIdx: objVecPushIdx2 },
+        { op: "local.get", index: kLocal },
+        { op: "f64.const", value: 1 },
+        { op: "f64.add" },
+        { op: "local.set", index: kLocal },
+        { op: "br", depth: 0 },
       ];
       return [
-        { op: "local.get", index: srcLocal } as Instr,
-        { op: "call", funcIdx: externLengthIdx } as Instr,
-        { op: "local.set", index: lenLocal } as Instr,
-        { op: "f64.const", value: 0 } as Instr,
-        { op: "local.set", index: kLocal } as Instr,
+        { op: "local.get", index: srcLocal },
+        { op: "call", funcIdx: externLengthIdx },
+        { op: "local.set", index: lenLocal },
+        { op: "f64.const", value: 0 },
+        { op: "local.set", index: kLocal },
         {
           op: "block",
           blockType: { kind: "empty" },
-          body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-        } as Instr,
+          body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+        },
       ];
     };
     body.unshift(
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: bfIdx } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: bfIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
-          { op: "local.get", index: 0 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.cast", typeIdx: bfIdx } as Instr,
-          { op: "local.set", index: bfLocal } as Instr,
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: bfIdx },
+          { op: "local.set", index: bfLocal },
           // merged = objvec_new()
-          { op: "call", funcIdx: objVecNewIdx2 } as Instr,
-          { op: "local.set", index: mergedLocal } as Instr,
+          { op: "call", funcIdx: objVecNewIdx2 },
+          { op: "local.set", index: mergedLocal },
           // copy boundArgs then call-args
-          { op: "local.get", index: bfLocal } as Instr,
-          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 2 } as Instr,
-          { op: "local.set", index: srcLocal } as Instr,
+          { op: "local.get", index: bfLocal },
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 2 },
+          { op: "local.set", index: srcLocal },
           ...copyLoop(),
-          { op: "local.get", index: 2 } as Instr,
-          { op: "local.set", index: srcLocal } as Instr,
+          { op: "local.get", index: 2 },
+          { op: "local.set", index: srcLocal },
           ...copyLoop(),
           // return __apply_closure(target, boundThis, merged)  [self-recursion]
-          { op: "local.get", index: bfLocal } as Instr,
-          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 0 } as Instr,
-          { op: "local.get", index: bfLocal } as Instr,
-          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 1 } as Instr,
-          { op: "local.get", index: mergedLocal } as Instr,
-          { op: "call", funcIdx: bridgeIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "local.get", index: bfLocal },
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 0 },
+          { op: "local.get", index: bfLocal },
+          { op: "struct.get", typeIdx: bfIdx, fieldIdx: 1 },
+          { op: "local.get", index: mergedLocal },
+          { op: "call", funcIdx: bridgeIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
     );
   }
 
@@ -9873,7 +9864,7 @@ export function reserveBindDynHelper(ctx: CodegenContext): number {
     locals: [],
     // Placeholder — filled at finalize by fillBindDynHelper. `unreachable`
     // keeps the stub valid if the fill were ever skipped.
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set("__bind_dyn", funcIdx);
@@ -9908,7 +9899,7 @@ export function fillBindDynHelper(ctx: CodegenContext): void {
     objVecNewIdx === undefined ||
     objVecPushIdx === undefined
   ) {
-    helperFn.body = [{ op: "ref.null.extern" } as Instr];
+    helperFn.body = [{ op: "ref.null.extern" }];
     helperFn.locals = [];
     return;
   }
@@ -9922,18 +9913,18 @@ export function fillBindDynHelper(ctx: CodegenContext): void {
   const LEN = 6;
   const mintArm: Instr[] = [
     // thisArg = args[0]
-    { op: "local.get", index: 1 } as Instr,
-    { op: "f64.const", value: 0 } as Instr,
-    { op: "call", funcIdx: externGetIdxIdx } as Instr,
-    { op: "local.set", index: THISV } as Instr,
+    { op: "local.get", index: 1 },
+    { op: "f64.const", value: 0 },
+    { op: "call", funcIdx: externGetIdxIdx },
+    { op: "local.set", index: THISV },
     // bound = objvec_new(); for (k=1; k<len; k++) push(bound, args[k])
-    { op: "call", funcIdx: objVecNewIdx } as Instr,
-    { op: "local.set", index: BARGS } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "call", funcIdx: externLengthIdx } as Instr,
-    { op: "local.set", index: LEN } as Instr,
-    { op: "f64.const", value: 1 } as Instr,
-    { op: "local.set", index: K } as Instr,
+    { op: "call", funcIdx: objVecNewIdx },
+    { op: "local.set", index: BARGS },
+    { op: "local.get", index: 1 },
+    { op: "call", funcIdx: externLengthIdx },
+    { op: "local.set", index: LEN },
+    { op: "f64.const", value: 1 },
+    { op: "local.set", index: K },
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -9942,48 +9933,48 @@ export function fillBindDynHelper(ctx: CodegenContext): void {
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            { op: "local.get", index: K } as Instr,
-            { op: "local.get", index: LEN } as Instr,
-            { op: "f64.ge" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
-            { op: "local.get", index: BARGS } as Instr,
-            { op: "local.get", index: 1 } as Instr,
-            { op: "local.get", index: K } as Instr,
-            { op: "call", funcIdx: externGetIdxIdx } as Instr,
-            { op: "call", funcIdx: objVecPushIdx } as Instr,
-            { op: "local.get", index: K } as Instr,
-            { op: "f64.const", value: 1 } as Instr,
-            { op: "f64.add" } as Instr,
-            { op: "local.set", index: K } as Instr,
-            { op: "br", depth: 0 } as Instr,
+            { op: "local.get", index: K },
+            { op: "local.get", index: LEN },
+            { op: "f64.ge" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: BARGS },
+            { op: "local.get", index: 1 },
+            { op: "local.get", index: K },
+            { op: "call", funcIdx: externGetIdxIdx },
+            { op: "call", funcIdx: objVecPushIdx },
+            { op: "local.get", index: K },
+            { op: "f64.const", value: 1 },
+            { op: "f64.add" },
+            { op: "local.set", index: K },
+            { op: "br", depth: 0 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     // return extern($__bound_fn{recv, thisArg, bound})
-    { op: "local.get", index: 0 } as Instr,
-    { op: "local.get", index: THISV } as Instr,
-    { op: "local.get", index: BARGS } as Instr,
-    { op: "struct.new", typeIdx: bfIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
-    { op: "return" } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: THISV },
+    { op: "local.get", index: BARGS },
+    { op: "struct.new", typeIdx: bfIdx },
+    { op: "extern.convert_any" },
+    { op: "return" },
   ];
 
   const body: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: ANY } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: ANY },
     ...buildClosureRefTestArms(ctx, ANY, mintArm),
   ];
   if (methodCallIdx !== undefined) {
     body.push(
-      { op: "local.get", index: 0 } as Instr,
+      { op: "local.get", index: 0 },
       ...stringConstantExternrefInstrs(ctx, "bind"),
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: methodCallIdx } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: methodCallIdx },
     );
   } else {
-    body.push({ op: "ref.null.extern" } as Instr);
+    body.push({ op: "ref.null.extern" });
   }
   helperFn.body = body;
   helperFn.locals = [
@@ -10067,23 +10058,23 @@ export function fillExternIsArray(ctx: CodegenContext): void {
   const carrierTypeIdxs = collectStandaloneArrayCarrierTypeIdxs(ctx);
   const anyLocal = 1;
   const body: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.set", index: anyLocal } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: anyLocal },
   ];
 
-  let chain: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+  let chain: Instr[] = [{ op: "i32.const", value: 0 }];
   for (let i = carrierTypeIdxs.length - 1; i >= 0; i--) {
     const typeIdx = carrierTypeIdxs[i]!;
     chain = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: 1 } as Instr],
+        then: [{ op: "i32.const", value: 1 }],
         else: chain,
-      } as Instr,
+      },
     ];
   }
   body.push(...chain);
@@ -10122,7 +10113,7 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
   if (elemType.kind === "f64") {
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx === undefined) return null;
-    return [{ op: "call", funcIdx: boxIdx } as Instr];
+    return [{ op: "call", funcIdx: boxIdx }];
   }
   if (elemType.kind === "i32") {
     // The `boolean`-tagged i32 variant must NOT box through `__box_number`
@@ -10130,7 +10121,7 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
     if ((elemType as { boolean?: boolean }).boolean) return null;
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx === undefined) return null;
-    return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr];
+    return [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxIdx }];
   }
   // (#2162b) A carrier whose `data` array element is EXACTLY `externref` (read
   // from `arrDef.element`, never the `"externref"` map key — see the scope note
@@ -10185,7 +10176,7 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
     if (ti >= 0) {
       const referent = ctx.mod.types[ti];
       if (referent && (referent.kind === "struct" || referent.kind === "array")) {
-        return [{ op: "extern.convert_any" } as Instr];
+        return [{ op: "extern.convert_any" }];
       }
     }
   }
@@ -10213,14 +10204,12 @@ export function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType)
 function unboxExternrefToVecElement(ctx: CodegenContext, elemType: ValType): Instr[] | null {
   if (elemType.kind === "f64") {
     const unboxIdx = ctx.funcMap.get("__unbox_number");
-    return unboxIdx === undefined ? null : [{ op: "call", funcIdx: unboxIdx } as Instr];
+    return unboxIdx === undefined ? null : [{ op: "call", funcIdx: unboxIdx }];
   }
   if (elemType.kind === "i32") {
     if ((elemType as { boolean?: boolean }).boolean) return null;
     const unboxIdx = ctx.funcMap.get("__unbox_number");
-    return unboxIdx === undefined
-      ? null
-      : [{ op: "call", funcIdx: unboxIdx } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr];
+    return unboxIdx === undefined ? null : [{ op: "call", funcIdx: unboxIdx }, { op: "i32.trunc_sat_f64_s" }];
   }
   if (elemType.kind === "externref") return [];
   return null;
@@ -10286,7 +10275,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
             { op: "call", funcIdx: p.externGetIdx },
             { op: "return" },
           ],
-        } as Instr,
+        },
       ]
     : [];
   return [
@@ -10301,7 +10290,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...p.missInstrs(), { op: "return" } as Instr],
+      then: [...p.missInstrs(), { op: "return" }],
     },
     // vec = cast<$ObjVec>(any) ; i = i32(idx)
     { op: "local.get", index: 2 },
@@ -10316,7 +10305,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...p.missInstrs(), { op: "return" } as Instr],
+      then: [...p.missInstrs(), { op: "return" }],
     },
     { op: "local.get", index: 4 },
     { op: "local.get", index: 3 },
@@ -10326,7 +10315,7 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...p.missInstrs(), { op: "return" } as Instr],
+      then: [...p.missInstrs(), { op: "return" }],
     },
     // return vec.data[i]
     { op: "local.get", index: 3 },
@@ -10405,7 +10394,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   // objects per use — a factory, never a shared array, per the finalize
   // double-remap hazard). The singleton instrs carry no funcIdx/typeIdx, so
   // splicing them at FINALIZE cannot desync any index-shift walk.
-  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
   // (#2903 R4) Packed sub-i32 element carriers (`i8`/`i16`) need an UNSIGNED
   // packed load (`array.get_u`) — plain `array.get` is invalid on a packed
   // array — then f64-box the zero-extended i32 (0..255 / 0..65535, always
@@ -10417,7 +10406,7 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
     if ((elemType.kind === "i8" || elemType.kind === "i16") && boxNumIdx !== undefined) {
       return {
         getOp: "array.get_u",
-        boxOps: [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr],
+        boxOps: [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }],
       };
     }
     const generic = boxVecElementToExternref(ctx, elemType);
@@ -10428,42 +10417,46 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
     const readBox = packedElemReadBox(elemType);
     if (readBox === null) continue; // unsupported element kind — leave to null fallback
     const { getOp, boxOps } = readBox;
-    vecArms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        // i = trunc_sat(idx) ; if i < 0 → miss
-        { op: "local.get", index: 1 },
-        { op: "i32.trunc_sat_f64_s" },
-        { op: "local.tee", index: 4 },
-        { op: "i32.const", value: 0 },
-        { op: "i32.lt_s" },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [...idxMiss(), { op: "return" } as Instr],
-        } as Instr,
-        // if i >= vec.length → miss
-        { op: "local.get", index: 4 },
-        { op: "local.get", index: 2 },
-        { op: "ref.cast", typeIdx },
-        { op: "struct.get", typeIdx, fieldIdx: 0 },
-        { op: "i32.ge_s" },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [...idxMiss(), { op: "return" } as Instr],
-        } as Instr,
-        // return box(vec.data[i])
-        { op: "local.get", index: 2 },
-        { op: "ref.cast", typeIdx },
-        { op: "struct.get", typeIdx, fieldIdx: 1 },
-        { op: "local.get", index: 4 },
-        { op: getOp, typeIdx: arrTypeIdx } as Instr,
-        ...boxOps,
-        { op: "return" },
-      ],
-    } as Instr);
+    vecArms.push(
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // i = trunc_sat(idx) ; if i < 0 → miss
+          { op: "local.get", index: 1 },
+          { op: "i32.trunc_sat_f64_s" },
+          { op: "local.tee", index: 4 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...idxMiss(), { op: "return" }],
+          },
+          // if i >= vec.length → miss
+          { op: "local.get", index: 4 },
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 0 },
+          { op: "i32.ge_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...idxMiss(), { op: "return" }],
+          },
+          // return box(vec.data[i])
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "local.get", index: 4 },
+          { op: getOp, typeIdx: arrTypeIdx },
+          ...boxOps,
+          { op: "return" },
+        ],
+      },
+    );
   }
 
   if (vecArms.length === 0) return; // no number carriers → leave the eager body untouched
@@ -10566,12 +10559,12 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
     strFlattenIdx === undefined || strEqualsIdx === undefined
       ? null
       : [
-          { op: "local.get", index: 1 } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
-          { op: "call", funcIdx: strFlattenIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: anyStrTypeIdx },
+          { op: "call", funcIdx: strFlattenIdx },
           ...nativeStringLiteralInstrs(ctx, "length"),
-          { op: "call", funcIdx: strEqualsIdx } as Instr,
+          { op: "call", funcIdx: strEqualsIdx },
         ];
 
   // ── __object_keys_forin: enumerate "0".."len-1" ──
@@ -10635,7 +10628,7 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
           { op: "local.get", index: kVec },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     keysFn.body.splice(0, 0, ...arm);
   }
@@ -10655,33 +10648,33 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
     const numericArm: Instr[] =
       strToNumIdx !== undefined
         ? [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "call", funcIdx: strToNumIdx } as Instr,
-            { op: "local.tee", index: hN } as Instr,
-            { op: "local.get", index: hN } as Instr,
-            { op: "f64.eq" } as Instr, // n == n (reject NaN, i.e. non-numeric)
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: strToNumIdx },
+            { op: "local.tee", index: hN },
+            { op: "local.get", index: hN },
+            { op: "f64.eq" }, // n == n (reject NaN, i.e. non-numeric)
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: 0 } as Instr,
-                { op: "local.get", index: hN } as Instr,
-                { op: "call", funcIdx: externHasIdxIdx } as Instr,
-                { op: "return" } as Instr,
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: hN },
+                { op: "call", funcIdx: externHasIdxIdx },
+                { op: "return" },
               ],
-            } as Instr,
+            },
           ]
         : [];
     const strKeyBody: Instr[] = [
       ...(lenArm
-        ? ([
+        ? [
             ...lenArm,
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
-            } as Instr,
-          ] as Instr[])
+              then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+            },
+          ]
         : []),
       ...numericArm,
     ];
@@ -10702,12 +10695,12 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
             op: "if",
             blockType: { kind: "empty" },
             then: strKeyBody,
-          } as Instr,
+          },
           // vec receiver, non-string / non-index / non-length key → absent
           { op: "i32.const", value: 0 },
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     hasFn.body.splice(0, 0, ...arm);
   }
@@ -10719,26 +10712,26 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
     const gAny = 2 + getFn.locals.length;
     const gN = gAny + 1;
     getFn.locals.push({ name: "__vec_any", type: { kind: "anyref" } }, { name: "__vec_n", type: { kind: "f64" } });
-    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+    const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
     const lenArm = keyIsLength();
     const numericArm: Instr[] =
       strToNumIdx !== undefined
         ? [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "call", funcIdx: strToNumIdx } as Instr,
-            { op: "local.tee", index: gN } as Instr,
-            { op: "local.get", index: gN } as Instr,
-            { op: "f64.eq" } as Instr, // n == n
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: strToNumIdx },
+            { op: "local.tee", index: gN },
+            { op: "local.get", index: gN },
+            { op: "f64.eq" }, // n == n
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: 0 } as Instr,
-                { op: "local.get", index: gN } as Instr,
-                { op: "call", funcIdx: externGetIdxIdx } as Instr,
-                { op: "return" } as Instr,
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: gN },
+                { op: "call", funcIdx: externGetIdxIdx },
+                { op: "return" },
               ],
-            } as Instr,
+            },
           ]
         : [];
     const lenBody: Instr[] =
@@ -10749,14 +10742,14 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: gAny } as Instr,
-                { op: "ref.cast", typeIdx: vecBaseIdx } as Instr,
-                { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 } as Instr,
-                { op: "f64.convert_i32_s" } as Instr,
-                { op: "call", funcIdx: boxNumberIdx } as Instr,
-                { op: "return" } as Instr,
+                { op: "local.get", index: gAny },
+                { op: "ref.cast", typeIdx: vecBaseIdx },
+                { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 },
+                { op: "f64.convert_i32_s" },
+                { op: "call", funcIdx: boxNumberIdx },
+                { op: "return" },
               ],
-            } as Instr,
+            },
           ]
         : [];
     const arm: Instr[] = [
@@ -10776,12 +10769,12 @@ export function fillDynamicForinVecArms(ctx: CodegenContext): void {
             op: "if",
             blockType: { kind: "empty" },
             then: [...lenBody, ...numericArm],
-          } as Instr,
+          },
           // vec receiver, unresolved key → undefined miss
           ...getMiss(),
           { op: "return" },
         ],
-      } as Instr,
+      },
     ];
     getFn.body.splice(0, 0, ...arm);
   }
@@ -10853,23 +10846,23 @@ export function fillExternSetVecArms(ctx: CodegenContext): void {
     const unbox = unboxExternrefToVecElement(ctx, elemType);
     if (unbox === null) continue; // unsupported element kind → store no-op (as before)
     carrierArms.push(
-      { op: "local.get", index: setAny } as Instr,
-      { op: "ref.test", typeIdx } as Instr,
+      { op: "local.get", index: setAny },
+      { op: "ref.test", typeIdx },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           // vec.data[i] = unbox(value)
-          { op: "local.get", index: setAny } as Instr,
-          { op: "ref.cast", typeIdx } as Instr,
-          { op: "struct.get", typeIdx, fieldIdx: 1 } as Instr,
-          { op: "local.get", index: setI } as Instr,
-          { op: "local.get", index: 2 } as Instr,
+          { op: "local.get", index: setAny },
+          { op: "ref.cast", typeIdx },
+          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "local.get", index: setI },
+          { op: "local.get", index: 2 },
           ...unbox,
-          { op: "array.set", typeIdx: arrTypeIdx } as Instr,
-          { op: "return" } as Instr,
+          { op: "array.set", typeIdx: arrTypeIdx },
+          { op: "return" },
         ],
-      } as Instr,
+      },
     );
   }
   if (carrierArms.length === 0) return; // no writable carriers → leave body untouched
@@ -10916,13 +10909,13 @@ export function fillExternSetVecArms(ctx: CodegenContext): void {
               op: "if",
               blockType: { kind: "empty" },
               then: carrierArms,
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
         // vec receiver, OOB / non-numeric / grow / unsupported kind → no-op
         { op: "return" },
       ],
-    } as Instr,
+    },
   ];
   fn.body.splice(0, 0, ...arm);
 }
@@ -10941,19 +10934,17 @@ function boxClosedStructFieldToExternref(ctx: CodegenContext, fieldType: ValType
   if (fieldType.kind === "externref") return [];
   if (fieldType.kind === "f64") {
     const boxNumIdx = ctx.funcMap.get("__box_number");
-    return boxNumIdx === undefined ? null : [{ op: "call", funcIdx: boxNumIdx } as Instr];
+    return boxNumIdx === undefined ? null : [{ op: "call", funcIdx: boxNumIdx }];
   }
   if (fieldType.kind === "i32") {
     if ((fieldType as { boolean?: boolean }).boolean === true) {
       const boxBoolIdx = ctx.funcMap.get("__box_boolean");
-      if (boxBoolIdx !== undefined) return [{ op: "call", funcIdx: boxBoolIdx } as Instr];
+      if (boxBoolIdx !== undefined) return [{ op: "call", funcIdx: boxBoolIdx }];
     }
     const boxNumIdx = ctx.funcMap.get("__box_number");
-    return boxNumIdx === undefined
-      ? null
-      : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
+    return boxNumIdx === undefined ? null : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
   }
-  if (fieldType.kind === "ref" || fieldType.kind === "ref_null") return [{ op: "extern.convert_any" } as Instr];
+  if (fieldType.kind === "ref" || fieldType.kind === "ref_null") return [{ op: "extern.convert_any" }];
   return null;
 }
 
@@ -11074,7 +11065,7 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
   if (cands.length === 0) return;
   cands.sort((a, b) => a.typeIdx - b.typeIdx);
 
-  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr];
+  const idxMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
   const MAX_SAFE = 9007199254740991; // 2^53 - 1
 
   /** Shared preamble test (identical for all three helpers). */
@@ -11095,55 +11086,51 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
       // a string ref (`length: "2"`) runs the §7.1.4 StringToNumber scanner.
       const readAsF64: Instr[] =
         cand.lengthFieldType.kind === "i32"
-          ? [{ op: "f64.convert_i32_s" } as Instr]
+          ? [{ op: "f64.convert_i32_s" }]
           : cand.lengthFieldType.kind === "externref"
             ? unboxNumIdx !== undefined
-              ? [{ op: "call", funcIdx: unboxNumIdx } as Instr]
-              : [{ op: "drop" } as Instr, { op: "f64.const", value: 0 } as Instr]
+              ? [{ op: "call", funcIdx: unboxNumIdx }]
+              : [{ op: "drop" }, { op: "f64.const", value: 0 }]
             : isStringRefType(cand.lengthFieldType) && strToNumIdx !== undefined
-              ? [{ op: "extern.convert_any" } as Instr, { op: "call", funcIdx: strToNumIdx } as Instr]
+              ? [{ op: "extern.convert_any" }, { op: "call", funcIdx: strToNumIdx }]
               : [];
       arms.push(
-        { op: "local.get", index: 1 } as Instr,
-        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: cand.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
-            { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: cand.lengthFieldIdx } as Instr,
+            { op: "local.get", index: 1 },
+            { op: "ref.cast", typeIdx: cand.typeIdx },
+            { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: cand.lengthFieldIdx },
             ...readAsF64,
             // ToLength clamp — mirrors the `$Object` arm's NaN/trunc/[0,2^53−1]
             // sequence, reusing the same scratch locals 2/3.
-            { op: "local.tee", index: 2 } as Instr,
-            { op: "local.get", index: 2 } as Instr,
-            { op: "f64.ne" } as Instr, // NaN?
+            { op: "local.tee", index: 2 },
+            { op: "local.get", index: 2 },
+            { op: "f64.ne" }, // NaN?
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "f64" } },
-              then: [{ op: "f64.const", value: 0 } as Instr],
+              then: [{ op: "f64.const", value: 0 }],
               else: [
-                { op: "local.get", index: 2 } as Instr,
-                { op: "f64.trunc" } as Instr,
-                { op: "local.tee", index: 3 } as Instr,
-                { op: "f64.const", value: 0 } as Instr,
-                { op: "f64.le" } as Instr,
+                { op: "local.get", index: 2 },
+                { op: "f64.trunc" },
+                { op: "local.tee", index: 3 },
+                { op: "f64.const", value: 0 },
+                { op: "f64.le" },
                 {
                   op: "if",
                   blockType: { kind: "val", type: { kind: "f64" } },
-                  then: [{ op: "f64.const", value: 0 } as Instr],
-                  else: [
-                    { op: "local.get", index: 3 } as Instr,
-                    { op: "f64.const", value: MAX_SAFE } as Instr,
-                    { op: "f64.min" } as Instr,
-                  ],
-                } as Instr,
+                  then: [{ op: "f64.const", value: 0 }],
+                  else: [{ op: "local.get", index: 3 }, { op: "f64.const", value: MAX_SAFE }, { op: "f64.min" }],
+                },
               ],
-            } as Instr,
-            { op: "return" } as Instr,
+            },
+            { op: "return" },
           ],
-        } as Instr,
+        },
       );
     }
     lenFn.body.splice(3, 0, ...arms);
@@ -11158,33 +11145,33 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
         const box = boxClosedStructFieldToExternref(ctx, nf.fieldType);
         if (box === null) continue; // unboxable field kind — reads as a miss
         fieldChecks.push(
-          { op: "local.get", index: 1 } as Instr,
-          { op: "f64.const", value: nf.n } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "f64.const", value: nf.n },
           {
             op: "f64.eq",
-          } as Instr,
+          },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: 2 } as Instr,
-              { op: "ref.cast", typeIdx: cand.typeIdx } as Instr,
-              { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: nf.fieldIdx } as Instr,
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: cand.typeIdx },
+              { op: "struct.get", typeIdx: cand.typeIdx, fieldIdx: nf.fieldIdx },
               ...box,
-              { op: "return" } as Instr,
+              { op: "return" },
             ],
-          } as Instr,
+          },
         );
       }
       if (fieldChecks.length === 0) continue; // no indexable fields — fall-through miss is identical
       arms.push(
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: cand.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...fieldChecks, ...idxMiss(), { op: "return" } as Instr],
-        } as Instr,
+          then: [...fieldChecks, ...idxMiss(), { op: "return" }],
+        },
       );
     }
     if (arms.length > 0) getIdxFn.body.splice(3, 0, ...arms);
@@ -11195,23 +11182,23 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
     const arms: Instr[] = [];
     for (const cand of cands) {
       if (cand.numericFields.length === 0) continue; // fall-through 0 is identical
-      const orChain: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+      const orChain: Instr[] = [{ op: "i32.const", value: 0 }];
       for (const nf of cand.numericFields) {
         orChain.push(
-          { op: "local.get", index: 1 } as Instr,
-          { op: "f64.const", value: nf.n } as Instr,
-          { op: "f64.eq" } as Instr,
-          { op: "i32.or" } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "f64.const", value: nf.n },
+          { op: "f64.eq" },
+          { op: "i32.or" },
         );
       }
       arms.push(
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.test", typeIdx: cand.typeIdx } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: cand.typeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [...orChain, { op: "return" } as Instr],
-        } as Instr,
+          then: [...orChain, { op: "return" }],
+        },
       );
     }
     if (arms.length > 0) hasIdxFn.body.splice(3, 0, ...arms);
@@ -11292,72 +11279,72 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
         { op: "call", funcIdx: strEqualsIdx },
         { op: "local.set", index: 5 },
       ],
-    } as Instr,
+    },
   ];
 
   // ── __builtinfn_get_meta arms ──
   if (getMetaFn) {
     const arms: Instr[] = [];
     for (const [typeIdx, meta] of entries) {
-      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: 4 }, // isName
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              // deleted? (state & NAME_DELETED)
-              { op: "local.get", index: 2 },
-              { op: "ref.cast", typeIdx },
-              { op: "struct.get", typeIdx, fieldIdx: 1 },
-              { op: "i32.const", value: 1 },
-              { op: "i32.and" },
-              { op: "i32.eqz" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  ...nativeStringLiteralInstrs(ctx, meta.name),
-                  { op: "extern.convert_any" } as Instr,
-                  { op: "return" },
-                ],
-              },
-              { op: "ref.null.extern" },
-              { op: "return" },
-            ],
-          },
-          // length: deleted? (state & LENGTH_DELETED)
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
-          { op: "i32.const", value: 2 },
-          { op: "i32.and" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "f64.const", value: meta.length }, { op: "call", funcIdx: boxNumIdx }, { op: "return" }],
-          },
-          { op: "ref.null.extern" },
-          { op: "return" },
-        ],
-      } as Instr);
+      arms.push(
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 4 }, // isName
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // deleted? (state & NAME_DELETED)
+                { op: "local.get", index: 2 },
+                { op: "ref.cast", typeIdx },
+                { op: "struct.get", typeIdx, fieldIdx: 1 },
+                { op: "i32.const", value: 1 },
+                { op: "i32.and" },
+                { op: "i32.eqz" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [...nativeStringLiteralInstrs(ctx, meta.name), { op: "extern.convert_any" }, { op: "return" }],
+                },
+                { op: "ref.null.extern" },
+                { op: "return" },
+              ],
+            },
+            // length: deleted? (state & LENGTH_DELETED)
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx },
+            { op: "struct.get", typeIdx, fieldIdx: 1 },
+            { op: "i32.const", value: 2 },
+            { op: "i32.and" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "f64.const", value: meta.length }, { op: "call", funcIdx: boxNumIdx }, { op: "return" }],
+            },
+            { op: "ref.null.extern" },
+            { op: "return" },
+          ],
+        },
+      );
     }
     getMetaFn.body.splice(
       0,
       0,
       ...classifyPreamble(),
       // Guard: only enter the arm block when the key is "name" or "length".
-      { op: "local.get", index: 4 } as Instr,
-      { op: "local.get", index: 5 } as Instr,
-      { op: "i32.or" } as Instr,
+      { op: "local.get", index: 4 },
+      { op: "local.get", index: 5 },
+      { op: "i32.or" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: arms,
-      } as Instr,
+      },
     );
   }
 
@@ -11367,12 +11354,12 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
     gopdFn.body.splice(
       0,
       0,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "local.get", index: 1 } as Instr,
-      { op: "call", funcIdx: getMetaFuncIdx } as Instr,
-      { op: "local.tee", index: 2 } as Instr,
-      { op: "ref.is_null" } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: getMetaFuncIdx },
+      { op: "local.tee", index: 2 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
@@ -11382,7 +11369,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
           { op: "call", funcIdx: createDescIdx },
           { op: "return" },
         ],
-      } as Instr,
+      },
     );
   }
 
@@ -11390,38 +11377,42 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
   if (deleteFn) {
     const arms: Instr[] = [];
     for (const [typeIdx] of entries) {
-      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // state |= isName ? 1 : 2
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
-          { op: "local.get", index: 4 },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "i32.const", value: 1 }],
-            else: [{ op: "i32.const", value: 2 }],
-          },
-          { op: "i32.or" },
-          { op: "struct.set", typeIdx, fieldIdx: 1 },
-          { op: "i32.const", value: 1 },
-          { op: "return" },
-        ],
-      } as Instr);
+      arms.push(
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // state |= isName ? 1 : 2
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx },
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx },
+            { op: "struct.get", typeIdx, fieldIdx: 1 },
+            { op: "local.get", index: 4 },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 1 }],
+              else: [{ op: "i32.const", value: 2 }],
+            },
+            { op: "i32.or" },
+            { op: "struct.set", typeIdx, fieldIdx: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "return" },
+          ],
+        },
+      );
     }
     deleteFn.body.splice(
       0,
       0,
       ...classifyPreamble(),
-      { op: "local.get", index: 4 } as Instr,
-      { op: "local.get", index: 5 } as Instr,
-      { op: "i32.or" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: arms } as Instr,
+      { op: "local.get", index: 4 },
+      { op: "local.get", index: 5 },
+      { op: "i32.or" },
+      { op: "if", blockType: { kind: "empty" }, then: arms },
     );
   }
 
@@ -11430,54 +11421,58 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
   if (pushOwnFn && objVecPushIdx !== undefined) {
     const arms: Instr[] = [];
     for (const [typeIdx] of entries) {
-      arms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // "length" first (spec order: OrdinaryOwnPropertyKeys creation order).
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
-          { op: "i32.const", value: 2 },
-          { op: "i32.and" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: 1 }, // vec
-              ...nativeStringLiteralInstrs(ctx, "length"),
-              { op: "extern.convert_any" } as Instr,
-              { op: "call", funcIdx: objVecPushIdx },
-            ],
-          },
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
-          { op: "i32.const", value: 1 },
-          { op: "i32.and" },
-          { op: "i32.eqz" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: 1 }, // vec
-              ...nativeStringLiteralInstrs(ctx, "name"),
-              { op: "extern.convert_any" } as Instr,
-              { op: "call", funcIdx: objVecPushIdx },
-            ],
-          },
-          { op: "i32.const", value: 1 },
-          { op: "return" },
-        ],
-      } as Instr);
+      arms.push(
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // "length" first (spec order: OrdinaryOwnPropertyKeys creation order).
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx },
+            { op: "struct.get", typeIdx, fieldIdx: 1 },
+            { op: "i32.const", value: 2 },
+            { op: "i32.and" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 }, // vec
+                ...nativeStringLiteralInstrs(ctx, "length"),
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: objVecPushIdx },
+              ],
+            },
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx },
+            { op: "struct.get", typeIdx, fieldIdx: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.and" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 }, // vec
+                ...nativeStringLiteralInstrs(ctx, "name"),
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: objVecPushIdx },
+              ],
+            },
+            { op: "i32.const", value: 1 },
+            { op: "return" },
+          ],
+        },
+      );
     }
     pushOwnFn.body.splice(
       0,
       0,
-      { op: "local.get", index: 0 } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 2 } as Instr,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
       ...arms,
     );
   }

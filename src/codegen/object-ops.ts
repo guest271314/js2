@@ -292,7 +292,7 @@ function emitDescriptorStructReify(
     // Object runtime unavailable (should not happen under ctx.standalone, but be
     // safe): degrade to the prior behavior — push the struct as externref.
     fctx.body.push({ op: "local.get", index: srcLocal });
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
     return;
   }
 
@@ -314,7 +314,7 @@ function emitDescriptorStructReify(
     for (const instr of stringConstantExternrefInstrs(ctx, field.name)) fctx.body.push(instr);
     // value: src.<field>, boxed to externref
     fctx.body.push({ op: "local.get", index: srcLocal });
-    fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "ref.as_non_null" });
     fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
     if (field.type.kind !== "externref") {
       coerceType(ctx, fctx, field.type, { kind: "externref" });
@@ -339,7 +339,7 @@ export function emitDefinePropertyDescRuntime(
   const objType = compileExpression(ctx, fctx, objArg);
   if (!objType) return null;
   if (objType.kind === "ref" || objType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (objType.kind !== "externref") {
     coerceType(ctx, fctx, objType, { kind: "externref" });
   }
@@ -376,7 +376,7 @@ export function emitDefinePropertyDescRuntime(
     // a `$Object` externref in its place.
   } else if (descType) {
     if (descType.kind === "ref" || descType.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     } else if (descType.kind !== "externref") {
       coerceType(ctx, fctx, descType, { kind: "externref" });
     }
@@ -516,43 +516,43 @@ function maybeEmitVecLengthGrowth(
     blockType: { kind: "empty" },
     then: [
       // data = vec.data
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "local.set", index: dataLocal } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: dataLocal },
 
       // if (idx >= array.len(data)) grow backing array to idx + 1
-      { op: "local.get", index: dataLocal } as Instr,
-      { op: "array.len" } as Instr,
-      { op: "local.tee", index: oldCapLocal } as Instr,
-      { op: "i32.const", value: idx } as Instr,
-      { op: "i32.le_s" } as Instr, // oldCap <= idx?
+      { op: "local.get", index: dataLocal },
+      { op: "array.len" },
+      { op: "local.tee", index: oldCapLocal },
+      { op: "i32.const", value: idx },
+      { op: "i32.le_s" }, // oldCap <= idx?
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           // newData = array.new_default(idx + 1)
-          { op: "i32.const", value: idx + 1 } as Instr,
-          { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-          { op: "local.set", index: newDataLocal } as Instr,
+          { op: "i32.const", value: idx + 1 },
+          { op: "array.new_default", typeIdx: arrTypeIdx },
+          { op: "local.set", index: newDataLocal },
           // array.copy newData[0..oldCap] = data[0..oldCap]
-          { op: "local.get", index: newDataLocal } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "local.get", index: dataLocal } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "local.get", index: oldCapLocal } as Instr,
-          { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+          { op: "local.get", index: newDataLocal },
+          { op: "i32.const", value: 0 },
+          { op: "local.get", index: dataLocal },
+          { op: "i32.const", value: 0 },
+          { op: "local.get", index: oldCapLocal },
+          { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
           // vec.data = newData
-          { op: "local.get", index: vecLocal } as Instr,
-          { op: "local.get", index: newDataLocal } as Instr,
-          { op: "ref.as_non_null" } as Instr,
-          { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "local.get", index: vecLocal },
+          { op: "local.get", index: newDataLocal },
+          { op: "ref.as_non_null" },
+          { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
         ],
-      } as Instr,
+      },
 
       // vec.length = idx + 1
-      { op: "local.get", index: vecLocal } as Instr,
-      { op: "i32.const", value: idx + 1 } as Instr,
-      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.get", index: vecLocal },
+      { op: "i32.const", value: idx + 1 },
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
     ],
   });
 }
@@ -824,19 +824,19 @@ function maybeEmitVecLengthDefine(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        { op: "local.get", index: newLenLocal } as Instr,
-        { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-        { op: "local.set", index: newDataLocal } as Instr,
-        { op: "local.get", index: newDataLocal } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: dataLocal } as Instr,
-        { op: "i32.const", value: 0 } as Instr,
-        { op: "local.get", index: oldCapLocal } as Instr,
-        { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-        { op: "local.get", index: vecLocal } as Instr,
-        { op: "local.get", index: newDataLocal } as Instr,
-        { op: "ref.as_non_null" } as Instr,
-        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: newLenLocal },
+        { op: "array.new_default", typeIdx: arrTypeIdx },
+        { op: "local.set", index: newDataLocal },
+        { op: "local.get", index: newDataLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: dataLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: oldCapLocal },
+        { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+        { op: "local.get", index: vecLocal },
+        { op: "local.get", index: newDataLocal },
+        { op: "ref.as_non_null" },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
       ],
     });
 
@@ -935,7 +935,7 @@ function emitObjectArgNullGuard(ctx: CodegenContext, fctx: FunctionContext, loca
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr],
+    then: [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }],
     else: [],
   });
 }
@@ -1085,13 +1085,13 @@ function emitMappedArgValueDefine(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [] as Instr[],
+    then: [],
     else: [
-      { op: "local.get", index: info.argsLocalIdx } as Instr,
-      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
-      { op: "i32.const", value: argIndex } as Instr,
-      { op: "local.get", index: valLocal } as Instr,
-      { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+      { op: "local.get", index: info.argsLocalIdx },
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 },
+      { op: "i32.const", value: argIndex },
+      { op: "local.get", index: valLocal },
+      { op: "array.set", typeIdx: info.arrTypeIdx },
     ],
   });
 
@@ -1107,7 +1107,7 @@ function emitMappedArgValueDefine(
 
   // Result of Object.defineProperty is the object — push arguments as externref.
   fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
   return { kind: "externref" };
 }
 
@@ -2081,7 +2081,7 @@ export function compileObjectDefineProperty(
     // If obj is externref but we know it's a struct (e.g. `const obj: any = { x: 0 }`),
     // cast from externref to the struct ref type via any.convert_extern + guarded ref.cast.
     if (objType.kind === "externref" && structTypeIdx !== undefined) {
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
       // Guard: ref.test before ref.cast to avoid illegal cast traps
       const tmpAny = allocTempLocal(fctx, { kind: "anyref" } as ValType);
       fctx.body.push({ op: "local.tee", index: tmpAny });
@@ -2089,9 +2089,12 @@ export function compileObjectDefineProperty(
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "ref_null", typeIdx: structTypeIdx } as ValType },
-        then: [{ op: "local.get", index: tmpAny } as Instr, { op: "ref.cast_null", typeIdx: structTypeIdx } as Instr],
+        then: [
+          { op: "local.get", index: tmpAny },
+          { op: "ref.cast_null", typeIdx: structTypeIdx },
+        ],
         else: [{ op: "ref.null", typeIdx: structTypeIdx }],
-      } as Instr);
+      });
       releaseTempLocal(fctx, tmpAny);
       objType = { kind: "ref_null", typeIdx: structTypeIdx };
     }
@@ -2349,7 +2352,7 @@ export function compileObjectDefineProperty(
     if (anyFlagSpecified || shouldStoreDescriptorDefaults) {
       fctx.body.push({ op: "local.get", index: objLocal });
       if (objType.kind === "ref" || objType.kind === "ref_null") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
+        fctx.body.push({ op: "extern.convert_any" });
       } else if (objType.kind !== "externref") {
         coerceType(ctx, fctx, objType, { kind: "externref" });
       }
@@ -2635,7 +2638,7 @@ function emitExternDefinePropertyValue(
   const objType = compileExpression(ctx, fctx, objArg);
   if (!objType) return null;
   if (objType.kind === "ref" || objType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (objType.kind !== "externref") {
     coerceType(ctx, fctx, objType, { kind: "externref" });
   }
@@ -2783,7 +2786,7 @@ function emitAccessorFn(
     // compileArrowAsClosure leaves a closure-struct ref; __defineProperty_accessor
     // expects externref. Convert unless it is already externref.
     if (closureType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     return true;
   }
@@ -2831,7 +2834,7 @@ function emitAccessorRefValue(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const t = compileExpression(ctx, fctx, expr, { kind: "externref" });
       if (t) {
         if (t.kind === "ref" || t.kind === "ref_null") {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         } else if (t.kind !== "externref") {
           coerceType(ctx, fctx, t, { kind: "externref" });
         }
@@ -2846,7 +2849,7 @@ function emitAccessorRefValue(ctx: CodegenContext, fctx: FunctionContext, expr: 
   const t = compileExpression(ctx, fctx, expr, { kind: "externref" });
   if (!t) return false;
   if (t.kind === "ref" || t.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (t.kind !== "externref") {
     coerceType(ctx, fctx, t, { kind: "externref" });
   }
@@ -3022,7 +3025,7 @@ function emitExternDefinePropertyNoValue(
 
       fctx.body.push({ op: "local.get", index: objLocal });
       if (objType.kind === "ref" || objType.kind === "ref_null") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
+        fctx.body.push({ op: "extern.convert_any" });
       } else if (objType.kind !== "externref") {
         coerceType(ctx, fctx, objType, { kind: "externref" });
       }
@@ -3131,7 +3134,7 @@ function emitExternDefinePropertyNoValue(
     // Use extern.convert_any directly (not coerceType) to avoid __make_iterable
     // for vec structs, which would create a new JS array with different identity (#856).
     if (objType.kind === "ref" || objType.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     } else if (objType.kind !== "externref") {
       coerceType(ctx, fctx, objType, { kind: "externref" });
     }
@@ -3546,7 +3549,7 @@ export function compileObjectDefineProperties(
           // Cast if needed — guard with ref.test to avoid illegal cast traps (#778)
           let needsGuard = false;
           if (objType.kind === "externref") {
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
             needsGuard = true;
           } else if (
             (objType.kind === "ref_null" || objType.kind === "ref") &&
@@ -3561,36 +3564,36 @@ export function compileObjectDefineProperties(
             if (needsGuard) {
               // Save as anyref for guarded access
               const defpTmp = allocLocal(fctx, `__defp_tmp_${fctx.locals.length}`, { kind: "anyref" });
-              fctx.body.push({ op: "local.set", index: defpTmp } as Instr);
+              fctx.body.push({ op: "local.set", index: defpTmp });
 
               // Save old value
               const oldValLocal = allocLocal(fctx, `__defps_oldval_${fctx.locals.length}`, fieldType);
-              fctx.body.push({ op: "local.get", index: defpTmp } as Instr);
-              fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+              fctx.body.push({ op: "local.get", index: defpTmp });
+              fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
               if (fieldType.kind === "f64") {
                 fctx.body.push({
                   op: "if",
                   blockType: { kind: "val", type: { kind: "f64" } as ValType },
                   then: [
-                    { op: "local.get", index: defpTmp } as Instr,
-                    { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx } as Instr,
+                    { op: "local.get", index: defpTmp },
+                    { op: "ref.cast", typeIdx: structTypeIdx },
+                    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
                   ],
-                  else: [{ op: "f64.const", value: 0 } as Instr],
-                } as Instr);
+                  else: [{ op: "f64.const", value: 0 }],
+                });
               } else if (fieldType.kind === "i32") {
                 fctx.body.push({
                   op: "if",
                   blockType: { kind: "val", type: { kind: "i32" } as ValType },
                   then: [
-                    { op: "local.get", index: defpTmp } as Instr,
-                    { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx } as Instr,
+                    { op: "local.get", index: defpTmp },
+                    { op: "ref.cast", typeIdx: structTypeIdx },
+                    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
                   ],
-                  else: [{ op: "i32.const", value: 0 } as Instr],
-                } as Instr);
+                  else: [{ op: "i32.const", value: 0 }],
+                });
               }
-              fctx.body.push({ op: "local.set", index: oldValLocal } as Instr);
+              fctx.body.push({ op: "local.set", index: oldValLocal });
 
               // Compile new value
               const valType = compileExpression(ctx, fctx, valueExpr, fieldType);
@@ -3599,7 +3602,7 @@ export function compileObjectDefineProperties(
                 if (valType.kind !== fieldType.kind) {
                   coerceType(ctx, fctx, valType, fieldType);
                 }
-                fctx.body.push({ op: "local.set", index: newValLocal } as Instr);
+                fctx.body.push({ op: "local.set", index: newValLocal });
 
                 // Compare values — throw if different
                 const tagIdx = ensureExnTag(ctx);
@@ -3614,7 +3617,7 @@ export function compileObjectDefineProperties(
                   fctx.body.push({
                     op: "if",
                     blockType: { kind: "empty" },
-                    then: [...errMsgInstrs, { op: "throw", tagIdx } as Instr],
+                    then: [...errMsgInstrs, { op: "throw", tagIdx }],
                   });
                 } else if (fieldType.kind === "i32") {
                   fctx.body.push({ op: "local.get", index: oldValLocal });
@@ -3623,24 +3626,24 @@ export function compileObjectDefineProperties(
                   fctx.body.push({
                     op: "if",
                     blockType: { kind: "empty" },
-                    then: [...errMsgInstrs, { op: "throw", tagIdx } as Instr],
+                    then: [...errMsgInstrs, { op: "throw", tagIdx }],
                   });
                 }
 
                 // Do the struct.set if values match
-                fctx.body.push({ op: "local.get", index: defpTmp } as Instr);
-                fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+                fctx.body.push({ op: "local.get", index: defpTmp });
+                fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
                 fctx.body.push({
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
-                    { op: "local.get", index: defpTmp } as Instr,
-                    { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                    { op: "local.get", index: newValLocal } as Instr,
-                    { op: "struct.set", typeIdx: structTypeIdx, fieldIdx } as Instr,
+                    { op: "local.get", index: defpTmp },
+                    { op: "ref.cast", typeIdx: structTypeIdx },
+                    { op: "local.get", index: newValLocal },
+                    { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
                   ],
                   else: [],
-                } as Instr);
+                });
               }
             } else {
               // Non-guarded: direct struct access
@@ -3668,7 +3671,7 @@ export function compileObjectDefineProperties(
                   fctx.body.push({
                     op: "if",
                     blockType: { kind: "empty" },
-                    then: [...errMsgInstrs, { op: "throw", tagIdx } as Instr],
+                    then: [...errMsgInstrs, { op: "throw", tagIdx }],
                   });
                 } else if (fieldType.kind === "i32") {
                   fctx.body.push({ op: "local.get", index: oldValLocal });
@@ -3677,7 +3680,7 @@ export function compileObjectDefineProperties(
                   fctx.body.push({
                     op: "if",
                     blockType: { kind: "empty" },
-                    then: [...errMsgInstrs, { op: "throw", tagIdx } as Instr],
+                    then: [...errMsgInstrs, { op: "throw", tagIdx }],
                   });
                 }
 
@@ -3692,7 +3695,7 @@ export function compileObjectDefineProperties(
           } else if (needsGuard) {
             // Save obj as anyref, compile value, then guard the struct.set
             const defpTmp = allocLocal(fctx, `__defp_tmp_${fctx.locals.length}`, { kind: "anyref" });
-            fctx.body.push({ op: "local.set", index: defpTmp } as Instr);
+            fctx.body.push({ op: "local.set", index: defpTmp });
 
             // Compile the value expression first (outside the guard)
             const valType = compileExpression(ctx, fctx, valueExpr, fieldType);
@@ -3701,22 +3704,22 @@ export function compileObjectDefineProperties(
               if (valType.kind !== fieldType.kind) {
                 coerceType(ctx, fctx, valType, fieldType);
               }
-              fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+              fctx.body.push({ op: "local.set", index: valLocal });
 
               // Now guard the struct.set with ref.test
-              fctx.body.push({ op: "local.get", index: defpTmp } as Instr);
-              fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+              fctx.body.push({ op: "local.get", index: defpTmp });
+              fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  { op: "local.get", index: defpTmp } as Instr,
-                  { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                  { op: "local.get", index: valLocal } as Instr,
-                  { op: "struct.set", typeIdx: structTypeIdx, fieldIdx } as Instr,
+                  { op: "local.get", index: defpTmp },
+                  { op: "ref.cast", typeIdx: structTypeIdx },
+                  { op: "local.get", index: valLocal },
+                  { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
                 ],
                 else: [],
-              } as Instr);
+              });
             }
           } else {
             const valType = compileExpression(ctx, fctx, valueExpr, fieldType);
@@ -3758,7 +3761,7 @@ export function compileObjectDefineProperties(
         // for vec structs, which would create a new JS array with different identity (#856/#1092).
         fctx.body.push({ op: "local.get", index: objLocal });
         if (objType.kind === "ref" || objType.kind === "ref_null") {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         } else if (objType.kind !== "externref") {
           coerceType(ctx, fctx, objType, { kind: "externref" });
         }
@@ -3932,7 +3935,7 @@ export function compileObjectDefineProperties(
   // Use extern.convert_any directly (not coerceType) to avoid __make_iterable
   // for vec structs, which would create a new JS array with different identity (#856/#1092).
   if (objType.kind === "ref" || objType.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   } else if (objType.kind !== "externref") {
     coerceType(ctx, fctx, objType, { kind: "externref" });
   }
@@ -4053,7 +4056,7 @@ export function compileObjectKeysOrValues(
     }
     // Fallback: drop arg, push null externref
     fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
 
@@ -4104,7 +4107,7 @@ export function compileObjectKeysOrValues(
     const objType = compileExpression(ctx, fctx, arg);
     if (!objType) return null;
     if (objType.kind === "ref" || objType.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     } else if (objType.kind !== "externref") {
       coerceType(ctx, fctx, objType, { kind: "externref" });
     }
@@ -4114,7 +4117,7 @@ export function compileObjectKeysOrValues(
       fctx.body.push({ op: "call", funcIdx });
     } else {
       fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
     return { kind: "externref" };
   }
@@ -4447,7 +4450,7 @@ export function compilePropertyIntrospection(
       const presentLocal = allocLocal(fctx, `__hop_present_${fctx.locals.length}`, { kind: "i32" });
       const recv = compileExpression(ctx, fctx, propAccess.expression, receiverWasm);
       if (recv && (recv.kind === "ref" || recv.kind === "ref_null")) {
-        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        fctx.body.push({ op: "ref.as_non_null" });
       }
       fctx.body.push({ op: "local.set", index: recvLocal });
       // present := (index < length) ? (data[index] != null) : 0. The bounds test
@@ -4460,15 +4463,15 @@ export function compilePropertyIntrospection(
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
-          { op: "local.get", index: recvLocal } as Instr,
-          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr, // data array
-          { op: "i32.const", value: idxVal } as Instr,
-          { op: "array.get", typeIdx: dataArrTypeIdx } as Instr, // element
-          { op: "ref.is_null" } as Instr,
-          { op: "i32.eqz" } as Instr, // present (non-null) → 1
+          { op: "local.get", index: recvLocal },
+          { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 }, // data array
+          { op: "i32.const", value: idxVal },
+          { op: "array.get", typeIdx: dataArrTypeIdx }, // element
+          { op: "ref.is_null" },
+          { op: "i32.eqz" }, // present (non-null) → 1
         ],
-        else: [{ op: "i32.const", value: 0 } as Instr],
-      } as Instr);
+        else: [{ op: "i32.const", value: 0 }],
+      });
       fctx.body.push({ op: "local.set", index: presentLocal });
       // result := present OR __hasOwnProperty(arr, key) — the latter catches an
       // index added to the sidecar (e.g. defineProperty on an array index, where
@@ -4480,7 +4483,7 @@ export function compilePropertyIntrospection(
         [{ kind: "i32" }],
       );
       fctx.body.push({ op: "local.get", index: recvLocal });
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
       const keyT = compileExpression(ctx, fctx, keyArg, { kind: "externref" });
       if (keyT && keyT.kind !== "externref") coerceType(ctx, fctx, keyT, { kind: "externref" });
       flushLateImportShifts(ctx, fctx);
@@ -4711,7 +4714,7 @@ export function compilePropertyIntrospection(
       if (hopIdx !== undefined) {
         const recvType = compileExpression(ctx, fctx, propAccess.expression);
         if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         } else if (recvType && recvType.kind !== "externref") {
           coerceType(ctx, fctx, recvType, { kind: "externref" });
         }

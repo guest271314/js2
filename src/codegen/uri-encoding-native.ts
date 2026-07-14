@@ -92,20 +92,20 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
   const L_LO = 11; // low surrogate
   const L_CAP = 12; // out capacity
 
-  const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-  const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-  const tee = (i: number): Instr => ({ op: "local.tee", index: i }) as Instr;
-  const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+  const get = (i: number): Instr => ({ op: "local.get", index: i });
+  const set = (i: number): Instr => ({ op: "local.set", index: i });
+  const tee = (i: number): Instr => ({ op: "local.tee", index: i });
+  const c = (value: number): Instr => ({ op: "i32.const", value });
 
   // out[n++] = ch  (ch already on stack-free; pass via instrs producing the value)
   const pushCh = (chInstrs: Instr[]): Instr[] => [
     get(L_OUT),
     get(L_N),
     ...chInstrs,
-    { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.set", typeIdx: strDataTypeIdx },
     get(L_N),
     c(1),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     set(L_N),
   ];
 
@@ -124,17 +124,17 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
       c(55 /* 'A'-10 */), // [v, 48, 55]
       ...vInstrs, // [v, 48, 55, v]
       c(10),
-      { op: "i32.lt_u" } as Instr, // [v, 48, 55, (v<10)]
-      { op: "select" } as Instr, // [v, base]
-      { op: "i32.add" } as Instr, // [v + base]
+      { op: "i32.lt_u" }, // [v, 48, 55, (v<10)]
+      { op: "select" }, // [v, base]
+      { op: "i32.add" }, // [v + base]
     ];
   };
 
   // Emit one byte (in L_B) as %XX (uppercase). Consumes nothing; reads L_B.
   const emitPercentByte: Instr[] = [
     ...pushCh([c(37 /* '%' */)]),
-    ...pushCh(hexDigit([get(L_B), c(4), { op: "i32.shr_u" } as Instr, c(0xf), { op: "i32.and" } as Instr])),
-    ...pushCh(hexDigit([get(L_B), c(0xf), { op: "i32.and" } as Instr])),
+    ...pushCh(hexDigit([get(L_B), c(4), { op: "i32.shr_u" }, c(0xf), { op: "i32.and" }])),
+    ...pushCh(hexDigit([get(L_B), c(0xf), { op: "i32.and" }])),
   ];
 
   // isPreserved(c, mask): leaves i32 bool. Reads L_C and P_MASK.
@@ -142,75 +142,75 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
   //   codes: 0x2D(-) 0x5F(_) 0x2E(.) 0x21(!) 0x7E(~) 0x2A(*) 0x27(') 0x28(() 0x29())
   // uriReserved ∪ #: ; / ? : @ & = + $ , #
   //   codes: 0x3B(;) 0x2F(/) 0x3F(?) 0x3A(:) 0x40(@) 0x26(&) 0x3D(=) 0x2B(+) 0x24($) 0x2C(,) 0x23(#)
-  const eqC = (code: number): Instr[] => [get(L_C), c(code), { op: "i32.eq" } as Instr];
+  const eqC = (code: number): Instr[] => [get(L_C), c(code), { op: "i32.eq" }];
   const rangeC = (lo: number, hi: number): Instr[] => [
     get(L_C),
     c(lo),
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     get(L_C),
     c(hi),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.le_u" },
+    { op: "i32.and" },
   ];
   const isPreserved: Instr[] = [
     // alphanumerics
     ...rangeC(0x41, 0x5a), // A-Z
     ...rangeC(0x61, 0x7a), // a-z
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...rangeC(0x30, 0x39), // 0-9
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     // uriUnescaped marks
     ...eqC(0x2d),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x5f),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2e),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x21),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x7e),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2a),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x27),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x28),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x29),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     // encodeURI extras gated by mask bit 1
     get(P_MASK),
     c(0b10),
-    { op: "i32.and" } as Instr,
+    { op: "i32.and" },
     {
       op: "if",
       blockType: { kind: "val", type: i32 },
       then: [
         ...eqC(0x3b),
         ...eqC(0x2f),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x3f),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x3a),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x40),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x26),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x3d),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x2b),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x24),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x2c),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
         ...eqC(0x23),
-        { op: "i32.or" } as Instr,
+        { op: "i32.or" },
       ],
       else: [c(0)],
-    } as Instr,
-    { op: "i32.or" } as Instr,
+    },
+    { op: "i32.or" },
   ];
 
   // ── URIError throw sequence (raw Instrs) ──
@@ -226,43 +226,43 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
   // objects per call keeps every `call` independently shiftable.
   const throwURIError = (): Instr[] => [
     ...stringConstantExternrefInstrs(ctx, "URI malformed"),
-    { op: "call", funcIdx: uriErrCtorIdx } as Instr,
-    { op: "throw", tagIdx } as Instr,
+    { op: "call", funcIdx: uriErrCtorIdx },
+    { op: "throw", tagIdx },
   ];
 
   // getC: L_C = data[L_I]
-  const getC: Instr[] = [get(L_DATA), get(L_I), { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr, set(L_C)];
+  const getC: Instr[] = [get(L_DATA), get(L_I), { op: "array.get_u", typeIdx: strDataTypeIdx }, set(L_C)];
 
   const body: Instr[] = [
     // flat = flatten(s); data = flat.data; i = flat.off; len = flat.off + flat.len
     get(P_S),
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
     set(L_FLAT),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     set(L_DATA),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     set(L_I),
     // len = off + flat.len
     get(L_I),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "i32.add" },
     set(L_LEN),
     // capacity = (len - off) * 9  (worst case: BMP char → 3 octets → 9 chars).
     // Guard a 0-length string (cap=0 array is valid; loop won't run).
     get(L_LEN),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
-    { op: "i32.sub" } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+    { op: "i32.sub" },
     c(9),
-    { op: "i32.mul" } as Instr,
+    { op: "i32.mul" },
     tee(L_CAP),
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
     set(L_OUT),
     c(0),
     set(L_N),
@@ -279,8 +279,8 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
             // if i>=len break
             get(L_I),
             get(L_LEN),
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             ...getC,
             // if isPreserved(c): out[n++]=c; i++; continue
             ...isPreserved,
@@ -291,27 +291,27 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
                 ...pushCh([get(L_C)]),
                 get(L_I),
                 c(1),
-                { op: "i32.add" } as Instr,
+                { op: "i32.add" },
                 set(L_I),
-                { op: "br", depth: 1 } as Instr, // continue loop
+                { op: "br", depth: 1 }, // continue loop
               ],
-            } as Instr,
+            },
             // ── not preserved: decode code point ──
             // default cp = c, advance 1
             get(L_C),
             set(L_CP),
             get(L_I),
             c(1),
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             set(L_I),
             // high surrogate? 0xD800..0xDBFF
             get(L_C),
             c(0xd800),
-            { op: "i32.ge_u" } as Instr,
+            { op: "i32.ge_u" },
             get(L_C),
             c(0xdbff),
-            { op: "i32.le_u" } as Instr,
-            { op: "i32.and" } as Instr,
+            { op: "i32.le_u" },
+            { op: "i32.and" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -319,58 +319,58 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
                 // need a following low surrogate
                 get(L_I),
                 get(L_LEN),
-                { op: "i32.ge_s" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.ge_s" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
                 // lo = data[i]
                 get(L_DATA),
                 get(L_I),
-                { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+                { op: "array.get_u", typeIdx: strDataTypeIdx },
                 set(L_LO),
                 // lo in 0xDC00..0xDFFF ?
                 get(L_LO),
                 c(0xdc00),
-                { op: "i32.ge_u" } as Instr,
+                { op: "i32.ge_u" },
                 get(L_LO),
                 c(0xdfff),
-                { op: "i32.le_u" } as Instr,
-                { op: "i32.and" } as Instr,
-                { op: "i32.eqz" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.le_u" },
+                { op: "i32.and" },
+                { op: "i32.eqz" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
                 // cp = 0x10000 + ((c-0xD800)<<10) + (lo-0xDC00)
                 c(0x10000),
                 get(L_C),
                 c(0xd800),
-                { op: "i32.sub" } as Instr,
+                { op: "i32.sub" },
                 c(10),
-                { op: "i32.shl" } as Instr,
-                { op: "i32.add" } as Instr,
+                { op: "i32.shl" },
+                { op: "i32.add" },
                 get(L_LO),
                 c(0xdc00),
-                { op: "i32.sub" } as Instr,
-                { op: "i32.add" } as Instr,
+                { op: "i32.sub" },
+                { op: "i32.add" },
                 set(L_CP),
                 // consume the low surrogate
                 get(L_I),
                 c(1),
-                { op: "i32.add" } as Instr,
+                { op: "i32.add" },
                 set(L_I),
               ],
-            } as Instr,
+            },
             // lone low surrogate (0xDC00..0xDFFF) → URIError
             get(L_C),
             c(0xdc00),
-            { op: "i32.ge_u" } as Instr,
+            { op: "i32.ge_u" },
             get(L_C),
             c(0xdfff),
-            { op: "i32.le_u" } as Instr,
-            { op: "i32.and" } as Instr,
-            { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+            { op: "i32.le_u" },
+            { op: "i32.and" },
+            { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
 
             // ── UTF-8 encode cp into %XX bytes ──
             // nbytes = cp<=0x7F?1 : cp<=0x7FF?2 : cp<=0xFFFF?3 : 4
             get(L_CP),
             c(0x7f),
-            { op: "i32.le_u" } as Instr,
+            { op: "i32.le_u" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -383,7 +383,7 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
               else: [
                 get(L_CP),
                 c(0x7ff),
-                { op: "i32.le_u" } as Instr,
+                { op: "i32.le_u" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -391,23 +391,23 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
                     // 2 bytes: 110xxxxx 10xxxxxx
                     get(L_CP),
                     c(6),
-                    { op: "i32.shr_u" } as Instr,
+                    { op: "i32.shr_u" },
                     c(0xc0),
-                    { op: "i32.or" } as Instr,
+                    { op: "i32.or" },
                     set(L_B),
                     ...emitPercentByte,
                     get(L_CP),
                     c(0x3f),
-                    { op: "i32.and" } as Instr,
+                    { op: "i32.and" },
                     c(0x80),
-                    { op: "i32.or" } as Instr,
+                    { op: "i32.or" },
                     set(L_B),
                     ...emitPercentByte,
                   ],
                   else: [
                     get(L_CP),
                     c(0xffff),
-                    { op: "i32.le_u" } as Instr,
+                    { op: "i32.le_u" },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
@@ -415,25 +415,25 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
                         // 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
                         get(L_CP),
                         c(12),
-                        { op: "i32.shr_u" } as Instr,
+                        { op: "i32.shr_u" },
                         c(0xe0),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                         get(L_CP),
                         c(6),
-                        { op: "i32.shr_u" } as Instr,
+                        { op: "i32.shr_u" },
                         c(0x3f),
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.and" },
                         c(0x80),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                         get(L_CP),
                         c(0x3f),
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.and" },
                         c(0x80),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                       ],
@@ -441,43 +441,43 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
                         // 4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
                         get(L_CP),
                         c(18),
-                        { op: "i32.shr_u" } as Instr,
+                        { op: "i32.shr_u" },
                         c(0xf0),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                         get(L_CP),
                         c(12),
-                        { op: "i32.shr_u" } as Instr,
+                        { op: "i32.shr_u" },
                         c(0x3f),
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.and" },
                         c(0x80),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                         get(L_CP),
                         c(6),
-                        { op: "i32.shr_u" } as Instr,
+                        { op: "i32.shr_u" },
                         c(0x3f),
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.and" },
                         c(0x80),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                         get(L_CP),
                         c(0x3f),
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.and" },
                         c(0x80),
-                        { op: "i32.or" } as Instr,
+                        { op: "i32.or" },
                         set(L_B),
                         ...emitPercentByte,
                       ],
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
-            { op: "br", depth: 0 } as Instr,
+            },
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -487,8 +487,8 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
     get(L_N),
     c(0),
     get(L_OUT),
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "extern.convert_any" },
   ];
   // (#1916 S3b) stable-regime handle — the "claim the slot last" ordering
   // dance this comment used to describe is moot: the handle is
@@ -569,9 +569,9 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
   const L_IDX = 16; // continuation-byte index (i + 3*k)
   const L_LO2 = 17; // scratch (parseByteAt low nibble) — never a parse target
 
-  const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-  const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-  const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+  const get = (i: number): Instr => ({ op: "local.get", index: i });
+  const set = (i: number): Instr => ({ op: "local.set", index: i });
+  const c = (value: number): Instr => ({ op: "i32.const", value });
 
   // (#2868) A FACTORY, not a shared const: `throwURIError` is spread at ~13
   // sites in the helper body. A spread is shallow, so a single shared
@@ -583,8 +583,8 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
   // objects per call keeps every `call` independently shiftable.
   const throwURIError = (): Instr[] => [
     ...stringConstantExternrefInstrs(ctx, "URI malformed"),
-    { op: "call", funcIdx: uriErrCtorIdx } as Instr,
-    { op: "throw", tagIdx } as Instr,
+    { op: "call", funcIdx: uriErrCtorIdx },
+    { op: "throw", tagIdx },
   ];
 
   // out[n++] = <value instrs>
@@ -592,10 +592,10 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
     get(L_OUT),
     get(L_N),
     ...chInstrs,
-    { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.set", typeIdx: strDataTypeIdx },
     get(L_N),
     c(1),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     set(L_N),
   ];
 
@@ -609,47 +609,47 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
     // if 0x30..0x39 -> -0x30
     get(L_HI),
     c(0x30),
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     get(L_HI),
     c(0x39),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.le_u" },
+    { op: "i32.and" },
     {
       op: "if",
       blockType: { kind: "val", type: i32 },
-      then: [get(L_HI), c(0x30), { op: "i32.sub" } as Instr],
+      then: [get(L_HI), c(0x30), { op: "i32.sub" }],
       else: [
         // if 0x41..0x46 -> -0x37
         get(L_HI),
         c(0x41),
-        { op: "i32.ge_u" } as Instr,
+        { op: "i32.ge_u" },
         get(L_HI),
         c(0x46),
-        { op: "i32.le_u" } as Instr,
-        { op: "i32.and" } as Instr,
+        { op: "i32.le_u" },
+        { op: "i32.and" },
         {
           op: "if",
           blockType: { kind: "val", type: i32 },
-          then: [get(L_HI), c(0x37), { op: "i32.sub" } as Instr],
+          then: [get(L_HI), c(0x37), { op: "i32.sub" }],
           else: [
             // if 0x61..0x66 -> -0x57 else -1
             get(L_HI),
             c(0x61),
-            { op: "i32.ge_u" } as Instr,
+            { op: "i32.ge_u" },
             get(L_HI),
             c(0x66),
-            { op: "i32.le_u" } as Instr,
-            { op: "i32.and" } as Instr,
+            { op: "i32.le_u" },
+            { op: "i32.and" },
             {
               op: "if",
               blockType: { kind: "val", type: i32 },
-              then: [get(L_HI), c(0x57), { op: "i32.sub" } as Instr],
+              then: [get(L_HI), c(0x57), { op: "i32.sub" }],
               else: [c(-1)],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
   ];
 
   // parseByteAt(idx): read '%XX' starting at code-unit index `idx`; require
@@ -661,104 +661,104 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
   const dataAt = (idxInstrs: Instr[]): Instr[] => [
     get(L_DATA),
     ...idxInstrs,
-    { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
   ];
   // parseByteAt writes the byte into the given target local.
   const parseByteAt = (idxLocal: number, targetLocal: number): Instr[] => [
     // bounds: idx+2 >= len -> throw
     get(idxLocal),
     c(2),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     get(L_LEN),
-    { op: "i32.ge_s" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+    { op: "i32.ge_s" },
+    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
     // data[idx] == '%' ?
     ...dataAt([get(idxLocal)]),
     c(37 /* '%' */),
-    { op: "i32.ne" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+    { op: "i32.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
     // hi = hexVal(data[idx+1]); if hi<0 throw
-    ...hexVal(dataAt([get(idxLocal), c(1), { op: "i32.add" } as Instr])),
+    ...hexVal(dataAt([get(idxLocal), c(1), { op: "i32.add" }])),
     set(targetLocal),
     get(targetLocal),
     c(0),
-    { op: "i32.lt_s" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+    { op: "i32.lt_s" },
+    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
     // byte = hi<<4
     get(targetLocal),
     c(4),
-    { op: "i32.shl" } as Instr,
+    { op: "i32.shl" },
     set(targetLocal),
     // lo = hexVal(data[idx+2]); if lo<0 throw; byte |= lo
     // (L_LO2 is a dedicated scratch — never a parse target — so calling
     //  parseByteAt(idx, L_CB) for the continuation byte does not self-clobber.)
-    ...hexVal(dataAt([get(idxLocal), c(2), { op: "i32.add" } as Instr])),
+    ...hexVal(dataAt([get(idxLocal), c(2), { op: "i32.add" }])),
     set(L_LO2),
     get(L_LO2),
     c(0),
-    { op: "i32.lt_s" } as Instr,
-    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+    { op: "i32.lt_s" },
+    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
     get(targetLocal),
     get(L_LO2),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     set(targetLocal),
   ];
 
   // isReserved(ascii in L_CP): reservedURISet = ; / ? : @ & = + $ , #
   //   0x3B ; 0x2F / 0x3F ? 0x3A : 0x40 @ 0x26 & 0x3D = 0x2B + 0x24 $ 0x2C , 0x23 #
-  const eqCp = (code: number): Instr[] => [get(L_CP), c(code), { op: "i32.eq" } as Instr];
+  const eqCp = (code: number): Instr[] => [get(L_CP), c(code), { op: "i32.eq" }];
   const isReserved: Instr[] = [
     ...eqCp(0x3b),
     ...eqCp(0x2f),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x3f),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x3a),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x40),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x26),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x3d),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x2b),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x24),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x2c),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqCp(0x23),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
   ];
 
   // Re-emit the original n-octet escape data[i .. i+3*nb) verbatim into out.
   // Used for the decodeURI single-octet reserved char (nb==1). Copies 3 chars.
   const reemitEscape3: Instr[] = [
     ...pushCh(dataAt([get(L_I)])),
-    ...pushCh(dataAt([get(L_I), c(1), { op: "i32.add" } as Instr])),
-    ...pushCh(dataAt([get(L_I), c(2), { op: "i32.add" } as Instr])),
+    ...pushCh(dataAt([get(L_I), c(1), { op: "i32.add" }])),
+    ...pushCh(dataAt([get(L_I), c(2), { op: "i32.add" }])),
   ];
 
   const body: Instr[] = [
     // flatten + read fields
     get(P_S),
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
     set(L_FLAT),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     set(L_DATA),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     set(L_I),
     get(L_I),
     set(L_OFF0),
     get(L_I),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "i32.add" },
     set(L_LEN),
     // capacity = (len - off). Decode never grows past the input length (each %XX
     // triple → ≤1 code unit; astral 4 triples=12 chars → 2 code units). A
@@ -766,8 +766,8 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
     // safe upper bound.
     get(L_LEN),
     get(L_OFF0),
-    { op: "i32.sub" } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+    { op: "i32.sub" },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
     set(L_OUT),
     c(0),
     set(L_N),
@@ -782,26 +782,19 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
           body: [
             get(L_I),
             get(L_LEN),
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             ...dataAt([get(L_I)]),
             set(L_C),
             // not '%' -> copy verbatim, i++, continue
             get(L_C),
             c(37 /* '%' */),
-            { op: "i32.ne" } as Instr,
+            { op: "i32.ne" },
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [
-                ...pushCh([get(L_C)]),
-                get(L_I),
-                c(1),
-                { op: "i32.add" } as Instr,
-                set(L_I),
-                { op: "br", depth: 1 } as Instr,
-              ],
-            } as Instr,
+              then: [...pushCh([get(L_C)]), get(L_I), c(1), { op: "i32.add" }, set(L_I), { op: "br", depth: 1 }],
+            },
             // '%': parse leading byte at i
             ...parseByteAt(L_I, L_B0),
             // determine sequence length nb from B0
@@ -809,7 +802,7 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
             //   else (0x80..0xBF stray cont, 0xC0..0xC1 overlong-2, >0xF4) -> URIError
             get(L_B0),
             c(0x80),
-            { op: "i32.lt_u" } as Instr,
+            { op: "i32.lt_u" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -817,52 +810,52 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
               else: [
                 get(L_B0),
                 c(0xc2),
-                { op: "i32.ge_u" } as Instr,
+                { op: "i32.ge_u" },
                 get(L_B0),
                 c(0xdf),
-                { op: "i32.le_u" } as Instr,
-                { op: "i32.and" } as Instr,
+                { op: "i32.le_u" },
+                { op: "i32.and" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
-                  then: [c(2), set(L_NB), get(L_B0), c(0x1f), { op: "i32.and" } as Instr, set(L_CP)],
+                  then: [c(2), set(L_NB), get(L_B0), c(0x1f), { op: "i32.and" }, set(L_CP)],
                   else: [
                     get(L_B0),
                     c(0xe0),
-                    { op: "i32.ge_u" } as Instr,
+                    { op: "i32.ge_u" },
                     get(L_B0),
                     c(0xef),
-                    { op: "i32.le_u" } as Instr,
-                    { op: "i32.and" } as Instr,
+                    { op: "i32.le_u" },
+                    { op: "i32.and" },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
-                      then: [c(3), set(L_NB), get(L_B0), c(0x0f), { op: "i32.and" } as Instr, set(L_CP)],
+                      then: [c(3), set(L_NB), get(L_B0), c(0x0f), { op: "i32.and" }, set(L_CP)],
                       else: [
                         get(L_B0),
                         c(0xf0),
-                        { op: "i32.ge_u" } as Instr,
+                        { op: "i32.ge_u" },
                         get(L_B0),
                         c(0xf4),
-                        { op: "i32.le_u" } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.le_u" },
+                        { op: "i32.and" },
                         {
                           op: "if",
                           blockType: { kind: "empty" },
-                          then: [c(4), set(L_NB), get(L_B0), c(0x07), { op: "i32.and" } as Instr, set(L_CP)],
+                          then: [c(4), set(L_NB), get(L_B0), c(0x07), { op: "i32.and" }, set(L_CP)],
                           else: [...throwURIError()],
-                        } as Instr,
+                        },
                       ],
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
 
             // ── nb == 1: ASCII single octet ──
             get(L_NB),
             c(1),
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -871,26 +864,26 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
                 //   re-emit the original 3-char escape; else emit the char.
                 get(P_MASK),
                 c(1),
-                { op: "i32.and" } as Instr,
+                { op: "i32.and" },
                 {
                   op: "if",
                   blockType: { kind: "val", type: i32 },
                   then: [...isReserved],
                   else: [c(0)],
-                } as Instr,
+                },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [...reemitEscape3],
                   else: [...pushCh([get(L_CP)])],
-                } as Instr,
+                },
                 get(L_I),
                 c(3),
-                { op: "i32.add" } as Instr,
+                { op: "i32.add" },
                 set(L_I),
-                { op: "br", depth: 1 } as Instr,
+                { op: "br", depth: 1 },
               ],
-            } as Instr,
+            },
 
             // ── nb >= 2: read (nb-1) continuation octets ──
             c(1),
@@ -905,38 +898,38 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
                   body: [
                     get(L_K),
                     get(L_NB),
-                    { op: "i32.ge_s" } as Instr,
-                    { op: "br_if", depth: 1 } as Instr,
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
                     // idx = i + 3*k  (into L_IDX, distinct from parseByteAt's L_HI scratch)
                     get(L_I),
                     get(L_K),
                     c(3),
-                    { op: "i32.mul" } as Instr,
-                    { op: "i32.add" } as Instr,
+                    { op: "i32.mul" },
+                    { op: "i32.add" },
                     set(L_IDX),
                     // parse the continuation byte '%XX' at idx into L_CB
                     ...parseByteAt(L_IDX, L_CB),
                     // L_CB must be 0x80..0xBF  (top two bits == 10)
                     get(L_CB),
                     c(0xc0),
-                    { op: "i32.and" } as Instr,
+                    { op: "i32.and" },
                     c(0x80),
-                    { op: "i32.ne" } as Instr,
-                    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                    { op: "i32.ne" },
+                    { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
                     // cp = (cp << 6) | (cb & 0x3F)
                     get(L_CP),
                     c(6),
-                    { op: "i32.shl" } as Instr,
+                    { op: "i32.shl" },
                     get(L_CB),
                     c(0x3f),
-                    { op: "i32.and" } as Instr,
-                    { op: "i32.or" } as Instr,
+                    { op: "i32.and" },
+                    { op: "i32.or" },
                     set(L_CP),
                     get(L_K),
                     c(1),
-                    { op: "i32.add" } as Instr,
+                    { op: "i32.add" },
                     set(L_K),
-                    { op: "br", depth: 0 } as Instr,
+                    { op: "br", depth: 0 },
                   ],
                 },
               ],
@@ -947,60 +940,60 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
             //   nb==4 -> cp >= 0x10000 && cp <= 0x10FFFF
             get(L_NB),
             c(2),
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
                 get(L_CP),
                 c(0x80),
-                { op: "i32.lt_u" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.lt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
               ],
-            } as Instr,
+            },
             get(L_NB),
             c(3),
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
                 get(L_CP),
                 c(0x800),
-                { op: "i32.lt_u" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.lt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
                 // surrogate range 0xD800..0xDFFF is invalid in UTF-8
                 get(L_CP),
                 c(0xd800),
-                { op: "i32.ge_u" } as Instr,
+                { op: "i32.ge_u" },
                 get(L_CP),
                 c(0xdfff),
-                { op: "i32.le_u" } as Instr,
-                { op: "i32.and" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.le_u" },
+                { op: "i32.and" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
               ],
-            } as Instr,
+            },
             get(L_NB),
             c(4),
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
                 get(L_CP),
                 c(0x10000),
-                { op: "i32.lt_u" } as Instr,
+                { op: "i32.lt_u" },
                 get(L_CP),
                 c(0x10ffff),
-                { op: "i32.gt_u" } as Instr,
-                { op: "i32.or" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] } as Instr,
+                { op: "i32.gt_u" },
+                { op: "i32.or" },
+                { op: "if", blockType: { kind: "empty" }, then: [...throwURIError()] },
               ],
-            } as Instr,
+            },
             // emit cp as UTF-16: BMP -> 1 unit; astral -> surrogate pair
             get(L_CP),
             c(0xffff),
-            { op: "i32.le_u" } as Instr,
+            { op: "i32.le_u" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -1011,30 +1004,30 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
                   c(0xd800),
                   get(L_CP),
                   c(0x10000),
-                  { op: "i32.sub" } as Instr,
+                  { op: "i32.sub" },
                   c(10),
-                  { op: "i32.shr_u" } as Instr,
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.shr_u" },
+                  { op: "i32.add" },
                 ]),
                 ...pushCh([
                   c(0xdc00),
                   get(L_CP),
                   c(0x10000),
-                  { op: "i32.sub" } as Instr,
+                  { op: "i32.sub" },
                   c(0x3ff),
-                  { op: "i32.and" } as Instr,
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.and" },
+                  { op: "i32.add" },
                 ]),
               ],
-            } as Instr,
+            },
             // advance i by 3*nb
             get(L_I),
             get(L_NB),
             c(3),
-            { op: "i32.mul" } as Instr,
-            { op: "i32.add" } as Instr,
+            { op: "i32.mul" },
+            { op: "i32.add" },
             set(L_I),
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -1044,8 +1037,8 @@ export function emitNativeUriDecode(ctx: CodegenContext): void {
     get(L_N),
     c(0),
     get(L_OUT),
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "extern.convert_any" },
   ];
 
   const uriDecodeIdx = mintDefinedFunc(ctx); // (#1916 S3b) stable-regime handle

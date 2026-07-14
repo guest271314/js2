@@ -922,7 +922,7 @@ function fixBranchType(
   // Uses ref.cast_null unconditionally — passes null through instead of trapping.
   // Downstream code has null guards, so null values are handled correctly.
   if ((expectedType.kind === "ref" || expectedType.kind === "ref_null") && produced === "externref") {
-    body.push({ op: "any.convert_extern" } as Instr);
+    body.push({ op: "any.convert_extern" });
     body.push({ op: "ref.cast_null", typeIdx: expectedType.typeIdx });
     recordFixup("branch-type-cast", `cast branch result externref → ${expectedType.kind} #${expectedType.typeIdx}`); // #1918
     return 1;
@@ -1035,7 +1035,7 @@ function fixBranch(
               func: currentDiagFunc,
               detail: `missing value of unknown valtype kind "${(t as { kind?: string }).kind ?? "?"}" in a val-typed block`,
             });
-            body.push({ op: "ref.null.extern" } as Instr);
+            body.push({ op: "ref.null.extern" });
             break;
         }
       } else {
@@ -1046,7 +1046,7 @@ function fixBranch(
           func: currentDiagFunc,
           detail: "missing value in a type-indexed (multi-value) block whose element types are not recoverable",
         });
-        body.push({ op: "ref.null.extern" } as Instr);
+        body.push({ op: "ref.null.extern" });
       }
       fixups++;
     }
@@ -1485,7 +1485,7 @@ function callArgCoercionInstrs(
   if (actualIsExternref && (expected.kind === "ref" || expected.kind === "ref_null")) {
     const typeIdx = (expected as any).typeIdx;
     if (typeIdx !== undefined) {
-      return [{ op: "any.convert_extern" } as Instr, { op: "ref.cast_null", typeIdx } as Instr];
+      return [{ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx }];
     }
   }
 

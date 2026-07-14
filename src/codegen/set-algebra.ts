@@ -52,12 +52,12 @@ const SET_ALGEBRA_PREDICATES = new Set(["isSubsetOf", "isSupersetOf", "isDisjoin
  */
 function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp: number, perEntry: Instr[]): Instr {
   const loadEntry: Instr[] = [
-    { op: "local.get", index: aLocal } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
-    { op: "local.get", index: iTmp } as Instr,
-    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-    { op: "local.set", index: entryTmp } as Instr,
+    { op: "local.get", index: aLocal },
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
+    { op: "local.get", index: iTmp },
+    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
+    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx },
+    { op: "local.set", index: entryTmp },
   ];
   return {
     op: "block",
@@ -67,28 +67,28 @@ function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp
         op: "loop",
         blockType: { kind: "empty" },
         body: [
-          { op: "local.get", index: iTmp } as Instr,
-          { op: "local.get", index: aLocal } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
-          { op: "i32.ge_s" } as Instr,
-          { op: "br_if", depth: 1 } as Instr,
+          { op: "local.get", index: iTmp },
+          { op: "local.get", index: aLocal },
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
+          { op: "i32.ge_s" },
+          { op: "br_if", depth: 1 },
           ...loadEntry,
-          { op: "local.get", index: iTmp } as Instr,
-          { op: "i32.const", value: 1 } as Instr,
-          { op: "i32.add" } as Instr,
-          { op: "local.set", index: iTmp } as Instr,
+          { op: "local.get", index: iTmp },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: iTmp },
           // tombstone? skip
-          { op: "local.get", index: entryTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
-          { op: "i32.const", value: TOMBSTONE_BIT } as Instr,
-          { op: "i32.and" } as Instr,
-          { op: "br_if", depth: 0 } as Instr,
+          { op: "local.get", index: entryTmp },
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
+          { op: "i32.const", value: TOMBSTONE_BIT },
+          { op: "i32.and" },
+          { op: "br_if", depth: 0 },
           ...perEntry,
-          { op: "br", depth: 0 } as Instr,
+          { op: "br", depth: 0 },
         ],
-      } as Instr,
+      },
     ],
-  } as Instr;
+  };
 }
 
 /** entry element (anyref) onto the stack — the entry's KEY. For a Set entry
@@ -97,8 +97,8 @@ function walkEntries(ctx: CodegenContext, aLocal: number, iTmp: number, entryTmp
  *  KEYS, so the walk must project F_KEY, not F_VALUE. */
 function entryValue(ctx: CodegenContext, entryTmp: number): Instr[] {
   return [
-    { op: "local.get", index: entryTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
+    { op: "local.get", index: entryTmp },
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY },
   ];
 }
 
@@ -145,25 +145,25 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
 
   // addToResult(value): result = __set_add(result, value)  [result stays in RES]
   const addValToResult = (): Instr[] => [
-    { op: "local.get", index: RES } as Instr,
+    { op: "local.get", index: RES },
     ...entryValue(ctx, ENTRY),
-    { op: "call", funcIdx: setAdd } as Instr,
-    { op: "local.set", index: RES } as Instr,
+    { op: "call", funcIdx: setAdd },
+    { op: "local.set", index: RES },
   ];
 
   // ── union(a,b): copy all of a, then all of b (set_add dedups). ───────────
   {
     const body: Instr[] = [
-      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
-      { op: "call", funcIdx: mapNew } as Instr,
-      { op: "local.set", index: RES } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: COLLECTION_KIND.SET }, // (#3171) result is a Set
+      { op: "call", funcIdx: mapNew },
+      { op: "local.set", index: RES },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, addValToResult()),
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, B, I, ENTRY, addValToResult()),
-      { op: "local.get", index: RES } as Instr,
+      { op: "local.get", index: RES },
     ];
     addFn("__set_union", [mref], [mref, i32, entryRef], body);
   }
@@ -172,24 +172,24 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   {
     const perEntry: Instr[] = [
       // if (__map_has(b, entry.value)) result = __set_add(result, value)
-      { op: "local.get", index: B } as Instr,
+      { op: "local.get", index: B },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
+      { op: "call", funcIdx: mapHas },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: addValToResult(),
         else: [],
-      } as Instr,
+      },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
-      { op: "call", funcIdx: mapNew } as Instr,
-      { op: "local.set", index: RES } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: COLLECTION_KIND.SET }, // (#3171) result is a Set
+      { op: "call", funcIdx: mapNew },
+      { op: "local.set", index: RES },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, perEntry),
-      { op: "local.get", index: RES } as Instr,
+      { op: "local.get", index: RES },
     ];
     addFn("__set_intersection", [mref], [mref, i32, entryRef], body);
   }
@@ -197,25 +197,25 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   // ── difference(a,b): values of a NOT in b. ───────────────────────────────
   {
     const perEntry: Instr[] = [
-      { op: "local.get", index: B } as Instr,
+      { op: "local.get", index: B },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "call", funcIdx: mapHas },
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
         then: addValToResult(),
         else: [],
-      } as Instr,
+      },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
-      { op: "call", funcIdx: mapNew } as Instr,
-      { op: "local.set", index: RES } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: COLLECTION_KIND.SET }, // (#3171) result is a Set
+      { op: "call", funcIdx: mapNew },
+      { op: "local.set", index: RES },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, perEntry),
-      { op: "local.get", index: RES } as Instr,
+      { op: "local.get", index: RES },
     ];
     addFn("__set_difference", [mref], [mref, i32, entryRef], body);
   }
@@ -224,30 +224,30 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   {
     // walk a: add value if NOT in b. walk b: add value if NOT in a.
     const aNotB: Instr[] = [
-      { op: "local.get", index: B } as Instr,
+      { op: "local.get", index: B },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
-      { op: "i32.eqz" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: addValToResult(), else: [] } as Instr,
+      { op: "call", funcIdx: mapHas },
+      { op: "i32.eqz" },
+      { op: "if", blockType: { kind: "empty" }, then: addValToResult(), else: [] },
     ];
     const bNotA: Instr[] = [
-      { op: "local.get", index: A } as Instr,
+      { op: "local.get", index: A },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
-      { op: "i32.eqz" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: addValToResult(), else: [] } as Instr,
+      { op: "call", funcIdx: mapHas },
+      { op: "i32.eqz" },
+      { op: "if", blockType: { kind: "empty" }, then: addValToResult(), else: [] },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: COLLECTION_KIND.SET } as Instr, // (#3171) result is a Set
-      { op: "call", funcIdx: mapNew } as Instr,
-      { op: "local.set", index: RES } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: COLLECTION_KIND.SET }, // (#3171) result is a Set
+      { op: "call", funcIdx: mapNew },
+      { op: "local.set", index: RES },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, aNotB),
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, B, I, ENTRY, bNotA),
-      { op: "local.get", index: RES } as Instr,
+      { op: "local.get", index: RES },
     ];
     addFn("__set_symmetricDifference", [mref], [mref, i32, entryRef], body);
   }
@@ -256,25 +256,28 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   //    value missing from b. ─────────────────────────────────────────────--
   {
     const perEntry: Instr[] = [
-      { op: "local.get", index: B } as Instr,
+      { op: "local.get", index: B },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "call", funcIdx: mapHas },
+      { op: "i32.eqz" },
       // if missing → flag = 0
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: FLAG } as Instr],
+        then: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: FLAG },
+        ],
         else: [],
-      } as Instr,
+      },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "local.set", index: FLAG } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: 1 },
+      { op: "local.set", index: FLAG },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, perEntry),
-      { op: "local.get", index: FLAG } as Instr,
+      { op: "local.get", index: FLAG },
     ];
     // locals: result slot unused but kept for index alignment (RES at 2).
     addFn("__set_isSubsetOf", [i32], [mref, i32, entryRef, i32], body);
@@ -284,24 +287,27 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   //    swapped). ──────────────────────────────────────────────────────────
   {
     const perEntry: Instr[] = [
-      { op: "local.get", index: A } as Instr,
+      { op: "local.get", index: A },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "call", funcIdx: mapHas },
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: FLAG } as Instr],
+        then: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: FLAG },
+        ],
         else: [],
-      } as Instr,
+      },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "local.set", index: FLAG } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: 1 },
+      { op: "local.set", index: FLAG },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, B, I, ENTRY, perEntry),
-      { op: "local.get", index: FLAG } as Instr,
+      { op: "local.get", index: FLAG },
     ];
     addFn("__set_isSupersetOf", [i32], [mref, i32, entryRef, i32], body);
   }
@@ -310,24 +316,27 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
   //    shared value. ──────────────────────────────────────────────────────
   {
     const perEntry: Instr[] = [
-      { op: "local.get", index: B } as Instr,
+      { op: "local.get", index: B },
       ...entryValue(ctx, ENTRY),
-      { op: "call", funcIdx: mapHas } as Instr,
+      { op: "call", funcIdx: mapHas },
       // if present in b → flag = 0 (not disjoint)
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: FLAG } as Instr],
+        then: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: FLAG },
+        ],
         else: [],
-      } as Instr,
+      },
     ];
     const body: Instr[] = [
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "local.set", index: FLAG } as Instr,
-      { op: "i32.const", value: 0 } as Instr,
-      { op: "local.set", index: I } as Instr,
+      { op: "i32.const", value: 1 },
+      { op: "local.set", index: FLAG },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: I },
       walkEntries(ctx, A, I, ENTRY, perEntry),
-      { op: "local.get", index: FLAG } as Instr,
+      { op: "local.get", index: FLAG },
     ];
     addFn("__set_isDisjointFrom", [i32], [mref, i32, entryRef, i32], body);
   }
@@ -340,10 +349,10 @@ export function ensureSetAlgebraHelpers(ctx: CodegenContext): void {
 function castToMap(ctx: CodegenContext, fctx: FunctionContext, t: ValType | null): boolean {
   if (t === null) return false;
   if (t.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
   } else if (t.kind === "anyref" || t.kind === "eqref") {
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
   } else if ((t.kind === "ref" || t.kind === "ref_null") && t.typeIdx !== ctx.mapTypeIdx) {
     return false;
   }

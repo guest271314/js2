@@ -44,12 +44,8 @@ export function emitVecDefineWritebackExports(
     const setElemFuncIdx = ctx.numImportFuncs + mod.functions.length;
     // params: 0 = vec (externref), 1 = idx (i32), 2 = value (externref)
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 3 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "i32.const", value: -1 } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 3 }];
+    let current: Instr[] = [{ op: "i32.const", value: -1 }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
       const [elemKey, vecTypeIdx] = mutEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -70,103 +66,102 @@ export function emitVecDefineWritebackExports(
       // value unboxing per element kind (value param is local 2)
       const valueInstrs: Instr[] =
         elemKey === "externref"
-          ? [{ op: "local.get", index: 2 } as Instr]
+          ? [{ op: "local.get", index: 2 }]
           : elemKey === "f64"
-            ? [{ op: "local.get", index: 2 } as Instr, { op: "call", funcIdx: unboxNumIdx! } as Instr]
-            : [
-                { op: "local.get", index: 2 } as Instr,
-                { op: "call", funcIdx: unboxNumIdx! } as Instr,
-                { op: "i32.trunc_sat_f64_s" } as Instr,
-              ];
+            ? [
+                { op: "local.get", index: 2 },
+                { op: "call", funcIdx: unboxNumIdx! },
+              ]
+            : [{ op: "local.get", index: 2 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
       const thenBranch: Instr[] = [
-        { op: "local.get", index: 3 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "local.set", index: vecL } as Instr,
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
         // len
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: lenL } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
         // data + capacity check: cap < idx+1 ?
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.tee", index: dataL } as Instr,
-        { op: "array.len" } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "i32.lt_s" } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.tee", index: dataL },
+        { op: "array.len" },
+        { op: "local.get", index: 1 },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "i32.lt_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // ncap = max((idx+1)*2, 4)
-            { op: "local.get", index: 1 } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.shl" } as Instr,
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "local.get", index: 1 } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.shl" } as Instr,
-            { op: "i32.const", value: 4 } as Instr,
-            { op: "i32.gt_s" } as Instr,
-            { op: "select" } as Instr,
-            { op: "local.set", index: ncapL } as Instr,
+            { op: "local.get", index: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "local.get", index: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "i32.gt_s" },
+            { op: "select" },
+            { op: "local.set", index: ncapL },
             // ndata = array.new_default(ncap); copy old len; vec.data = ndata
-            { op: "local.get", index: ncapL } as Instr,
-            { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-            { op: "local.set", index: ndataL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: dataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: lenL } as Instr,
-            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-            { op: "local.get", index: vecL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "local.set", index: dataL } as Instr,
+            { op: "local.get", index: ncapL },
+            { op: "array.new_default", typeIdx: arrTypeIdx },
+            { op: "local.set", index: ndataL },
+            { op: "local.get", index: ndataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: dataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: lenL },
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+            { op: "local.get", index: vecL },
+            { op: "local.get", index: ndataL },
+            { op: "ref.as_non_null" },
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
+            { op: "local.get", index: ndataL },
+            { op: "local.set", index: dataL },
           ],
-        } as Instr,
+        },
         // data[idx] = value
-        { op: "local.get", index: dataL } as Instr,
-        { op: "local.get", index: 1 } as Instr,
+        { op: "local.get", index: dataL },
+        { op: "local.get", index: 1 },
         ...valueInstrs,
-        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        { op: "array.set", typeIdx: arrTypeIdx },
         // vec.length = max(len, idx+1)
-        { op: "local.get", index: lenL } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "i32.lt_s" } as Instr,
+        { op: "local.get", index: lenL },
+        { op: "local.get", index: 1 },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "i32.lt_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: vecL } as Instr,
-            { op: "local.get", index: 1 } as Instr,
-            { op: "i32.const", value: 1 } as Instr,
-            { op: "i32.add" } as Instr,
-            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "local.get", index: vecL },
+            { op: "local.get", index: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
           ],
-        } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "return" } as Instr,
+        },
+        { op: "i32.const", value: 1 },
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 3 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 3 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);
@@ -192,12 +187,8 @@ export function emitVecDefineWritebackExports(
     const setLenFuncIdx = ctx.numImportFuncs + mod.functions.length;
     // params: 0 = vec (externref), 1 = newLen (i32)
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 2 } as Instr,
-    ];
-    let current: Instr[] = [{ op: "i32.const", value: -1 } as Instr, { op: "return" } as Instr];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 2 }];
+    let current: Instr[] = [{ op: "i32.const", value: -1 }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
       const [, vecTypeIdx] = mutEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -214,55 +205,55 @@ export function emitVecDefineWritebackExports(
         { name: `__vsl_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
       );
       const thenBranch: Instr[] = [
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
-        { op: "local.set", index: vecL } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
         // old len
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "local.set", index: lenL } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
         // grow data when cap < newLen (allocation bound is enforced host-side)
-        { op: "local.get", index: vecL } as Instr,
-        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
-        { op: "local.tee", index: dataL } as Instr,
-        { op: "array.len" } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "i32.lt_s" } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.tee", index: dataL },
+        { op: "array.len" },
+        { op: "local.get", index: 1 },
+        { op: "i32.lt_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
-            { op: "local.set", index: ndataL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: dataL } as Instr,
-            { op: "i32.const", value: 0 } as Instr,
-            { op: "local.get", index: lenL } as Instr,
-            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
-            { op: "local.get", index: vecL } as Instr,
-            { op: "local.get", index: ndataL } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "local.get", index: 1 },
+            { op: "array.new_default", typeIdx: arrTypeIdx },
+            { op: "local.set", index: ndataL },
+            { op: "local.get", index: ndataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: dataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: lenL },
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+            { op: "local.get", index: vecL },
+            { op: "local.get", index: ndataL },
+            { op: "ref.as_non_null" },
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
           ],
-        } as Instr,
+        },
         // vec.length = newLen
-        { op: "local.get", index: vecL } as Instr,
-        { op: "local.get", index: 1 } as Instr,
-        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "return" } as Instr,
+        { op: "local.get", index: vecL },
+        { op: "local.get", index: 1 },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: 1 },
+        { op: "return" },
       ];
       current = [
-        { op: "local.get", index: 2 } as Instr,
-        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: thenBranch,
           else: current,
-        } as Instr,
+        },
       ];
     }
     body.push(...current);

@@ -286,7 +286,7 @@ function emitRootFuncrefDispatch(
     funcDispatch = [
       { op: "local.get", index: funcrefLocal },
       { op: "ref.test", typeIdx: fc.funcTypeIdx },
-      { op: "if", blockType: retBlockType, then: fcCallBody, else: funcDispatch } as Instr,
+      { op: "if", blockType: retBlockType, then: fcCallBody, else: funcDispatch },
     ];
   }
   fctx.body.push(...funcDispatch);
@@ -517,11 +517,11 @@ export function compileGetterCallable(
           structTypeIdx !== undefined
         ) {
           // externref -> struct: convert via any.convert_extern + guarded cast
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
           emitGuardedRefCast(fctx, structTypeIdx);
         } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvTypeHint.kind === "externref") {
           // struct -> externref: convert via extern.convert_any
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
+          fctx.body.push({ op: "extern.convert_any" });
         } else if (recvType.kind !== recvTypeHint.kind) {
           // General type mismatch: use coerceType
           coerceType(ctx, fctx, recvType, recvTypeHint);
@@ -533,7 +533,7 @@ export function compileGetterCallable(
         recvTypeHint === undefined
       ) {
         // Fallback: no param type info but we know the struct — cast to struct
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "any.convert_extern" });
         emitGuardedRefCast(fctx, structTypeIdx);
       }
     }
@@ -793,7 +793,7 @@ export function compileCallablePropertyCall(
     }
     // externref must round-trip through anyref before ref.test/ref.cast.
     if (recvResult && recvResult.kind === "externref") {
-      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "any.convert_extern" });
       emitGuardedRefCast(fctx, structTypeIdx);
       return;
     }

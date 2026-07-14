@@ -1315,10 +1315,10 @@ function emitReflectiveNativeProtoClosureCall(
   // The receiver is externref (type-erased) or already a (ref $wrap). Normalize
   // to the concrete wrapper struct via any.convert_extern + ref.cast.
   if (recvType && recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   }
-  fctx.body.push({ op: "ref.cast", typeIdx: closureInfo.structTypeIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: closureLocal } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: closureInfo.structTypeIdx });
+  fctx.body.push({ op: "local.set", index: closureLocal });
 
   // call_ref ABI mirrors the canonical closure-call sequence
   // (calls-closures.ts compileClosureCall): the lifted func type is
@@ -1331,7 +1331,7 @@ function emitReflectiveNativeProtoClosureCall(
   // in the type-renumber pass).
 
   // self param 0: the wrapper struct.
-  fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: closureLocal });
 
   const paramTypes = closureInfo.paramTypes; // excludes the self param
   for (let i = 0; i < paramTypes.length; i++) {
@@ -1342,7 +1342,7 @@ function emitReflectiveNativeProtoClosureCall(
         coerceType(ctx, fctx, aType, pType);
       }
     } else if (pType.kind === "externref") {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     } else {
       pushDefaultValue(fctx, pType, ctx);
     }
@@ -1351,11 +1351,11 @@ function emitReflectiveNativeProtoClosureCall(
   // Trailing operand: funcref from the wrapper struct's field 0, guard-cast to
   // the lifted func type, null-checked (→ TypeError, never a trap) — exactly
   // the canonical closure-call tail (calls-closures.ts ~lines 138-150).
-  fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: closureInfo.structTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: closureLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: closureInfo.structTypeIdx, fieldIdx: 0 });
   emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
   emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
-  fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
+  fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
   return closureInfo.returnType ?? { kind: "externref" };
 }
 
@@ -1783,7 +1783,7 @@ function tryEmitJsonStringifyPrimitive(
   // null literal
   if (flags & ts.TypeFlags.Null) {
     const t = compileExpression(ctx, fctx, arg);
-    if (t) fctx.body.push({ op: "drop" } as Instr);
+    if (t) fctx.body.push({ op: "drop" });
     return compileStringLiteral(ctx, fctx, "null", arg);
   }
 
@@ -1795,7 +1795,7 @@ function tryEmitJsonStringifyPrimitive(
   // the existing helper's documented contract).
   if (flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
     const t = compileExpression(ctx, fctx, arg);
-    if (t) fctx.body.push({ op: "drop" } as Instr);
+    if (t) fctx.body.push({ op: "drop" });
     emitUndefined(ctx, fctx);
     return { kind: "externref" };
   }
@@ -1821,7 +1821,7 @@ function tryEmitJsonStringifyPrimitive(
       blockType: { kind: "val", type: resultType },
       then: trueBody,
       else: falseBody,
-    } as Instr);
+    });
     return resultType;
   }
 
@@ -1844,31 +1844,28 @@ function tryEmitJsonStringifyPrimitive(
     // Stack: [f64 value]. Save to a local so we can both test for
     // finiteness AND pass to number_toString in the finite branch.
     const valLocal = allocTempLocal(fctx, { kind: "f64" });
-    fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: valLocal });
 
     // isFinite check: x - x === 0. NaN-NaN and ±Infinity-±Infinity both
     // produce NaN, which fails the equality. Finite values produce 0.
-    fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-    fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-    fctx.body.push({ op: "f64.sub" } as Instr);
-    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
-    fctx.body.push({ op: "f64.eq" } as Instr);
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "f64.sub" });
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "f64.eq" });
 
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: resultType },
       then: [
-        { op: "local.get", index: valLocal } as Instr,
-        { op: "call", funcIdx: numToStrIdx } as Instr,
+        { op: "local.get", index: valLocal },
+        { op: "call", funcIdx: numToStrIdx },
         ...(ctx.standalone || ctx.wasi
-          ? ([
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-            ] as Instr[])
+          ? [{ op: "any.convert_extern" }, { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx }]
           : []),
       ],
       else: nullBody,
-    } as Instr);
+    });
     releaseTempLocal(fctx, valLocal);
     return resultType;
   }
@@ -1887,7 +1884,7 @@ function tryEmitJsonStringifyPrimitive(
     }
     const quoteIdx = emitJsonQuoteString(ctx);
     flushLateImportShifts(ctx, fctx);
-    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_quote_string") ?? quoteIdx } as Instr);
+    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_quote_string") ?? quoteIdx });
     // __json_quote_string returns a native string ref (matches compileStringLiteral
     // in nativeStrings mode), so downstream string ops (===, return) see the same
     // type they expect rather than an over-wrapped externref.
@@ -1949,7 +1946,7 @@ function tryEmitJsonParsePrimitive(
   }
   const parseIdx = emitJsonParsePrimitive(ctx);
   flushLateImportShifts(ctx, fctx);
-  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_primitive") ?? parseIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_primitive") ?? parseIdx });
   return { kind: "ref", typeIdx: ctx.anyValueTypeIdx };
 }
 
@@ -1998,7 +1995,7 @@ function emitIterableArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts
         // the entire literal to externref. Native engine will iterate the
         // spread source on our behalf.
         if (ts.isSpreadElement(el)) {
-          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: "drop" });
           compileExpression(ctx, fctx, argExpr, { kind: "externref" });
           return;
         }
@@ -2168,8 +2165,8 @@ function emitBoundFnValueFromLocals(
     fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
   }
   fctx.body.push({ op: "local.get", index: argsVecLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: bfIdx } as Instr);
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: bfIdx });
+  fctx.body.push({ op: "extern.convert_any" });
 }
 
 function compileFunctionBind(
@@ -2247,7 +2244,7 @@ function compileFunctionBind(
   const arrPushResolvedIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
   if (arrNewResolvedIdx === undefined || arrPushResolvedIdx === undefined) {
     // Late-import setup failed (very unusual). Bail to identity-bind for safety.
-    fctx.body.push({ op: "drop" } as Instr); // drop thisArg
+    fctx.body.push({ op: "drop" }); // drop thisArg
     return externRef;
   }
   fctx.body.push({ op: "call", funcIdx: arrNewResolvedIdx });
@@ -2299,10 +2296,10 @@ function compileFunctionBind(
   const bindResolvedIdx = ctx.funcMap.get("__bind_function") ?? bindIdx;
   if (bindResolvedIdx === undefined) {
     // Should not happen in host mode — drop the staged args and degrade.
-    fctx.body.push({ op: "drop" } as Instr); // length hint
-    fctx.body.push({ op: "drop" } as Instr); // name hint
-    fctx.body.push({ op: "drop" } as Instr); // args array
-    fctx.body.push({ op: "drop" } as Instr); // thisArg
+    fctx.body.push({ op: "drop" }); // length hint
+    fctx.body.push({ op: "drop" }); // name hint
+    fctx.body.push({ op: "drop" }); // args array
+    fctx.body.push({ op: "drop" }); // thisArg
     // Leave receiver on the stack as identity-bind fallback.
     return externRef;
   }
@@ -2768,7 +2765,7 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
   // extrasLen, so totalLen = argc + extrasLen gives the correct arguments.length.
   const argc = Math.min(actualArgCount, paramCount);
   fctx.body.push({ op: "i32.const", value: argc });
-  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx });
 }
 
 /**
@@ -2783,10 +2780,10 @@ function emitSetArgc(ctx: CodegenContext, fctx: FunctionContext, actualArgCount:
 export function emitResetArgcExtras(ctx: CodegenContext, fctx: FunctionContext): void {
   const { globalIdx: extrasGlobalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
   const argcGlobalIdx = ensureArgcGlobal(ctx);
-  fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx } as Instr);
-  fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
-  fctx.body.push({ op: "i32.const", value: -1 } as Instr);
-  fctx.body.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "global.set", index: extrasGlobalIdx });
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "global.set", index: argcGlobalIdx });
 }
 
 /**
@@ -2835,19 +2832,19 @@ function buildArgcExtrasSetupFromLocals(
     const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
     const extrasArrTi = getArrTypeIdxFromVec(ctx, extrasVecTi);
     for (const el of extrasLocals) {
-      out.push({ op: "local.get", index: el } as Instr);
+      out.push({ op: "local.get", index: el });
     }
-    out.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+    out.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length });
     const arrTmp = allocLocal(fctx, `__extras_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: extrasArrTi });
-    out.push({ op: "local.set", index: arrTmp } as Instr);
-    out.push({ op: "i32.const", value: extrasLocals.length } as Instr);
-    out.push({ op: "local.get", index: arrTmp } as Instr);
-    out.push({ op: "struct.new", typeIdx: extrasVecTi } as Instr);
-    out.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+    out.push({ op: "local.set", index: arrTmp });
+    out.push({ op: "i32.const", value: extrasLocals.length });
+    out.push({ op: "local.get", index: arrTmp });
+    out.push({ op: "struct.new", typeIdx: extrasVecTi });
+    out.push({ op: "global.set", index: extrasGlobalIdx });
   }
   const argcGlobalIdx = ensureArgcGlobal(ctx);
-  out.push({ op: "i32.const", value: Math.min(callArgCount, paramCount) } as Instr);
-  out.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  out.push({ op: "i32.const", value: Math.min(callArgCount, paramCount) });
+  out.push({ op: "global.set", index: argcGlobalIdx });
   return out;
 }
 
@@ -2861,10 +2858,10 @@ function buildArgcExtrasReset(ctx: CodegenContext): Instr[] {
   const { globalIdx: extrasGlobalIdx, vecTypeIdx: extrasVecTi } = ensureExtrasArgvGlobal(ctx);
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   return [
-    { op: "ref.null", typeIdx: extrasVecTi } as Instr,
-    { op: "global.set", index: extrasGlobalIdx } as Instr,
-    { op: "i32.const", value: -1 } as Instr,
-    { op: "global.set", index: argcGlobalIdx } as Instr,
+    { op: "ref.null", typeIdx: extrasVecTi },
+    { op: "global.set", index: extrasGlobalIdx },
+    { op: "i32.const", value: -1 },
+    { op: "global.set", index: argcGlobalIdx },
   ];
 }
 
@@ -2895,11 +2892,11 @@ function buildArgcResetNoLazyExtras(ctx: CodegenContext): Instr[] {
   const argcGlobalIdx = ensureArgcGlobal(ctx);
   const out: Instr[] = [];
   if (ctx.extrasArgvGlobalIdx >= 0) {
-    out.push({ op: "ref.null", typeIdx: ctx.extrasArgvVecTypeIdx } as Instr);
-    out.push({ op: "global.set", index: ctx.extrasArgvGlobalIdx } as Instr);
+    out.push({ op: "ref.null", typeIdx: ctx.extrasArgvVecTypeIdx });
+    out.push({ op: "global.set", index: ctx.extrasArgvGlobalIdx });
   }
-  out.push({ op: "i32.const", value: -1 } as Instr);
-  out.push({ op: "global.set", index: argcGlobalIdx } as Instr);
+  out.push({ op: "i32.const", value: -1 });
+  out.push({ op: "global.set", index: argcGlobalIdx });
   return out;
 }
 
@@ -2993,7 +2990,7 @@ function compileOptionalDirectCall(ctx: CodegenContext, fctx: FunctionContext, e
 
   if (closureInfo && (calleeType.kind === "ref" || calleeType.kind === "ref_null")) {
     fctx.body.push({ op: "local.get", index: tmp });
-    if (calleeType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    if (calleeType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
     const closureTmp = allocLocal(fctx, `__optdcall_cls_${fctx.locals.length}`, {
       kind: "ref",
       typeIdx: calleeType.typeIdx,
@@ -3601,7 +3598,7 @@ function tryEmitInlineDynamicCall(
 
   const pushUndefinedExternref = (body: Instr[]): void => {
     if (undefinedIdx !== undefined) {
-      body.push({ op: "call", funcIdx: undefinedIdx } as Instr);
+      body.push({ op: "call", funcIdx: undefinedIdx });
     } else if (undefinedSingletonPad !== undefined) {
       // FRESH Instr objects per use — the singleton sequence lands in multiple
       // dispatch arms, and a shared Instr aliased into two branches gets
@@ -3609,7 +3606,7 @@ function tryEmitInlineDynamicCall(
       // `reference_shared_instr_object_dce_double_remap` class).
       for (const ins of undefinedSingletonPad) body.push({ ...ins });
     } else {
-      body.push({ op: "ref.null.extern" } as Instr);
+      body.push({ op: "ref.null.extern" });
     }
   };
 
@@ -3647,7 +3644,7 @@ function tryEmitInlineDynamicCall(
   if (calleeType === null) return null;
   // If already a ref type, skip the extern→any convert; otherwise expect externref.
   if (calleeType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
   } else if (calleeType.kind !== "ref" && calleeType.kind !== "ref_null") {
     // Unexpected stack type — bail, the existing fallback will run.
     fctx.body.push({ op: "drop" });
@@ -3668,7 +3665,7 @@ function tryEmitInlineDynamicCall(
 
   // Build dispatch chain (innermost = default, outermost = first).
   // Default: ref.null.extern (matches existing fallback semantics).
-  let dispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
+  let dispatch: Instr[] = [{ op: "ref.null.extern" }];
 
   for (const cand of candidates) {
     const funcTypeDef = ctx.mod.types[cand.info.funcTypeIdx];
@@ -3681,8 +3678,8 @@ function tryEmitInlineDynamicCall(
     const callBody: Instr[] = [];
 
     // Self arg: anyref → the concrete struct type this funcref expects.
-    callBody.push({ op: "local.get", index: anyLocal } as Instr);
-    callBody.push({ op: "ref.cast", typeIdx: selfTypeIdx } as Instr);
+    callBody.push({ op: "local.get", index: anyLocal });
+    callBody.push({ op: "ref.cast", typeIdx: selfTypeIdx });
 
     // Push each FORMAL of the candidate, marshalling per its declared param
     // type. Call-site args (i < arity) come from the saved arg locals;
@@ -3695,48 +3692,48 @@ function tryEmitInlineDynamicCall(
         // Missing arg → `undefined`. For ref/ref_null formals there is no
         // valid concrete struct to cast `undefined` to; pass the typed null.
         if (pType.kind === "f64") {
-          callBody.push({ op: "f64.const", value: Number.NaN } as Instr);
+          callBody.push({ op: "f64.const", value: Number.NaN });
         } else if (pType.kind === "i32") {
-          callBody.push({ op: "i32.const", value: 0 } as Instr);
+          callBody.push({ op: "i32.const", value: 0 });
         } else if (pType.kind === "externref") {
           pushUndefinedExternref(callBody);
         } else if (pType.kind === "ref" || pType.kind === "ref_null") {
-          callBody.push({ op: "ref.null", typeIdx: (pType as { typeIdx: number }).typeIdx } as Instr);
+          callBody.push({ op: "ref.null", typeIdx: (pType as { typeIdx: number }).typeIdx });
         }
         continue;
       }
-      callBody.push({ op: "local.get", index: argLocals[i]! } as Instr);
+      callBody.push({ op: "local.get", index: argLocals[i]! });
       if (pType.kind === "f64") {
-        callBody.push({ op: "call", funcIdx: unboxNumberIdx } as Instr);
+        callBody.push({ op: "call", funcIdx: unboxNumberIdx });
       } else if (pType.kind === "i32") {
-        callBody.push({ op: "call", funcIdx: unboxNumberIdx } as Instr);
-        callBody.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+        callBody.push({ op: "call", funcIdx: unboxNumberIdx });
+        callBody.push({ op: "i32.trunc_sat_f64_s" });
       } else if (pType.kind === "externref") {
         // already externref
       } else if (pType.kind === "ref" || pType.kind === "ref_null") {
-        callBody.push({ op: "any.convert_extern" } as Instr);
-        callBody.push({ op: "ref.cast", typeIdx: (pType as { typeIdx: number }).typeIdx } as Instr);
+        callBody.push({ op: "any.convert_extern" });
+        callBody.push({ op: "ref.cast", typeIdx: (pType as { typeIdx: number }).typeIdx });
       }
     }
 
     // Extract funcref from field 0 and call_ref.
-    callBody.push({ op: "local.get", index: anyLocal } as Instr);
-    callBody.push({ op: "ref.cast", typeIdx: selfTypeIdx } as Instr);
-    callBody.push({ op: "struct.get", typeIdx: selfTypeIdx, fieldIdx: 0 } as Instr);
-    callBody.push({ op: "ref.cast", typeIdx: cand.info.funcTypeIdx } as Instr);
-    callBody.push({ op: "call_ref", typeIdx: cand.info.funcTypeIdx } as Instr);
+    callBody.push({ op: "local.get", index: anyLocal });
+    callBody.push({ op: "ref.cast", typeIdx: selfTypeIdx });
+    callBody.push({ op: "struct.get", typeIdx: selfTypeIdx, fieldIdx: 0 });
+    callBody.push({ op: "ref.cast", typeIdx: cand.info.funcTypeIdx });
+    callBody.push({ op: "call_ref", typeIdx: cand.info.funcTypeIdx });
 
     // Coerce return value to externref.
     const ret = cand.info.returnType;
     if (ret === null) {
-      callBody.push({ op: "ref.null.extern" } as Instr);
+      callBody.push({ op: "ref.null.extern" });
     } else if (ret.kind === "f64") {
-      callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+      callBody.push({ op: "call", funcIdx: boxNumberIdx });
     } else if (ret.kind === "i32") {
-      callBody.push({ op: "f64.convert_i32_s" } as Instr);
-      callBody.push({ op: "call", funcIdx: boxNumberIdx } as Instr);
+      callBody.push({ op: "f64.convert_i32_s" });
+      callBody.push({ op: "call", funcIdx: boxNumberIdx });
     } else if (ret.kind === "ref" || ret.kind === "ref_null") {
-      callBody.push({ op: "extern.convert_any" } as Instr);
+      callBody.push({ op: "extern.convert_any" });
     }
     // externref: no conversion
 
@@ -3753,19 +3750,19 @@ function tryEmitInlineDynamicCall(
     const rootStructIdx =
       (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx ?? selfTypeIdx;
     const testCond: Instr[] = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx: rootStructIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: rootStructIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
         then: [
-          { op: "local.get", index: anyLocal } as Instr,
-          { op: "ref.cast", typeIdx: rootStructIdx } as Instr,
-          { op: "struct.get", typeIdx: rootStructIdx, fieldIdx: 0 } as Instr,
-          { op: "ref.test", typeIdx: cand.info.funcTypeIdx } as Instr,
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: rootStructIdx },
+          { op: "struct.get", typeIdx: rootStructIdx, fieldIdx: 0 },
+          { op: "ref.test", typeIdx: cand.info.funcTypeIdx },
         ],
-        else: [{ op: "i32.const", value: 0 } as Instr],
-      } as Instr,
+        else: [{ op: "i32.const", value: 0 }],
+      },
     ];
 
     dispatch = [
@@ -3775,7 +3772,7 @@ function tryEmitInlineDynamicCall(
         blockType: { kind: "val", type: { kind: "externref" } },
         then: callBody,
         else: dispatch,
-      } as Instr,
+      },
     ];
   }
 
@@ -3788,28 +3785,28 @@ function tryEmitInlineDynamicCall(
   if (proxyArm !== undefined) {
     const vecLocal = allocLocal(fctx, `__dyn_pargs_${fctx.locals.length}`, { kind: "externref" });
     const armBody: Instr[] = [
-      { op: "call", funcIdx: proxyArm.vecNewIdx } as Instr,
-      { op: "local.set", index: vecLocal } as Instr,
+      { op: "call", funcIdx: proxyArm.vecNewIdx },
+      { op: "local.set", index: vecLocal },
     ];
     for (const argLocal of argLocals) {
-      armBody.push({ op: "local.get", index: vecLocal } as Instr);
-      armBody.push({ op: "local.get", index: argLocal } as Instr);
-      armBody.push({ op: "call", funcIdx: proxyArm.vecPushIdx } as Instr);
+      armBody.push({ op: "local.get", index: vecLocal });
+      armBody.push({ op: "local.get", index: argLocal });
+      armBody.push({ op: "call", funcIdx: proxyArm.vecPushIdx });
     }
-    armBody.push({ op: "local.get", index: anyLocal } as Instr);
-    armBody.push({ op: "extern.convert_any" } as Instr);
+    armBody.push({ op: "local.get", index: anyLocal });
+    armBody.push({ op: "extern.convert_any" });
     pushUndefinedExternref(armBody); // thisArgument = undefined
-    armBody.push({ op: "local.get", index: vecLocal } as Instr);
-    armBody.push({ op: "call", funcIdx: proxyArm.dispatchIdx } as Instr);
+    armBody.push({ op: "local.get", index: vecLocal });
+    armBody.push({ op: "call", funcIdx: proxyArm.dispatchIdx });
     dispatch = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx: proxyArm.proxyTypeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: proxyArm.proxyTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: armBody,
         else: dispatch,
-      } as Instr,
+      },
     ];
   }
 
@@ -3821,28 +3818,28 @@ function tryEmitInlineDynamicCall(
   if (boundArm !== undefined) {
     const vecLocal = allocLocal(fctx, `__dyn_bargs_${fctx.locals.length}`, { kind: "externref" });
     const armBody: Instr[] = [
-      { op: "call", funcIdx: boundArm.vecNewIdx } as Instr,
-      { op: "local.set", index: vecLocal } as Instr,
+      { op: "call", funcIdx: boundArm.vecNewIdx },
+      { op: "local.set", index: vecLocal },
     ];
     for (const argLocal of argLocals) {
-      armBody.push({ op: "local.get", index: vecLocal } as Instr);
-      armBody.push({ op: "local.get", index: argLocal } as Instr);
-      armBody.push({ op: "call", funcIdx: boundArm.vecPushIdx } as Instr);
+      armBody.push({ op: "local.get", index: vecLocal });
+      armBody.push({ op: "local.get", index: argLocal });
+      armBody.push({ op: "call", funcIdx: boundArm.vecPushIdx });
     }
-    armBody.push({ op: "local.get", index: anyLocal } as Instr);
-    armBody.push({ op: "extern.convert_any" } as Instr);
-    armBody.push({ op: "ref.null.extern" } as Instr); // recv — [[BoundThis]] wins in the guard
-    armBody.push({ op: "local.get", index: vecLocal } as Instr);
-    armBody.push({ op: "call", funcIdx: boundArm.applyIdx } as Instr);
+    armBody.push({ op: "local.get", index: anyLocal });
+    armBody.push({ op: "extern.convert_any" });
+    armBody.push({ op: "ref.null.extern" }); // recv — [[BoundThis]] wins in the guard
+    armBody.push({ op: "local.get", index: vecLocal });
+    armBody.push({ op: "call", funcIdx: boundArm.applyIdx });
     dispatch = [
-      { op: "local.get", index: anyLocal } as Instr,
-      { op: "ref.test", typeIdx: boundArm.bfTypeIdx } as Instr,
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: boundArm.bfTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: armBody,
         else: dispatch,
-      } as Instr,
+      },
     ];
   }
 
@@ -3959,7 +3956,7 @@ function emitVirtualMethodDispatchByTag(
     // ref.cast_null preserves nullability if the receiver might be null;
     // ref.cast (non-null) traps on null. Use ref.cast_null since the
     // receiver could be null at the static type level.
-    body.push({ op: "ref.cast_null", typeIdx: selfTypeIdx } as Instr);
+    body.push({ op: "ref.cast_null", typeIdx: selfTypeIdx });
     for (const a of argLocals) {
       body.push({ op: "local.get", index: a.idx });
     }
@@ -3970,20 +3967,20 @@ function emitVirtualMethodDispatchByTag(
 
   // Build the cascade: load __tag, compare to each candidate's classTag.
   // Outermost: candidates[0]; deepest else: unreachable.
-  let elseInstrs: Instr[] = [{ op: "unreachable" } as Instr];
+  let elseInstrs: Instr[] = [{ op: "unreachable" }];
   for (let i = candidates.length - 1; i >= 0; i--) {
     const cand = candidates[i]!;
     const branch: Instr[] = [
       { op: "local.get", index: recvLocal },
-      { op: "struct.get", typeIdx: baseStructIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: cand.classTag } as Instr,
-      { op: "i32.eq" } as Instr,
+      { op: "struct.get", typeIdx: baseStructIdx, fieldIdx: 0 },
+      { op: "i32.const", value: cand.classTag },
+      { op: "i32.eq" },
       {
         op: "if",
         blockType: freshBlockType(),
         then: callBody(cand),
         else: elseInstrs,
-      } as Instr,
+      },
     ];
     elseInstrs = branch;
   }
@@ -4156,18 +4153,18 @@ function emitHostPromiseThenFallback(
 
   if (funcIdx === undefined) {
     // Keep the stack balanced even if the import couldn't be registered.
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
 
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
 
   const firstArg = method === "catch" ? onRejectedArg : onFulfilledArg;
   if (firstArg) {
     const cbType = compileExpression(ctx, fctx, firstArg, { kind: "externref" });
     if (cbType && cbType.kind !== "externref") coerceType(ctx, fctx, cbType, { kind: "externref" });
   } else {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
 
   if (useThen2) {
@@ -4176,7 +4173,7 @@ function emitHostPromiseThenFallback(
   }
 
   const finalIdx = ctx.funcMap.get(importName) ?? funcIdx;
-  fctx.body.push({ op: "call", funcIdx: finalIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: finalIdx });
 }
 
 /**
@@ -4262,28 +4259,34 @@ function tryEmitAsyncGenNextDispatch(
   if (rt !== null && rt !== undefined && (rt as ValType).kind !== "externref") {
     coerceType(ctx, fctx, rt as ValType, { kind: "externref" });
   }
-  fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: recvLocal });
   // funcMap lookups happen AFTER the receiver compile (which may register late
   // imports and shift defined indices).
   const wantHostFallback = ctx.asyncGenLegacyBufferEmitted === true;
   const hostGenNext = wantHostFallback ? ctx.funcMap.get("__gen_next") : undefined;
   let chain: Instr[] =
     hostGenNext !== undefined
-      ? [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: hostGenNext } as Instr]
-      : [{ op: "ref.null.extern" } as Instr];
+      ? [
+          { op: "local.get", index: recvLocal },
+          { op: "call", funcIdx: hostGenNext },
+        ]
+      : [{ op: "ref.null.extern" }];
   for (const p of [...producers.values()].reverse()) {
     const nextIdx = ctx.funcMap.get(p.nextHelperName);
     if (nextIdx === undefined) continue;
     chain = [
-      { op: "local.get", index: recvLocal } as Instr,
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.test", typeIdx: p.stateTypeIdx } as Instr,
+      { op: "local.get", index: recvLocal },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: p.stateTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
-        then: [{ op: "local.get", index: recvLocal } as Instr, { op: "call", funcIdx: nextIdx } as Instr],
+        then: [
+          { op: "local.get", index: recvLocal },
+          { op: "call", funcIdx: nextIdx },
+        ],
         else: chain,
-      } as Instr,
+      },
     ];
   }
   fctx.body.push(...chain);
@@ -4369,12 +4372,12 @@ function emitStandaloneThenWithNativeFallback(
     if (recvType && recvType.kind !== "externref") {
       coerceType(ctx, fctx, recvType, { kind: "externref" });
     }
-    fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: recvLocal });
 
     const onFulfilled =
       method === "then" ? compileStandalonePromiseThenCallback(ctx, fctx, onFulfilledArg, liveBuffers) : null;
     const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, onRejectedArg, liveBuffers);
-    const promiseInstrs: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+    const promiseInstrs: Instr[] = [{ op: "local.get", index: recvLocal }];
 
     const outerBody = fctx.body;
 
@@ -4392,7 +4395,7 @@ function emitStandaloneThenWithNativeFallback(
 
     const hostArm: Instr[] = [];
     if (opts?.nullMiss === true) {
-      hostArm.push({ op: "ref.null.extern" } as Instr);
+      hostArm.push({ op: "ref.null.extern" });
     } else {
       ctx.liveBodies.add(hostArm);
       liveBuffers.push(hostArm);
@@ -4420,15 +4423,15 @@ function emitStandaloneThenWithNativeFallback(
     }
 
     const promiseTypeIdx = getOrRegisterPromiseType(ctx);
-    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
       then: nativeArm,
       else: hostArm,
-    } as Instr);
+    });
   } finally {
     for (const b of liveBuffers) ctx.liveBodies.delete(b);
   }
@@ -4454,19 +4457,19 @@ function emitHostPromiseFinallyFallback(
   funcIdx = ctx.funcMap.get("Promise_finally") ?? funcIdx;
 
   if (funcIdx === undefined) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
 
-  fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: recvLocal });
   if (onFinallyArg) {
     const cbType = compileExpression(ctx, fctx, onFinallyArg, { kind: "externref" });
     if (cbType && cbType.kind !== "externref") coerceType(ctx, fctx, cbType, { kind: "externref" });
   } else {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
   const finalIdx = ctx.funcMap.get("Promise_finally") ?? funcIdx;
-  fctx.body.push({ op: "call", funcIdx: finalIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: finalIdx });
 }
 
 /**
@@ -4492,7 +4495,7 @@ function emitStandaloneFinallyWithNativeFallback(
     if (recvType && recvType.kind !== "externref") {
       coerceType(ctx, fctx, recvType, { kind: "externref" });
     }
-    fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+    fctx.body.push({ op: "local.set", index: recvLocal });
 
     const onFinally = compileStandalonePromiseThenCallback(ctx, fctx, onFinallyArg, liveBuffers);
 
@@ -4503,7 +4506,7 @@ function emitStandaloneFinallyWithNativeFallback(
     fctx.savedBodies.push(outerBody);
     fctx.body = nativeArm;
     try {
-      emitStandalonePromiseFinally(ctx, fctx, [{ op: "local.get", index: recvLocal } as Instr], onFinally);
+      emitStandalonePromiseFinally(ctx, fctx, [{ op: "local.get", index: recvLocal }], onFinally);
     } finally {
       fctx.savedBodies.pop();
       fctx.body = outerBody;
@@ -4511,7 +4514,7 @@ function emitStandaloneFinallyWithNativeFallback(
 
     const hostArm: Instr[] = [];
     if (opts?.nullMiss === true) {
-      hostArm.push({ op: "ref.null.extern" } as Instr);
+      hostArm.push({ op: "ref.null.extern" });
     } else {
       ctx.liveBodies.add(hostArm);
       liveBuffers.push(hostArm);
@@ -4530,15 +4533,15 @@ function emitStandaloneFinallyWithNativeFallback(
     }
 
     const promiseTypeIdx = getOrRegisterPromiseType(ctx);
-    fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
       then: nativeArm,
       else: hostArm,
-    } as Instr);
+    });
   } finally {
     for (const b of liveBuffers) ctx.liveBodies.delete(b);
   }
@@ -4578,7 +4581,7 @@ function compileNumberIsPredicate(
   // (test262 Number/{isInteger,isFinite,isSafeInteger}/arg-is-not-number.js.)
   if ((argTsType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
     const t = compileExpression(ctx, fctx, arg);
-    if (t) fctx.body.push({ op: "drop" } as Instr);
+    if (t) fctx.body.push({ op: "drop" });
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
   }
@@ -4626,13 +4629,13 @@ function compileNumberIsPredicate(
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: [
-      { op: "local.get", index: boxTmp } as Instr,
-      { op: "call", funcIdx: unboxIdx } as Instr,
-      { op: "local.set", index: valTmp } as Instr,
+      { op: "local.get", index: boxTmp },
+      { op: "call", funcIdx: unboxIdx },
+      { op: "local.set", index: valTmp },
       ...emitPredicate(valTmp),
     ],
-    else: [{ op: "i32.const", value: 0 } as Instr],
-  } as Instr);
+    else: [{ op: "i32.const", value: 0 }],
+  });
   return { kind: "i32" };
 }
 
@@ -4729,7 +4732,7 @@ function compileFromCharCodeFamily(
         fctx.body = throwBuf;
         emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
         fctx.body = savedForThrow;
-        buf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf } as Instr);
+        buf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
         // Re-push the validated code point for the helper.
         buf.push({ op: "local.get", index: cpTmp });
       }
@@ -4799,8 +4802,8 @@ function emitJsonReplacerAllowList(
   const externSetIdx = ctx.funcMap.get("__extern_set")!;
   const allowLocal = allocLocal(fctx, `__json_allow_${fctx.locals.length}`, { kind: "externref" });
   // allow = __new_plain_object()
-  fctx.body.push({ op: "call", funcIdx: newObjIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: allowLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: newObjIdx });
+  fctx.body.push({ op: "local.set", index: allowLocal });
   const seen = new Set<string>();
   for (const el of arrayLit.elements) {
     let key: string | undefined;
@@ -4819,15 +4822,15 @@ function emitJsonReplacerAllowList(
     if (key === undefined || seen.has(key)) continue;
     seen.add(key);
     // __extern_set(allow, key, key) — value is immaterial (membership only).
-    fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: allowLocal });
     for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
     for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    fctx.body.push({ op: "call", funcIdx: externSetIdx } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "call", funcIdx: externSetIdx });
   }
   // leave the allowlist object on the stack as externref
-  fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: allowLocal });
 }
 
 /**
@@ -4856,7 +4859,7 @@ function tryWasiTimerCall(
   // builds on. The timer heap + run loop were registered in the deferred phase.
   if (name === "__wasiStdinReadByte") {
     emitStdinReadByte(ctx, fctx);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
 
@@ -4865,7 +4868,7 @@ function tryWasiTimerCall(
   // hit EOF with the buffer fully drained.
   if (name === "__wasiStdinAvailable") {
     emitStdinAvailable(ctx, fctx);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
   if (name === "__wasiStdinEof") {
@@ -4913,7 +4916,7 @@ function tryWasiTimerCall(
     }
     if (!closureInfo) return undefined;
     const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
-    emitStdinSetReader(ctx, fctx, [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr], capInstrs);
+    emitStdinSetReader(ctx, fctx, [{ op: "ref.func", funcIdx: wrapperFuncIdx }], capInstrs);
     return VOID_RESULT;
   }
 
@@ -4951,7 +4954,7 @@ function tryWasiTimerCall(
     compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
     const idInstrs = fctx.body;
     popBody(fctx, saved);
-    idInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    idInstrs.push({ op: "i32.trunc_sat_f64_s" });
     emitTimerCancel(ctx, fctx, idInstrs);
     return VOID_RESULT;
   }
@@ -4998,9 +5001,9 @@ function tryWasiTimerCall(
     emitMicrotaskEnqueue(
       ctx,
       fctx,
-      [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+      [{ op: "ref.func", funcIdx: wrapperFuncIdx }],
       capInstrs, // captures externref = the closure struct
-      [{ op: "ref.null.extern" } as Instr], // value = undefined
+      [{ op: "ref.null.extern" }], // value = undefined
     );
     return VOID_RESULT;
   }
@@ -5018,31 +5021,31 @@ function tryWasiTimerCall(
   }
   // Clamp negative / NaN ms to 0 (Node treats ms<=0 or NaN as 0).
   fctx.body.push({ op: "f64.const", value: 0 });
-  fctx.body.push({ op: "f64.max" } as Instr);
-  fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "f64.max" });
+  fctx.body.push({ op: "i64.trunc_sat_f64_s" });
   fctx.body.push({ op: "i64.const", value: 1000000n });
-  fctx.body.push({ op: "i64.mul" } as Instr);
+  fctx.body.push({ op: "i64.mul" });
   fctx.body.push({ op: "local.set", index: delayNsLocal });
 
   const deadlineInstrs: Instr[] = [
-    { op: "call", funcIdx: nowIdx } as Instr,
-    { op: "local.get", index: delayNsLocal } as Instr,
-    { op: "i64.add" } as Instr,
+    { op: "call", funcIdx: nowIdx },
+    { op: "local.get", index: delayNsLocal },
+    { op: "i64.add" },
   ];
   // interval period: setInterval re-arms with delayNs; setTimeout = 0 (one-shot).
   const intervalInstrs: Instr[] =
-    name === "setInterval" ? [{ op: "local.get", index: delayNsLocal } as Instr] : [{ op: "i64.const", value: 0n }];
+    name === "setInterval" ? [{ op: "local.get", index: delayNsLocal }] : [{ op: "i64.const", value: 0n }];
 
   emitTimerAdd(
     ctx,
     fctx,
     deadlineInstrs,
-    [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+    [{ op: "ref.func", funcIdx: wrapperFuncIdx }],
     capInstrs, // captures externref = the closure struct
     intervalInstrs,
   );
   // __timer_add returns the i32 id; setTimeout/setInterval return a JS number.
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" });
   return { kind: "f64" };
 }
 
@@ -5087,7 +5090,7 @@ function tryIteratorStaticsIntrinsicCall(
 
   if (name === "__j2w_iter_value") {
     const scratchIdx = ensureIterStepScratchGlobal(ctx);
-    fctx.body.push({ op: "global.get", index: scratchIdx } as Instr);
+    fctx.body.push({ op: "global.get", index: scratchIdx });
     return { kind: "externref" };
   }
 
@@ -5107,8 +5110,8 @@ function tryIteratorStaticsIntrinsicCall(
     const scratchIdx = ensureIterStepScratchGlobal(ctx);
     // (i32 done, externref value) — park the value, surface done as f64 0/1.
     fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__iterator_next")! });
-    fctx.body.push({ op: "global.set", index: scratchIdx } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    fctx.body.push({ op: "global.set", index: scratchIdx });
+    fctx.body.push({ op: "f64.convert_i32_s" });
     return { kind: "f64" };
   }
   // __j2w_iter_close
@@ -6529,16 +6532,16 @@ function compileCallExpression(
               }
               const thisTmpType: ValType = { kind: "anyref" };
               const thisTmp = allocTempLocal(fctx, thisTmpType);
-              fctx.body.push({ op: "local.tee", index: thisTmp } as Instr);
-              fctx.body.push({ op: "ref.test", typeIdx: selfTypeIdx } as Instr);
-              fctx.body.push({ op: "i32.eqz" } as Instr);
+              fctx.body.push({ op: "local.tee", index: thisTmp });
+              fctx.body.push({ op: "ref.test", typeIdx: selfTypeIdx });
+              fctx.body.push({ op: "i32.eqz" });
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "empty" },
                 then: typeErrorThrowInstrs(ctx, expr),
-              } as Instr);
-              fctx.body.push({ op: "local.get", index: thisTmp } as Instr);
-              fctx.body.push({ op: "ref.cast", typeIdx: selfTypeIdx } as Instr);
+              });
+              fctx.body.push({ op: "local.get", index: thisTmp });
+              fctx.body.push({ op: "ref.cast", typeIdx: selfTypeIdx });
               releaseTempLocal(fctx, thisTmp);
             }
 
@@ -6687,7 +6690,7 @@ function compileCallExpression(
           if (expr.arguments.length >= 1) {
             const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
             if (argType?.kind === "ref" || argType?.kind === "ref_null") {
-              fctx.body.push({ op: "extern.convert_any" } as Instr);
+              fctx.body.push({ op: "extern.convert_any" });
             } else if (argType && argType.kind !== "externref") {
               // Fall back to the standard coerce for non-ref result types.
               coerceType(ctx, fctx, argType, { kind: "externref" });
@@ -6737,7 +6740,7 @@ function compileCallExpression(
         // mutually exclusive; keep the former, drop the latter.
         compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "i32" });
       } else {
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 });
       }
       fctx.body.push({ op: "call", funcIdx: ctx.wasiProcExitIdx });
       return VOID_RESULT;
@@ -6773,7 +6776,7 @@ function compileCallExpression(
         if (escapeIdx !== undefined) {
           compileExpression(ctx, fctx, arg!, nativeStringType(ctx));
           flushLateImportShifts(ctx, fctx);
-          fctx.body.push({ op: "call", funcIdx: ctx.nativeStrHelpers.get("__regex_escape")! } as Instr);
+          fctx.body.push({ op: "call", funcIdx: ctx.nativeStrHelpers.get("__regex_escape")! });
           return nativeStringType(ctx);
         }
       } else if (arg !== undefined && !isUnresolvedArg) {
@@ -6781,7 +6784,7 @@ function compileCallExpression(
         // (number / object / array / null / undefined literals — the
         // non-string-inputs.js test exercises exactly these.)
         emitBrandCheckTypeError(ctx, fctx.body, "RegExp.escape called on a non-string value");
-        fctx.body.push({ op: "unreachable" } as Instr);
+        fctx.body.push({ op: "unreachable" });
         return nativeStringType(ctx);
       }
       // `any`/`unknown` arg → narrow-refuse (fall through to the generic path).
@@ -6811,7 +6814,7 @@ function compileCallExpression(
         return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.ne" } as Instr,
+          { op: "f64.ne" },
         ]);
       }
       if (method === "isInteger" && expr.arguments.length >= 1) {
@@ -6819,15 +6822,15 @@ function compileCallExpression(
         return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.trunc" } as Instr,
-          { op: "f64.eq" } as Instr,
+          { op: "f64.trunc" },
+          { op: "f64.eq" },
           // finite: n - n === 0 (Infinity - Infinity = NaN, NaN !== 0)
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.sub" } as Instr,
+          { op: "f64.sub" },
           { op: "f64.const", value: 0 },
-          { op: "f64.eq" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "f64.eq" },
+          { op: "i32.and" },
         ]);
       }
       if (method === "isFinite" && expr.arguments.length >= 1) {
@@ -6835,9 +6838,9 @@ function compileCallExpression(
         return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.sub" } as Instr,
+          { op: "f64.sub" },
           { op: "f64.const", value: 0 },
-          { op: "f64.eq" } as Instr,
+          { op: "f64.eq" },
         ]);
       }
       if (method === "isSafeInteger" && expr.arguments.length >= 1) {
@@ -6846,20 +6849,20 @@ function compileCallExpression(
           // isInteger: n === trunc(n) && isFinite(n)
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.trunc" } as Instr,
-          { op: "f64.eq" } as Instr,
+          { op: "f64.trunc" },
+          { op: "f64.eq" },
           { op: "local.get", index: v },
           { op: "local.get", index: v },
-          { op: "f64.sub" } as Instr,
+          { op: "f64.sub" },
           { op: "f64.const", value: 0 },
-          { op: "f64.eq" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "f64.eq" },
+          { op: "i32.and" },
           // abs(n) <= MAX_SAFE_INTEGER
           { op: "local.get", index: v },
-          { op: "f64.abs" } as Instr,
+          { op: "f64.abs" },
           { op: "f64.const", value: Number.MAX_SAFE_INTEGER },
-          { op: "f64.le" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "f64.le" },
+          { op: "i32.and" },
         ]);
       }
       if ((method === "parseFloat" || method === "parseInt") && expr.arguments.length >= 1) {
@@ -7215,7 +7218,7 @@ function compileCallExpression(
                 const iTmp = allocLocal(fctx, `__tafrom_i_${fctx.locals.length}`, { kind: "i32" });
 
                 // src vec ref → field0 (len), field1 (data)
-                if (srcT.kind === "ref_null") fctx.body.push({ op: "ref.cast", typeIdx: srcVecIdx } as Instr);
+                if (srcT.kind === "ref_null") fctx.body.push({ op: "ref.cast", typeIdx: srcVecIdx });
                 fctx.body.push({ op: "local.set", index: srcVec });
                 fctx.body.push({ op: "local.get", index: srcVec });
                 fctx.body.push({ op: "struct.get", typeIdx: srcVecIdx, fieldIdx: 0 });
@@ -7240,39 +7243,39 @@ function compileCallExpression(
                 const srcStore: ValType = srcElemIsPacked ? { kind: "i32" } : srcElem;
                 const savedLoopBody = pushBody(fctx);
                 // if (i >= len) break
-                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
-                fctx.body.push({ op: "local.get", index: lenTmp } as Instr);
-                fctx.body.push({ op: "i32.ge_s" } as Instr);
-                fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+                fctx.body.push({ op: "local.get", index: iTmp });
+                fctx.body.push({ op: "local.get", index: lenTmp });
+                fctx.body.push({ op: "i32.ge_s" });
+                fctx.body.push({ op: "br_if", depth: 1 });
                 // dst[i] = coerce(src[i])
-                fctx.body.push({ op: "local.get", index: dstData } as Instr);
-                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
-                fctx.body.push({ op: "local.get", index: srcData } as Instr);
-                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
+                fctx.body.push({ op: "local.get", index: dstData });
+                fctx.body.push({ op: "local.get", index: iTmp });
+                fctx.body.push({ op: "local.get", index: srcData });
+                fctx.body.push({ op: "local.get", index: iTmp });
                 if (srcElemIsPacked) {
                   fctx.body.push({
                     op: srcElemIsSigned ? "array.get_s" : "array.get_u",
                     typeIdx: srcArrIdx,
-                  } as Instr);
+                  });
                 } else {
-                  fctx.body.push({ op: "array.get", typeIdx: srcArrIdx } as Instr);
+                  fctx.body.push({ op: "array.get", typeIdx: srcArrIdx });
                 }
                 if (!valTypesMatch(srcStore, storeWasm)) coerceType(ctx, fctx, srcStore, storeWasm);
-                fctx.body.push({ op: "array.set", typeIdx: taArrTypeIdx } as Instr);
+                fctx.body.push({ op: "array.set", typeIdx: taArrTypeIdx });
                 // i++
-                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
-                fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-                fctx.body.push({ op: "i32.add" } as Instr);
-                fctx.body.push({ op: "local.set", index: iTmp } as Instr);
+                fctx.body.push({ op: "local.get", index: iTmp });
+                fctx.body.push({ op: "i32.const", value: 1 });
+                fctx.body.push({ op: "i32.add" });
+                fctx.body.push({ op: "local.set", index: iTmp });
                 // continue
-                fctx.body.push({ op: "br", depth: 0 } as Instr);
+                fctx.body.push({ op: "br", depth: 0 });
                 const loopInner = fctx.body;
                 popBody(fctx, savedLoopBody);
                 fctx.body.push({
                   op: "block",
                   blockType: { kind: "empty" },
-                  body: [{ op: "loop", blockType: { kind: "empty" }, body: loopInner } as Instr],
-                } as Instr);
+                  body: [{ op: "loop", blockType: { kind: "empty" }, body: loopInner }],
+                });
                 // struct.new (len, dstData)
                 fctx.body.push({ op: "local.get", index: lenTmp });
                 fctx.body.push({ op: "local.get", index: dstData });
@@ -7324,7 +7327,7 @@ function compileCallExpression(
           (t.typeIdx === ctx.anyStrTypeIdx || t.typeIdx === ctx.nativeStrTypeIdx)
         ) {
           if (t.kind === "ref_null") {
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
+            fctx.body.push({ op: "ref.as_non_null" });
           }
           const { funcIdx: toCharVecIdx, vecTypeIdx: nstrVecTypeIdx } = ensureStrToCharVecHelper(ctx);
           fctx.body.push({ op: "call", funcIdx: toCharVecIdx });
@@ -7492,11 +7495,11 @@ function compileCallExpression(
             op: "array.copy",
             dstTypeIdx: arrTypeIdx,
             srcTypeIdx: arrTypeIdx,
-          } as Instr);
+          });
           // Create new vec struct with copied data
           fctx.body.push({ op: "local.get", index: lenTmp });
           fctx.body.push({ op: "local.get", index: dstData });
-          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" });
           fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
           return { kind: "ref", typeIdx: vecTypeIdx };
         }
@@ -7689,7 +7692,7 @@ function compileCallExpression(
               at === null &&
               (elemWasm.kind === "ref" || elemWasm.kind === "ref_null" || elemWasm.kind === "externref")
             )
-              fctx.body.push({ op: "ref.null.extern" } as Instr);
+              fctx.body.push({ op: "ref.null.extern" });
           }
           fctx.body.push({ op: "array.new_fixed", typeIdx: ofArrTypeIdx, length: expr.arguments.length });
           const ofDataLocal = allocLocal(fctx, `__arrof_data_${fctx.locals.length}`, {
@@ -8685,35 +8688,35 @@ function compileCallExpression(
                 const gopdTmp = allocLocal(fctx, `__gopd_tmp_${fctx.locals.length}`, { kind: "anyref" });
                 fctx.body.push({ op: "local.set", index: gopdTmp });
                 fctx.body.push({ op: "local.get", index: gopdTmp });
-                fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+                fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
                 fctx.body.push({
                   op: "if",
                   blockType: { kind: "val", type: { kind: "externref" } as ValType },
                   then: (() => {
                     // Cast succeeds — proceed with struct.get + descriptor
                     const thenInstrs: Instr[] = [
-                      { op: "local.get", index: gopdTmp } as Instr,
-                      { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-                      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: entry.fieldIdx } as Instr,
+                      { op: "local.get", index: gopdTmp },
+                      { op: "ref.cast", typeIdx: structTypeIdx },
+                      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: entry.fieldIdx },
                     ];
                     // Coerce field value to externref
                     const ft = entry.field.type;
                     if (ft.kind === "f64") {
                       const boxIdx2 = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
                       flushLateImportShifts(ctx, fctx);
-                      if (boxIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx2 } as Instr);
+                      if (boxIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx2 });
                     } else if (ft.kind === "i32") {
-                      thenInstrs.push({ op: "f64.convert_i32_s" } as Instr);
+                      thenInstrs.push({ op: "f64.convert_i32_s" });
                       const boxIdx2 = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
                       flushLateImportShifts(ctx, fctx);
-                      if (boxIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx2 } as Instr);
+                      if (boxIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: boxIdx2 });
                     } else if (ft.kind === "ref" || ft.kind === "ref_null") {
-                      thenInstrs.push({ op: "extern.convert_any" } as Instr);
+                      thenInstrs.push({ op: "extern.convert_any" });
                     } else if (ft.kind !== "externref") {
-                      thenInstrs.push({ op: "extern.convert_any" } as Instr);
+                      thenInstrs.push({ op: "extern.convert_any" });
                     }
                     // Push flags + call __create_descriptor
-                    thenInstrs.push({ op: "i32.const", value: flags } as Instr);
+                    thenInstrs.push({ op: "i32.const", value: flags });
                     const createIdx2 = ensureLateImport(
                       ctx,
                       "__create_descriptor",
@@ -8721,14 +8724,14 @@ function compileCallExpression(
                       [{ kind: "externref" }],
                     );
                     flushLateImportShifts(ctx, fctx);
-                    if (createIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: createIdx2 } as Instr);
+                    if (createIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: createIdx2 });
                     return thenInstrs;
                   })(),
                   else: [
                     // Cast would fail — return undefined (property not own)
-                    { op: "ref.null.extern" } as Instr,
+                    { op: "ref.null.extern" },
                   ],
-                } as Instr);
+                });
                 return { kind: "externref" };
               }
             }
@@ -8877,10 +8880,10 @@ function compileCallExpression(
                 // `.get` is the SAME function object across repeated gOPD calls and
                 // the syntactic getter-invocation self (property-access.ts Site 3).
                 fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, protoClosure));
-                fctx.body.push({ op: "extern.convert_any" } as Instr); // get
-                fctx.body.push({ op: "ref.null.extern" } as Instr); // set = undefined
-                fctx.body.push({ op: "i32.const", value: 0x04 } as Instr); // FLAG_CONFIGURABLE
-                fctx.body.push({ op: "call", funcIdx: createAccIdx } as Instr);
+                fctx.body.push({ op: "extern.convert_any" }); // get
+                fctx.body.push({ op: "ref.null.extern" }); // set = undefined
+                fctx.body.push({ op: "i32.const", value: 0x04 }); // FLAG_CONFIGURABLE
+                fctx.body.push({ op: "call", funcIdx: createAccIdx });
                 return { kind: "externref" };
               }
             } else {
@@ -8899,9 +8902,9 @@ function compileCallExpression(
                 // read `RegExp.prototype.exec` (property-access.ts method arm):
                 // `gOPD(p,"exec").value === RegExp.prototype.exec`.
                 fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, protoClosure));
-                fctx.body.push({ op: "extern.convert_any" } as Instr); // value
-                fctx.body.push({ op: "i32.const", value: 0x05 } as Instr); // FLAG_WRITABLE | FLAG_CONFIGURABLE
-                fctx.body.push({ op: "call", funcIdx: createIdx } as Instr);
+                fctx.body.push({ op: "extern.convert_any" }); // value
+                fctx.body.push({ op: "i32.const", value: 0x05 }); // FLAG_WRITABLE | FLAG_CONFIGURABLE
+                fctx.body.push({ op: "call", funcIdx: createIdx });
                 return { kind: "externref" };
               }
             }
@@ -8981,7 +8984,7 @@ function compileCallExpression(
         // (#2515 S0) `>= 0`, not `!== undefined`: the standalone `-1` sentinel
         // must fall to the inline-materializing path, not bake `global.get -1`.
         if (strIdx !== undefined && strIdx >= 0) {
-          fctx.body.push({ op: "global.get", index: strIdx } as Instr);
+          fctx.body.push({ op: "global.get", index: strIdx });
         } else {
           compileStringLiteral(ctx, fctx, builtinName);
         }
@@ -9160,9 +9163,9 @@ function compileCallExpression(
           fctx.body.push({ op: "local.set", index: yLocal });
           // bits(x) == bits(y)
           fctx.body.push({ op: "local.get", index: xLocal });
-          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "i64.reinterpret_f64" });
           fctx.body.push({ op: "local.get", index: yLocal });
-          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "i64.reinterpret_f64" });
           fctx.body.push({ op: "i64.eq" });
           // (x !== x) & (y !== y)  →  both NaN
           fctx.body.push({ op: "local.get", index: xLocal });
@@ -9567,7 +9570,7 @@ function compileCallExpression(
           if (keyType && (keyType.kind !== "ref" || keyType.typeIdx !== ctx.anyStrTypeIdx)) {
             coerceType(ctx, fctx, keyType, { kind: "ref", typeIdx: ctx.anyStrTypeIdx });
           }
-          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" });
           fctx.body.push({ op: "call", funcIdx: forIdx });
           return { kind: "i32" };
         }
@@ -9634,14 +9637,14 @@ function compileCallExpression(
         if (isView || argSym === "BigInt64Array" || argSym === "BigUint64Array") {
           // Static `true`. Still evaluate the (possibly side-effecting) arg, drop it.
           const at = compileExpression(ctx, fctx, arg0);
-          if (at !== null) fctx.body.push({ op: "drop" } as Instr);
-          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+          if (at !== null) fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 1 });
           return { kind: "i32" };
         }
         if (isResolvableNonView) {
           const at = compileExpression(ctx, fctx, arg0);
-          if (at !== null) fctx.body.push({ op: "drop" } as Instr);
-          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          if (at !== null) fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
           return { kind: "i32" };
         }
         // Runtime fallback for `any`/union/unresolved receivers: ref.test the
@@ -9656,18 +9659,18 @@ function compileCallExpression(
         const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
         const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
         const anyTmp = allocLocal(fctx, `__isview_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
-        fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "local.set", index: anyTmp });
         let emitted = false;
         for (const vi of vecTypeIdxs) {
-          fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-          fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
-          if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+          fctx.body.push({ op: "local.get", index: anyTmp });
+          fctx.body.push({ op: "ref.test", typeIdx: vi });
+          if (emitted) fctx.body.push({ op: "i32.or" });
           emitted = true;
         }
-        fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-        fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
-        if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+        fctx.body.push({ op: "local.get", index: anyTmp });
+        fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx });
+        if (emitted) fctx.body.push({ op: "i32.or" });
         return { kind: "i32" };
       }
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
@@ -9851,14 +9854,14 @@ function compileCallExpression(
           })();
           // if !ref.test $Object(target) → throw TypeError
           fctx.body.push({ op: "local.get", index: targetLocal });
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx });
           fctx.body.push({ op: "i32.eqz" });
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: throwInstrs,
-          } as Instr);
+          });
           // target is an $Object — push [target, key] and delete.
           fctx.body.push({ op: "local.get", index: targetLocal });
           releaseTempLocal(fctx, targetLocal);
@@ -9931,14 +9934,14 @@ function compileCallExpression(
           })();
           // if !ref.test $Object(target) → throw TypeError
           fctx.body.push({ op: "local.get", index: targetLocal });
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx });
           fctx.body.push({ op: "i32.eqz" });
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
             then: throwInstrs,
-          } as Instr);
+          });
           // target is an $Object — push [target, key] and read the descriptor.
           fctx.body.push({ op: "local.get", index: targetLocal });
           releaseTempLocal(fctx, targetLocal);
@@ -10769,7 +10772,7 @@ function compileCallExpression(
             }
           }
           flushLateImportShifts(ctx, fctx);
-          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_rawjson")! } as Instr);
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_rawjson")! });
           return { kind: "externref" };
         }
         if (method === "isRawJSON") {
@@ -10780,11 +10783,11 @@ function compileCallExpression(
               coerceType(ctx, fctx, argResult, { kind: "externref" });
             }
           } else {
-            fctx.body.push({ op: "ref.null.extern" } as Instr);
+            fctx.body.push({ op: "ref.null.extern" });
           }
           emitJsonIsRawJson(ctx);
           flushLateImportShifts(ctx, fctx);
-          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_is_rawjson")! } as Instr);
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_is_rawjson")! });
           return { kind: "i32" };
         }
       }
@@ -10806,7 +10809,7 @@ function compileCallExpression(
             // affects nested output).
             for (let i = 1; i < expr.arguments.length; i++) {
               const t = compileExpression(ctx, fctx, expr.arguments[i]!);
-              if (t) fctx.body.push({ op: "drop" } as Instr);
+              if (t) fctx.body.push({ op: "drop" });
             }
             return primitiveStringType;
           }
@@ -10870,7 +10873,7 @@ function compileCallExpression(
               // Bring the value to anyref so the codec can ref.test-discriminate
               // it. Externref-typed object/array values widen via any.convert_extern.
               if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
-                fctx.body.push({ op: "any.convert_extern" } as Instr);
+                fctx.body.push({ op: "any.convert_extern" });
               } else if (argResult.kind !== "anyref") {
                 coerceType(ctx, fctx, argResult, { kind: "anyref" });
               }
@@ -10878,14 +10881,14 @@ function compileCallExpression(
               flushLateImportShifts(ctx, fctx);
               if (gap === "") {
                 // No indentation — the compact root (cheapest path).
-                fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! } as Instr);
+                fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! });
               } else {
                 // Pretty-print: push the gap string and call the indent root.
                 for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
                 fctx.body.push({
                   op: "call",
                   funcIdx: ctx.funcMap.get("__json_stringify_root_indent")!,
-                } as Instr);
+                });
               }
               return nativeStringType(ctx);
             }
@@ -10905,19 +10908,19 @@ function compileCallExpression(
                 const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
                 if (argResult === null) return null;
                 if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
-                  fctx.body.push({ op: "any.convert_extern" } as Instr);
+                  fctx.body.push({ op: "any.convert_extern" });
                 } else if (argResult.kind !== "anyref") {
                   coerceType(ctx, fctx, argResult, { kind: "anyref" });
                 }
                 // gap (or null for compact)
                 if (gap === "") {
-                  fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+                  fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx });
                 } else {
                   for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
                 }
                 // replacer (externref) + allowList (externref); exactly one is set.
                 if (isArrayLiteral) {
-                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no fn replacer
+                  fctx.body.push({ op: "ref.null.extern" }); // no fn replacer
                   emitJsonReplacerAllowList(ctx, fctx, replacerArg); // builds $Object → externref
                 } else {
                   // A function replacer goes through the GC-closure path
@@ -10931,14 +10934,14 @@ function compileCallExpression(
                     const r = compileExpression(ctx, fctx, replacerArg, { kind: "externref" });
                     if (r === null) return null;
                   }
-                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no allowList
+                  fctx.body.push({ op: "ref.null.extern" }); // no allowList
                 }
                 emitJsonStringifyValue(ctx);
                 flushLateImportShifts(ctx, fctx);
                 fctx.body.push({
                   op: "call",
                   funcIdx: ctx.funcMap.get("__json_stringify_root_replacer")!,
-                } as Instr);
+                });
                 return nativeStringType(ctx);
               }
             }
@@ -11017,7 +11020,7 @@ function compileCallExpression(
                     : compileExpression(ctx, fctx, reviverArg!, { kind: "anyref" });
                 if (revResult === null) return null;
                 if (revResult.kind === "ref" || revResult.kind === "ref_null" || revResult.kind === "anyref") {
-                  fctx.body.push({ op: "extern.convert_any" } as Instr);
+                  fctx.body.push({ op: "extern.convert_any" });
                 } else if (revResult.kind !== "externref") {
                   coerceType(ctx, fctx, revResult, { kind: "externref" });
                 }
@@ -11026,12 +11029,12 @@ function compileCallExpression(
                 fctx.body.push({
                   op: "call",
                   funcIdx: ctx.funcMap.get("__json_parse_text_reviver")!,
-                } as Instr);
+                });
                 return { kind: "anyref" };
               }
               emitJsonParseText(ctx);
               flushLateImportShifts(ctx, fctx);
-              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_text")! } as Instr);
+              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_text")! });
               // The codec returns the value graph as anyref ($Object/$ObjVec/
               // $NativeString widened, or a ref $AnyValue for primitives). The
               // downstream coercion paths (object property read, AnyValue→
@@ -11115,7 +11118,7 @@ function compileCallExpression(
       ctx.wasi &&
       ctx.funcMap.has("__wasi_performance_now")
     ) {
-      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_performance_now")! } as Instr);
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_performance_now")! });
       return { kind: "f64" };
     }
 
@@ -11131,7 +11134,7 @@ function compileCallExpression(
         // (#1483) Under --target wasi, route to clock_time_get instead of the
         // env::__date_now host import (which wasmtime does not provide).
         if (ctx.wasi && ctx.funcMap.has("__wasi_date_now")) {
-          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
+          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! });
           return { kind: "f64" };
         }
         // (#2164) Pure standalone (--target standalone, no JS host AND no WASI
@@ -11145,15 +11148,15 @@ function compileCallExpression(
         // cannot provide) stay failing — and those need a clock source, not a
         // host import.
         if (ctx.standalone === true) {
-          fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+          fctx.body.push({ op: "f64.const", value: 0 });
           return { kind: "f64" };
         }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
-          fctx.body.push({ op: "call", funcIdx: dateNowIdx } as Instr);
+          fctx.body.push({ op: "call", funcIdx: dateNowIdx });
         } else {
-          fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+          fctx.body.push({ op: "f64.const", value: 0 });
         }
         return { kind: "f64" };
       }
@@ -11174,7 +11177,7 @@ function compileCallExpression(
         // §21.4.3.4 step 1: with no year argument, y = ToNumber(undefined) = NaN,
         // so the whole result is NaN (Date.UTC() ⇒ NaN).
         if (args.length === 0) {
-          fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+          fctx.body.push({ op: "f64.const", value: NaN });
           return { kind: "f64" };
         }
 
@@ -11184,49 +11187,49 @@ function compileCallExpression(
         // *present* component (a missing arg uses a finite default and never
         // contributes). i64.trunc_sat would otherwise silently clamp NaN/±Inf.
         const nonFiniteLocal = allocTempLocal(fctx, { kind: "i32" });
-        fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-        fctx.body.push({ op: "local.set", index: nonFiniteLocal } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: nonFiniteLocal });
         const checkNonFinite = (f64Local: number) => {
-          fctx.body.push({ op: "local.get", index: nonFiniteLocal } as Instr);
-          fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-          fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-          fctx.body.push({ op: "f64.ne" } as Instr); // NaN: v !== v
-          fctx.body.push({ op: "i32.or" } as Instr);
-          fctx.body.push({ op: "local.get", index: f64Local } as Instr);
-          fctx.body.push({ op: "f64.abs" } as Instr);
-          fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
-          fctx.body.push({ op: "f64.gt" } as Instr);
-          fctx.body.push({ op: "i32.or" } as Instr);
-          fctx.body.push({ op: "local.set", index: nonFiniteLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: nonFiniteLocal });
+          fctx.body.push({ op: "local.get", index: f64Local });
+          fctx.body.push({ op: "local.get", index: f64Local });
+          fctx.body.push({ op: "f64.ne" }); // NaN: v !== v
+          fctx.body.push({ op: "i32.or" });
+          fctx.body.push({ op: "local.get", index: f64Local });
+          fctx.body.push({ op: "f64.abs" });
+          fctx.body.push({ op: "f64.const", value: 8.64e15 });
+          fctx.body.push({ op: "f64.gt" });
+          fctx.body.push({ op: "i32.or" });
+          fctx.body.push({ op: "local.set", index: nonFiniteLocal });
         };
 
         // year → i64 (ToNumber via f64 coercion; non-finite tracked)
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
         const yearF64 = allocTempLocal(fctx, { kind: "f64" });
-        fctx.body.push({ op: "local.tee", index: yearF64 } as Instr);
+        fctx.body.push({ op: "local.tee", index: yearF64 });
         checkNonFinite(yearF64);
-        fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "i64.trunc_sat_f64_s" });
         const yearL = allocTempLocal(fctx, { kind: "i64" });
-        fctx.body.push({ op: "local.set", index: yearL } as Instr);
+        fctx.body.push({ op: "local.set", index: yearL });
         releaseTempLocal(fctx, yearF64);
 
         // MakeFullYear §21.4.1.27: if 0 ≤ yr ≤ 99, yr += 1900.
         fctx.body.push(
-          { op: "local.get", index: yearL } as Instr,
-          { op: "i64.const", value: 0n } as Instr,
-          { op: "i64.ge_s" } as Instr,
-          { op: "local.get", index: yearL } as Instr,
-          { op: "i64.const", value: 99n } as Instr,
-          { op: "i64.le_s" } as Instr,
-          { op: "i32.and" } as Instr,
+          { op: "local.get", index: yearL },
+          { op: "i64.const", value: 0n },
+          { op: "i64.ge_s" },
+          { op: "local.get", index: yearL },
+          { op: "i64.const", value: 99n },
+          { op: "i64.le_s" },
+          { op: "i32.and" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: yearL } as Instr,
-              { op: "i64.const", value: 1900n } as Instr,
-              { op: "i64.add" } as Instr,
-              { op: "local.set", index: yearL } as Instr,
+              { op: "local.get", index: yearL },
+              { op: "i64.const", value: 1900n },
+              { op: "i64.add" },
+              { op: "local.set", index: yearL },
             ],
           },
         );
@@ -11237,15 +11240,15 @@ function compileCallExpression(
           if (args.length > idx) {
             compileExpression(ctx, fctx, args[idx]!, { kind: "f64" });
             const f = allocTempLocal(fctx, { kind: "f64" });
-            fctx.body.push({ op: "local.tee", index: f } as Instr);
+            fctx.body.push({ op: "local.tee", index: f });
             checkNonFinite(f);
             releaseTempLocal(fctx, f);
-            fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+            fctx.body.push({ op: "i64.trunc_sat_f64_s" });
           } else {
-            fctx.body.push({ op: "i64.const", value: def } as Instr);
+            fctx.body.push({ op: "i64.const", value: def });
           }
           const l = allocTempLocal(fctx, { kind: "i64" });
-          fctx.body.push({ op: "local.set", index: l } as Instr);
+          fctx.body.push({ op: "local.set", index: l });
           return l;
         };
 
@@ -11264,42 +11267,42 @@ function compileCallExpression(
         const qL = allocTempLocal(fctx, { kind: "i64" });
         const rL = allocTempLocal(fctx, { kind: "i64" });
         fctx.body.push(
-          { op: "local.get", index: monthL } as Instr,
-          { op: "i64.const", value: 12n } as Instr,
-          { op: "i64.div_s" } as Instr,
-          { op: "local.set", index: qL } as Instr,
-          { op: "local.get", index: monthL } as Instr,
-          { op: "i64.const", value: 12n } as Instr,
-          { op: "i64.rem_s" } as Instr,
-          { op: "local.set", index: rL } as Instr,
+          { op: "local.get", index: monthL },
+          { op: "i64.const", value: 12n },
+          { op: "i64.div_s" },
+          { op: "local.set", index: qL },
+          { op: "local.get", index: monthL },
+          { op: "i64.const", value: 12n },
+          { op: "i64.rem_s" },
+          { op: "local.set", index: rL },
           // if (r < 0) { q -= 1; r += 12 }
-          { op: "local.get", index: rL } as Instr,
-          { op: "i64.const", value: 0n } as Instr,
-          { op: "i64.lt_s" } as Instr,
+          { op: "local.get", index: rL },
+          { op: "i64.const", value: 0n },
+          { op: "i64.lt_s" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              { op: "local.get", index: qL } as Instr,
-              { op: "i64.const", value: 1n } as Instr,
-              { op: "i64.sub" } as Instr,
-              { op: "local.set", index: qL } as Instr,
-              { op: "local.get", index: rL } as Instr,
-              { op: "i64.const", value: 12n } as Instr,
-              { op: "i64.add" } as Instr,
-              { op: "local.set", index: rL } as Instr,
+              { op: "local.get", index: qL },
+              { op: "i64.const", value: 1n },
+              { op: "i64.sub" },
+              { op: "local.set", index: qL },
+              { op: "local.get", index: rL },
+              { op: "i64.const", value: 12n },
+              { op: "i64.add" },
+              { op: "local.set", index: rL },
             ],
           },
           // year += q
-          { op: "local.get", index: yearL } as Instr,
-          { op: "local.get", index: qL } as Instr,
-          { op: "i64.add" } as Instr,
-          { op: "local.set", index: yearL } as Instr,
+          { op: "local.get", index: yearL },
+          { op: "local.get", index: qL },
+          { op: "i64.add" },
+          { op: "local.set", index: yearL },
           // civil month = r + 1  (reuse monthL)
-          { op: "local.get", index: rL } as Instr,
-          { op: "i64.const", value: 1n } as Instr,
-          { op: "i64.add" } as Instr,
-          { op: "local.set", index: monthL } as Instr,
+          { op: "local.get", index: rL },
+          { op: "i64.const", value: 1n },
+          { op: "i64.add" },
+          { op: "local.set", index: monthL },
         );
         releaseTempLocal(fctx, rL);
         releaseTempLocal(fctx, qL);
@@ -11307,44 +11310,44 @@ function compileCallExpression(
         // ts = days_from_civil(year, civilMonth, day) * 86400000
         //      + h*3600000 + min*60000 + s*1000 + ms
         fctx.body.push(
-          { op: "local.get", index: yearL } as Instr,
-          { op: "local.get", index: monthL } as Instr,
-          { op: "local.get", index: dayL } as Instr,
-          { op: "call", funcIdx: daysFromCivilIdx } as Instr,
-          { op: "i64.const", value: 86400000n } as Instr,
-          { op: "i64.mul" } as Instr,
-          { op: "local.get", index: hoursL } as Instr,
-          { op: "i64.const", value: 3600000n } as Instr,
-          { op: "i64.mul" } as Instr,
-          { op: "i64.add" } as Instr,
-          { op: "local.get", index: minutesL } as Instr,
-          { op: "i64.const", value: 60000n } as Instr,
-          { op: "i64.mul" } as Instr,
-          { op: "i64.add" } as Instr,
-          { op: "local.get", index: secondsL } as Instr,
-          { op: "i64.const", value: 1000n } as Instr,
-          { op: "i64.mul" } as Instr,
-          { op: "i64.add" } as Instr,
-          { op: "local.get", index: msL } as Instr,
-          { op: "i64.add" } as Instr,
+          { op: "local.get", index: yearL },
+          { op: "local.get", index: monthL },
+          { op: "local.get", index: dayL },
+          { op: "call", funcIdx: daysFromCivilIdx },
+          { op: "i64.const", value: 86400000n },
+          { op: "i64.mul" },
+          { op: "local.get", index: hoursL },
+          { op: "i64.const", value: 3600000n },
+          { op: "i64.mul" },
+          { op: "i64.add" },
+          { op: "local.get", index: minutesL },
+          { op: "i64.const", value: 60000n },
+          { op: "i64.mul" },
+          { op: "i64.add" },
+          { op: "local.get", index: secondsL },
+          { op: "i64.const", value: 1000n },
+          { op: "i64.mul" },
+          { op: "i64.add" },
+          { op: "local.get", index: msL },
+          { op: "i64.add" },
         );
         const tsL = allocTempLocal(fctx, { kind: "i64" });
-        fctx.body.push({ op: "local.set", index: tsL } as Instr);
+        fctx.body.push({ op: "local.set", index: tsL });
 
         // TimeClip §21.4.1.14: any non-finite component, or |ts| > 8.64e15 ⇒ NaN.
         fctx.body.push(
-          { op: "local.get", index: nonFiniteLocal } as Instr,
-          { op: "local.get", index: tsL } as Instr,
-          { op: "f64.convert_i64_s" } as Instr,
-          { op: "f64.abs" } as Instr,
-          { op: "f64.const", value: 8.64e15 } as Instr,
-          { op: "f64.gt" } as Instr,
-          { op: "i32.or" } as Instr,
+          { op: "local.get", index: nonFiniteLocal },
+          { op: "local.get", index: tsL },
+          { op: "f64.convert_i64_s" },
+          { op: "f64.abs" },
+          { op: "f64.const", value: 8.64e15 },
+          { op: "f64.gt" },
+          { op: "i32.or" },
           {
             op: "if",
             blockType: { kind: "val", type: { kind: "f64" } },
-            then: [{ op: "f64.const", value: NaN } as Instr],
-            else: [{ op: "local.get", index: tsL } as Instr, { op: "f64.convert_i64_s" } as Instr],
+            then: [{ op: "f64.const", value: NaN }],
+            else: [{ op: "local.get", index: tsL }, { op: "f64.convert_i64_s" }],
           },
         );
 
@@ -11374,7 +11377,7 @@ function compileCallExpression(
       if (method === "parse") {
         // Date.parse() with no args → NaN (§21.4.3.2 — ToString(undefined)).
         if (expr.arguments.length === 0) {
-          fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+          fctx.body.push({ op: "f64.const", value: NaN });
           return { kind: "f64" };
         }
         // (#2678) HOST mode: delegate to the JS `Date.parse` host import
@@ -11390,16 +11393,16 @@ function compileCallExpression(
             if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
             for (let i = 1; i < expr.arguments.length; i++) {
               const t = compileExpression(ctx, fctx, expr.arguments[i]!);
-              if (t) fctx.body.push({ op: "drop" } as Instr);
+              if (t) fctx.body.push({ op: "drop" });
             }
-            fctx.body.push({ op: "call", funcIdx: hostIdx } as Instr);
+            fctx.body.push({ op: "call", funcIdx: hostIdx });
             return { kind: "f64" };
           }
           for (const arg of expr.arguments) {
             const t = compileExpression(ctx, fctx, arg);
-            if (t) fctx.body.push({ op: "drop" } as Instr);
+            if (t) fctx.body.push({ op: "drop" });
           }
-          fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+          fctx.body.push({ op: "f64.const", value: NaN });
           return { kind: "f64" };
         }
         // Standalone / WASI: pure-Wasm native parser (#2164).
@@ -11410,10 +11413,10 @@ function compileCallExpression(
         // Evaluate any extra args for side effects, then drop.
         for (let i = 1; i < expr.arguments.length; i++) {
           const t = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (t) fctx.body.push({ op: "drop" } as Instr);
+          if (t) fctx.body.push({ op: "drop" });
         }
         flushLateImportShifts(ctx, fctx);
-        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse") ?? dateParseIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse") ?? dateParseIdx });
         return { kind: "f64" };
       }
     }
@@ -11498,7 +11501,7 @@ function compileCallExpression(
       if (recvSym === "TextEncoder" && method === "encode") {
         const { encodeIdx, vecTypeIdx } = ensureTextEncodingHelpers(ctx);
         const recvResult = compileExpression(ctx, fctx, propAccess.expression);
-        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
+        if (recvResult !== null) fctx.body.push({ op: "drop" });
         if (expr.arguments.length > 0) {
           compileExpression(ctx, fctx, expr.arguments[0]!, nativeStringType(ctx));
         } else {
@@ -11506,16 +11509,16 @@ function compileCallExpression(
         }
         for (let i = 1; i < expr.arguments.length; i++) {
           const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
+          if (extra !== null) fctx.body.push({ op: "drop" });
         }
-        fctx.body.push({ op: "call", funcIdx: encodeIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: encodeIdx });
         return { kind: "ref_null", typeIdx: vecTypeIdx };
       }
 
       if (recvSym === "TextDecoder" && method === "decode") {
         const { decodeU8Idx, vecTypeIdx } = ensureTextEncodingHelpers(ctx);
         const recvResult = compileExpression(ctx, fctx, propAccess.expression);
-        if (recvResult !== null) fctx.body.push({ op: "drop" } as Instr);
+        if (recvResult !== null) fctx.body.push({ op: "drop" });
         if (expr.arguments.length === 0) {
           compileStringLiteral(ctx, fctx, "");
           return nativeStringType(ctx);
@@ -11527,9 +11530,9 @@ function compileCallExpression(
         }
         for (let i = 1; i < expr.arguments.length; i++) {
           const extra = compileExpression(ctx, fctx, expr.arguments[i]!);
-          if (extra !== null) fctx.body.push({ op: "drop" } as Instr);
+          if (extra !== null) fctx.body.push({ op: "drop" });
         }
-        fctx.body.push({ op: "call", funcIdx: decodeU8Idx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: decodeU8Idx });
         return nativeStringType(ctx);
       }
     }
@@ -11586,7 +11589,7 @@ function compileCallExpression(
             // null-extern; `x === undefined` is `ref.is_null` — see
             // `__extern_is_undefined`, object-runtime.ts), so this IS the
             // canonical undefined here.
-            fctx.body.push({ op: "ref.null.extern" } as Instr);
+            fctx.body.push({ op: "ref.null.extern" });
             return { kind: "externref" };
           }
           return VOID_RESULT;
@@ -12436,7 +12439,7 @@ function compileCallExpression(
           if (structTypeIdx !== undefined) {
             // Check for null BEFORE the guarded cast — only genuine null should throw TypeError
             emitNullCheckThrow(ctx, fctx, { kind: "externref" });
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
             emitGuardedRefCast(fctx, structTypeIdx);
             recvType = { kind: "ref_null", typeIdx: structTypeIdx };
             receiverWasCast = true;
@@ -12463,7 +12466,7 @@ function compileCallExpression(
           // Build the else branch (non-null path) with the full call
           const savedBody = pushBody(fctx);
           fctx.body.push({ op: "local.get", index: tmp });
-          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "ref.as_non_null" });
           const paramTypes = getFuncParamTypes(ctx, funcIdx);
           // Coerce receiver (self param) if ref type doesn't match function's first param
           if (paramTypes?.[0]) {
@@ -12507,7 +12510,7 @@ function compileCallExpression(
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: receiverWasCast ? ([] as Instr[]) : typeErrorThrowInstrs(ctx),
+              then: receiverWasCast ? [] : typeErrorThrowInstrs(ctx),
               else: elseInstrs,
             });
             return VOID_RESULT;
@@ -12618,7 +12621,7 @@ function compileCallExpression(
 
             const savedBody = pushBody(fctx);
             fctx.body.push({ op: "local.get", index: tmp });
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
+            fctx.body.push({ op: "ref.as_non_null" });
             const paramTypes = getFuncParamTypes(ctx, funcIdx);
             // Coerce receiver (self param) if ref type doesn't match function's first param
             if (paramTypes?.[0]) {
@@ -12661,7 +12664,7 @@ function compileCallExpression(
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "empty" },
-                then: smReceiverWasCast ? ([] as Instr[]) : typeErrorThrowInstrs(ctx),
+                then: smReceiverWasCast ? [] : typeErrorThrowInstrs(ctx),
                 else: elseInstrs,
               });
               return VOID_RESULT;
@@ -12929,8 +12932,8 @@ function compileCallExpression(
           fctx.body.push({ op: "local.get", index: radixLocalIdx });
           fctx.body.push({ op: "call", funcIdx: radixFuncIdx });
           if (unwrapToNative) {
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
-            fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
+            fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
             return nativeStringType(ctx);
           }
           return { kind: "externref" };
@@ -12940,8 +12943,8 @@ function compileCallExpression(
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         if (unwrapToNative) {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
           return nativeStringType(ctx);
         }
         return { kind: "externref" };
@@ -12968,8 +12971,8 @@ function compileCallExpression(
         fctx.body.push({ op: "call", funcIdx });
         const unwrapToNative = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && (ctx.standalone || ctx.wasi);
         if (unwrapToNative) {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
           return nativeStringType(ctx);
         }
         return { kind: "externref" };
@@ -13003,7 +13006,7 @@ function compileCallExpression(
           fctx.body.push({
             op: "if",
             blockType: { kind: "empty" },
-            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+            then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
             else: [],
           });
         }
@@ -13204,7 +13207,7 @@ function compileCallExpression(
         rangeCheckBody.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
           else: [],
         });
         fctx.body.push({
@@ -13289,7 +13292,7 @@ function compileCallExpression(
         rangeCheckBody.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+          then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
           else: [],
         });
         fctx.body.push({ op: "local.get", index: isFiniteLocal });
@@ -13398,8 +13401,8 @@ function compileCallExpression(
               addStringConstantGlobal(ctx, "string");
               fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
               fctx.body.push({ op: "call", funcIdx: toPrimIdx });
-              fctx.body.push({ op: "any.convert_extern" } as Instr);
-              fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+              fctx.body.push({ op: "any.convert_extern" });
+              fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
               return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
             };
             return compileNativeStringMethodCall(ctx, fctx, expr, propAccess, method, wrapperReceiverOverride);
@@ -13451,18 +13454,18 @@ function compileCallExpression(
           fctx.body.push({ op: "i32.and" });
           // then: f64(charCodeAt(recv, idx)) ; else: NaN
           const thenInstrs: Instr[] = [
-            { op: "local.get", index: recvLocal } as Instr,
-            { op: "local.get", index: idxLocal } as Instr,
-            { op: "call", funcIdx: charCodeAtIdx } as Instr,
-            { op: "f64.convert_i32_u" } as Instr,
+            { op: "local.get", index: recvLocal },
+            { op: "local.get", index: idxLocal },
+            { op: "call", funcIdx: charCodeAtIdx },
+            { op: "f64.convert_i32_u" },
           ];
-          const elseInstrs: Instr[] = [{ op: "f64.const", value: Number.NaN } as Instr];
+          const elseInstrs: Instr[] = [{ op: "f64.const", value: Number.NaN }];
           fctx.body.push({
             op: "if",
             blockType: { kind: "val", type: { kind: "f64" } },
             then: thenInstrs,
             else: elseInstrs,
-          } as Instr);
+          });
           return { kind: "f64" };
         }
       }
@@ -13518,19 +13521,19 @@ function compileCallExpression(
             // constructor (no `__throw_type_error` host import).
             if (noJsHost(ctx)) {
               emitThrowTypeError(ctx, fctx, msg);
-              fctx.body.push({ op: "unreachable" } as Instr);
+              fctx.body.push({ op: "unreachable" });
             } else {
               const throwIdx = ensureLateImport(ctx, "__throw_type_error", [{ kind: "externref" }], []);
               if (throwIdx !== undefined) {
                 flushLateImportShifts(ctx, fctx);
                 const throwFuncIdx = ctx.funcMap.get("__throw_type_error")!;
-                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-                fctx.body.push({ op: "call", funcIdx: throwFuncIdx } as Instr);
-                fctx.body.push({ op: "unreachable" } as Instr);
+                fctx.body.push({ op: "global.get", index: strIdx });
+                fctx.body.push({ op: "call", funcIdx: throwFuncIdx });
+                fctx.body.push({ op: "unreachable" });
               } else {
                 const tagIdx = ensureExnTag(ctx);
-                fctx.body.push({ op: "global.get", index: strIdx } as Instr);
-                fctx.body.push({ op: "throw", tagIdx } as Instr);
+                fctx.body.push({ op: "global.get", index: strIdx });
+                fctx.body.push({ op: "throw", tagIdx });
               }
             }
             // After unreachable / throw, the wasm stack is polymorphic.
@@ -13618,7 +13621,7 @@ function compileCallExpression(
             if (lenIdx !== undefined) {
               fctx.body.push({ op: "local.get", index: savedReceiverLocal });
               fctx.body.push({ op: "call", funcIdx: lenIdx });
-              fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+              fctx.body.push({ op: "f64.convert_i32_u" });
             } else {
               fctx.body.push({ op: "f64.const", value: 0x7fffffff });
             }
@@ -13672,7 +13675,7 @@ function compileCallExpression(
               if (lenIdx !== undefined) {
                 fctx.body.push({ op: "local.get", index: savedReceiverLocal });
                 fctx.body.push({ op: "call", funcIdx: lenIdx });
-                fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+                fctx.body.push({ op: "f64.convert_i32_u" });
               } else {
                 // Fallback if length import is unavailable for some reason
                 fctx.body.push({ op: "f64.const", value: 0x7fffffff });
@@ -14035,28 +14038,26 @@ function compileCallExpression(
               fctx.body.push({ op: "local.set", index: aLocal });
               argLocals.push(aLocal);
             }
-            const thenArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
+            const thenArm: Instr[] = [{ op: "local.get", index: recvLocal }];
             for (let a = 0; a < 3; a++) {
               thenArm.push(
-                a < argLocals.length
-                  ? ({ op: "local.get", index: argLocals[a]! } as Instr)
-                  : ({ op: "ref.null.extern" } as Instr),
+                a < argLocals.length ? { op: "local.get", index: argLocals[a]! } : { op: "ref.null.extern" },
               );
             }
-            thenArm.push({ op: "i32.const", value: arity } as Instr);
-            thenArm.push({ op: "call", funcIdx: taFillIdx } as Instr);
-            const elseArm: Instr[] = [{ op: "local.get", index: recvLocal } as Instr];
-            for (const aLocal of argLocals) elseArm.push({ op: "local.get", index: aLocal } as Instr);
-            elseArm.push({ op: "call", funcIdx: dispatchIdx } as Instr);
+            thenArm.push({ op: "i32.const", value: arity });
+            thenArm.push({ op: "call", funcIdx: taFillIdx });
+            const elseArm: Instr[] = [{ op: "local.get", index: recvLocal }];
+            for (const aLocal of argLocals) elseArm.push({ op: "local.get", index: aLocal });
+            elseArm.push({ op: "call", funcIdx: dispatchIdx });
             fctx.body.push({ op: "local.get", index: recvLocal });
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
-            fctx.body.push({ op: "ref.test", typeIdx: dynIdx } as Instr);
+            fctx.body.push({ op: "any.convert_extern" });
+            fctx.body.push({ op: "ref.test", typeIdx: dynIdx });
             fctx.body.push({
               op: "if",
               blockType: { kind: "val", type: { kind: "externref" } },
               then: thenArm,
               else: elseArm,
-            } as Instr);
+            });
             return { kind: "externref" };
           }
           // (#3140) `.bind` on an `any`-typed receiver that is a CLOSURE at
@@ -14280,27 +14281,27 @@ function compileCallExpression(
                 blockType: { kind: "empty" },
                 body: [
                   // if idx >= len break
-                  { op: "local.get", index: spreadIdxLocal } as Instr,
-                  { op: "local.get", index: spreadLenLocal } as Instr,
-                  { op: "i32.ge_s" } as Instr,
-                  { op: "br_if", depth: 1 } as Instr,
+                  { op: "local.get", index: spreadIdxLocal },
+                  { op: "local.get", index: spreadLenLocal },
+                  { op: "i32.ge_s" },
+                  { op: "br_if", depth: 1 },
                   // __objvec_push(combined, __extern_get_idx(src, idx))
-                  { op: "local.get", index: argsVecLocal } as Instr,
-                  { op: "local.get", index: spreadSrcLocal } as Instr,
-                  { op: "local.get", index: spreadIdxLocal } as Instr,
-                  { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: getIdxFn } as Instr,
-                  { op: "call", funcIdx: objVecPush } as Instr,
+                  { op: "local.get", index: argsVecLocal },
+                  { op: "local.get", index: spreadSrcLocal },
+                  { op: "local.get", index: spreadIdxLocal },
+                  { op: "f64.convert_i32_s" },
+                  { op: "call", funcIdx: getIdxFn },
+                  { op: "call", funcIdx: objVecPush },
                   // idx++
-                  { op: "local.get", index: spreadIdxLocal } as Instr,
-                  { op: "i32.const", value: 1 } as Instr,
-                  { op: "i32.add" } as Instr,
-                  { op: "local.set", index: spreadIdxLocal } as Instr,
-                  { op: "br", depth: 0 } as Instr,
+                  { op: "local.get", index: spreadIdxLocal },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: spreadIdxLocal },
+                  { op: "br", depth: 0 },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr);
+          });
 
           // __call_m_<name>_vararg(recv, combined)
           fctx.body.push({ op: "local.get", index: recvLocal });
@@ -14357,9 +14358,9 @@ function compileCallExpression(
             // Receiver → externref → recvLocal.
             const recvT = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
             if (recvT && recvT.kind !== "externref") coerceType(ctx, fctx, recvT, { kind: "externref" });
-            else if (!recvT) fctx.body.push({ op: "ref.null.extern" } as Instr);
+            else if (!recvT) fctx.body.push({ op: "ref.null.extern" });
             const recvLocal = allocLocal(fctx, `__nvm_recv_${fctx.locals.length}`, { kind: "externref" });
-            fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: recvLocal });
             // push's single element → argLocal (evaluate side effects once, up front).
             let argLocal: number | undefined;
             if (methodName === "push") {
@@ -14367,59 +14368,59 @@ function compileCallExpression(
               if (a) {
                 const at = compileExpression(ctx, fctx, a, { kind: "externref" });
                 if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
-                else if (!at) fctx.body.push({ op: "ref.null.extern" } as Instr);
+                else if (!at) fctx.body.push({ op: "ref.null.extern" });
               } else {
-                fctx.body.push({ op: "ref.null.extern" } as Instr);
+                fctx.body.push({ op: "ref.null.extern" });
               }
               argLocal = allocLocal(fctx, `__nvm_arg_${fctx.locals.length}`, { kind: "externref" });
-              fctx.body.push({ op: "local.set", index: argLocal } as Instr);
+              fctx.body.push({ op: "local.set", index: argLocal });
             }
             // isVec = OR of ref.test over every registered vec carrier.
             const anyTmp = allocLocal(fctx, `__nvm_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-            fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-            fctx.body.push({ op: "any.convert_extern" } as Instr);
-            fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+            fctx.body.push({ op: "local.get", index: recvLocal });
+            fctx.body.push({ op: "any.convert_extern" });
+            fctx.body.push({ op: "local.set", index: anyTmp });
             let emitted = false;
             for (const vi of new Set(ctx.vecTypeMap.values())) {
-              fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-              fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
-              if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+              fctx.body.push({ op: "local.get", index: anyTmp });
+              fctx.body.push({ op: "ref.test", typeIdx: vi });
+              if (emitted) fctx.body.push({ op: "i32.or" });
               emitted = true;
             }
             // THEN (native vec op) — emit then splice into a detached arm.
             const thenStart = fctx.body.length;
             if (methodName === "push") {
-              fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-              fctx.body.push({ op: "local.get", index: argLocal! } as Instr);
-              fctx.body.push({ op: "call", funcIdx: vecOpIdx } as Instr); // -> i32 new length
-              fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-              fctx.body.push({ op: "call", funcIdx: boxNumIdx! } as Instr); // -> externref
+              fctx.body.push({ op: "local.get", index: recvLocal });
+              fctx.body.push({ op: "local.get", index: argLocal! });
+              fctx.body.push({ op: "call", funcIdx: vecOpIdx }); // -> i32 new length
+              fctx.body.push({ op: "f64.convert_i32_s" });
+              fctx.body.push({ op: "call", funcIdx: boxNumIdx! }); // -> externref
             } else {
-              fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-              fctx.body.push({ op: "call", funcIdx: vecOpIdx } as Instr); // -> externref
+              fctx.body.push({ op: "local.get", index: recvLocal });
+              fctx.body.push({ op: "call", funcIdx: vecOpIdx }); // -> externref
             }
             const thenInstrs = fctx.body.splice(thenStart);
             // ELSE (host bridge) — build the args array, then __extern_method_call.
             const elseStart = fctx.body.length;
-            fctx.body.push({ op: "call", funcIdx: arrNewIdx } as Instr);
+            fctx.body.push({ op: "call", funcIdx: arrNewIdx });
             const argsLocal = allocLocal(fctx, `__nvm_args_${fctx.locals.length}`, { kind: "externref" });
-            fctx.body.push({ op: "local.set", index: argsLocal } as Instr);
+            fctx.body.push({ op: "local.set", index: argsLocal });
             if (methodName === "push") {
-              fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
-              fctx.body.push({ op: "local.get", index: argLocal! } as Instr);
-              fctx.body.push({ op: "call", funcIdx: arrPushIdx } as Instr);
+              fctx.body.push({ op: "local.get", index: argsLocal });
+              fctx.body.push({ op: "local.get", index: argLocal! });
+              fctx.body.push({ op: "call", funcIdx: arrPushIdx });
             }
-            fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: recvLocal });
             fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
-            fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
-            fctx.body.push({ op: "call", funcIdx: mcIdx } as Instr);
+            fctx.body.push({ op: "local.get", index: argsLocal });
+            fctx.body.push({ op: "call", funcIdx: mcIdx });
             const elseInstrs = fctx.body.splice(elseStart);
             fctx.body.push({
               op: "if",
               blockType: { kind: "val", type: { kind: "externref" } as ValType },
               then: thenInstrs,
               else: elseInstrs,
-            } as Instr);
+            });
             return { kind: "externref" };
           }
         }
@@ -14574,7 +14575,7 @@ function compileCallExpression(
         if (t) fctx.body.push({ op: "drop" });
       }
       if (fnName === "writeFileSync") return VOID_RESULT;
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
     flushLateImportShifts(ctx, fctx);
@@ -14586,7 +14587,7 @@ function compileCallExpression(
       compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
     }
     for (let i = argCount; i < 2; i++) {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
     // Drop extra args (e.g. callback overload) without emitting them — Initial
     // scope is sync 2-arg shapes only.
@@ -14616,8 +14617,8 @@ function compileCallExpression(
       // Handle path argument — must be a string literal for now (embedded in data segment)
       if (ts.isStringLiteral(pathArg)) {
         const pathData = wasiAllocStringData(ctx, pathArg.text);
-        fctx.body.push({ op: "i32.const", value: pathData.offset } as Instr);
-        fctx.body.push({ op: "i32.const", value: pathData.length } as Instr);
+        fctx.body.push({ op: "i32.const", value: pathData.offset });
+        fctx.body.push({ op: "i32.const", value: pathData.length });
       } else {
         // Dynamic path: compile expression and use runtime string-to-linear-memory copy
         // For now, use bump allocator to store the string data
@@ -14627,8 +14628,8 @@ function compileCallExpression(
       // Handle data argument — string literal or expression
       if (ts.isStringLiteral(dataArg) || ts.isNoSubstitutionTemplateLiteral(dataArg)) {
         const dataData = wasiAllocStringData(ctx, dataArg.text);
-        fctx.body.push({ op: "i32.const", value: dataData.offset } as Instr);
-        fctx.body.push({ op: "i32.const", value: dataData.length } as Instr);
+        fctx.body.push({ op: "i32.const", value: dataData.offset });
+        fctx.body.push({ op: "i32.const", value: dataData.length });
       } else {
         // Dynamic data: compile and convert to linear memory
         compileWasiStringArgToLinearMemory(ctx, fctx, dataArg);
@@ -14669,7 +14670,7 @@ function compileCallExpression(
       const t = compileExpression(ctx, fctx, arg);
       if (t) fctx.body.push({ op: "drop" });
     }
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
   }
 
@@ -14697,7 +14698,7 @@ function compileCallExpression(
       });
       fctx.body.push({ op: "local.tee", index: tmp });
       fctx.body.push({ op: "local.get", index: tmp });
-      fctx.body.push({ op: "f64.ne" } as Instr);
+      fctx.body.push({ op: "f64.ne" });
       return { kind: "i32" };
     }
 
@@ -14709,9 +14710,9 @@ function compileCallExpression(
       });
       fctx.body.push({ op: "local.tee", index: tmp });
       fctx.body.push({ op: "local.get", index: tmp });
-      fctx.body.push({ op: "f64.sub" } as Instr);
+      fctx.body.push({ op: "f64.sub" });
       fctx.body.push({ op: "f64.const", value: 0 });
-      fctx.body.push({ op: "f64.eq" } as Instr);
+      fctx.body.push({ op: "f64.eq" });
       return { kind: "i32" };
     }
 
@@ -14865,7 +14866,7 @@ function compileCallExpression(
       const emitStrRefToNumber = (alreadyExternref: boolean): boolean => {
         const s2nIdx = ctx.funcMap.get("__str_to_number");
         if (s2nIdx === undefined) return false;
-        if (!alreadyExternref) fctx.body.push({ op: "extern.convert_any" } as Instr);
+        if (!alreadyExternref) fctx.body.push({ op: "extern.convert_any" });
         fctx.body.push({ op: "call", funcIdx: s2nIdx });
         return true;
       };
@@ -14960,7 +14961,7 @@ function compileCallExpression(
         litNum = -Number(litArg.operand.text);
       }
       if (litNum !== undefined && Number.isSafeInteger(litNum)) {
-        fctx.body.push({ op: "i64.const", value: BigInt(litNum) } as Instr);
+        fctx.body.push({ op: "i64.const", value: BigInt(litNum) });
         return { kind: "i64", bigint: true };
       }
       if (ts.isStringLiteral(litArg) || ts.isNoSubstitutionTemplateLiteral(litArg)) {
@@ -14969,7 +14970,7 @@ function compileCallExpression(
           const minI64 = -(1n << 63n);
           const maxI64 = (1n << 63n) - 1n;
           if (litBig >= minI64 && litBig <= maxI64) {
-            fctx.body.push({ op: "i64.const", value: litBig } as Instr);
+            fctx.body.push({ op: "i64.const", value: litBig });
             return { kind: "i64", bigint: true };
           }
         } catch {
@@ -15007,7 +15008,7 @@ function compileCallExpression(
       fctx.body.push({
         op: ctx.fast ? "i32.const" : "f64.const",
         value: 0,
-      } as Instr);
+      });
       return ctx.fast ? { kind: "i32" } : { kind: "f64" };
     }
 
@@ -15124,7 +15125,7 @@ function compileCallExpression(
         // number (i32) → string via f64 conversion
         const toStrIdx = ctx.funcMap.get("number_toString");
         if (toStrIdx !== undefined) {
-          fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+          fctx.body.push({ op: "f64.convert_i32_s" });
           fctx.body.push({ op: "call", funcIdx: toStrIdx });
           return { kind: "externref" };
         }
@@ -15206,17 +15207,17 @@ function compileCallExpression(
         });
         fctx.body.push({ op: "local.tee", index: tmp });
         fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "f64.ne" } as Instr);
+        fctx.body.push({ op: "f64.ne" });
         fctx.body.push({ op: "local.get", index: tmp });
         fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.eq" } as Instr); // NaN check: x == x
-        fctx.body.push({ op: "i32.and" } as Instr);
+        fctx.body.push({ op: "f64.eq" }); // NaN check: x == x
+        fctx.body.push({ op: "i32.and" });
         return { kind: "i32" };
       }
       if (argType?.kind === "i32") {
         // i32: truthy if != 0
         fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "i32.ne" } as Instr);
+        fctx.body.push({ op: "i32.ne" });
         return { kind: "i32" };
       }
       if (argType?.kind === "i64") {
@@ -15224,8 +15225,8 @@ function compileCallExpression(
         // i64.eqz yields 1 for 0n; invert with i32.eqz so nonzero → 1.
         // Must NOT route through f64.convert_i64_s — that loses precision
         // for |x| > 2^53 and would misreport large BigInts.
-        fctx.body.push({ op: "i64.eqz" } as Instr);
-        fctx.body.push({ op: "i32.eqz" } as Instr);
+        fctx.body.push({ op: "i64.eqz" });
+        fctx.body.push({ op: "i32.eqz" });
         return { kind: "i32" };
       }
       // String: truthy if length > 0
@@ -15242,7 +15243,7 @@ function compileCallExpression(
           fieldIdx: 0,
         });
         fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "i32.ne" } as Instr);
+        fctx.body.push({ op: "i32.ne" });
         return { kind: "i32" };
       }
       if (argType?.kind === "externref") {
@@ -15259,7 +15260,7 @@ function compileCallExpression(
           if (lenIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: lenIdx });
             fctx.body.push({ op: "i32.const", value: 0 });
-            fctx.body.push({ op: "i32.ne" } as Instr);
+            fctx.body.push({ op: "i32.ne" });
             return { kind: "i32" };
           }
         }
@@ -15290,9 +15291,9 @@ function compileCallExpression(
         }
         // Fallback: the legacy null-only check (preserves prior behaviour
         // when the host import couldn't be registered).
-        fctx.body.push({ op: "ref.is_null" } as Instr);
+        fctx.body.push({ op: "ref.is_null" });
         fctx.body.push({ op: "i32.const", value: 1 });
-        fctx.body.push({ op: "i32.xor" } as Instr);
+        fctx.body.push({ op: "i32.xor" });
         return { kind: "i32" };
       }
       // Ref types (objects, arrays): always truthy — drop the ref, push 1
@@ -15612,7 +15613,7 @@ function compileCallExpression(
                   fctx.body.push({ op: "ref.null.extern" });
                 }
               } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
-                fctx.body.push({ op: "extern.convert_any" } as Instr);
+                fctx.body.push({ op: "extern.convert_any" });
               }
               const extraLocal = allocLocal(fctx, `__cextra_${fctx.locals.length}`, { kind: "externref" });
               fctx.body.push({ op: "local.set", index: extraLocal });
@@ -15773,7 +15774,7 @@ function compileCallExpression(
             // value that reaches the call — and traps no earlier than the old
             // struct.get-on-null did for mismatched shapes.
             if (closureCastStructIdx !== matchedStructTypeIdx) {
-              fctx.body.push({ op: "ref.cast_null", typeIdx: matchedStructTypeIdx } as Instr);
+              fctx.body.push({ op: "ref.cast_null", typeIdx: matchedStructTypeIdx });
             }
             // Push args
             for (const al of argLocals) {
@@ -15863,7 +15864,7 @@ function compileCallExpression(
               const matchedDispatch = expectedReturn !== null && fc.returnType !== null;
               const numericKind = (t: ValType): boolean => t.kind === "i32" || t.kind === "f64" || t.kind === "i64";
               if (expectedReturn === null && fc.returnType !== null) {
-                fcCallBody.push({ op: "drop" } as Instr);
+                fcCallBody.push({ op: "drop" });
               } else if (expectedReturn !== null && fc.returnType === null) {
                 fcCallBody.push(...defaultValueInstrs(expectedReturn));
               } else if (
@@ -15896,7 +15897,7 @@ function compileCallExpression(
                 // widening `expectedReturn` to externref above, which makes the
                 // live async/Promise arm `valTypesMatch` and pass through; the
                 // dead f64 candidates land here and get a null-extern default.)
-                fcCallBody.push({ op: "drop" } as Instr);
+                fcCallBody.push({ op: "drop" });
                 fcCallBody.push(...defaultValueInstrs(expectedReturn!));
               }
 
@@ -15908,7 +15909,7 @@ function compileCallExpression(
                   blockType: retBlockType,
                   then: fcCallBody,
                   else: funcDispatch,
-                } as Instr,
+                },
               ];
             }
 
@@ -15939,9 +15940,9 @@ function compileCallExpression(
             // 4-test merge_group regression that parked PR #2149).
             if (expectedReturn !== null) {
               const retL = allocLocal(fctx, `__mfd_ret_${fctx.locals.length}`, expectedReturn);
-              fctx.body.push({ op: "local.set", index: retL } as Instr);
+              fctx.body.push({ op: "local.set", index: retL });
               for (const ins of buildArgcResetNoLazyExtras(ctx)) fctx.body.push(ins);
-              fctx.body.push({ op: "local.get", index: retL } as Instr);
+              fctx.body.push({ op: "local.get", index: retL });
             } else {
               for (const ins of buildArgcResetNoLazyExtras(ctx)) fctx.body.push(ins);
             }
@@ -16788,14 +16789,14 @@ function compileCallExpression(
                 if (op === "return") {
                   // The instruction before `return` is the return value expression.
                   // Replace `return` with `local.set + br`
-                  instrs[i] = { op: "local.set", index: retLocal } as Instr;
-                  instrs.splice(i + 1, 0, { op: "br", depth } as Instr);
+                  instrs[i] = { op: "local.set", index: retLocal };
+                  instrs.splice(i + 1, 0, { op: "br", depth });
                   i++; // skip the inserted br
                 } else if (op === "return_call" || op === "return_call_ref") {
                   // Undo tail-call: return_call funcIdx → call funcIdx + local.set + br
                   const instr = instrs[i] as any;
                   instr.op = op === "return_call" ? "call" : "call_ref";
-                  instrs.splice(i + 1, 0, { op: "local.set", index: retLocal } as Instr, { op: "br", depth } as Instr);
+                  instrs.splice(i + 1, 0, { op: "local.set", index: retLocal }, { op: "br", depth });
                   i += 2; // skip inserted instructions
                 }
                 // Recurse into sub-blocks (if/then/else/block/loop)
@@ -16812,7 +16813,7 @@ function compileCallExpression(
               op: "block",
               blockType: { kind: "empty" },
               body: blockBody,
-            } as Instr);
+            });
             fctx.body.push({ op: "local.get", index: retLocal });
             return iifeWasmRetType;
           } else {
@@ -16861,12 +16862,12 @@ function compileCallExpression(
                 const op = instrs[i]!.op;
                 if (op === "return") {
                   // void IIFE: no value to capture — replace with br
-                  instrs[i] = { op: "br", depth } as Instr;
+                  instrs[i] = { op: "br", depth };
                 } else if (op === "return_call" || op === "return_call_ref") {
                   // Undo tail-call: rewrite as plain call + br
                   const instr = instrs[i] as any;
                   instr.op = op === "return_call" ? "call" : "call_ref";
-                  instrs.splice(i + 1, 0, { op: "br", depth } as Instr);
+                  instrs.splice(i + 1, 0, { op: "br", depth });
                   i++; // skip inserted br
                 }
                 const instr = instrs[i] as any;
@@ -16888,7 +16889,7 @@ function compileCallExpression(
               op: "block",
               blockType: { kind: "empty" },
               body: blockBody,
-            } as Instr);
+            });
             return VOID_RESULT;
           }
         }
@@ -17281,7 +17282,7 @@ function compileCallExpression(
 
             const savedBody = pushBody(fctx);
             fctx.body.push({ op: "local.get", index: tmp });
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
+            fctx.body.push({ op: "ref.as_non_null" });
             const paramTypes = getFuncParamTypes(ctx, funcIdx);
             const eaNgParamCount = paramTypes ? paramTypes.length - 1 : expr.arguments.length;
             for (let i = 0; i < expr.arguments.length; i++) {
@@ -17308,7 +17309,7 @@ function compileCallExpression(
               fctx.body.push({
                 op: "if",
                 blockType: { kind: "empty" },
-                then: eaReceiverWasCast ? ([] as Instr[]) : typeErrorThrowInstrs(ctx),
+                then: eaReceiverWasCast ? [] : typeErrorThrowInstrs(ctx),
                 else: elseInstrs,
               });
               return VOID_RESULT;
@@ -17505,7 +17506,7 @@ function compileCallExpression(
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
               else: [],
             });
           }
@@ -17538,7 +17539,7 @@ function compileCallExpression(
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
+              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
               else: [],
             });
           }
@@ -18174,7 +18175,7 @@ function compileCallExpression(
               fctx.body.push({ op: "ref.null.extern" });
             }
           } else if (extraType.kind === "ref" || extraType.kind === "ref_null") {
-            fctx.body.push({ op: "extern.convert_any" } as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
           const extraLocal = allocLocal(fctx, `__cb_cextra_${fctx.locals.length}`, { kind: "externref" });
           fctx.body.push({ op: "local.set", index: extraLocal });
@@ -18247,7 +18248,7 @@ function compileCallExpression(
           for (const el of extrasLocals) {
             fctx.body.push({ op: "local.get", index: el });
           }
-          fctx.body.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length } as Instr);
+          fctx.body.push({ op: "array.new_fixed", typeIdx: extrasArrTi, length: extrasLocals.length });
           const arrTmp = allocLocal(fctx, `__cb_extras_arr_${fctx.locals.length}`, {
             kind: "ref",
             typeIdx: extrasArrTi,
@@ -18256,7 +18257,7 @@ function compileCallExpression(
           fctx.body.push({ op: "i32.const", value: extrasLocals.length });
           fctx.body.push({ op: "local.get", index: arrTmp });
           fctx.body.push({ op: "struct.new", typeIdx: extrasVecTi });
-          fctx.body.push({ op: "global.set", index: extrasGlobalIdx } as Instr);
+          fctx.body.push({ op: "global.set", index: extrasGlobalIdx });
         }
         emitSetArgc(ctx, fctx, expr.arguments.length, ccParamCnt);
 
@@ -18284,7 +18285,7 @@ function compileCallExpression(
         }
 
         // 6. else branch — graceful null.
-        const elseInstrs: Instr[] = [{ op: "ref.null.extern" } as Instr];
+        const elseInstrs: Instr[] = [{ op: "ref.null.extern" }];
 
         // 7. Restore body, emit the if/else.
         popBody(fctx, savedBody);
@@ -18365,7 +18366,7 @@ function emitFnctorSubclassDynamicMethodCall(
   if (recvType === null) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   const recvLocal = allocLocal(fctx, `__fsd_recv_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: recvLocal });
@@ -18377,7 +18378,7 @@ function emitFnctorSubclassDynamicMethodCall(
     fctx.body.push({ op: "local.get", index: argsLocal });
     const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
     if (argType && argType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     if (argType === null) {
       fctx.body.push({ op: "ref.null.extern" });
@@ -19098,8 +19099,8 @@ function compileWasiStringArgToLinearMemory(ctx: CodegenContext, fctx: FunctionC
       const init = sym.valueDeclaration.initializer;
       if (init && (ts.isStringLiteral(init) || ts.isNoSubstitutionTemplateLiteral(init))) {
         const data = wasiAllocStringData(ctx, init.text);
-        fctx.body.push({ op: "i32.const", value: data.offset } as Instr);
-        fctx.body.push({ op: "i32.const", value: data.length } as Instr);
+        fctx.body.push({ op: "i32.const", value: data.offset });
+        fctx.body.push({ op: "i32.const", value: data.length });
         return;
       }
     }
@@ -19108,14 +19109,14 @@ function compileWasiStringArgToLinearMemory(ctx: CodegenContext, fctx: FunctionC
   // Template literal with only a head (no substitutions)
   if (ts.isNoSubstitutionTemplateLiteral(expr)) {
     const data = wasiAllocStringData(ctx, expr.text);
-    fctx.body.push({ op: "i32.const", value: data.offset } as Instr);
-    fctx.body.push({ op: "i32.const", value: data.length } as Instr);
+    fctx.body.push({ op: "i32.const", value: data.offset });
+    fctx.body.push({ op: "i32.const", value: data.length });
     return;
   }
 
   // Fallback: unsupported dynamic string — trap at runtime
   // TODO: implement runtime GC-string to linear-memory copy for dynamic strings
-  fctx.body.push({ op: "unreachable" } as Instr);
+  fctx.body.push({ op: "unreachable" });
 }
 
 // ── #2922 arms 2+3 — dynamic Promise.all/race argument ──────────────────────
@@ -19210,7 +19211,7 @@ function emitDynamicCombinatorArg(
     typeIdx: ids.vecTypeIdx,
   });
   fctx.body.push({ op: "local.get", index: drainedLocal });
-  fctx.body.push({ op: "ref.is_null" } as Instr);
+  fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
@@ -19219,17 +19220,17 @@ function emitDynamicCombinatorArg(
       { op: "local.set", index: notIterLocal },
       { op: "i32.const", value: 0 },
       { op: "i32.const", value: 0 },
-      { op: "array.new_default", typeIdx: ids.arrTypeIdx } as Instr,
-      { op: "struct.new", typeIdx: ids.vecTypeIdx } as Instr,
+      { op: "array.new_default", typeIdx: ids.arrTypeIdx },
+      { op: "struct.new", typeIdx: ids.vecTypeIdx },
       { op: "local.set", index: vecLocal },
     ],
     else: [
       { op: "local.get", index: drainedLocal },
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: ids.vecTypeIdx } as Instr,
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: ids.vecTypeIdx },
       { op: "local.set", index: vecLocal },
     ],
-  } as Instr);
+  });
 
   // Reject-reason instrs (externref TypeError instance). funcMap is read AFTER
   // every ensure above (and after the arg compile), so the baked funcIdx is

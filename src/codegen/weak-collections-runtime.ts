@@ -60,7 +60,7 @@ export function ensureWeakCollectionHelpers(ctx: CodegenContext): void {
     { op: "local.get", index: 0 }, // m
     { op: "local.get", index: 1 }, // key = v
     { op: "local.get", index: 1 }, // value = v
-    { op: "call", funcIdx: mapSetIdx } as Instr,
+    { op: "call", funcIdx: mapSetIdx },
   ];
   const typeIdx = addFuncType(ctx, [mref, anyref], [mref]);
   const funcIdx = mintDefinedFunc(ctx);
@@ -73,10 +73,10 @@ export function ensureWeakCollectionHelpers(ctx: CodegenContext): void {
 function castReceiverToMap(ctx: CodegenContext, fctx: FunctionContext, recvType: ValType | null): boolean {
   if (recvType === null) return false;
   if (recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
   } else if (recvType.kind === "anyref" || recvType.kind === "eqref") {
-    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx } as Instr);
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.mapTypeIdx });
   } else if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx !== ctx.mapTypeIdx) {
     return false;
   }

@@ -47,9 +47,9 @@ import {
 // Only `Math.random` remains hand-emitted (WASI `random_get` host import —
 // not a dialect gap); every other Math core is self-hosted TS source in
 // `src/stdlib/math.ts`. These are the few shorthands its body still needs.
-const f64c = (v: number): Instr => ({ op: "f64.const", value: v }) as Instr;
-const mul: Instr = { op: "f64.mul" } as Instr;
-const i32const = (v: number): Instr => ({ op: "i32.const", value: v }) as Instr;
+const f64c = (v: number): Instr => ({ op: "f64.const", value: v });
+const mul: Instr = { op: "f64.mul" };
+const i32const = (v: number): Instr => ({ op: "i32.const", value: v });
 
 // ─── Type aliases ───────────────────────────────────────────────────
 const f64Type: ValType = { kind: "f64" };
@@ -124,28 +124,28 @@ export function emitInlineMathFunctions(ctx: CodegenContext, needed: Set<string>
           // random_get(ptr=64, len=8) — fills memory[64..72] with entropy
           i32const(64),
           i32const(8),
-          { op: "call", funcIdx: randomGetIdx } as Instr,
-          { op: "drop" } as Instr, // ignore errno (best-effort)
+          { op: "call", funcIdx: randomGetIdx },
+          { op: "drop" }, // ignore errno (best-effort)
           // Low 32 bits: i64.extend_i32_u(i32.load offset=0 align=2)
           i32const(64),
-          { op: "i32.load", offset: 0, align: 2 } as Instr,
-          { op: "i64.extend_i32_u" } as Instr,
+          { op: "i32.load", offset: 0, align: 2 },
+          { op: "i64.extend_i32_u" },
           // High 32 bits: i64.extend_i32_u(i32.load offset=4) << 32
           i32const(64),
-          { op: "i32.load", offset: 4, align: 2 } as Instr,
-          { op: "i64.extend_i32_u" } as Instr,
-          { op: "i64.const", value: 32n } as Instr,
-          { op: "i64.shl" } as Instr,
+          { op: "i32.load", offset: 4, align: 2 },
+          { op: "i64.extend_i32_u" },
+          { op: "i64.const", value: 32n },
+          { op: "i64.shl" },
           // OR low + high
-          { op: "i64.or" } as Instr,
+          { op: "i64.or" },
           // Shift right 11 → keep upper 53 bits in unsigned i64
-          { op: "i64.const", value: 11n } as Instr,
-          { op: "i64.shr_u" } as Instr,
+          { op: "i64.const", value: 11n },
+          { op: "i64.shr_u" },
           // Convert to f64 and multiply by 2^-53. After `shr_u 11` the value
           // fits in 53 unsigned bits (max ~9e15), so `convert_i64_s` (which the
           // backend supports — `convert_i64_u` is not in the IR union) gives
           // an identical result.
-          { op: "f64.convert_i64_s" } as Instr,
+          { op: "f64.convert_i64_s" },
           f64c(1 / 9007199254740992), // 2^-53
           mul,
         ],

@@ -87,7 +87,7 @@ export function reserveAccessorGetDriver(ctx: CodegenContext): number {
     // Placeholder; filled by fillAccessorDrivers in post-processing. A bare
     // `unreachable` keeps the stub valid (externref result) if the fill is ever
     // skipped (no arity-0 closure ⇒ no real getter installed ⇒ driver unused).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -120,7 +120,7 @@ export function reserveAccessorSetDriver(ctx: CodegenContext): number {
     locals: [],
     // Placeholder; filled by fillAccessorDrivers. Bare `unreachable` is a valid
     // empty-result stub when the fill is skipped (no arity-1 closure in module).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -160,7 +160,7 @@ export function reserveReviverDriver(ctx: CodegenContext): number {
     // A bare `unreachable` keeps the stub valid (externref result) if the fill
     // is skipped (no arity-2 closure ⇒ no reviver could have been passed).
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -192,7 +192,7 @@ export function reserveToJsonDriver(ctx: CodegenContext): number {
     name: CALL_TO_JSON,
     typeIdx: sigIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -226,7 +226,7 @@ export function reserveReplacerDriver(ctx: CodegenContext): number {
     name: CALL_REPLACER,
     typeIdx: sigIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -266,12 +266,12 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
           // from any live accessor arm in that case (no arity-0 closure ⇒ no
           // getter closure installed), but keep a valid body so the module
           // verifies: return undefined (null externref).
-          driverFn.body = [{ op: "ref.null.extern" } as Instr];
+          driverFn.body = [{ op: "ref.null.extern" }];
         } else {
           driverFn.body = [
-            { op: "local.get", index: 0 } as Instr, // recv (bound as `this`)
-            { op: "local.get", index: 1 } as Instr, // getter closure
-            { op: "call", funcIdx: callMethod0 } as Instr,
+            { op: "local.get", index: 0 }, // recv (bound as `this`)
+            { op: "local.get", index: 1 }, // getter closure
+            { op: "call", funcIdx: callMethod0 },
             // getter result (externref) stays on the stack as the return value
           ];
         }
@@ -291,13 +291,13 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
           driverFn.body = [];
         } else {
           driverFn.body = [
-            { op: "local.get", index: 0 } as Instr, // recv (bound as `this`)
-            { op: "local.get", index: 1 } as Instr, // setter closure
-            { op: "local.get", index: 2 } as Instr, // value argument
-            { op: "call", funcIdx: callMethod1 } as Instr,
+            { op: "local.get", index: 0 }, // recv (bound as `this`)
+            { op: "local.get", index: 1 }, // setter closure
+            { op: "local.get", index: 2 }, // value argument
+            { op: "call", funcIdx: callMethod1 },
             // __call_fn_method_1 returns an externref result; the setter's
             // return value is discarded per §10.1.5.3 (Set ignores it).
-            { op: "drop" } as Instr,
+            { op: "drop" },
           ];
         }
       }
@@ -316,14 +316,14 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
           // No arity-2 closure dispatcher ⇒ no reviver closure could have been
           // passed; the driver is unreachable from any live walk. Keep a valid
           // identity body: return the value arg unchanged (externref result).
-          driverFn.body = [{ op: "local.get", index: 3 } as Instr];
+          driverFn.body = [{ op: "local.get", index: 3 }];
         } else {
           driverFn.body = [
-            { op: "local.get", index: 0 } as Instr, // holder (bound as `this`)
-            { op: "local.get", index: 1 } as Instr, // reviver closure
-            { op: "local.get", index: 2 } as Instr, // key (arg0)
-            { op: "local.get", index: 3 } as Instr, // value (arg1)
-            { op: "call", funcIdx: callMethod2 } as Instr,
+            { op: "local.get", index: 0 }, // holder (bound as `this`)
+            { op: "local.get", index: 1 }, // reviver closure
+            { op: "local.get", index: 2 }, // key (arg0)
+            { op: "local.get", index: 3 }, // value (arg1)
+            { op: "call", funcIdx: callMethod2 },
             // result (reviver's return, externref) is this driver's result
           ];
         }
@@ -344,13 +344,13 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
           // the module ⇒ the driver is unreachable (the codec's HasProperty
           // ref-test never finds a closure). Keep a valid identity body:
           // return the value arg unchanged (externref result).
-          driverFn.body = [{ op: "local.get", index: 0 } as Instr];
+          driverFn.body = [{ op: "local.get", index: 0 }];
         } else {
           driverFn.body = [
-            { op: "local.get", index: 0 } as Instr, // value (bound as `this`)
-            { op: "local.get", index: 1 } as Instr, // toJSON method closure
-            { op: "local.get", index: 2 } as Instr, // key (arg0)
-            { op: "call", funcIdx: callMethod1 } as Instr,
+            { op: "local.get", index: 0 }, // value (bound as `this`)
+            { op: "local.get", index: 1 }, // toJSON method closure
+            { op: "local.get", index: 2 }, // key (arg0)
+            { op: "call", funcIdx: callMethod1 },
             // result (toJSON's return, externref) is this driver's result
           ];
         }
@@ -370,14 +370,14 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
           // No arity-2 closure dispatcher ⇒ no function replacer could have been
           // passed; the driver is unreachable from any live walk. Keep a valid
           // identity body: return the value arg unchanged (externref result).
-          driverFn.body = [{ op: "local.get", index: 3 } as Instr];
+          driverFn.body = [{ op: "local.get", index: 3 }];
         } else {
           driverFn.body = [
-            { op: "local.get", index: 0 } as Instr, // holder (bound as `this`)
-            { op: "local.get", index: 1 } as Instr, // replacer closure
-            { op: "local.get", index: 2 } as Instr, // key (arg0)
-            { op: "local.get", index: 3 } as Instr, // value (arg1)
-            { op: "call", funcIdx: callMethod2 } as Instr,
+            { op: "local.get", index: 0 }, // holder (bound as `this`)
+            { op: "local.get", index: 1 }, // replacer closure
+            { op: "local.get", index: 2 }, // key (arg0)
+            { op: "local.get", index: 3 }, // value (arg1)
+            { op: "call", funcIdx: callMethod2 },
             // result (replacer's return, externref) is this driver's result
           ];
         }

@@ -116,7 +116,7 @@ export function reserveMemberSetDispatch(
     // Placeholder; filled by fillMemberSetDispatch. `unreachable` keeps the stub
     // valid (no results) if the fill is ever skipped (it never is — the fill
     // iterates the same name set this reserve populates).
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set(name, funcIdx);
@@ -161,10 +161,10 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
     const fallback: Instr[] =
       fallbackIdx !== undefined
         ? [
-            { op: "local.get", index: 0 } as Instr, // recv
+            { op: "local.get", index: 0 }, // recv
             ...stringConstantExternrefInstrs(ctx, propName),
-            { op: "local.get", index: 1 } as Instr, // val
-            { op: "call", funcIdx: fallbackIdx } as Instr,
+            { op: "local.get", index: 1 }, // val
+            { op: "call", funcIdx: fallbackIdx },
           ]
         : [];
 
@@ -180,29 +180,29 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
       // and externref→ref coercions resolve through funcMap, not temp locals.
       const coerce = coercionInstrs(ctx, { kind: "externref" }, cand.fieldType);
       const setFieldInstrs: Instr[] = [
-        { op: "local.get", index: 2 } as Instr, // __any
-        { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
-        { op: "local.get", index: 1 } as Instr, // val (externref)
+        { op: "local.get", index: 2 }, // __any
+        { op: "ref.cast", typeIdx: cand.structTypeIdx },
+        { op: "local.get", index: 1 }, // val (externref)
         ...coerce,
-        { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx } as Instr,
+        { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx },
       ];
       return [
-        { op: "local.get", index: 2 } as Instr, // __any
-        { op: "ref.test", typeIdx: cand.structTypeIdx } as Instr,
+        { op: "local.get", index: 2 }, // __any
+        { op: "ref.test", typeIdx: cand.structTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: setFieldInstrs,
           else: buildSetDispatch(idx + 1),
-        } as Instr,
+        },
       ];
     };
 
     dispFn.locals = [{ name: "__any", type: { kind: "anyref" } }];
     dispFn.body = [
-      { op: "local.get", index: 0 } as Instr, // recv (externref)
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 2 } as Instr, // __any
+      { op: "local.get", index: 0 }, // recv (externref)
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 }, // __any
       ...buildSetDispatch(0),
     ];
   }

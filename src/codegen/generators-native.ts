@@ -2483,12 +2483,12 @@ function ensureRegisteredNativeGenerator(ctx: CodegenContext, name: string): Nat
 //   - i32 carrier: no sentinel space in i32; keep 0.
 function defaultElemValueInstrs(elemValType: ValType): Instr[] {
   if (elemValType.kind === "f64") {
-    return [{ op: "i64.const", value: UNDEF_F64_BITS }, { op: "f64.reinterpret_i64" } as Instr];
+    return [{ op: "i64.const", value: UNDEF_F64_BITS }, { op: "f64.reinterpret_i64" }];
   }
   if (elemValType.kind === "i32") return [{ op: "i32.const", value: 0 }];
   // (#2864 F1) The boxed-any carrier's inert default is a null externref.
-  if (elemValType.kind === "externref") return [{ op: "ref.null.extern" } as Instr];
-  return [{ op: "ref.null", typeIdx: (elemValType as { typeIdx: number }).typeIdx } as Instr];
+  if (elemValType.kind === "externref") return [{ op: "ref.null.extern" }];
+  return [{ op: "ref.null", typeIdx: (elemValType as { typeIdx: number }).typeIdx }];
 }
 
 function emptyResult(info: NativeGeneratorInfo): Instr[] {
@@ -2560,13 +2560,13 @@ function emitCarrierValue(
   const carrier: ValType = { kind: "externref" };
   const tmp = allocLocal(fctx, `__gen_carrier_${fctx.locals.length}`, carrier);
   if (!expr) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     fctx.body.push({ op: "local.set", index: tmp });
     return tmp;
   }
   const t = compileExpression(ctx, fctx, expr, carrier);
   if (t === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   } else if (!valTypesMatch(t, carrier)) {
     coerceType(ctx, fctx, t, carrier);
   }
@@ -2584,13 +2584,13 @@ function emitOpenAnyArgValue(ctx: CodegenContext, fctx: FunctionContext, expr: t
   const carrier: ValType = { kind: "externref" };
   const tmp = allocLocal(fctx, `__gen_any_arg_${fctx.locals.length}`, carrier);
   if (!expr) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     fctx.body.push({ op: "local.set", index: tmp });
     return tmp;
   }
   const t = compileExpression(ctx, fctx, expr, carrier);
   if (t === null) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   } else if (!valTypesMatch(t, carrier)) {
     coerceType(ctx, fctx, t, carrier);
   }
@@ -2737,9 +2737,9 @@ function emitTrampoline(
           op: "loop",
           blockType: { kind: "empty" },
           body: chain,
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     { op: "local.get", index: resultLocal },
   ];
 }
@@ -2830,7 +2830,7 @@ function compileState(
     const throwBody: Instr[] = [
       { op: "local.get", index: selfLocal },
       { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-      { op: "throw", tagIdx: ensureExnTag(ctx) } as Instr,
+      { op: "throw", tagIdx: ensureExnTag(ctx) },
     ];
 
     // mode 1 (return): complete with the abrupt value (unchanged from F1). The
@@ -3024,10 +3024,10 @@ function compileState(
           then: [
             { op: "local.get", index: selfLocal },
             ...materialize,
-            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx },
             { op: "local.get", index: selfLocal },
             { op: "i32.const", value: 0 },
-            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx },
           ],
           else: [],
         });
@@ -3058,7 +3058,7 @@ function compileState(
                 op: "struct.set",
                 typeIdx: info.stateTypeIdx,
                 fieldIdx: info.spillFieldOffset + bindSpillIdx,
-              } as Instr,
+              },
             );
           }
         }
@@ -3067,7 +3067,7 @@ function compileState(
           // exhausted — clear the slot, advance to the successor, re-enter.
           { op: "local.get", index: selfLocal },
           { op: "ref.null", typeIdx: vecTypeIdx },
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx } as Instr,
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.vecFieldIdx },
           ...bindInstrs,
           ...setStateInstrs(info, selfLocal, term.next),
           { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
@@ -3080,13 +3080,13 @@ function compileState(
           { op: "local.get", index: cursorLocal },
           { op: "i32.const", value: 1 },
           { op: "i32.add" },
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx } as Instr,
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: vslot.cursorFieldIdx },
           // result = { vec.data[cursor] (f64), done: 0 }
           { op: "local.get", index: vecLocal },
-          { op: "ref.as_non_null" } as Instr,
+          { op: "ref.as_non_null" },
           { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: cursorLocal },
-          { op: "array.get", typeIdx: vslot.arrTypeIdx } as Instr,
+          { op: "array.get", typeIdx: vslot.arrTypeIdx },
           { op: "i32.const", value: 0 },
           { op: "struct.new", typeIdx: info.resultTypeIdx },
           { op: "local.set", index: resultLocal },
@@ -3095,9 +3095,9 @@ function compileState(
         // if (cursor >= vec.length) doneArm else yieldArm
         body.push({ op: "local.get", index: cursorLocal });
         body.push({ op: "local.get", index: vecLocal });
-        body.push({ op: "ref.as_non_null" } as Instr);
+        body.push({ op: "ref.as_non_null" });
         body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
-        body.push({ op: "i32.ge_s" } as Instr);
+        body.push({ op: "i32.ge_s" });
         body.push({ op: "if", blockType: { kind: "empty" }, then: doneArm, else: yieldArm });
         break;
       }
@@ -3145,19 +3145,19 @@ function compileState(
           fctx.body = materialize;
           const st = compileExpression(ctx, fctx, term.subject, { kind: "externref" });
           if (st && st.kind !== "externref") coerceType(ctx, fctx, st, { kind: "externref" });
-          fctx.body.push({ op: "call", funcIdx: iteratorIdx } as Instr);
+          fctx.body.push({ op: "call", funcIdx: iteratorIdx });
           fctx.body = savedC;
         }
         body.push({ op: "local.get", index: selfLocal });
         body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx });
-        body.push({ op: "ref.is_null" } as Instr);
+        body.push({ op: "ref.is_null" });
         body.push({
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: selfLocal } as Instr,
+            { op: "local.get", index: selfLocal },
             ...materialize,
-            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx } as Instr,
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx },
           ],
           else: [],
         });
@@ -3167,7 +3167,7 @@ function compileState(
         body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx });
         body.push({ op: "local.set", index: recLocal });
         body.push({ op: "local.get", index: recLocal });
-        body.push({ op: "call", funcIdx: iteratorNextIdx } as Instr);
+        body.push({ op: "call", funcIdx: iteratorNextIdx });
         body.push({ op: "local.set", index: valueLocal }); // value (top of stack)
         body.push({ op: "local.set", index: doneLocal }); // done
 
@@ -3180,8 +3180,7 @@ function compileState(
           const bindSpillIdx = info.spillNames.indexOf(term.bindResultTo);
           if (bindLocal !== undefined && bindSpillIdx >= 0) {
             const bindType = getLocalType(fctx, bindLocal);
-            const undef: Instr =
-              bindType?.kind === "f64" ? { op: "f64.const", value: NaN } : ({ op: "ref.null.extern" } as Instr);
+            const undef: Instr = bindType?.kind === "f64" ? { op: "f64.const", value: NaN } : { op: "ref.null.extern" };
             bindInstrs.push(
               undef,
               { op: "local.set", index: bindLocal },
@@ -3191,7 +3190,7 @@ function compileState(
                 op: "struct.set",
                 typeIdx: info.stateTypeIdx,
                 fieldIdx: info.spillFieldOffset + bindSpillIdx,
-              } as Instr,
+              },
             );
           }
         }
@@ -3203,7 +3202,7 @@ function compileState(
         {
           const savedC = fctx.body;
           fctx.body = valueInstrs;
-          fctx.body.push({ op: "local.get", index: valueLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: valueLocal });
           if (info.elemValType.kind === "f64") {
             coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
           }
@@ -3212,9 +3211,9 @@ function compileState(
 
         const doneArm: Instr[] = [
           // exhausted — clear the slot, advance to the successor, re-enter.
-          { op: "local.get", index: selfLocal } as Instr,
-          { op: "ref.null.extern" } as Instr,
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx } as Instr,
+          { op: "local.get", index: selfLocal },
+          { op: "ref.null.extern" },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: islot.fieldIdx },
           ...bindInstrs,
           ...setStateInstrs(info, selfLocal, term.next),
           { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
@@ -3281,7 +3280,7 @@ function compileState(
         then: [
           { op: "local.get", index: selfLocal },
           ...constructInner,
-          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx } as Instr,
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
         ],
         else: [],
       });
@@ -3289,7 +3288,7 @@ function compileState(
       // deleg (non-null) → local; drive its resume once.
       body.push({ op: "local.get", index: selfLocal });
       body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx });
-      body.push({ op: "ref.as_non_null" } as Instr);
+      body.push({ op: "ref.as_non_null" });
       body.push({ op: "local.set", index: delegLocal });
       body.push({ op: "local.get", index: delegLocal });
       body.push({ op: "call", funcIdx: innerResumeIdx });
@@ -3316,7 +3315,7 @@ function compileState(
               op: "struct.set",
               typeIdx: info.stateTypeIdx,
               fieldIdx: info.spillFieldOffset + bindSpillIdx,
-            } as Instr,
+            },
           );
         }
       }
@@ -3326,7 +3325,7 @@ function compileState(
         // inner done — clear the slot, advance to the successor state, re-enter.
         { op: "local.get", index: selfLocal },
         { op: "ref.null", typeIdx: innerInfo.stateTypeIdx },
-        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx } as Instr,
+        { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: slot.fieldIdx },
         ...bindInstrs,
         ...setStateInstrs(info, selfLocal, term.next),
         { op: "br", depth: loopDepth + 1 }, // +1 for the inner `if`
@@ -3405,7 +3404,7 @@ function compileState(
     // `__get_caught_exception` (acquired up-front — no late import here) and
     // route identically. Standalone/wasi have no foreign exceptions (#1473).
     const catchAll: Instr[] | undefined =
-      getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx } as Instr, ...routeInstrs()] : undefined;
+      getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...routeInstrs()] : undefined;
     return [
       {
         op: "try",
@@ -3413,7 +3412,7 @@ function compileState(
         body,
         catches: [{ tagIdx: ensureExnTag(ctx), body: routeInstrs() }],
         catchAll,
-      } as Instr,
+      },
     ];
   }
   return body;
@@ -3505,7 +3504,7 @@ function emitUnwindWalk(
   const throwBody: Instr[] = [
     { op: "local.get", index: o.selfLocal },
     { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
-    { op: "throw", tagIdx: ensureExnTag(ctx) } as Instr,
+    { op: "throw", tagIdx: ensureExnTag(ctx) },
   ];
   const returnBody: Instr[] = [];
   if (valTypesMatch(genCarrierFieldType(info.elemValType), info.elemValType)) {
@@ -3570,7 +3569,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     name: fnName,
     typeIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, funcIdx, placeholder);
@@ -3663,7 +3662,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
       resumeFctx.body.push({ op: "local.get", index: 0 });
       resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
       resumeFctx.body.push({ op: "i32.eqz" });
-      resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] } as Instr);
+      resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] });
     } finally {
       ctx.currentFunc = savedFunc;
     }
@@ -3742,13 +3741,13 @@ export function compileNativeGeneratorFunction(
   // numeric/string carriers (unchanged) or a null externref for the boxed-any
   // carrier so the struct.new typechecks before the first `.next(v)`.
   const carrierInit: Instr = carrierIsAny(info.elemValType)
-    ? ({ op: "ref.null.extern" } as Instr)
+    ? { op: "ref.null.extern" }
     : { op: "f64.const", value: NaN };
   fctx.body.push({ op: "i32.const", value: 0 }); // state
   fctx.body.push(carrierInit); // sent
   fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
   fctx.body.push(carrierInit); // abrupt
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // (#2864 F2) error
+  fctx.body.push({ op: "ref.null.extern" }); // (#2864 F2) error
   // (#2571) Read every wasm param into its `param_*` state slot. For an instance
   // method generator the synthetic `this` is wasm param 0 and user params are
   // 1..n, so iterate `info.paramTypes.length` (which includes the synthetic
@@ -3789,7 +3788,7 @@ export function compileNativeGeneratorFunction(
   // the `$__IterRec` is materialized lazily (`__iterator(subject)`) on first
   // entry into the iterable-yield-star state.
   for (const _slot of info.iterableDelegationSlots ?? []) {
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
   }
   // (#3050) Pending completion kind starts at 0 (none).
   if (info.pendingFieldIdx !== undefined) {
@@ -3896,7 +3895,7 @@ function compileDirectNativeGeneratorMethod(
         // Not-started / completed: mark done and throw the error to the caller.
         ...setStateI32FromConst(info, selfLocal, STATE_FIELD, info.doneState),
         { op: "local.get", index: errorTmp },
-        { op: "throw", tagIdx } as Instr,
+        { op: "throw", tagIdx },
       ],
     });
     return { kind: "ref", typeIdx: info.resultTypeIdx };
@@ -4054,7 +4053,7 @@ function buildNativeGeneratorDispatch(
   // host `__gen_*` arm; internal non-generators keep the #1344 TypeError.
   let fallback: Instr[] = typeErrArm;
   if (hostMix) {
-    const hostCall: Instr[] = [{ op: "local.get", index: anyLocal }, { op: "extern.convert_any" } as Instr];
+    const hostCall: Instr[] = [{ op: "local.get", index: anyLocal }, { op: "extern.convert_any" }];
     if (methodName === "return") {
       // `gen.return(v)` — the host import takes (gen, value externref). Prefer
       // the already-externref `valueAnyLocal`; otherwise box the f64 value
@@ -4065,46 +4064,42 @@ function buildNativeGeneratorDispatch(
       } else {
         const boxIdx = ctx.funcMap.get("__box_number");
         if (boxIdx !== undefined && valueLocal !== undefined) {
-          hostCall.push({ op: "local.get", index: valueLocal }, { op: "call", funcIdx: boxIdx } as Instr);
+          hostCall.push({ op: "local.get", index: valueLocal }, { op: "call", funcIdx: boxIdx });
         } else {
-          hostCall.push({ op: "ref.null.extern" } as Instr);
+          hostCall.push({ op: "ref.null.extern" });
         }
       }
     } else if (methodName === "throw") {
-      hostCall.push(
-        errorLocal !== undefined
-          ? ({ op: "local.get", index: errorLocal } as Instr)
-          : ({ op: "ref.null.extern" } as Instr),
-      );
+      hostCall.push(errorLocal !== undefined ? { op: "local.get", index: errorLocal } : { op: "ref.null.extern" });
     }
     hostCall.push(
-      { op: "call", funcIdx: hostMix.callIdx } as Instr,
-      { op: "local.set", index: hostMix.hostResLocal } as Instr,
+      { op: "call", funcIdx: hostMix.callIdx },
+      { op: "local.set", index: hostMix.hostResLocal },
       // Wrap {value, done} into the externref-elem native result struct so the
       // arm satisfies the dispatch block type and downstream `.value`/`.done`
       // reads dispatch on it like any native result.
-      { op: "local.get", index: hostMix.hostResLocal } as Instr,
-      { op: "call", funcIdx: hostMix.resultValueIdx } as Instr,
-      { op: "local.get", index: hostMix.hostResLocal } as Instr,
-      { op: "call", funcIdx: hostMix.resultDoneIdx } as Instr,
-      { op: "struct.new", typeIdx: hostMix.extResultTypeIdx } as Instr,
+      { op: "local.get", index: hostMix.hostResLocal },
+      { op: "call", funcIdx: hostMix.resultValueIdx },
+      { op: "local.get", index: hostMix.hostResLocal },
+      { op: "call", funcIdx: hostMix.resultDoneIdx },
+      { op: "struct.new", typeIdx: hostMix.extResultTypeIdx },
     );
     fallback = [
       { op: "local.get", index: anyLocal },
-      { op: "ref.test", typeIdx: HEAP_TYPE_STRUCT } as Instr,
+      { op: "ref.test", typeIdx: HEAP_TYPE_STRUCT },
       { op: "local.get", index: anyLocal },
-      { op: "ref.test", typeIdx: HEAP_TYPE_ARRAY } as Instr,
-      { op: "i32.or" } as Instr,
+      { op: "ref.test", typeIdx: HEAP_TYPE_ARRAY },
+      { op: "i32.or" },
       { op: "local.get", index: anyLocal },
-      { op: "ref.test", typeIdx: HEAP_TYPE_I31 } as Instr,
-      { op: "i32.or" } as Instr,
-      { op: "i32.eqz" } as Instr,
+      { op: "ref.test", typeIdx: HEAP_TYPE_I31 },
+      { op: "i32.or" },
+      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "val", type: resultType },
         then: hostCall,
         else: typeErrArm,
-      } as Instr,
+      },
     ];
   }
 
@@ -4154,7 +4149,7 @@ function buildNativeGeneratorDispatch(
             { op: "i32.const", value: info.doneState },
             { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
             { op: "local.get", index: errorLocal! },
-            { op: "throw", tagIdx } as Instr,
+            { op: "throw", tagIdx },
           ],
         },
       ];
@@ -4490,15 +4485,18 @@ export function isNativeGeneratorResultStruct(ctx: CodegenContext, typeIdx: numb
 export function sentinelAwareF64BoxInstrs(f64ScratchIdx: number, boxNumberIdx: number): Instr[] {
   return [
     { op: "local.tee", index: f64ScratchIdx },
-    { op: "i64.reinterpret_f64" } as Instr,
+    { op: "i64.reinterpret_f64" },
     { op: "i64.const", value: UNDEF_F64_BITS },
-    { op: "i64.eq" } as Instr,
+    { op: "i64.eq" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
-      then: [{ op: "ref.null.extern" } as Instr],
-      else: [{ op: "local.get", index: f64ScratchIdx } as Instr, { op: "call", funcIdx: boxNumberIdx } as Instr],
-    } as Instr,
+      then: [{ op: "ref.null.extern" }],
+      else: [
+        { op: "local.get", index: f64ScratchIdx },
+        { op: "call", funcIdx: boxNumberIdx },
+      ],
+    },
   ];
 }
 
@@ -4534,19 +4532,19 @@ function buildOpenResultValueReadExtern(
     if (e.elemValType.kind === "f64" || e.elemValType.kind === "i32") {
       if (boxNumberIdx === undefined) {
         // No boxing available (defensive): undefined is the only safe answer.
-        return [...read, { op: "drop" }, { op: "ref.null.extern" } as Instr];
+        return [...read, { op: "drop" }, { op: "ref.null.extern" }];
       }
-      const toF64: Instr[] = e.elemValType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : [];
+      const toF64: Instr[] = e.elemValType.kind === "i32" ? [{ op: "f64.convert_i32_s" }] : [];
       return [...read, ...toF64, ...sentinelAwareF64BoxInstrs(f64Scratch, boxNumberIdx)];
     }
     // ref/ref_null elem (native string / struct): wrap to externref. A null
     // ref (the done default) converts to the null externref = canonical
     // undefined.
-    return [...read, { op: "extern.convert_any" } as Instr];
+    return [...read, { op: "extern.convert_any" }];
   };
 
   const wrap = (i: number): Instr[] => {
-    if (i >= entries.length) return [{ op: "ref.null.extern" } as Instr];
+    if (i >= entries.length) return [{ op: "ref.null.extern" }];
     const e = entries[i]!;
     return [
       { op: "local.get", index: anyLocal },
@@ -4556,10 +4554,10 @@ function buildOpenResultValueReadExtern(
         blockType: { kind: "val", type: externVT },
         then: armFor(e),
         else: wrap(i + 1),
-      } as Instr,
+      },
     ];
   };
-  return { op: "block", blockType: { kind: "val", type: externVT }, body: wrap(0) } as Instr;
+  return { op: "block", blockType: { kind: "val", type: externVT }, body: wrap(0) };
 }
 
 /**
@@ -4580,7 +4578,7 @@ function buildOpenResultRead(
     fieldIdx === RESULT_DONE_FIELD
       ? { op: "i32.const", value: 1 }
       : returnVT.kind === "externref"
-        ? ({ op: "ref.null.extern" } as Instr)
+        ? { op: "ref.null.extern" }
         : { op: "f64.const", value: 0 };
   // Each level emits its own `ref.test` condition then the `if`; the tail (no
   // match) yields the inert default.
@@ -4599,11 +4597,11 @@ function buildOpenResultRead(
           { op: "struct.get", typeIdx: e.typeIdx, fieldIdx },
         ],
         else: wrap(i + 1),
-      } as Instr,
+      },
     ];
   };
   // Wrap the chain in a single block so the caller pushes exactly one Instr.
-  return { op: "block", blockType: { kind: "val", type: returnVT }, body: wrap(0) } as Instr;
+  return { op: "block", blockType: { kind: "val", type: returnVT }, body: wrap(0) };
 }
 
 /**
@@ -4726,7 +4724,7 @@ export function tryCompileNativeGeneratorForOf(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "br", depth: 2 } as Instr], // if + loop = depth 2 to exit block
+    then: [{ op: "br", depth: 2 }], // if + loop = depth 2 to exit block
     else: [],
   });
 
@@ -4765,7 +4763,7 @@ export function tryCompileNativeGeneratorForOf(
         op: "loop",
         blockType: { kind: "empty" },
         body: loopBody,
-      } as Instr,
+      },
     ],
   });
   return true;
@@ -4860,7 +4858,7 @@ export function emitNativeGeneratorToVec(
     { op: "local.get", index: dataLocal },
     { op: "i32.const", value: 0 },
     { op: "local.get", index: lenLocal },
-    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
     { op: "local.get", index: growLocal },
     { op: "local.set", index: dataLocal },
   ];
@@ -4875,7 +4873,7 @@ export function emitNativeGeneratorToVec(
     { op: "local.set", index: resultLocal },
     { op: "local.get", index: resultLocal },
     { op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_DONE_FIELD },
-    { op: "if", blockType: { kind: "empty" }, then: [{ op: "br", depth: 2 } as Instr], else: [] },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "br", depth: 2 }], else: [] },
     // grow if full
     { op: "local.get", index: lenLocal },
     { op: "local.get", index: capLocal },
@@ -4886,7 +4884,7 @@ export function emitNativeGeneratorToVec(
     { op: "local.get", index: lenLocal },
     { op: "local.get", index: resultLocal },
     { op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD },
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    { op: "array.set", typeIdx: arrTypeIdx },
     // len++
     { op: "local.get", index: lenLocal },
     { op: "i32.const", value: 1 },
@@ -4897,7 +4895,7 @@ export function emitNativeGeneratorToVec(
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
   });
 
   // (#2169) Trim the backing array to exactly `len` when the consumer
@@ -4914,7 +4912,7 @@ export function emitNativeGeneratorToVec(
     fctx.body.push({ op: "local.get", index: dataLocal });
     fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.get", index: lenLocal });
-    fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+    fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx });
     fctx.body.push({ op: "local.get", index: trimLocal });
     fctx.body.push({ op: "local.set", index: dataLocal });
   }

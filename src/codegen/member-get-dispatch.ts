@@ -278,7 +278,7 @@ export function reserveMemberGetDispatch(
     name,
     typeIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   });
   ctx.funcMap.set(name, funcIdx);
@@ -350,68 +350,71 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
       if (idx >= methodArms.length) return [];
       const arm = methodArms[idx]!;
       return [
-        { op: "local.get", index: 1 } as Instr, // __any
-        { op: "ref.test", typeIdx: arm.receiverStructTypeIdx } as Instr,
+        { op: "local.get", index: 1 }, // __any
+        { op: "ref.test", typeIdx: arm.receiverStructTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
             // Lazy-init the canonical singleton (mirrors emitCachedMethodClosureAccess).
-            { op: "global.get", index: arm.cacheGlobalIdx } as Instr,
-            { op: "ref.is_null" } as Instr,
+            { op: "global.get", index: arm.cacheGlobalIdx },
+            { op: "ref.is_null" },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "ref.func", funcIdx: arm.trampIdx } as Instr,
-                { op: "struct.new", typeIdx: arm.closureStructTypeIdx } as Instr,
-                { op: "extern.convert_any" } as Instr,
-                { op: "global.set", index: arm.cacheGlobalIdx } as Instr,
+                { op: "ref.func", funcIdx: arm.trampIdx },
+                { op: "struct.new", typeIdx: arm.closureStructTypeIdx },
+                { op: "extern.convert_any" },
+                { op: "global.set", index: arm.cacheGlobalIdx },
               ],
               else: [],
-            } as Instr,
-            { op: "global.get", index: arm.cacheGlobalIdx } as Instr,
-            { op: "local.set", index: mresLocal } as Instr,
+            },
+            { op: "global.get", index: arm.cacheGlobalIdx },
+            { op: "local.set", index: mresLocal },
           ],
           else: buildMethodArmChain(idx + 1, mresLocal),
-        } as Instr,
+        },
       ];
     };
     const buildFallbackWithMethodArms = (mresLocal: number): Instr[] => {
       const hostRead: Instr[] =
         getIdx !== undefined
           ? [
-              { op: "local.get", index: 0 } as Instr, // recv
+              { op: "local.get", index: 0 }, // recv
               ...stringConstantExternrefInstrs(ctx, propName),
-              { op: "call", funcIdx: getIdx } as Instr,
+              { op: "call", funcIdx: getIdx },
             ]
-          : [{ op: "ref.null.extern" } as Instr];
+          : [{ op: "ref.null.extern" }];
       // miss = ref.is_null(v) || __extern_is_undefined(v)
       const missTest: Instr[] = [
-        { op: "local.get", index: mresLocal } as Instr,
-        { op: "ref.is_null" } as Instr,
+        { op: "local.get", index: mresLocal },
+        { op: "ref.is_null" },
         ...(isUndefIdx !== undefined
           ? [
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } as ValType },
-                then: [{ op: "i32.const", value: 1 } as Instr],
-                else: [{ op: "local.get", index: mresLocal } as Instr, { op: "call", funcIdx: isUndefIdx } as Instr],
-              } as Instr,
+                then: [{ op: "i32.const", value: 1 }],
+                else: [
+                  { op: "local.get", index: mresLocal },
+                  { op: "call", funcIdx: isUndefIdx },
+                ],
+              },
             ]
           : []),
       ];
       return [
         ...hostRead,
-        { op: "local.set", index: mresLocal } as Instr,
+        { op: "local.set", index: mresLocal },
         ...missTest,
         {
           op: "if",
           blockType: { kind: "empty" },
           then: buildMethodArmChain(0, mresLocal),
           else: [],
-        } as Instr,
-        { op: "local.get", index: mresLocal } as Instr,
+        },
+        { op: "local.get", index: mresLocal },
       ];
     };
 
@@ -420,11 +423,11 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
         ? buildFallbackWithMethodArms(2)
         : getIdx !== undefined
           ? [
-              { op: "local.get", index: 0 } as Instr, // recv
+              { op: "local.get", index: 0 }, // recv
               ...stringConstantExternrefInstrs(ctx, propName),
-              { op: "call", funcIdx: getIdx } as Instr,
+              { op: "call", funcIdx: getIdx },
             ]
-          : [{ op: "ref.null.extern" } as Instr];
+          : [{ op: "ref.null.extern" }];
 
     let usedSentinelBox = false;
     // (#2963) Locals layout: 1 = __any (anyref); with method arms 2 = __mres
@@ -464,23 +467,23 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
       const box = useSentinelBox
         ? sentinelAwareF64BoxInstrs(f64ScratchIdx, boxNumIdx)
         : boxBoolIdx !== undefined
-          ? [{ op: "call", funcIdx: boxBoolIdx } as Instr]
+          ? [{ op: "call", funcIdx: boxBoolIdx }]
           : coercionInstrs(ctx, cand.fieldType, { kind: "externref" });
       const readInstrs: Instr[] = [
-        { op: "local.get", index: 1 } as Instr, // __any
-        { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
-        { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx } as Instr,
+        { op: "local.get", index: 1 }, // __any
+        { op: "ref.cast", typeIdx: cand.structTypeIdx },
+        { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx },
         ...box,
       ];
       return [
-        { op: "local.get", index: 1 } as Instr, // __any
-        { op: "ref.test", typeIdx: cand.structTypeIdx } as Instr,
+        { op: "local.get", index: 1 }, // __any
+        { op: "ref.test", typeIdx: cand.structTypeIdx },
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
           then: readInstrs,
           else: buildGetDispatch(idx + 1),
-        } as Instr,
+        },
       ];
     };
 
@@ -489,9 +492,9 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
     // actually referenced it — keeps every dispatcher without such an arm
     // byte-identical (host mode never has gen-result structs).
     const dispatchBody: Instr[] = [
-      { op: "local.get", index: 0 } as Instr, // recv (externref)
-      { op: "any.convert_extern" } as Instr,
-      { op: "local.set", index: 1 } as Instr, // __any
+      { op: "local.get", index: 0 }, // recv (externref)
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 }, // __any
       ...buildGetDispatch(0),
     ];
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];

@@ -76,7 +76,7 @@ export function buildAccessorClosure(
   // compileArrowAsClosure leaves a closure-struct ref; the closure globals + the
   // S5b __call_accessor_get/set drivers take externref. Convert unless already so.
   if (closureType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   return true;
 }
@@ -120,7 +120,7 @@ export function ensureStructAccessorGlobal(
     name,
     type: { kind: "externref" } as ValType,
     mutable: true,
-    init: [{ op: "ref.null.extern" } as Instr],
+    init: [{ op: "ref.null.extern" }],
   });
   if (kind === "get") entry.getGlobal = globalIdx;
   else entry.setGlobal = globalIdx;

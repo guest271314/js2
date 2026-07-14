@@ -301,14 +301,14 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
   );
 
   const errRef = (): Instr[] => [
-    { op: "local.get", index: anyL } as Instr,
-    { op: "ref.cast", typeIdx: errTypeIdx } as Instr,
+    { op: "local.get", index: anyL },
+    { op: "ref.cast", typeIdx: errTypeIdx },
   ];
   const keyEquals = (lit: string): Instr[] => [
-    { op: "local.get", index: fkeyL } as Instr,
-    { op: "ref.as_non_null" } as Instr,
+    { op: "local.get", index: fkeyL },
+    { op: "ref.as_non_null" },
     ...nativeStringLiteralInstrs(ctx, lit),
-    { op: "call", funcIdx: strEqualsIdx } as Instr,
+    { op: "call", funcIdx: strEqualsIdx },
   ];
   // key == "<lit>" → return struct field <fieldIdx> (externref, returned raw:
   // the same value rep the typed fast path in property-access.ts yields).
@@ -317,8 +317,8 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [...errRef(), { op: "struct.get", typeIdx: errTypeIdx, fieldIdx } as Instr, { op: "return" } as Instr],
-    } as Instr,
+      then: [...errRef(), { op: "struct.get", typeIdx: errTypeIdx, fieldIdx }, { op: "return" }],
+    },
   ];
 
   // One `constructor` arm per builtin error ctor EMITTED in this module. The
@@ -330,15 +330,18 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
     if (!ctx.funcMap.has(`__new_${name}`)) continue;
     const globalIdx = ensureErrorCtorCarrierGlobal(ctx, name);
     const answerCarrier: Instr[] = [
-      { op: "global.get", index: globalIdx } as Instr,
-      { op: "ref.is_null" } as Instr,
+      { op: "global.get", index: globalIdx },
+      { op: "ref.is_null" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "call", funcIdx: newObjectIdx } as Instr, { op: "global.set", index: globalIdx } as Instr],
-      } as Instr,
-      { op: "global.get", index: globalIdx } as Instr,
-      { op: "return" } as Instr,
+        then: [
+          { op: "call", funcIdx: newObjectIdx },
+          { op: "global.set", index: globalIdx },
+        ],
+      },
+      { op: "global.get", index: globalIdx },
+      { op: "return" },
     ];
     // The "Error" tag is SHARED with Test262Error (emitStandaloneTest262Error
     // constructs with the Error tag). Disambiguate by the immutable `$name`
@@ -348,46 +351,49 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
       name === "Error"
         ? [
             ...errRef(),
-            { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
             {
               op: "if",
               blockType: { kind: "val", type: { kind: "i32" } as ValType },
               then: [
                 ...errRef(),
-                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 } as Instr,
-                { op: "any.convert_extern" } as Instr,
-                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 2 },
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "call", funcIdx: strFlattenIdx },
                 ...nativeStringLiteralInstrs(ctx, "Error"),
-                { op: "call", funcIdx: strEqualsIdx } as Instr,
+                { op: "call", funcIdx: strEqualsIdx },
               ],
-              else: [{ op: "i32.const", value: 0 } as Instr],
-            } as Instr,
-            { op: "if", blockType: { kind: "empty" }, then: answerCarrier } as Instr,
+              else: [{ op: "i32.const", value: 0 }],
+            },
+            { op: "if", blockType: { kind: "empty" }, then: answerCarrier },
           ]
         : answerCarrier;
     ctorArms.push(
       ...errRef(),
-      { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 0 } as Instr,
-      { op: "i32.const", value: BUILTIN_TYPE_TAGS[name] } as Instr,
-      { op: "i32.eq" } as Instr,
-      { op: "if", blockType: { kind: "empty" }, then: guarded } as Instr,
+      { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: BUILTIN_TYPE_TAGS[name] },
+      { op: "i32.eq" },
+      { op: "if", blockType: { kind: "empty" }, then: guarded },
     );
   }
 
   // "is the $props read a miss?" — leaves an i32 on the stack.
   const propsMiss = (): Instr[] =>
     isNullishIdx !== undefined
-      ? [{ op: "local.get", index: scratchL } as Instr, { op: "call", funcIdx: isNullishIdx } as Instr]
-      : [{ op: "local.get", index: scratchL } as Instr, { op: "ref.is_null" } as Instr];
+      ? [
+          { op: "local.get", index: scratchL },
+          { op: "call", funcIdx: isNullishIdx },
+        ]
+      : [{ op: "local.get", index: scratchL }, { op: "ref.is_null" }];
 
   const arm: Instr[] = [
-    { op: "local.get", index: 0 } as Instr,
-    { op: "any.convert_extern" } as Instr,
-    { op: "local.tee", index: anyL } as Instr,
-    { op: "ref.test", typeIdx: errTypeIdx } as Instr,
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: anyL },
+    { op: "ref.test", typeIdx: errTypeIdx },
     {
       op: "if",
       blockType: { kind: "empty" },
@@ -395,42 +401,42 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
         // 1) $props sidecar first — subclass own fields / dynamic writes shadow
         //    the builtin surface (JS shadowing order).
         ...errRef(),
-        { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 5 } as Instr,
-        { op: "local.tee", index: scratchL } as Instr,
-        { op: "ref.is_null" } as Instr,
-        { op: "i32.eqz" } as Instr,
+        { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 5 },
+        { op: "local.tee", index: scratchL },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: scratchL } as Instr,
-            { op: "local.get", index: 1 } as Instr,
-            { op: "call", funcIdx: externGetIdx } as Instr, // recursive: $props IS a plain $Object
-            { op: "local.set", index: scratchL } as Instr,
+            { op: "local.get", index: scratchL },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: externGetIdx }, // recursive: $props IS a plain $Object
+            { op: "local.set", index: scratchL },
             ...propsMiss(),
-            { op: "i32.eqz" } as Instr,
+            { op: "i32.eqz" },
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [{ op: "local.get", index: scratchL } as Instr, { op: "return" } as Instr],
-            } as Instr,
+              then: [{ op: "local.get", index: scratchL }, { op: "return" }],
+            },
           ],
-        } as Instr,
+        },
         // 2) Named-key dispatch — string keys only. A Symbol / boxed-number key
         //    skips this block and falls through to the standard miss, exactly
         //    like today (no trap: the cast is guarded by the ref.test).
-        { op: "local.get", index: 1 } as Instr,
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
         {
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            { op: "local.get", index: 1 } as Instr,
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-            { op: "call", funcIdx: strFlattenIdx } as Instr,
-            { op: "local.set", index: fkeyL } as Instr,
+            { op: "local.get", index: 1 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+            { op: "call", funcIdx: strFlattenIdx },
+            { op: "local.set", index: fkeyL },
             ...fieldArm("message", 1),
             ...fieldArm("name", 2),
             ...fieldArm("stack", 3),
@@ -443,17 +449,17 @@ export function fillExternGetErrorProps(ctx: CodegenContext): void {
                 // keeps today's miss rather than answering the WRONG (parent)
                 // constructor.
                 ...errRef(),
-                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 4 } as Instr,
-                { op: "i32.const", value: -1 } as Instr,
-                { op: "i32.eq" } as Instr,
-                { op: "if", blockType: { kind: "empty" }, then: ctorArms } as Instr,
+                { op: "struct.get", typeIdx: errTypeIdx, fieldIdx: 4 },
+                { op: "i32.const", value: -1 },
+                { op: "i32.eq" },
+                { op: "if", blockType: { kind: "empty" }, then: ctorArms },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
         // No match → fall through to the original body → standard miss.
       ],
-    } as Instr,
+    },
   ];
 
   fn.body.splice(0, 0, ...arm);

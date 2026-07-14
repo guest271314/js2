@@ -87,9 +87,9 @@ export function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[]
 export function buildClosureRefTestArms(ctx: CodegenContext, anyLocalIdx: number, onMatch: Instr[]): Instr[] {
   const arms: Instr[] = [];
   for (const t of collectClosureBaseWrapperTypeIdxs(ctx)) {
-    arms.push({ op: "local.get", index: anyLocalIdx } as Instr);
-    arms.push({ op: "ref.test", typeIdx: t } as Instr);
-    arms.push({ op: "if", blockType: { kind: "empty" }, then: [...onMatch] } as Instr);
+    arms.push({ op: "local.get", index: anyLocalIdx });
+    arms.push({ op: "ref.test", typeIdx: t });
+    arms.push({ op: "if", blockType: { kind: "empty" }, then: [...onMatch] });
   }
   return arms;
 }

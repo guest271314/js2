@@ -35,9 +35,9 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3
 
 const i32: ValType = { kind: "i32" };
 
-const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+const get = (i: number): Instr => ({ op: "local.get", index: i });
+const set = (i: number): Instr => ({ op: "local.set", index: i });
+const c = (value: number): Instr => ({ op: "i32.const", value });
 
 const HI_LO = 0xd800; // leading (high) surrogate range [0xD800, 0xDBFF]
 const HI_HI = 0xdbff;
@@ -47,15 +47,7 @@ const REPLACEMENT = 0xfffd; // U+FFFD REPLACEMENT CHARACTER
 
 /** `(v >= lo) & (v <= hi)` on the i32 in local `L_V`, unsigned. */
 function inRange(vLocal: number, lo: number, hi: number): Instr[] {
-  return [
-    get(vLocal),
-    c(lo),
-    { op: "i32.ge_u" } as Instr,
-    get(vLocal),
-    c(hi),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
-  ];
+  return [get(vLocal), c(lo), { op: "i32.ge_u" }, get(vLocal), c(hi), { op: "i32.le_u" }, { op: "i32.and" }];
 }
 
 /**
@@ -90,7 +82,7 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
     const readData = (idxInstrs: Instr[]): Instr[] => [
       get(L_DATA),
       ...idxInstrs,
-      { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
     ];
 
     // `br`/`br_if` only appear at the loop-body top level (depth 0 = loop,
@@ -100,8 +92,8 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
       // if i >= end break
       get(L_I),
       get(L_END),
-      { op: "i32.ge_s" } as Instr,
-      { op: "br_if", depth: 1 } as Instr,
+      { op: "i32.ge_s" },
+      { op: "br_if", depth: 1 },
       // ch = data[i]
       ...readData([get(L_I)]),
       set(L_CH),
@@ -114,15 +106,15 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
           // (i + 1 < end) ?
           get(L_I),
           c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           get(L_END),
-          { op: "i32.lt_s" } as Instr,
+          { op: "i32.lt_s" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
               // ch2 = data[i+1]
-              ...readData([get(L_I), c(1), { op: "i32.add" } as Instr]),
+              ...readData([get(L_I), c(1), { op: "i32.add" }]),
               set(L_CH2),
               // isTrailingSurrogate(ch2) ?
               ...inRange(L_CH2, LO_LO, LO_HI),
@@ -131,10 +123,10 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
                 blockType: { kind: "empty" },
                 then: [], // valid pair
                 else: [c(1), set(L_VIOL)], // lone leading surrogate
-              } as unknown as Instr,
+              },
             ],
             else: [c(1), set(L_VIOL)], // leading surrogate with no following unit
-          } as unknown as Instr,
+          },
         ],
         else: [
           // not leading: a trailing surrogate here is lone
@@ -144,12 +136,12 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
             blockType: { kind: "empty" },
             then: [c(1), set(L_VIOL)],
             else: [],
-          } as unknown as Instr,
+          },
         ],
-      } as unknown as Instr,
+      },
       // if viol break
       get(L_VIOL),
-      { op: "br_if", depth: 1 } as Instr,
+      { op: "br_if", depth: 1 },
       // advance i by 2 for a valid surrogate pair, else 1
       get(L_I),
       c(2),
@@ -157,31 +149,31 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
       ...inRange(L_CH, HI_LO, HI_HI),
       get(L_I),
       c(1),
-      { op: "i32.add" } as Instr,
+      { op: "i32.add" },
       get(L_END),
-      { op: "i32.lt_s" } as Instr,
-      { op: "i32.and" } as Instr,
+      { op: "i32.lt_s" },
+      { op: "i32.and" },
       ...inRange(L_CH2, LO_LO, LO_HI),
-      { op: "i32.and" } as Instr,
-      { op: "select" } as Instr,
-      { op: "i32.add" } as Instr,
+      { op: "i32.and" },
+      { op: "select" },
+      { op: "i32.add" },
       set(L_I),
-      { op: "br", depth: 0 } as Instr,
+      { op: "br", depth: 0 },
     ];
 
     const bodyFinal: Instr[] = [
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       set(L_LEN),
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
       set(L_OFF),
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
       set(L_DATA),
       get(L_OFF),
       get(L_LEN),
-      { op: "i32.add" } as Instr,
+      { op: "i32.add" },
       set(L_END),
       get(L_OFF),
       set(L_I),
@@ -190,10 +182,10 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
       {
         op: "block",
         blockType: { kind: "empty" },
-        body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-      } as Instr,
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+      },
       get(L_VIOL),
-      { op: "i32.eqz" } as Instr,
+      { op: "i32.eqz" },
     ];
 
     pushDefinedFunc(ctx, funcIdx, {
@@ -235,22 +227,22 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
     const readData = (idxInstrs: Instr[]): Instr[] => [
       get(L_DATA),
       ...idxInstrs,
-      { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+      { op: "array.get_u", typeIdx: strDataTypeIdx },
     ];
     // out[nOffset] = value
     const writeOut = (nOffsetInstrs: Instr[], valueInstrs: Instr[]): Instr[] => [
       get(L_OUT),
       ...nOffsetInstrs,
       ...valueInstrs,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+      { op: "array.set", typeIdx: strDataTypeIdx },
     ];
 
     const loopBody: Instr[] = [
       // if i >= end break
       get(L_I),
       get(L_END),
-      { op: "i32.ge_s" } as Instr,
-      { op: "br_if", depth: 1 } as Instr,
+      { op: "i32.ge_s" },
+      { op: "br_if", depth: 1 },
       // ch = data[i]
       ...readData([get(L_I)]),
       set(L_CH),
@@ -263,15 +255,15 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
           // (i + 1 < end) ?
           get(L_I),
           c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           get(L_END),
-          { op: "i32.lt_s" } as Instr,
+          { op: "i32.lt_s" },
           {
             op: "if",
             blockType: { kind: "empty" },
             then: [
               // ch2 = data[i+1]
-              ...readData([get(L_I), c(1), { op: "i32.add" } as Instr]),
+              ...readData([get(L_I), c(1), { op: "i32.add" }]),
               set(L_CH2),
               // isTrailingSurrogate(ch2) ?
               ...inRange(L_CH2, LO_LO, LO_HI),
@@ -281,14 +273,14 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
                 then: [
                   // valid pair: out[n] = ch; out[n+1] = ch2; n += 2; i += 2
                   ...writeOut([get(L_N)], [get(L_CH)]),
-                  ...writeOut([get(L_N), c(1), { op: "i32.add" } as Instr], [get(L_CH2)]),
+                  ...writeOut([get(L_N), c(1), { op: "i32.add" }], [get(L_CH2)]),
                   get(L_N),
                   c(2),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   set(L_N),
                   get(L_I),
                   c(2),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   set(L_I),
                 ],
                 else: [
@@ -296,28 +288,28 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
                   ...writeOut([get(L_N)], [c(REPLACEMENT)]),
                   get(L_N),
                   c(1),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   set(L_N),
                   get(L_I),
                   c(1),
-                  { op: "i32.add" } as Instr,
+                  { op: "i32.add" },
                   set(L_I),
                 ],
-              } as unknown as Instr,
+              },
             ],
             else: [
               // leading surrogate at end: out[n] = U+FFFD; n += 1; i += 1
               ...writeOut([get(L_N)], [c(REPLACEMENT)]),
               get(L_N),
               c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               set(L_N),
               get(L_I),
               c(1),
-              { op: "i32.add" } as Instr,
+              { op: "i32.add" },
               set(L_I),
             ],
-          } as unknown as Instr,
+          },
         ],
         else: [
           // not leading. Trailing surrogate here is lone → U+FFFD; else verbatim.
@@ -327,53 +319,53 @@ export function emitNativeWellFormedHelpers(ctx: CodegenContext, strTypeIdx: num
             blockType: { kind: "empty" },
             then: [...writeOut([get(L_N)], [c(REPLACEMENT)])],
             else: [...writeOut([get(L_N)], [get(L_CH)])],
-          } as unknown as Instr,
+          },
           // n += 1; i += 1
           get(L_N),
           c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           set(L_N),
           get(L_I),
           c(1),
-          { op: "i32.add" } as Instr,
+          { op: "i32.add" },
           set(L_I),
         ],
-      } as unknown as Instr,
-      { op: "br", depth: 0 } as Instr,
+      },
+      { op: "br", depth: 0 },
     ];
 
     const body: Instr[] = [
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
       set(L_LEN),
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
       set(L_OFF),
       get(0),
-      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
       set(L_DATA),
       get(L_OFF),
       get(L_LEN),
-      { op: "i32.add" } as Instr,
+      { op: "i32.add" },
       set(L_END),
       get(L_OFF),
       set(L_I),
       // out = array.new_default $i16arr(len)  (same length — 1:1 substitution)
       get(L_LEN),
-      { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+      { op: "array.new_default", typeIdx: strDataTypeIdx },
       set(L_OUT),
       c(0),
       set(L_N),
       {
         op: "block",
         blockType: { kind: "empty" },
-        body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-      } as Instr,
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+      },
       // return struct.new $NativeString(len, off=0, out)
       get(L_LEN),
       c(0),
       get(L_OUT),
-      { op: "struct.new", typeIdx: strTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: strTypeIdx },
     ];
 
     pushDefinedFunc(ctx, funcIdx, {

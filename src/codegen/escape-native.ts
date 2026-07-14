@@ -35,9 +35,9 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3
 
 const i32: ValType = { kind: "i32" };
 
-const get = (i: number): Instr => ({ op: "local.get", index: i }) as Instr;
-const set = (i: number): Instr => ({ op: "local.set", index: i }) as Instr;
-const c = (value: number): Instr => ({ op: "i32.const", value }) as Instr;
+const get = (i: number): Instr => ({ op: "local.get", index: i });
+const set = (i: number): Instr => ({ op: "local.set", index: i });
+const c = (value: number): Instr => ({ op: "i32.const", value });
 
 /**
  * Map a nibble (0..15) on the stack to its ASCII uppercase hex code unit,
@@ -53,9 +53,9 @@ function hexDigit(vInstrs: Instr[]): Instr[] {
     c(55 /* 'A'-10 */),
     ...vInstrs, // [v, 48, 55, v]
     c(10),
-    { op: "i32.lt_u" } as Instr,
-    { op: "select" } as Instr, // [v, base]
-    { op: "i32.add" } as Instr, // [v + base]
+    { op: "i32.lt_u" },
+    { op: "select" }, // [v, base]
+    { op: "i32.add" }, // [v + base]
   ];
 }
 
@@ -90,77 +90,77 @@ export function emitNativeEscape(ctx: CodegenContext): void {
     get(L_OUT),
     get(L_N),
     ...chInstrs,
-    { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.set", typeIdx: strDataTypeIdx },
     get(L_N),
     c(1),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     set(L_N),
   ];
 
   // isUnescaped(L_C): A-Z a-z 0-9 @ * _ + - . /
-  const eqC = (code: number): Instr[] => [get(L_C), c(code), { op: "i32.eq" } as Instr];
+  const eqC = (code: number): Instr[] => [get(L_C), c(code), { op: "i32.eq" }];
   const rangeC = (lo: number, hi: number): Instr[] => [
     get(L_C),
     c(lo),
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     get(L_C),
     c(hi),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "i32.le_u" },
+    { op: "i32.and" },
   ];
   const isUnescaped: Instr[] = [
     ...rangeC(0x41, 0x5a), // A-Z
     ...rangeC(0x61, 0x7a), // a-z
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...rangeC(0x30, 0x39), // 0-9
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x40), // @
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2a), // *
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x5f), // _
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2b), // +
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2d), // -
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2e), // .
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     ...eqC(0x2f), // /
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
   ];
 
   const nibble = (shift: number): Instr[] => {
-    const src = shift === 0 ? [get(L_C)] : [get(L_C), c(shift), { op: "i32.shr_u" } as Instr];
-    return hexDigit([...src, c(0xf), { op: "i32.and" } as Instr]);
+    const src = shift === 0 ? [get(L_C)] : [get(L_C), c(shift), { op: "i32.shr_u" }];
+    return hexDigit([...src, c(0xf), { op: "i32.and" }]);
   };
 
   const body: Instr[] = [
     // flat = flatten(s); data = flat.data; i = flat.off; len = flat.off + flat.len
     get(P_S),
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
     set(L_FLAT),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     set(L_DATA),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     set(L_I),
     // len = off + flat.len
     get(L_I),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "i32.add" },
     set(L_LEN),
     // capacity = flat.len * 6 (worst case: code unit ≥ 256 → "%uWXYZ").
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
     c(6),
-    { op: "i32.mul" } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+    { op: "i32.mul" },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
     set(L_OUT),
     c(0),
     set(L_N),
@@ -176,12 +176,12 @@ export function emitNativeEscape(ctx: CodegenContext): void {
             // if i >= len break
             get(L_I),
             get(L_LEN),
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             // c = data[i]
             get(L_DATA),
             get(L_I),
-            { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
             set(L_C),
             ...isUnescaped,
             {
@@ -191,7 +191,7 @@ export function emitNativeEscape(ctx: CodegenContext): void {
               else: [
                 get(L_C),
                 c(256),
-                { op: "i32.ge_u" } as Instr,
+                { op: "i32.ge_u" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -210,15 +210,15 @@ export function emitNativeEscape(ctx: CodegenContext): void {
                     ...pushCh(nibble(4)),
                     ...pushCh(nibble(0)),
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
             // i++
             get(L_I),
             c(1),
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             set(L_I),
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -228,8 +228,8 @@ export function emitNativeEscape(ctx: CodegenContext): void {
     get(L_N),
     c(0),
     get(L_OUT),
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "extern.convert_any" },
   ];
 
   const idx = mintDefinedFunc(ctx);
@@ -286,19 +286,15 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
     get(L_OUT),
     get(L_N),
     get(L_C),
-    { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.set", typeIdx: strDataTypeIdx },
     get(L_N),
     c(1),
-    { op: "i32.add" } as Instr,
+    { op: "i32.add" },
     set(L_N),
   ];
 
-  const idxPlus = (n: number): Instr[] => (n === 0 ? [get(L_I)] : [get(L_I), c(n), { op: "i32.add" } as Instr]);
-  const readUnit = (n: number): Instr[] => [
-    get(L_DATA),
-    ...idxPlus(n),
-    { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
-  ];
+  const idxPlus = (n: number): Instr[] => (n === 0 ? [get(L_I)] : [get(L_I), c(n), { op: "i32.add" }]);
+  const readUnit = (n: number): Instr[] => [get(L_DATA), ...idxPlus(n), { op: "array.get_u", typeIdx: strDataTypeIdx }];
 
   // Read data[<idxInstrs>] into L_CH, then push its hex value (0..15) or -1 when
   // not a hex digit, computed purely on the stack from L_CH:
@@ -307,65 +303,65 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
   const nibbleOf = (idxInstrs: Instr[]): Instr[] => [
     get(L_DATA),
     ...idxInstrs,
-    { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
     set(L_CH),
     // digit value candidate: ch - 0x30
     get(L_CH),
     c(0x30),
-    { op: "i32.sub" } as Instr,
+    { op: "i32.sub" },
     // a-f value candidate: (ch|0x20) - 0x57
     get(L_CH),
     c(0x20),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     c(0x57),
-    { op: "i32.sub" } as Instr,
+    { op: "i32.sub" },
     c(-1),
     // afOk = (0x61 <= (ch|0x20) <= 0x66)
     get(L_CH),
     c(0x20),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     c(0x61),
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     get(L_CH),
     c(0x20),
-    { op: "i32.or" } as Instr,
+    { op: "i32.or" },
     c(0x66),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "select" } as Instr, // stack: [digitCand, (afOk ? afCand : -1)]
+    { op: "i32.le_u" },
+    { op: "i32.and" },
+    { op: "select" }, // stack: [digitCand, (afOk ? afCand : -1)]
     // digitOk = (0x30 <= ch <= 0x39)
     get(L_CH),
     c(0x30),
-    { op: "i32.ge_u" } as Instr,
+    { op: "i32.ge_u" },
     get(L_CH),
     c(0x39),
-    { op: "i32.le_u" } as Instr,
-    { op: "i32.and" } as Instr,
-    { op: "select" } as Instr, // digitOk ? digitCand : (afOk ? afCand : -1)
+    { op: "i32.le_u" },
+    { op: "i32.and" },
+    { op: "select" }, // digitOk ? digitCand : (afOk ? afCand : -1)
   ];
 
   const body: Instr[] = [
     get(P_S),
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-    { op: "call", funcIdx: flattenIdx } as Instr,
-    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
     set(L_FLAT),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
     set(L_DATA),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
     set(L_I),
     get(L_I),
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "i32.add" },
     set(L_LEN),
     // capacity = flat.len (output is never longer than input).
     get(L_FLAT),
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
     set(L_OUT),
     c(0),
     set(L_N),
@@ -380,15 +376,15 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
           body: [
             get(L_I),
             get(L_LEN),
-            { op: "i32.ge_s" } as Instr,
-            { op: "br_if", depth: 1 } as Instr,
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
             // c = data[i]
             ...readUnit(0),
             set(L_C),
             // if c == '%'
             get(L_C),
             c(0x25),
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -398,9 +394,9 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
                 // %uWXYZ attempt — guard: i+5 < len (⟺ k ≤ length-6)
                 get(L_I),
                 c(5),
-                { op: "i32.add" } as Instr,
+                { op: "i32.add" },
                 get(L_LEN),
-                { op: "i32.lt_s" } as Instr,
+                { op: "i32.lt_s" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -408,7 +404,7 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
                     // data[i+1] == 'u'
                     ...readUnit(1),
                     c(117 /* u */),
-                    { op: "i32.eq" } as Instr,
+                    { op: "i32.eq" },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
@@ -424,19 +420,19 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
                         // all four ≥ 0 ?
                         get(L_N2),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
+                        { op: "i32.ge_s" },
                         get(L_N3),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.ge_s" },
+                        { op: "i32.and" },
                         get(L_N4),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.ge_s" },
+                        { op: "i32.and" },
                         get(L_N5),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.ge_s" },
+                        { op: "i32.and" },
                         {
                           op: "if",
                           blockType: { kind: "empty" },
@@ -444,42 +440,42 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
                             // c = (n2<<12)|(n3<<8)|(n4<<4)|n5
                             get(L_N2),
                             c(12),
-                            { op: "i32.shl" } as Instr,
+                            { op: "i32.shl" },
                             get(L_N3),
                             c(8),
-                            { op: "i32.shl" } as Instr,
-                            { op: "i32.or" } as Instr,
+                            { op: "i32.shl" },
+                            { op: "i32.or" },
                             get(L_N4),
                             c(4),
-                            { op: "i32.shl" } as Instr,
-                            { op: "i32.or" } as Instr,
+                            { op: "i32.shl" },
+                            { op: "i32.or" },
                             get(L_N5),
-                            { op: "i32.or" } as Instr,
+                            { op: "i32.or" },
                             set(L_C),
                             get(L_I),
                             c(5),
-                            { op: "i32.add" } as Instr,
+                            { op: "i32.add" },
                             set(L_I),
                             c(1),
                             set(L_DONE),
                           ],
-                        } as Instr,
+                        },
                       ],
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
+                },
                 // %XY attempt (only if not already decoded) — guard: i+2 < len
                 get(L_DONE),
-                { op: "i32.eqz" } as Instr,
+                { op: "i32.eqz" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
                     get(L_I),
                     c(2),
-                    { op: "i32.add" } as Instr,
+                    { op: "i32.add" },
                     get(L_LEN),
-                    { op: "i32.lt_s" } as Instr,
+                    { op: "i32.lt_s" },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
@@ -490,40 +486,40 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
                         set(L_N3),
                         get(L_N2),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
+                        { op: "i32.ge_s" },
                         get(L_N3),
                         c(0),
-                        { op: "i32.ge_s" } as Instr,
-                        { op: "i32.and" } as Instr,
+                        { op: "i32.ge_s" },
+                        { op: "i32.and" },
                         {
                           op: "if",
                           blockType: { kind: "empty" },
                           then: [
                             get(L_N2),
                             c(4),
-                            { op: "i32.shl" } as Instr,
+                            { op: "i32.shl" },
                             get(L_N3),
-                            { op: "i32.or" } as Instr,
+                            { op: "i32.or" },
                             set(L_C),
                             get(L_I),
                             c(2),
-                            { op: "i32.add" } as Instr,
+                            { op: "i32.add" },
                             set(L_I),
                           ],
-                        } as Instr,
+                        },
                       ],
-                    } as Instr,
+                    },
                   ],
-                } as Instr,
+                },
               ],
-            } as Instr,
+            },
             // out[n++] = c ; i++
             ...pushC,
             get(L_I),
             c(1),
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             set(L_I),
-            { op: "br", depth: 0 } as Instr,
+            { op: "br", depth: 0 },
           ],
         },
       ],
@@ -532,8 +528,8 @@ export function emitNativeUnescape(ctx: CodegenContext): void {
     get(L_N),
     c(0),
     get(L_OUT),
-    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
-    { op: "extern.convert_any" } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "extern.convert_any" },
   ];
 
   const idx = mintDefinedFunc(ctx);

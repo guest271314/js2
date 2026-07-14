@@ -427,21 +427,21 @@ export function ensureMicrotaskQueue(ctx: CodegenContext): void {
     name: "__mt_funcs",
     type: { kind: "ref_null", typeIdx: funcArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: funcArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: funcArrIdx }],
   });
   state.microtaskCapsGlobalIdx = baseGlobalIdx + 4;
   ctx.mod.globals.push({
     name: "__mt_caps",
     type: { kind: "ref_null", typeIdx: argsArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: argsArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: argsArrIdx }],
   });
   state.microtaskArgsGlobalIdx = baseGlobalIdx + 5;
   ctx.mod.globals.push({
     name: "__mt_args",
     type: { kind: "ref_null", typeIdx: argsArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: argsArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: argsArrIdx }],
   });
 
   // 3. Helper function bodies. Index assignment matches push order — keep
@@ -508,49 +508,49 @@ function buildGrowBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrId
 
   return [
     // Snapshot the old state.
-    { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskFuncsGlobalIdx },
     { op: "local.set", index: oldFuncs },
-    { op: "global.get", index: state.microtaskCapsGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskCapsGlobalIdx },
     { op: "local.set", index: oldCaps },
-    { op: "global.get", index: state.microtaskArgsGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskArgsGlobalIdx },
     { op: "local.set", index: oldArgs },
-    { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskHeadGlobalIdx },
     { op: "local.set", index: oldHead },
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
     { op: "local.set", index: oldTail },
 
     // Allocate the new arrays with init = ref.null.
     // funcs: array.new (default=null funcref) of $newCap.
-    { op: "ref.null.func" } as Instr,
+    { op: "ref.null.func" },
     { op: "local.get", index: newCapLocal },
     { op: "array.new", typeIdx: funcArrIdx },
-    { op: "global.set", index: state.microtaskFuncsGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskFuncsGlobalIdx },
 
     { op: "ref.null.extern" },
     { op: "local.get", index: newCapLocal },
     { op: "array.new", typeIdx: argsArrIdx },
-    { op: "global.set", index: state.microtaskCapsGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskCapsGlobalIdx },
 
     { op: "ref.null.extern" },
     { op: "local.get", index: newCapLocal },
     { op: "array.new", typeIdx: argsArrIdx },
-    { op: "global.set", index: state.microtaskArgsGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskArgsGlobalIdx },
 
     // If oldFuncs is null, no live entries to copy. Just reset head/tail
     // pointers and capacity, then return.
     { op: "local.get", index: oldFuncs },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
         { op: "i32.const", value: 0 },
-        { op: "global.set", index: state.microtaskHeadGlobalIdx } as Instr,
+        { op: "global.set", index: state.microtaskHeadGlobalIdx },
         { op: "i32.const", value: 0 },
-        { op: "global.set", index: state.microtaskTailGlobalIdx } as Instr,
+        { op: "global.set", index: state.microtaskTailGlobalIdx },
         { op: "local.get", index: newCapLocal },
-        { op: "global.set", index: state.microtaskCapGlobalIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "global.set", index: state.microtaskCapGlobalIdx },
+        { op: "return" },
       ],
     },
 
@@ -569,33 +569,33 @@ function buildGrowBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrId
           body: [
             { op: "local.get", index: i },
             { op: "local.get", index: oldTail },
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             // depth 1: exit the enclosing block (skip the loop label).
             { op: "br_if", depth: 1 },
 
             // funcs[dst] = oldFuncs[i]
-            { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskFuncsGlobalIdx },
             { op: "local.get", index: dst },
             { op: "local.get", index: oldFuncs },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: funcArrIdx },
             { op: "array.set", typeIdx: funcArrIdx },
 
             // caps[dst] = oldCaps[i]
-            { op: "global.get", index: state.microtaskCapsGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskCapsGlobalIdx },
             { op: "local.get", index: dst },
             { op: "local.get", index: oldCaps },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: argsArrIdx },
             { op: "array.set", typeIdx: argsArrIdx },
 
             // args[dst] = oldArgs[i]
-            { op: "global.get", index: state.microtaskArgsGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskArgsGlobalIdx },
             { op: "local.get", index: dst },
             { op: "local.get", index: oldArgs },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: argsArrIdx },
             { op: "array.set", typeIdx: argsArrIdx },
@@ -603,11 +603,11 @@ function buildGrowBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrId
             // i++, dst++
             { op: "local.get", index: i },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: i },
             { op: "local.get", index: dst },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: dst },
             // depth 0: re-enter the loop label.
             { op: "br", depth: 0 },
@@ -618,11 +618,11 @@ function buildGrowBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrId
 
     // Finalise head/tail/cap.
     { op: "i32.const", value: 0 },
-    { op: "global.set", index: state.microtaskHeadGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskHeadGlobalIdx },
     { op: "local.get", index: dst },
-    { op: "global.set", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskTailGlobalIdx },
     { op: "local.get", index: newCapLocal },
-    { op: "global.set", index: state.microtaskCapGlobalIdx } as Instr,
+    { op: "global.set", index: state.microtaskCapGlobalIdx },
   ];
 }
 
@@ -633,8 +633,8 @@ function buildEnqueueBody(state: AsyncSchedulerState, funcArrIdx: number, argsAr
 
   return [
     // Lazy first-allocate. Test `funcs` against null.
-    { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.microtaskFuncsGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
@@ -645,44 +645,44 @@ function buildEnqueueBody(state: AsyncSchedulerState, funcArrIdx: number, argsAr
     },
 
     // If tail == cap, double the queue.
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
-    { op: "global.get", index: state.microtaskCapGlobalIdx } as Instr,
-    { op: "i32.eq" } as Instr,
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
+    { op: "global.get", index: state.microtaskCapGlobalIdx },
+    { op: "i32.eq" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
-        { op: "global.get", index: state.microtaskCapGlobalIdx } as Instr,
+        { op: "global.get", index: state.microtaskCapGlobalIdx },
         { op: "i32.const", value: 1 },
-        { op: "i32.shl" } as Instr,
+        { op: "i32.shl" },
         { op: "call", funcIdx: state.growFuncIdx },
       ],
     },
 
     // Store fn, caps, arg at index `tail`.
-    { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskFuncsGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
     { op: "local.get", index: fnLocal },
     { op: "array.set", typeIdx: funcArrIdx },
 
-    { op: "global.get", index: state.microtaskCapsGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskCapsGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
     { op: "local.get", index: capsLocal },
     { op: "array.set", typeIdx: argsArrIdx },
 
-    { op: "global.get", index: state.microtaskArgsGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskArgsGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
     { op: "local.get", index: argLocal },
     { op: "array.set", typeIdx: argsArrIdx },
 
     // tail++
-    { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "global.get", index: state.microtaskTailGlobalIdx },
     { op: "i32.const", value: 1 },
-    { op: "i32.add" } as Instr,
-    { op: "global.set", index: state.microtaskTailGlobalIdx } as Instr,
+    { op: "i32.add" },
+    { op: "global.set", index: state.microtaskTailGlobalIdx },
   ];
 }
 
@@ -702,12 +702,12 @@ function buildDrainBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrI
   return [
     // If the queue was never used (`funcs` global null), there's nothing
     // to drain. Early-return to avoid `ref.as_non_null` on a null ref.
-    { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.microtaskFuncsGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "return" } as Instr],
+      then: [{ op: "return" }],
     },
 
     {
@@ -719,37 +719,37 @@ function buildDrainBody(state: AsyncSchedulerState, funcArrIdx: number, argsArrI
           blockType: { kind: "empty" },
           body: [
             // Done when head == tail.
-            { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
-            { op: "global.get", index: state.microtaskTailGlobalIdx } as Instr,
-            { op: "i32.eq" } as Instr,
+            { op: "global.get", index: state.microtaskHeadGlobalIdx },
+            { op: "global.get", index: state.microtaskTailGlobalIdx },
+            { op: "i32.eq" },
             // depth 1: exit the enclosing block (skip the loop label).
             { op: "br_if", depth: 1 },
 
             // Read fn, caps, arg at head.
-            { op: "global.get", index: state.microtaskFuncsGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskFuncsGlobalIdx },
+            { op: "ref.as_non_null" },
+            { op: "global.get", index: state.microtaskHeadGlobalIdx },
             { op: "array.get", typeIdx: funcArrIdx },
             { op: "local.set", index: fnLocal },
 
-            { op: "global.get", index: state.microtaskCapsGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskCapsGlobalIdx },
+            { op: "ref.as_non_null" },
+            { op: "global.get", index: state.microtaskHeadGlobalIdx },
             { op: "array.get", typeIdx: argsArrIdx },
             { op: "local.set", index: capsLocal },
 
-            { op: "global.get", index: state.microtaskArgsGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
-            { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskArgsGlobalIdx },
+            { op: "ref.as_non_null" },
+            { op: "global.get", index: state.microtaskHeadGlobalIdx },
             { op: "array.get", typeIdx: argsArrIdx },
             { op: "local.set", index: argLocal },
 
             // head++ (advance BEFORE the call so a callback that enqueues
             // more entries doesn't have to worry about an unconsumed slot).
-            { op: "global.get", index: state.microtaskHeadGlobalIdx } as Instr,
+            { op: "global.get", index: state.microtaskHeadGlobalIdx },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
-            { op: "global.set", index: state.microtaskHeadGlobalIdx } as Instr,
+            { op: "i32.add" },
+            { op: "global.set", index: state.microtaskHeadGlobalIdx },
 
             // call_ref fn(caps, arg) — push args then the funcref, then
             // ref.cast to a non-null `(ref $__mt_func_type)` because
@@ -1070,7 +1070,7 @@ function ensurePromiseThenableSubstrate(
     name: "__promise_has_callable_then",
     typeIdx: hasThenTypeIdx,
     locals: [],
-    body: [{ op: "i32.const", value: 0 } as Instr],
+    body: [{ op: "i32.const", value: 0 }],
     exported: false,
   });
   ctx.funcMap.set("__promise_has_callable_then", hasCallableThenFuncIdx);
@@ -1084,7 +1084,7 @@ function ensurePromiseThenableSubstrate(
     name: "__promise_peel_value",
     typeIdx: peelTypeIdx,
     locals: [],
-    body: [{ op: "local.get", index: 0 } as Instr],
+    body: [{ op: "local.get", index: 0 }],
     exported: false,
   });
   ctx.funcMap.set("__promise_peel_value", peelValueFuncIdx);
@@ -1105,8 +1105,8 @@ function ensurePromiseThenableSubstrate(
   const emitSettleCap = (clFuncIdx: number): Instr[] => [
     { op: "ref.func", funcIdx: clFuncIdx },
     { op: "local.get", index: promiseLocal },
-    { op: "ref.as_non_null" } as Instr,
-    { op: "struct.new", typeIdx: execClosures.capTypeIdx } as Instr,
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: execClosures.capTypeIdx },
     { op: "extern.convert_any" },
   ];
   const jobTryBody: Instr[] = [
@@ -1137,8 +1137,8 @@ function ensurePromiseThenableSubstrate(
     body: [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: capsTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "ref.cast", typeIdx: capsTypeIdx },
+      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
       { op: "local.set", index: promiseLocal },
       {
         op: "try",
@@ -1153,14 +1153,14 @@ function ensurePromiseThenableSubstrate(
               // are no-ops via the one-shot settle guard.
               { op: "local.set", index: reasonLocal },
               { op: "local.get", index: promiseLocal },
-              { op: "ref.as_non_null" } as Instr,
+              { op: "ref.as_non_null" },
               { op: "local.get", index: reasonLocal },
               { op: "call", funcIdx: state.promiseRejectFuncIdx },
               { op: "drop" },
             ],
           },
         ],
-      } as Instr,
+      },
       { op: "ref.null.extern" },
     ],
     exported: false,
@@ -1211,7 +1211,7 @@ function buildPromiseSettleBody(
       op: "if",
       blockType: { kind: "empty" },
       then: [{ op: "local.get", index: valueLocal }, { op: "return" }],
-    } as Instr,
+    },
 
     // promise.state = fulfilled/rejected; promise.value = value
     { op: "local.get", index: promiseLocal },
@@ -1261,7 +1261,7 @@ function buildPromiseSettleBody(
           ],
         },
       ],
-    } as Instr,
+    },
 
     { op: "local.get", index: valueLocal },
   ];
@@ -1374,7 +1374,7 @@ function buildPromiseResolveValueBody(
                 ],
               },
             ],
-          } as Instr,
+          },
           { op: "local.get", index: poisonedLocal },
           {
             op: "if",
@@ -1398,7 +1398,7 @@ function buildPromiseResolveValueBody(
                   { op: "ref.func", funcIdx: thenable.thenableJobFuncIdx },
                   { op: "ref.null.extern" },
                   { op: "local.get", index: promiseLocal },
-                  { op: "struct.new", typeIdx: capsTypeIdx } as Instr,
+                  { op: "struct.new", typeIdx: capsTypeIdx },
                   { op: "extern.convert_any" },
                   { op: "local.get", index: valueLocal },
                   { op: "call", funcIdx: state.enqueueFuncIdx },
@@ -1410,9 +1410,9 @@ function buildPromiseResolveValueBody(
                   { op: "local.get", index: valueLocal },
                   { op: "call", funcIdx: state.promiseFulfillFuncIdx },
                 ],
-              } as Instr,
+              },
             ],
-          } as Instr,
+          },
         ];
 
   // (#3125) Step 6 — SameValue(resolution, promise): a promise resolved with
@@ -1432,14 +1432,14 @@ function buildPromiseResolveValueBody(
             blockType: { kind: "empty" },
             then: [
               { op: "local.get", index: promiseLocal },
-              ...(stringConstantExternrefInstrs(ctx, thenable.selfResolutionMsg) as Instr[]),
+              ...stringConstantExternrefInstrs(ctx, thenable.selfResolutionMsg),
               { op: "call", funcIdx: thenable.newTypeErrorFuncIdx },
               { op: "call", funcIdx: state.promiseRejectFuncIdx },
               { op: "drop" },
               { op: "local.get", index: valueLocal },
               { op: "return" },
             ],
-          } as Instr,
+          },
         ];
 
   // (#3125) Classify the PEELED resolution: an `any`-typed value arrives as an
@@ -1464,7 +1464,7 @@ function buildPromiseResolveValueBody(
     ...peelPrelude,
     { op: "local.get", index: peeledLocal },
     { op: "any.convert_extern" },
-    { op: "ref.test", typeIdx: promiseTypeIdx } as Instr,
+    { op: "ref.test", typeIdx: promiseTypeIdx },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
@@ -1472,13 +1472,13 @@ function buildPromiseResolveValueBody(
         // inner = (ref $Promise) peeled
         { op: "local.get", index: peeledLocal },
         { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
+        { op: "ref.cast", typeIdx: promiseTypeIdx },
         { op: "local.set", index: innerLocal },
         ...selfCheck,
         // caps = $__then_caps{ callback: null, chained: promise }
         { op: "ref.null.extern" },
         { op: "local.get", index: promiseLocal },
-        { op: "struct.new", typeIdx: capsTypeIdx } as Instr,
+        { op: "struct.new", typeIdx: capsTypeIdx },
         { op: "extern.convert_any" },
         { op: "local.set", index: capsLocal },
         // dispatch on inner.state
@@ -1522,18 +1522,18 @@ function buildPromiseResolveValueBody(
                 { op: "local.get", index: capsLocal },
                 { op: "local.get", index: innerLocal },
                 { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 },
-                { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+                { op: "struct.new", typeIdx: callbackTypeIdx },
                 { op: "extern.convert_any" },
-                { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+                { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 },
               ],
-            } as Instr,
+            },
           ],
-        } as Instr,
+        },
         // result (unused by the microtask drain, but the type must be externref)
         { op: "local.get", index: valueLocal },
       ],
       else: nonPromiseArm,
-    } as Instr,
+    },
   ];
 }
 
@@ -1562,13 +1562,13 @@ function pushDefaultForType(body: Instr[], type: ValType): void {
       body.push({ op: "ref.null.extern" });
       return;
     case "ref":
-      body.push({ op: "ref.null", typeIdx: type.typeIdx }, { op: "ref.as_non_null" } as Instr);
+      body.push({ op: "ref.null", typeIdx: type.typeIdx }, { op: "ref.as_non_null" });
       return;
     case "ref_null":
       body.push({ op: "ref.null", typeIdx: type.typeIdx });
       return;
     case "funcref":
-      body.push({ op: "ref.null.func" } as Instr);
+      body.push({ op: "ref.null.func" });
       return;
     default:
       body.push({ op: "ref.null.extern" });
@@ -1610,10 +1610,10 @@ function pushExternrefLocalAsType(ctx: CodegenContext, body: Instr[], valueLocal
       return;
     }
     case "ref":
-      body.push({ op: "any.convert_extern" }, { op: "ref.cast", typeIdx: type.typeIdx } as Instr);
+      body.push({ op: "any.convert_extern" }, { op: "ref.cast", typeIdx: type.typeIdx });
       return;
     case "ref_null":
-      body.push({ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: type.typeIdx } as Instr);
+      body.push({ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: type.typeIdx });
       return;
     default:
       body.push({ op: "drop" });
@@ -1727,15 +1727,15 @@ function emitThenWrapperFunction(
   }
   tryBody.push(
     { op: "local.get", index: callbackLocal },
-    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 },
+    { op: "ref.cast", typeIdx: info.funcTypeIdx },
     { op: "call_ref", typeIdx: info.funcTypeIdx },
   );
   coerceStackValueToExternref(ctx, tryBody, info.returnType);
   tryBody.push(
     { op: "local.set", index: resultLocal },
     { op: "local.get", index: capLocal },
-    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: resultLocal },
     { op: "call", funcIdx: settleFuncIdx },
     { op: "drop" }, // settle returns the value; the drain ignores the wrapper result
@@ -1751,14 +1751,14 @@ function emitThenWrapperFunction(
         body: [
           { op: "local.set", index: reasonLocal },
           { op: "local.get", index: capLocal },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: reasonLocal },
           { op: "call", funcIdx: state.promiseRejectFuncIdx },
           { op: "drop" },
         ],
       },
     ],
-  } as Instr);
+  });
   // Wrapper result (externref) — dropped by the drain; always null now.
   body.push({ op: "ref.null.extern" });
 
@@ -1999,35 +1999,35 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
     name: "__timer_deadlines",
     type: { kind: "ref_null", typeIdx: i64ArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: i64ArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: i64ArrIdx }],
   });
   state.timerCallbacksGlobalIdx = baseGlobalIdx + 3;
   ctx.mod.globals.push({
     name: "__timer_callbacks",
     type: { kind: "ref_null", typeIdx: funcArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: funcArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: funcArrIdx }],
   });
   state.timerCapturesGlobalIdx = baseGlobalIdx + 4;
   ctx.mod.globals.push({
     name: "__timer_captures",
     type: { kind: "ref_null", typeIdx: externArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: externArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: externArrIdx }],
   });
   state.timerIntervalsGlobalIdx = baseGlobalIdx + 5;
   ctx.mod.globals.push({
     name: "__timer_intervals",
     type: { kind: "ref_null", typeIdx: i64ArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: i64ArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: i64ArrIdx }],
   });
   state.timerCancelledGlobalIdx = baseGlobalIdx + 6;
   ctx.mod.globals.push({
     name: "__timer_cancelled",
     type: { kind: "ref_null", typeIdx: i32ArrIdx },
     mutable: true,
-    init: [{ op: "ref.null", typeIdx: i32ArrIdx } as Instr],
+    init: [{ op: "ref.null", typeIdx: i32ArrIdx }],
   });
 
   // #2632 Phase 2 — fd-readiness reactor globals. Registered ONLY when the
@@ -2074,14 +2074,14 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
       name: "__stdin_reader_hook",
       type: { kind: "ref_null", typeIdx: mtFuncTypeIdx },
       mutable: true,
-      init: [{ op: "ref.null", typeIdx: mtFuncTypeIdx } as Instr],
+      init: [{ op: "ref.null", typeIdx: mtFuncTypeIdx }],
     });
     state.stdinReaderCapGlobalIdx = rlBase + 5;
     ctx.mod.globals.push({
       name: "__stdin_reader_cap",
       type: { kind: "externref" },
       mutable: true,
-      init: [{ op: "ref.null.extern" } as Instr],
+      init: [{ op: "ref.null.extern" }],
     });
   }
 
@@ -2236,55 +2236,55 @@ function buildTimerGrowBody(
 
   return [
     // Snapshot old arrays + count.
-    { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerDeadlinesGlobalIdx },
     { op: "local.set", index: oldDl },
-    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCallbacksGlobalIdx },
     { op: "local.set", index: oldCb },
-    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCapturesGlobalIdx },
     { op: "local.set", index: oldCap },
-    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerIntervalsGlobalIdx },
     { op: "local.set", index: oldIv },
-    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCancelledGlobalIdx },
     { op: "local.set", index: oldCn },
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "local.set", index: count },
 
     // Allocate new arrays of $newCap (default-initialised).
     { op: "i64.const", value: 0n },
     { op: "local.get", index: newCap },
     { op: "array.new", typeIdx: i64ArrIdx },
-    { op: "global.set", index: state.timerDeadlinesGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerDeadlinesGlobalIdx },
 
-    { op: "ref.null.func" } as Instr,
+    { op: "ref.null.func" },
     { op: "local.get", index: newCap },
     { op: "array.new", typeIdx: funcArrIdx },
-    { op: "global.set", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerCallbacksGlobalIdx },
 
     { op: "ref.null.extern" },
     { op: "local.get", index: newCap },
     { op: "array.new", typeIdx: externArrIdx },
-    { op: "global.set", index: state.timerCapturesGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerCapturesGlobalIdx },
 
     { op: "i64.const", value: 0n },
     { op: "local.get", index: newCap },
     { op: "array.new", typeIdx: i64ArrIdx },
-    { op: "global.set", index: state.timerIntervalsGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerIntervalsGlobalIdx },
 
     { op: "i32.const", value: 0 },
     { op: "local.get", index: newCap },
     { op: "array.new", typeIdx: i32ArrIdx },
-    { op: "global.set", index: state.timerCancelledGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerCancelledGlobalIdx },
 
     // If oldDeadlines null → nothing to copy; set cap and return.
     { op: "local.get", index: oldDl },
-    { op: "ref.is_null" } as Instr,
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
         { op: "local.get", index: newCap },
-        { op: "global.set", index: state.timerCapGlobalIdx } as Instr,
-        { op: "return" } as Instr,
+        { op: "global.set", index: state.timerCapGlobalIdx },
+        { op: "return" },
       ],
     },
 
@@ -2302,62 +2302,62 @@ function buildTimerGrowBody(
           body: [
             { op: "local.get", index: i },
             { op: "local.get", index: count },
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             { op: "br_if", depth: 1 },
 
             // deadlines[i] = old
-            { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerDeadlinesGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "local.get", index: oldDl },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: i64ArrIdx },
             { op: "array.set", typeIdx: i64ArrIdx },
 
             // callbacks[i] = old
-            { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerCallbacksGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "local.get", index: oldCb },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: funcArrIdx },
             { op: "array.set", typeIdx: funcArrIdx },
 
             // captures[i] = old
-            { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerCapturesGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "local.get", index: oldCap },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: externArrIdx },
             { op: "array.set", typeIdx: externArrIdx },
 
             // intervals[i] = old
-            { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerIntervalsGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "local.get", index: oldIv },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: i64ArrIdx },
             { op: "array.set", typeIdx: i64ArrIdx },
 
             // cancelled[i] = old
-            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerCancelledGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "local.get", index: oldCn },
-            { op: "ref.as_non_null" } as Instr,
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: i32ArrIdx },
             { op: "array.set", typeIdx: i32ArrIdx },
 
             { op: "local.get", index: i },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: i },
             { op: "br", depth: 0 },
           ],
@@ -2366,7 +2366,7 @@ function buildTimerGrowBody(
     },
 
     { op: "local.get", index: newCap },
-    { op: "global.set", index: state.timerCapGlobalIdx } as Instr,
+    { op: "global.set", index: state.timerCapGlobalIdx },
   ];
 }
 
@@ -2386,8 +2386,8 @@ function buildTimerAddBody(
 
   return [
     // Lazy first-allocate when callbacks global is null.
-    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.timerCallbacksGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
@@ -2397,53 +2397,53 @@ function buildTimerAddBody(
       ],
     },
     // If count == cap, double.
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
-    { op: "global.get", index: state.timerCapGlobalIdx } as Instr,
-    { op: "i32.eq" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx },
+    { op: "global.get", index: state.timerCapGlobalIdx },
+    { op: "i32.eq" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
-        { op: "global.get", index: state.timerCapGlobalIdx } as Instr,
+        { op: "global.get", index: state.timerCapGlobalIdx },
         { op: "i32.const", value: 1 },
-        { op: "i32.shl" } as Instr,
+        { op: "i32.shl" },
         { op: "call", funcIdx: growIdx },
       ],
     },
 
     // slot = count; write fields.
-    { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerDeadlinesGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "local.get", index: deadline },
     { op: "array.set", typeIdx: i64ArrIdx },
 
-    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCallbacksGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "local.get", index: cb },
     { op: "array.set", typeIdx: funcArrIdx },
 
-    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCapturesGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "local.get", index: cap },
     { op: "array.set", typeIdx: externArrIdx },
 
-    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerIntervalsGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "local.get", index: interval },
     { op: "array.set", typeIdx: i64ArrIdx },
 
     // cancelled[slot] is already 0 from array.new default.
 
     // id = count; count++; return id.
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx },
+    { op: "global.get", index: state.timerCountGlobalIdx },
     { op: "i32.const", value: 1 },
-    { op: "i32.add" } as Instr,
-    { op: "global.set", index: state.timerCountGlobalIdx } as Instr,
+    { op: "i32.add" },
+    { op: "global.set", index: state.timerCountGlobalIdx },
     // (id left on stack as result)
   ];
 }
@@ -2452,32 +2452,32 @@ function buildTimerCancelBody(state: AsyncSchedulerState, i32ArrIdx: number): In
   // Param 0 = id (i32). Lazy delete: bounds-check then set cancelled[id]=1.
   const id = 0;
   return [
-    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.timerCancelledGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "return" } as Instr],
+      then: [{ op: "return" }],
     },
     // if id < 0 || id >= count: return
     { op: "local.get", index: id },
     { op: "i32.const", value: 0 },
-    { op: "i32.lt_s" } as Instr,
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "return" } as Instr],
+      then: [{ op: "return" }],
     },
     { op: "local.get", index: id },
-    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
-    { op: "i32.ge_s" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx },
+    { op: "i32.ge_s" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "return" } as Instr],
+      then: [{ op: "return" }],
     },
-    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-    { op: "ref.as_non_null" } as Instr,
+    { op: "global.get", index: state.timerCancelledGlobalIdx },
+    { op: "ref.as_non_null" },
     { op: "local.get", index: id },
     { op: "i32.const", value: 1 },
     { op: "array.set", typeIdx: i32ArrIdx },
@@ -2504,12 +2504,12 @@ function buildTimerPeekBody(state: AsyncSchedulerState, i64ArrIdx: number, i32Ar
   return [
     { op: "i64.const", value: I64_MAX },
     { op: "local.set", index: best },
-    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.timerCallbacksGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "local.get", index: best }, { op: "return" } as Instr],
+      then: [{ op: "local.get", index: best }, { op: "return" }],
     },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: i },
@@ -2522,30 +2522,30 @@ function buildTimerPeekBody(state: AsyncSchedulerState, i64ArrIdx: number, i32Ar
           blockType: { kind: "empty" },
           body: [
             { op: "local.get", index: i },
-            { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
-            { op: "i32.ge_s" } as Instr,
+            { op: "global.get", index: state.timerCountGlobalIdx },
+            { op: "i32.ge_s" },
             { op: "br_if", depth: 1 },
 
             // skip if cancelled[i] != 0
-            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerCancelledGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: i32ArrIdx },
-            { op: "i32.eqz" } as Instr,
+            { op: "i32.eqz" },
             {
               op: "if",
               blockType: { kind: "empty" } as any,
               then: [
                 // d = deadlines[i]
-                { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
-                { op: "ref.as_non_null" } as Instr,
+                { op: "global.get", index: state.timerDeadlinesGlobalIdx },
+                { op: "ref.as_non_null" },
                 { op: "local.get", index: i },
                 { op: "array.get", typeIdx: i64ArrIdx },
                 { op: "local.set", index: d },
                 // if d < best: best = d
                 { op: "local.get", index: d },
                 { op: "local.get", index: best },
-                { op: "i64.lt_s" } as Instr,
+                { op: "i64.lt_s" },
                 {
                   op: "if",
                   blockType: { kind: "empty" } as any,
@@ -2559,7 +2559,7 @@ function buildTimerPeekBody(state: AsyncSchedulerState, i64ArrIdx: number, i32Ar
 
             { op: "local.get", index: i },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: i },
             { op: "br", depth: 0 },
           ],
@@ -2606,12 +2606,12 @@ function buildTimerFireBody(
   const dl = 5;
 
   return [
-    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-    { op: "ref.is_null" } as Instr,
+    { op: "global.get", index: state.timerCallbacksGlobalIdx },
+    { op: "ref.is_null" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "return" } as Instr],
+      then: [{ op: "return" }],
     },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: i },
@@ -2624,37 +2624,37 @@ function buildTimerFireBody(
           blockType: { kind: "empty" },
           body: [
             { op: "local.get", index: i },
-            { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
-            { op: "i32.ge_s" } as Instr,
+            { op: "global.get", index: state.timerCountGlobalIdx },
+            { op: "i32.ge_s" },
             { op: "br_if", depth: 1 },
 
             // live = cancelled[i] == 0
-            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-            { op: "ref.as_non_null" } as Instr,
+            { op: "global.get", index: state.timerCancelledGlobalIdx },
+            { op: "ref.as_non_null" },
             { op: "local.get", index: i },
             { op: "array.get", typeIdx: i32ArrIdx },
-            { op: "i32.eqz" } as Instr,
+            { op: "i32.eqz" },
             {
               op: "if",
               blockType: { kind: "empty" } as any,
               then: [
                 // dl = deadlines[i]
-                { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
-                { op: "ref.as_non_null" } as Instr,
+                { op: "global.get", index: state.timerDeadlinesGlobalIdx },
+                { op: "ref.as_non_null" },
                 { op: "local.get", index: i },
                 { op: "array.get", typeIdx: i64ArrIdx },
                 { op: "local.set", index: dl },
                 // due = dl <= now
                 { op: "local.get", index: dl },
                 { op: "local.get", index: nowNs },
-                { op: "i64.le_s" } as Instr,
+                { op: "i64.le_s" },
                 {
                   op: "if",
                   blockType: { kind: "empty" } as any,
                   then: [
                     // iv = intervals[i]
-                    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
-                    { op: "ref.as_non_null" } as Instr,
+                    { op: "global.get", index: state.timerIntervalsGlobalIdx },
+                    { op: "ref.as_non_null" },
                     { op: "local.get", index: i },
                     { op: "array.get", typeIdx: i64ArrIdx },
                     { op: "local.set", index: iv },
@@ -2664,25 +2664,25 @@ function buildTimerFireBody(
                     // fire (it sets cancelled[i]=1 over our re-arm here).
                     { op: "local.get", index: iv },
                     { op: "i64.const", value: 0n },
-                    { op: "i64.gt_s" } as Instr,
+                    { op: "i64.gt_s" },
                     {
                       op: "if",
                       blockType: { kind: "empty" } as any,
                       then: [
                         // interval: deadlines[i] = dl + iv (re-arm relative to
                         // the scheduled deadline so cadence doesn't drift).
-                        { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
-                        { op: "ref.as_non_null" } as Instr,
+                        { op: "global.get", index: state.timerDeadlinesGlobalIdx },
+                        { op: "ref.as_non_null" },
                         { op: "local.get", index: i },
                         { op: "local.get", index: dl },
                         { op: "local.get", index: iv },
-                        { op: "i64.add" } as Instr,
+                        { op: "i64.add" },
                         { op: "array.set", typeIdx: i64ArrIdx },
                       ],
                       else: [
                         // one-shot: mark cancelled so it never fires again.
-                        { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
-                        { op: "ref.as_non_null" } as Instr,
+                        { op: "global.get", index: state.timerCancelledGlobalIdx },
+                        { op: "ref.as_non_null" },
                         { op: "local.get", index: i },
                         { op: "i32.const", value: 1 },
                         { op: "array.set", typeIdx: i32ArrIdx },
@@ -2690,13 +2690,13 @@ function buildTimerFireBody(
                     },
 
                     // Load callback + captures.
-                    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
-                    { op: "ref.as_non_null" } as Instr,
+                    { op: "global.get", index: state.timerCallbacksGlobalIdx },
+                    { op: "ref.as_non_null" },
                     { op: "local.get", index: i },
                     { op: "array.get", typeIdx: funcArrIdx },
                     { op: "local.set", index: fn },
-                    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
-                    { op: "ref.as_non_null" } as Instr,
+                    { op: "global.get", index: state.timerCapturesGlobalIdx },
+                    { op: "ref.as_non_null" },
                     { op: "local.get", index: i },
                     { op: "array.get", typeIdx: externArrIdx },
                     { op: "local.set", index: cap },
@@ -2715,7 +2715,7 @@ function buildTimerFireBody(
 
             { op: "local.get", index: i },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: i },
             { op: "br", depth: 0 },
           ],
@@ -2733,21 +2733,21 @@ function buildRunLoopNowBody(clockIdx: number | undefined): Instr[] {
     return [{ op: "i64.const", value: 0n }];
   }
   return [
-    { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
+    { op: "i32.const", value: 1 }, // CLOCK_MONOTONIC
     { op: "i64.const", value: 1000n }, // precision 1us
-    { op: "i32.const", value: RL_NOW_OUT_OFFSET } as Instr,
-    { op: "call", funcIdx: clockIdx } as Instr,
-    { op: "drop" } as Instr,
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET },
+    { op: "call", funcIdx: clockIdx },
+    { op: "drop" },
     // hi << 32 | lo
-    { op: "i32.const", value: RL_NOW_OUT_OFFSET + 4 } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
-    { op: "i64.extend_i32_u" } as Instr,
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET + 4 },
+    { op: "i32.load", align: 2, offset: 0 },
+    { op: "i64.extend_i32_u" },
     { op: "i64.const", value: 32n },
-    { op: "i64.shl" } as Instr,
-    { op: "i32.const", value: RL_NOW_OUT_OFFSET } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
-    { op: "i64.extend_i32_u" } as Instr,
-    { op: "i64.or" } as Instr,
+    { op: "i64.shl" },
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET },
+    { op: "i32.load", align: 2, offset: 0 },
+    { op: "i64.extend_i32_u" },
+    { op: "i64.or" },
   ];
 }
 
@@ -2794,17 +2794,17 @@ function buildRunLoopBody(state: AsyncSchedulerState, sleepMsIdx: number | undef
     // if next == I64_MAX → no pending handles → break out of the loop.
     { op: "local.get", index: next },
     { op: "i64.const", value: I64_MAX },
-    { op: "i64.eq" } as Instr,
+    { op: "i64.eq" },
     { op: "br_if", depth: 1 },
 
     // waitMs = (next - now) / 1e6 ; clamp negative to 0.
     { op: "local.get", index: next },
     { op: "call", funcIdx: state.runLoopNowFuncIdx },
-    { op: "i64.sub" } as Instr,
+    { op: "i64.sub" },
     { op: "local.set", index: waitMs },
     { op: "local.get", index: waitMs },
     { op: "i64.const", value: 0n },
-    { op: "i64.gt_s" } as Instr,
+    { op: "i64.gt_s" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
@@ -2815,11 +2815,11 @@ function buildRunLoopBody(state: AsyncSchedulerState, sleepMsIdx: number | undef
               // ms = (ns + 999_999) / 1_000_000 (round up so we never wake early)
               { op: "local.get", index: waitMs },
               { op: "i64.const", value: 999999n },
-              { op: "i64.add" } as Instr,
+              { op: "i64.add" },
               { op: "i64.const", value: 1000000n },
-              { op: "i64.div_s" } as Instr,
-              { op: "i32.wrap_i64" } as Instr,
-              { op: "call", funcIdx: sleepMsIdx } as Instr,
+              { op: "i64.div_s" },
+              { op: "i32.wrap_i64" },
+              { op: "call", funcIdx: sleepMsIdx },
             ],
     },
     // continue looping.
@@ -2876,7 +2876,7 @@ function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
     {
       op: "global.get",
       index: state.stdinFdActiveGlobalIdx,
-    } as Instr,
+    },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
@@ -2889,22 +2889,22 @@ function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
     // callbacks. Skipped (byte-identical to Phase 2) when no reader is registered.
     ...(state.stdinReaderHookGlobalIdx >= 0
       ? [
-          { op: "global.get", index: state.stdinReaderHookGlobalIdx } as Instr,
-          { op: "ref.is_null" } as Instr,
+          { op: "global.get", index: state.stdinReaderHookGlobalIdx },
+          { op: "ref.is_null" },
           {
             op: "if",
             blockType: { kind: "empty" } as any,
-            then: [] as Instr[],
+            then: [],
             else: [
               // pump(captures=Readable instance, value=null)
-              { op: "global.get", index: state.stdinReaderCapGlobalIdx } as Instr,
-              { op: "ref.null.extern" } as Instr,
-              { op: "global.get", index: state.stdinReaderHookGlobalIdx } as Instr,
-              { op: "ref.as_non_null" } as Instr,
-              { op: "call_ref", typeIdx: state.microtaskFuncTypeIdx } as Instr,
-              { op: "drop" } as Instr,
-            ] as Instr[],
-          } as Instr,
+              { op: "global.get", index: state.stdinReaderCapGlobalIdx },
+              { op: "ref.null.extern" },
+              { op: "global.get", index: state.stdinReaderHookGlobalIdx },
+              { op: "ref.as_non_null" },
+              { op: "call_ref", typeIdx: state.microtaskFuncTypeIdx },
+              { op: "drop" },
+            ],
+          },
         ]
       : []),
 
@@ -2920,14 +2920,14 @@ function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
     // pending = (next != I64_MAX) | fd0_active
     { op: "local.get", index: next },
     { op: "i64.const", value: I64_MAX },
-    { op: "i64.ne" } as Instr,
-    { op: "global.get", index: state.stdinFdActiveGlobalIdx } as Instr,
-    { op: "i32.or" } as Instr,
+    { op: "i64.ne" },
+    { op: "global.get", index: state.stdinFdActiveGlobalIdx },
+    { op: "i32.or" },
     { op: "local.set", index: pending },
 
     // if !pending → no timers and no fd subscription → exit.
     { op: "local.get", index: pending },
-    { op: "i32.eqz" } as Instr,
+    { op: "i32.eqz" },
     { op: "br_if", depth: 1 },
 
     // Block on fd0-readable OR the nearest timer deadline. The result (1 if
@@ -2935,7 +2935,7 @@ function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
     // ready and fires whichever timer is now due.
     { op: "local.get", index: next },
     { op: "call", funcIdx: state.runLoopNowFuncIdx },
-    { op: "call", funcIdx: state.pollFd0OrClockFuncIdx } as Instr,
+    { op: "call", funcIdx: state.pollFd0OrClockFuncIdx },
     { op: "drop" },
 
     { op: "br", depth: 0 },
@@ -2996,125 +2996,128 @@ function buildStdinDrainBody(ctx: CodegenContext, state: AsyncSchedulerState): I
     // No fd_read import → nothing to drain; report EOF so the loop can exit.
     return [
       { op: "i32.const", value: 0 },
-      { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
+      { op: "global.set", index: state.stdinFdActiveGlobalIdx },
       { op: "i32.const", value: 0 },
     ];
   }
 
   return [
     // Set fd0 non-blocking once.
-    { op: "global.get", index: state.stdinNonblockSetGlobalIdx } as Instr,
-    { op: "i32.eqz" } as Instr,
+    { op: "global.get", index: state.stdinNonblockSetGlobalIdx },
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
         { op: "i32.const", value: 1 },
-        { op: "global.set", index: state.stdinNonblockSetGlobalIdx } as Instr,
+        { op: "global.set", index: state.stdinNonblockSetGlobalIdx },
         ...(setFlagsIdx === undefined || setFlagsIdx < 0
           ? []
           : [
-              { op: "i32.const", value: 0 } as Instr, // fd 0
-              { op: "i32.const", value: FDFLAG_NONBLOCK } as Instr,
-              { op: "call", funcIdx: setFlagsIdx } as Instr,
-              { op: "drop" } as Instr, // ignore errno (best-effort)
+              { op: "i32.const", value: 0 }, // fd 0
+              { op: "i32.const", value: FDFLAG_NONBLOCK },
+              { op: "call", funcIdx: setFlagsIdx },
+              { op: "drop" }, // ignore errno (best-effort)
             ]),
       ],
     },
 
     // Reclaim space when the buffer is fully consumed: if pos == len, reset both.
-    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "i32.ge_s" } as Instr,
+    { op: "global.get", index: state.stdinBufPosGlobalIdx },
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "i32.ge_s" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
         { op: "i32.const", value: 0 },
-        { op: "global.set", index: state.stdinBufPosGlobalIdx } as Instr,
+        { op: "global.set", index: state.stdinBufPosGlobalIdx },
         { op: "i32.const", value: 0 },
-        { op: "global.set", index: state.stdinBufLenGlobalIdx } as Instr,
+        { op: "global.set", index: state.stdinBufLenGlobalIdx },
       ],
     },
 
     // space = CAP - len ; dst = BUF_START + len.
     { op: "i32.const", value: RL_STDIN_BUF_CAP },
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "i32.sub" } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "i32.sub" },
     { op: "local.set", index: space },
     { op: "i32.const", value: RL_STDIN_BUF_START },
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "i32.add" } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "i32.add" },
     { op: "local.set", index: dst },
 
     // If no space left, report 0 bytes (consumer must drain first).
     { op: "local.get", index: space },
-    { op: "i32.eqz" } as Instr,
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
 
     // Build the iovec at RL_FDREAD_IOV_OFFSET: { base=dst, len=space }.
-    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET } as Instr,
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET },
     { op: "local.get", index: dst },
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET + 4 } as Instr,
+    { op: "i32.store", align: 2, offset: 0 },
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET + 4 },
     { op: "local.get", index: space },
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.store", align: 2, offset: 0 },
 
     // errno = fd_read(0, iovs=RL_FDREAD_IOV_OFFSET, iovs_len=1, nread=RL_FDREAD_NREAD_OFFSET)
-    { op: "i32.const", value: 0 } as Instr, // fd 0
-    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET } as Instr,
-    { op: "call", funcIdx: fdReadIdx } as Instr,
+    { op: "i32.const", value: 0 }, // fd 0
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET },
+    { op: "i32.const", value: 1 },
+    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET },
+    { op: "call", funcIdx: fdReadIdx },
     { op: "local.set", index: errno },
 
     // EAGAIN → no data yet, return 0 WITHOUT EOF.
     { op: "local.get", index: errno },
     { op: "i32.const", value: EAGAIN },
-    { op: "i32.eq" } as Instr,
+    { op: "i32.eq" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
     },
 
     // nread = mem[RL_FDREAD_NREAD_OFFSET]
-    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET },
+    { op: "i32.load", align: 2, offset: 0 },
     { op: "local.set", index: nread },
 
     // If errno != 0 (and not EAGAIN), treat as EOF (e.g. EBADF) to avoid spin.
     { op: "local.get", index: errno },
     { op: "i32.const", value: 0 },
-    { op: "i32.ne" } as Instr,
+    { op: "i32.ne" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
       then: [
         { op: "i32.const", value: 0 },
-        { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
+        { op: "global.set", index: state.stdinFdActiveGlobalIdx },
         { op: "i32.const", value: 0 },
-        { op: "return" } as Instr,
+        { op: "return" },
       ],
     },
 
     // nread == 0 at a readable fd → EOF: drop the subscription.
     { op: "local.get", index: nread },
-    { op: "i32.eqz" } as Instr,
+    { op: "i32.eqz" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
-      then: [{ op: "i32.const", value: 0 }, { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr],
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "global.set", index: state.stdinFdActiveGlobalIdx },
+      ],
       else: [
         // len += nread
-        { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+        { op: "global.get", index: state.stdinBufLenGlobalIdx },
         { op: "local.get", index: nread },
-        { op: "i32.add" } as Instr,
-        { op: "global.set", index: state.stdinBufLenGlobalIdx } as Instr,
+        { op: "i32.add" },
+        { op: "global.set", index: state.stdinBufLenGlobalIdx },
       ],
     },
 
@@ -3170,24 +3173,24 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
   return [
     // ── sub[0] @ RL_POLL_SUB0_OFFSET = FD_READ on fd 0 ──
     // userdata @0 = 0
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
     // tag @8 = 1 (EVENTTYPE_FD_READ); pad → store 1 over 8 bytes
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 8 } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 8 },
     { op: "i64.const", value: 1n },
     { op: "i64.store", align: 3, offset: 0 },
     // fd @16 = 0 (and clear the rest of the fd_read union, 32 bytes → 4×i64)
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 16 } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 16 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 24 } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 24 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 32 } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 32 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 40 } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 40 },
     { op: "i64.const", value: 0n },
     { op: "i64.store", align: 3, offset: 0 },
 
@@ -3198,7 +3201,7 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
     // If deadline != I64_MAX → add the clock subscription as sub[1].
     { op: "local.get", index: deadline },
     { op: "i64.const", value: I64_MAX },
-    { op: "i64.ne" } as Instr,
+    { op: "i64.ne" },
     {
       op: "if",
       blockType: { kind: "empty" } as any,
@@ -3206,11 +3209,11 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
         // timeoutNs = max(0, deadline - now)
         { op: "local.get", index: deadline },
         { op: "local.get", index: nowNs },
-        { op: "i64.sub" } as Instr,
+        { op: "i64.sub" },
         { op: "local.set", index: timeoutNs },
         { op: "local.get", index: timeoutNs },
         { op: "i64.const", value: 0n },
-        { op: "i64.lt_s" } as Instr,
+        { op: "i64.lt_s" },
         {
           op: "if",
           blockType: { kind: "empty" } as any,
@@ -3221,27 +3224,27 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
         },
         // sub[1] @ RL_POLL_SUB1_OFFSET = CLOCK on CLOCK_MONOTONIC.
         // userdata @0 = 0
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET },
         { op: "i64.const", value: 0n },
         { op: "i64.store", align: 3, offset: 0 },
         // tag @8 = 0 (EVENTTYPE_CLOCK), pad → 0
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 8 } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 8 },
         { op: "i64.const", value: 0n },
         { op: "i64.store", align: 3, offset: 0 },
         // clockid @16 = 1 (CLOCK_MONOTONIC), pad @20 = 0 → combined i64
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 16 } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 16 },
         { op: "i64.const", value: 1n },
         { op: "i64.store", align: 3, offset: 0 },
         // timeout @24 = timeoutNs
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 24 } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 24 },
         { op: "local.get", index: timeoutNs },
         { op: "i64.store", align: 3, offset: 0 },
         // precision @32 = 0
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 32 } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 32 },
         { op: "i64.const", value: 0n },
         { op: "i64.store", align: 3, offset: 0 },
         // flags @40 = 0 (relative), pad → clear 8 bytes
-        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 40 } as Instr,
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 40 },
         { op: "i64.const", value: 0n },
         { op: "i64.store", align: 3, offset: 0 },
         // nsubs = 2
@@ -3251,16 +3254,16 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
     },
 
     // poll_oneoff(in=SUB0, out=EVT, nsubs, nevents_out=NEVENTS) — errno dropped.
-    { op: "i32.const", value: RL_POLL_SUB0_OFFSET } as Instr,
-    { op: "i32.const", value: RL_POLL_EVT_OFFSET } as Instr,
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET },
+    { op: "i32.const", value: RL_POLL_EVT_OFFSET },
     { op: "local.get", index: nsubs },
-    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET } as Instr,
-    { op: "call", funcIdx: pollIdx } as Instr,
-    { op: "drop" } as Instr,
+    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET },
+    { op: "call", funcIdx: pollIdx },
+    { op: "drop" },
 
     // nev = mem[RL_POLL_NEVENTS_OFFSET]
-    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET } as Instr,
-    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET },
+    { op: "i32.load", align: 2, offset: 0 },
     { op: "local.set", index: nev },
 
     // readable = 0 ; scan events for an FD_READ (event_t.type @ +10 == 1).
@@ -3278,22 +3281,22 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
           body: [
             { op: "local.get", index: i },
             { op: "local.get", index: nev },
-            { op: "i32.ge_s" } as Instr,
+            { op: "i32.ge_s" },
             { op: "br_if", depth: 1 },
 
             // evType = u8 mem[EVT + i*32 + 10]
             { op: "local.get", index: i },
             { op: "i32.const", value: 32 },
-            { op: "i32.mul" } as Instr,
+            { op: "i32.mul" },
             { op: "i32.const", value: RL_POLL_EVT_OFFSET + 10 },
-            { op: "i32.add" } as Instr,
-            { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
+            { op: "i32.add" },
+            { op: "i32.load8_u", align: 0, offset: 0 },
             { op: "local.set", index: evType },
 
             // if evType == 1 (FD_READ) → readable = 1
             { op: "local.get", index: evType },
             { op: "i32.const", value: 1 },
-            { op: "i32.eq" } as Instr,
+            { op: "i32.eq" },
             {
               op: "if",
               blockType: { kind: "empty" } as any,
@@ -3305,7 +3308,7 @@ function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState
 
             { op: "local.get", index: i },
             { op: "i32.const", value: 1 },
-            { op: "i32.add" } as Instr,
+            { op: "i32.add" },
             { op: "local.set", index: i },
             { op: "br", depth: 0 },
           ],
@@ -3329,26 +3332,26 @@ export function emitStdinReadByte(ctx: CodegenContext, fctx: FunctionContext): v
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
   // pos < len ? (byte = mem[BUF_START + pos]; pos++; byte) : -1
   fctx.body.push(
-    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "i32.lt_s" } as Instr,
+    { op: "global.get", index: state.stdinBufPosGlobalIdx },
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "i32.lt_s" },
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "i32" } } as any,
       then: [
         // byte = mem[BUF_START + pos]
-        { op: "i32.const", value: RL_STDIN_BUF_START } as Instr,
-        { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
+        { op: "i32.const", value: RL_STDIN_BUF_START },
+        { op: "global.get", index: state.stdinBufPosGlobalIdx },
+        { op: "i32.add" },
+        { op: "i32.load8_u", align: 0, offset: 0 },
         // pos++
-        { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "global.set", index: state.stdinBufPosGlobalIdx } as Instr,
-      ] as Instr[],
-      else: [{ op: "i32.const", value: -1 } as Instr] as Instr[],
-    } as Instr,
+        { op: "global.get", index: state.stdinBufPosGlobalIdx },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "global.set", index: state.stdinBufPosGlobalIdx },
+      ],
+      else: [{ op: "i32.const", value: -1 }],
+    },
   );
 }
 
@@ -3360,9 +3363,9 @@ export function emitStdinReadByte(ctx: CodegenContext, fctx: FunctionContext): v
 export function emitStdinAvailable(ctx: CodegenContext, fctx: FunctionContext): void {
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
   fctx.body.push(
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-    { op: "i32.sub" } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "global.get", index: state.stdinBufPosGlobalIdx },
+    { op: "i32.sub" },
   );
 }
 
@@ -3377,12 +3380,12 @@ export function emitStdinEof(ctx: CodegenContext, fctx: FunctionContext): void {
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
   // (fd_active == 0) && (pos >= len)
   fctx.body.push(
-    { op: "global.get", index: state.stdinFdActiveGlobalIdx } as Instr,
-    { op: "i32.eqz" } as Instr,
-    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
-    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "i32.and" } as Instr,
+    { op: "global.get", index: state.stdinFdActiveGlobalIdx },
+    { op: "i32.eqz" },
+    { op: "global.get", index: state.stdinBufPosGlobalIdx },
+    { op: "global.get", index: state.stdinBufLenGlobalIdx },
+    { op: "i32.ge_s" },
+    { op: "i32.and" },
   );
 }
 
@@ -3401,10 +3404,7 @@ export function emitStdinEof(ctx: CodegenContext, fctx: FunctionContext): void {
 export function emitStdinStop(ctx: CodegenContext, fctx: FunctionContext): void {
   const state = getOrInitState(ctx as CodegenContextWithScheduler);
   if (state.stdinFdActiveGlobalIdx < 0) return;
-  fctx.body.push(
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
-  );
+  fctx.body.push({ op: "i32.const", value: 0 }, { op: "global.set", index: state.stdinFdActiveGlobalIdx });
 }
 
 /**
@@ -3438,10 +3438,10 @@ export function emitStdinSetReader(
   }
   // __stdin_reader_cap = captures
   for (const i of capInstrs) fctx.body.push(i);
-  fctx.body.push({ op: "global.set", index: state.stdinReaderCapGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: state.stdinReaderCapGlobalIdx });
   // __stdin_reader_hook = (cb as $__mt_func_type)
   for (const i of cbFuncRefInstrs) fctx.body.push(i);
-  fctx.body.push({ op: "global.set", index: state.stdinReaderHookGlobalIdx } as Instr);
+  fctx.body.push({ op: "global.set", index: state.stdinReaderHookGlobalIdx });
 }
 
 /**
@@ -3534,8 +3534,8 @@ export function emitTimerCallbackWrapper(ctx: CodegenContext, info: ClosureInfo)
   }
   body.push(
     { op: "local.get", index: callbackLocal },
-    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 },
+    { op: "ref.cast", typeIdx: info.funcTypeIdx },
     { op: "call_ref", typeIdx: info.funcTypeIdx },
   );
   // Discard the closure's return value; coerce to externref result of the
@@ -3614,7 +3614,7 @@ export function emitStandalonePromiseResolve(ctx: CodegenContext, fctx: Function
   fctx.body.push({ op: "local.set", index: vLocal });
   fctx.body.push({ op: "local.get", index: vLocal });
   fctx.body.push({ op: "any.convert_extern" });
-  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: promiseTypeIdx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
@@ -3627,7 +3627,7 @@ export function emitStandalonePromiseResolve(ctx: CodegenContext, fctx: Function
       { op: "i32.const", value: PROMISE_STATE_PENDING },
       { op: "ref.null.extern" },
       { op: "ref.null.extern" },
-      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: promiseTypeIdx },
       { op: "local.set", index: pLocal },
       { op: "local.get", index: pLocal },
       { op: "local.get", index: vLocal },
@@ -3636,7 +3636,7 @@ export function emitStandalonePromiseResolve(ctx: CodegenContext, fctx: Function
       { op: "local.get", index: pLocal },
       { op: "extern.convert_any" },
     ],
-  } as Instr);
+  });
 }
 
 /**
@@ -3746,7 +3746,7 @@ export function emitStandalonePromiseThen(
 
   fctx.body.push(
     { op: "local.get", index: promiseLocal },
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
     { op: "i32.const", value: PROMISE_STATE_FULFILLED },
     { op: "i32.eq" },
     {
@@ -3756,12 +3756,12 @@ export function emitStandalonePromiseThen(
         { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
         { op: "local.get", index: fulfilledCapsLocal },
         { op: "local.get", index: promiseLocal },
-        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
         { op: "call", funcIdx: state.enqueueFuncIdx },
       ],
       else: [
         { op: "local.get", index: promiseLocal },
-        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: PROMISE_STATE_REJECTED },
         { op: "i32.eq" },
         {
@@ -3771,7 +3771,7 @@ export function emitStandalonePromiseThen(
             { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
             { op: "local.get", index: rejectedCapsLocal },
             { op: "local.get", index: promiseLocal },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
             { op: "call", funcIdx: state.enqueueFuncIdx },
           ],
           else: [
@@ -3785,16 +3785,16 @@ export function emitStandalonePromiseThen(
             { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
             { op: "local.get", index: rejectedCapsLocal },
             { op: "local.get", index: promiseLocal },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
-            { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 },
+            { op: "struct.new", typeIdx: callbackTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     { op: "local.get", index: chainedLocal },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   );
 }
 
@@ -3873,28 +3873,28 @@ function ensurePromiseFinallyRuntime(ctx: CodegenContext): void {
     body: [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: capsTypeIdx } as Instr,
+      { op: "ref.cast", typeIdx: capsTypeIdx },
       { op: "local.set", index: 2 },
       { op: "local.get", index: 2 },
-      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 2 } as Instr,
+      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 2 },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: [
           { op: "local.get", index: 2 },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 },
           { op: "local.get", index: 2 },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
           { op: "call", funcIdx: state.promiseRejectFuncIdx },
         ],
         else: [
           { op: "local.get", index: 2 },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 },
           { op: "local.get", index: 2 },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
           { op: "call", funcIdx: state.promiseResolveValueFuncIdx },
         ],
-      } as Instr,
+      },
     ],
     exported: false,
   });
@@ -3911,8 +3911,8 @@ function ensurePromiseFinallyRuntime(ctx: CodegenContext): void {
     body: [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: capsTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "ref.cast", typeIdx: capsTypeIdx },
+      { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 0 },
       { op: "local.get", index: 1 },
       { op: "call", funcIdx: state.promiseRejectFuncIdx },
     ],
@@ -3945,7 +3945,7 @@ function ensurePromiseFinallyRuntime(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
-      { op: "struct.new", typeIdx: capsTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: capsTypeIdx },
       { op: "extern.convert_any" },
       { op: "local.set", index: 4 },
       // tmp = $Promise{PENDING, null, node(restoreSettle, caps, restoreReject, caps, null)}
@@ -3956,9 +3956,9 @@ function ensurePromiseFinallyRuntime(ctx: CodegenContext): void {
       { op: "ref.func", funcIdx: restoreRejectFuncIdx },
       { op: "local.get", index: 4 },
       { op: "ref.null.extern" },
-      { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: callbackTypeIdx },
       { op: "extern.convert_any" },
-      { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+      { op: "struct.new", typeIdx: promiseTypeIdx },
       { op: "local.set", index: 5 },
       // Resolve(tmp, result) — fires/enqueues the restore reaction.
       { op: "local.get", index: 5 },
@@ -4015,8 +4015,8 @@ function emitFinallyWrapperFunction(ctx: CodegenContext, info: ClosureInfo, isRe
   for (const paramType of info.paramTypes) pushDefaultForType(tryBody, paramType);
   tryBody.push(
     { op: "local.get", index: callbackLocal },
-    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
-    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 },
+    { op: "ref.cast", typeIdx: info.funcTypeIdx },
     { op: "call_ref", typeIdx: info.funcTypeIdx },
   );
   coerceStackValueToExternref(ctx, tryBody, info.returnType);
@@ -4025,7 +4025,7 @@ function emitFinallyWrapperFunction(ctx: CodegenContext, info: ClosureInfo, isRe
     // __finally_after(result, chained, originalValue, isReject)
     { op: "local.get", index: resultLocal },
     { op: "local.get", index: capLocal },
-    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
     { op: "local.get", index: 1 },
     { op: "i32.const", value: isReject ? 1 : 0 },
     { op: "call", funcIdx: state.finallyAfterFuncIdx },
@@ -4041,14 +4041,14 @@ function emitFinallyWrapperFunction(ctx: CodegenContext, info: ClosureInfo, isRe
         body: [
           { op: "local.set", index: reasonLocal },
           { op: "local.get", index: capLocal },
-          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 } as Instr,
+          { op: "struct.get", typeIdx: capsTypeIdx, fieldIdx: 1 },
           { op: "local.get", index: reasonLocal },
           { op: "call", funcIdx: state.promiseRejectFuncIdx },
           { op: "drop" },
         ],
       },
     ],
-  } as Instr);
+  });
   body.push({ op: "ref.null.extern" });
 
   pushDefinedFunc(ctx, funcIdx, {
@@ -4126,7 +4126,7 @@ export function emitStandalonePromiseFinally(
 
   fctx.body.push(
     { op: "local.get", index: promiseLocal },
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
     { op: "i32.const", value: PROMISE_STATE_FULFILLED },
     { op: "i32.eq" },
     {
@@ -4136,12 +4136,12 @@ export function emitStandalonePromiseFinally(
         { op: "ref.func", funcIdx: fulfillWrapperFuncIdx },
         { op: "local.get", index: capsLocal },
         { op: "local.get", index: promiseLocal },
-        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
         { op: "call", funcIdx: state.enqueueFuncIdx },
       ],
       else: [
         { op: "local.get", index: promiseLocal },
-        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
         { op: "i32.const", value: PROMISE_STATE_REJECTED },
         { op: "i32.eq" },
         {
@@ -4151,7 +4151,7 @@ export function emitStandalonePromiseFinally(
             { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
             { op: "local.get", index: capsLocal },
             { op: "local.get", index: promiseLocal },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
             { op: "call", funcIdx: state.enqueueFuncIdx },
           ],
           else: [
@@ -4163,16 +4163,16 @@ export function emitStandalonePromiseFinally(
             { op: "ref.func", funcIdx: rejectWrapperFuncIdx },
             { op: "local.get", index: capsLocal },
             { op: "local.get", index: promiseLocal },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
-            { op: "struct.new", typeIdx: callbackTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
-            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 } as Instr,
+            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 2 },
+            { op: "struct.new", typeIdx: callbackTypeIdx },
+            { op: "extern.convert_any" },
+            { op: "struct.set", typeIdx: promiseTypeIdx, fieldIdx: 2 },
           ],
-        } as Instr,
+        },
       ],
-    } as Instr,
+    },
     { op: "local.get", index: chainedLocal },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   );
 }
 

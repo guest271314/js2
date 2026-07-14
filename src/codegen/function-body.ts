@@ -842,7 +842,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     const savedBody = pushBody(fctx);
     if (tdzViolatingName !== undefined) {
       emitThrowReferenceError(ctx, fctx, `Cannot access '${tdzViolatingName}' before initialization`);
-      fctx.body.push({ op: "unreachable" } as Instr);
+      fctx.body.push({ op: "unreachable" });
     } else if (dstrNullDefault) {
       for (const ins of buildDestructureNullThrow(ctx, fctx)) fctx.body.push(ins);
     } else {
@@ -896,7 +896,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       flushLateImportShifts(ctx, fctx);
       fctx.body.push({ op: "local.get", index: paramIdx });
       if (undefIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: undefIdx } as Instr);
+        fctx.body.push({ op: "call", funcIdx: undefIdx });
       } else {
         // Fallback (standalone mode): ref.is_null is imprecise — treats null
         // as undefined. Preserves pre-#737 behavior when the host import can't
@@ -1102,7 +1102,10 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       const catchBody: Instr[] = [{ op: "local.set", index: pendingThrowLocal }];
       const catchAllBody: Instr[] =
         getCaughtIdx !== undefined
-          ? [{ op: "call", funcIdx: getCaughtIdx } as Instr, { op: "local.set", index: pendingThrowLocal }]
+          ? [
+              { op: "call", funcIdx: getCaughtIdx },
+              { op: "local.set", index: pendingThrowLocal },
+            ]
           : [];
       fctx.body.push({
         op: "try",

@@ -763,9 +763,9 @@ export function patchStructNewForAddedField(
   function defaultInstrFor(ft: ValType): Instr {
     switch (ft.kind) {
       case "f64":
-        return { op: "f64.const", value: 0 } as Instr;
+        return { op: "f64.const", value: 0 };
       case "i32":
-        return { op: "i32.const", value: 0 } as Instr;
+        return { op: "i32.const", value: 0 };
       case "externref":
         return { op: "ref.null.extern" };
       case "ref":
@@ -778,7 +778,7 @@ export function patchStructNewForAddedField(
         if ((ft as any).kind === "eqref") {
           return { op: "ref.null.eq" };
         }
-        return { op: "i32.const", value: 0 } as Instr;
+        return { op: "i32.const", value: 0 };
     }
   }
 

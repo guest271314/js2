@@ -158,7 +158,7 @@ export function emitPrivateBrandPredicate(
   const allowedTags = collectClassAndDescendantTags(ctx, className);
 
   fctx.body.push({ op: "local.get", index: receiverLocal });
-  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx });
 
   if (tagFieldIdx < 0 || allowedTags.length === 0) {
     return;
@@ -166,13 +166,13 @@ export function emitPrivateBrandPredicate(
 
   const tagChecks: Instr[] = [];
   for (let i = 0; i < allowedTags.length; i++) {
-    tagChecks.push({ op: "local.get", index: receiverLocal } as Instr);
-    tagChecks.push({ op: "ref.cast", typeIdx: structTypeIdx } as Instr);
-    tagChecks.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: tagFieldIdx } as Instr);
-    tagChecks.push({ op: "i32.const", value: allowedTags[i]! } as Instr);
-    tagChecks.push({ op: "i32.eq" } as Instr);
+    tagChecks.push({ op: "local.get", index: receiverLocal });
+    tagChecks.push({ op: "ref.cast", typeIdx: structTypeIdx });
+    tagChecks.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: tagFieldIdx });
+    tagChecks.push({ op: "i32.const", value: allowedTags[i]! });
+    tagChecks.push({ op: "i32.eq" });
     if (i > 0) {
-      tagChecks.push({ op: "i32.or" } as Instr);
+      tagChecks.push({ op: "i32.or" });
     }
   }
 
@@ -180,8 +180,8 @@ export function emitPrivateBrandPredicate(
     op: "if",
     blockType: { kind: "val", type: { kind: "i32" } },
     then: tagChecks,
-    else: [{ op: "i32.const", value: 0 } as Instr],
-  } as Instr);
+    else: [{ op: "i32.const", value: 0 }],
+  });
 }
 
 /**

@@ -94,22 +94,22 @@ export function tryEmitLinearU8New(
   // then store each (constant or computed) byte.
   if (args.length === 1 && ts.isArrayLiteralExpression(args[0]!)) {
     const elems = args[0]!.elements;
-    fctx.body.push({ op: "i32.const", value: elems.length } as Instr);
-    fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
-    fctx.body.push({ op: "i32.const", value: elems.length } as Instr);
-    fctx.body.push({ op: "call", funcIdx: allocIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: ptrLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: elems.length });
+    fctx.body.push({ op: "local.set", index: lenLocal });
+    fctx.body.push({ op: "i32.const", value: elems.length });
+    fctx.body.push({ op: "call", funcIdx: allocIdx });
+    fctx.body.push({ op: "local.set", index: ptrLocal });
     elems.forEach((el, i) => {
       // address = ptr + i
-      fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: ptrLocal });
       if (i > 0) {
-        fctx.body.push({ op: "i32.const", value: i } as Instr);
-        fctx.body.push({ op: "i32.add" } as Instr);
+        fctx.body.push({ op: "i32.const", value: i });
+        fctx.body.push({ op: "i32.add" });
       }
       // value = trunc(elem) — element expr compiled in f64 then truncated to a byte.
       compileExpression(ctx, fctx, el, { kind: "f64" });
-      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-      fctx.body.push({ op: "i32.store8", align: 0, offset: 0 } as Instr);
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+      fctx.body.push({ op: "i32.store8", align: 0, offset: 0 });
     });
     registerBuffer(ctx, fctx, nameNode, ptrLocal, lenLocal);
     return true;
@@ -118,15 +118,15 @@ export function tryEmitLinearU8New(
   // Length form: `new Uint8Array(n)` (or `new Uint8Array()` ⇒ 0).
   if (args.length >= 1) {
     compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 });
   }
-  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
   // ptr = __lin_u8_alloc(len)
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: allocIdx } as Instr);
-  fctx.body.push({ op: "local.set", index: ptrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "call", funcIdx: allocIdx });
+  fctx.body.push({ op: "local.set", index: ptrLocal });
   registerBuffer(ctx, fctx, nameNode, ptrLocal, lenLocal);
   return true;
 }
@@ -165,18 +165,18 @@ export function tryEmitLinearU8ElementGet(
   // computation observe the same value (and side-effecting index exprs run once).
   const idxLocal = allocLocal(fctx, `__linu8_gidx_${fctx.locals.length}`, { kind: "i32" });
   compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxLocal });
   // #2045 A.2: bounds-check like the GC path. An unchecked OOB read silently
   // returned arbitrary linear memory (iovec scratch, string data, a caller's
   // buffer under Slice C); trap instead.
   emitLinearU8BoundsCheck(fctx, idxLocal, buf.lenLocalIdx);
   // address = ptr + idx
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 });
+  fctx.body.push({ op: "f64.convert_i32_u" });
   return { kind: "f64" };
 }
 
@@ -192,14 +192,14 @@ export function tryEmitLinearU8ElementGet(
  * the cost is one compare + branch per element access.
  */
 function emitLinearU8BoundsCheck(fctx: FunctionContext, idxLocal: number, lenLocalIdx: number): void {
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocalIdx } as Instr);
-  fctx.body.push({ op: "i32.ge_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "local.get", index: lenLocalIdx });
+  fctx.body.push({ op: "i32.ge_u" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [{ op: "unreachable" } as Instr],
-  } as Instr);
+    then: [{ op: "unreachable" }],
+  });
 }
 
 /**
@@ -239,25 +239,25 @@ export function tryEmitLinearU8ElementSet(
 
   // idx = trunc(index)  (index evaluated first, per JS + the GC path)
   compileExpression(ctx, fctx, target.argumentExpression, { kind: "f64" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxLocal });
   // #2045 A.2: bounds-check BEFORE evaluating the value, so an OOB write traps
   // (like the GC path) rather than scribbling into a caller's linear memory.
   // The check precedes value evaluation to match the GC array.set trap order.
   emitLinearU8BoundsCheck(fctx, idxLocal, buf.lenLocalIdx);
   // addr = ptr + idx
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: addrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: addrLocal });
   // val = v (kept as f64 for the assignment-expression result)
   compileExpression(ctx, fctx, valueExpr, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal });
   // mem[addr] = (u8) trunc(val) — low byte kept by i32.store8.
-  fctx.body.push({ op: "local.get", index: addrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: addrLocal });
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 });
   // Leave NOTHING on the stack and return VOID_RESULT: `buf[i] = v` compiles as
   // a statement (the common case, e.g. the native-messaging frame builder). The
   // assigned value lives in `valLocal` if a value-context caller ever needs it,
@@ -308,30 +308,30 @@ export function tryEmitLinearU8ElementCompound(
 
   // idx = trunc(index); evaluate the index once (JS + GC order), bounds-check.
   compileExpression(ctx, fctx, target.argumentExpression, { kind: "f64" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxLocal });
   emitLinearU8BoundsCheck(fctx, idxLocal, buf.lenLocalIdx);
   // addr = ptr + idx (shared by the read and the write).
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: addrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: addrLocal });
 
   // result = (f64) mem[addr]  op  rhs
-  fctx.body.push({ op: "local.get", index: addrLocal } as Instr);
-  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: addrLocal });
+  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 });
+  fctx.body.push({ op: "f64.convert_i32_u" });
   emitOp(); // pushes rhs, emits the compound op → result f64 on the stack
   const valLocal = allocLocal(fctx, `__linu8_cval_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal });
   // mem[addr] = (u8) trunc(result)
-  fctx.body.push({ op: "local.get", index: addrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: addrLocal });
+  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 });
   // Push the (untruncated) assigned value as the expression result, matching the
   // GC/externref compound paths.
-  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal });
   return { kind: "f64" };
 }
 
@@ -364,31 +364,31 @@ export function tryEmitLinearU8ElementUpdate(
 
   // idx = trunc(index) (once), bounds-check, addr = ptr + idx.
   compileExpression(ctx, fctx, target.argumentExpression, { kind: "f64" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "local.set", index: idxLocal } as Instr);
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: idxLocal });
   emitLinearU8BoundsCheck(fctx, idxLocal, buf.lenLocalIdx);
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: idxLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: addrLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: addrLocal });
 
   // old = (f64) mem[addr]
-  fctx.body.push({ op: "local.get", index: addrLocal } as Instr);
-  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: oldLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: addrLocal });
+  fctx.body.push({ op: "i32.load8_u", align: 0, offset: 0 });
+  fctx.body.push({ op: "f64.convert_i32_u" });
+  fctx.body.push({ op: "local.set", index: oldLocal });
   // new = old ± 1
-  fctx.body.push({ op: "local.get", index: oldLocal } as Instr);
-  fctx.body.push({ op: "f64.const", value: 1 } as Instr);
-  fctx.body.push({ op: isIncrement ? "f64.add" : "f64.sub" } as Instr);
-  fctx.body.push({ op: "local.set", index: newLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: oldLocal });
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: isIncrement ? "f64.add" : "f64.sub" });
+  fctx.body.push({ op: "local.set", index: newLocal });
   // mem[addr] = (u8) trunc(new)
-  fctx.body.push({ op: "local.get", index: addrLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: newLocal } as Instr);
-  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: addrLocal });
+  fctx.body.push({ op: "local.get", index: newLocal });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "i32.store8", align: 0, offset: 0 });
   // Result: prefix → new value, postfix → old value (JS §13.4).
-  fctx.body.push({ op: "local.get", index: isPrefix ? newLocal : oldLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: isPrefix ? newLocal : oldLocal });
   return { kind: "f64" };
 }
 
@@ -401,8 +401,8 @@ export function tryEmitLinearU8Length(
   if (expr.name.text !== "length") return null;
   const buf = lookupLinearU8Buffer(ctx, fctx, expr.expression);
   if (!buf) return null;
-  fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+  fctx.body.push({ op: "local.get", index: buf.lenLocalIdx });
+  fctx.body.push({ op: "f64.convert_i32_u" });
   return { kind: "f64" };
 }
 
@@ -440,11 +440,11 @@ export function tryEmitLinearU8StdWrite(
   // the shared memory: zero staging copy, no iovec, no nwritten cell. `writeSync`
   // returns bytes-written (i32) → drop to match the fd_write path's stack contract.
   if (ctx.linkNodeShims) {
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
-    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeSinkIdx } as Instr);
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "i32.const", value: fd });
+    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx });
+    fctx.body.push({ op: "call", funcIdx: writeSinkIdx });
+    fctx.body.push({ op: "drop" });
     return true;
   }
 
@@ -457,28 +457,28 @@ export function tryEmitLinearU8StdWrite(
   // bytes written (dropped to match the stack contract).
   const writeAllIdx = ensureWasiFdWriteAllHelper(ctx);
   if (writeAllIdx >= 0) {
-    fctx.body.push({ op: "i32.const", value: fd } as Instr);
-    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeAllIdx } as Instr);
-    fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "i32.const", value: fd });
+    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx });
+    fctx.body.push({ op: "call", funcIdx: writeAllIdx });
+    fctx.body.push({ op: "drop" });
     return true;
   }
 
   // iovec.buf = ptr (memory[0])
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
   // iovec.buf_len = len (memory[4])
-  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-  fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 4 });
+  fctx.body.push({ op: "local.get", index: buf.lenLocalIdx });
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 });
   // fd_write(fd, iovs=0, iovs_len=1, nwritten=8) — reads directly from ptr.
-  fctx.body.push({ op: "i32.const", value: fd } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "call", funcIdx: writeSinkIdx } as Instr);
-  fctx.body.push({ op: "drop" } as Instr);
+  fctx.body.push({ op: "i32.const", value: fd });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.const", value: 8 });
+  fctx.body.push({ op: "call", funcIdx: writeSinkIdx });
+  fctx.body.push({ op: "drop" });
   return true;
 }

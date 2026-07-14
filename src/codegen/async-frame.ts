@@ -1062,7 +1062,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     name: resumeName,
     typeIdx: resumeTypeIdx,
     locals: [],
-    body: [{ op: "unreachable" } as Instr],
+    body: [{ op: "unreachable" }],
     exported: false,
   };
   pushDefinedFunc(ctx, resumeFuncIdx, resumePlaceholder);
@@ -1182,14 +1182,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       if (layout.castToTypeIdx !== null) {
         const castLocal = allocLocal(resumeFctx, "__self_cast", { kind: "ref", typeIdx: layout.castToTypeIdx });
         resumeFctx.body.push({ op: "local.get", index: selfIdx });
-        resumeFctx.body.push({ op: "ref.cast", typeIdx: layout.castToTypeIdx } as Instr);
+        resumeFctx.body.push({ op: "ref.cast", typeIdx: layout.castToTypeIdx });
         resumeFctx.body.push({ op: "local.set", index: castLocal });
         selfForCaptures = castLocal;
       }
       for (const entry of layout.entries) {
         const idx = allocLocal(resumeFctx, entry.name, entry.localType);
         resumeFctx.body.push({ op: "local.get", index: selfForCaptures });
-        resumeFctx.body.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: entry.fieldIdx } as Instr);
+        resumeFctx.body.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: entry.fieldIdx });
         resumeFctx.body.push({ op: "local.set", index: idx });
       }
     }
@@ -1298,8 +1298,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         op: "struct.get",
         typeIdx: info.stateTypeIdx,
         fieldIdx: ERROR_FIELD,
-      } as Instr,
-      { op: "throw", tagIdx: exnTag } as Instr,
+      },
+      { op: "throw", tagIdx: exnTag },
     );
     out.push({ op: "local.get", index: frameLocal });
     out.push({
@@ -1313,7 +1313,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       op: "if",
       blockType: { kind: "empty" },
       then: throwArm,
-    } as Instr);
+    });
     if (rp.binding) {
       const bl = bindingLocal.get(rp.binding.name)!;
       if (bl.cell !== undefined) {
@@ -1328,7 +1328,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           fieldIdx: SENT_FIELD,
         });
         coerceType(ctx, resumeFctx, { kind: "externref" }, bl.cell.valType);
-        out.push({ op: "struct.set", typeIdx: bl.cell.refCellTypeIdx, fieldIdx: 0 } as Instr);
+        out.push({ op: "struct.set", typeIdx: bl.cell.refCellTypeIdx, fieldIdx: 0 });
       } else {
         out.push({ op: "local.get", index: frameLocal });
         out.push({
@@ -1406,7 +1406,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               kind: "externref",
             });
           } else {
-            out.push({ op: "ref.null.extern" } as Instr);
+            out.push({ op: "ref.null.extern" });
           }
           out.push({ op: "local.set", index: awaitedLocal });
 
@@ -1432,11 +1432,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             out.push({ op: "local.get", index: pHostLocal });
             out.push({ op: "i32.const", value: info.stepFulfillCbId! });
             out.push({ op: "local.get", index: frameLocal });
-            out.push({ op: "extern.convert_any" } as Instr);
+            out.push({ op: "extern.convert_any" });
             out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
             out.push({ op: "i32.const", value: info.stepRejectCbId! });
             out.push({ op: "local.get", index: frameLocal });
-            out.push({ op: "extern.convert_any" } as Instr);
+            out.push({ op: "extern.convert_any" });
             out.push({ op: "call", funcIdx: hostImports!.makeCbIdx });
             out.push({ op: "call", funcIdx: hostImports!.then2Idx });
             out.push({ op: "drop" });
@@ -1457,12 +1457,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               op: "struct.get",
               typeIdx: info.promiseTypeIdx,
               fieldIdx: 1,
-            } as Instr,
+            },
             {
               op: "struct.set",
               typeIdx: info.stateTypeIdx,
               fieldIdx: SENT_FIELD,
-            } as Instr,
+            },
           ];
           const rejectFromP: Instr[] = [
             { op: "local.get", index: frameLocal },
@@ -1471,12 +1471,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               op: "struct.get",
               typeIdx: info.promiseTypeIdx,
               fieldIdx: 1,
-            } as Instr,
+            },
             {
               op: "struct.set",
               typeIdx: info.stateTypeIdx,
               fieldIdx: ERROR_FIELD,
-            } as Instr,
+            },
             ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_THROW),
           ];
           const markPending: Instr[] = [
@@ -1490,7 +1490,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               op: "struct.set",
               typeIdx: info.stateTypeIdx,
               fieldIdx: SENT_FIELD,
-            } as Instr,
+            },
           ];
           const pendingOrRejected: Instr[] = [
             { op: "local.get", index: pLocal },
@@ -1498,7 +1498,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               op: "struct.get",
               typeIdx: info.promiseTypeIdx,
               fieldIdx: 0,
-            } as Instr,
+            },
             { op: "i32.const", value: PROMISE_STATE_REJECTED },
             { op: "i32.eq" },
             {
@@ -1506,26 +1506,26 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               blockType: { kind: "empty" },
               then: rejectFromP,
               else: markPending,
-            } as Instr,
+            },
           ];
           out.push(
             { op: "local.get", index: awaitedLocal },
-            { op: "any.convert_extern" } as Instr,
-            { op: "ref.test", typeIdx: info.promiseTypeIdx } as Instr,
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: info.promiseTypeIdx },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
                 { op: "local.get", index: awaitedLocal },
-                { op: "any.convert_extern" } as Instr,
-                { op: "ref.cast", typeIdx: info.promiseTypeIdx } as Instr,
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: info.promiseTypeIdx },
                 { op: "local.set", index: pLocal },
                 { op: "local.get", index: pLocal },
                 {
                   op: "struct.get",
                   typeIdx: info.promiseTypeIdx,
                   fieldIdx: 0,
-                } as Instr,
+                },
                 { op: "i32.const", value: PROMISE_STATE_FULFILLED },
                 { op: "i32.eq" },
                 {
@@ -1533,10 +1533,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
                   blockType: { kind: "empty" },
                   then: deliverFromP,
                   else: pendingOrRejected,
-                } as Instr,
+                },
               ],
               else: deliverPlain,
-            } as Instr,
+            },
           );
 
           // Advance-or-suspend. STATE = resumeState for both (suspend → the
@@ -1546,36 +1546,36 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             ...storeSpills(info, resumeFctx, frameLocal),
             // promise.callbacks = $PromiseCallback{stepFulfill, frame, stepReject, frame, promise.callbacks}
             { op: "local.get", index: pLocal },
-            { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! } as Instr,
+            { op: "ref.func", funcIdx: info.stepFulfillFuncIdx! },
             { op: "local.get", index: frameLocal },
-            { op: "extern.convert_any" } as Instr,
-            { op: "ref.func", funcIdx: info.stepRejectFuncIdx! } as Instr,
+            { op: "extern.convert_any" },
+            { op: "ref.func", funcIdx: info.stepRejectFuncIdx! },
             { op: "local.get", index: frameLocal },
-            { op: "extern.convert_any" } as Instr,
+            { op: "extern.convert_any" },
             { op: "local.get", index: pLocal },
             {
               op: "struct.get",
               typeIdx: info.promiseTypeIdx,
               fieldIdx: 2,
-            } as Instr,
-            { op: "struct.new", typeIdx: rt!.callbackTypeIdx } as Instr,
-            { op: "extern.convert_any" } as Instr,
+            },
+            { op: "struct.new", typeIdx: rt!.callbackTypeIdx },
+            { op: "extern.convert_any" },
             {
               op: "struct.set",
               typeIdx: info.promiseTypeIdx,
               fieldIdx: 2,
-            } as Instr,
+            },
             { op: "return" },
           ];
           // Advance: `br` to the dispatch `loop` to re-enter at STATE=resumeState.
-          const advanceArm: Instr[] = [{ op: "br", depth: loopDepth } as Instr];
+          const advanceArm: Instr[] = [{ op: "br", depth: loopDepth }];
           out.push({ op: "local.get", index: suspendedLocal });
           out.push({
             op: "if",
             blockType: { kind: "empty" },
             then: suspendArm,
             else: advanceArm,
-          } as Instr);
+          });
           break;
         }
         case "goto": {
@@ -1588,7 +1588,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           // loop is one nearer: `loopDepth - 1`. (Fixes the off-by-one the
           // producer-unreachable slice-3 goto shipped with.)
           out.push(...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.target));
-          out.push({ op: "br", depth: loopDepth - 1 } as Instr);
+          out.push({ op: "br", depth: loopDepth - 1 });
           break;
         }
         case "condGoto": {
@@ -1611,13 +1611,13 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               // The br sits inside this `if(cond)` arm — one level deep, exactly
               // like the suspend `advanceArm` br — so it reaches the loop at
               // `loopDepth` (id+2), NOT loopDepth+1.
-              { op: "br", depth: loopDepth } as Instr,
+              { op: "br", depth: loopDepth },
             ],
             else: [
               ...setStateI32FromConst(info, frameLocal, STATE_FIELD, term.whenFalse),
-              { op: "br", depth: loopDepth } as Instr,
+              { op: "br", depth: loopDepth },
             ],
-          } as Instr);
+          });
           break;
         }
         case "settleSent": {
@@ -1638,7 +1638,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           // Fall off the body — fulfil with undefined. (`return v` inside the
           // lead already settles via the `asyncDriveReturn` hook and returns.)
           out.push({ op: "local.get", index: resultPromiseLocal });
-          out.push({ op: "ref.null.extern" } as Instr);
+          out.push({ op: "ref.null.extern" });
           out.push({ op: "call", funcIdx: settleFulfillIdx });
           out.push({ op: "drop" });
           out.push({ op: "return" });
@@ -1656,9 +1656,9 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           if (term.fromSent) {
             // `yield await P` — the awaited value delivered into SENT_FIELD.
             out.push({ op: "local.get", index: frameLocal });
-            out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD } as Instr);
+            out.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: SENT_FIELD });
           } else if (term.value === null) {
-            out.push({ op: "ref.null.extern" } as Instr); // `yield;` → undefined
+            out.push({ op: "ref.null.extern" }); // `yield;` → undefined
           } else {
             const vt = isEmitOperand(term.value)
               ? term.value.emit(ctx, resumeFctx)
@@ -1666,7 +1666,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             if (vt !== null && vt !== undefined) {
               coerceType(ctx, resumeFctx, vt as ValType, { kind: "externref" });
             } else {
-              out.push({ op: "ref.null.extern" } as Instr);
+              out.push({ op: "ref.null.extern" });
             }
           }
           out.push({ op: "local.set", index: yieldValLocal });
@@ -1674,8 +1674,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           out.push({ op: "local.get", index: resultPromiseLocal });
           out.push({ op: "local.get", index: yieldValLocal });
           out.push({ op: "i32.const", value: 0 }); // done = false
-          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
-          out.push({ op: "extern.convert_any" } as Instr);
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx });
+          out.push({ op: "extern.convert_any" });
           out.push({ op: "call", funcIdx: settleFulfillIdx });
           out.push({ op: "drop" });
           // Suspend: STATE=resumeState, persist spills, return (await the next kick).
@@ -1689,10 +1689,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           // `next()`-promise with `{value: undefined, done: true}`.
           const resultTypeIdx = info.asyncGenResultTypeIdx!;
           out.push({ op: "local.get", index: resultPromiseLocal });
-          out.push({ op: "ref.null.extern" } as Instr); // value = undefined
+          out.push({ op: "ref.null.extern" }); // value = undefined
           out.push({ op: "i32.const", value: 1 }); // done = true
-          out.push({ op: "struct.new", typeIdx: resultTypeIdx } as Instr);
-          out.push({ op: "extern.convert_any" } as Instr);
+          out.push({ op: "struct.new", typeIdx: resultTypeIdx });
+          out.push({ op: "extern.convert_any" });
           out.push({ op: "call", funcIdx: settleFulfillIdx });
           out.push({ op: "drop" });
           out.push({ op: "return" });
@@ -1731,7 +1731,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // generator trampoline. Recursion depth == state id (dense, validated), so
   // each arm's `br`-to-loop depth is `id + 2` inside `buildStateBody`.
   const buildStateArm = (i: number): Instr[] => {
-    if (i >= cfg.states.length) return [{ op: "unreachable" } as Instr];
+    if (i >= cfg.states.length) return [{ op: "unreachable" }];
     const st = cfg.states[i]!;
     const then = trackDetached(buildStateBody(st));
     return [
@@ -1744,7 +1744,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         blockType: { kind: "empty" },
         then,
         else: buildStateArm(i + 1),
-      } as Instr,
+      },
     ];
   };
 
@@ -1778,17 +1778,20 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         ctx.liveBodies.delete(saved);
       }
       if (cfg.handlers.length === 1) {
-        catchFinallyInstrs.push({ op: "local.get", index: inSrcTryLocal }, {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: fbody,
-        } as Instr);
+        catchFinallyInstrs.push(
+          { op: "local.get", index: inSrcTryLocal },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: fbody,
+          },
+        );
       } else {
         catchFinallyInstrs.push(
           { op: "local.get", index: inSrcTryLocal },
           { op: "i32.const", value: region.id },
           { op: "i32.eq" },
-          { op: "if", blockType: { kind: "empty" }, then: fbody } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: fbody },
         );
       }
     }
@@ -1806,8 +1809,8 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     {
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: chain } as Instr],
-    } as Instr,
+      body: [{ op: "loop", blockType: { kind: "empty" }, body: chain }],
+    },
   ];
   resumeFctx.body.push({
     op: "try",
@@ -1828,7 +1831,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         ],
       },
     ],
-  } as Instr);
+  });
 
   resumePlaceholder.locals = resumeFctx.locals;
   resumePlaceholder.body = resumeFctx.body;
@@ -1858,8 +1861,8 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
   const frameLocal = 2;
   const body: Instr[] = [
     { op: "local.get", index: capsLocal },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: info.stateTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.stateTypeIdx },
     { op: "local.set", index: frameLocal },
     // SENT_FIELD = value (the settled awaited value the continuation reads).
     { op: "local.get", index: frameLocal },
@@ -1868,7 +1871,7 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
       op: "struct.set",
       typeIdx: info.stateTypeIdx,
       fieldIdx: SENT_FIELD,
-    } as Instr,
+    },
   ];
   if (reject) {
     // ERROR_FIELD = reason; MODE_FIELD = MODE_THROW (2). (Slice-1 surfaces the
@@ -1881,14 +1884,14 @@ function buildStepAdapterBody(info: AsyncFrameInfo, resumeFuncIdx: number, rejec
         op: "struct.set",
         typeIdx: info.stateTypeIdx,
         fieldIdx: ERROR_FIELD,
-      } as Instr,
+      },
       ...setStateI32FromConst(info, frameLocal, MODE_FIELD, 2),
     );
   }
   body.push(
     { op: "local.get", index: frameLocal },
     { op: "call", funcIdx: resumeFuncIdx },
-    { op: "ref.null.extern" } as Instr, // dropped by the drain
+    { op: "ref.null.extern" }, // dropped by the drain
   );
   return body;
 }
@@ -1921,7 +1924,7 @@ export function emitAsyncFrameStateMachine(
         decl,
         "internal: host async-drive imports not pre-registered (collectAsyncCpsImports prepass missing) (#1042)",
       );
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
       return;
     }
     hostImports = resolved;
@@ -1946,7 +1949,7 @@ export function emitAsyncFrameStateMachine(
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
     reportError(ctx, decl, "internal: async-frame resume function unavailable (#2895 slice 1)");
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
 
@@ -1960,19 +1963,19 @@ export function emitAsyncFrameStateMachine(
     fctx.body.push({ op: "call", funcIdx: hostImports!.newPendingIdx });
   } else {
     fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
-    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
   }
   fctx.body.push({ op: "local.set", index: resultPromiseLocal });
 
   // Build the $AsyncFrame: state=0, sent=null, mode=0, abrupt=null, error=null,
   // params (from this fn's wasm params), spills(default), result_promise.
   fctx.body.push({ op: "i32.const", value: 0 }); // state
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // sent
+  fctx.body.push({ op: "ref.null.extern" }); // sent
   fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // abrupt
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // error
+  fctx.body.push({ op: "ref.null.extern" }); // abrupt
+  fctx.body.push({ op: "ref.null.extern" }); // error
   for (let i = 0; i < info.paramTypes.length; i++) {
     fctx.body.push({ op: "local.get", index: i });
   }
@@ -1994,7 +1997,7 @@ export function emitAsyncFrameStateMachine(
       } else {
         fctx.body.push(defaultSpillInstr(cell.valType));
       }
-      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx });
     } else if (derivedInitLocal !== undefined) {
       fctx.body.push({ op: "local.get", index: derivedInitLocal });
     } else {
@@ -2002,7 +2005,7 @@ export function emitAsyncFrameStateMachine(
     }
   }
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx });
   const frameLocal = allocLocal(fctx, "__async_frame", {
     kind: "ref",
     typeIdx: info.stateTypeIdx,
@@ -2023,7 +2026,7 @@ export function emitAsyncFrameStateMachine(
 
   // Return the result promise (externref; the host result promise already is one).
   fctx.body.push({ op: "local.get", index: resultPromiseLocal });
-  if (!host) fctx.body.push({ op: "extern.convert_any" } as Instr);
+  if (!host) fctx.body.push({ op: "extern.convert_any" });
   fctx.body.push({ op: "return" });
 }
 
@@ -2190,7 +2193,7 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   const resumeFuncIdx = ensureAsyncResumeFunction(ctx, info, plan);
   if (resumeFuncIdx < 0) {
     reportError(ctx, decl, "internal: async-generator resume function unavailable (#2906 slice 3d-i)");
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "ref.null.extern" });
     return;
   }
 
@@ -2216,10 +2219,10 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   // Build the frame WITHOUT kicking (lazy): state=0, sent/mode/abrupt/error inert,
   // params, [no spills — bounded shape], result_promise = fresh pending.
   fctx.body.push({ op: "i32.const", value: 0 }); // state
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // sent
+  fctx.body.push({ op: "ref.null.extern" }); // sent
   fctx.body.push({ op: "i32.const", value: 0 }); // mode = MODE_NEXT
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // abrupt
-  fctx.body.push({ op: "ref.null.extern" } as Instr); // error
+  fctx.body.push({ op: "ref.null.extern" }); // abrupt
+  fctx.body.push({ op: "ref.null.extern" }); // error
   for (let i = 0; i < info.paramTypes.length; i++) {
     fctx.body.push({ op: "local.get", index: i });
   }
@@ -2239,7 +2242,7 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
       } else {
         fctx.body.push(defaultSpillInstr(cell.valType));
       }
-      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: cell.refCellTypeIdx });
     } else if (derivedInitLocal !== undefined) {
       fctx.body.push({ op: "local.get", index: derivedInitLocal });
     } else {
@@ -2248,13 +2251,13 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
   }
   // result_promise: fresh pending $Promise (overwritten by the first next()).
   fctx.body.push({ op: "i32.const", value: PROMISE_STATE_PENDING });
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx } as Instr);
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "ref.null.extern" });
+  fctx.body.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  fctx.body.push({ op: "struct.new", typeIdx: info.stateTypeIdx });
 
   // Return the frame as the async-gen object (externref carrier).
-  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  fctx.body.push({ op: "extern.convert_any" });
   fctx.body.push({ op: "return" });
   // Keep `rt` referenced (scheduler must be registered before the readers run).
   void rt;
@@ -2284,25 +2287,25 @@ function emitAsyncGenNextHelper(ctx: CodegenContext, info: AsyncFrameInfo, promi
   const pLocal = 2;
   const body: Instr[] = [
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: info.stateTypeIdx } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.stateTypeIdx },
     { op: "local.set", index: fLocal },
     // fresh pending result promise
     { op: "i32.const", value: PROMISE_STATE_PENDING },
-    { op: "ref.null.extern" } as Instr,
-    { op: "ref.null.extern" } as Instr,
-    { op: "struct.new", typeIdx: promiseTypeIdx } as Instr,
+    { op: "ref.null.extern" },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: promiseTypeIdx },
     { op: "local.set", index: pLocal },
     // frame.result_promise = p
     { op: "local.get", index: fLocal },
     { op: "local.get", index: pLocal },
-    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx } as Instr,
+    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx },
     // kick the resume machine
     { op: "local.get", index: fLocal },
     { op: "call", funcIdx: resumeIdx },
     // return p (as externref)
     { op: "local.get", index: pLocal },
-    { op: "extern.convert_any" } as Instr,
+    { op: "extern.convert_any" },
   ];
   pushDefinedFunc(ctx, funcIdx, {
     name,
@@ -2346,20 +2349,20 @@ function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number,
   // promise → state (i32).
   register("__async_gen_p_state", { kind: "i32" }, [
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 } as Instr, // state
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: promiseTypeIdx },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 }, // state
   ]);
 
   // promise → (promise.value as IteratorResult).done (i32).
   register("__async_gen_result_done", { kind: "i32" }, [
     { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult, boxed)
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
-    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD } as Instr,
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: promiseTypeIdx },
+    { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 }, // value (IteratorResult, boxed)
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: resultTypeIdx },
+    { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD },
   ]);
 
   // promise → ToNumber((promise.value as IteratorResult).value) (f64). The
@@ -2374,12 +2377,12 @@ function ensureAsyncGenReaderProbes(ctx: CodegenContext, promiseTypeIdx: number,
     returnType: { kind: "f64" },
     body: [
       { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: promiseTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 } as Instr, // value (IteratorResult)
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: resultTypeIdx } as Instr,
-      { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD } as Instr, // element (boxed number)
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: promiseTypeIdx },
+      { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 }, // value (IteratorResult)
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: resultTypeIdx },
+      { op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD }, // element (boxed number)
     ],
     blockDepth: 0,
     breakStack: [],
