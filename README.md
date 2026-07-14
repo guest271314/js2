@@ -191,15 +191,14 @@ avoids the custom-descriptors proposal, which stable Wasmtime does not yet
 accept.
 
 **Do not use `-W all-proposals=y`.** It also enables the **stack-switching**
-proposal, which Wasmtime 44/45 does not support in its compiler configuration —
+proposal, which Wasmtime does not support in its default compiler configuration —
 the runtime then fails at module load with `the wasm_stack_switching feature is
 not supported on this compiler configuration` and exits before running anything,
 regardless of module content (js2wasm output contains zero stack-switching
 opcodes). Stick to the targeted flag set above.
 
-**Recommended version:** Wasmtime **46+**. WasmGC first stabilized in 44, but
-44 and 45 carry GC bugs that can miscompile or mis-handle valid GC modules — use
-**46 or newer**. Versions older than 44 reject the GC types outright.
+**Recommended version:** Wasmtime **46+** — earlier releases either reject the
+GC types or carry WasmGC bugs that can miscompile or mis-handle valid GC modules.
 
 Other standalone runtimes: WasmGC support in WAMR and WasmEdge is still
 maturing, so compiled output is not guaranteed to run there yet. Browser hosts
