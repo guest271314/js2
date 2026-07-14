@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-14",
   "threshold": 1500,
-  "totalCeiling": 411286,
+  "totalCeiling": 411275,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -40,7 +40,7 @@
     "src/codegen/object-runtime.ts": 11608,
     "src/codegen/parse-number-native.ts": 1838,
     "src/codegen/property-access.ts": 8928,
-    "src/codegen/regexp-standalone.ts": 2893,
+    "src/codegen/regexp-standalone.ts": 2882,
     "src/codegen/stack-balance.ts": 2772,
     "src/codegen/statements/control-flow.ts": 1529,
     "src/codegen/statements/loops.ts": 6611,
