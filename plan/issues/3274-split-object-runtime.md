@@ -118,6 +118,21 @@ are property-keys / block-locals, not captures. Byte-identity `check` =
 green (`__object_is` SameValue NaN/-0 edges + `__extern_length`, zero host
 imports).
 
+## Slice 3 — prototype-chain group
+
+Extracted the prototype-chain block (~320 LOC) VERBATIM into
+`src/codegen/object-runtime-prototype.ts` as `buildObjectPrototypeHelpers`.
+Helpers relocated: `__getPrototypeOf`, `__object_create`,
+`__object_setPrototypeOf`, `__isPrototypeOf`.
+
+Cleanest slice yet — only 6 captures (`registerNative`, `propEntryTypeIdx`,
+`propMapTypeIdx`, `objectTypeIdx`, `objRefNull`, `propMapRef`) + 2 consts
+(`INITIAL_CAP`, `OBJ_FLAG_NONEXTENSIBLE`) via state, no cross-module imports, no
+downstream-const entanglement. `object-runtime.ts`: 6,607 → 6,299 LOC;
+`ensureObjectRuntime` now ~3,493. Byte-identity `check` = `IDENTICAL` (39/39);
+`tsc --noEmit` = 0; `tests/issue-3274-slice3.test.ts` (3) green
+(`Object.create(null)` + `getPrototypeOf` exercised natively, zero host imports).
+
 ## Acceptance criteria
 
 - `scripts/prove-emit-identity.mjs check` → `IDENTICAL` (39/39). ✓
