@@ -451,6 +451,7 @@ export function findBodyLocalLexicalNames(stmt: ts.ForStatement): Set<string> {
   return names;
 }
 
+/** Collect all identifier names from a binding pattern (ObjectBindingPattern or ArrayBindingPattern) */
 export function collectBindingNames(pattern: ts.BindingPattern): string[] {
   const names: string[] = [];
   for (const element of pattern.elements) {

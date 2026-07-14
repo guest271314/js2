@@ -34,7 +34,7 @@ import { ensureNativeGeneratorResultType } from "./generators-native.js";
 import { resolveWasmType } from "./index.js";
 import { coerceType, compileExpression, compileStatement } from "./shared.js";
 import { ensureAsyncIterator } from "./statements/destructuring.js";
-import { compileForOfDestructuring } from "./statements/loops.js";
+import { compileForOfDestructuring } from "./statements/for-of-destructuring.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
