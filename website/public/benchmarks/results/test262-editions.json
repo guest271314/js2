@@ -781,12 +781,12 @@
   },
   {
     "edition": "ES2017",
-    "pass": 375,
-    "fail": 285,
+    "pass": 384,
+    "fail": 276,
     "ce": 7,
     "skip": 0,
     "total": 667,
-    "pct": 56,
+    "pct": 58,
     "features": [
       {
         "name": "async-functions",
@@ -808,30 +808,30 @@
       },
       {
         "name": "Atomics",
-        "pass": 95,
-        "fail": 112,
+        "pass": 104,
+        "fail": 103,
         "ce": 3,
         "skip": 0,
         "total": 210,
-        "pct": 45
+        "pct": 50
       },
       {
         "name": "TypedArray",
-        "pass": 71,
-        "fail": 120,
+        "pass": 80,
+        "fail": 111,
         "ce": 2,
         "skip": 0,
         "total": 193,
-        "pct": 37
+        "pct": 41
       },
       {
         "name": "ArrayBuffer",
-        "pass": 8,
-        "fail": 49,
+        "pass": 17,
+        "fail": 40,
         "ce": 0,
         "skip": 0,
         "total": 57,
-        "pct": 14
+        "pct": 30
       },
       {
         "name": "Symbol",

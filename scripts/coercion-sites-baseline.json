@@ -9,7 +9,7 @@
   "codegen/closed-method-dispatch.ts": 1,
   "codegen/collections-es2025.ts": 5,
   "codegen/dataview-native.ts": 5,
-  "codegen/declarations.ts": 23,
+  "codegen/declarations/import-collector.ts": 23,
   "codegen/expressions/calls-closures.ts": 2,
   "codegen/expressions/calls.ts": 30,
   "codegen/expressions/identifiers.ts": 2,

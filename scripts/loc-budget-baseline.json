@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-14",
   "threshold": 1500,
-  "totalCeiling": 411755,
+  "totalCeiling": 411633,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3638,
@@ -17,7 +17,8 @@
     "src/codegen/closures.ts": 5145,
     "src/codegen/context/types.ts": 2600,
     "src/codegen/dataview-native.ts": 5327,
-    "src/codegen/declarations.ts": 5683,
+    "src/codegen/declarations.ts": 2351,
+    "src/codegen/declarations/import-collector.ts": 1949,
     "src/codegen/destructuring-params.ts": 2240,
     "src/codegen/expressions.ts": 1552,
     "src/codegen/expressions/assignment.ts": 4641,
@@ -46,7 +47,8 @@
     "src/codegen/registry/imports.ts": 2237,
     "src/codegen/stack-balance.ts": 2772,
     "src/codegen/statements/control-flow.ts": 1536,
-    "src/codegen/statements/loops.ts": 6617,
+    "src/codegen/statements/for-of-destructuring.ts": 2111,
+    "src/codegen/statements/loops.ts": 3602,
     "src/codegen/statements/nested-declarations.ts": 2726,
     "src/codegen/statements/variables.ts": 1558,
     "src/codegen/string-ops.ts": 3590,
