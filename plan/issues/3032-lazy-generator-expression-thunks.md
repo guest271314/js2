@@ -1,19 +1,21 @@
 ---
 id: 3032
 title: "Lazy-first-resume generator thunks: stop running eager-buffer generator bodies at creation (unblocks #2141 S3 / #2626 classifier)"
-status: in-progress
-assignee: ttraenkler/fable-tag5
+status: ready
+assignee:
 sprint: current
 created: 2026-07-04
 priority: high
 feasibility: hard
 reasoning_effort: max
+horizon: xl
 task_type: bugfix
 area: codegen, runtime, generators, value-rep
 language_feature: generators, destructuring defaults, equality
 goal: test262-conformance
-related: [2141, 2626, 2040, 2585, 928, 2203, 991]
+related: [2141, 2626, 2040, 2585, 928, 2203, 991, 3050]
 origin: "2026-07-04 #2141 S2 root-cause (fable-tag5): the −162 dstr eject was never a dstr/eq dependency — it was eager generator bodies + comparator vacuity"
+note: "FRESH-WINDOW BIG ROCK (sendev-3032, 2026-07-14): the remaining W3 work is threading TDZ-flag capture boxes through the native generator state machine (~4-6 tightly-coupled offset sites in generators-native.ts + nested-declarations.ts; merge_group-only validation; HIGH floor-risk). Slot at a budget-window START, NOT a tail — a partial window guarantees a stranded half-done native-generator change. See '## W3 — CORRECTED ROUTE + THE REAL BLOCKER'. Slice 1 (zero-param gen expressions) already LANDED; this issue is NOT done."
 ---
 
 # #3032 — eager-buffer generators run their body AT CREATION; the tag-5 comparator vacuity is the only thing hiding it
@@ -246,3 +248,93 @@ call). Not a pure wrap — do after W3.
 - gc/host lane: no regression on the generator suites
   (`gen-func-expr-args-trailing-comma-*`, `iter-val-array-prototype` — the
   two PR-#2625 regression buckets must stay green).
+
+## W3 — CORRECTED ROUTE + THE REAL BLOCKER (sendev-3032, 2026-07-14, empirically verified against `origin/main @ f1c9069`)
+
+The 2026-07-12 Implementation Plan above is **materially wrong about the
+code** — do not follow its file anchors. Corrected, all verified by probe +
+source trace:
+
+### 1. The plan's anchors are stale
+
+- The plan asserts "**There is no `nested-declarations.ts`** — the W3 note's
+  pointer is stale; the eager path for nested named generators is the
+  function-body.ts arm." **FALSE.** `src/codegen/statements/nested-declarations.ts`
+  exists (2726 lines) and IS the target. `function-body.ts` :1041-1128 is the
+  path for **top-level** generator declarations, and in standalone/wasi its
+  non-native arm `reportError`s — it is NOT where nested capturing generators
+  land.
+- A **capturing** nested named generator (`function* g(){...}` inside
+  `export function test()`) routes through `compileNestedFunctionDeclaration`
+  → the **has-captures branch** (`nested-declarations.ts` ~:771), whose
+  generator arm is an **eager-buffer** (`__gen_create_buffer` +
+  `__create_generator`, ~:990) that runs the WHOLE body at creation. Probe
+  (`function* g(){ iterations+=1; yield 1; iterations+=1 }`, read `iterations`
+  before the first `next()`): returns **202, must be 1** — on BOTH host AND
+  standalone. That is the §27.5 violation / eager-generator vacuity.
+- The has-captures path is **direct-call-with-leading-capture-params**
+  (`ctx.nestedFuncCaptures`), NOT a closure struct. So the plan's route (a-i)
+  "route through `compileArrowAsClosure`'s generator branch" and the
+  `__create_generator(<self>, null)` thunk model **do not apply** here — there
+  is no `__self` closure to hand as a thunk.
+
+### 2. The genuinely-lazy fix + the exact blocker
+
+The right mechanism already exists: **#3050's `capturingNativeGen`** — the
+native generator state machine with captures riding as leading synthetic
+params. Native generators suspend at start (lazy by construction), so they fix
+202→1 for free, host-free, in both modes. Two gates block the dominant shape:
+
+- `nested-declarations.ts` ~:817-823 requires `bodyHasNewTryRegionAcrossYield(stmt)`.
+  Relaxing that for the standalone lane (`ctx.standalone || ctx.wasi`) is
+  **safe** and lets non-try-region native-candidate capturing generators go
+  native. Host lane stays byte-identical: `isNativeGeneratorCandidate`
+  (`generators-native.ts` :1637-1665) internally still requires a try-region
+  under a JS host, so a non-try-region capturing generator keeps the host
+  eager path there. **Verified:** with the relaxation, standalone
+  `candidate=true`, host `candidate=false` (clean split).
+- **THE REAL BLOCKER:** the same gate also requires
+  `tdzFlaggedCaptures.length === 0`. The dominant shape captures `let`/`const`
+  bindings, which are **TDZ-flagged** (`hasTdzFlag`), so the relaxation is
+  **corpus-vacuous** for the real population. #3050 gated `=== 0` because the
+  native state-struct param model + resume function **do not thread TDZ flag
+  boxes** ("flag-box plumbing not modeled in the resume fn — a separate,
+  larger change, reasoning_effort:max", `nested-declarations.ts` :810).
+
+### 3. Concrete implementation plan for the TDZ-native-threading extension (next session, a FULL fresh window)
+
+The value-capture machinery (#3050) is the template; TDZ flag boxes are
+structurally identical `ref $cell`-of-i32 params. Thread them the same way:
+
+1. `nested-declarations.ts` has-captures gate: replace `tdzFlaggedCaptures.length === 0`
+   with a standalone-lane arm that INCLUDES the tdz flags, and pass them to
+   `registerNativeGenerator` (a new `leadingTdzFlags?: {name, refCellTypeIdx}[]`
+   arg, or extend `leadingCaptures`). Note `allParamTypes` already =
+   `[valueCaps, tdzFlags, userParams]` (:798-799) — the fix must make
+   `paramNames`/`leadingCaptureCount` agree with that ordering.
+2. `registerNativeGenerator` (`generators-native.ts` :1962): insert the tdz
+   flag names into `paramNames` between `captureNames` and `userParamNames`
+   (so `param_*` state fields exist + align with `allParamTypes`), and carry a
+   `leadingTdzFlagCells` list on `NativeGeneratorInfo`.
+3. Resume function (`generators-native.ts` ~:3300-3345): after the value-capture
+   `boxedCaptures` registration (:3314), register each tdz flag box in
+   `resumeFctx.boxedTdzFlags` + `tdzFlagLocals` (map name → {refCellTypeIdx,
+   localIdx of its `param_*` local}). Update `thisOffset`/`leadingCaptureCount`
+   (:3343) to include the tdz flag count so pattern-param offsets stay correct.
+4. Confirm the TDZ-checked identifier reads inside the body
+   (`emitLocalTdzCheck`, expressions/identifiers.ts) resolve through
+   `resumeFctx.boxedTdzFlags` (they only do `local.get flagBox; struct.get`, so
+   a param-slot flag box works — same as the lifted-closure path at
+   `nested-declarations.ts` :937-950).
+
+**Validation:** probes must show V1 (lazy: `iterations` before `next()` == 0,
+return 1) and V2 (drain a capturing generator: correct values) green on host
+AND standalone; the #3050 try-region tests + a no-capture control stay
+byte-identical; **merge_group standalone-floor is the decider** (broad-impact,
+native-generator internals — do NOT trust scoped CI). Host lane must be
+byte-identical (`prove-emit-identity`) — the standalone-only gate arm
+guarantees it.
+
+**Risk:** HIGH-floor, native-generator machinery, ~4-6 tightly-coupled offset
+sites; a subtle `param_*`/offset misalignment only surfaces in merge_group.
+Budget it as a full fresh window, not a tail slice.

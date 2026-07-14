@@ -704,3 +704,44 @@ iter-hof-native.ts).
 - The old acceptance criteria above are superseded: acceptance is now
   per-slice (the four assertion-family counts → ~0) + dstr standalone fail
   count ≤ 1,800 after slices 1-4.
+
+## A1-unblock map — CORRECTED (sendev-3032, 2026-07-14) — supersedes the "BLOCKED on #2580 M2 / #3032 / #3053" cell above
+
+The 2026-07-12 re-ground lists A1 (382 rows, the headline) as "BLOCKED on
+#2580 M2 / #3032 / #3053". Verified against `origin/main @ f1c9069`, that
+three-way blocker is **inaccurate**. The corrected map (each verified, not
+narrative):
+
+- **#3053 (unified carrier) — LANDED-but-VACUOUS, NOT a near-term A1 lever.**
+  U0/U1/U2 (`__dyn_member_get`/`ensureDynMemberGet`/`usesDynMemberGet`/the
+  `select.ts` scan) are all ON `origin/main` (fork branches merged; u0/u2 =0
+  commits ahead, u1 =+1 baseline-file merge). But #3053's own "U2 LANDED"
+  section proves it is corpus-VACUOUS: byte-inert (`prove-emit-identity`
+  39/39), claim-delta ~0, because property-access alone never claims the
+  `_isSameValue`/reduce comparator (it needs eq + relational + truthiness +
+  dynamic-arithmetic forms). The identity payoff (U3 #3037 CS3 / U4 #2175
+  V2-S3b) is OWNED by those issues and only materialises once #2949's
+  claim-rate forms land. So #3053 does NOT unblock A1 in the near term.
+- **#2580 M2 — value-rep rabbit hole, DEFER (not the A1 blocker).** 2388-line
+  diagnosis; M1a ejected (−13/13 regr), M2.2c WONT-FIX, most of it deferred to
+  the value-rep substrate (#35). Not a tractable near-term A1 lever; remove it
+  from the A1 blocker set.
+- **#3032 (lazy-first generators) — THE actual A1 lever.** #3032's root cause
+  (fully verified) is that the −162 classifier eject "was never a dstr/eq
+  dependency — it was eager generator bodies + comparator vacuity". Making
+  eager generators lazy turns the classifier-unmasked vacuous passes into
+  GENUINE passes, which is exactly what makes the flag-gated 3-way tag-5
+  classifier flip floor-safe. Slice 1 (zero-param generator EXPRESSIONS)
+  landed. The residual dominant standalone shape is **nested capturing NAMED
+  generators** (`function* g(){...}` inside the `export function test()`
+  wrapper) — they run their whole body AT CREATION (probe returns 202 not 1)
+  via `nested-declarations.ts`'s has-captures eager-buffer arm. See #3032 for
+  the corrected route + the TDZ-flag-capture native-threading extension that
+  the fix requires (the arch spec's function-body.ts:1052 / route-(a-i)
+  pointers are stale — verified 2026-07-14).
+
+**Net:** A1's classifier flip is gated primarily on **#3032**'s remaining
+generator-laziness work (specifically the TDZ-flag-capture native-threading
+extension), NOT on #2580 M2 or #3053. Keep the tag-5 3-way classifier flag
+gated OFF until #3032's standalone generator-laziness clears the merge_group
+floor under `JS2WASM_TAG5_CLASSIFIER=1`.
