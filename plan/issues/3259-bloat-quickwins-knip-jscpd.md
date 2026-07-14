@@ -1,7 +1,8 @@
 ---
 id: 3259
 title: "Bloat quick-wins: knip dead-export sweep + jscpd duplication scan of src/codegen"
-status: ready
+status: done
+completed: 2026-07-14
 sprint: current
 priority: high
 horizon: s
@@ -44,3 +45,27 @@ passes bank easy −LOC and inform the self-host order.
 
 - No risky god-file restructuring (calls.ts/index.ts shrink is a byproduct of the
   IR migration #2855 + backend convergence #2953/#2956, not direct editing).
+
+## Outcome (2026-07-14) — no cheap −LOC left; both halves empty
+
+Full run recorded in `plan/log/3259-bloat-quickwins-report.md`.
+
+**Half 1 — dead-export sweep.** knip was never actually wired (the premise was
+off — #3090 Phase 2b used a purpose-built reachability audit,
+`check:dead-exports`, not knip). That gate is clean: **16 known-unreferenced top-
+level functions, but all 16 are pinned by unit tests** (issue-1325/1919/2089/
+1238/682/2104/2091 + regex-bytecode). #3090 already deleted the truly-dead ones.
+**Zero safe deletions.** Two owner-judgment clusters remain (test-only internal
+helpers; the whole 299-LOC `regex/vm.ts` reference VM kept alive only by its two
+tests) — filed as notes, not deleted here.
+
+**Half 2 — jscpd.** `npx jscpd@4 src/codegen`: **11 clones, 0.64% duplication**,
+all small/local. **Critical caveat: jscpd is blind to the god-files** — its
+tokenizer silently drops files >~1k lines (regardless of `--max-size`), so it
+analyzed only 105/166 files (14% of LOC) and skipped every one of calls.ts /
+index.ts / object-runtime.ts / array-methods.ts / native-strings.ts. It cannot
+measure the `Instr[]` duplication that matters.
+
+**Conclusion:** no byte-inert automated win available. The real subtraction lever
+is the self-host epic #3256–#3258 (deletes the hand-emitted `Instr[]` wholesale);
+jscpd offers no sequencing signal because it can't see those files.
