@@ -1,13 +1,14 @@
 ---
 id: 3280
 title: "Decompose compileBinaryExpression — extract typed-operand dispatch + `in` operator into sibling modules"
-status: in-progress
+status: done
 sprint: current
 priority: high
 feasibility: hard
 model: opus
 task_type: refactor
 subtask_of: 3182
+completed: 2026-07-14
 assignee: ttraenkler/sendev-binops
 area: codegen
 ---
@@ -89,3 +90,7 @@ LOC (no `loc-budget-allow` required).
 - Slice 1 (tail): prove-emit-identity IDENTICAL 39/39; tsc 0; biome 0.
   `binary-ops.ts` 4,582 → 3,164 LOC; new module 1,485 LOC;
   `compileBinaryExpression` ~3,129 → ~1,710 LOC.
+- Slice 2 (`in` operator): prove-emit-identity IDENTICAL 39/39; tsc 0; biome 0;
+  smoke test 11/11 green. `binary-ops.ts` 3,164 → 2,789 LOC; new module
+  `binary-ops-in.ts` 417 LOC; `compileBinaryExpression` ~1,710 → ~1,330 LOC
+  (< 1,500 threshold — goal met).
