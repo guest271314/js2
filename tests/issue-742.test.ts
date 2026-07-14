@@ -209,3 +209,30 @@ describe("#742 receiver-type method dispatch (compileReceiverMethodCall)", () =>
     );
   });
 });
+
+// Slice 5 (#742 Wave B): the tail dispatch of compileCallExpression — IIFE, super
+// method calls, element-access method calls, call-of-call, conditional callee,
+// and the graceful fallback — was moved verbatim into the sibling module
+// call-tail-dispatch.ts (compileTailDispatch). These tests pin the behaviour of
+// the moved tail paths (wasm ≡ JS).
+describe("#742 tail dispatch (compileTailDispatch)", () => {
+  it("IIFE forms — function-expression and arrow", async () => {
+    await assertEquivalent(
+      `export function iifeFn(): number { return (function () { return 21; })() * 2; }
+       export function iifeArrow(): number { return ((x: number) => x + 1)(41); }`,
+      [
+        { fn: "iifeFn", args: [] },
+        { fn: "iifeArrow", args: [] },
+      ],
+    );
+  });
+
+  it("super method call dispatches to the base class", async () => {
+    await assertEquivalent(
+      `class Base { greet(): number { return 10; } }
+       class Derived extends Base { greet(): number { return super.greet() + 5; } }
+       export function sup(): number { return new Derived().greet(); }`,
+      [{ fn: "sup", args: [] }],
+    );
+  });
+});
