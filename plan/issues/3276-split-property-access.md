@@ -76,4 +76,26 @@ oracle ratchet; the loc-budget gate flags the new file (`loc-budget-allow` above
 
 ## Test Results
 
-(recorded below as slices land)
+### Slice 1 (PR — leading buffer/TA + constructor/prototype + JSON/Temporal/TextEncoder + Error bands)
+
+Extracted 7 cohesive guard bands from `compilePropertyAccess` into the new
+`src/codegen/property-access-dispatch.ts`:
+
+| Helper | Original band | Families |
+| --- | --- | --- |
+| `tryDynamicReceiverRuntimeDispatchReads` | #3054 D / #3237 | dynamic-receiver TA ctor `BYTES_PER_ELEMENT`, TA view `byteLength`, DisposableStack `.disposed` |
+| `tryConstructorPrototypeIdentity` | #2743/#2901/#2026/#3006/#3133/#2660 | `arguments.constructor(.prototype)`, `%TypedArray%` intrinsic ctor, tag-dispatch ctor identity, builtin/plain-object ctor singletons, fnctor `.prototype` |
+| `tryPinnedAndDeleteAwareDynamicGet` | #2681/#2686/#2179 | pinned-struct member get, tombstone-aware dynamic get |
+| `tryBuiltinNamespaceDeferredReads` | JSON/Temporal/TextEncoder | `JSON.parse` prop, Temporal prop, TextEncoder/TextDecoder read-only Web API props |
+| `tryBufferViewAttributeReads` | #3054 B2/C / #2159/#3061/#2596/#3173 | `$__ta_view` accessors, `maxByteLength`/`resizable`, `byteLength`/`byteOffset` view semantics, `.buffer` |
+| `tryStandaloneBuiltinAndWasiMemberReads` | #2175/#1914/#1780/#1482 | builtin-proto member meta/value, standalone RegExp reflection + match-result, `TextEncoderEncodeIntoResult`, `process.env` WASI |
+| `tryNativeErrorMemberRead` | #1104/#1536c/#2077 | standalone/WASI native Error `message`/`name`/`stack` |
+
+- `compilePropertyAccess` / `property-access.ts`: **7989 → 7107 LOC** (−882).
+- New `property-access-dispatch.ts`: 1078 LOC (loc-budget allowance granted).
+- Sentinel-guarded call sites (`PA_FALLTHROUGH`) preserve control flow exactly.
+- **Byte-identity: IDENTICAL — all 39 (file,target) emits match baseline** (gc/standalone/wasi).
+- `tsc --noEmit`: 0 errors. Gates green: loc-budget, oracle-ratchet (net +0),
+  any-box-sites, coercion-sites, speculative-rollback, stack-balance, dead-exports,
+  prettier.
+- Smoke test `tests/issue-3276.test.ts`: 7/7 pass.
