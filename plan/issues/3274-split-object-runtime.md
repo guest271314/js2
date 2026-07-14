@@ -100,6 +100,28 @@ import cycle. Cross-module utility functions (`addStringConstantGlobal`,
 `ensureExnTag`, `addUnionImportsViaRegistry`, `SELF_HOSTED_OBJECT_RUNTIME`) are
 imported directly from their original source modules.
 
+## Slice 2 — enumeration / array-like / object-static group
+
+Extracted the `__object_keys` … `__object_is` block (~1,137 LOC) VERBATIM into
+`src/codegen/object-runtime-enumeration.ts` as `buildObjectEnumerationHelpers`.
+Helpers relocated: `__object_keys` / `__object_keys_forin`, `__extern_length` /
+`__extern_get_idx` / `__extern_has_idx`, `__object_values` / `__object_entries`,
+`__object_assign`, `__object_is`.
+
+`ensureObjectRuntime` shrinks a further ~1,137 LOC (after slice 1, now ~3,813).
+`object-runtime.ts`: 7,720 → 6,607 LOC.
+
+Notes: `externSetIdx` was the one function-scope `const` inside the region also
+read by the (later) descriptor call, so it is re-derived
+(`ctx.funcMap.get("__extern_set")!`) immediately before that call — byte-neutral.
+`buildExternGetIdxBody` (a module-local helper the `__extern_get_idx` block
+calls) is now `export`ed and imported by the sibling (a benign function-decl
+cycle, used only at call time). `externGetIdx`/`externHasIdx` inside the region
+are property-keys / block-locals, not captures. Byte-identity `check` =
+`IDENTICAL` (39/39); `tsc --noEmit` = 0; `tests/issue-3274-slice2.test.ts` (4)
+green (`__object_is` SameValue NaN/-0 edges + `__extern_length`, zero host
+imports).
+
 ## Acceptance criteria
 
 - `scripts/prove-emit-identity.mjs check` → `IDENTICAL` (39/39). ✓
