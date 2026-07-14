@@ -1,9 +1,10 @@
 ---
 id: 3192
 title: "bloat S2: route DataView + RegExp brand checks through receiver-brand.ts"
-status: ready
+status: done
+completed: 2026-07-14
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-14
 priority: high
 feasibility: medium
 task_type: refactor
@@ -59,3 +60,42 @@ independently.
 - Zero test-diff; brand TypeError messages byte-identical
   (`DV_BRAND_MESSAGE` string preserved verbatim).
 - No new import cycles; `pnpm run typecheck` clean.
+
+## Resolution (2026-07-14)
+
+**RegExp — routed (the clean half).** `recoverRegExpStructFromExternref`
+(`regexp-standalone.ts`) previously hand-rolled the §22.2.6 brand gate
+(`any.convert_extern` → `ref.test $NativeRegExp` → `i32.eqz` → `if` throw via
+native-proto's `emitBrandCheckTypeError` → `ref.cast`). It now delegates the
+entire gate to the shared `emitReceiverBrandCheck` (`receiver-brand.ts`, #3171)
+with a **struct-only** `ReceiverBrandSpec` (RegExp has no shared backing store,
+so no `kindField`). The externref `this` is pushed on the stack, the preamble
+throws a catchable TypeError on a miss (message preserved verbatim:
+`"Method called on incompatible receiver (RegExp brand check failed)"`) and
+leaves the recovered `(ref $NativeRegExp)` on the stack, which the function then
+stashes in a typed local — identical observable behaviour. The now-unused
+`emitBrandCheckTypeError` import was dropped. Validated: `tests/issue-3192.test.ts`
+plus the existing `issue-2175-native-proto-brands` (5), `issue-2876` (8) and
+`issue-2161-regex-symbol-protocol` (14) suites all green; typecheck clean; no
+new runtime import cycle (`receiver-brand.ts` is a leaf — its only regexp edge
+is a pre-existing type-only import in `context/types.ts`, erased at runtime).
+
+**DataView — deliberately NOT routed (judgment gate hit).** The DataView
+accessors (`dataview-native.ts`) build the brand throw as a **template `Instr[]`
+(`dvTypeErrorThrow(ctx, DV_BRAND_MESSAGE)`) BEFORE the accessor body** — the
+funcIdx-capture ordering S1 preserves (`__new_TypeError` / `emitWasiErrorConstructor`
+push must precede any later funcIdx capture) — and then weave that template into
+a hand-built `if (not $__dv_window) <brandThrow>` that shares its single
+`$__dv_window` `ref.test` result with the detached-buffer and bounds checks (and
+reads the view length / buffer off the same narrowed struct). `emitReceiverBrandCheck`
+consumes a **stack receiver inside the fctx**, runs its **own** `ref.test`, and
+emits the throw **inline** (not as a pre-built, reusable template) — so adopting
+it here would either (a) force a second redundant `ref.test`, (b) break the
+pre-body template-ordering contract, or (c) require weakening receiver-brand's
+API to hand back a template. All three are worse couplings than the current
+tiny dup. Per the issue's explicit judgment gate we **stop at S1's shared throw
+template for DataView**: its throw already routes through S1's
+`buildThrowJsErrorInstrs` (#3191) via `dvTypeErrorThrow`, so the DataView brand
+throw is already de-duplicated at the throw-builder layer; only the gate
+structure stays local. `DV_BRAND_MESSAGE` unchanged; DataView brand behaviour
+locked by `tests/issue-3192.test.ts`.
