@@ -81,11 +81,11 @@ npx js2wasm input.ts -o output.wasm
 
 Programmatic API:
 
-> **Breaking change (#1757):** `compile()` (and `compileMulti`, `compileFiles`,
-> `compileToWat`, `compileProject`, `createIncrementalCompiler().compile`) now
-> return a `Promise` — `await` them. This lets the optional Binaryen optimizer
-> load lazily only when `optimize` is requested, without forcing standalone
-> bundles to embed Binaryen (GH #986).
+> The compile functions — `compile`, `compileMulti`, `compileFiles`,
+> `compileToWat`, `compileProject`, and `createIncrementalCompiler().compile` —
+> are async: they return a `Promise`, so `await` them. This keeps the optional
+> Binaryen optimizer out of standalone bundles by loading it lazily only when
+> `optimize` is requested.
 
 ```ts
 import { compile } from "js2wasm";
