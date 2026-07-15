@@ -16,7 +16,7 @@ goal: test262-conformance
 related: [3285]
 ---
 
-> **2026-07-15 — root cause DIAGNOSED, fix DEFERRED to a next window (senior-dev).**
+> **2026-07-15 — root cause DIAGNOSED. RC2 FIXED; RC1 fix DEFERRED to a next window (senior-dev).**
 > The verify-first trace (below, `## Diagnosis (2026-07-15)`) refuted the original
 > hypothesis: this is NOT a call-target type-inference bug. **Both** RC1 and RC2
 > collapse to a single root cause — top-level code runs in the wasm `(start)`
@@ -24,9 +24,16 @@ related: [3285]
 > can wire `setExports(instance.exports)`; the host closure-wrap/dispatch glue
 > then has no exports to work with. Standalone mode already dispatches RC1
 > natively and is unaffected (it is the reference implementation for the fix).
-> The real fix is broad-impact host-mode codegen (option A below), validatable
-> only on `merge_group` — too large for the 4% budget tail it was found in, so it
-> is banked here as a next-window **big-rock** (horizon xl). Do NOT attempt the
+>
+> **RC2 (`Promise.then`) is FIXED** by the small, additive `deferToExports`
+> change in the `callback_maker` host bridge (`src/runtime.ts`) — a top-level
+> `.then` callback whose microtask drains before `setExports` is now parked and
+> replayed the moment the instance is wired (mirrors the #2128 setter fix). See
+> the RC2 sub-fix note in `## Diagnosis`.
+>
+> **RC1 remains a next-window big-rock.** Its real fix is broad-impact host-mode
+> codegen (option A below), validatable only on `merge_group` — too large for the
+> budget tail it was found in, so it is banked here (horizon xl). Do NOT attempt the
 > `deferTopLevelInit`/init-contract route (option B) — it breaks the very
 > external raw-`(start)` harness this issue is about.
 
@@ -249,20 +256,31 @@ runs `assert.js` etc. as real top-level code → `(start)` → the bug.
   bridge?" question is answered: yes, it reaches `src/runtime.ts`'s
   `Promise_then`). The callback is wrapped via
   `_maybeWrapCallable(cb, arity, callbackState)`.
-- Same root cause: `.then(cb)` is top-level → `(start)` → `getExports()`
-  undefined → the callback can't be wrapped into a working JS-callable, so the
-  native `Promise`'s microtask fires a dead callback (nothing prints).
-- **Same code inside a post-`setExports` `test()` fires the callback** ("in
-  then" prints) — confirming identical exports-timing root cause.
-- **Important nuance that makes RC2 narrower than RC1:** the `.then` callback is
-  **asynchronous** — it fires on the host microtask queue _after_ `(start)`
-  returns and control is back in the host, by which time `setExports` HAS run.
-  So RC2 is fixable with a **lazy/deferred wrap in the Promise bridge**
-  (`__make_callback` / `Promise_then` should resolve the closure→JS-callable at
-  **fire time**, not eagerly at `(start)` time). This is the tech-lead's
-  "lazy-wrap-at-call" idea — it does NOT work for RC1 (that call is synchronous,
-  in `(start)`), but it DOES work for RC2 (async, post-`setExports`). RC2 could
-  land as a much smaller, host-glue-local PR independent of RC1.
+- Exact lowering: `.then(cb)` compiles to `__make_callback(cbId, caps)` (a
+  `callback_maker` host bridge that returns a JS function dispatching
+  `exports.__cb_<id>`), which is passed to `Promise_then`. The
+  `callback_maker` bridge ALREADY resolves `getExports()` lazily at fire time —
+  so a naive "lazy wrap" is already in place and is NOT enough.
+- **Precise timing (the subtlety):** the `.then` microtask does NOT wait until
+  `setExports`. It drains while the async instantiate helper is still
+  `await`-ing `WebAssembly.instantiate(...)` — i.e. AFTER `(start)` returns but
+  BEFORE the caller's `setExports` line. So at fire time `getExports()` is STILL
+  `undefined`, `exports.__cb_<id>` is missing, and the callback silently
+  no-ops. Confirmed by tracing `exportsWired=false` at the `__cb` fire, printed
+  before the driver's post-`setExports` marker.
+- **FIX (landed in this issue's RC2 PR):** when the `callback_maker` callback
+  fires with exports not yet wired, **park it via `deferToExports`** and replay
+  it the instant `setExports` wires the instance — the exact #2128 mechanism
+  used for `getter_callback_maker` setters. Additive: a callback whose reaction
+  fires AFTER `setExports` (every `wrapTest`/equivalence body runs inside an
+  exported function the host calls post-wiring) never hits the new branch, so no
+  harness-executed callback changes. Verified: RC2 repro + top-level `async fn`
+  `.then` both fire; 83 async/promise equivalence tests still green. (Baseline
+  check: `new Promise(exec).then()` and chained `.then` producing data were
+  ALREADY broken at top-level on main — not regressions; the deferred replay
+  fires the callbacks, though a value-carrying top-level `.then` chain can still
+  deliver a wrong chained value pre-wiring — an acceptable strict improvement
+  over "silent", and never hit by the post-`setExports` harness path.)
 
 ### Fix options
 
@@ -287,8 +305,9 @@ runs `assert.js` etc. as real top-level code → `(start)` → the bug.
   host can invoke closures without `getExports()`. Keeps `(start)` for all
   modes, but relies on funcref→JS-callable exposure and adds a new import +
   codegen + host-glue; broad-impact, unvalidated. Only if (A) proves infeasible.
-- **RC2 sub-fix (independent, smaller):** deferred/lazy callback wrap in the
-  Promise bridge (see RC2 nuance above). Host-glue-local; can land separately.
+- **RC2 sub-fix — DONE.** `deferToExports` park-and-replay in the
+  `callback_maker` host bridge (`src/runtime.ts`); host-glue-local, additive,
+  landed independently of RC1. Test: `tests/issue-3284-rc2.test.ts`.
 
 ### Reproduce (drop into a `.tmp/` driver)
 
