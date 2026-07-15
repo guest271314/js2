@@ -7,7 +7,7 @@ created: 2026-07-15
 priority: high
 feasibility: hard
 model: opus
-horizon: l
+horizon: xl
 reasoning_effort: high
 task_type: bugfix
 area: codegen, runtime
@@ -15,6 +15,20 @@ language_feature: promises, prototype-methods
 goal: test262-conformance
 related: [3285]
 ---
+
+> **2026-07-15 — root cause DIAGNOSED, fix DEFERRED to a next window (senior-dev).**
+> The verify-first trace (below, `## Diagnosis (2026-07-15)`) refuted the original
+> hypothesis: this is NOT a call-target type-inference bug. **Both** RC1 and RC2
+> collapse to a single root cause — top-level code runs in the wasm `(start)`
+> section, which executes _during_ `WebAssembly.instantiate`, **before** the host
+> can wire `setExports(instance.exports)`; the host closure-wrap/dispatch glue
+> then has no exports to work with. Standalone mode already dispatches RC1
+> natively and is unaffected (it is the reference implementation for the fix).
+> The real fix is broad-impact host-mode codegen (option A below), validatable
+> only on `merge_group` — too large for the 4% budget tail it was found in, so it
+> is banked here as a next-window **big-rock** (horizon xl). Do NOT attempt the
+> `deferTopLevelInit`/init-contract route (option B) — it breaks the very
+> external raw-`(start)` harness this issue is about.
 
 # #3284 — compiler compatibility with the real, unmodified test262 harness
 
@@ -56,17 +70,26 @@ these are compiler bugs, not artifacts of how that harness invokes us.
 `assert.js`'s actual, real implementation shape is:
 
 ```js
-function assert(mustBeTrue, message) { /* ... */ }
-assert.sameValue = function (actual, expected, message) { /* ... */ };
-assert.notSameValue = function (actual, expected, message) { /* ... */ };
-assert.throws = function (expectedErrorConstructor, func, message) { /* ... */ };
+function assert(mustBeTrue, message) {
+  /* ... */
+}
+assert.sameValue = function (actual, expected, message) {
+  /* ... */
+};
+assert.notSameValue = function (actual, expected, message) {
+  /* ... */
+};
+assert.throws = function (expectedErrorConstructor, func, message) {
+  /* ... */
+};
 ```
 
 i.e. `assert` is declared as a function, then given callable properties via
 plain assignment afterward — the single most common pattern in the entire
-harness. Minimal repro (target: `gc`, no wrapping needed — reproduces at
-top-level or inside a wrapped `export function test() {}`, same result
-either way):
+harness. Minimal repro (target: `gc`). **[CORRECTED: the "same result either
+way" claim is wrong — it reproduces ONLY at top-level; inside a wrapped
+`export function test() {}` called after `setExports` it WORKS. See
+`## Diagnosis`.]**
 
 ```js
 function assert(mustBeTrue, message) {
@@ -78,17 +101,23 @@ assert.sameValue = function (actual, expected, message) {
   throw new Error("sameValue failed: " + message);
 };
 console.log(typeof assert.sameValue); // prints "function" — property read + typeof are fine
-assert.sameValue(1, 1, 'should be equal'); // throws TypeError: sameValue is not a function
+assert.sameValue(1, 1, "should be equal"); // throws TypeError: sameValue is not a function
 ```
 
-`typeof assert.sameValue` correctly reports `"function"` immediately before
-the failing call — so the property is stored and readable, but the compiled
-**call site** doesn't resolve/dispatch it as callable. Likely somewhere in
-how call-target type inference handles a property added to a function object
-after its declaration (as opposed to a method defined inline in an object
-literal, or a property known statically at the declaration site) — worth
-comparing against how `compileCallExpression`/`compileReceiverMethodCall`
-(see #3282's LOC table) resolve the callee's type for this exact shape.
+**[CORRECTED 2026-07-15 — this hypothesis was wrong; see `## Diagnosis`.]** The
+original guess below (call-target type inference) is NOT the cause. The call
+codegen is correct — the identical call works inside a post-`setExports`
+`export function test(){…}`. The real cause is exports-timing during the wasm
+`(start)` section (see the Diagnosis section). Original text kept for history:
+
+> `typeof assert.sameValue` correctly reports `"function"` immediately before
+> the failing call — so the property is stored and readable, but the compiled
+> **call site** doesn't resolve/dispatch it as callable. Likely somewhere in
+> how call-target type inference handles a property added to a function object
+> after its declaration (as opposed to a method defined inline in an object
+> literal, or a property known statically at the declaration site) — worth
+> comparing against how `compileCallExpression`/`compileReceiverMethodCall`
+> (see #3282's LOC table) resolve the callee's type for this exact shape.
 
 This alone blocks the overwhelming majority of raw test262: `assert.js` is
 concatenated ahead of nearly every test file test262-wide.
@@ -96,13 +125,13 @@ concatenated ahead of nearly every test file test262-wide.
 ### 2. `Promise.prototype.then()` callbacks never fire
 
 ```js
-console.log('before promise');
+console.log("before promise");
 Promise.resolve(42).then(function (v) {
-  console.log('in then, v=', v); // never printed — confirmed with an explicit
-                                  // 500ms setTimeout wait afterward, not just
-                                  // "hasn't happened yet by the next line"
+  console.log("in then, v=", v); // never printed — confirmed with an explicit
+  // 500ms setTimeout wait afterward, not just
+  // "hasn't happened yet by the next line"
 });
-console.log('after promise setup');
+console.log("after promise setup");
 ```
 
 `src/runtime.ts` bridges `Promise_then`/`Promise_new`/`Promise_resolve` etc.
@@ -111,6 +140,7 @@ where `p` is a genuine native `Promise`), so in principle this should Just
 Work via Node's own microtask queue — but the callback provably never runs,
 even after the compiled function that scheduled it has returned and control
 is back in plain host JS with time to spare. This breaks:
+
 - the standard test262 async-test convention (`doneprintHandle.js`'s
   `$DONE`/`print('Test262:AsyncTestComplete')`, driven by a `.then()`/`.catch()`
   chain, not `async`/`await`)
@@ -121,7 +151,7 @@ is back in plain host JS with time to spare. This breaks:
   entry point does not, which is a narrower, more diagnosable bug than "async
   is broken").
 
-Confirm this is specifically about *host-visible* callback firing, not about
+Confirm this is specifically about _host-visible_ callback firing, not about
 `.then()` being unimplemented — the promise itself resolves fine (no error,
 no unhandled rejection surfaces either) and `#test262-worker.mjs`'s own
 `testFn()` invocation model calls the wrapped test **synchronously and
@@ -164,3 +194,128 @@ correctness gap independent of any test-harness framing.
   scores correctly for a representative batch of currently-failing-for-this-
   reason test262 files.
 - No regression in the existing rewritten-harness JS-host pass rate.
+
+## Diagnosis (2026-07-15, senior-dev)
+
+Verified directly against `origin/main` (@ `9013d0b8`) by building a clean
+`compile()` + `buildImports()` + `instantiateWasm()` driver with host-side
+tracing (all repros compiled `target: 'gc'`).
+
+### Both root causes are ONE bug: top-level `(start)` runs before `setExports`
+
+Every top-level statement is compiled into the wasm `(start)` /
+`__module_init` function (see `src/codegen/declarations.ts` ~L2279–2336). The
+wasm `start` section runs **inside** `WebAssembly.instantiate`, so it executes
+**before** the host can call `setExports(instance.exports)` (you cannot obtain
+`instance.exports` until `instantiate` returns). During `(start)`, the host
+runtime's `callbackState.getExports()` returns `undefined`, which disables
+every exports-backed capability — including wrapping/dispatching Wasm closures
+(needs the module's `__is_closure` / `__call_fn_*` exports).
+
+The custom test262 preamble hides this because `wrapTest()` moves the whole
+test body into an `export function test(){…}` the runner calls **after**
+`setExports` (`tests/test262-runner.ts` L4104-4112). The raw upstream harness
+runs `assert.js` etc. as real top-level code → `(start)` → the bug.
+
+#### RC1 — `assert.sameValue(1,1)` ("… is not a function")
+
+- The store `assert.sameValue = fn` and the call `assert.sameValue(1,1)` are
+  **both** top-level → both run in `(start)` with `exportsWired=false`
+  (confirmed by tracing `!!callbackState.getExports()` at the
+  `__extern_method_call` entry).
+- At store time, `__extern_set_strict` → `_maybeWrapCallableUnknownArity(val)`
+  bails (no exports) and stores the **raw** `__fn_wrap_N` GC struct in the
+  sidecar — traced as `val=(function, isWasm=true)` [raw struct] at top-level
+  vs `(function, isWasm=false)` [real JS fn] when the same code is wrapped in a
+  post-`setExports` `test()`.
+- At call time, the host receiver is wrapped as a plain host `Proxy`
+  (`isWasm=false`, not a function), its get-trap returns the raw `__fn_wrap`
+  struct un-wrapped, `typeof fn !== "function"`, the `#1712` callable-closure
+  arm is skipped (receiver is not a JS function), and dispatch falls through to
+  `throw new TypeError(method + " is not a function")`.
+- **Same code inside `export function test(){…}` (host-called after
+  `setExports`) works perfectly** — proving the call codegen is correct; the
+  only variable is exports-timing.
+- **STANDALONE mode (`target:'standalone'`, stub `env`) dispatches the SAME
+  repro correctly** — it uses the wasm-native object-runtime (`struct.get`
+  funcref + `call_ref`, no host round-trip, no exports dependency) and runs via
+  `(start)` with no problem. So the bug is **host-mode only**, and standalone is
+  the reference implementation for the fix.
+
+#### RC2 — `Promise.resolve(42).then(cb)` callback never fires
+
+- The source DOES lower to the host bridge — imports include `Promise_resolve`,
+  `Promise_then`, and `__make_callback` (so the issue's "does it even reach the
+  bridge?" question is answered: yes, it reaches `src/runtime.ts`'s
+  `Promise_then`). The callback is wrapped via
+  `_maybeWrapCallable(cb, arity, callbackState)`.
+- Same root cause: `.then(cb)` is top-level → `(start)` → `getExports()`
+  undefined → the callback can't be wrapped into a working JS-callable, so the
+  native `Promise`'s microtask fires a dead callback (nothing prints).
+- **Same code inside a post-`setExports` `test()` fires the callback** ("in
+  then" prints) — confirming identical exports-timing root cause.
+- **Important nuance that makes RC2 narrower than RC1:** the `.then` callback is
+  **asynchronous** — it fires on the host microtask queue _after_ `(start)`
+  returns and control is back in the host, by which time `setExports` HAS run.
+  So RC2 is fixable with a **lazy/deferred wrap in the Promise bridge**
+  (`__make_callback` / `Promise_then` should resolve the closure→JS-callable at
+  **fire time**, not eagerly at `(start)` time). This is the tech-lead's
+  "lazy-wrap-at-call" idea — it does NOT work for RC1 (that call is synchronous,
+  in `(start)`), but it DOES work for RC2 (async, post-`setExports`). RC2 could
+  land as a much smaller, host-glue-local PR independent of RC1.
+
+### Fix options
+
+- **(A) — THE fix for RC1 (next-window big-rock).** Make host-mode
+  function-object member get/call dispatch **wasm-native**, the way standalone
+  already does (route dynamic props on function-objects through the native
+  object-runtime, or give function-objects a struct shape carrying assigned
+  callable fields → `struct.get` funcref + `call_ref`). Works inside `(start)`,
+  host+standalone uniform, and keeps EXTERNAL raw-`(start)` harnesses
+  (test262.fyi) working with zero host cooperation. Broad-impact host-mode
+  member-dispatch codegen; validatable only on `merge_group`
+  (standalone-floor + full-CI). Horizon xl. Standalone is the reference.
+- **(B) — REJECTED, do not re-propose.** Mode-aware `deferTopLevelInit`
+  (export `__module_init`, drop the `(start)` section, host calls it after
+  `setExports`; the mechanism already exists for the diff-test harness, #2796).
+  It makes OUR repro pass but **breaks the motivating scenario**: test262.fyi
+  uses raw `WebAssembly.instantiate` + `(start)` and does NOT call
+  `__module_init`, so ALL top-level code — including currently-passing simple
+  tests — would stop running (~7.48% → ~0). Also a broad init-contract change.
+- **(C) — speculative.** Hand the host the module's dispatch funcrefs during
+  `(start)` (new import `__wire_dispatch` at the top of `__module_init`) so the
+  host can invoke closures without `getExports()`. Keeps `(start)` for all
+  modes, but relies on funcref→JS-callable exposure and adds a new import +
+  codegen + host-glue; broad-impact, unvalidated. Only if (A) proves infeasible.
+- **RC2 sub-fix (independent, smaller):** deferred/lazy callback wrap in the
+  Promise bridge (see RC2 nuance above). Host-glue-local; can land separately.
+
+### Reproduce (drop into a `.tmp/` driver)
+
+```js
+// RC1 — throws "sameValue is not a function" at top-level; works inside test()
+function assert(x) {
+  if (x === true) return;
+  throw new Error("a");
+}
+assert.sameValue = function (a, e) {
+  if (a === e) return;
+  throw new Error("s");
+};
+console.log(typeof assert.sameValue); // "function"
+assert.sameValue(1, 1);
+
+// RC2 — "in then" never prints at top-level; prints inside test()
+Promise.resolve(42).then(function (v) {
+  console.log("in then, v=", v);
+});
+```
+
+Driver: `compile(src, {target:'gc'})` → `buildImports(r.imports)` →
+`instantiateWasm(...)` → `imports.setExports(instance.exports)`. The top-level
+variants fail because the failure happens _during_ `instantiateWasm` (the
+`(start)` run), before `setExports`.
+
+The scoped invariant test lives at `tests/issue-3284-rc1.test.ts`
+(`describe.skip`, with a pointer to this section) so a future implementer can
+un-skip it to drive the fix.
