@@ -14,6 +14,8 @@ task_type: bugfix
 area: runtime, codegen
 goal: test262-conformance
 related: [3285, 3284]
+loc-budget-allow:
+  - src/codegen/array-prototype-borrow.ts
 ---
 
 # #3287 — fix the compiler bugs behind the newly-failing `assert.throws` tests
