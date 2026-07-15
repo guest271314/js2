@@ -12,10 +12,29 @@ reasoning_effort: high
 task_type: ci-infra
 area: test-infrastructure
 goal: test-infrastructure
-related: [3285]
+related: [3285, 3287]
 ---
 
 # #3286 — land #3285 slice-1 despite the CI-flagged "regression"
+
+## Sequencing note — check this before choosing a landing path (added 2026-07-15)
+
+**[[3287]] may make this issue's lever-dance path unnecessary or much
+cheaper.** The ~2664 flips this issue is about are pass→fail because the
+compiler currently throws the *wrong* error type for those tests (#3287's
+subject). If #3287's fixes land on `main` **before** PR #3104's harness
+tightening does, every test #3287 fixed would already throw the correct
+type — so tightening the check produces `pass→pass` (no flip) for those,
+not `pass→fail`. The residual flip count (whatever #3287 doesn't cover) is
+what actually needs a landing path here, and it may fall under
+`ORACLE_REBASE_DRIFT_TOLERANCE` (25) / the per-bucket-50 limit / the #1668
+catastrophic guard (200) without any lever-raising at all — turning this
+into a normal PR.
+
+**Before starting options A/B/C below**: rebase PR #3104 on current `main`,
+re-run the regression diff, and check the residual flip count. Only reach
+for the lever dance if a real residual remains after #3287's progress is
+accounted for.
 
 ## Context
 

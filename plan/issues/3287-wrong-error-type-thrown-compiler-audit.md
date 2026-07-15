@@ -80,16 +80,25 @@ is turning it into one.
    small, well-scoped sub-issues once the harvest identifies them, rather
    than one large PR.
 
-## Relationship to #3286
+## Relationship to #3286 — fix this FIRST if at all possible
 
 #3286 is purely a CI/baseline-landing-mechanics problem: how does the
 *already-correct* #3285 slice-1 scoring fix get merged despite tripping the
 regression guards. This issue (#3287) is the actual compiler-correctness
-work the scoring fix exposed. They're independent — #3286 could land (or
-stay deferred) without any of this issue's fixes existing yet, and fixes
-here don't require #3104 to be merged first (they can be validated locally
-against the harness change on that branch, or against a hand-rolled
-`assert.throws(ErrorType, fn)` probe independent of the harness entirely).
+work the scoring fix exposed. Fixes here don't require #3104 to be merged
+first — validate locally against #3104's branch harness, or against a
+hand-rolled `assert.throws(ErrorType, fn)` probe independent of the harness
+entirely.
+
+**Sequencing matters**: landing these fixes on `main` *before* #3104's
+harness-tightening PR lands means those tests go straight from "wrong type,
+scored pass under the old lenient check" to "correct type, scored pass under
+the new strict check" — a `pass→pass` transition with no flip, invisible to
+the regression gates. That sidesteps #3286's entire lever-dance problem for
+however many tests this issue covers; only the uncovered residual would
+still need #3286's landing-path work. Prioritize breadth of coverage here
+(even partial) over waiting for a "complete" fix — every root cause closed
+here shrinks #3286's blast radius.
 
 ## Acceptance criteria
 
