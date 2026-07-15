@@ -14,6 +14,13 @@ area: codegen, runtime
 language_feature: promises, prototype-methods
 goal: test262-conformance
 related: [3285]
+# Intentional +20 LOC in the host import-resolver: the RC2 `deferToExports`
+# guard added to the `callback_maker` case of `resolveImport` mirrors the
+# adjacent `getter_callback_maker` (#2128) host-glue bridge — extracting 20
+# host-local lines into a subsystem module would balloon a deliberately-minimal
+# bugfix. Grants THIS change-set the god-file growth (#3131).
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 > **2026-07-15 — root cause DIAGNOSED. RC2 FIXED; RC1 fix DEFERRED to a next window (senior-dev).**
