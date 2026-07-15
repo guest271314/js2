@@ -1597,6 +1597,12 @@
               with the full JS ecosystem, the web, and npm, and accessing Web APIs without glue code &mdash; the target
               the project is working toward, not a level of compatibility it claims today.
             </p>
+            <p>
+              The goal is for the compiler to consume and AOT-compile JavaScript from npm packages, while lowering
+              host API and native addon references to imports that are left to be satisfied by the host runtime. The
+              resulting modules will still depend on a compatible host environment &mdash; which could be the Web,
+              Node, or Deno &mdash; or an API-compatible WASI port if provided by the consumer.
+            </p>
           </article>
           <article class="feature-card">
             <div class="feature-icon"><img src="./wasm-logo-white.svg" alt="WebAssembly logo" /></div>
