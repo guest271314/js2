@@ -119,7 +119,7 @@ export {
 } from "./expressions/operator-assignment.js";
 export { compileCallExpression, compileIIFE, compileOptionalCallExpression } from "./expressions/calls.js";
 export { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
-export { emitThrowString, getFuncParamTypes } from "./expressions/helpers.js";
+export { getFuncParamTypes } from "./expressions/helpers.js";
 export {
   analyzeTdzAccessByPos,
   compileIdentifier,

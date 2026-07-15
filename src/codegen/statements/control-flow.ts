@@ -8,7 +8,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
-import { emitThrowString } from "../expressions/helpers.js";
+import { emitThrowTypeError } from "../expressions/helpers.js";
 import {
   addStringImports,
   addUnionImports,
@@ -210,7 +210,7 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
       ts.TypeFlags.StringLike |
       ts.TypeFlags.ESSymbolLike;
     if (tsType.flags & primitiveFlags) {
-      emitThrowString(ctx, fctx, "TypeError: Derived constructors may only return an object or undefined");
+      emitThrowTypeError(ctx, fctx, "Derived constructors may only return an object or undefined");
       return;
     }
   }

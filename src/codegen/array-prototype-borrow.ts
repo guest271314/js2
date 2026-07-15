@@ -21,7 +21,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import { addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
-import { buildThrowStringInstrs, noJsHost } from "./js-errors.js";
+import { buildThrowJsErrorInstrs, noJsHost } from "./js-errors.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -980,7 +980,9 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowJsErrorInstrs(ctx, "TypeError", "Reduce of empty array with no initial value", {
+            flush: fctx,
+          }),
         });
       }
 
@@ -1144,7 +1146,9 @@ export function compileArrayLikePrototypeCall(
         fctx.body.push({
           op: "if",
           blockType: { kind: "empty" },
-          then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+          then: buildThrowJsErrorInstrs(ctx, "TypeError", "Reduce of empty array with no initial value", {
+            flush: fctx,
+          }),
         });
       }
 

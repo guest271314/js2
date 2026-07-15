@@ -76,7 +76,6 @@ import { compileSpreadCallArgs } from "./extern.js";
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
   emitThrowReferenceError,
-  emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,

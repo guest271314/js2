@@ -42,7 +42,6 @@ import {
   classifyPrivateMember,
   emitSuperUninitializedThisGuard,
   emitThrowReferenceError,
-  emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
 } from "./helpers.js";
@@ -1561,7 +1560,7 @@ export function compileCompoundAssignment(
   if (fctx.constBindings?.has(name)) {
     const rhsType = compileExpression(ctx, fctx, expr.right);
     if (rhsType) fctx.body.push({ op: "drop" });
-    emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+    emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
     fctx.body.push({ op: "unreachable" });
     return { kind: "f64" };
   }

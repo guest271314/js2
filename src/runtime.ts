@@ -13411,6 +13411,26 @@ assert._isSameValue = isSameValue;
       return (id: number, cap: any) =>
         (...args: any[]) => {
           const exports = callbackState?.getExports();
+          // (#3284) A callback whose reaction fires DURING WebAssembly.instantiate
+          // — e.g. a top-level `Promise.resolve(x).then(cb)` whose microtask
+          // drains while the async instantiate helper is still awaiting, BEFORE
+          // the caller wires `setExports` — sees `getExports()` undefined and
+          // would otherwise silently no-op (the `.then` callback never runs).
+          // Park it and replay the moment setExports wires the instance, mirroring
+          // the #2128 `getter_callback_maker` setter fix. Purely additive: when
+          // exports are already wired (the normal post-instantiation path, incl.
+          // every wrapTest/equivalence body that runs inside an exported function
+          // the host calls AFTER setExports), the branch is skipped and behaviour
+          // below is unchanged — so no harness-executed callback is affected.
+          if (exports === undefined && callbackState) {
+            const defer = (callbackState as { deferToExports?: (fn: () => void) => void }).deferToExports;
+            if (defer) {
+              defer(() => {
+                callbackState.getExports()?.[`__cb_${id}`]?.(cap, ...args);
+              });
+              return undefined;
+            }
+          }
           return exports?.[`__cb_${id}`]?.(cap, ...args);
         };
     case "getter_callback_maker":
