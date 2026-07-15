@@ -27,7 +27,7 @@ import {
   registerNativeGenerator,
   type NativeGeneratorCaptureParam,
 } from "../generators-native.js";
-import { emitThrowReferenceError, emitThrowString, emitThrowTypeError, noJsHost } from "../expressions/helpers.js";
+import { emitThrowReferenceError, emitThrowTypeError, noJsHost } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
   compileClassBodies,
