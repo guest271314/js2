@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 3;
+export const ORACLE_VERSION = 4;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -71,5 +71,30 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "function'. LABEL-ONLY: zero pass/fail flips (net_per_test 0). The " +
       "regression-gate bucket diff is label-noise; landed with ORACLE_REBASE so " +
       "the guards treat the cross-policy relabel as a re-baseline.",
+  },
+  {
+    version: 4,
+    note:
+      "#3285 assert_throws error-type precision (slice 1). transformAssertThrows " +
+      "previously discarded the expected error constructor (args[0]): " +
+      "`assert.throws(TypeError, fn)` became a bare `assert_throws(fn)` that only " +
+      "checked 'did anything throw', so a codegen bug throwing the WRONG error " +
+      "type (e.g. RangeError where the spec mandates TypeError) read as a false " +
+      "pass. The runner now threads the expected type through — " +
+      "`assert_throws(ErrorCtor, fn)` verifies the caught error MATCHES the " +
+      "expected type (`e instanceof ErrorCtor`, `.name` fallback for host-opaque " +
+      "shapes) before counting a pass. This reclassifies previously-inflated " +
+      "false-passes to honest fails (owner-approved per #3285 acceptance " +
+      "criteria — the drop is the correct signal, not a regression). NOTE: because " +
+      "the synthetic harness/preamble compiles INTO the wasm, this shim change " +
+      "alters wasm_sha for every assert.throws test, so the reclassified flips " +
+      "register as wasm-CHANGE regressions — the #3086 forward-bump auto-rebase " +
+      "excuses only SAME-wasm oracle-skew flips, so this re-baseline needs a " +
+      "promote-baseline/force-refresh at v4 to seed the new-policy floor (the " +
+      "oracle bump alone does not clear the #1668/#3086 wasm-change guards). NOTE: " +
+      "the #3003 verdict-oracle-bump gate did NOT flag this change — its " +
+      "VERDICT_SIGNAL_RE only matches `status:` verdict-literal assignments, not " +
+      "verdict-tightening inside the assert_throws/assert_throwsAsync shim body; " +
+      "that false-negative is a follow-up gate-hardening item for a future window.",
   },
 ];
