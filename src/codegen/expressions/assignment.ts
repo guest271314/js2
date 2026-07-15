@@ -65,7 +65,6 @@ import {
   emitCoercedLocalSet,
   emitSuperUninitializedThisGuard,
   emitThrowReferenceError,
-  emitThrowString,
   emitThrowTypeError,
   getFuncParamTypes,
   updateLocalType,
@@ -207,7 +206,7 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       // Evaluate RHS for side effects, then throw
       const rhsType = compileExpression(ctx, fctx, expr.right);
       if (rhsType) fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+      emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
       fctx.body.push({ op: "unreachable" });
       return { kind: "f64" }; // unreachable, but satisfy type
     }
@@ -660,7 +659,7 @@ function emitIdentifierWriteFromLocal(
 
   // const → TypeError; read-only (named-fn-expr) → silent no-op (sloppy).
   if (fctx.constBindings?.has(name)) {
-    emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+    emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
     fctx.body.push({ op: "unreachable" });
     return;
   }
@@ -2513,7 +2512,7 @@ export function emitAssignToTarget(
   if (ts.isPropertyAccessExpression(target)) {
     // Compile-away: frozen object property writes throw TypeError
     if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
-      emitThrowString(ctx, fctx, "TypeError: Cannot assign to read only property of frozen object");
+      emitThrowTypeError(ctx, fctx, "Cannot assign to read only property of frozen object");
       return;
     }
 
@@ -3333,7 +3332,7 @@ function compilePropertyAssignment(
     if (rhsType) {
       fctx.body.push({ op: "drop" });
     }
-    emitThrowString(ctx, fctx, "TypeError: Cannot assign to read only property of frozen object");
+    emitThrowTypeError(ctx, fctx, "Cannot assign to read only property of frozen object");
     return { kind: "f64" }; // unreachable, but need a type
   }
 

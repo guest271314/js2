@@ -22,7 +22,7 @@ import {
   typedArrayPackedSignedness,
 } from "./index.js";
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
-import { buildThrowStringInstrs, emitThrowString, noJsHost } from "./js-errors.js";
+import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
@@ -220,7 +220,7 @@ function emitCallbackTypeCheck(
 ): boolean {
   // No callback argument → always throw
   if (callExpr.arguments.length < 1) {
-    emitThrowString(ctx, fctx, `TypeError: ${methodName} callback is not a function`);
+    emitThrowTypeError(ctx, fctx, `${methodName} callback is not a function`);
     return true;
   }
   // Known non-callable literal → compile arg for side effects, then throw
@@ -228,7 +228,7 @@ function emitCallbackTypeCheck(
   if (isKnownNonCallable(ctx, cbArg)) {
     const cbType = compileExpression(ctx, fctx, cbArg);
     if (cbType) fctx.body.push({ op: "drop" });
-    emitThrowString(ctx, fctx, `TypeError: ${methodName} callback is not a function`);
+    emitThrowTypeError(ctx, fctx, `${methodName} callback is not a function`);
     return true;
   }
   return false;
@@ -315,7 +315,7 @@ export function emitReceiverNullGuard(
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: buildThrowStringInstrs(ctx, "TypeError: Array method called on null or undefined"),
+    then: buildThrowJsErrorInstrs(ctx, "TypeError", "Array method called on null or undefined", { flush: fctx }),
     else: [],
   });
 }
@@ -2269,7 +2269,7 @@ function compileArrayAt(
     } else if (argType.kind === "i64") {
       // BigInt index → TypeError per ToNumber (§7.1.4).
       fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "TypeError: Cannot convert a BigInt value to a number");
+      emitThrowTypeError(ctx, fctx, "Cannot convert a BigInt value to a number");
       fctx.body.push({ op: "i32.const", value: 0 });
     } else {
       // Coerce ToNumber → f64 via the engine, then ToIntegerOrInfinity.
@@ -5538,7 +5538,7 @@ function compileArrayReduce(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowJsErrorInstrs(ctx, "TypeError", "Reduce of empty array with no initial value", { flush: fctx }),
     });
     fctx.body.push({ op: "local.get", index: loop.dataTmp });
     fctx.body.push({ op: "i32.const", value: 0 });
@@ -5753,7 +5753,7 @@ function compileArrayReduceRight(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: buildThrowStringInstrs(ctx, "TypeError: Reduce of empty array with no initial value"),
+      then: buildThrowJsErrorInstrs(ctx, "TypeError", "Reduce of empty array with no initial value", { flush: fctx }),
     });
     fctx.body.push({ op: "local.get", index: dataTmp });
     fctx.body.push({ op: "local.get", index: lenTmp });
@@ -6469,7 +6469,7 @@ function compileArraySort(
       if (recvType) fctx.body.push({ op: "drop" });
       const cbType = compileExpression(ctx, fctx, cbArg);
       if (cbType) fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "TypeError: Array.prototype.sort comparator is not a function");
+      emitThrowTypeError(ctx, fctx, "Array.prototype.sort comparator is not a function");
       fctx.body.push({ op: "unreachable" });
       return { kind: "ref_null", typeIdx: vecTypeIdx };
     }
