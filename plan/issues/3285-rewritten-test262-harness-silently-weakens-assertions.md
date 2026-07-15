@@ -1,7 +1,8 @@
 ---
 id: 3285
 title: "wrapTest()'s synthetic harness silently deletes/weakens real test262 assertions instead of translating them"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-3285
 sprint: current
 created: 2026-07-15
 priority: high
@@ -68,8 +69,8 @@ function assert_throws(fn: () => void): void {
 }
 ```
 
-only checks "did *anything* throw." `assert.throws(TypeError, fn)` is test262's
-standard way to assert a *specific* error type — the majority of the spec's
+only checks "did _anything_ throw." `assert.throws(TypeError, fn)` is test262's
+standard way to assert a _specific_ error type — the majority of the spec's
 early-error and type-coercion-failure tests use this to distinguish "correctly
 threw TypeError" from "threw the wrong thing" or "threw for the wrong reason."
 With the type dropped, a codegen bug that throws `RangeError` instead of the
@@ -149,3 +150,72 @@ have made was never emitted at all. It should get the same seriousness.
 - Re-measure the JS-host test262 pass rate after these fixes — a drop is
   expected and correct (previously-inflated passes moving to fail), report
   the delta rather than treating it as a regression.
+
+## Progress — Slice 1 DONE (fix #1 only), #2 and #3 deferred to next window
+
+This issue was sliced for budget. **Slice 1 (fix #1: `transformAssertThrows`
+error-type threading) is implemented and validated in this PR.** Fixes #2
+(`stripUndefinedAssert`) and #3 (full `strip*` inventory) are **not** done —
+they are banked for a follow-up window. `status` stays `in-progress`.
+
+### Slice 1 — what changed (test-infra only, no `src/` change)
+
+`tests/test262-runner.ts`:
+
+1. `transformAssertThrows` now emits `assert_throws(ErrorType, fn)` — it keeps
+   `args[0]` (the expected error constructor) instead of discarding it. The
+   optional 3rd message arg is still dropped. This flows through unchanged for
+   the `assert.throwsAsync` → `assert_throws` → `assert_throwsAsync` rewrite
+   path, so both shims get the type.
+2. The synthetic `assert_throws` / `assert_throwsAsync` shims (in
+   `buildPreamble`) now take `(ErrorCtor, fn)` and verify the caught error
+   MATCHES the expected type before counting a pass:
+   `e instanceof ErrorCtor`, then a `.name`-vs-`ErrorCtor.name` fallback. A
+   wrong-but-present throw is now a real failure, not a pass.
+
+**Why `instanceof` + `.name` fallback (confirmed by probing compiled code):**
+inside the compiled test, `instanceof` against the in-module error constructor
+works and correctly discriminates (including subclass — `assert.throws(Error,
+…)` matches a `TypeError`), and `Test262Error` (a user class) matches too.
+The `.name` fallback covers host-opaque error representations where the
+in-module constructor identity isn't shared. Both are read inline in the shim
+(factoring the matcher into a helper trapped on a null-pointer deref, so the
+logic stays inline). `assert_throwsAsync`'s thenable-return path stays untyped
+(the rejection reason can't be inspected synchronously) — a narrow, documented
+limitation; the synchronous-throw path IS type-checked.
+
+### Slice 1 — validation delta (scoped, JS-host lane)
+
+Ran the real `wrapTest` + `buildPreamble` pipeline (`runTest262File`) over
+`assert.throws`-using files, before vs after:
+
+| scoped batch                                                                           | before pass | after pass | flipped pass→fail         | fail→pass |
+| -------------------------------------------------------------------------------------- | ----------- | ---------- | ------------------------- | --------- |
+| `built-ins/Reflect` + `built-ins/TypedArray/prototype/set` (116 files)                 | 62          | 45         | **17**                    | 0         |
+| `built-ins/Map/prototype` + `Set/prototype` + `Array/prototype/copyWithin` (228 files) | —           | 212        | (control: 93% still pass) | —         |
+
+The **17-test drop is expected and correct** per the acceptance criteria —
+they are previously-inflated false-passes becoming real fails. All 17 are
+`Reflect/**/return-abrupt-from-*` and `arguments-list-is-not-array-like`
+tests: they assert a _specific_ error (`Test262Error` from a throwing
+`toString`/abrupt coercion) propagates. Instrumenting the caught error in the
+real wrapped run shows the compiler throws a **different named error**
+(diagnostic class 20 for all 17), NOT the spec-mandated `Test262Error` — a
+genuine compiler conformance gap (owned by #3284, not this test-infra fix)
+that the old "any throw counts" shim silently passed. **Zero false-negatives**:
+no case where a correct `Test262Error` was thrown but the matcher missed it.
+The 228-file control batch (simple correct-type `TypeError`/`RangeError`
+throws) stays at 93% pass, confirming correct-type throws are preserved and
+the matcher does not mass-fail. Full-suite delta will be measured by CI.
+
+## Next window (#2, #3 — NOT in this PR)
+
+- **#2 `stripUndefinedAssert`** (`tests/test262-runner.ts:~1036`) and
+  `stripUndefinedThrowGuards` (`~744`): still delete `assert.sameValue(x,
+undefined)` / `if (x !== undefined) throw` outright. Route through a real
+  comparison (`__extern_is_undefined` is referenced in #3284/#3282 context) or
+  track as reduced-coverage — do not silently count as an unconditional pass.
+- **#3 full `strip*` inventory**: sweep every `strip*` helper in `wrapTest()`,
+  classify cosmetic (message-arg stripping, harmless) vs. assertion-deleting
+  (e.g. the `/* stripped object identity assert */` bare-identifier-pair arm
+  near `simpleExprPat`), fix/track the deleting ones.

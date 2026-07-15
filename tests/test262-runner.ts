@@ -660,12 +660,18 @@ function replaceOtherThrows(code: string): string {
 }
 
 /**
- * Transform `assert.throws(ErrorType, fn)` into `assert_throws(fn)`.
+ * Transform `assert.throws(ErrorType, fn)` into `assert_throws(ErrorType, fn)`.
  *
- * These test that calling `fn` throws an error of the given type. We strip
- * the error type argument (first arg) and optional message (third arg),
- * keeping only the function callback (second arg). A shim `assert_throws`
- * in the preamble calls fn() inside try/catch.
+ * These test that calling `fn` throws an error of the given type. We keep BOTH
+ * the expected error constructor (first arg) AND the function callback (second
+ * arg), dropping only the optional message (third arg). The shim `assert_throws`
+ * in the preamble calls `fn()` inside try/catch and verifies the caught error
+ * MATCHES `ErrorType` before treating it as a pass (#3285).
+ *
+ * Previously the first arg was read and discarded — `assert.throws(TypeError,
+ * fn)` became `assert_throws(fn)`, so a callback that threw the WRONG error type
+ * (e.g. `RangeError` where the spec mandates `TypeError`) still counted as a
+ * pass. Threading the type through closes that false-positive.
  *
  * Uses paren-counting to handle nested parens in the function argument.
  */
@@ -726,9 +732,14 @@ function transformAssertThrows(code: string, outputFnName: string = "assert_thro
     )
       endPos++;
 
-    // args[0] = ErrorType, args[1] = fn, args[2] = optional message
-    if (args.length >= 2 && args[1]) {
-      result += `${outputFnName}(${args[1]});`;
+    // args[0] = ErrorType, args[1] = fn, args[2] = optional message.
+    // (#3285) Keep BOTH the expected error constructor (args[0]) and the
+    // callback (args[1]) so the shim can verify the caught error MATCHES the
+    // expected type. The optional 3rd message arg is intentionally not
+    // forwarded. Previously only args[1] was kept, discarding the type — so a
+    // wrong-but-present throw counted as a pass.
+    if (args.length >= 2 && args[0] && args[1]) {
+      result += `${outputFnName}(${args[0]}, ${args[1]});`;
     }
     // If we couldn't parse args properly, just strip the call (fallback)
     i = endPos;
@@ -1627,11 +1638,22 @@ function assert_true(value: any, _msg?: any): void {
   if (needsAssertThrows) {
     p += `
 
-function assert_throws(fn: () => void): void {
+function assert_throws(ErrorCtor: any, fn: () => void): void {
   __assert_count = __assert_count + 1;
   try {
     fn();
   } catch (e) {
+    // (#3285) A caught error only counts as a pass when it MATCHES the expected
+    // type. \`instanceof\` handles in-module errors and subclass relationships
+    // (assert.throws(Error, …) matches a TypeError); comparing the error's
+    // \`.name\` to the constructor's \`.name\` is the fallback for host-opaque
+    // error representations where the in-module constructor identity isn't
+    // shared. A throw of the WRONG type is a real failure, not a pass.
+    if (e instanceof ErrorCtor) return;
+    const en: any = (e as any).name;
+    const cn: any = ErrorCtor.name;
+    if (en === cn) return;
+    if (!__fail) __fail = __assert_count;
     return;
   }
   if (!__fail) __fail = __assert_count;
@@ -1641,15 +1663,25 @@ function assert_throws(fn: () => void): void {
   if (needsAssertThrowsAsync) {
     p += `
 
-function assert_throwsAsync(fn: () => any): void {
+function assert_throwsAsync(ErrorCtor: any, fn: () => any): void {
   __assert_count = __assert_count + 1;
   try {
     const res = fn();
-    // Accept thenable returns (Promise rejections from async generators .throw())
+    // Accept thenable returns (Promise rejections from async generators .throw()).
+    // The rejection reason can't be inspected synchronously here (the shim does
+    // not await), so a thenable return is still accepted untyped — a narrow,
+    // documented limitation. The synchronous-throw path below IS type-checked.
     if (res !== null && res !== undefined && typeof res === 'object' && typeof res.then === 'function') {
       return;
     }
   } catch (e) {
+    // (#3285) Verify the synchronously-thrown error matches the expected type —
+    // same rule as assert_throws (instanceof, then .name fallback).
+    if (e instanceof ErrorCtor) return;
+    const en: any = (e as any).name;
+    const cn: any = ErrorCtor.name;
+    if (en === cn) return;
+    if (!__fail) __fail = __assert_count;
     return;
   }
   if (!__fail) __fail = __assert_count;
