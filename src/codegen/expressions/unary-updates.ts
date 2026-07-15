@@ -35,7 +35,7 @@ import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#268
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
-import { emitSuperUninitializedThisGuard, emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
+import { emitSuperUninitializedThisGuard, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitToPropertyKeyOnce } from "./operator-assignment.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
@@ -982,7 +982,7 @@ function compilePrefixUpdate(
       // Unwrap parenthesized expressions: ++(x) -> ++x
       const ppOperand = unwrapParens(expr.operand);
       if (ts.isIdentifier(ppOperand) && fctx.constBindings?.has(ppOperand.text)) {
-        emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+        emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
         fctx.body.push({ op: "unreachable" });
         return { kind: "f64" };
       }
@@ -1198,7 +1198,7 @@ function compilePrefixUpdate(
       // Unwrap parenthesized expressions: --(x) -> --x
       const mmOperand = unwrapParens(expr.operand);
       if (ts.isIdentifier(mmOperand) && fctx.constBindings?.has(mmOperand.text)) {
-        emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+        emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
         fctx.body.push({ op: "unreachable" });
         return { kind: "f64" };
       }
@@ -1435,7 +1435,7 @@ function compilePostfixUnary(
   if (ts.isIdentifier(postOperand)) {
     // const bindings — increment/decrement throws TypeError at runtime
     if (fctx.constBindings?.has(postOperand.text)) {
-      emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+      emitThrowTypeError(ctx, fctx, "Assignment to constant variable.");
       fctx.body.push({ op: "unreachable" });
       return { kind: "f64" };
     }

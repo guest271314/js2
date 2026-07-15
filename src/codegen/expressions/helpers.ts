@@ -3,7 +3,6 @@
  * Shared utility helpers for expression sub-modules.
  *
  * Contains functions used by multiple expression sub-modules:
- *   - emitThrowString: emit a Wasm throw with a string message
  *   - isEffectivelyVoidReturn: check if a return type is void (incl. async)
  *   - getFuncParamTypes: look up Wasm param types for a function index
  *   - wasmFuncReturnsVoid / wasmFuncTypeReturnsVoid: void-return predicates
@@ -25,21 +24,17 @@ import { coerceType, valTypesMatch } from "../shared.js";
 // `expressions/helpers.js` unchanged.
 import {
   buildThrowJsErrorInstrs,
-  buildThrowStringInstrs,
   emitThrowJsError,
   emitThrowRangeError,
   emitThrowReferenceError,
-  emitThrowString,
   emitThrowTypeError,
   noJsHost,
 } from "../js-errors.js";
 export {
   buildThrowJsErrorInstrs,
-  buildThrowStringInstrs,
   emitThrowJsError,
   emitThrowRangeError,
   emitThrowReferenceError,
-  emitThrowString,
   emitThrowTypeError,
   noJsHost,
 };

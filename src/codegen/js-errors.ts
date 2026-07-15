@@ -34,28 +34,6 @@ export function noJsHost(ctx: CodegenContext): boolean {
 export type JsErrorKind = "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" | "Error";
 
 /**
- * Build the terminal instruction sequence that throws a BARE STRING message via
- * the shared `$exc` tag. Returns the instrs (does not push) so it can be spliced
- * into an `if.then`/`else` arm or a raw `Instr[]`. Registers the string constant
- * + exception tag as a side effect. (No late-import / funcIdx capture, so there
- * is nothing to flush.)
- */
-export function buildThrowStringInstrs(ctx: CodegenContext, message: string): Instr[] {
-  addStringConstantGlobal(ctx, message);
-  const tagIdx = ensureExnTag(ctx);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }];
-}
-
-/**
- * Emit a Wasm throw instruction with a string error message.
- * This replaces `unreachable` traps so that JS try/catch (and assert.throws)
- * can catch the error instead of getting an uncatchable RuntimeError.
- */
-export function emitThrowString(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
-  fctx.body.push(...buildThrowStringInstrs(ctx, message));
-}
-
-/**
  * (#3175) Build the real-instance `<Kind>`-throw lowering as a terminal
  * instruction sequence (does not push), so it can be spliced into a nested
  * `if.then` array (a CONDITIONAL throw — e.g. the `Number.prototype.toString`
