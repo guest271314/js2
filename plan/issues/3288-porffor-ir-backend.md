@@ -20,6 +20,7 @@ origin: "2026-07-16 user directive: add Porffor IR as an optional backend and sh
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-16T20:07:57.957Z
 branch: symphony/porffor/3288
+pr: 3166
 ---
 
 # #3288 - Optional Porffor IR backend over the JS2 linear-memory plan
