@@ -17,6 +17,7 @@ import {
   readPullRequest,
   readPullRequestForBranch,
   scopePullRequestIssues,
+  scopeSprintIssues,
 } from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
@@ -479,12 +480,13 @@ class MarkdownTracker {
 
   fetchCandidateIssues() {
     const issues = this.allIssues();
-    const sprint = issues[0]?.selected_sprint ?? "latest";
     const candidateStates = this.resumeInProgress
       ? new Set([...this.claimableStates, ...this.activeStates])
       : this.claimableStates;
-    return issues
-      .filter((issue) => String(issue.sprint) === String(sprint))
+    const scopedIssues = scopeSprintIssues(issues, {
+      includeDependencies: Boolean(get(this.config, "tracker.include_dependencies", false)),
+    });
+    return scopedIssues
       .filter((issue) => candidateStates.has(issue.state))
       .filter((issue) => !activeDispatchClaim(issue.id))
       .filter((issue) => !this.isBlocked(issue, issues))
@@ -520,6 +522,12 @@ class MarkdownTracker {
       claimed_by: lane.name,
       claimed_at: new Date().toISOString(),
       ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+      ...(issue.pull_request || issue.last_merged_pr
+        ? {
+            pr: issue.pull_request ?? null,
+            ...(issue.last_merged_pr ? { last_merged_pr: issue.last_merged_pr } : {}),
+          }
+        : {}),
       ...(issue.last_ci_retry_head ? { last_ci_retry_head: issue.last_ci_retry_head } : {}),
     });
   }
@@ -1507,24 +1515,32 @@ class Orchestrator {
       }
 
       if (planned.action === "continue") {
+        const mergedBranch = issue.branch_name;
+        const branchPrefix = String(get(this.config, "workspace.branch_prefix", "symphony")).replace(/\/+$/, "");
+        const continuationBranch =
+          mergedBranch && (mergedBranch === branchPrefix || mergedBranch.startsWith(`${branchPrefix}/`))
+            ? mergedBranch
+            : null;
         const running = this.running.get(id);
         const retry = this.retryAttempts.get(id);
         if (retry?.timer_handle) clearTimeout(retry.timer_handle);
         this.retryAttempts.delete(id);
         this.pullRequestRetryCounts.delete(id);
         this.handledFailedPrHeads.delete(id);
-        if (running?.lane.kind !== "claude-channel") {
+        if (running && running.lane.kind !== "claude-channel") {
           this.suppressedRetries.add(id);
-          running?.child.kill("SIGTERM");
-        } else if (activeDispatchClaim(id)) {
+          running.child.kill("SIGTERM");
+        } else if (running && activeDispatchClaim(id)) {
           releaseDispatchClaim(id, `PR #${state.number} merged; continuing issue`);
         }
         issue.last_merged_pr = planned.mergeKey;
         issue.last_ci_retry_head = null;
         issue.pull_request = null;
         issue.pr = null;
+        issue.branch_name = continuationBranch;
         this.tracker.updateIssueStatusFile(issue, issue.file, "ready", {
           pr: null,
+          branch: continuationBranch,
           last_ci_retry_head: null,
           last_merged_pr: planned.mergeKey,
         });
@@ -1534,7 +1550,8 @@ class Orchestrator {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           pr: state.number,
-          branch: issue.branch_name,
+          branch: continuationBranch,
+          merged_branch: mergedBranch,
         });
         continue;
       }
