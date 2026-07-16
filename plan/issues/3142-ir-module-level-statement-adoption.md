@@ -17,6 +17,12 @@ language_feature: compiler-internals
 goal: ir-full-coverage
 related: [3090, 2855, 2856]
 origin: "plan/bloat-reduction-battle-plan.md slice 6; gate G3 in plan/log/3090-phase0-legacy-delete-list.md"
+# Slice 1 adds the module-init claim assessment to the selector; it must live
+# in select.ts because it reads the module-level isPhase1* walk state
+# (earlyReturnLoopDepth / barrier / forInitLeakedNames) that is deliberately
+# not exported (see the threading rationale on currentHostGlobalResolver).
+loc-budget-allow:
+  - src/ir/select.ts
 ---
 
 # #3142 — IR adoption for module-level statements (gate G3)
