@@ -3311,6 +3311,24 @@ export function test(): number {
   // EVERY assertion is unreachable, which is itself a vacuous test.
   const hasExecutableAsserts = /\bassert_[A-Za-z]\w*\s*\(/.test(bodyForFunc);
   const generalVacuityGate = hasExecutableAsserts ? "  if (__assert_count === 1) { return -262; }\n" : "";
+  // (#3227) Async tests: the JS-host lane schedules `.then`/await continuations
+  // on the HOST microtask queue, which cannot drain while `test()` is still on
+  // the Wasm→JS stack — so the sync return value is read BEFORE the
+  // assertion-bearing callbacks run (they DO run, immediately after `test()`
+  // returns; verified empirically). `__drain_microtasks()` is a deliberate
+  // no-op on this lane (#2895 PATH B), so the sync verdict of an async test is
+  // structurally premature. Export a `__result()` re-check with the SAME
+  // verdict logic as the `test()` epilogue; the runner yields to the host
+  // event loop after `test()` returns and re-reads the verdict through it.
+  const asyncResultExport = isAsyncTest
+    ? `
+export function __result(): number {
+  if (__fail) { return __fail; }
+  if (__harness_cb_expected > 0 && __harness_cb_dead === __harness_cb_expected) { return -262; }
+${generalVacuityGate}  return 1;
+}
+`
+    : "";
   const postBody = `
   } catch (e) {
     if (!__fail) __fail = -1;
@@ -3327,7 +3345,7 @@ ${asyncDrainCall}  if (__fail) { return __fail; }
   if (__harness_cb_expected > 0 && __harness_cb_dead === __harness_cb_expected) { return -262; }
 ${generalVacuityGate}  return 1;
 }
-`;
+${asyncResultExport}`;
   const bodyLineOffset = preBody.split("\n").length - 1;
   // Also account for lines stripped from the original source (metadata block)
   const metaBlock = source.match(/\/\*---[\s\S]*?---\*\//);
@@ -4259,8 +4277,64 @@ export async function runTest262File(
     }
 
     const executeStart = performance.now();
-    const ret = testFn();
+    let ret = testFn();
     executeMs = performance.now() - executeStart;
+    // (#3227) Async re-read: for async-flagged tests the wrapper exports
+    // `__result()` (same verdict logic as the test() epilogue). The JS-host
+    // lane runs `.then`/await continuations on the HOST microtask queue, which
+    // only drains after `test()` returns — so a sync `1`/`-262` from an async
+    // test was read before the assertion-bearing callbacks executed. Yield to
+    // the event loop (setImmediate runs after the whole microtask queue,
+    // including recursively-queued chains; two rounds cover continuations that
+    // schedule a macrotask hop), then re-read the verdict. Sync assert
+    // failures (ret >= 2, __fail is sticky/first-wins) and runtime-negative
+    // tests keep their sync semantics.
+    const resultFn = (instance.exports as any).__result;
+    if (!isRuntimeNegative && typeof resultFn === "function" && (ret === 1 || ret === -262)) {
+      // A post-return continuation can THROW (a wasm trap or a Test262Error
+      // escaping a .then reaction) — inside the drain window that surfaces as
+      // an uncaughtException/unhandledRejection, which would kill the fork
+      // worker. Capture it and score THIS test failed instead (the throw IS
+      // the test's async outcome; pre-#3227 it fired unattributed between
+      // tests).
+      let deferredError: unknown = null;
+      const onDeferred = (err: unknown) => {
+        if (deferredError == null) deferredError = err;
+      };
+      process.on("uncaughtException", onDeferred);
+      process.on("unhandledRejection", onDeferred);
+      try {
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+      } finally {
+        process.off("uncaughtException", onDeferred);
+        process.off("unhandledRejection", onDeferred);
+      }
+      if (deferredError != null) {
+        const e: any = deferredError;
+        const msg =
+          e?.message != null ? `${e.constructor?.name ?? "Error"}: ${String(e.message)}` : String(deferredError);
+        return {
+          file: relPath,
+          category,
+          status: "fail",
+          error: `${msg.slice(0, 600)} | async continuation threw after test() returned (#3227)`,
+          timing: {
+            totalMs: round2(performance.now() - totalStart),
+            compileMs: round2(compileMs),
+            instantiateMs: round2(instantiateMs),
+            executeMs: round2(executeMs),
+          },
+          wasm_sha,
+        };
+      }
+      try {
+        ret = resultFn();
+      } catch {
+        // The re-read itself trapped — keep the sync verdict rather than
+        // crediting/blaming the re-read.
+      }
+    }
     const totalMs = performance.now() - totalStart;
     const timing: TestTiming = {
       totalMs: round2(totalMs),

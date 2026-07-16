@@ -93,6 +93,18 @@ export interface CodegenOptions {
    * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
    */
   honestAnyBoxing?: boolean;
+  /**
+   * (#745 S2) Known-union `$AnyValue` representation — heterogeneous primitive
+   * unions (`number | string`, …) resolve to the universal `$AnyValue` tagged
+   * carrier instead of externref. Default OFF: byte-identical to the legacy
+   * regime (the mapping in `resolveWasmType` is the only behaviour keyed on
+   * it, and it only fires on such union types). Flips to default-on for
+   * standalone/nativeStrings in a later slice, after the consumer migration
+   * (strict-eq / truthiness / string-concat / call-boundary operands — see
+   * #745 `## Slice plan` S3) makes those paths carrier-agnostic. Coordinate
+   * with #2141 (tag-5 ABI untangle).
+   */
+  unionAnyRep?: boolean;
   /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
    *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
   tag5ValueEqClassifier?: boolean;
@@ -1793,6 +1805,19 @@ export interface CodegenContext {
   tupleTypeMap: Map<string, number>;
   /** Fast mode: default number to i32, promote to f64 only when needed */
   fast: boolean;
+  /**
+   * (#745 S2) When true, statically-known heterogeneous primitive unions
+   * (`number | string`, `string | boolean`, … — see
+   * `isHeterogeneousPrimitiveUnion`) resolve to the universal `$AnyValue`
+   * tagged carrier instead of externref, eliminating per-op box/unbox/typeof
+   * helper round-trips. Currently OPT-IN (default false, see
+   * `CodegenOptions.unionAnyRep`): narrowed reads/writes work through the
+   * existing `$AnyValue` coercion arms, but strict-eq / truthiness /
+   * string-concat / call-boundary consumers are not yet carrier-agnostic
+   * (S3, coordinate with #2141). Modules with no such union emit
+   * byte-identical wasm regardless of this flag.
+   */
+  unionAnyRep: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */
   nativeStrings: boolean;
   /** #1719 S1 — `ITER_OVERRIDDEN` whole-program brand for the array

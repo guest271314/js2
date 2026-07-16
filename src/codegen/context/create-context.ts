@@ -155,6 +155,9 @@ export function createCodegenContext(
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
     nativeStrings,
+    // (#745 S2) union→$AnyValue rep: opt-in while consumers are made
+    // carrier-agnostic (S3); flips lane-default later (see types.ts doc).
+    unionAnyRep: options?.unionAnyRep ?? false,
     // #1719 S1 — ITER_OVERRIDDEN brand; set later by the
     // sourceOverridesArrayIterator pre-scan in index.ts. Default OFF.
     arrayIteratorMaybeOverridden: false,
