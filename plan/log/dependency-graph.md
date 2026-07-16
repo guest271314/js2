@@ -16,26 +16,26 @@ self-serving devs pull these first, in this order:
 common Wasm-native suspendable **frame substrate** (arch-frame spec in
 #2860/#2864). Sequence: **frame substrate → #2864 → #2867 → #2865**.
 
-| Issue | Cluster | Est. | Priority | Horizon | Status / dep |
-| ----- | ------- | ---- | -------- | ------- | ------------ |
-| #2860 | umbrella / arch-frame spec | — | high | xl | ready |
-| #2864 | sync generator carrier | 697 | high | xl | ready — first carrier on the frame |
-| #2867 | Promise / microtask carrier | 375 | high | l | ready — microtask scheduler |
-| #2865 | async-generator / for-await carrier | 986 | high | xl | ready — `depends_on: [2864, 2867]` |
-| #2866 | Symbol carrier | 418 | high | l | ready — independent track |
+| Issue | Cluster                             | Est. | Priority | Horizon | Status / dep                       |
+| ----- | ----------------------------------- | ---- | -------- | ------- | ---------------------------------- |
+| #2860 | umbrella / arch-frame spec          | —    | high     | xl      | ready                              |
+| #2864 | sync generator carrier              | 697  | high     | xl      | ready — first carrier on the frame |
+| #2867 | Promise / microtask carrier         | 375  | high     | l       | ready — microtask scheduler        |
+| #2865 | async-generator / for-await carrier | 986  | high     | xl      | ready — `depends_on: [2864, 2867]` |
+| #2866 | Symbol carrier                      | 418  | high     | l       | ready — independent track          |
 
 **Substrate + de-masked real-failure clusters (parallel track).**
 
-| Issue | Cluster | Est. | Priority | Horizon | Status |
-| ----- | ------- | ---- | -------- | ------- | ------ |
-| #2861 | built-in static/proto value-read glue | ~882 | high | l | ready — start now |
-| #2863 | dynamic-shape `__get_builtin` read codegen | 365 | high | m | ready |
-| #2878 | invalid-Wasm residual (`__str_flatten`/body shapes) | — | high | m | ready |
-| #2872 | TypedArray.prototype.* cluster | 294 | high | m | ready (de-masked from #2862) |
-| #2873 | language/expressions cluster | 276 | high | m | ready (de-masked from #2862) |
-| #2875 | String.prototype.* cluster | 159 | high | m | ready (de-masked from #2862) |
-| #2876 | RegExp cluster | 125 | high | m | ready (de-masked from #2862) |
-| #2877 | exception message readability (triage enabler) | — | medium | s | ready |
+| Issue | Cluster                                             | Est. | Priority | Horizon | Status                       |
+| ----- | --------------------------------------------------- | ---- | -------- | ------- | ---------------------------- |
+| #2861 | built-in static/proto value-read glue               | ~882 | high     | l       | ready — start now            |
+| #2863 | dynamic-shape `__get_builtin` read codegen          | 365  | high     | m       | ready                        |
+| #2878 | invalid-Wasm residual (`__str_flatten`/body shapes) | —    | high     | m       | ready                        |
+| #2872 | TypedArray.prototype.\* cluster                     | 294  | high     | m       | ready (de-masked from #2862) |
+| #2873 | language/expressions cluster                        | 276  | high     | m       | ready (de-masked from #2862) |
+| #2875 | String.prototype.\* cluster                         | 159  | high     | m       | ready (de-masked from #2862) |
+| #2876 | RegExp cluster                                      | 125  | high     | m       | ready (de-masked from #2862) |
+| #2877 | exception message readability (triage enabler)      | —    | medium   | s       | ready                        |
 
 **Done / blocked children:** #2868 (invalid-Wasm, via #2350) · #2874
 (getOwnPropertyDescriptor key coercion, via #2354) · #2879 (honest metric, via
@@ -520,7 +520,7 @@ All independent — can run in parallel.
 | 1105 | Wasm-native String methods on i16 arrays                                        | Standalone string ops        | **Ready** (H)                          |
 | 1104 | Wasm-native Error construction                                                  | Standalone errors            | **Ready** (M)                          |
 | 1100 | Wasm-native Proxy meta-object protocol                                          | Standalone Proxy             | **Ready** (H)                          |
-| 1102 | Wasm-native eval (AOT compilation)                                              | Standalone eval              | **Ready** (H)                          |
+| 1102 | ~~Wasm-native eval (AOT compilation)~~                                          | Standalone eval              | **Done** (PR #3113)                    |
 | 1101 | Wasm-native WeakRef / FinalizationRegistry                                      | Standalone weak refs         | **Ready** (H)                          |
 
 ### Module extraction sub-tasks of #688. All independent, can run in parallel.
@@ -715,7 +715,7 @@ Edition-gap issues with their sub-dependencies (umbrella → concrete slices):
   - #2671 Date/RegExp/Promise/JSON/super tracker → reopen-or-child #1343/#1440 (Date), #1444/#1439 (RegExp), #1465/#1368 (Promise), #1551 (super eval order). JSON deps #2668.
 
 Edges: #2668 → #2671(JSON); #2580 ↔ #2670(length); #1642+#2566+#1556 ⊂ #2669.
-Deprioritized (eval/dynamic-code): #1066 #1102 #1240 #1263-#1266 — not scheduled.
+Deprioritized (eval/dynamic-code): #1066 #1240 #1263-#1266 — not scheduled. (#1102 done 2026-07-16, PR #3113.)
 
 ## 2026-07-12 — #2860 standalone-gap method-family slices (PO grooming)
 
@@ -752,7 +752,7 @@ Native substrate exists (microtask ring / $Promise / #2906 N-state machine);
 the family is admission-coverage slices:
 
 - **S1 = #3164** sync gen fn-expressions (~1,741 leaky, plan ready, fable-now)
-- **S2 = #3132** async-gen methods/yield*/return (~2,408, in-progress)
+- **S2 = #3132** async-gen methods/yield\*/return (~2,408, in-progress)
 - **S3** capturing generators → ref-cell capture slots (NEW child at staffing;
   opus-design; coordinate #3032)
 - **S4** for-await-of dstr legacy async lowering (90; NEW child; overlaps #2602)
@@ -775,6 +775,7 @@ Three filed umbrellas decomposed into individually-lockable slices so multiple
 devs can work them in parallel without colliding.
 
 **#3182 bloat-elimination epic** (tracking umbrella stays open):
+
 - #3191 S1 — unify 4 JS-error-throw templates on `buildThrowJsErrorInstrs` [M, high]
 - #3192 S2 — DataView+RegExp brand → `receiver-brand.ts` [M, high, `depends_on: 3191`]
 - #3193 S3 — delete 5 shape-path `Array.prototype.*.call` clones [M, medium — array-methods.ts hot]
@@ -784,11 +785,13 @@ devs can work them in parallel without colliding.
 - Edges: #3191 → #3192 (stacked); #3193 ∥ #3196 claim serially (both array-methods.ts).
 
 **#3184 async-vacuous cluster** (tracking umbrella stays open):
+
 - #3197 — for-await-of / async-dstr drive (383 vacuous) [M, high]
 - #3198 — Promise-combinator vacuous callbacks (218) [M, medium — overlaps blocked #2614 + active Promise work; likely shares #3197 root cause]
 
 **#3185 default-lane Array.prototype generics** (tracking umbrella stays open;
 disjoint from standalone #3169/#3180 by lane):
+
 - #3199 — fold/predicate: reduce/reduceRight/every/some (~283) [M, high]
 - #3200 — iteration/producer: forEach/map/filter/flatMap (~204) [M, high]
 - #3201 — search+structural: indexOf/lastIndexOf/slice/splice/sort/concat/pop (~312) [M, high — owns 30 trap-class fails, land first]
