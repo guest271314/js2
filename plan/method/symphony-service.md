@@ -129,6 +129,26 @@ Use `--dry-run` first. It exercises workflow loading, issue scanning, lane
 selection, and dispatch planning without creating worktrees or launching
 agents.
 
+## Scoped Porffor Workflow
+
+`WORKFLOW.porffor.md` isolates the optional Porffor backend chain in the
+`porffor-backend` sprint. It uses one `gpt-5.6-sol` lane, a dedicated worktree
+and log root, and initializes only the optional `vendor/Porffor` submodule in
+worker worktrees. Start and inspect it with:
+
+```bash
+pnpm run symphony -- --workflow WORKFLOW.porffor.md --dry-run --json
+pnpm run symphony -- --workflow WORKFLOW.porffor.md
+pnpm run symphony -- --workflow WORKFLOW.porffor.md --status --json
+```
+
+The workflow sets `pull_requests.sprint_only: true` and
+`pull_requests.include_dependencies: true`. Fresh candidate dispatch therefore
+ignores every issue outside `porffor-backend`, while PR reconciliation includes
+only that sprint and its transitive prerequisites. Symphony can repair or
+complete #2953/#2956 so P1/P3 unblock, but it cannot consume unrelated
+`in-progress` or `in-review` work from the broad `current` sprint.
+
 ## Safety Posture
 
 - The service refuses to launch an agent in `/workspace`.

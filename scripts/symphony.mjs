@@ -12,7 +12,12 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { planPullRequestAction, readPullRequest, readPullRequestForBranch } from "./symphony-pr-state.mjs";
+import {
+  planPullRequestAction,
+  readPullRequest,
+  readPullRequestForBranch,
+  scopePullRequestIssues,
+} from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
 const DEFAULT_WORKFLOW = path.join(ROOT, "WORKFLOW.md");
@@ -1417,7 +1422,11 @@ class Orchestrator {
     const repository = String(get(this.config, "pull_requests.repository", ""));
     const command = String(get(this.config, "pull_requests.command", "gh"));
     const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
-    const issues = this.tracker.fetchIssuesByStates(reviewStates);
+    const wantedReviewStates = new Set(reviewStates.map(normalizeState));
+    const issues = scopePullRequestIssues(this.tracker.allIssues(), {
+      sprintOnly: Boolean(get(this.config, "pull_requests.sprint_only", false)),
+      includeDependencies: Boolean(get(this.config, "pull_requests.include_dependencies", false)),
+    }).filter((issue) => wantedReviewStates.has(issue.state));
 
     for (const issue of issues) {
       if (!issue.pull_request && !issue.branch_name) continue;

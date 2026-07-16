@@ -11,7 +11,7 @@ task_type: architecture
 area: ir, codegen-linear, backend
 language_feature: compiler-internals
 goal: backend-agnostic-ir
-sprint: current
+sprint: porffor-backend
 depends_on: []
 horizon: xl
 model: gpt-5.6-sol
@@ -160,7 +160,7 @@ through one PR per dependency-ordered child issue:
 
 | Slice | Issue                                                     | Dispatch gate     |
 | ----- | --------------------------------------------------------- | ----------------- |
-| P0    | #3295 - freeze the optional Porffor compatibility surface | ready immediately |
+| P0    | #3295 - freeze the optional Porffor compatibility surface | merged (#3107/#3109) |
 | P1    | #3296 - make generic lowering results non-Wasm            | #3295 and #2953   |
 | P2    | #3297 - scalar/control-flow Porffor proof                 | #3296             |
 | P3    | #3298 - extract shared `LinearMemoryPlan`                 | #3297 and #2956   |
