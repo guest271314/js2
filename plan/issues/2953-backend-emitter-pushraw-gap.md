@@ -4,7 +4,7 @@ title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coe
 status: in-progress
 assignee: ttraenkler/opus-1a
 branch: symphony/porffor/2953
-pr: 3128
+pr: null
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -21,8 +21,8 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T11:55:48.323Z
-last_merged_pr: 3108
+claimed_at: 2026-07-16T12:43:20.310Z
+last_merged_pr: 3128
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -72,34 +72,45 @@ value/aggregate families.
 ## Slice progress (one PR per family)
 
 - [x] **(a5) ref-cell family** — `emitRefCellNew`/`emitRefCellGet`/`emitRefCellSet`
-  promoted from declared-optional to REQUIRED on `BackendEmitter`, implemented
-  byte-identically on `WasmGcEmitter` (struct.new / struct.get / struct.set over
-  the cell's typeIdx/fieldIdx), stubbed (`notImplemented`/throw) on Linear +
-  Bytecode emitters, and the 3 `refcell.new/get/set` pushRaw sites in `lower.ts`
-  converted to trait calls. pushRaw in lower.ts: 77 → 74. Golden-Instr unit
-  coverage added (`tests/ir-backend-emitter.test.ts`); cross-backend + closure
-  runtime suites green. (opus-1a)
+      promoted from declared-optional to REQUIRED on `BackendEmitter`, implemented
+      byte-identically on `WasmGcEmitter` (struct.new / struct.get / struct.set over
+      the cell's typeIdx/fieldIdx), stubbed (`notImplemented`/throw) on Linear +
+      Bytecode emitters, and the 3 `refcell.new/get/set` pushRaw sites in `lower.ts`
+      converted to trait calls. pushRaw in lower.ts: 77 → 74. Golden-Instr unit
+      coverage added (`tests/ir-backend-emitter.test.ts`); cross-backend + closure
+      runtime suites green. (opus-1a)
 - [x] **(a6) unions/boxing** (`emitBox`/`emitUnbox`/`emitTagLoad`) —
-  `emitBox` now receives the already-lowered value in a dedicated backend sink,
-  allowing `WasmGcEmitter` to synthesize the canonical tag and append tag/value
-  in layout field order before `struct.new`. Unbox and tag loads route through
-  typed primitives; tag constants/comparisons use existing typed core methods.
-  Backends without a union representation fail through legality/missing-hook
-  errors, with no raw Wasm fallback. `emitter.pushRaw` sites in `lower.ts`:
-  104 → 98. Golden union lowering stayed instruction-identical, and the emitted
-  Wasm oracle matched clean main for all 56 `(file,target)` records across gc,
-  standalone, wasi, and linear. (ttraenkler/codex-2953-unions-boxing)
+      `emitBox` now receives the already-lowered value in a dedicated backend sink,
+      allowing `WasmGcEmitter` to synthesize the canonical tag and append tag/value
+      in layout field order before `struct.new`. Unbox and tag loads route through
+      typed primitives; tag constants/comparisons use existing typed core methods.
+      Backends without a union representation fail through legality/missing-hook
+      errors, with no raw Wasm fallback. `emitter.pushRaw` sites in `lower.ts`:
+      104 → 98. Golden union lowering stayed instruction-identical, and the emitted
+      Wasm oracle matched clean main for all 56 `(file,target)` records across gc,
+      standalone, wasi, and linear. (ttraenkler/codex-2953-unions-boxing)
 - [x] **closures** (`emitClosureNew`/`emitClosureFuncGet`/`emitCaptureGet`) —
-  promoted from declared-optional to required on `BackendEmitter`, implemented
-  byte-identically on `WasmGcEmitter` (`struct.new` for construction and the
-  canonical `struct.get` fields for function/capture reads), and stubbed loudly
-  on Linear + Bytecode until their closure representations land. The 3 closure
-  aggregate `pushRaw` sites now use the trait, reducing `emitter.pushRaw` calls
-  in `lower.ts` from 98 to 95. The existing `ref.func` and `ref.cast` sites stay
-  in their dependency-ordered funcref/coercion slices. Golden emitter tests,
-  the 31-case IR closure suite, cross-backend proof, equivalence gate, and the
-  56-record byte oracle are green. (porffor-codex-developer)
-- [ ] coercions/null (`emitNull`/`emitToExternref`/`emitFromExternref`)
+      promoted from declared-optional to required on `BackendEmitter`, implemented
+      byte-identically on `WasmGcEmitter` (`struct.new` for construction and the
+      canonical `struct.get` fields for function/capture reads), and stubbed loudly
+      on Linear + Bytecode until their closure representations land. The 3 closure
+      aggregate `pushRaw` sites now use the trait, reducing `emitter.pushRaw` calls
+      in `lower.ts` from 98 to 95. The existing `ref.func` and `ref.cast` sites stay
+      in their dependency-ordered funcref/coercion slices. Golden emitter tests,
+      the 31-case IR closure suite, cross-backend proof, equivalence gate, and the
+      56-record byte oracle are green. (porffor-codex-developer)
+- [x] **coercions/null** (`emitNull`/`emitToExternref`/`emitFromExternref`) —
+      promoted the three reserved hooks to required, sink-generic primitives and
+      restored the audited `emitDowncast` seam for non-extern reference narrowing.
+      `WasmGcEmitter` now owns typed `ref.null*`, `extern.convert_any`, and the
+      canonical `any.convert_extern` + `ref.cast` sequence; Linear + Bytecode fail
+      loudly until their nullable/reference representations land. Const-null,
+      generator bridges, closure casts, mode-aware `coerce.to_externref`, and the
+      coercion/null portions of Promise construction/await now use the trait. This
+      reduces `emitter.pushRaw` calls in `lower.ts` from 95 to 86; Promise aggregate
+      allocation/field ops remain for their dedicated slice. Golden emitter tests,
+      closure + cross-backend suites, equivalence, and the 56-record byte oracle
+      are green. (porffor-codex-developer)
 - [ ] funcref (`emitFuncRef`)
 - [ ] Promise ops
 - [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
@@ -144,3 +155,33 @@ value/aggregate families.
 - Slice acceptance: complete. The parent issue intentionally remains
   `in-progress` for coercions/null, funcref, Promise ops, and the pushRaw
   justification ratchet.
+
+## 2026-07-16 — coercions/null slice results
+
+- Re-grounded and fast-forwarded to `origin/main` at
+  `d2cb1922bdd7eb306f73ca98729c77aab0c7d227` before implementation.
+- Made `emitNull`, `emitToExternref`, and `emitFromExternref` required and
+  generic over the backend sink. Added the original #1713 audit's
+  `emitDowncast` hook so closure subtype/funcref narrowing also leaves
+  `pushRaw`; `emitFromExternref` composes conversion + narrowing in canonical
+  Wasm order. Operand evaluation and the host/native-string externref no-op
+  decision remain in shared lowering.
+- Routed all matching `lower.ts` sites, including typed const-null,
+  `gen.epilogue`, reference-shaped `gen.setReturn`, `coerce.to_externref`, the
+  null/extern conversion edges around Promise allocation, and await's external
+  Promise cast. Promise struct allocation and state/value field access remain
+  untouched for the later Promise-ops slice.
+- Added Golden-Instr coverage for typed nulls, to/from-externref, standalone
+  downcasts, and the const-null delegation in
+  `tests/ir-backend-emitter.test.ts`.
+- Focused verification:
+  `pnpm vitest run tests/ir-backend-emitter.test.ts tests/issue-1169c.test.ts tests/ir-bytecode-proof.test.ts`
+  (74 tests passed), plus `pnpm run typecheck`, the coercion-site and test262
+  hard-error quality gates, and `pnpm run test:equivalence:gate` (1,607 passing,
+  36 known baseline failures, zero new regressions).
+- Byte identity: bundled the existing `scripts/prove-emit-identity.mjs` harness
+  with esbuild because `tsx` is absent, captured the pre-edit baseline, and
+  compared the edited compiler against it. Result:
+  `IDENTICAL — all 56 (file,target) emits match baseline`.
+- Slice acceptance: complete. The parent issue intentionally remains
+  `in-progress` for funcref, Promise ops, and the pushRaw justification ratchet.

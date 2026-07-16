@@ -1607,7 +1607,7 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot resolve closure subtype for ${func.name}`);
         }
         emitValue(instr.self, out);
-        emitter.pushRaw(out, { op: "ref.cast", typeIdx: sub.structTypeIdx });
+        emitter.emitDowncast({ typeIdx: sub.structTypeIdx }, out);
         emitter.emitCaptureGet(sub, instr.index, out);
         return;
       }
@@ -1634,11 +1634,11 @@ export function lowerIrFunctionBody<S>(
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
-        // The function-field read now routes through the closure-family hook.
-        // The ref.cast stays on pushRaw until the coercion family migrates; the
-        // terminal call_ref is the (a1) call family → typed emitCallRef
+        // The function-field read routes through the closure-family hook and
+        // the narrowing cast through the ref-coercion hook. The terminal
+        // call_ref is the (a1) call family → typed emitCallRef
         // (byte-identical {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
-        emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
+        emitter.emitDowncast({ typeIdx: cl.funcTypeIdx }, out);
         emitter.emitCallRef(cl.funcTypeIdx, out);
         return;
       }
@@ -2007,7 +2007,7 @@ export function lowerIrFunctionBody<S>(
           op: "local.get",
           index: slotWasmIdx(func.generatorBufferSlot),
         });
-        emitter.pushRaw(out, { op: "ref.null.extern" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
@@ -2076,7 +2076,7 @@ export function lowerIrFunctionBody<S>(
             funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
           });
         } else if (valueT?.kind === "ref" || valueT?.kind === "ref_null") {
-          emitter.pushRaw(out, { op: "extern.convert_any" });
+          emitter.emitToExternref(out);
         }
         // externref: already the right Wasm type — no coercion.
         emitter.pushRaw(out, { op: "call", funcIdx: setReturnIdx });
@@ -2215,7 +2215,7 @@ export function lowerIrFunctionBody<S>(
           (opTy.kind === "val" && opTy.val.kind === "externref") ||
           (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
         if (!alreadyExternref) {
-          emitter.pushRaw(out, { op: "extern.convert_any" });
+          emitter.emitToExternref(out);
         }
         return;
       }
@@ -2848,9 +2848,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_FULFILLED,
         });
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
         emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        emitter.emitToExternref(out);
         return;
       }
       case "async.throw": {
@@ -2866,9 +2866,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_REJECTED,
         });
         emitValue(instr.reason, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
         emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        emitter.emitToExternref(out);
         return;
       }
       case "await": {
@@ -2901,8 +2901,7 @@ export function lowerIrFunctionBody<S>(
         // Assert S = Instr[].
         const wasmOut = requireInstrSink(out);
         emitValue(instr.operand, out);
-        wasmOut.push({ op: "any.convert_extern" });
-        wasmOut.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
+        emitter.emitFromExternref({ typeIdx: promiseTypeIdx }, out);
         // The next emit needs a scratch local. Reuse the
         // jsBitwiseTmp pattern: allocate lazily into `locals` and
         // remember the index for any further await in the same fn.
@@ -3609,26 +3608,8 @@ export function emitConstInstr(instr: Extract<IrInstr, { kind: "const" }>, out: 
     case "bool":
       out.push({ op: "i32.const", value: v.value ? 1 : 0 });
       return;
-    case "null": {
-      const valTy = instr.resultType ? asVal(instr.resultType) : null;
-      if (valTy && valTy.kind === "ref_null") {
-        out.push({
-          op: "ref.null",
-          typeIdx: (valTy as { typeIdx: number }).typeIdx,
-        });
-        return;
-      }
-      // Slice 7b (#1169f): bare `yield;` lowers to a `gen.push` of
-      // a null externref. The IrConst `{ kind: "null", ty:
-      // irVal({ kind: "externref" }) }` materializes here as a
-      // `ref.null.extern` Wasm op. Same shape the legacy generator
-      // path uses for the "no value" yield (see misc.ts:212-215).
-      if (valTy && valTy.kind === "externref") {
-        out.push({ op: "ref.null.extern" });
-        return;
-      }
-      throw new Error(`ir/lower: const null must have ref_null or externref resultType (${funcName})`);
-    }
+    case "null":
+      throw new Error(`ir/lower: const null must be emitted through BackendEmitter.emitNull (${funcName})`);
     case "undefined":
       throw new Error(`ir/lower: Phase 1 does not materialize 'undefined' constants (${funcName})`);
   }

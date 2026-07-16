@@ -170,3 +170,45 @@ describe("#2953 WasmGcEmitter — closure family byte-identity", () => {
     expect(out).toEqual([{ op: "struct.get", typeIdx: 17, fieldIdx: 3 }]);
   });
 });
+
+describe("#2953 WasmGcEmitter — ref-coercion/null family byte-identity", () => {
+  it("emitNull selects the canonical nullable-ref and externref ops", () => {
+    const out: Instr[] = [];
+    emitter.emitNull({ kind: "val", val: { kind: "ref_null", typeIdx: 31 } }, out);
+    emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
+    expect(out).toEqual([{ op: "ref.null", typeIdx: 31 }, { op: "ref.null.extern" }]);
+  });
+
+  it("emitToExternref re-tags the anyref subtype", () => {
+    const out: Instr[] = [];
+    emitter.emitToExternref(out);
+    expect(out).toEqual([{ op: "extern.convert_any" }]);
+  });
+
+  it("emitDowncast narrows a reference without an externref conversion", () => {
+    const out: Instr[] = [];
+    emitter.emitDowncast({ typeIdx: 37 }, out);
+    expect(out).toEqual([{ op: "ref.cast", typeIdx: 37 }]);
+  });
+
+  it("emitFromExternref converts then narrows in canonical order", () => {
+    const out: Instr[] = [];
+    emitter.emitFromExternref({ typeIdx: 41 }, out);
+    expect(out).toEqual([{ op: "any.convert_extern" }, { op: "ref.cast", typeIdx: 41 }]);
+  });
+
+  it("emitConst routes typed null materialization through emitNull", () => {
+    const out: Instr[] = [];
+    emitter.emitConst(
+      {
+        kind: "const",
+        result: null,
+        resultType: { kind: "val", val: { kind: "externref" } },
+        value: { kind: "null", ty: { kind: "val", val: { kind: "externref" } } },
+      },
+      "f",
+      out,
+    );
+    expect(out).toEqual([{ op: "ref.null.extern" }]);
+  });
+});
