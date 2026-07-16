@@ -319,6 +319,16 @@ export interface CompileOptions {
    */
   honestAnyBoxing?: boolean;
   /**
+   * (#745 S2) Known-union `$AnyValue` representation — heterogeneous primitive
+   * unions (`number | string`, …) resolve to the universal `$AnyValue` tagged
+   * carrier instead of externref, so narrowed reads become tag-checked
+   * `struct.get`s with no box/unbox helper round-trip. Default false (legacy,
+   * byte-identical — the mapping only fires on such union types). EXPERIMENTAL
+   * opt-in until the consumer migration (#745 S3: strict-eq / truthiness /
+   * string-concat / call boundaries; coordinate #2141) makes it lane-default.
+   */
+  unionAnyRep?: boolean;
+  /**
    * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
    * three-way true-class dispatch inside the both-tags-5 arm of
    * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),

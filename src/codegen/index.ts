@@ -12,6 +12,7 @@ import {
   isBigIntType,
   isBooleanType,
   isExternalDeclaredClass,
+  isHeterogeneousPrimitiveUnion,
   isHeterogeneousUnion,
   isNullablePrimitiveType,
   isNumberType,
@@ -5467,6 +5468,16 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       const inner = resolveWasmType(ctx, nonNullish[0]!, _depth + 1, _visited);
       if (inner.kind === "ref") return { kind: "ref_null", typeIdx: inner.typeIdx };
       return inner;
+    }
+    // (#745 S2) Known heterogeneous primitive unions (number|string, …) adopt
+    // the universal $AnyValue tagged carrier in unionAnyRep lanes
+    // (standalone/nativeStrings), replacing externref + per-op
+    // box/unbox/typeof round-trips. Homogeneous unions, nullable single-kind
+    // unions (handled above), and unions with any non-primitive member keep
+    // their existing representation — see isHeterogeneousPrimitiveUnion.
+    if (ctx.unionAnyRep && isHeterogeneousPrimitiveUnion(tsType)) {
+      ensureAnyValueType(ctx);
+      return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
     }
   }
 
