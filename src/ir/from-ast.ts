@@ -135,6 +135,28 @@ export interface IrFromAstResolver {
    * standalone `$AnyValue` boxing) is a semantic follow-up tracked in #2955.
    */
   hasHostNumberBox?(): boolean;
+  /**
+   * (#2955 slice 3) Rep predicate: is `IrType.string`'s carrier ValType
+   * externref (the host-strings backend), so a string SSA value can flow
+   * unchanged into an externref-expected position (host-call args,
+   * `__extern_is_undefined` operands)? The two from-ast string-rep arms
+   * (`coerceToExpectedExtern` string→externref pass-through,
+   * `tryLowerUndefinedCompare` externref-shaped test) previously read
+   * `nativeStrings` directly for this — a mode read the #2955 grep gate
+   * wants out of the front-end. The mode knowledge now lives on the
+   * resolver/lower side (`integration.ts`); from-ast only asks the rep
+   * question and demotes (or takes the native fold path) when the answer
+   * is no. The answer MUST stay a build-time answer: the native arm of
+   * `coerceToExpectedExtern` is a demote throw (claim/demote decisions
+   * have no lower-time channel — same constraint as `stringMethodPlan` /
+   * `hasHostNumberBox`). Implementation is intentionally
+   * `!ctx.nativeStrings` today (byte-inert relocation); a native string
+   * (`(ref $AnyString)`) can NEVER satisfy an externref host-arg position,
+   * so unlike the number-box capability there is no widening follow-up on
+   * the coercion arm — only the undefined-test's fold could ever move to a
+   * true abstract op (tracked in #2955's remaining-slices map).
+   */
+  stringIsExternref?(): boolean;
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
    * #1804 — register-or-recover the vec struct for an element ValType so
@@ -3358,12 +3380,18 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
   if (got && got.kind === expected.kind) {
     return value;
   }
-  // String → externref: in host-strings mode, IrType.string is already
-  // externref; the verifier sees the SSA type as `string` but the Wasm
-  // valtype is externref so the host call accepts it transparently.
-  // We keep the SSA type as-is and rely on the lowerer's ValType
-  // resolution.
-  if (expected.kind === "externref" && t.kind === "string" && !cx.resolver?.nativeStrings?.()) {
+  // String → externref: when the string carrier IS externref (host-strings
+  // mode), the verifier sees the SSA type as `string` but the Wasm valtype
+  // is externref so the host call accepts it transparently. We keep the
+  // SSA type as-is and rely on the lowerer's ValType resolution. When the
+  // carrier is the native `(ref $AnyString)` struct, a string can never
+  // satisfy an externref host-arg position → fall through to the demote
+  // throw. (#2955 slice 3: the rep question is resolver-owned —
+  // `stringIsExternref` — so from-ast reads no `nativeStrings` here. The
+  // `!== false` polarity deliberately preserves the legacy resolver-absent
+  // default of this site's old `!cx.resolver?.nativeStrings?.()` read:
+  // no resolver → host-shaped → pass-through.)
+  if (expected.kind === "externref" && t.kind === "string" && cx.resolver?.stringIsExternref?.() !== false) {
     return value;
   }
   // extern → externref: extern values are externref-shaped.
@@ -6326,10 +6354,15 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
     return isStrictNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
   }
   const tv = asVal(t);
+  // (#2955 slice 3) The string arm asks the resolver-owned rep predicate
+  // (`stringIsExternref`) instead of reading `nativeStrings` directly. The
+  // `=== true` polarity deliberately preserves the legacy resolver-absent
+  // default of this site's old `nativeStrings?.() === false` read: no
+  // resolver → NOT externref-shaped → fall to the fold path / demote.
   const externrefShaped =
     (tv !== null && tv.kind === "externref") ||
     t.kind === "extern" ||
-    (t.kind === "string" && cx.resolver?.nativeStrings?.() === false);
+    (t.kind === "string" && cx.resolver?.stringIsExternref?.() === true);
   if (externrefShaped) {
     const flag = cx.builder.emitCall({ kind: "func", name: "__extern_is_undefined" }, [v], irVal({ kind: "i32" }));
     if (flag === null) {

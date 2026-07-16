@@ -1131,6 +1131,22 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     hasHostNumberBox(): boolean {
       return !ctx.nativeStrings;
     },
+    // (#2955 slice 3) Rep predicate: the string carrier is externref (host
+    // strings), so string SSA values flow unchanged into externref-expected
+    // positions (`coerceToExpectedExtern` host-call args) and take the
+    // externref-shaped `__extern_is_undefined` arm of the strict
+    // undefined-compare. The from-ast string-rep arms consult THIS
+    // predicate instead of reading `nativeStrings` directly — the mode
+    // knowledge lives here, on the lower/integration side, per #2955's
+    // de-polymorph direction. Implementation is deliberately the exact
+    // truth value the old in-place reads produced (byte-inert relocation).
+    // The demote arm this gates in `coerceToExpectedExtern` is a build-time
+    // claim/demote decision (no lower-time demote channel) and — unlike the
+    // number-box capability — has no widening follow-up: a native
+    // `(ref $AnyString)` can never satisfy an externref host-arg position.
+    stringIsExternref(): boolean {
+      return !ctx.nativeStrings;
+    },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
     // (assignment.ts): symbol name of the receiver's TS type against the
