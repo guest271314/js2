@@ -240,14 +240,16 @@ re-derive them:
   often (missing features), which the old any-throw shim counted as passes.
   The #3303 ceiling applies per-lane, so `count` must cover the worst lane —
   hence 4650, not the 2700 sketched in #3303's illustrative example.
-- **#2097 high-water floor** (allowance-immune by design — it is an absolute
-  floor, not a diff gate): the v4 tightening drops standalone
-  `host_free_pass` 24033 → 20317 (measured; official-scope 20087/43106). The
-  committed mark (`benchmarks/results/test262-standalone-highwater.json`) is
-  lowered to exactly the measured value IN THIS PR (the sanctioned `--update`
-  re-seed only runs post-merge on main — chicken-and-egg for the merge_group).
-  Provenance sha in the file = the measurement head. Post-merge, the
-  promote-baseline `--update` path resumes ratcheting it upward from 20317.
+- **#2097 high-water floor — OPEN BLOCKER, deliberately NOT edited in this
+  PR** (coordinator review, 2026-07-16): the v4 tightening drops standalone
+  `host_free_pass` 24033 → 20317 measured (official-scope 20087/43106), which
+  breaches the absolute floor. An earlier draft lowered the committed mark
+  in-PR; that was backed out — lowering a ratchets-up-only floor from inside
+  the PR that benefits from it is a self-serving baseline mutation, the exact
+  risk class #3303 exists to avoid. The floor question is a separate,
+  explicitly-reviewed decision (post-merge `--update` reseed, or a reviewed
+  standalone mark change) that must be resolved BEFORE this PR can clear the
+  merge_group; until then the #2097 step will (correctly) fail on it.
 - **classifyError trap false-positive (fixed here, same v4 bump)**: the
   tightened shim embeds the original test source line in "returned N — assert
   #X at LY: <source>" failure messages; quoted text like "out of bounds" hit
