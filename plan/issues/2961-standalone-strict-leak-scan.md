@@ -1,11 +1,11 @@
 ---
 id: 2961
 title: "Extend the strictNoHostImports leak guarantee to `--target standalone` (today wasi-only)"
-status: blocked
+status: in-progress
 depends_on: [3009]
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-16
 priority: medium
 horizon: m
 feasibility: medium
@@ -16,6 +16,9 @@ language_feature: compiler-internals
 goal: standalone-mode
 related: [2094, 2879, 2073, 2075, 2860, 3009]
 origin: "2026-07-02 July Fable audit §3 (protection asymmetry: standalone has only the statistical floor, no structural guarantee)"
+regressions-allow:
+  count: 3150
+  reason: "#2961's own purpose (reject host-backed standalone passes, ORACLE_VERSION 5->6) produces exactly this reclassification shape, anticipated in its own acceptance criteria. merge_group run 29532692021: 3084 non-excused wasm-change regressions, 100% one category (host_import_leak, no other present) -- leaky passes correctly becoming honest fails. Traps all decreased/flat (null_deref 339->251, illegal_cast 566->259, oob 43->41, unreachable 3->3), zero new. Net -3082 (27964->24882 standalone pass), 2 improvements. Ceiling: 3084 + ~66 margin."
 ---
 
 # #2961 — `--target standalone` has no structural no-leak guarantee
@@ -55,7 +58,7 @@ the standalone leak surface is far narrower than the "7,498 pass-but-leaky"
 headline suggested. Two findings:
 
 1. **Most pure-language features are already host-free under `--target
-   standalone`.** Verified on current main (zero `env` imports emitted):
+standalone`.** Verified on current main (zero `env` imports emitted):
    arithmetic, classes/methods, string concat + coercion, `String()` /
    `.toString()`, `throw` / `Error`, `JSON.stringify`. So the naïve
    "flip strict on for standalone → huge baseline churn" fear is overstated;
