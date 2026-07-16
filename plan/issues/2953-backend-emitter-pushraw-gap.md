@@ -4,7 +4,7 @@ title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coe
 status: in-progress
 assignee: ttraenkler/opus-1a
 branch: symphony/porffor/2953-after-3129
-pr: null
+pr: 3134
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
