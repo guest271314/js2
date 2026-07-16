@@ -1,8 +1,9 @@
 ---
 id: 3285
 title: "wrapTest()'s synthetic harness silently deletes/weakens real test262 assertions instead of translating them"
-status: in-progress
-assignee: ttraenkler/dev-3285
+status: done
+assignee: ttraenkler/sendev-3303
+completed: 2026-07-16
 sprint: current
 created: 2026-07-15
 priority: high
@@ -13,7 +14,10 @@ reasoning_effort: high
 task_type: bugfix
 area: test-infrastructure
 goal: test-infrastructure
-related: [3284]
+related: [3284, 3286, 3303, 3307]
+regressions-allow:
+  count: 4650
+  reason: "#3285 assert_throws error-type tightening (oracle v4) — honest reclassification of previously-inflated false passes, measured on the 2026-07-16 branch dispatch run 29505786797: host 2614, standalone 4520 non-excused wasm-change flips; ceiling covers the worst lane +130 margin. Full residual analysis: #3286."
 ---
 
 # #3285 — audit and harden `wrapTest()`'s test-body rewrite pipeline
@@ -219,3 +223,49 @@ undefined)` / `if (x !== undefined) throw` outright. Route through a real
   classify cosmetic (message-arg stripping, harmless) vs. assertion-deleting
   (e.g. the `/* stripped object identity assert */` bare-identifier-pair arm
   near `simpleExprPat`), fix/track the deleting ones.
+
+## Landing notes (2026-07-16, sendev-3303 — how this PR clears the gate stack)
+
+This PR is the first user of the #3303 `regressions-allow:` mechanism (see
+frontmatter). Grounding for every number, so the next window doesn't have to
+re-derive them:
+
+- **Measurement**: branch `workflow_dispatch` of test262-sharded (run
+  29505786797, head 8c892a4e = branch + current main), diffed locally against
+  the fresh 2026-07-16 baselines with guard-identical flags. Host lane: 2614
+  non-excused wasm-change reclassifications (net −2610, improvements 4).
+  Standalone lane: 4520 (net −4409, improvements 111). The earlier quoted
+  2615/2668 figures were host-lane-only snapshots from 7-15; the standalone
+  lane is the LARGER one because standalone throws wrong-typed errors far more
+  often (missing features), which the old any-throw shim counted as passes.
+  The #3303 ceiling applies per-lane, so `count` must cover the worst lane —
+  hence 4650, not the 2700 sketched in #3303's illustrative example.
+- **#2097 high-water floor** (allowance-immune by design — it is an absolute
+  floor, not a diff gate): the v4 tightening drops standalone
+  `host_free_pass` 24033 → 20317 (measured; official-scope 20087/43106). The
+  committed mark (`benchmarks/results/test262-standalone-highwater.json`) is
+  lowered to exactly the measured value IN THIS PR (the sanctioned `--update`
+  re-seed only runs post-merge on main — chicken-and-egg for the merge_group).
+  Provenance sha in the file = the measurement head. Post-merge, the
+  promote-baseline `--update` path resumes ratcheting it upward from 20317.
+- **classifyError trap false-positive (fixed here, same v4 bump)**: the
+  tightened shim embeds the original test source line in "returned N — assert
+  #X at LY: <source>" failure messages; quoted text like "out of bounds" hit
+  the trap regexes and mis-binned honest assertion fails as uncatchable traps
+  (live instance: Temporal/Duration/subtract/result-out-of-range-1 counted as
+  a NEW oob and false-tripped the allowance-immune #3189 ratchet). Fix:
+  classify the `^returned` wrapper-protocol shapes BEFORE the trap patterns
+  (a genuine trap can never produce a "returned N" message). Label-only — no
+  pass/fail flips; 19 pre-existing mislabeled host rows also self-correct.
+  Projected post-fix trap growth vs today's baseline: host oob +3 (the known
+  #3202 BigInt `TypedArray.prototype.set` flap, within the tolerance-4 repo
+  var), everything else shrinks.
+- **#3307 dependency**: the guards' diff must run at the same
+  `TRAP_RATCHET_TOLERANCE` as the regression-gate job or the oob flap's
+  exit 1 re-litigates the raw count and vetoes the allowance in the guards.
+  PR #3137 (2 env lines) must be on main before this PR enqueues.
+- **Enqueue checklist**: #3137 merged → re-merge origin/main here → CI green →
+  coordinator confirms → remove the bot park-hold (diagnosed: the 7-15
+  auto-park is exactly the reclassification this PR declares) → single
+  enqueue. If the merge_group reports a residual above 4650, do NOT raise the
+  number blindly — re-measure and re-declare honestly (ceiling semantics).

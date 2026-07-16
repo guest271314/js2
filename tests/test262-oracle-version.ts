@@ -95,6 +95,13 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "the #3003 verdict-oracle-bump gate did NOT flag this change — its " +
       "VERDICT_SIGNAL_RE only matches `status:` verdict-literal assignments, not " +
       "verdict-tightening inside the assert_throws/assert_throwsAsync shim body; " +
-      "that false-negative is a follow-up gate-hardening item for a future window.",
+      "that false-negative is a follow-up gate-hardening item for a future window. " +
+      "ALSO in v4 (label-only, same bump): classifyError now bins wrapper " +
+      "return-code messages ('returned N — assert #X at LY: <source>') as " +
+      "assertion_fail/exception_in_test BEFORE the trap regexes — the embedded " +
+      "test source was matching /out of bounds/ etc. and mis-binning honest " +
+      "assertion fails as uncatchable traps, false-positive-tripping the #3189 " +
+      "trap ratchet (seen live: Temporal/Duration/subtract/result-out-of-range-1 " +
+      "counted as a NEW oob on the #3104 measurement run). No pass/fail flips.",
   },
 ];

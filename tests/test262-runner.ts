@@ -4396,6 +4396,23 @@ function round2(n: number): number {
 export function classifyError(errorMsg: string | undefined): string | undefined {
   if (!errorMsg) return undefined;
 
+  // (#3285) Wrapper return-code protocol FIRST — before the trap patterns. A
+  // message beginning with "returned <N>" is by construction the synthetic
+  // wrapper's assert-counter protocol (an assertion failure / caught
+  // exception), never a genuine Wasm trap: a real trap surfaces as a host
+  // RuntimeError message ("out of bounds memory access", "unreachable" …) and
+  // aborts the module — it cannot produce a "returned N" result. Since the
+  // #3285 shim embeds the ORIGINAL test source line in these messages
+  // ("returned 2 — assert #1 at L28: assert.throws(RangeError, …, `…is out of
+  // bounds: ${duration}`)"), quoted test text was hitting the trap regexes
+  // below and mis-binning honest assertion fails as uncatchable traps —
+  // poisoning the #3189 trap-growth ratchet with false positives (19 such
+  // rows pre-existed in the host baseline; the #3285 tightening added more).
+  // Label-only relabel (no pass/fail flips) — covered by the same
+  // ORACLE_VERSION 4 bump as the #3285 tightening itself.
+  if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
+  if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+
   // Wasm traps
   if (/dereferencing a null/i.test(errorMsg)) return "null_deref";
   if (/illegal cast/i.test(errorMsg)) return "illegal_cast";
@@ -4410,9 +4427,8 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // Promise / async failures
   if (/^Promise\b|promise/i.test(errorMsg)) return "promise_error";
 
-  // Assertion failures (returned N patterns)
-  if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
-  if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+  // (Assertion "returned N" patterns are classified at the TOP of this
+  // function — before the trap regexes — see the #3285 comment there.)
   // (#2962) A thrown Test262Error IS an assertion failure by definition. The
   // standalone exception renderer (#2962) surfaces these as
   // "Test262Error: <assert text>" — before it, such failures were the opaque
