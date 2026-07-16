@@ -783,6 +783,31 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) =>
       hasAny(text, ["uncaught wasm-gc exception (non-stringifiable payload)", "non-stringifiable payload"]),
   },
+  {
+    // #2961 — standalone host-import honesty reclassification. A legacy
+    // "leaky pass" (the compiled binary emits `env::__*` host imports, but the
+    // JS test262 harness satisfied them so the row read `pass`) is now scored
+    // `compile_error` at both the worker (scripts/test262-worker.mjs) and the
+    // report builder (`normalizeStandaloneVerdict`, defense-in-depth for
+    // legacy JSONL). The overwhelming majority of these rows are ALREADY
+    // classified by an earlier feature-path bucket above (e.g. a leaked
+    // `env::__temporal_*` import on a Temporal test still lands in
+    // `temporal-proposal` via its file path) — that's intentional and this
+    // bucket must stay LAST so `find`'s first-match never poaches those. This
+    // is the honest residual catch for imports with no dedicated feature
+    // bucket (`instanceof`, `AggregateError`, `SuppressedError`,
+    // `Error.isError`, …): the root cause of the FAILURE is the reclassification
+    // policy itself, not a per-feature codegen gap, so — unlike the other
+    // residual buckets above — a match here is not evidence of unclassified
+    // compiler behavior; it correctly satisfies the merge_group
+    // `--max-unclassified-root-causes 0` gate for the #2961 policy change.
+    id: "standalone-host-import-leak-reclassification",
+    issues: ["#2961"],
+    label:
+      "Standalone host-import honesty reclassification (#2961): legacy leaky-pass row (host-satisfied `env::` import) now scored compile_error — residual not matched by a feature-path bucket",
+    match: (record, text) =>
+      record.error_category === "host_import_leak" || hasAny(text, ["standalone target emitted host imports"]),
+  },
 ];
 
 function emptyRootCauseBucket(bucket) {
