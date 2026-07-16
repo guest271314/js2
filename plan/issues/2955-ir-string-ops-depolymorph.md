@@ -309,5 +309,22 @@ number-toString snippet + dom/style example hashes in host mode — the site is
 genuinely exercised. `tsc --noEmit` clean; prettier clean;
 `check:ir-fallbacks` unchanged.
 
+**Also in this slice — selfhost build-resolver hardening (latent slice-3
+gap).** `IrFromAstResolver` has three implementers: `makeFromAstResolver`
+(integration, gets every predicate), `makeLinearIrResolver` (linear — omits
+`nativeStrings` entirely, so the per-site preserved resolver-absent defaults
+keep it byte-inert across all slices), and stdlib-selfhost's
+`NATIVE_STRINGS_FROMAST_RESOLVER` (`nativeStrings() → true`). The last one
+diverged after slice 3: site 3366's resolver-absent default is
+**pass-through** (host-shaped), the opposite of the demote-throw a
+native-strings build wants — a latent (corpus-unreachable, byte-diff- and
+CI-verified-inert today) hazard where a `(ref $AnyString)` could flow into an
+externref-expected position without the loud error. Fixed here by
+implementing `stringIsExternref() → false` (plus `hasHostNumberBox`/
+`hasHostNumberToString` → false explicitly — those absent-defaults already
+demoted, made total rather than lucky). Slice 5 must likewise give this
+resolver its for-of answer (`char-loop`), since the plan-absent default is
+iter-host.
+
 **Remaining after slice 4** (from-ast functional `nativeStrings` reads, 1):
 the for-of strategy switch (~4470, slice 5 — last). `status` stays `ready`.
