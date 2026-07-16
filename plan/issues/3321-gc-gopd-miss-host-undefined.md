@@ -62,9 +62,13 @@ un-skipped — both shapes now run and pass on BOTH lanes.
 - SHA lane audit vs base: ONLY the gc binary of the miss shape changes;
   legacy-standalone byte-identical, unrelated gc sources byte-identical
   (surgical).
-- **Full equivalence suite** (`tests/equivalence/`, 212 files): result
-  recorded below at completion.
-- Adjacent gOPD suites re-run clean on this branch.
+- **Full equivalence suite** (`tests/equivalence/`, 212 files / 1646 tests):
+  fix-vs-base failure-NAME diff **empty in both directions** — 36 identical
+  pre-existing local-env failures on both runs (CI equivalence shards are
+  green on the same base), zero introduced.
+- Adjacent gOPD battery re-run clean post-merge (incl. #3154's
+  primitiveReceiverArm interplay): 206 pass / 2 known skips;
+  `tests/issue-3319.test.ts` 20/20.
 
 ## Notes
 
