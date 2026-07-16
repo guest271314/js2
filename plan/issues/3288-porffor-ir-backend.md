@@ -18,12 +18,12 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T23:26:22.974Z
+claimed_at: 2026-07-16T23:40:30.263Z
 branch: symphony/porffor/3288
 pr: 3166
 loc-budget-allow:
   - src/ir/lower.ts
-last_ci_retry_head: f9bd48a8a8f10fbec3b45375f6571bcfd52e6716
+last_ci_retry_head: abbedb937d924639d4b2e604b370c4ff7d68ccb0
 ---
 
 # #3288 - Optional Porffor IR backend over the JS2 linear-memory plan
@@ -418,3 +418,9 @@ started on this branch.
   `pushRaw` and LOC ratchets, and a fresh 56-record emit-identity comparison
   against that exact main commit all passed. No branch-owned repair or later
   Porffor slice was needed.
+- Attempt 3 confirmed that head `abbedb937d9` passed quality, linear,
+  equivalence, cross-backend parity, and test262 relevance checks. Its only
+  failure was again infrastructure-only: `actions/setup-node` received
+  GitHub's HTTP 503 response while downloading Node 25 for `cla-check`.
+  `origin/main` remained at the already-merged `6e1f780c07c`; no P1 behavior
+  changed and P2-P5 remain unstarted.
