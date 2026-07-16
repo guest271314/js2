@@ -28,6 +28,7 @@ import {
   matchesPathFilter,
   parseMeta,
   shouldSkip,
+  standaloneHostImportError,
   TEST_CATEGORIES,
   type Test262Scope,
   wrapTest,
@@ -329,6 +330,11 @@ function recordResult(
   retryInfo?: { retried?: boolean; retryCount?: number },
   metadata?: RecordMetadata,
 ) {
+  const hostImportError = status === "pass" ? standaloneHostImportError(TEST262_TARGET, metadata?.imports) : undefined;
+  if (hostImportError) {
+    status = "compile_error";
+    error = hostImportError;
+  }
   const errorCategory = status === "fail" || status === "compile_error" ? classifyError(error) : undefined;
 
   const entry = JSON.stringify({
@@ -674,6 +680,20 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                 }
                 // Execute the compiled binary in-process (fixture tests are rare,
                 // in-process execution is acceptable for 172 tests).
+                const hostImportError = standaloneHostImportError(TEST262_TARGET, compileRecordMetadata.imports);
+                if (hostImportError) {
+                  recordResult(
+                    relPath,
+                    category,
+                    "compile_error",
+                    hostImportError,
+                    undefined,
+                    scopeInfo,
+                    undefined,
+                    compileRecordMetadata,
+                  );
+                  return;
+                }
                 const buildImports = await getBuildImports();
                 let reachedFixtureTest = false;
                 try {
