@@ -1,11 +1,11 @@
 ---
 id: 3227
 title: "default (JS-host) lane: async-completion harness callbacks never execute → 1,690 vacuous fails (#2940 detector), dominated by for-await-of / dynamic-import / Promise"
-horizon: xl
 status: in-progress
 assignee: ttraenkler/fable-s2
 sprint: current
 priority: high
+horizon: xl
 feasibility: hard
 reasoning_effort: max
 task_type: research+bugfix
@@ -13,8 +13,11 @@ area: codegen
 language_feature: async, promises, for-await-of, dynamic-import, test262-harness
 related: [3074, 3086, 3001, 2940, 2903, 2939, 1014, 1116, 1326c]
 created: 2026-07-13
-updated: 2026-07-13
+updated: 2026-07-16
 origin: "2026-07-13 /harvest-errors. Baselines run 20260713-085257 (gitHash bb27494f, 32,990 pass), default lane test262-current.jsonl. Count unchanged from run 179d73ca."
+regressions-allow:
+  count: 1300
+  reason: "#3227 S1 async post-drain verdict re-read (oracle v5), lead-approved honesty regression 2026-07-16 (precedent #3086/#3285) — post-await assertions in currently-passing async-flagged tests finally execute and expose real bugs (S2 await-NaN / S3 IteratorResult clusters). Measured on 80-record sample: ~875 host pass->fail expected, CI 525-1225; ceiling = CI upper bound 1225 + ~75 drift margin. Standalone lane expects ~0 flips (its __drain_microtasks drains synchronously pre-epilogue, so the re-read is verdict-neutral there). NOTE: the ceiling assumes the baseline is already re-seeded at v4 (post-#3104 promote-baseline); against a stale pre-#3104 baseline the diff would also carry #3104's ~1358 flips and exceed this ceiling - that is a wait-for-promote-baseline park, not a regression."
 ---
 
 # #3227 — default-lane async harness callbacks are vacuous (no assertion runs)
@@ -97,7 +100,121 @@ harness shapes, or the dynamic-dispatch arity/type tolerance from **#2939**
   are detector/oracle _infrastructure_; #3227 is the underlying _feature_ fix
   (make the async continuation actually run).
 
-## S2 — `await Promise.resolve(x)` yields NaN (JS-host lane) — FIXED
+## Root cause — VERIFIED (2026-07-16, fable-3, slice 1)
+
+The hypothesis ("dropped continuation") is WRONG in an interesting way — the
+continuations are NOT dropped. Two verified mechanisms:
+
+1. **Verdict read before host microtasks drain (the 1,690-record driver).**
+   The runner calls `testFn()` synchronously (tests/test262-runner.ts,
+   `runTest262File`) and reads the verdict from its return value. In the
+   JS-host lane, `.then`/await continuations are scheduled on the HOST
+   microtask queue, which structurally cannot drain while `test()` is still on
+   the Wasm→JS stack. `__drain_microtasks()` is a deliberate no-op on this
+   lane (#2895 PATH B). So the callbacks run — _immediately after `test()`
+   returns_ — but the verdict was already read: `__assert_count === 1` → -262
+   → "vacuous". Empirically verified: `Promise.resolve(42).then(v => count =
+v)` shows count=0 sync, count=42 one macrotask later.
+
+2. **`await <host promise>` yields NaN, synchronously (value corruption).**
+   `const v = await Promise.resolve(7); count = v` sets count=NaN _before
+   test() returns_ — the continuation runs eagerly with a garbage value
+   (externref→f64 read of the promise, not its settled value). `await 7`
+   (non-promise) is fine. This is a separate compiler bug (slice 2) and is
+   the root of most honest-fail flips below (`v.value` NaN, `done` wrong).
+
+## Slice plan (dispatchable)
+
+- **S1 (this PR, fable-3) — async post-drain verdict re-read + ORACLE_VERSION 5.**
+  `wrapTest` exports `__result()` (same verdict logic as the `test()` epilogue)
+  for async-flagged tests; `runTest262File` yields 2× `setImmediate` after a
+  sync `1`/`-262` and re-reads. A deferred continuation THROW during the drain
+  window is captured via temporary `uncaughtException`/`unhandledRejection`
+  handlers and scored a fail for that test (pre-S1 it fired unattributed
+  between tests and could kill the fork worker). Verdict-logic change ⇒
+  ORACLE_VERSION bumped (drafted as 3→4; landed as 4→5 — see the merge
+  reconciliation note below; forward-monotonic auto-rebase in diff-test262).
+  Measured on samples: 1,680 vacuous-callback records → ~25% flip to honest
+  PASS (~420), ~62% to honest assert-fail (real signal, already scored fail
+  today), ~8% stay vacuous; BUT ~25% of the 3,503 currently-passing
+  async-flagged tests flip pass→honest-fail (~875, CI 525–1,225) because their
+  post-await assertions finally run and hit real bugs. Net raw pass ≈ −455.
+  Needs lead/PO sign-off (precedent: #3086 owner-approved honesty regression).
+- **S2 — `await <host promise>` NaN corruption (JS-host lane).** Fix the await
+  value read so the settled value is delivered (repro above; also the likely
+  root of the `class-elements async-gen … v.value = 42` flip cluster). Expect
+  this to recover a large share of the S1 pass→fail flips + convert many of
+  the 1,680 into passes. Repro: `.tmp/repro-3227c.mts` shapes C1/C2/C4/C5.
+- **S3 — async-generator `.next().then(...)` result delivery.** Flip cluster
+  `yield-star-next-then-*` / `named-yield-*`: `done`/`value` read wrong in the
+  `.then` continuation (assert #2 `done === false/true` fails). Distinct
+  receiver: the IteratorResult object crossing the host boundary.
+- **S4 — still-vacuous residual (~8%).** Callbacks that genuinely never run
+  even post-drain (e.g. `Array.fromAsync` thenable chains, some
+  dynamic-import namespace shapes). Diagnose per-family after S2/S3 land.
+
+## S1 measured delta (sampled, for merge_group park-diagnosis)
+
+| Population                            | n sampled | Flip                                               | Extrapolated                                                 |
+| ------------------------------------- | --------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| 1,680 vacuous-callback records        | 60        | → honest **pass**                                  | **+~420**                                                    |
+| 1,680 vacuous-callback records        | 60        | → honest fail (already `fail` today)               | ~1,040 (no pass-count change; now carry real assert indices) |
+| 1,680 vacuous-callback records        | 60        | stay vacuous (S4 residual)                         | ~140                                                         |
+| 3,503 currently-passing async-flagged | 80        | → honest **fail** (post-await asserts finally run) | **−~875** (CI 525–1,225)                                     |
+
+Net raw pass ≈ **−455** (intentional honesty regression, lead-approved
+2026-07-16, precedent #3086). The −875 clusters are the S2/S3 work
+definitions:
+
+- **S2 cluster — await-NaN**: `class-elements async-gen … v.value === 42`
+  fails (value is NaN); root = `await <host promise>` reads NaN synchronously.
+- **S3 cluster — async-gen `.next().then(...)` IteratorResult**:
+  `yield-star-next-then-*` / `named-yield-*` fail assert #2 (`done` wrong) —
+  the IteratorResult crossing the host boundary delivers wrong `done`/`value`.
+
+ORACLE_VERSION: S1 drafted **v4** assuming it landed first — it did NOT.
+#3285 (PR #3104, assert_throws error-type precision) landed its own 3→4 bump
+first, so per the whichever-lands-second-re-bumps rule S1 landed as **v5**
+(see the merge reconciliation note below). Draft PR #3111 (standalone
+host-backed rejection, another drafted 3→4) — or any later oracle change —
+must take **v6** with its own history entry.
+
+## Merge reconciliation with #3285 / PR #3104 (2026-07-16, sendev-3161-conflict)
+
+PR #3161 went DIRTY when #3104 merged — both PRs bumped ORACLE_VERSION 3→4
+and both touched `tests/test262-runner.ts`. Resolution decisions and WHY:
+
+- **Oracle version**: main's v4 entry (#3285) kept verbatim; S1's entry
+  re-labeled **v5** and `ORACLE_VERSION = 5`. Each verdict-logic change needs
+  its own bump — re-claiming 4 would make v4 rows ambiguous between two
+  different verdict policies, breaking same-version row comparability (the
+  entire point of the version stamp).
+- **Runner**: git auto-merged cleanly and the composition was verified by
+  hand, not assumed. #3104's shim rework (name-string side channel
+  `__expected_throw_name`, strict `.name` match — deliberately avoiding the
+  2-arg call shape that triggers the #3315 standalone corruption) is
+  untouched. #3227's `__result()` export + post-drain re-read is untouched.
+  They compose additively: the shims consume `__expected_throw_name`
+  synchronously at entry (no clobber risk inside the #3227 drain window), and
+  shim failures set the sticky `__fail` that `__result()` re-reads — so an
+  `assert.throws` inside a deferred continuation now gets #3104's type
+  precision AND #3227's post-drain visibility.
+- **Carried-over caveat**: like #3104's shim, the `__result()` export
+  compiles INTO the wasm wrapper, so wasm_sha changes for every async-flagged
+  test — the #3086 same-wasm auto-rebase does NOT excuse these flips; the v5
+  note documents the promote-baseline/force-refresh requirement, mirroring v4.
+
+## Test Results (slice 1)
+
+- Issue-cited sample `async-generator/dstr/ary-ptrn-elem-id-iter-complete.js`:
+  vacuous → **pass**. `dynamic-import/namespace/promise-then-ns-set-prototype-of.js`
+  and `for-await-of/ticks-…`: vacuous → honest fail with real assert index.
+- 60-record vacuous sample: 15 pass / 37 fail / 5 fail-vacuous / 3 skip.
+- 80-record currently-passing async sample: 60 pass / 20 fail (all honest
+  post-await assertion failures; clusters above).
+- wrapTest consumer unit tests: issue-1049/1450/1385/1567/1318-locator — 24/24 pass.
+
+## S2 — `await Promise.resolve(x)` yields NaN (JS-host lane) — FIXED (PR #3165)
 
 **Root cause (verified 2026-07-16, fable-s2, current main).** The
 static-resolution census (`awaitIsStaticallyResolved`, #1936) classifies
@@ -131,3 +248,31 @@ operands keep the identity passthrough; standalone/WASI lane untouched (its
   issue-2906-async-multiawait, issue-2967-engine-convergence — all pass.
   issue-2865-standalone (WASI) has 2 failures **pre-existing on main**
   (verified on the main checkout; untouched lane).
+
+## S3 — async-gen `yield*` delegation drained zero values — FIXED (PR #3165)
+
+**Root cause (verified 2026-07-16, fable-s2).** `yield* <async generator>`
+inside an `async function*`: `__gen_yield_star` (src/runtime.ts) drains the
+inner iterable with a sync `for...of` gated on `Symbol.iterator` — but an
+async-generator object carries only `Symbol.asyncIterator`, so ZERO values
+were pushed and the outer async generator reported `{value: undefined,
+done: true}` on the first `.next()` (probe S3-3). Plain `.next().then`
+(S3-1/2) and `yield*` over arrays / `yield* await <array>` — including the
+class-elements static-async-gen shape (S3-4/5) — were already correct.
+
+**Fix.** Our async generators are EAGERLY buffered (`_AsyncGeneratorState` →
+`{buf, index, pendingThrow}`), so the settled values are synchronously
+available: `__gen_yield_star` now drains the remaining inner buffer directly
+and rethrows a `pendingThrow` (§27.6.3.8 — inner abrupt completion propagates
+out of the `yield*`; probe S3-6 confirms reject delivery). Non-asyncgen
+iterables keep the exact prior path. Residual (S4 territory): custom host
+async iterables (promise-returning `next`) still can't be drained in the
+eager model.
+
+### Test Results (S3)
+
+- Probes `.tmp/repro-3227-s3.mts`: S3-3 `value=5,done=false` (was
+  `undefined,true`); S3-6 `[1,false][reject]` (inner throw propagates);
+  S3-1/2/4/5 unchanged-correct.
+- `tests/issue-3227-s3.test.ts`: asyncgen-inner delegation, chained
+  exhaustion, inner-throw propagation, array-inner control.

@@ -742,6 +742,7 @@ function buildCodegenOptions(
     standalone: options.target === "standalone",
     // (#2141 S1) honest any-boxing regime flag (default off = legacy tag-5 ABI).
     honestAnyBoxing: options.honestAnyBoxing,
+    unionAnyRep: options.unionAnyRep,
     // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier flag (default off).
     tag5ValueEqClassifier: options.tag5ValueEqClassifier,
     // (#2106 S1) standalone $undefined tag-1 singleton regime flag (default off).
