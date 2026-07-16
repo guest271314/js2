@@ -3511,9 +3511,23 @@ export function compileElementAccess(
   // then reuse the existing native `__str_charAt(flat, i)` helper (§22.1.3.1
   // semantics — out-of-range yields ""). Standalone + nativeStrings only; the
   // host path keeps its own String-exotic indexer.
+  //
+  // (#3304) ALSO fires for a PRIMITIVE-string receiver (`"XYZ"[2]`,
+  // `s[s.length - 1]` — §10.4.3.5 StringGetOwnProperty via the String exotic
+  // wrapper the spec conjures for member access). Neither this arm (wrapper-
+  // only) nor #3027 below (non-numeric keys only) matched, so a numeric index
+  // on a plain string fell to the generic `__extern_get` dynamic read — which
+  // has no `$NativeString` arm and answered null (`s[2] === "Z"` → false;
+  // `s[2].length` null-derefed). The oracle-side string predicate is the same
+  // one #3027 uses; the emission is unchanged (`__to_primitive` of a primitive
+  // string is identity per §7.1.1 step 1, so the wrapper slot-read doubles as
+  // a pass-through).
   if (ctx.standalone && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
     const recvWrapTsType = ctx.checker.getTypeAtLocation(expr.expression);
-    if (isStringWrapperType(recvWrapTsType) && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+    if (
+      (isStringWrapperType(recvWrapTsType) || ctx.oracle.staticJsTypeOf(expr.expression) === "string") &&
+      isNumericIndexExpression(ctx, expr.argumentExpression)
+    ) {
       ensureObjectRuntime(ctx);
       ensureNativeStringHelpers(ctx);
       const toPrimIdx = ctx.funcMap.get("__to_primitive");

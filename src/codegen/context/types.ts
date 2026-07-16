@@ -349,6 +349,45 @@ export interface NativeGeneratorInfo {
    * shared cell — writes propagate to the enclosing frame.
    */
   leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
+  /**
+   * (#3032 W3) TDZ-flag boxes riding as leading synthetic params. Each entry
+   * names a TDZ-flagged capture (`name` = the ORIGINAL captured binding) and
+   * the index into `paramNames`/`paramTypes` of its `ref $cell<i32>` flag-box
+   * param (named `__tdz_box_<name>`, minted by nested-declarations.ts after
+   * the value-capture params — the #1205 Stage 3 layout
+   * `[valueCaps, tdzFlagBoxes, userParams]`). The resume function registers
+   * the rehydrated flag-box local in `boxedTdzFlags` + `tdzFlagLocals` under
+   * the original name so TDZ-checked identifier reads inside resume states
+   * (`emitLocalTdzCheck`) deref the shared i32 cell, exactly like a lifted
+   * capturing closure body.
+   */
+  leadingTdzFlags?: { name: string; paramIdx: number }[];
+  /**
+   * (#3302) CAPTURING generator FUNCTION EXPRESSION (lifted closure): the
+   * `__self` capture-struct rehydration recipe for the resume function. The
+   * lifted closure carries its captures as fields of the closure struct
+   * (value captures at fields 1..N — ref cells for mutable ones — and TDZ
+   * flag boxes at fields N+1..N+K; closures.ts prologue invariant), and the
+   * `__self` ref itself rides the state struct as the single leading capture
+   * param (#3164). The resume fn compiles the SAME body statements in a fresh
+   * FunctionContext, so it must re-run the closures.ts capture prologue from
+   * the rehydrated `__self` local: materialize each entry into a named local,
+   * then re-apply the `boxedCaptures` / `boxedTdzFlags` + `tdzFlagLocals`
+   * registrations so identifier reads/writes and TDZ checks resolve through
+   * the shared cells. Mirrors the async drive lane's re-materialization
+   * (async-frame.ts #2865); without it capture resolution falls back to STALE
+   * outer-scope local indices — a guaranteed miscompile.
+   * `castToTypeIdx` is set when `__self`'s param type is the wrapper base
+   * struct (needs a `ref.cast` to the concrete capture struct first).
+   */
+  selfCaptureRehydration?: {
+    selfParamName: string;
+    structTypeIdx: number;
+    castToTypeIdx: number | null;
+    entries: { name: string; fieldIdx: number; localType: ValType }[];
+    boxedCaptures: { name: string; refCellTypeIdx: number; valType: ValType }[];
+    tdzFlags: { name: string; fieldIdx: number; refCellTypeIdx: number }[];
+  };
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";

@@ -1460,7 +1460,21 @@ function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.Function
   if (bodyUsesArguments(decl.body)) return false;
   if (fnExprBodyReferencesThis(decl.body)) return false;
   if (decl.name && bodyReferencesOwnName(decl.body, decl.name.text)) return false;
-  if (generatorCapturesOuterScope(ctx, decl)) return false;
+  // (#3302) Outer-scope captures are ADMITTED in the standalone/wasi lane:
+  // the lifted closure already carries them as `__self` struct fields, and
+  // the resume function re-materializes them via
+  // `NativeGeneratorInfo.selfCaptureRehydration` (the exact async-drive-lane
+  // mechanism, async-frame.ts #2865). This retires the eager-buffer HOST
+  // fallback for the dominant test262 dstr-fixture IIFE
+  // (`var iter = function*(){ iterations += 1; }();`) — which leaked the
+  // whole `env::__gen_*`/`__get_caught_exception` import family into
+  // standalone binaries (validate-but-can't-instantiate) AND ran the body at
+  // creation (the §27.5.3.1 violation, #3032). Under a JS host a fn-expr
+  // never reaches this gate (the host-lane candidate block admits only
+  // FunctionDeclarations), but keep the bail explicit for defense — the
+  // eager host path with the slice-1 lazy thunk remains the host-lane
+  // lowering.
+  if (!noJsHostTarget(ctx) && generatorCapturesOuterScope(ctx, decl)) return false;
   return true;
 }
 
@@ -1957,6 +1971,15 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
 export interface NativeGeneratorCaptureParam {
   name: string;
   boxed?: { refCellTypeIdx: number; valType: ValType };
+  /**
+   * (#3032 W3) This synthetic leading param is a TDZ-flag BOX
+   * (`ref $cell<i32>`, param name `__tdz_box_<orig>`) for the TDZ-flagged
+   * capture named here — NOT a value capture. `boxed` must stay unset (the
+   * flag box must not enter the resume fctx's `boxedCaptures`); the resume
+   * function instead registers it in `boxedTdzFlags`/`tdzFlagLocals` under
+   * this original name so `emitLocalTdzCheck` reads the shared i32 cell.
+   */
+  tdzFlagFor?: string;
 }
 
 export function registerNativeGenerator(
@@ -2150,6 +2173,17 @@ export function registerNativeGenerator(
     leadingCaptureCells: leadingCaptures
       ?.filter((c) => c.boxed)
       .map((c) => ({ name: c.name, refCellTypeIdx: c.boxed!.refCellTypeIdx, valType: c.boxed!.valType })),
+    // (#3032 W3) TDZ-flag box params (entries marked `tdzFlagFor`): record the
+    // ORIGINAL captured name + the param index of its flag box so the resume
+    // function can register `boxedTdzFlags`/`tdzFlagLocals`. The paramIdx is
+    // the leadingCaptures position — value captures and flag boxes together
+    // form the paramNames/paramTypes prefix, in caller order.
+    leadingTdzFlags: (() => {
+      const flags = (leadingCaptures ?? []).flatMap((c, i) =>
+        c.tdzFlagFor ? [{ name: c.tdzFlagFor, paramIdx: i }] : [],
+      );
+      return flags.length > 0 ? flags : undefined;
+    })(),
   };
   ctx.nativeGenerators.set(functionName, info);
   return info;
@@ -3315,6 +3349,78 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     for (const cap of info.leadingCaptureCells) {
       if (!resumeFctx.boxedCaptures) resumeFctx.boxedCaptures = new Map();
       resumeFctx.boxedCaptures.set(cap.name, { refCellTypeIdx: cap.refCellTypeIdx, valType: cap.valType });
+    }
+  }
+
+  // (#3032 W3) TDZ-flag boxes riding as leading params: register each
+  // rehydrated flag-box local in `boxedTdzFlags` + `tdzFlagLocals` under the
+  // ORIGINAL captured name, so TDZ-checked identifier reads inside resume
+  // states (`emitLocalTdzCheck` / `emitLocalTdzInit`) deref the shared i32
+  // cell — the exact mechanism a lifted capturing function body uses
+  // (nested-declarations.ts #1205 Stage 3). The flag box already rides the
+  // state struct as an ordinary `param_*` field (copied into a local above);
+  // only this registration makes the body's TDZ machinery resolve it. The
+  // cell's typeIdx comes from the param's own ValType so it always matches
+  // the state-struct field / call-site prepend.
+  if (info.leadingTdzFlags) {
+    for (const tf of info.leadingTdzFlags) {
+      const boxLocalIdx = resumeFctx.localMap.get(info.paramNames[tf.paramIdx]!);
+      const pt = info.paramTypes[tf.paramIdx]!;
+      if (boxLocalIdx === undefined || (pt.kind !== "ref" && pt.kind !== "ref_null")) continue;
+      if (!resumeFctx.boxedTdzFlags) resumeFctx.boxedTdzFlags = new Map();
+      resumeFctx.boxedTdzFlags.set(tf.name, { refCellTypeIdx: pt.typeIdx, localIdx: boxLocalIdx });
+      if (!resumeFctx.tdzFlagLocals) resumeFctx.tdzFlagLocals = new Map();
+      resumeFctx.tdzFlagLocals.set(tf.name, boxLocalIdx);
+    }
+  }
+
+  // (#3302) CAPTURING generator fn-expression (lifted closure): re-run the
+  // closures.ts capture prologue from the rehydrated `__self` param — the
+  // captures live as fields of the closure struct, NOT as leading wasm params
+  // (the closure ABI is fixed: trampoline passes `[args..., __self]`).
+  // Materialize each capture field into a named local, then re-apply the
+  // `boxedCaptures` / `boxedTdzFlags` + `tdzFlagLocals` registrations the
+  // lifted body's prologue made, so identifier reads/writes and TDZ checks in
+  // the resume states deref the SHARED cells (write-through to the enclosing
+  // frame — by-reference, not the host buffer's by-value snapshot). Mirrors
+  // async-frame.ts #2865; immutable by-value captures re-read the immutable
+  // struct field on every resume (stable), mutable ones re-fetch the cell
+  // (identity-stable), so suspends are transparent.
+  if (info.selfCaptureRehydration) {
+    const rehydration = info.selfCaptureRehydration;
+    const selfIdx = resumeFctx.localMap.get(rehydration.selfParamName);
+    if (selfIdx !== undefined) {
+      let selfForCaptures = selfIdx;
+      if (rehydration.castToTypeIdx !== null) {
+        const castLocal = allocLocal(resumeFctx, "__self_cast", { kind: "ref", typeIdx: rehydration.castToTypeIdx });
+        resumeFctx.body.push({ op: "local.get", index: selfIdx });
+        resumeFctx.body.push({ op: "ref.cast", typeIdx: rehydration.castToTypeIdx });
+        resumeFctx.body.push({ op: "local.set", index: castLocal });
+        selfForCaptures = castLocal;
+      }
+      for (const entry of rehydration.entries) {
+        const localIdx = allocLocal(resumeFctx, entry.name, entry.localType);
+        resumeFctx.body.push({ op: "local.get", index: selfForCaptures });
+        resumeFctx.body.push({ op: "struct.get", typeIdx: rehydration.structTypeIdx, fieldIdx: entry.fieldIdx });
+        resumeFctx.body.push({ op: "local.set", index: localIdx });
+      }
+      for (const bc of rehydration.boxedCaptures) {
+        if (!resumeFctx.boxedCaptures) resumeFctx.boxedCaptures = new Map();
+        resumeFctx.boxedCaptures.set(bc.name, { refCellTypeIdx: bc.refCellTypeIdx, valType: bc.valType });
+      }
+      for (const tf of rehydration.tdzFlags) {
+        const flagLocal = allocLocal(resumeFctx, `__tdz_box_${tf.name}`, {
+          kind: "ref_null",
+          typeIdx: tf.refCellTypeIdx,
+        });
+        resumeFctx.body.push({ op: "local.get", index: selfForCaptures });
+        resumeFctx.body.push({ op: "struct.get", typeIdx: rehydration.structTypeIdx, fieldIdx: tf.fieldIdx });
+        resumeFctx.body.push({ op: "local.set", index: flagLocal });
+        if (!resumeFctx.boxedTdzFlags) resumeFctx.boxedTdzFlags = new Map();
+        resumeFctx.boxedTdzFlags.set(tf.name, { refCellTypeIdx: tf.refCellTypeIdx, localIdx: flagLocal });
+        if (!resumeFctx.tdzFlagLocals) resumeFctx.tdzFlagLocals = new Map();
+        resumeFctx.tdzFlagLocals.set(tf.name, flagLocal);
+      }
     }
   }
 

@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/fable-2
 sprint: 69
 created: 2026-07-02
-updated: 2026-07-03
+updated: 2026-07-16
 completed: 2026-07-02
 priority: high
 horizon: l
@@ -177,3 +177,29 @@ Smoke-tested every premise before implementing (`.tmp/probe-2962-*.mjs`):
   exactly what it would do to a production shard on such a payload.
 - Follow-ups filed: #2968 (wasi `_start` printer), #2969 (construction-time
   `ToString(message)` §20.5.1.1 + numeric payload rendering).
+
+## 2026-07-16 harvest-errors residual note (post-completion)
+
+The `/harvest-errors` pass against the 2026-07-16 standalone baseline
+(`baseline_sha 6f89a7e8`) still finds **113 official-scope failing records**
+rendering as `uncaught Wasm-GC exception (non-stringifiable payload)` —
+i.e. the opaque-payload mask persists at scale after this issue, #2968 and
+#2969 all landed. The cluster is concentrated in destructuring **error-path**
+tests (abrupt-completion steps inside dstr):
+
+- `language/expressions/class/dstr` 20, `language/statements/class/dstr` 20,
+  `language/expressions/object/dstr` 13, `language/expressions/async-generator/dstr` 8,
+  `language/statements/for-of/dstr` 6, `language/statements/for/dstr` 6,
+  generators/function dstr dirs the rest (all `*/dstr`).
+- Samples: `test/language/expressions/class/dstr/async-gen-meth-ary-ptrn-elision-step-err.js`,
+  `test/language/statements/for-of/dstr/let-ary-ptrn-rest-id-iter-step-err.js`.
+
+This matches the "1 residual (generator try-finally payload)" class named in
+the outcome above, but at 113 records it is a whole class, not a single test.
+The underlying conformance failures are tracked by the destructuring
+error-path issues (#2669 umbrella, #2040, #3245 "error-path mirage"); this
+note flags only the persisting **observability mask** — whoever picks up
+those slices will be triaging opaque signatures until the generator/dstr
+abrupt-completion payload is made stringifiable. If a dedicated fix is
+scoped, it should extend this issue's `__error_to_string` coverage to the
+generator try/finally throw path.

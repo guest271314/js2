@@ -38,6 +38,7 @@ import {
 import type { IrBinop, IrUnop } from "../nodes.js";
 import type {
   IrClassLowering,
+  IrClosureLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrVecLowering,
@@ -148,6 +149,18 @@ class StubEmitter implements BackendEmitter<StubSink> {
   emitLoop(_blockType: BlockType, body: StubSink, out: StubSink): void {
     out.push("loop", ...body, "end");
   }
+  emitNull(irType: IrType, out: StubSink): void {
+    out.push(`null:${irType.kind}`);
+  }
+  emitToExternref(out: StubSink): void {
+    out.push("to.externref");
+  }
+  emitDowncast(_target: { typeIdx: number } | IrType, out: StubSink): void {
+    out.push("downcast");
+  }
+  emitFromExternref(_target: { typeIdx: number } | IrType, out: StubSink): void {
+    out.push("from.externref");
+  }
   emitCall(funcIdx: FuncHandle, out: StubSink): void {
     out.push(`call:${funcIdx}`);
   }
@@ -180,6 +193,15 @@ class StubEmitter implements BackendEmitter<StubSink> {
     for (const c of catches) out.push(`catch:${c.tagIdx}`, ...c.body);
     if (catchAll) out.push("catch_all", ...catchAll);
     out.push("end");
+  }
+  emitClosureNew(_layout: IrClosureLowering, captureCount: number, out: StubSink): void {
+    out.push(`closure.new:${captureCount}`);
+  }
+  emitClosureFuncGet(_layout: IrClosureLowering, out: StubSink): void {
+    out.push("closure.func.get");
+  }
+  emitCaptureGet(_layout: IrClosureLowering, index: number, out: StubSink): void {
+    out.push(`closure.capture.get:${index}`);
   }
   emitRefCellNew(_layout: IrRefCellLowering, out: StubSink): void {
     out.push("refcell.new");

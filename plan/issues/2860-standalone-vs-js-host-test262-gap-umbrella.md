@@ -67,16 +67,28 @@ single fix flips directly.
 
 | # | Cluster | total | pure | tractability | issue |
 | - | ------- | ----- | ---- | ------------ | ----- |
-| 1 | built-in static/proto value read refused (CE) | 882 | 882 | mechanical (glue pattern) | **2861** |
-| 2 | ToPrimitive over built-in exotics + inherited valueOf/toString | 2,039 | 728 | medium (extend `__to_primitive`) | **2862** |
-| 3 | dynamic-shape object/property codegen (`__get_builtin`, `__extern_toLocaleString`) CE | 365 | 365 | medium codegen | **2863** |
-| 4 | sync generators — no standalone carrier (`__gen_*`/`__create_generator`) | 697 | — | hard (new carrier) | **2864** |
-| 5 | async generators — no standalone carrier (`__create_async_generator`) | 986 | — | hard (dep #2864) | **2865** |
-| 6 | Symbol — standalone carrier (`__box_symbol`) | 418 | — | medium-hard | **2866** |
-| 7 | Promise / async microtask — standalone carrier (`Promise_*`, `__make_callback`) | 375 | — | hard | **2867** |
-| 8 | invalid Wasm binary emitted in standalone (correctness) | 523 | 118 | triage-then-fix | **2868** |
+| 1 | built-in static/proto value read refused (CE) | 882 | 882 | mechanical (glue pattern) | **2861 — done** |
+| 2 | ToPrimitive over built-in exotics + inherited valueOf/toString | 2,039 | 728 | medium (extend `__to_primitive`) | **2862 — wont-fix (superseded)** |
+| 3 | dynamic-shape object/property codegen (`__get_builtin`, `__extern_toLocaleString`) CE | 365 | 365 | medium codegen | **2863 — done** |
+| 4 | sync generators — no standalone carrier (`__gen_*`/`__create_generator`) | 697 | — | hard (new carrier) | **2864 — in-progress** |
+| 5 | async generators — no standalone carrier (`__create_async_generator`) | 986 | — | hard (dep #2864) | **2865 — in-progress** |
+| 6 | Symbol — standalone carrier (`__box_symbol`) | 418 | — | medium-hard | **2866 — in-progress** |
+| 7 | Promise / async microtask — standalone carrier (`Promise_*`, `__make_callback`) | 375 | — | hard | **2867 — in-progress** |
+| 8 | invalid Wasm binary emitted in standalone (correctness) | 523 | 118 | triage-then-fix | **2868 — done** |
 
 ### Not-yet-issued follow-ons (tracked here)
+
+**Groomed 2026-07-16 (PO pass): every bullet below now has an owning issue —
+none of this section is actually un-issued anymore.** $Object reader → #3027
+(done); TypedArray internals → #3177 (ready); gOPD 124 → MOP lineage #2884/
+#2885/#2896/#2965 (done), #2984/#2992 (in-progress), #2874/#3250 (done);
+eval/Function → #3005 (done) / #3017 (ready); spread/`Array.from(iter,n)`
+~321 → #2904/#2995/#3206/#3100 (all done); namespace static reads ~120 →
+#2933 (ready); illegal-cast → folded into #2863/#2868 (both done); null-deref
+`__str_flatten`/RegExp ~185 → #2935 (ready). This umbrella is fully groomed —
+no new child issues needed; #3178 (the generator/async/Promise host-machinery
+deep-dive within cluster rows 4/5/7 above) is the one active sub-umbrella
+still carving new slices (see #3178 itself, and #3302 spun from it).
 
 - **$Object dynamic-object-property reader** — **[#3027](3027-standalone-dynamic-object-property-reader-residual.md)
   is `done` (2026-07-05)**, superseding this note. Re-measurement found the

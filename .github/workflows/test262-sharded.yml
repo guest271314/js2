@@ -585,6 +585,15 @@ jobs:
       - name: Checkout
         if: env.SHARDS_RAN == 'true'
         uses: actions/checkout@v5
+        with:
+          # #3303 — depth 2 (not the default 1) so `HEAD^1` resolves: the
+          # regression guards below run diff-test262.ts, whose PR-scoped
+          # `regressions-allow:` read (scripts/lib/change-scope.mjs
+          # resolveChangeBase) derives the change-set from the synthetic merge
+          # commit's first parent on pull_request/merge_group/push. At depth 1
+          # the parents are unreachable and the allowance would be silently
+          # unreadable in exactly the job that gates the merge queue.
+          fetch-depth: 2
 
       - name: Setup Node
         if: env.SHARDS_RAN == 'true'
@@ -671,6 +680,21 @@ jobs:
       # pass→fail with changed wasm) fails the build. On the no-shards path
       # (SHARDS_RAN != true) it's skipped, matching the required check's
       # existing no-op-pass behaviour for non-test262 changes.
+      #
+      # #3303 — exit-code contract with diff-test262.ts (pinned by
+      # tests/issue-3303.test.ts, which executes this step's bash):
+      #   exit >1 → script crashed / refused the diff → fail with that code.
+      #   exit 0  → the script's own gate PASSED — AUTHORITATIVE. It already
+      #             encodes net/ratio/bucket, the #3086 rebase drift tolerance,
+      #             the #3303 regressions-allow ceiling and the #3189 trap
+      #             ratchet. The raw printed count is NOT re-litigated here:
+      #             pre-#3303 this step re-parsed the raw count and vetoed
+      #             legitimate, declared re-baselines the script had approved.
+      #   exit 1  → the script's gate FAILED → apply the coarse catastrophic
+      #             threshold to the raw count, exactly as before. Small
+      #             fine-grained failures (net-negative drift) stay the
+      #             regression-gate job's business and do not fail this
+      #             required check; a catastrophic-size failure does.
       - name: Catastrophic regression guard (#1668)
         if: env.SHARDS_RAN == 'true'
         env:
@@ -704,13 +728,22 @@ jobs:
           fi
           NET=$(grep -oE 'Regressions with wasm-hash change: [0-9]+' /tmp/cat-diff.txt | grep -oE '[0-9]+' | head -1)
           NET="${NET:-0}"
-          echo "Catastrophic guard: ${NET} wasm-change regressions vs baseline (threshold ${CATASTROPHIC_REGRESSION_THRESHOLD})."
+          if [ "$diff_exit" -eq 0 ]; then
+            echo "Catastrophic guard: diff-test262 gate PASS (exit 0, authoritative — #3303): ${NET} raw wasm-change regressions vs baseline."
+            if [ "$NET" -gt "$CATASTROPHIC_REGRESSION_THRESHOLD" ]; then
+              echo "Raw count exceeds ${CATASTROPHIC_REGRESSION_THRESHOLD} but the script's own gate approved it (deliberate re-baseline). Verdict lines:"
+              grep -E 'regressions-allow|Re-baseline gate|ORACLE' /tmp/cat-diff.txt || true
+            fi
+            exit 0
+          fi
+          echo "Catastrophic guard: diff-test262 gate FAIL (exit 1) — applying the coarse threshold: ${NET} wasm-change regressions (threshold ${CATASTROPHIC_REGRESSION_THRESHOLD})."
           if [ "$NET" -gt "$CATASTROPHIC_REGRESSION_THRESHOLD" ]; then
             echo "::error::CATASTROPHIC test262 regression: ${NET} tests went pass→fail with changed wasm, exceeding the ${CATASTROPHIC_REGRESSION_THRESHOLD} threshold. This blocks the merge queue. A regression this large is almost always a codegen/harness corruption (cf. #608). Investigate before merging."
             echo "----- regression sample (first 40 lines) -----"
             head -40 /tmp/cat-diff.txt
             exit 1
           fi
+          echo "Fine-grained gate failure below the catastrophic threshold — left to the regression-gate job (pre-#3303 behaviour preserved)."
 
       # #1897 — HARD standalone-regression guard. Mirrors the host
       # catastrophic guard above, but for the STANDALONE lane and at a much
@@ -745,6 +778,16 @@ jobs:
       #
       # net = improvements − regressions_with_wasm_hash_change
       # fail when net < −STANDALONE_REGRESSION_TOLERANCE.
+      #
+      # #3303 — same exit-code contract as the catastrophic guard above
+      # (pinned by tests/issue-3303.test.ts, which executes this step's bash):
+      # exit 0 is AUTHORITATIVE (rebase drift tolerance / regressions-allow
+      # ceiling / trap ratchet already decided in the script); the coarse
+      # net-below-−tolerance check applies only when the script's own gate
+      # FAILED (exit 1). In non-rebase mode exit 0 implies net ≥ 0, so the
+      # exit-0 branch never changes an ordinary PR's outcome — it only stops
+      # this step from vetoing a deliberate re-baseline the script approved
+      # (pre-#3303 it re-derived net from the raw count and disagreed).
       - name: Standalone regression guard (#1897)
         if: env.SHARDS_RAN == 'true'
         env:
@@ -787,22 +830,29 @@ jobs:
             exit "$diff_exit"
           fi
           # Pull the flake-filtered regression count and the improvement count
-          # straight out of the diff report, then compute net ourselves so the
-          # threshold logic is explicit (the script's own exit code uses a
-          # net<0 gate with no drift tolerance, which is too strict for a
-          # gating check on the standalone lane).
+          # straight out of the diff report for the coarse net check below
+          # (applied only when the script's own gate failed — #3303).
           REG=$(grep -oE 'Regressions with wasm-hash change: [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
           IMP=$(grep -oE 'Improvements \(other → pass\): [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
           CT=$(grep -oE 'Compile timeouts \(pass → compile_timeout\): [0-9]+' /tmp/standalone-diff.txt | grep -oE '[0-9]+' | head -1)
           REG="${REG:-0}"; IMP="${IMP:-0}"; CT="${CT:-0}"
           NET=$((IMP - REG))
-          echo "Standalone guard: improvements=${IMP}, wasm-change regressions=${REG} (compile_timeout flake=${CT}, excluded), net=${NET} (tolerance −${STANDALONE_REGRESSION_TOLERANCE})."
+          if [ "$diff_exit" -eq 0 ]; then
+            echo "Standalone guard: diff-test262 gate PASS (exit 0, authoritative — #3303): improvements=${IMP}, wasm-change regressions=${REG} (compile_timeout flake=${CT}, excluded), net=${NET}."
+            if [ "$NET" -lt "$((0 - STANDALONE_REGRESSION_TOLERANCE))" ]; then
+              echo "Net is below the −${STANDALONE_REGRESSION_TOLERANCE} tolerance but the script's own gate approved it (deliberate re-baseline). Verdict lines:"
+              grep -E 'regressions-allow|Re-baseline gate|ORACLE' /tmp/standalone-diff.txt || true
+            fi
+            exit 0
+          fi
+          echo "Standalone guard: diff-test262 gate FAIL (exit 1) — applying the coarse net check: improvements=${IMP}, wasm-change regressions=${REG} (compile_timeout flake=${CT}, excluded), net=${NET} (tolerance −${STANDALONE_REGRESSION_TOLERANCE})."
           if [ "$NET" -lt "$((0 - STANDALONE_REGRESSION_TOLERANCE))" ]; then
             echo "::error::STANDALONE test262 regression: net ${NET} (improvements ${IMP} − regressions ${REG}) is below the −${STANDALONE_REGRESSION_TOLERANCE} tolerance. The standalone lane regressed against the current baseline floor and this blocks the merge queue. compile_timeout flake is already excluded; this is a real standalone conformance drop. See #1897."
             echo "----- standalone regression report (first 60 lines) -----"
             head -60 /tmp/standalone-diff.txt
             exit 1
           fi
+          echo "Fine-grained gate failure within the standalone tolerance — left to the regression-gate job (pre-#3303 behaviour preserved)."
 
       # #1942 — compile-time regression guard. `pass → compile_timeout` is
       # excluded from every regression gate above (it's runner-load flake —

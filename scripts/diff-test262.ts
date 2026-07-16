@@ -50,14 +50,162 @@ export type TrapCategory = (typeof TRAP_ERROR_CATEGORIES)[number];
 // what remains is main-side DRIFT the re-baseline cannot avoid (the baseline the
 // merge_group diffs against lags main HEAD by the promote-serialization window).
 // In rebase mode we therefore replace net/ratio with a bounded drift tolerance
-// PLUS the unchanged per-bucket (50) concentration check. The coarse safety nets
-// stay fully in force: the #1668 catastrophic guard (host, threshold 200) and
-// the #1897 standalone guard (tolerance 15) both parse "Regressions with
-// wasm-hash change" from this same output and are NOT affected by this exit-code
-// path. Set to 25 — comfortably above realistic single-window host drift, ~8×
+// PLUS the unchanged per-bucket (50) concentration check. Since #3303 the
+// #1668 catastrophic guard and the #1897 standalone guard treat THIS script's
+// exit code as authoritative when it passes (exit 0) and only apply their
+// coarse raw-count thresholds (200 / net −15) when this script's own gate
+// FAILED (exit 1) — so a rebase within tolerance (or within a declared
+// #3303 regressions-allow ceiling, below) clears the whole gate stack in one
+// place. Set to 25 — comfortably above realistic single-window host drift, ~8×
 // below the catastrophic threshold, so a genuine concentrated break still trips
 // (bucket-50) or overflows (25) while ordinary drift self-lands the re-baseline.
 export const ORACLE_REBASE_DRIFT_TOLERANCE = 25;
+
+// #3303 — PR-scoped allowance for HONEST verdict-logic reclassifications that
+// exceed the bounded drift tolerance above (e.g. #3285/#3104: 2615 previously
+// inflated false passes becoming honest fails — plain assertion_fail /
+// type_error rows, so the #2940 vacuity excusal does not cover them, see
+// #3286). The PR declares a ceiling in its OWN issue file's frontmatter:
+//
+//   regressions-allow:
+//     count: 2700
+//     reason: "#3285 assert_throws error-type tightening, see #3286"
+//
+// Read via the same change-set scoping as loc-budget-allow (#3131,
+// scripts/lib/change-scope.mjs): only issue files in the PR's OWN diff are
+// consulted, so the allowance is inherently per-PR — an allowance that landed
+// on main grants nothing to later PRs, unlike a repo variable
+// (#3202's TRAP_RATCHET_TOLERANCE), which would silently stay open for every
+// subsequent PR. Containment properties (all load-bearing):
+//   - REBASE-MODE ONLY: the allowance is consulted exclusively inside the
+//     rebase-mode gate, so it has ZERO effect unless the same PR also bumps
+//     `oracle_version` forward (or CI sets ORACLE_REBASE=1) — an ordinary PR
+//     cannot use it to sneak regressions past the net/ratio/bucket gate.
+//   - CEILING, NOT BLANK CHECK: regressionsWasmChange > declared count still
+//     hard-fails; if reality exceeds the declaration, that is itself signal
+//     and needs a fresh, honest re-declaration.
+//   - TRAP-RATCHET IMMUNE: the #3189 uncatchable-trap growth ratchet runs
+//     before and independent of this gate in BOTH branches — an allowance
+//     never excuses a new trap.
+export const REGRESSIONS_ALLOW_KEY = "regressions-allow";
+
+export interface RegressionsAllowance {
+  /** Declared ceiling on non-excused wasm-change regressions. */
+  count: number;
+  /** Required human-readable justification (self-documenting in review). */
+  reason: string;
+  /** Issue file(s) in the PR's diff that declared the allowance. */
+  sources: string[];
+}
+
+/**
+ * #3303 — the rebase-mode gate (#3086 drift tolerance + bucket concentration,
+ * or a declared regressions-allow ceiling superseding both). Pure (no I/O) so
+ * the unit test drives it directly, mirroring `evaluateRegressionThresholds`
+ * (#1943). Returns GATE-FAIL reasons (empty ⇒ pass) plus informational notes
+ * the CLI prints on pass.
+ */
+export function evaluateRebaseGate(opts: {
+  regressionsWasmChange: number;
+  regressedFiles: string[];
+  allowance?: RegressionsAllowance | null;
+}): { failures: string[]; notes: string[] } {
+  const { regressionsWasmChange, regressedFiles, allowance } = opts;
+  const failures: string[] = [];
+  const notes: string[] = [];
+  if (allowance) {
+    if (regressionsWasmChange > allowance.count) {
+      failures.push(
+        `regressions-allow ceiling exceeded (#3303): ${regressionsWasmChange} non-excused wasm-change regressions > declared count ${allowance.count} ` +
+          `(declared in ${allowance.sources.join(", ")}; reason: ${allowance.reason}). ` +
+          `The declared count is a ceiling the PR commits to, not a blank check — re-measure and re-declare honestly if the reclassification really grew`,
+      );
+    } else {
+      notes.push(
+        `=== regressions-allow (#3303): excused ${regressionsWasmChange} of ${allowance.count} declared wasm-change regressions — ` +
+          `reason: ${allowance.reason} (declared in ${allowance.sources.join(", ")}). ` +
+          `Drift tolerance (${ORACLE_REBASE_DRIFT_TOLERANCE}) and bucket limit (${REGRESSION_BUCKET_LIMIT}) are superseded by the declared ceiling for this re-baseline; the #3189 trap ratchet is NOT. ===`,
+      );
+    }
+    return { failures, notes };
+  }
+  if (regressionsWasmChange > ORACLE_REBASE_DRIFT_TOLERANCE) {
+    failures.push(
+      `re-baseline residual ${regressionsWasmChange} non-excused wasm-change regressions exceeds drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE} (#3086)`,
+    );
+  }
+  for (const { bucket, count } of bucketRegressions(regressedFiles)) {
+    if (count > REGRESSION_BUCKET_LIMIT) {
+      failures.push(
+        `bucket "${bucket}" has ${count} regressions, exceeds the ${REGRESSION_BUCKET_LIMIT}-test limit (re-baseline concentration check)`,
+      );
+    }
+  }
+  if (failures.length === 0) {
+    notes.push(
+      `=== Re-baseline gate (#3086): ${regressionsWasmChange} residual non-excused wasm-change regression(s) within drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE}; net/ratio skipped (0-improvement re-baseline). ===`,
+    );
+  }
+  return { failures, notes };
+}
+
+/**
+ * #3303 — read the change-set-scoped `regressions-allow:` declaration (CLI
+ * path only; never called when this module is imported for its pure helpers).
+ * Resolution:
+ *   1. `REGRESSIONS_ALLOW_FILE` env — read the declaration from ONE explicit
+ *      file, bypassing git scoping entirely. Test/emergency hook: keeps the
+ *      fixture tests hermetic (the ambient repo diff can never leak an
+ *      allowance into them, and they can grant one without touching the repo).
+ *   2. Git change-set scoping via `resolveChangeBase` + the PR's own
+ *      `plan/issues/**.md` diff (`changeSetNumericAllowances`) — the real
+ *      mechanism. In CI this resolves `HEAD^1` of the synthetic merge commit
+ *      (pull_request / merge_group / push), which is exactly the PR's own
+ *      change-set even inside a stacked merge-queue group.
+ * Multiple valid declarations: the ceiling is the MAX single declaration (one
+ * PR = one honest reclassification; declarations deliberately do NOT sum).
+ */
+async function readRegressionsAllowance(): Promise<{ allowance: RegressionsAllowance | null; notes: string[] }> {
+  const notes: string[] = [];
+  const { resolveChangeBase, changeSetNumericAllowances, parseFrontmatterCountReason } =
+    await import("./lib/change-scope.mjs");
+  const overrideFile = process.env.REGRESSIONS_ALLOW_FILE;
+  if (overrideFile !== undefined && overrideFile !== "") {
+    let parsed: { count: number; reason: string } | null | undefined;
+    try {
+      parsed = parseFrontmatterCountReason(readFileSync(overrideFile, "utf-8"), REGRESSIONS_ALLOW_KEY);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed === null) {
+      notes.push(
+        `⚠️  regressions-allow (#3303): MALFORMED declaration in ${overrideFile} (needs positive-integer count + non-empty reason) — ignored.`,
+      );
+    }
+    if (!parsed) return { allowance: null, notes };
+    return { allowance: { ...parsed, sources: [overrideFile] }, notes };
+  }
+  const repoRoot = process.cwd();
+  const { base, how } = resolveChangeBase(repoRoot);
+  if (!base) return { allowance: null, notes };
+  const { declarations, invalid } = changeSetNumericAllowances(repoRoot, base, REGRESSIONS_ALLOW_KEY);
+  for (const p of invalid) {
+    notes.push(
+      `⚠️  regressions-allow (#3303): MALFORMED declaration in ${p} (needs positive-integer count + non-empty reason) — ignored.`,
+    );
+  }
+  if (declarations.length === 0) return { allowance: null, notes };
+  const best = declarations.reduce((a, b) => (b.count > a.count ? b : a));
+  if (declarations.length > 1) {
+    notes.push(
+      `regressions-allow (#3303): ${declarations.length} declarations in the change-set (base via ${how}) — using the max ceiling ${best.count} from ${best.source}; declarations do not sum.`,
+    );
+  }
+  return {
+    allowance: { count: best.count, reason: best.reason, sources: declarations.map((d) => d.source) },
+    notes,
+  };
+}
 
 /**
  * Group regressed test files into path buckets (first
@@ -420,6 +568,15 @@ Environment:
                                 the diff would read oracle skew as regressions. Set this only on the
                                 oracle-flip PR (e.g. #1945) to intentionally re-seed the baseline at
                                 the new oracle version.
+  REGRESSIONS_ALLOW_FILE=<path> (#3303) Read the rebase-mode 'regressions-allow:' ceiling from ONE
+                                explicit file instead of the change-set's own plan/issues diff.
+                                Test/emergency hook; /dev/null disables the allowance entirely.
+                                In rebase mode ONLY, a PR may declare in its own issue file:
+                                  regressions-allow:
+                                    count: <N>
+                                    reason: "<why these flips are honest>"
+                                which supersedes the drift-tolerance + bucket checks up to count
+                                (hard-fails above it; #3189 trap ratchet is never excused).
   --path-filter <patterns>      Restrict the diff to tests whose path contains any of the
                                 pipe-separated substrings (same semantics as TEST262_PATH_FILTER).
                                 Used by #1954 scoped PR-time runs: the candidate JSONL only covers
@@ -1033,28 +1190,29 @@ async function run(
   if (rebaseMode) {
     // A pure re-baseline has ~0 improvements → net/ratio are inapplicable (see
     // ORACLE_REBASE_DRIFT_TOLERANCE). The intended reclassification is already
-    // excused from regressionsWasmChange; the residual is main drift. Gate on a
-    // bounded drift tolerance + the unchanged per-bucket concentration check; the
-    // #1668 / #1897 guards remain the coarse safety nets (they read the printed
-    // "Regressions with wasm-hash change" line, not this exit code).
-    if (regressionsWasmChange > ORACLE_REBASE_DRIFT_TOLERANCE) {
-      console.log(
-        `=== GATE FAIL: re-baseline residual ${regressionsWasmChange} non-excused wasm-change regressions exceeds drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE} (#3086) ===`,
-      );
+    // excused from regressionsWasmChange; the residual is main drift — gated on
+    // a bounded drift tolerance + the per-bucket concentration check — UNLESS
+    // the PR declares a #3303 `regressions-allow:` ceiling in its own issue
+    // file (an honest reclassification larger than drift, e.g. #3285/#3286),
+    // which supersedes both checks up to the declared count and hard-fails
+    // above it. The allowance is read lazily HERE (rebase mode only) so an
+    // ordinary same-oracle run never consults it — a declared allowance grants
+    // nothing without the oracle bump that makes this a deliberate re-baseline.
+    // Since #3303 the #1668/#1897 workflow guards treat this exit code as
+    // authoritative when it passes, so this branch IS the rebase verdict.
+    const { allowance, notes: allowanceNotes } = await readRegressionsAllowance();
+    for (const note of allowanceNotes) console.log(note);
+    const rebaseGate = evaluateRebaseGate({
+      regressionsWasmChange,
+      regressedFiles: noiseFiltered.map((r) => r.file),
+      allowance,
+    });
+    for (const reason of rebaseGate.failures) {
+      console.log(`=== GATE FAIL: ${reason} ===`);
       gateFailed = true;
     }
-    for (const { bucket, count } of bucketRegressions(noiseFiltered.map((r) => r.file))) {
-      if (count > REGRESSION_BUCKET_LIMIT) {
-        console.log(
-          `=== GATE FAIL: bucket "${bucket}" has ${count} regressions, exceeds the ${REGRESSION_BUCKET_LIMIT}-test limit (re-baseline concentration check) ===`,
-        );
-        gateFailed = true;
-      }
-    }
-    if (!gateFailed) {
-      console.log(
-        `=== Re-baseline gate (#3086): ${regressionsWasmChange} residual non-excused wasm-change regression(s) within drift tolerance ${ORACLE_REBASE_DRIFT_TOLERANCE}; net/ratio skipped (0-improvement re-baseline). #1668 (200) + #1897 (15) guards remain in force. ===`,
-      );
+    if (rebaseGate.failures.length === 0) {
+      for (const note of rebaseGate.notes) console.log(note);
     }
   } else {
     if (netPerTest < 0) {

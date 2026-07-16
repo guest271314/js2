@@ -44,7 +44,7 @@
 
 import type { IrBackendKind } from "./legality.js";
 import type { IrBinop, IrInstr, IrType, IrUnop } from "../nodes.js";
-import type { BlockType, Instr } from "../types.js";
+import type { BlockType, Instr, ValType } from "../types.js";
 import type {
   IrClassLowering,
   IrClosureLowering,
@@ -152,23 +152,48 @@ export interface BackendEmitter<S = Instr[]> {
   /** Wrap `body` in a structured loop; `body` was built via `newSink()`. */
   emitLoop(blockType: BlockType, body: S, out: S): void;
 
+  // ---- (a6) union/boxing family — MIGRATED behind the trait (#2953) ----
+  // `emitBox` receives the already-lowered value in its own sink because the
+  // backend layout owns both the tag encoding and the tag/value field order.
+  // WasmGC appends those field sinks in layout order before `struct.new`;
+  // backends without a union representation leave these hooks absent and
+  // lower.ts rejects the family loudly before emitting backend-specific ops.
+  emitBox?(layout: IrUnionLowering, member: ValType, value: S, out: S): void;
+  emitUnbox?(layout: IrUnionLowering, out: S): void;
+  emitTagLoad?(layout: IrUnionLowering, out: S): void;
+
+  // ---- ref-coercion / null family — MIGRATED behind the trait (#2953) ----
+  // Typed nulls and reference casts are representation operations: WasmGC
+  // uses the nullable heap-type op family, while a linear or bytecode backend
+  // needs its own sentinel/tag representation. The caller owns operand
+  // evaluation and passes either an abstract IrType or an already-resolved
+  // runtime type handle; the emitter owns the terminal coercion sequence.
+  /** Push a typed null appropriate for `irType`. */
+  emitNull(irType: IrType, out: S): void;
+  /** anyref subtype on the stack -> externref. */
+  emitToExternref(out: S): void;
+  /** ref on the stack -> the same ref narrowed to `target`. */
+  emitDowncast(target: { typeIdx: number } | IrType, out: S): void;
+  /** externref on the stack -> a ref narrowed to `target`. */
+  emitFromExternref(target: { typeIdx: number } | IrType, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
-  // The following are part of the full seam the spec audited but are NOT
-  // routed through the trait in Phase 1 (#1713). They remain inline in
-  // lower.ts. Declared here so the staged groups (aggregate / union /
-  // closure / ref-coercion) have a stable signature to migrate against and
-  // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
-  // need not implement them until its group is wired.
-  emitBox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitUnbox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitTagLoad?(layout: IrUnionLowering, out: Instr[]): void;
-  emitNull?(irType: IrType, out: Instr[]): void;
-  emitToExternref?(out: Instr[]): void;
-  emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;
   emitFuncRef?(funcIdx: number, out: Instr[]): void;
-  emitClosureNew?(layout: IrClosureLowering, captureCount: number, out: Instr[]): void;
-  emitClosureFuncGet?(layout: IrClosureLowering, out: Instr[]): void;
-  emitCaptureGet?(layout: IrClosureLowering, index: number, out: Instr[]): void;
+
+  // ---- closure family — MIGRATED behind the trait (#2953) -----------------
+  // Closure construction and field reads are aggregate operations whose
+  // representation differs by backend. The caller still owns operand order:
+  // closure.new leaves the lifted function reference followed by each capture
+  // on the stack; closure.cap performs its subtype downcast before the field
+  // read; closure.call performs its typed-funcref cast after the function-field
+  // read. Those ref.func/ref.cast operations migrate in their dedicated #2953
+  // slices, while these hooks close the closure struct.new/get bypasses.
+  /** lifted function ref + captureCount captures on the stack -> closure value. */
+  emitClosureNew(layout: IrClosureLowering, captureCount: number, out: S): void;
+  /** closure ref on the stack -> its abstract funcref field. */
+  emitClosureFuncGet(layout: IrClosureLowering, out: S): void;
+  /** downcast closure-subtype ref on the stack -> capture at `index`. */
+  emitCaptureGet(layout: IrClosureLowering, index: number, out: S): void;
 
   // ---- (a1) call family — MIGRATED behind the trait (#1584 §2a) -----------
   // The first op-family to move from inline `lower.ts` pushes to typed trait

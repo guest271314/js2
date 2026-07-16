@@ -2069,6 +2069,34 @@ export function compileArrowAsClosure(
       /* synthesizedThis */ false,
       [{ name: "__self" }],
     );
+    // (#3302) CAPTURING fn-expr generator: hand the resume function the
+    // `__self` capture-struct rehydration recipe. The value-capture entries
+    // come from the prologue-recorded `selfCaptureLayout` (fields 1..N of the
+    // closure struct, exactly what the lifted body materialized above); the
+    // TDZ flag boxes follow at fields N+1..N+K (the #1177 prologue
+    // invariant). `boxedCaptures`/`boxedTdzFlags` snapshots re-apply the same
+    // cell registrations to the resume fctx so reads/writes/TDZ checks deref
+    // the SHARED cells — write-through visibility to the enclosing frame.
+    if (nativeGenExprInfo && captures.length > 0 && liftedFctx.selfCaptureLayout) {
+      const tdzFlaggedForGen = captures.filter((c) => c.hasTdzFlag);
+      const i32CellForGen = tdzFlaggedForGen.length > 0 ? getOrRegisterRefCellType(ctx, { kind: "i32" }) : -1;
+      nativeGenExprInfo.selfCaptureRehydration = {
+        selfParamName: "__self",
+        structTypeIdx: liftedFctx.selfCaptureLayout.structTypeIdx,
+        castToTypeIdx: liftedFctx.selfCaptureLayout.castToTypeIdx,
+        entries: liftedFctx.selfCaptureLayout.entries,
+        boxedCaptures: Array.from(liftedFctx.boxedCaptures ?? []).map(([name, b]) => ({
+          name,
+          refCellTypeIdx: b.refCellTypeIdx,
+          valType: b.valType,
+        })),
+        tdzFlags: tdzFlaggedForGen.map((c, ti) => ({
+          name: c.name,
+          fieldIdx: 1 + captures.length + ti,
+          refCellTypeIdx: i32CellForGen,
+        })),
+      };
+    }
   }
 
   if (
