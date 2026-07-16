@@ -32,10 +32,17 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; the 'TypedAr
 # index.ts: +6 — one import + the fillTaDynViewMopArms(ctx) call, which MUST
 # sit in the barrel's finalize sequence (ordering vs the other fills is
 # load-bearing); the implementation itself is in the new module.
+# (slice 3, calls.ts +29): the §23.2.5.1-step-1 without-`new` TypeError arm
+# must live INSIDE tryEmitInlineDynamicCall's dynamic-callee dispatch chain
+# (it is one `ref.test $__ta_ctor` arm prepended to the same chain the
+# proxy/bound-fn arms extend — extracting the chain builder to a module is
+# the #3182 consolidation epic's call, not this slice's); the proto/
+# isExtensible arms themselves live in ta-dyn-mop.ts.
 loc-budget-allow:
   - src/codegen/dataview-native.ts
   - src/codegen/property-access-dispatch.ts
   - src/codegen/index.ts
+  - src/codegen/expressions/calls.ts
 # coercion-sites-allow: the NEW module's 4 uses (number_toString ×2,
 # __str_to_number, __unbox_number) are the exact §7.1.21
 # CanonicalNumericIndexString round-trip + the finalize-safe ToNumber the
@@ -243,6 +250,57 @@ the upgraded static-windowed RangeError path.
   `emitTaViewConstructWindowed` has alignment/bounds but no detached check;
   static count `new Int8Array(-1)` ToIndex asymmetry) — low corpus value,
   the harness always constructs through dynamic ctor values.
+
+### Slice 3 — proto identity + without-new + isExtensible (PR: issue-3177-slice3-proto-identity, 2026-07-16, fable-3177)
+
+Directory sweep (411 non-bigint files, standalone): 134 → **154 pass (+20),
+0 regressions** (every diff line fail→pass vs the slice-2 result).
+
+What landed:
+
+- **`Object.getPrototypeOf(view) === TA.prototype` identity**
+  (ta-dyn-mop.ts): the per-kind proto object IS the per-view-brand
+  `$NativeProto` glue SINGLETON that a static `<View>.prototype` value read
+  already yields (`emitLazyNativeProtoGet` global, #2651/#2901 lineage) — no
+  new object shape. The fill registers the glue for all 9 kinds
+  (`ensureTypedArrayViewNativeProtoGlue`, idempotent; shared memberCsv) and
+  prepends: (a) a `__getPrototypeOf` dyn-view arm (runtime kind → glue
+  global, lazy-init inline), (b) an `__extern_get` `$__ta_ctor` receiver arm
+  serving `prototype` (same switch — identity closes) and
+  `BYTES_PER_ELEMENT`; other keys fall through to the original body.
+- **`TA(1)` without `new` → TypeError** (§23.2.5.1 step 1,
+  calls.ts `tryEmitInlineDynamicCall`): an outermost `ref.test $__ta_ctor`
+  arm in the dynamic-callee dispatch throws a real TypeError instance;
+  gated on `ctx.taCtorTypeIdx >= 0` (byte-inert without TA ctor values) and
+  added to the empty-candidates early-outs so it fires even in closure-free
+  modules. Flipped all 7 undefined-newtarget/invoked-with-undefined-newtarget
+  rows (incl. one `-sab` — the call throws before any SAB cast).
+- **`Object.isExtensible(view)` → true** (`__object_isExtensible` dyn-view
+  arm) — flipped all 5 new-instance-extensibility rows.
+
+Flipped (20): defined-length(+-and-offset)/defined-offset,
+returns-new-instance, returns-object ×2, as-array-returns,
+same-ctor-returns-new-cloned-typedarray, new-instance-extensibility ×5,
+undefined-newtarget-throws ×4, invoked-with-undefined-newtarget ×2 (+sab),
+object-arg/length-throws (collateral of the ctor-receiver [[Get]] arm).
+
+Verified: tests/issue-3177.test.ts 45/45 (11 new — incl. plain-object
+getPrototypeOf/isExtensible/closure-dispatch fall-through guards); scoped
+suites 2186/2190/2872/3006/3054\*/3057/3058/3133 all green (197 tests).
+
+Known residuals (documented, low corpus value):
+
+- The `__extern_get` ctor arm lives inside the dyn-view-gated fill, so a
+  module that mentions a TA ctor but never CONSTRUCTS a view gets no
+  `TA.prototype`/`BYTES_PER_ELEMENT` runtime read (corpus always
+  constructs).
+- `getProto(ta).constructor` chained-dyn reads land on the glue struct
+  (whose `$ctor` field is null, #2651 S1) → undefined; the corpus asserts
+  `ta.constructor` (slice 1) and `<TA>.prototype.constructor` (static arm)
+  instead.
+- Statically-typed receivers (`getPrototypeOf(new Uint8Array(4))` with a
+  B1 `$__ta_view` rep) don't reach the dyn-view arm — harness shapes are
+  all any-typed.
 
 ### Remaining (next slices — release+reclaim per phase)
 
