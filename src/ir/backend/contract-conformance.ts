@@ -164,6 +164,15 @@ class StubEmitter implements BackendEmitter<StubSink> {
   emitFuncRef(funcIdx: FuncHandle, out: StubSink): void {
     out.push(`func.ref:${funcIdx}`);
   }
+  emitPromiseNew(promiseTypeIdx: TypeHandle, out: StubSink): void {
+    out.push(`promise.new:${promiseTypeIdx}`);
+  }
+  emitPromiseStateGet(promiseTypeIdx: TypeHandle, out: StubSink): void {
+    out.push(`promise.state.get:${promiseTypeIdx}`);
+  }
+  emitPromiseValueGet(promiseTypeIdx: TypeHandle, out: StubSink): void {
+    out.push(`promise.value.get:${promiseTypeIdx}`);
+  }
   emitCall(funcIdx: FuncHandle, out: StubSink): void {
     out.push(`call:${funcIdx}`);
   }
