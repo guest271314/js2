@@ -16,6 +16,13 @@ model: fable
 sprint: current
 required_by: [1584]
 es_edition: ES5
+# oracle-ratchet-allow: resolveConstStringBinding needs BINDING resolution
+# (checker.getSymbolAtLocation: identifier → declaring const) — a symbol/
+# declaration query, not a type fact; the TypeOracle surface (#1930) has no
+# binding-resolution facility. Same category as the file's pre-existing
+# isGlobalEvalIdentifier / isGlobalFunctionIdentifier checker sites.
+oracle-ratchet-allow:
+  - src/codegen/expressions/eval-inline.ts
 ---
 
 # #1102 — Wasm-native eval: ahead-of-time compilation strategy
@@ -190,9 +197,7 @@ detect `eval(arg)` / `new Function(...)` and route to
 2. **Argument analysis**:
    1. Concatenate const-foldable string operands at compile time.
    2. If the result is a fully-known string → specialize.
-   3. Otherwise → emit `__eval_dynamic_trap(arg)` import:
-      - JS-host mode: import maps to `(s) => eval(s)`.
-      - Standalone mode: throws `EvalError: dynamic eval not
+   3. Otherwise → emit `__eval_dynamic_trap(arg)` import: - JS-host mode: import maps to `(s) => eval(s)`. - Standalone mode: throws `EvalError: dynamic eval not
 supported`.
 
 3. **Specialization for direct eval**:
