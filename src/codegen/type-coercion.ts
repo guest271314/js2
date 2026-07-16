@@ -1367,6 +1367,39 @@ export function coerceType(
       // Unboxing: any ref → non-any ref (extract refval and cast)
       if (isAnyValue(from, ctx) && !isAnyValue(to, ctx)) {
         ensureAnyHelpers(ctx);
+        // (#1988 / #745 S3) A native string is boxed into $AnyValue tag 5 with
+        // its payload in `externval` (field 4, externref-wrapped $AnyString) —
+        // NOT `refval` (field 3, eqref). The `ref_null → ref` arm below got the
+        // externval handling in #1988, but this same-kind (`ref_null → ref_null`)
+        // arm kept reading field 3 only, so unboxing a tag-5 string box to a
+        // nullable native-string target always produced null (a `number|string`
+        // $AnyValue local compared `=== "lit"` answered false — #745 S3).
+        // Mirror the #1988 native-string-target path here.
+        const toIdxStr = (to as { typeIdx: number }).typeIdx;
+        const isNativeStrTarget =
+          ctx.nativeStrings &&
+          (toIdxStr === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdxStr === ctx.nativeStrTypeIdx));
+        if (isNativeStrTarget) {
+          const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "local.tee", index: tmpStr });
+          fctx.body.push({ op: "ref.test", typeIdx: toIdxStr });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdxStr } as ValType },
+            then: [
+              { op: "local.get", index: tmpStr },
+              { op: "ref.cast_null", typeIdx: toIdxStr },
+            ],
+            else: [{ op: "ref.null", typeIdx: toIdxStr }],
+          });
+          if (to.kind === "ref") {
+            fctx.body.push({ op: "ref.as_non_null" });
+          }
+          releaseTempLocal(fctx, tmpStr);
+          return;
+        }
         // Get the refval field (eqref), then guarded ref.cast to target type
         fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
         // Guard: ref.test before ref.cast to avoid illegal cast traps

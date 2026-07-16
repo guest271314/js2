@@ -12339,6 +12339,31 @@ assert._isSameValue = isSameValue;
           // half of the for-await dstr cluster). Materialize it into a real JS
           // array through the module's `__vec_len`/`__vec_get` exports first;
           // non-vec / host iterables pass through unchanged.
+          // (#3227 S3) `yield* <async generator>` inside an `async function*`:
+          // the inner object carries only `Symbol.asyncIterator`, so the sync
+          // for-of below drained ZERO values — the outer async generator then
+          // reported `{value: undefined, done: true}` on the first `.next()`
+          // (the yield-star half of the S3 flip cluster). Our async generators
+          // are EAGERLY buffered (`_AsyncGeneratorState` → `{buf, index}`), so
+          // the settled values are synchronously available: drain the
+          // remaining buffer directly, then propagate a pendingThrow exactly
+          // like the eager body would (§27.6.3.8 — an inner abrupt completion
+          // propagates out of the `yield*`).
+          const asyncState = rawIterable != null ? _AsyncGeneratorState.get(rawIterable) : undefined;
+          if (asyncState !== undefined) {
+            while (asyncState.index < asyncState.buf.length) {
+              if (buf.length >= __EAGER_GEN_LIMIT) {
+                throw new RangeError("Eager generator buffer exceeded " + __EAGER_GEN_LIMIT + " yields");
+              }
+              buf.push(asyncState.buf[asyncState.index++]);
+            }
+            if (asyncState.pendingThrow !== null && asyncState.pendingThrow !== undefined) {
+              const e = asyncState.pendingThrow;
+              asyncState.pendingThrow = null;
+              throw e;
+            }
+            return;
+          }
           const iterable = _materializeIterable(rawIterable, callbackState);
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {
