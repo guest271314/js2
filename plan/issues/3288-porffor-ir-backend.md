@@ -18,7 +18,7 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T19:24:56.854Z
+claimed_at: 2026-07-16T20:07:57.957Z
 branch: symphony/porffor/3288
 ---
 
@@ -382,12 +382,13 @@ started on this branch.
 #### Validation
 
 - `pnpm run typecheck` - passed.
-- `tests/issue-3288.test.ts`, `tests/backend-contract.test.ts`, and
-  `tests/ir-bytecode-proof.test.ts` - 42 tests passed.
+- Direct Vitest run of `tests/issue-3288.test.ts`,
+  `tests/backend-contract.test.ts`, and `tests/ir-bytecode-proof.test.ts` - 42
+  tests passed.
 - `pnpm run check:pushraw` - passed; 82 sites, `+0` versus the merge base.
-- `scripts/prove-emit-identity.mjs` against a sparse `origin/main` control -
-  all 56 `(file, target)` records identical across gc, standalone, WASI, and
-  linear.
+- `scripts/prove-emit-identity.mjs` against a clean current `origin/main`
+  control - all 56 `(file, target)` records identical across gc, standalone,
+  WASI, and linear.
 - Broad `tests/ir-*.test.ts` plus `tests/ir/*.test.ts` run - 419 passed and 18
   failed in existing non-P1 harness paths (string/helper initialization,
   missing host import stubs, and a stale AST-to-IR return-shape assertion); no
