@@ -28,6 +28,7 @@ origin: "plan/bloat-reduction-battle-plan.md slice 6; gate G3 in plan/log/3090-p
 loc-budget-allow:
   - src/ir/select.ts
   - src/ir/integration.ts
+  - src/ir/from-ast.ts
   - src/codegen/index.ts
 ---
 
