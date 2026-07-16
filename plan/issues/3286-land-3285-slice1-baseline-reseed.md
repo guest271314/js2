@@ -36,6 +36,46 @@ re-run the regression diff, and check the residual flip count. Only reach
 for the lever dance if a real residual remains after #3287's progress is
 accounted for.
 
+**Answered 2026-07-16 (see "Update" section below): a real residual of 2615
+remains — #3287 barely dented the cluster (~2% reduction from ~2664-2668).
+The lever dance is still required in full; this did not become a normal PR.**
+
+## Update 2026-07-16 — residual measured post-#3287, lever dance still required
+
+Merged post-#3287 `origin/main` (PR #3106 landed, commit `11800e99e66f9a`)
+into PR #3104's branch (`issue-3285-assert-throws-error-type`, clean
+merge, no conflicts). Ran the full local test262 suite (`pnpm run
+test:262`, `COMPILER_POOL_SIZE=4`, include-proposals scope, 48088 common
+tests) and diffed candidate (oracle v4) against the freshly-fetched
+authoritative baseline (oracle v3, `loopdive/js2wasm-baselines`) via
+`scripts/diff-test262.ts` with `ORACLE_REBASE=1` (forward-bump rebase
+mode):
+
+- **Residual non-excused wasm-change regressions: 2615** (pass 34348 →
+  31733). This is only ~2-4% below the originally-estimated 2664-2668
+  cluster — #3287's fixes closed a small slice (~49-53 tests) but left the
+  overwhelming majority of the reclassification untouched.
+- Still fails all three independent gates by a wide margin:
+  - `regressionsWasmChange` 2615 ≫ `ORACLE_REBASE_DRIFT_TOLERANCE` (25).
+  - Per-bucket concentration: `class/dstr` 168, `statements/class/dstr`
+    168, `Temporal/ZonedDateTime/prototype` 115,
+    `Temporal/PlainDateTime/prototype` 94, `object/dstr` 84,
+    `Temporal/PlainDate/prototype` 73, `Temporal/PlainYearMonth/prototype`
+    63, `Temporal/Instant/prototype` 59, `async-generator/dstr` 56,
+    `Temporal/Duration/prototype` 52 — all still far over the 50-test
+    limit, matching the buckets already documented above (168, 63-115, 84,
+    56), confirming this is the same cluster, not a new one.
+  - #1668 catastrophic guard (200) — 2615 is still ~13x over.
+- Also observed (pre-existing on `main`, unrelated to #3104 — carried in
+  via the merge, do not attribute to this PR): the #3189 uncatchable-trap
+  ratchet flagged `oob` trap category growing 48→53 (+5) on `main` itself.
+  Flagging for whoever owns that ratchet; out of scope here.
+- **Conclusion: option (A)/(B)/(C) from the landing-path list below is
+  still required as originally scoped — this did NOT get cheaper via
+  #3287 and does NOT reduce to a normal PR under existing thresholds.** No
+  landing action taken (measure-only per this task's scope); PR #3104
+  remains `hold`-labeled, untouched, `mergeState=CLEAN`.
+
 ## Context
 
 PR #3104 implements #3285 slice 1 (`transformAssertThrows` now threads the
