@@ -250,6 +250,57 @@ export function awaitIsStaticallyResolved(operand: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * (#3227 S2) When an awaited operand is the `Promise.resolve(...)` form that
+ * {@link awaitIsStaticallyResolved} recognises, return the expression the
+ * `await` actually settles to: the single resolve argument, or `"undefined"`
+ * for the zero-arg form. Unwraps transparent wrappers and NESTED
+ * `Promise.resolve(Promise.resolve(x))` chains (PromiseResolve is idempotent:
+ * resolving a promise returns it, so `await` settles to the innermost value).
+ *
+ * Returns `null` when the operand is not a `Promise.resolve` call — callers
+ * then compile the operand itself.
+ *
+ * Why this exists: the JS-host legacy await passthrough compiled the OPERAND
+ * for statically-resolved awaits, but `Promise.resolve(7)` compiles to a host
+ * call returning the Promise OBJECT (externref) — not the settled value — so
+ * a numeric consumer's externref→f64 coercion read NaN (the await-NaN cluster
+ * behind ~875 honest fails in the #3227 S1 census). Substituting the resolve
+ * argument delivers the settled value (§27.7.5.3 Await + §27.2.4.7
+ * Promise.resolve: for non-thenable x, `await Promise.resolve(x)` ≡ x up to
+ * scheduling, which js2wasm's synchronous model collapses).
+ */
+export function staticPromiseResolveSettledExpr(operand: ts.Expression): ts.Expression | "undefined" | null {
+  let expr: ts.Expression = operand;
+  let settled: ts.Expression | "undefined" | null = null;
+  for (;;) {
+    while (
+      ts.isParenthesizedExpression(expr) ||
+      ts.isAsExpression(expr) ||
+      ts.isTypeAssertionExpression(expr) ||
+      ts.isNonNullExpression(expr)
+    ) {
+      expr = expr.expression;
+    }
+    if (
+      ts.isCallExpression(expr) &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      ts.isIdentifier(expr.expression.expression) &&
+      expr.expression.expression.text === "Promise" &&
+      expr.expression.name.text === "resolve"
+    ) {
+      if (expr.arguments.length === 0) return "undefined";
+      if (expr.arguments.length === 1) {
+        settled = expr.arguments[0]!;
+        expr = settled;
+        continue; // keep unwrapping nested Promise.resolve(Promise.resolve(x))
+      }
+      return settled; // >1 args: not the recognised form; keep last match (or null)
+    }
+    return settled;
+  }
+}
+
 /** Promise static combinators whose call result is already a real Promise. */
 const PROMISE_COMBINATOR_NAMES = new Set(["all", "race", "any", "allSettled"]);
 
