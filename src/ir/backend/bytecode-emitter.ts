@@ -687,6 +687,12 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     throw new Error("BytecodeEmitter: externref conversion not yet wired — see §2a ref-coercion family.");
   }
 
+  // ---- function-reference family (#2953) — callable values need a VM handle
+  // representation; do not admit a raw WasmGC ref.func through pushRaw.
+  emitFuncRef(): void {
+    throw new Error("BytecodeEmitter: function references not yet wired — see §2a closure family.");
+  }
+
   // ---- closure family (#2953) — closure records and callable handles are not
   // yet represented by the bytecode VM. Keep the trait boundary loud instead
   // of falling back to WasmGC struct instructions through pushRaw.

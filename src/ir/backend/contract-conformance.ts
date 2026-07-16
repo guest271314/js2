@@ -161,6 +161,9 @@ class StubEmitter implements BackendEmitter<StubSink> {
   emitFromExternref(_target: { typeIdx: number } | IrType, out: StubSink): void {
     out.push("from.externref");
   }
+  emitFuncRef(funcIdx: FuncHandle, out: StubSink): void {
+    out.push(`func.ref:${funcIdx}`);
+  }
   emitCall(funcIdx: FuncHandle, out: StubSink): void {
     out.push(`call:${funcIdx}`);
   }

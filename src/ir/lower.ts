@@ -1589,7 +1589,7 @@ export function lowerIrFunctionBody<S>(
         }
         const liftedIdx = resolver.resolveFunc(instr.liftedFunc);
         // ref.func $lifted, push captures, struct.new <subtype>.
-        emitter.pushRaw(out, { op: "ref.func", funcIdx: liftedIdx });
+        emitter.emitFuncRef(liftedIdx, out);
         for (const cap of instr.captures) emitValue(cap, out);
         emitter.emitClosureNew(sub, instr.captures.length, out);
         return;
