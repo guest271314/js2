@@ -121,10 +121,10 @@ machines 2/3.
 
 | # | Slice | Retires (leaky) | Owner issue | Class |
 | - | --- | ---: | --- | --- |
-| S1 | sync generator FUNCTION EXPRESSIONS native | ~1,741 | **#3164** (full impl plan written 2026-07-12 — do not duplicate) | fable-executable-now |
+| S1 | sync generator FUNCTION EXPRESSIONS native | ~1,741 | **#3164 — done** | fable-executable-now |
 | S2 | async-gen methods / yield\* / return native | ~2,408 (subsumes most of the Promise column) | **#3132** S2–S4 (in-progress, live dev — coordinate, don't fork) | in-flight (XL) |
-| S3 | capturing nested generators → capture slots in the state struct | small leaky (≤ ~60) but large FAIL/CE value + unblocks #3032 semantics | NEW child (allocate at staffing; design notes below) | **opus-owned design**, fable-executable after |
-| S4 | for-await-of dstr legacy async lowering → native drive | 90 | NEW child (notes below; overlaps #2602) | fable-executable after probe |
+| S3 | capturing nested generators → capture slots in the state struct | small leaky (≤ ~60) but large FAIL/CE value + unblocks #3032 semantics | **#3302** (spun off 2026-07-16; design notes below carried into it) | **opus-owned design**, fable-executable after |
+| S4 | for-await-of dstr legacy async lowering → native drive | 90 | **#3228 — done** (banked the 24 array-source files); residual 96 `asyncIter`-var-source files fold into **#3132**'s lane per #3228's own scope note — not a separate child | mostly done, residual rides #3132 |
 | S5 | `new Promise(NON-inline executor)` + `class X extends Promise` producer | ~15 leaky + fail-bucket | #2903 (re-grounded plan there) | fable-executable-now |
 | S6 | lazy Iterator helpers (map/filter/take/drop/flatMap) + TypedArray callback methods | ~30 | #2903 sub-fronts 2b/4 (plan there) | fable-executable-now |
 | S7 | `__get_caught_exception` zero-registration assert + eager-buffer code deletion | 0 direct (accounting rides S1/S2) | fold into the LAST of S1/S2 to land | mechanical |
@@ -159,10 +159,16 @@ Design direction (needs opus review before staffing):
   surface is captured-binding read/write ordering across suspends — the
   ref-cell indirection makes each access go through the cell, so suspends are
   transparent.
-- Coordinate with **#3032** (in-progress, fable-tag5): #3032 makes the eager
+- Coordinate with **#3032** (`ready`, unassigned — the "in-progress fable-tag5"
+  label above was stale as of the 2026-07-16 PO groom): #3032 makes the eager
   path LAZY (semantics fix keeping the host path); S3 makes captures NATIVE
   (leak fix). If S3 lands first, #3032's remaining scope shrinks to the
   shapes S1+S3 still exclude. Whoever lands second re-measures.
+
+**Groomed 2026-07-16 (PO pass): spun off as #3302** — full design notes above
+carried into that issue file verbatim, with line numbers re-verified against
+current `main` (the `generators-native.ts:2001` citation above pre-dates the
+#3271 god-file split; #3302 cites the current locations).
 
 ### S4 design notes (for-await-of dstr legacy async lowering)
 
@@ -179,6 +185,13 @@ the dstr binding lowers through the existing sync `__iterator` +
 IteratorBindingInitialization path once the awaited step value is settled; no
 new machinery. Ground in `src/codegen/async-cps.ts` (the async-fn drive gate)
 before writing the child issue.
+
+**Groomed 2026-07-16 (PO pass): #3228 (done) banked the 24 array-source
+files of this 90-file bucket.** #3228's own scope note punts the remaining
+~96 `asyncIter`-var-source files to #3132's lane (same admission-widening
+mechanism, already in flight there) rather than a standalone child issue —
+re-measure this residual once #3132 lands before deciding whether a separate
+issue is still warranted.
 
 ## Validation (applies to every slice)
 
