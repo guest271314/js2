@@ -261,7 +261,17 @@ const BUCKETS_INTRO = `## Selector buckets (one row = one reason from \`src/ir/s
 
 These are the reasons a \`FunctionDeclaration\` ends up in \`mixed\` rather
 than \`ir-owned\`. Driving each unintended bucket to zero promotes the
-relevant kind row above.`;
+relevant kind row above.
+
+**Module-level unit (#3142, gate G3).** Since Slice 1 the selector also
+assesses the top-level statement list as a synthetic \`<module-init>\` claim
+unit (\`IrSelection.moduleInit\`, \`trackFallbacks\` only). Its rejections
+REUSE the reasons below but are baselined separately — the \`moduleLevel\`
+section of \`scripts/ir-fallback-baseline.json\` counts one entry per corpus
+MODULE whose module-init unit is not claimable (gated must-not-increase by
+\`check:ir-fallbacks\`). Slice 2 wires the actual lowering + the
+\`__module_init\` slot patch; only then do legacy statement handlers become
+per-file deletable (gate G3 in \`plan/log/3090-phase0-legacy-delete-list.md\`).`;
 
 const FOOTER = `## How to update this table
 

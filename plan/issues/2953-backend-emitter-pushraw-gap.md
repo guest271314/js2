@@ -1,10 +1,10 @@
 ---
 id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
-status: in-progress
+status: in-review
 assignee: ttraenkler/opus-1a
-branch: symphony/porffor/2953-after-pr-3134
-pr: 3146
+branch: symphony/porffor/2953-after-pr-3146
+pr: 3159
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -21,8 +21,9 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T14:18:50.817Z
-last_merged_pr: 3134
+claimed_at: 2026-07-16T18:05:52.080Z
+last_merged_pr: 3146
+last_ci_retry_head: ad68ab2760e5cb152f05f60420088103aea803da
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -131,7 +132,14 @@ value/aggregate families.
       `if` remains intentionally out of scope. Golden emitter coverage, the
       86-test focused suite, typecheck, equivalence, and the 56-record byte
       oracle are green. (porffor-codex-developer)
-- [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
+- [x] **ratchet** — added the change-scoped `check:pushraw` quality gate.
+      Every newly added or moved `pushRaw(` call must carry a valid
+      `// pushraw-ok(#issue)` tag on the same or preceding line, even when the
+      change removes another raw site. A committed source-derived dashboard
+      records 82 live calls (the prior reported 83 included a comment-only
+      `emitter.pushRaw` mention); `--update-on-decrease` banks legacy-debt
+      removal. Focused fixture coverage locks tag parsing, net-neutral moves,
+      tagged growth, and zero-context diff attribution.
 
 ## 2026-07-16 — unions/boxing slice results
 
@@ -259,3 +267,32 @@ value/aggregate families.
 - Slice acceptance: complete. The parent issue intentionally remains
   `in-progress` for the pushRaw justification ratchet, which must land on the
   next fresh continuation branch.
+
+## 2026-07-16 — pushRaw ratchet slice results
+
+- Re-grounded at `origin/main` `926297fe7`. The exact `pushRaw(` call count is
+  82; the slice notes' 83 count came from matching `emitter.pushRaw` text and
+  included the explanatory comment at `lower.ts:3561`. The original ≤15 target
+  predated the later dynamic/string/class/loop work; those out-of-family escape
+  hatches are now explicit legacy debt for #3296 rather than silently accepted
+  new surface.
+- Added `scripts/check-pushraw.mjs` and `scripts/pushraw-baseline.json`. The
+  default gate compares against the change-set's own merge base, so unrelated
+  main advances cannot fail a merge group. Any added call must be tagged on the
+  same or preceding line; tagged growth is reviewable, while untagged additions
+  fail even when the net count does not grow. Whole-tree and
+  `--update-on-decrease` modes preserve the count dashboard and bank removals.
+- Wired `check:pushraw` into the required `quality` job and added focused
+  fixture tests in `tests/issue-2953.test.ts`. No compiler source changed, so
+  emitted output is byte-identical by construction for this final slice.
+- Validation: focused Vitest (4/4), default + whole-tree pushRaw gates,
+  TypeScript typecheck, full Biome lint, Prettier, issue integrity, LOC budget,
+  and equivalence (1,607 passing, 36 known baseline failures, zero new
+  regressions) are green. Per the issue rules, no full local test262 was run.
+- Merge-queue retry: the first two final-slice queue attempts reached green
+  compiler/ratchet checks but were ejected by a stale #2097 standalone
+  high-water mark and external test262 baseline drift. The branch was merged
+  forward to main's targeted #3322 high-water correction without changing the
+  ratchet implementation; `last_ci_retry_head` records the handled failed head.
+- Slice acceptance: complete; all issue-defined slices are now implemented and
+  the issue is ready for final review in PR #3159.
