@@ -8,6 +8,7 @@
 import { ts } from "../ts-api.js";
 import { isVoidType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
+import { emitUndefinedExtern } from "./any-helpers.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
@@ -3182,7 +3183,12 @@ function emitExternDefinePropertyNoValue(
       coerceType(ctx, fctx, objType, { kind: "externref" });
     }
     fctx.body.push({ op: "local.get", index: propLocal });
-    fctx.body.push({ op: "ref.null.extern" }); // null value
+    // (#3319) no-value define: [[Value]] defaults to `undefined` on a FRESH
+    // define (§10.1.6.3) — the $undefined singleton under the #2106 regime
+    // (null read back as `typeof 'object'` / `!== undefined`); legacy lanes
+    // keep the byte-identical null value. Redefines ignore this param (the
+    // #2992 S3 merge preserves the live value when hasValue is unset).
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" }); // null value
     emitRuntimeFlagsF64(
       ctx,
       fctx,
@@ -3910,7 +3916,11 @@ export function compileObjectDefineProperties(
           fctx.body.push({ op: "local.get", index: objExtLocal });
           compileExpression(ctx, fctx, ts.factory.createStringLiteral(propName), { kind: "externref" });
 
-          // Compile value or push null
+          // Compile value or push the no-value default. (#3319) A missing
+          // `value` defaults [[Value]] to `undefined` on a fresh define
+          // (§10.1.6.3) — the $undefined singleton under the #2106 regime
+          // (null read back `!== undefined` / typeof "object"); legacy lanes
+          // keep the byte-identical null push.
           if (valueExpr) {
             const vt = compileExpression(ctx, fctx, valueExpr, { kind: "externref" });
             if (vt && vt.kind !== "externref") {
@@ -3918,7 +3928,7 @@ export function compileObjectDefineProperties(
             } else if (!vt) {
               fctx.body.push({ op: "ref.null.extern" });
             }
-          } else {
+          } else if (!emitUndefinedExtern(ctx, fctx)) {
             fctx.body.push({ op: "ref.null.extern" });
           }
 
