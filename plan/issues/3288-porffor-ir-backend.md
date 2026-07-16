@@ -412,3 +412,9 @@ started on this branch.
   gate's GitHub org-membership request received a transient HTTP 503; the
   recorded retry head preserves that infrastructure failure for the same-PR
   retry.
+- Attempt 2 confirmed that head `f9bd48a8a8f` again failed only `cla-check`:
+  GitHub returned HTTP 503 while the workflow fetched PR #3166. After merging
+  `origin/main` at `6e1f780c07c`, typecheck, the 42 focused tests, the
+  `pushRaw` and LOC ratchets, and a fresh 56-record emit-identity comparison
+  against that exact main commit all passed. No branch-owned repair or later
+  Porffor slice was needed.
