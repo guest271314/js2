@@ -22,6 +22,12 @@ origin: "PO re-scope split of #3170 (2026-07-16) — buckets 3 and 5 of the veri
 loc-budget-allow:
   - src/codegen/array-prototype-borrow.ts
   - src/codegen/object-runtime.ts
+# (#2108) The new closed-struct object-length arm FUNNELS through the
+# canonical `__to_primitive` native (no hand-rolled ToPrimitive matrix) —
+# the +1 is the sanctioned-direction call site inside the object runtime's
+# own helper emission, not a fresh inline coercion copy.
+coercion-sites-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 # #3317 — array search methods: object-valued length/fromIndex ToNumber + includes abrupt getters
@@ -76,7 +82,7 @@ Three cooperating gaps, all standalone-gated fixes:
 1. **Object-valued `length` on a closed-struct receiver read as 0** — the
    #3169 `fillExternArrayLikeStructArms` `__extern_length` arm only accepted
    f64/i32/externref/string-ref `length` fields, so `{1:true, length:
-   {toString(){…}}}` was not a candidate at all (length → 0 → scan never ran,
+{toString(){…}}}` was not a candidate at all (length → 0 → scan never ran,
    the `-3-19/-3-20/-3-21/-3-22` "returned 2" signature). Fix
    (`src/codegen/object-runtime.ts`): accept ref/ref_null `length` fields and
    run §7.1.20 ToLength(ToNumber(ToPrimitive(v, number))) — `__to_primitive`
@@ -105,7 +111,7 @@ scoped tests flip fail→pass on the branch:
 
 - `indexOf/15.4.4.14-3-{19,20,21,22}.js` — pass (were "returned 2/3")
 - `lastIndexOf/15.4.4.15-3-{19,20,21,22}.js` — pass (were "returned 2/3")
-- `includes/return-abrupt-get-length.js` — pass (was "illegal cast in __closure_3")
+- `includes/return-abrupt-get-length.js` — pass (was "illegal cast in \_\_closure_3")
 - `includes/return-abrupt-tonumber-length.js` — pass (was "illegal cast")
 
 Out of scope, verified unchanged/expected: `includes/tolength-length.js` now
