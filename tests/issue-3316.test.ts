@@ -1,4 +1,4 @@
-// #3307 — singleton-regime (post-#2106-flip) regressions in the standalone
+// #3316 — singleton-regime (post-#2106-flip) regressions in the standalone
 // dynamic-descriptor accessor path. Bisected to f78be06991 (feat(#2106) flip
 // $undefined singleton default ON). Two mechanisms:
 //
@@ -34,7 +34,7 @@ async function run(src: string, target: "gc" | "standalone"): Promise<any> {
 }
 
 for (const target of ["gc", "standalone"] as const) {
-  describe(`#3307 — singleton-regime carrier/gOPD fixes (${target})`, () => {
+  describe(`#3316 — singleton-regime carrier/gOPD fixes (${target})`, () => {
     it("minimal carrier repro: var d: any = { value: 5 } does not trap", async () => {
       const ret = await run(
         `

@@ -1890,7 +1890,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "call", funcIdx: boxBoolIdx },
     ];
 
-    // (#3307) Materialize an accessor HALF (e.get = field 4 / e.set = field 5)
+    // (#3316) Materialize an accessor HALF (e.get = field 4 / e.set = field 5)
     // as an externref descriptor value. Under the `undefinedSingleton` regime a
     // NULL stored half must surface as the `$undefined` singleton (null ≠
     // undefined there); legacy lanes keep the bare `extern.convert_any`
@@ -2078,7 +2078,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         blockType: { kind: "empty" },
         // accessor: { get, set, enumerable, configurable }
         //
-        // (#3307) Empty accessor halves are stored as NULL anyref. Legacy
+        // (#3316) Empty accessor halves are stored as NULL anyref. Legacy
         // regime: null externref *is* the undefined representation, so a bare
         // `extern.convert_any` sufficed. Under the `undefinedSingleton` regime
         // (#2106) null is DISTINCT from undefined — `desc.get === undefined`

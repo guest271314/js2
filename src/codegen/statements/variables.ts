@@ -291,7 +291,7 @@ function nativeStringVecType(ctx: CodegenContext): ValType | null {
  * `local-set-coerce` stack-balance fixup would splice an UNGUARDED
  * `any.convert_extern; ref.cast_null N` on that non-null singleton → "illegal
  * cast" trap at the first instruction of the function (the dominant flip-ON
- * RegExp regression cluster; #3307 — the same trap on every
+ * RegExp regression cluster; #3316 — the same trap on every
  * `var d: any = { … }` carrier, e.g. dynamic property descriptors). A
  * concrete-ref slot cannot represent the singleton anyway (it is not `any`), so
  * the hoist emits the flag-OFF `ref.null.extern` value instead — which casts
@@ -307,7 +307,7 @@ function nativeStringVecType(ctx: CodegenContext): ValType | null {
  */
 export function hoistedVarRetypesToConcreteRef(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
   if (inferStandaloneRegExpMatchArrayType(ctx, decl.initializer) !== null) return true;
-  // (#3307) Mirror `initIsAnyObjectCarrier` (declaration compile, #3037 CS1a).
+  // (#3316) Mirror `initIsAnyObjectCarrier` (declaration compile, #3037 CS1a).
   if (
     decl.initializer !== undefined &&
     ts.isObjectLiteralExpression(decl.initializer) &&
