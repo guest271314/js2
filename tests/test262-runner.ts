@@ -660,15 +660,37 @@ function replaceOtherThrows(code: string): string {
 }
 
 /**
- * Transform `assert.throws(ErrorType, fn)` into `assert_throws(fn)`.
+ * Transform `assert.throws(ErrorType, fn)` into `assert_throws(ErrorType, fn)`.
  *
- * These test that calling `fn` throws an error of the given type. We strip
- * the error type argument (first arg) and optional message (third arg),
- * keeping only the function callback (second arg). A shim `assert_throws`
- * in the preamble calls fn() inside try/catch.
+ * These test that calling `fn` throws an error of the given type. We keep BOTH
+ * the expected error constructor (first arg) AND the function callback (second
+ * arg), dropping only the optional message (third arg). The shim `assert_throws`
+ * in the preamble calls `fn()` inside try/catch and verifies the caught error
+ * MATCHES `ErrorType` before treating it as a pass (#3285).
+ *
+ * Previously the first arg was read and discarded — `assert.throws(TypeError,
+ * fn)` became `assert_throws(fn)`, so a callback that threw the WRONG error type
+ * (e.g. `RangeError` where the spec mandates `TypeError`) still counted as a
+ * pass. Threading the type through closes that false-positive.
  *
  * Uses paren-counting to handle nested parens in the function argument.
  */
+// (#3285/#3104) Global error constructors whose NAME can be derived at wrap
+// time for the assert_throws side channel (`ErrCtor.name === identifier` holds
+// for exactly these). Everything else (test-local ctor variables) stays
+// legacy-untyped — see the emission comment in transformAssertThrows.
+const KNOWN_ERROR_CTOR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "Test262Error",
+]);
+
 function transformAssertThrows(code: string, outputFnName: string = "assert_throws"): string {
   const pattern = "assert.throws(";
   let result = "";
@@ -726,9 +748,41 @@ function transformAssertThrows(code: string, outputFnName: string = "assert_thro
     )
       endPos++;
 
-    // args[0] = ErrorType, args[1] = fn, args[2] = optional message
-    if (args.length >= 2 && args[1]) {
-      result += `${outputFnName}(${args[1]});`;
+    // args[0] = ErrorType, args[1] = fn, args[2] = optional message.
+    // (#3285/#3104) The expected error type is threaded through a GLOBAL NAME
+    // side channel (`__expected_throw_name = "TypeError"; assert_throws(fn);`)
+    // instead of a second call argument. The two-arg form
+    // `assert_throws(ErrorCtor, fn)` — and even a plain global assignment of
+    // the ctor VALUE — deterministically triggers #3315 in standalone: any
+    // class-as-value in the method body silently CORRUPTS sibling destructured
+    // bindings in the enclosing method (A/B-verified 2026-07-16; the
+    // name-string assignment is the only validated-clean shape). The name
+    // literal is derived at WRAP time for simple ctor identifiers; a complex
+    // ctor EXPRESSION (e.g. `typeof(x)==='y' ? RangeError : TypeError`, 3
+    // corpus tests) would have to be EVALUATED in the method body — the #3315
+    // trigger — so those emit `null` and keep the legacy untyped any-throw
+    // semantics (documented narrow limitation).
+    if (args.length >= 2 && args[0] && args[1]) {
+      // Only KNOWN GLOBAL error constructors resolve to a name literal at wrap
+      // time. A test-local ctor VARIABLE (`expectedError`, `DummyError`, …)
+      // must NOT be stringified — the identifier is not the error's .name, so
+      // the check would false-fail every honest throw (132 host + 67
+      // standalone false fails measured on the 2026-07-16 re-measure run
+      // before this whitelist). Resolving a variable's value would require
+      // evaluating it in the method body — the #3315 trigger — so those sites
+      // stay legacy-untyped (null).
+      const nameLiteral = KNOWN_ERROR_CTOR_NAMES.has(args[0]) ? JSON.stringify(args[0]) : "null";
+      // Statement-position splice: the original call can be prefixed by
+      // `await ` (assert.throwsAsync sites). The assignment must land BEFORE
+      // the whole statement, not between `await` and the call expression.
+      const trailingAwait = /(^|[\s;{}()])await\s*$/.test(result);
+      if (trailingAwait) {
+        const awaitStart = result.lastIndexOf("await");
+        result = result.slice(0, awaitStart) + `__expected_throw_name = ${nameLiteral}; ` + result.slice(awaitStart);
+        result += `${outputFnName}(${args[1]});`;
+      } else {
+        result += `__expected_throw_name = ${nameLiteral}; ${outputFnName}(${args[1]});`;
+      }
     }
     // If we couldn't parse args properly, just strip the call (fallback)
     i = endPos;
@@ -1582,6 +1636,11 @@ let __harness_cb_dead: number = 0;
 
 class Test262Error {
   message: string;
+  // (#3104) \`name\` field so the assert_throws side-channel name check
+  // (\`(e as any).name === "Test262Error"\`) can verify a caught Test262Error —
+  // the poisoned-iterator dstr-err family throws these and must keep passing
+  // under the #3285 typed-throw tightening.
+  name: string = "Test262Error";
   constructor(msg: string = "") {
     this.message = msg;
   }
@@ -1624,14 +1683,56 @@ function assert_true(value: any, _msg?: any): void {
   }
 }`;
 
+  if (needsAssertThrows || needsAssertThrowsAsync) {
+    // (#3285/#3104) The expected-error-type NAME side channel. wrapTest emits
+    // `__expected_throw_name = "TypeError"; assert_throws(fn);` — a string
+    // assignment plus the ORIGINAL single-argument call shape. Threading the
+    // ctor through as a value (a 2nd call argument, a matcher closure, or even
+    // a plain global assignment of the ctor) deterministically triggers #3315
+    // in standalone: a class-as-value in the method body silently corrupts
+    // sibling destructured bindings in the enclosing method. The name-string
+    // assignment is the only A/B-validated clean shape (2026-07-16).
+    p += `
+
+let __expected_throw_name: any = null;`;
+  }
+
   if (needsAssertThrows) {
     p += `
 
 function assert_throws(fn: () => void): void {
   __assert_count = __assert_count + 1;
+  // Consume the side-channel value so it can never leak into a later
+  // (untyped) assert_throws call emitted by other transforms.
+  const __expected: any = __expected_throw_name;
+  __expected_throw_name = null;
   try {
     fn();
   } catch (e) {
+    // (#3285) A caught error only counts as a pass when its \`.name\` matches
+    // the expected constructor name (strict: a nameless payload — bare-string
+    // throw, null exception carrier — is NOT the required error type, so it
+    // fails honestly). The check itself must never throw: a null/opaque
+    // payload previously blew up the harness with its own TypeError
+    // (the "Cannot access property on null at 81:21" family) — guarded now.
+    // No expected name (legacy untyped call sites, or a complex ctor
+    // expression wrapTest could not resolve at wrap time) ⇒ any throw passes,
+    // matching the pre-#3285 semantics for exactly those sites.
+    let __wrong: boolean = false;
+    try {
+      if (__expected != null) {
+        if (e == null) __wrong = true;
+        else {
+          const en: any = (e as any).name;
+          if (en !== __expected) __wrong = true;
+        }
+      }
+    } catch (_ignore) {
+      __wrong = true;
+    }
+    if (__wrong) {
+      if (!__fail) __fail = __assert_count;
+    }
     return;
   }
   if (!__fail) __fail = __assert_count;
@@ -1643,13 +1744,34 @@ function assert_throws(fn: () => void): void {
 
 function assert_throwsAsync(fn: () => any): void {
   __assert_count = __assert_count + 1;
+  const __expected: any = __expected_throw_name;
+  __expected_throw_name = null;
   try {
     const res = fn();
-    // Accept thenable returns (Promise rejections from async generators .throw())
+    // Accept thenable returns (Promise rejections from async generators .throw()).
+    // The rejection reason can't be inspected synchronously here (the shim does
+    // not await), so a thenable return is still accepted untyped — a narrow,
+    // documented limitation. The synchronous-throw path below IS type-checked.
     if (res !== null && res !== undefined && typeof res === 'object' && typeof res.then === 'function') {
       return;
     }
   } catch (e) {
+    // (#3285) Same strict name-match rule as assert_throws (see there).
+    let __wrong: boolean = false;
+    try {
+      if (__expected != null) {
+        if (e == null) __wrong = true;
+        else {
+          const en: any = (e as any).name;
+          if (en !== __expected) __wrong = true;
+        }
+      }
+    } catch (_ignore) {
+      __wrong = true;
+    }
+    if (__wrong) {
+      if (!__fail) __fail = __assert_count;
+    }
     return;
   }
   if (!__fail) __fail = __assert_count;
@@ -4364,6 +4486,23 @@ function round2(n: number): number {
 export function classifyError(errorMsg: string | undefined): string | undefined {
   if (!errorMsg) return undefined;
 
+  // (#3285) Wrapper return-code protocol FIRST — before the trap patterns. A
+  // message beginning with "returned <N>" is by construction the synthetic
+  // wrapper's assert-counter protocol (an assertion failure / caught
+  // exception), never a genuine Wasm trap: a real trap surfaces as a host
+  // RuntimeError message ("out of bounds memory access", "unreachable" …) and
+  // aborts the module — it cannot produce a "returned N" result. Since the
+  // #3285 shim embeds the ORIGINAL test source line in these messages
+  // ("returned 2 — assert #1 at L28: assert.throws(RangeError, …, `…is out of
+  // bounds: ${duration}`)"), quoted test text was hitting the trap regexes
+  // below and mis-binning honest assertion fails as uncatchable traps —
+  // poisoning the #3189 trap-growth ratchet with false positives (19 such
+  // rows pre-existed in the host baseline; the #3285 tightening added more).
+  // Label-only relabel (no pass/fail flips) — covered by the same
+  // ORACLE_VERSION 4 bump as the #3285 tightening itself.
+  if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
+  if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+
   // Wasm traps
   if (/dereferencing a null/i.test(errorMsg)) return "null_deref";
   if (/illegal cast/i.test(errorMsg)) return "illegal_cast";
@@ -4378,9 +4517,8 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   // Promise / async failures
   if (/^Promise\b|promise/i.test(errorMsg)) return "promise_error";
 
-  // Assertion failures (returned N patterns)
-  if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
-  if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
+  // (Assertion "returned N" patterns are classified at the TOP of this
+  // function — before the trap regexes — see the #3285 comment there.)
   // (#2962) A thrown Test262Error IS an assertion failure by definition. The
   // standalone exception renderer (#2962) surfaces these as
   // "Test262Error: <assert text>" — before it, such failures were the opaque
