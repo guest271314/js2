@@ -1,10 +1,11 @@
 ---
 id: 3170
 title: "standalone: Array.prototype.indexOf/lastIndexOf/includes — method-as-value + array-like receivers (125 gap tests)"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-3170
 created: 2026-07-12
 updated: 2026-07-13
+completed: 2026-07-16
 priority: high
 feasibility: hard
 task_type: bug
@@ -15,7 +16,7 @@ goal: standalone
 umbrella: 2860
 sprint: current
 horizon: m
-related: [2860, 2670, 3169, 2861, 2175]
+related: [2860, 2670, 3169, 2861, 2175, 3317, 3318]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"
 ---
 
@@ -29,7 +30,7 @@ lastIndexOf 54, includes 8; measured 2026-07-12 lane-baseline diff, method in
 #3169). Two measured signatures:
 
 1. `TypeError: Array.prototype.lastIndexOf is not yet callable as a value in
-   standalone mode` — the prototype-method **value read** (S6-b refusal
+standalone mode` — the prototype-method **value read** (S6-b refusal
    lineage, #1907/#1888): `var f = Array.prototype.indexOf; f.call(obj, 7)`.
    Across ALL of `Array.prototype` this signature accounts for 76 gap rows,
    most of them in this family.
@@ -69,12 +70,12 @@ ladder for the callback HOFs) landed the SAME day this was groomed and
 pre-closed ~83 of the 125. Process-isolated (`runTest262File`) branch-vs-main
 measurement of all three dirs on current `main` gives the REAL residual:
 
-| dir | host-pass | std-pass | gap |
-| --- | --- | --- | --- |
-| indexOf | 110 | 94 | **16** |
-| lastIndexOf | 106 | 85 | **21** |
-| includes | 17 | 12 | **5** |
-| **total** | | | **42** |
+| dir         | host-pass | std-pass | gap    |
+| ----------- | --------- | -------- | ------ |
+| indexOf     | 110       | 94       | **16** |
+| lastIndexOf | 106       | 85       | **21** |
+| includes    | 17        | 12       | **5**  |
+| **total**   |           |          | **42** |
 
 (An earlier shared-process loop under-counted this to 16 via cross-test state
 contamination — the per-dir numbers above are each measured in an isolated
@@ -108,7 +109,7 @@ process, per the measurement-integrity mandate.)
    inside `assert_throws`. "illegal cast in `__closure`" — accessor-getter
    invocation from `__extern_length` (broad).
 6. **CE crash (2: `-9-a-14`, `-8-a-14`)** — `Cannot create property
-   'declaredType' on number '1'` (prototype-delete pattern). Compiler crash.
+'declaredType' on number '1'` (prototype-delete pattern). Compiler crash.
 7. **Object-identity / `new Array` gap rows (`-9-5`, `-8-5`)** — direct
    compile+run of these returns the CORRECT value (`ref.eq` preserves object
    identity even in heterogeneous `new Array(...)`); the corpus rows fail for a
@@ -145,3 +146,33 @@ residual 42 into targeted follow-ups by bucket above — several (4 substrate,
 1 primitive-receiver, 2 exotic-host-receiver) depend on infrastructure outside
 this method family and are NOT bounded single-PR work. Buckets 3 (ToNumber-of-
 object) and 5 (includes abrupt getters) are the next most tractable.
+
+## Re-scope decision (tech lead, 2026-07-16)
+
+Closing `#3170` as `done` against a re-scoped acceptance: the original
+`≥90 flips` target was set from a pre-#3169 gap count (125) that #3169 landing
+the same day pre-closed to 42 — unreachable as originally scoped, not a
+shortfall in execution. What actually shipped is real: a genuine `fromIndex`
+correctness fix (§23.1.3.14/.20/.15 clamp) with zero regressions, +21
+non-vacuous unit assertions, and an honest 0-net-corpus-yield explanation
+(the corpus's own fromIndex tests were already vacuous passes pre-fix — this
+converts to a genuine flip once #3086's honest-vacuity oracle lands, not
+before).
+
+Residual 42 split by bucket:
+
+- **Buckets 3 + 5** (ToNumber-of-object length/fromIndex, `includes` abrupt
+  getters — ~10 tests, judged most tractable) → **#3317**.
+- **Bucket 6** (CE crash, `'declaredType' on number` — 2 tests, a compiler
+  crash unrelated to search-method semantics) → **#3318**, split on its own
+  merits per the no-drive-by-fixes convention.
+- **Bucket 4** (real-array null/undefined identity, ~4 tests) — already
+  tracked as substrate-blocked on the undefined-singleton work; no new issue,
+  cross-referenced to #2106.
+- **Buckets 1 + 2** (exotic host-object receivers ~10, primitive receivers
+  ~11) — broad, not bounded single-PR work; left as known-blocked residual
+  under the #2860 umbrella, no new issue until someone scopes the underlying
+  host-object/ToObject(primitive) infrastructure work itself.
+- **Bucket 7** (`-9-5`/`-8-5`, harness/vacuity-artifact rows, not a real
+  indexOf gap) — flagged to whoever owns the #3086 honest-vacuity oracle;
+  not this issue's or #3317's concern.

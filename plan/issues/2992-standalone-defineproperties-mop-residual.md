@@ -68,7 +68,7 @@ Wants slicing into separate PRs:
 2. array/arguments index + `length` own-prop MOP. **BLOCKED on the vec-receiver own-prop substrate (see slice-3 findings) — no bounded slice (#2986 agrees).**
 3. accessor-attribute (get/set) define→gOPD fidelity. **SHIPPED (with the broader §10.1.6.3 partial-descriptor MERGE) — see slice-3 findings below.**
 4. (NEW, found during slice 1) nominal-struct field delete fidelity — see below. **SHIPPED (standalone `{}`-widening shape) — see slice-4 findings below.**
-5. (NEW, found during slice 3) accessor/own-prop MOP on CLOSED-STRUCT receivers (`__extern_get` accessor arm misses; hasOwnProperty/delete invisible) — the biggest residual cluster (4-75/4-82-* family), substrate-adjacent to slice 2 and slice 4. **SHIPPED for the empty-`{}`-widening receiver shape — see slice-5 findings below.**
+5. (NEW, found during slice 3) accessor/own-prop MOP on CLOSED-STRUCT receivers (`__extern_get` accessor arm misses; hasOwnProperty/delete invisible) — the biggest residual cluster (4-75/4-82-\* family), substrate-adjacent to slice 2 and slice 4. **SHIPPED for the empty-`{}`-widening receiver shape — see slice-5 findings below.**
 
 ## Slice 1 findings (measured 2026-07-10 on main 569e29b761, fable-18th)
 
@@ -137,7 +137,7 @@ Root-caused via the real runner pipeline (`runTest262File(..., "standalone")`
   attribute MOP (~109 "expected TypeError" tests, slice 2); (c) accessor
   define on CLOSED-STRUCT receivers (runner-wrapped `var obj = {}` with pure
   prop access) — `__extern_get` accessor-arm reads miss; affects the large
-  4-75/4-82-* residual. All shapes fail identically on unmodified main
+  4-75/4-82-\* residual. All shapes fail identically on unmodified main
   (verified) — no regression from this slice.
 
 Measured sample flips (runner pipeline, standalone): 11 of 144 sampled gap
@@ -176,7 +176,7 @@ gap sample and +2/9 in the `language/expressions/delete` standalone gap;
   (host poison needs the #2937/#2944 `objectHashConsumerTypes` escape
   discipline — separate risk profile).
 - **Non-empty literal receivers** (`const o = { name: "hello" }; delete
-  o.name`) — closed-struct-literal shape (fails in gc too; the pre-existing
+o.name`) — closed-struct-literal shape (fails in gc too; the pre-existing
   `delete-sentinel` equivalence failure). Extending #2837's
   `collectGrowableObjectLiterals` triggers with delete-targets is the likely
   lever, but its consumer-safety guard needs its own validation pass.
@@ -187,7 +187,7 @@ gap sample and +2/9 in the `language/expressions/delete` standalone gap;
 
 ## Slice 5 findings (measured 2026-07-16 on main f01f7fbb6e, fable-mop)
 
-The slice-3-documented closed-struct-receiver accessor cluster (4-75/4-82-*
+The slice-3-documented closed-struct-receiver accessor cluster (4-75/4-82-\*
 family) is fixed for the **empty-`{}`-widening receiver shape**: an
 ACCESSOR-descriptor `Object.defineProperty(varName, k, {get/set…})` (or any
 `defineProperties` member descriptor with a get/set key — present key counts
@@ -218,14 +218,15 @@ documented pre-existing `delete-sentinel` string-property case).
   `tests/issue-2992-accessor-merge.test.ts` standalone cases now fail on
   unmodified main (3× `illegal cast`, 1 value mismatch) — the
   dynamic-descriptor (`var d: any = {get…}; Object.defineProperty(o, k, d)`)
-  + bracket-poisoned-receiver shapes from slice 3. They passed 18/18 on main
-  026f40f771 (2026-07-11), so something later regressed them. Not caught by
-  CI (the quality gate runs scoped suites only). Needs its own triage/issue.
+  - bracket-poisoned-receiver shapes from slice 3. They passed 18/18 on main
+    026f40f771 (2026-07-11), so something later regressed them. Not caught by
+    CI (the quality gate runs scoped suites only). Tracked as **#3316**
+    (bisect + fix).
 - **Exotic DESCRIPTOR receivers** (array/arguments/function/Error descriptor
   objects) and **array-index/length attribute MOP** — still the slice-2 wall
   (vec/closed-struct receiver substrate, #2986).
 - **Non-empty literal receivers** (`var o = {a: 1}; defineProperty(o, k,
-  {get…})`) — closed-struct-literal shape, same class as the slice-4
+{get…})`) — closed-struct-literal shape, same class as the slice-4
   non-empty-literal residual (the widening pre-pass only decides empty-`{}`
   vars; `collectGrowableObjectLiterals` guards would need their own pass).
 

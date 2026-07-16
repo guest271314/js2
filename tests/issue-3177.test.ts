@@ -250,6 +250,82 @@ describe("#3177 slice 2 — §23.2.5.1 ctor-arg protocol throws (buffer/length a
   });
 });
 
+describe("#3177 slice 3 — proto identity, without-new TypeError, isExtensible", () => {
+  it("Object.getPrototypeOf(dynview) === TA.prototype (static read) — THE identity", async () => {
+    expect(
+      await run(
+        `const p: any = Object.getPrototypeOf(s); const sp: any = Uint8Array.prototype; return p === sp ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Object.getPrototypeOf(dynview) === Reflect.get(TA, 'prototype') (runtime read)", async () => {
+    expect(
+      await run(
+        `const p: any = Object.getPrototypeOf(s); const q: any = Reflect.get(TA, "prototype"); return p === q ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("cross-kind protos stay distinct: getProto(new Uint16Array) !== Uint8Array.prototype", async () => {
+    expect(
+      await run(
+        `const T16: any = Uint16Array; const t: any = new T16(4); const sp: any = Uint8Array.prototype; return Object.getPrototypeOf(t) === sp ? 0 : 1;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("TA(1) without new → TypeError instance (§23.2.5.1 step 1)", async () => {
+    expect(await run(`try { TA(1); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`)).toBe(1);
+  });
+
+  it("without-new throw fires inside a closure (the assert.throws harness shape)", async () => {
+    expect(
+      await run(
+        `const f = function(): number { try { TA(1); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; } }; return f();`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Object.isExtensible(dynview) → true", async () => {
+    expect(await run(`return Object.isExtensible(s) ? 1 : 0;`)).toBe(1);
+  });
+
+  it("TA.BYTES_PER_ELEMENT via runtime [[Get]] (construct present in module)", async () => {
+    expect(
+      await run(
+        `const T16: any = Uint16Array; const b: any = Reflect.get(T16, "BYTES_PER_ELEMENT"); return b === 2 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: getPrototypeOf on a plain object keeps the $proto walk", async () => {
+    expect(
+      await run(
+        `const base: any = { x: 1 }; const o: any = Object.create(base); return Object.getPrototypeOf(o) === base ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: isExtensible on a plain object stays true / false after preventExtensions", async () => {
+    expect(
+      await run(
+        `const o: any = {}; const a = Object.isExtensible(o); Object.preventExtensions(o); const b = Object.isExtensible(o); return (a && !b) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: unknown key on a TA-ctor receiver falls through to undefined", async () => {
+    expect(await run(`const v: any = Reflect.get(TA, "someUnknownKey"); return v === undefined ? 1 : 0;`)).toBe(1);
+  });
+
+  it("guard: a non-ctor dynamic callee still dispatches (closures unaffected)", async () => {
+    expect(await run(`const f: any = (x: number): number => x + 1; const r: any = f(2); return r === 3 ? 1 : 0;`)).toBe(
+      1,
+    );
+  });
+});
+
 describe("#3177 — non-view receivers keep their behavior (arms fall through)", () => {
   it("plain any-typed array element/length are unchanged", async () => {
     // NOTE: `Object.keys(<any-typed plain array>)` returns [] on main (the

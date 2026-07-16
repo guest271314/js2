@@ -704,6 +704,12 @@ jobs:
           # pass counts as a pass→absent "regression". Empty on merge_group/
           # push/dispatch (always full corpus there).
           TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
+          # #3307 — same #3189 trap-ratchet tolerance the regression-gate job
+          # applies (repo var, #3202). Post-#3303 this step trusts the script's
+          # exit code, so its diff must run under the SAME sanctioned tolerance
+          # as the fine gate — otherwise a trap-flake exit 1 here re-litigates
+          # the raw count and vetoes a re-baseline the fine gate passes.
+          TRAP_RATCHET_TOLERANCE: ${{ vars.TRAP_RATCHET_TOLERANCE || '0' }}
         run: |
           # Sparse + blob-filtered clone: the baselines repo carries a large
           # runs/ history (~500 MB cap), so a plain --depth=1 clone took
@@ -794,6 +800,9 @@ jobs:
           STANDALONE_REGRESSION_TOLERANCE: "15"
           # #1954 — see the catastrophic guard above.
           TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
+          # #3307 — see the catastrophic guard above: same trap-ratchet
+          # tolerance as the regression-gate job (repo var, #3202/#3189).
+          TRAP_RATCHET_TOLERANCE: ${{ vars.TRAP_RATCHET_TOLERANCE || '0' }}
         run: |
           # Reuse the baselines clone from the catastrophic guard above (same
           # job, same runner). Re-clone defensively (sparse + blob-filtered,

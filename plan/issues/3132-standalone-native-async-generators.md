@@ -1,7 +1,8 @@
 ---
 id: 3132
 title: "Standalone native ASYNC GENERATORS — retire env::__create_async_generator leaky-passes (~2,800 files)"
-status: in-progress
+status: done
+completed: 2026-07-16
 sprint: current
 priority: high
 feasibility: hard
@@ -12,10 +13,10 @@ language_feature: async-generators, yield-star, iterator-protocol
 goal: standalone-mode
 horizon: xl
 umbrella: 2860
-related: [3075, 2906, 2865, 2938, 2936, 2980, 2895, 2922, 1042, 3120]
+related: [3075, 2906, 2865, 2938, 2936, 2980, 2895, 2922, 1042, 3120, 3312, 3313]
 created: 2026-07-10
-updated: 2026-07-10
-assignee: ttraenkler/opus-asyncgen
+updated: 2026-07-16
+assignee: ttraenkler/fable-3132-s2
 loc-budget-allow:
   - src/codegen/class-bodies.ts
   - src/codegen/async-cps.ts
@@ -25,6 +26,9 @@ loc-budget-allow:
   - src/codegen/declarations.ts
   - src/codegen/context/types.ts
   - src/codegen/async-scheduler.ts
+  - src/codegen/closures.ts
+  - src/codegen/literals.ts
+  - src/codegen/declarations/import-collector.ts
 origin: "FABLE task 30 — env::__create_async_generator touches ~2,800 leaky-passes (largest unowned chunk of the standalone-vs-host gap)."
 ---
 
@@ -265,6 +269,67 @@ parts landed as two PRs:
   carrier). Flips the ~195 `async-func-dstr-*-async-*` corpus files. The
   consumer whose source is itself an async GENERATOR (`async-gen-dstr-*`, +195)
   is a harder nested shape, banked for a later slice.
+
+## S2 SHIPPED (2026-07-16, fable-3132-s2) — receiver threading + object-literal methods + carrier lockstep
+
+Closes the remaining S2 scope on top of S2a. Three changes:
+
+1. **Receiver threading (class methods)** — `class-bodies.ts` gate relaxed:
+   an INSTANCE method body reading/writing `this` now drives. No new frame
+   machinery was needed: the receiver is the synthetic param 0 (`this`, typed
+   `ref $Class`), which `emitAsyncGenerator` already captures as a frame param
+   field and `ensureAsyncResumeFunction` restores BY NAME into the resume fn's
+   localMap — the ThisKeyword branch (expressions.ts:1009) resolves it exactly
+   as in the entry body. Still legacy (correct-or-legacy): `super` (new
+   `genBodyReferencesSuper` walk in closures.ts — home-object binding not
+   threaded), `arguments`, and STATIC bodies reading `this` (the
+   `isStaticContext`/class-object-global fallback isn't threaded into the
+   resume FunctionContext).
+2. **Object-literal methods** — `literals.ts` (~2960) gained the same
+   interception in front of the legacy eager-buffer arm (receiver = param 0
+   `this`, same threading; captures work via the existing promote-to-globals
+   path). Class expressions, nested classes/literals in functions, and the
+   `emitObjectMethodAsClosure` trampoline (wraps the same funcIdx) all route
+   through it.
+3. **Carrier pre-pass lockstep** (`import-collector.ts`) — methods are no
+   longer blanket non-drivable: a method is drivable under the same
+   preconditions the emit sites apply (no super/arguments/static-this) plus
+   `asyncGenDrivableUnderCarrier` + stem dedup. Drivable-method-only modules
+   keep the native `$Promise` carrier → the `Promise_resolve/Promise_reject/
+   __get_caught_exception` residue disappears too (probes: zero imports).
+   Pre-pass ⊆ emit is preserved (emit-side skips — computed names, dedup —
+   emit NO legacy buffer, so an optimistic verdict there is still mix-safe).
+   PLUS a shadowed-outer-local exclusion (`methodBodyRefsShadowedOuterLocal`,
+   closures.ts): the pre-existing #3312 capture-promotion bug makes a method
+   body and sibling `.then` callbacks bind DIVERGENT storages when an
+   enclosing fn-local shadows a module-scope name (test262's dstr
+   `ary-elision-iter` template via wrapper hoisting, 16 files); such modules
+   keep the host pipeline so the divergence is not newly exposed. Remove the
+   guard when #3312 lands.
+
+### S2 Test Results (2026-07-16)
+
+- Probes (standalone): this-reading/this-writing class methods, obj-literal
+  methods (plain/this/capturing), class expressions, nested classes,
+  yield-await under carrier, S1×S2 compose — all host-free with correct
+  values; static-this/super/arguments stay legacy; mixed drivable+legacy
+  module valid (carrier off). Default JS-host lane byte-identical (SHA-equal)
+  on method/obj-literal shapes.
+- Targeted dstr scan (182 files: all 72 `function* g` template files + 110
+  stratified): base 157 pass → S2 166 pass, **+9, zero pass→fail**.
+- Broad stratified scan (190 files across expr/object, class async-gen,
+  stmt/expr async-generator, for-await-of): base → S2 **+4, zero pass→fail**
+  (incl. class-async-gen-this 21→23).
+- Suites: issue-3132 (7, 1 pre-existing baseline failure: elision-hole),
+  issue-3132-s2 (17), issue-3132-s2-consumer (7), issue-3075 (6) pass;
+  issue-2865 WASI failures identical on control.
+- Known pre-existing hazards found and filed: #3312 (shadowed-binding capture
+  promotion, host lane affected), #3313 (same-layout $AsyncFrame
+  canonicalization misdispatch, affects fn decls on main today).
+
+**Banked follow-ups (S3/S4 remain, see sections above):** S3 general `yield*`
+/ control-flow yields; S4 `return` completion. Spin out as fresh issues when
+scheduled.
 
 ## Graveyard discipline
 

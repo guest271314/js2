@@ -47,10 +47,14 @@ import {
   pushElemSizeForKind,
   pushTaDynViewInBoundsLen,
 } from "./dataview-native.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, TA_CTOR_KINDS } from "./registry/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
 import { nativeStringLiteralInstrs } from "./native-strings.js";
+// (#3177 slice 3) per-kind `<View>.prototype` identity — the SAME $NativeProto
+// glue singleton a static `<View>.prototype` value read yields.
+import { ensureTypedArrayViewNativeProtoGlue } from "./array-object-proto.js";
+import { emitLazyNativeProtoGet } from "./native-proto.js";
 
 /** Fresh synthetic FunctionContext for a native helper (the #2872 pattern). */
 function makeFctx(name: string, params: { name: string; type: ValType }[], returnType: ValType): FunctionContext {
@@ -721,6 +725,163 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
       { op: "any.convert_extern" },
       { op: "local.tee", index: kAny },
       { op: "ref.test", typeIdx: dynIdx },
+      { op: "if", blockType: { kind: "empty" }, then: inner },
+    );
+  }
+
+  // ── (#3177 slice 3) Proto-identity + isExtensible arms ────────────────────
+  //
+  // `Object.getPrototypeOf(view) === TA.prototype` (ctors/*/defined-length,
+  // returns-new-instance, returns-object, …) needs BOTH sides to resolve to
+  // the per-kind `$NativeProto` glue SINGLETON — the same object a static
+  // `<View>.prototype` value read yields (one lazily-initialized global per
+  // view brand, `emitLazyNativeProtoGet`). Register the glue for every kind
+  // up front (idempotent; the memberCsv string is shared across kinds), then
+  // switch on the runtime `kind`.
+  const protoKinds: { kind: number; brand: number }[] = [];
+  for (let k = 0; k < TA_CTOR_KINDS.length; k++) {
+    const brand = ensureTypedArrayViewNativeProtoGlue(ctx, TA_CTOR_KINDS[k]!);
+    if (brand !== undefined) protoKinds.push({ kind: k, brand });
+  }
+  // kind (i32 local) → push the glue externref → return. Emitted via a body
+  // swap on `fctxLike` because emitLazyNativeProtoGet pushes onto fctx.body.
+  const pushKindToProtoSwitch = (fctxLike: FunctionContext, kindLocal: number): void => {
+    for (const { kind: k, brand } of protoKinds) {
+      const armThen: Instr[] = [];
+      const saved = fctxLike.body;
+      fctxLike.body = armThen;
+      const ok = emitLazyNativeProtoGet(ctx, fctxLike, brand);
+      fctxLike.body = saved;
+      if (!ok) continue;
+      armThen.push({ op: "return" });
+      fctxLike.body.push({ op: "local.get", index: kindLocal });
+      fctxLike.body.push({ op: "i32.const", value: k });
+      fctxLike.body.push({ op: "i32.eq" });
+      fctxLike.body.push({ op: "if", blockType: { kind: "empty" }, then: armThen });
+    }
+  };
+
+  // __getPrototypeOf(externref) -> externref: dyn-view receiver → per-kind
+  // `<View>.prototype` glue (§10.4.5 views are ordinary here — their
+  // [[Prototype]] IS the intrinsic per-kind prototype).
+  const getProtoFn = findFn("__getPrototypeOf");
+  if (getProtoFn && protoKinds.length > 0) {
+    const base = 1 + getProtoFn.locals.length;
+    const pAny = base;
+    const pKind = base + 1;
+    getProtoFn.locals.push(
+      { name: "__tap_any", type: { kind: "anyref" } },
+      { name: "__tap_kind", type: { kind: "i32" } },
+    );
+    const inner: Instr[] = [];
+    const fctxLike = {
+      body: inner,
+      locals: getProtoFn.locals,
+      params: [{ name: "p", type: { kind: "externref" } }],
+      localMap: new Map(),
+    } as unknown as FunctionContext;
+    inner.push({ op: "local.get", index: pAny });
+    inner.push({ op: "ref.cast", typeIdx: dynIdx });
+    inner.push({ op: "struct.get", typeIdx: dynIdx, fieldIdx: 3 });
+    inner.push({ op: "local.set", index: pKind });
+    pushKindToProtoSwitch(fctxLike, pKind);
+    inner.push({ op: "ref.null.extern" });
+    inner.push({ op: "return" });
+    getProtoFn.body.unshift(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: pAny },
+      { op: "ref.test", typeIdx: dynIdx },
+      { op: "if", blockType: { kind: "empty" }, then: inner },
+    );
+  }
+
+  // __object_isExtensible(externref) -> i32: a live view IS extensible
+  // (§10.4.5 views are ordinary wrt [[IsExtensible]]; no preventExtensions
+  // state exists on `$__ta_dyn_view` yet — the expando slice owns that).
+  const isExtFn = findFn("__object_isExtensible");
+  if (isExtFn) {
+    isExtFn.body.unshift(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: dynIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
+    );
+  }
+
+  // __extern_get $__ta_ctor receiver arm: `TA.prototype` (→ the SAME per-kind
+  // glue as getPrototypeOf above, closing the identity) and
+  // `TA.BYTES_PER_ELEMENT`. Other keys fall through to the original body
+  // (current behavior: undefined). Only when a `$__ta_ctor` value can exist.
+  if (getFn && ctx.taCtorTypeIdx >= 0 && protoKinds.length > 0) {
+    const ctorIdx = ctx.taCtorTypeIdx;
+    const base = 2 + getFn.locals.length;
+    const cAny = base;
+    const cKind = base + 1;
+    const cKey = base + 2;
+    getFn.locals.push(
+      { name: "__tac_any", type: { kind: "anyref" } },
+      { name: "__tac_kind", type: { kind: "i32" } },
+      { name: "__tac_key", type: { kind: "externref" } },
+    );
+    const inner: Instr[] = [];
+    const fctxLike = {
+      body: inner,
+      locals: getFn.locals,
+      params: [
+        { name: "p0", type: { kind: "externref" } },
+        { name: "p1", type: { kind: "externref" } },
+      ],
+      localMap: new Map(),
+    } as unknown as FunctionContext;
+    inner.push({ op: "local.get", index: cAny });
+    inner.push({ op: "ref.cast", typeIdx: ctorIdx });
+    inner.push({ op: "struct.get", typeIdx: ctorIdx, fieldIdx: 0 });
+    inner.push({ op: "local.set", index: cKind });
+    inner.push({ op: "local.get", index: 1 });
+    inner.push({ op: "call", funcIdx: tpkIdx });
+    inner.push({ op: "local.set", index: cKey });
+    const strKeyed: Instr[] = [];
+    const savedInner = fctxLike.body;
+    fctxLike.body = strKeyed;
+    strKeyed.push(...keyIs(cKey, "prototype"));
+    {
+      const protoThen: Instr[] = [];
+      const saved2 = fctxLike.body;
+      fctxLike.body = protoThen;
+      pushKindToProtoSwitch(fctxLike, cKind);
+      fctxLike.body = saved2;
+      protoThen.push(...undef());
+      protoThen.push({ op: "return" });
+      strKeyed.push({ op: "if", blockType: { kind: "empty" }, then: protoThen });
+    }
+    strKeyed.push(...keyIs(cKey, "BYTES_PER_ELEMENT"));
+    {
+      const bpeThen: Instr[] = [];
+      const saved2 = fctxLike.body;
+      fctxLike.body = bpeThen;
+      pushElemSizeForKind(fctxLike, cKind);
+      fctxLike.body = saved2;
+      bpeThen.push({ op: "f64.convert_i32_s" });
+      bpeThen.push({ op: "call", funcIdx: boxNumIdx });
+      bpeThen.push({ op: "return" });
+      strKeyed.push({ op: "if", blockType: { kind: "empty" }, then: bpeThen });
+    }
+    fctxLike.body = savedInner;
+    // Only string keys take the fast checks; anything else falls through.
+    inner.push({ op: "local.get", index: cKey });
+    inner.push({ op: "any.convert_extern" });
+    inner.push({ op: "ref.test", typeIdx: anyStrTypeIdx });
+    inner.push({ op: "if", blockType: { kind: "empty" }, then: strKeyed });
+    getFn.body.unshift(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: cAny },
+      { op: "ref.test", typeIdx: ctorIdx },
       { op: "if", blockType: { kind: "empty" }, then: inner },
     );
   }

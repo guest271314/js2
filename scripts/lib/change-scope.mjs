@@ -215,8 +215,9 @@ export function parseFrontmatterCountReason(text, key) {
     let count;
     let reason;
     for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*$/.test(lines[j]) || /^\s*#/.test(lines[j])) continue; // blank / comment line inside the block
       const lm = lines[j].match(/^\s+([A-Za-z_-]+):\s*(.*)$/);
-      if (!lm) break; // dedent / list item / blank ⇒ end of the nested block
+      if (!lm) break; // dedent / list item ⇒ end of the nested block
       const v = unquote(lm[2].trim());
       if (lm[1] === "count") count = /^[0-9]+$/.test(v) ? Number.parseInt(v, 10) : NaN;
       else if (lm[1] === "reason") reason = v;
@@ -250,6 +251,7 @@ export function parseFrontmatterList(text, key) {
       out.push(unquote(rest));
     } else {
       for (let j = i + 1; j < lines.length; j++) {
+        if (/^\s*$/.test(lines[j]) || /^\s*#/.test(lines[j])) continue; // blank / comment line inside the block
         const lm = lines[j].match(/^\s+-\s+(.+)$/);
         if (!lm) break;
         const v = unquote(lm[1].trim());
