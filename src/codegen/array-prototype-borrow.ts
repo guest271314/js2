@@ -245,7 +245,15 @@ export function compileArrayLikePrototypeCall(
   // here. The structural fix (make `__extern_length` / `__extern_get_idx`
   // re-throw instead of swallow) is tracked in #1382 (Wasm closure / host
   // bridge gap).
-  {
+  //
+  // (#3317) Standalone/wasi SEARCH methods skip this bailout: the swallow
+  // hazard is a HOST-import property (`src/runtime.ts` wraps the getter in
+  // try/catch), while the standalone-native `__extern_length`/`__extern_get_idx`
+  // trio invokes accessor getters / `__to_primitive` as plain Wasm calls whose
+  // throws PROPAGATE. Bailing under standalone routes to the legacy
+  // `__proto_method_call` host bridge — a host-import leak that can never work
+  // there (includes/return-abrupt-get-length.js, return-abrupt-tonumber-length.js).
+  if (!((ctx.standalone || ctx.wasi) && ARRAY_LIKE_SEARCH_METHODS.has(methodName))) {
     let p: ts.Node | undefined = callExpr.parent;
     while (p) {
       if (
@@ -1278,8 +1286,15 @@ function compileArrayLikePrototypeSearch(
   // `Array.prototype.METHOD.call(receiver, ...methodArgs)`, where
   // callExpr.arguments[0] is `receiver` (passed to us as `receiverArg`) and
   // [1+] are the method arguments. Search methods need at least one method
-  // argument: the search value.
-  if (callExpr.arguments.length < 2) return undefined;
+  // argument: the search value — except under standalone/wasi (#3317), where
+  // the no-search-arg form (`Array.prototype.indexOf.call(obj)` /
+  // `[].includes.call(obj)`) must STILL run the observable length coercion
+  // (§23.1.3.15/.17/.20 step 2 reads and ToLengths `obj.length` — a throwing
+  // valueOf/toString/getter propagates from there, e.g. indexOf/15.4.4.14-3-22
+  // and includes/return-abrupt-tonumber-length). The search element is simply
+  // `undefined` then. Host/gc keeps the legacy bail (its host bridge handles
+  // the form natively).
+  if (callExpr.arguments.length < 2 && !(ctx.standalone || ctx.wasi)) return undefined;
 
   // #1360 PR #274 follow-up: bail to the legacy `__proto_method_call` host
   // bridge when the search argument is statically null or undefined.
@@ -1290,7 +1305,7 @@ function compileArrayLikePrototypeSearch(
   // The host bridge invokes native `Array.prototype.lastIndexOf` which
   // honours HasProperty correctly. Until __extern_has_idx grows a
   // "field-defined-with-null" path (#1382), bail.
-  {
+  if (callExpr.arguments.length >= 2) {
     const searchArg = callExpr.arguments[1]!;
     const searchIsNullish =
       searchArg.kind === ts.SyntaxKind.NullKeyword ||
@@ -1370,30 +1385,36 @@ function compileArrayLikePrototypeSearch(
   const searchTmp = allocLocal(fctx, `__alis_search_${fctx.locals.length}`, { kind: "externref" });
   // `compileArrayLikePrototypeCall` shape: args[0] is the receiver (already
   // bound to receiverArg), args[1] is the search value, args[2] is fromIndex.
-  const searchExpr = callExpr.arguments[1]!;
-  const searchTsType = ctx.checker.getTypeAtLocation(searchExpr);
-  const searchIsBoolean =
-    searchTsType !== undefined &&
-    ((searchTsType.flags & ts.TypeFlags.Boolean) !== 0 || (searchTsType.flags & ts.TypeFlags.BooleanLiteral) !== 0);
-  const searchType = compileExpression(ctx, fctx, searchExpr, { kind: "externref" });
-  if (searchType === null) {
-    fctx.body.push({ op: "ref.null.extern" });
-  } else if (searchType.kind === "i32" && searchIsBoolean) {
-    // Box boolean as actual JS boolean. addUnionImports is idempotent and
-    // installs __box_boolean alongside the other any-value helpers.
-    addUnionImports(ctx);
-    const boxBoolIdx = ctx.funcMap.get("__box_boolean");
-    if (boxBoolIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
-    } else {
-      // Last-resort fallback: drops the i32 and pushes null so the program
-      // is still well-formed. Should never trigger in practice.
+  // (#3317) The standalone no-search-arg form searches for `undefined`.
+  const searchExpr = callExpr.arguments[1];
+  if (searchExpr === undefined) {
+    emitUndefined(ctx, fctx);
+    fctx.body.push({ op: "local.set", index: searchTmp });
+  } else {
+    const searchTsType = ctx.checker.getTypeAtLocation(searchExpr);
+    const searchIsBoolean =
+      searchTsType !== undefined &&
+      ((searchTsType.flags & ts.TypeFlags.Boolean) !== 0 || (searchTsType.flags & ts.TypeFlags.BooleanLiteral) !== 0);
+    const searchType = compileExpression(ctx, fctx, searchExpr, { kind: "externref" });
+    if (searchType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (searchType.kind === "i32" && searchIsBoolean) {
+      // Box boolean as actual JS boolean. addUnionImports is idempotent and
+      // installs __box_boolean alongside the other any-value helpers.
+      addUnionImports(ctx);
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (boxBoolIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+      } else {
+        // Last-resort fallback: drops the i32 and pushes null so the program
+        // is still well-formed. Should never trigger in practice.
+        coerceType(ctx, fctx, searchType, { kind: "externref" });
+      }
+    } else if (searchType.kind !== "externref") {
       coerceType(ctx, fctx, searchType, { kind: "externref" });
     }
-  } else if (searchType.kind !== "externref") {
-    coerceType(ctx, fctx, searchType, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: searchTmp });
   }
-  fctx.body.push({ op: "local.set", index: searchTmp });
 
   // Loop index (f64) — always allocated; defaulted below. f64 lets the loop
   // walk huge array-like lengths up to 2^53-1 without truncation.
@@ -1684,12 +1705,31 @@ export function compileArrayPrototypeCall(
   const methodAccess = propAccess.expression; // Array.prototype.METHOD
   const methodName = methodAccess.name.text;
 
-  // Check that the receiver of .METHOD is Array.prototype
-  if (!ts.isPropertyAccessExpression(methodAccess.expression)) return undefined;
-  const protoAccess = methodAccess.expression; // Array.prototype
-  if (protoAccess.name.text !== "prototype") return undefined;
-  if (!ts.isIdentifier(protoAccess.expression)) return undefined;
-  if (protoAccess.expression.text !== "Array") return undefined;
+  // Check that the receiver of .METHOD is Array.prototype — or, under
+  // standalone/wasi (#3317), an EMPTY array literal: `[].includes.call(obj, x)`
+  // is the test262 corpus's canonical spelling of the same §23.1.3 generic
+  // borrow (`[].includes` IS `Array.prototype.includes` — the literal only
+  // supplies the prototype). The generic member-call path this form otherwise
+  // takes casts the borrowed receiver to the literal's vec type and TRAPS
+  // ("illegal cast", e.g. includes/return-abrupt-get-length.js), so route it
+  // through the same borrow compiler as the `Array.prototype.` spelling.
+  // Empty literals only — a non-empty literal's element expressions would need
+  // spec-order evaluation that dropping the literal here would skip. Host/gc
+  // is untouched (its generic path delegates to the real host method).
+  let protoExpr: ts.Expression = methodAccess.expression;
+  // Unwrap parens / `as` casts so `([] as any[]).includes.call(…)` matches the
+  // bare `[].includes.call(…)` corpus form.
+  while (ts.isParenthesizedExpression(protoExpr) || ts.isAsExpression(protoExpr) || ts.isNonNullExpression(protoExpr)) {
+    protoExpr = protoExpr.expression;
+  }
+  const isArrayProtoBorrow =
+    ts.isPropertyAccessExpression(protoExpr) &&
+    protoExpr.name.text === "prototype" &&
+    ts.isIdentifier(protoExpr.expression) &&
+    protoExpr.expression.text === "Array";
+  const isEmptyArrayLiteralBorrow =
+    (ctx.standalone || ctx.wasi) && ts.isArrayLiteralExpression(protoExpr) && protoExpr.elements.length === 0;
+  if (!isArrayProtoBorrow && !isEmptyArrayLiteralBorrow) return undefined;
 
   // First argument to .call() is the receiver object
   if (callExpr.arguments.length < 1) return undefined;

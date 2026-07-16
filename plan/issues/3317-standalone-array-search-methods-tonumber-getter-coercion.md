@@ -1,7 +1,9 @@
 ---
 id: 3317
 title: "standalone: Array.prototype.{indexOf,lastIndexOf,includes} — ToNumber-of-object length/fromIndex + includes abrupt-getter length reads"
-status: ready
+status: done
+assignee: ttraenkler/fable-3317
+completed: 2026-07-16
 sprint: current
 created: 2026-07-16
 priority: medium
@@ -59,3 +61,57 @@ plumbing as bucket 3's ToNumber path (they likely share a fix site).
   scope (in which case, re-split further rather than force a fix).
 - Zero host-mode regressions; zero standalone high-water regressions.
 - No changes outside the search-method dispatch / length-read coercion path.
+
+## Root cause + fix (2026-07-16, fable-3317)
+
+Three cooperating gaps, all standalone-gated fixes:
+
+1. **Object-valued `length` on a closed-struct receiver read as 0** — the
+   #3169 `fillExternArrayLikeStructArms` `__extern_length` arm only accepted
+   f64/i32/externref/string-ref `length` fields, so `{1:true, length:
+   {toString(){…}}}` was not a candidate at all (length → 0 → scan never ran,
+   the `-3-19/-3-20/-3-21/-3-22` "returned 2" signature). Fix
+   (`src/codegen/object-runtime.ts`): accept ref/ref_null `length` fields and
+   run §7.1.20 ToLength(ToNumber(ToPrimitive(v, number))) — `__to_primitive`
+   with a null-extern hint (= number/default; valueOf→toString ordering,
+   both-objects TypeError via the #2638 class driver), then `__str_to_number`
+   (string result) / `__unbox_number` (other primitives), then the shared
+   clamp. Abrupt completions propagate as Wasm throws.
+2. **`[].includes.call(obj, …)` trapped "illegal cast"** — the corpus spelling
+   of the borrow took the generic member path, which cast the borrowed
+   receiver to the literal's own vec type. Fix
+   (`src/codegen/array-prototype-borrow.ts` `compileArrayPrototypeCall`):
+   under standalone/wasi, an EMPTY array-literal method borrow (with
+   paren/`as`-cast unwrap) routes through the same compiler as
+   `Array.prototype.<m>.call(…)`.
+3. **assert_throws bailout + no-search-arg bail routed the observable length
+   coercion to the host bridge** — the swallow hazard that bailout guards is
+   a HOST-import property; standalone-native reads propagate throws. Fix:
+   skip the bailout for search methods under standalone/wasi, and let the
+   no-arg form (`indexOf.call(obj)` — §23.1.3 reads length before anything)
+   proceed with `searchElement = undefined`.
+
+## Test Results (2026-07-16)
+
+Direct `runTest262File(…, "standalone")` on the scoped corpus — all 10
+scoped tests flip fail→pass on the branch:
+
+- `indexOf/15.4.4.14-3-{19,20,21,22}.js` — pass (were "returned 2/3")
+- `lastIndexOf/15.4.4.15-3-{19,20,21,22}.js` — pass (were "returned 2/3")
+- `includes/return-abrupt-get-length.js` — pass (was "illegal cast in __closure_3")
+- `includes/return-abrupt-tonumber-length.js` — pass (was "illegal cast")
+
+Out of scope, verified unchanged/expected: `includes/tolength-length.js` now
+progresses past the trap but needs closed-struct property EXPANDO writes
+(`obj.length = 0.1` on a literal without a length field — #3177 family);
+`-5-21` already passed pre-fix.
+
+Unit tests: `tests/issue-3317.test.ts` (11/11, non-vacuous direct
+compile+run). Related suites re-run green: issue-3170-fromindex (21),
+issue-1360, issue-3169 (16), issue-1461-standalone-{search,reduce}-arraylike,
+issue-2583-any-array-method-brand — 102 tests total. issue-2036.test.ts has
+7 pre-existing failures IDENTICAL on pristine main (verified side-by-side;
+its "refuses loudly" expectations were retired by #3169's refusal-set
+emptying — flagged to the tech lead, not caused here). Full
+includes/indexOf/lastIndexOf dir sweep diffed branch-vs-main (process-level
+runs) for zero regressions.
