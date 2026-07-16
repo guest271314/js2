@@ -123,7 +123,7 @@ machines 2/3.
 | - | --- | ---: | --- | --- |
 | S1 | sync generator FUNCTION EXPRESSIONS native | ~1,741 | **#3164 — done** | fable-executable-now |
 | S2 | async-gen methods / yield\* / return native | ~2,408 (subsumes most of the Promise column) | **#3132** S2–S4 (in-progress, live dev — coordinate, don't fork) | in-flight (XL) |
-| S3 | capturing nested generators → capture slots in the state struct | small leaky (≤ ~60) but large FAIL/CE value + unblocks #3032 semantics | **#3302** (spun off 2026-07-16; design notes below carried into it) | **opus-owned design**, fable-executable after |
+| S3 | capturing nested generators → capture slots in the state struct | small leaky (≤ ~60) but large FAIL/CE value + unblocks #3032 semantics | **#3302 — done** (2026-07-16; declarations landed via #3032 W3's TDZ-native-threading, fn-expressions + the latent #3164 sgDeps-only fill hole via #3302's own PR) | landed |
 | S4 | for-await-of dstr legacy async lowering → native drive | 90 | **#3228 — done** (banked the 24 array-source files); residual 96 `asyncIter`-var-source files fold into **#3132**'s lane per #3228's own scope note — not a separate child | mostly done, residual rides #3132 |
 | S5 | `new Promise(NON-inline executor)` + `class X extends Promise` producer | ~15 leaky + fail-bucket | #2903 (re-grounded plan there) | fable-executable-now |
 | S6 | lazy Iterator helpers (map/filter/take/drop/flatMap) + TypedArray callback methods | ~30 | #2903 sub-fronts 2b/4 (plan there) | fable-executable-now |
