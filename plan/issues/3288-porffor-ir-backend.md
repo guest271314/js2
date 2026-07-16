@@ -3,7 +3,7 @@ id: 3288
 title: "Optional Porffor IR backend: prove the target-neutral JS2 linear-memory plan"
 status: in-progress
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-17
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -18,7 +18,7 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T22:09:21.122Z
+claimed_at: 2026-07-16T22:20:31.606Z
 branch: symphony/porffor/3288
 pr: 3166
 loc-budget-allow:
@@ -403,3 +403,7 @@ started on this branch.
   failed in existing non-P1 harness paths (string/helper initialization,
   missing host import stubs, and a stale AST-to-IR return-shape assertion); no
   Porffor metadata, backend-contract, or bytecode proof assertion failed.
+- Final retry validation after merging `origin/main` at `5bae1e42a38` passed
+  typecheck, the 42 focused tests, the `pushRaw` and LOC ratchets, and a fresh
+  56-record emit-identity comparison against that exact main commit. The prior
+  PR head `0e65d083f90` was fully green before the required main catch-up.
