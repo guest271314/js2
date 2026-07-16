@@ -144,7 +144,7 @@ export function ensureDateStruct(ctx: CodegenContext): number {
  * on the stack. `tmpLocal` is a scratch i64 local. Leaves the year i64 on the
  * stack.
  */
-function emitPackedYear(out: Instr[], tmpLocal: number): void {
+export function emitPackedYear(out: Instr[], tmpLocal: number): void {
   // tmp = packed
   out.push({ op: "local.tee", index: tmpLocal });
   // q = packed / 10000  (trunc toward zero)
@@ -194,7 +194,7 @@ function emitPackedMmdd(out: Instr[], tmpLocal: number, yearTmp: number): void {
  *
  * Uses Hinnant's algorithm: http://howardhinnant.github.io/date_algorithms.html#civil_from_days
  */
-function ensureDateCivilHelper(ctx: CodegenContext): number {
+export function ensureDateCivilHelper(ctx: CodegenContext): number {
   const existing = ctx.funcMap.get("__date_civil_from_days");
   if (existing !== undefined) return existing;
 
@@ -517,7 +517,7 @@ export function ensureDateDaysFromCivilHelper(ctx: CodegenContext): number {
  * the actual number of code units written (24 for the common 4-digit year, 27
  * for the extended ±6-digit form). Trailing slots past `len` are never read.
  */
-function ensureDateIsoStringHelper(ctx: CodegenContext): number {
+export function ensureDateIsoStringHelper(ctx: CodegenContext): number {
   const existing = ctx.funcMap.get("__date_iso_string");
   if (existing !== undefined) return existing;
 
