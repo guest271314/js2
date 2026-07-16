@@ -15,6 +15,22 @@ function checkStatus(check) {
   return String(check?.status ?? "").toUpperCase();
 }
 
+function normalizePullRequestNumber(value) {
+  if (value == null || value === "") return null;
+  const text = String(value).trim();
+  const match = text.match(/\/pull\/(\d+)/i) || text.match(/^#?(\d+)$/);
+  return match ? match[1] : text;
+}
+
+function selectPullRequestForBranch(snapshots, { excludeNumbers = [] } = {}) {
+  const excluded = new Set(excludeNumbers.map(normalizePullRequestNumber).filter(Boolean));
+  const candidates = snapshots.filter((snapshot) => {
+    const number = normalizePullRequestNumber(snapshot?.number);
+    return !number || !excluded.has(number);
+  });
+  return candidates.find((snapshot) => String(snapshot?.state ?? "").toUpperCase() === "OPEN") ?? candidates[0] ?? null;
+}
+
 export function classifyPullRequest(snapshot) {
   if (!snapshot || typeof snapshot !== "object") throw new Error("invalid_pull_request_snapshot");
 
@@ -136,7 +152,14 @@ export function readPullRequest({ command = "gh", cwd, number, repository = "", 
   return classifyPullRequest(snapshot);
 }
 
-export function readPullRequestForBranch({ branch, command = "gh", cwd, repository = "", timeoutMs = 30_000 }) {
+export function readPullRequestForBranch({
+  branch,
+  command = "gh",
+  cwd,
+  repository = "",
+  timeoutMs = 30_000,
+  excludeNumbers = [],
+}) {
   const args = [
     "pr",
     "list",
@@ -145,7 +168,7 @@ export function readPullRequestForBranch({ branch, command = "gh", cwd, reposito
     "--state",
     "all",
     "--limit",
-    "1",
+    "20",
     "--json",
     "number,state,mergedAt,url,headRefName,headRefOid,statusCheckRollup",
   ];
@@ -169,5 +192,6 @@ export function readPullRequestForBranch({ branch, command = "gh", cwd, reposito
     throw new Error(`pull_request_query_invalid_json: ${error.message}`);
   }
   if (!Array.isArray(snapshots)) throw new Error("pull_request_query_invalid_json: expected an array");
-  return snapshots.length > 0 ? classifyPullRequest(snapshots[0]) : null;
+  const selected = selectPullRequestForBranch(snapshots, { excludeNumbers });
+  return selected ? classifyPullRequest(selected) : null;
 }

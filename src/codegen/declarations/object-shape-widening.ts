@@ -88,6 +88,26 @@ export function collectEmptyObjectWidening(
             }
           }
 
+          // (#2992 S5, standalone) An ACCESSOR-descriptor
+          // `Object.defineProperty(varName, k, {get/set…})` (or any
+          // `defineProperties` member descriptor with a get/set key) is an
+          // `$Object`-hash consumer too: a widened closed-struct FIELD can only
+          // store a plain value, so the define either stores the getter closure
+          // itself or null into the fixed slot — a later read (`obj[k]` through
+          // an any-typed harness param, or `obj.k`) can never INVOKE the getter,
+          // and gOPD can never observe accessor-ness (`hasOwnProperty("get")`).
+          // Poison the widening so the var stays a `$Object`, where the slice-3
+          // (#2893) accessor machinery (FLAG_ACCESSOR + live get/set halves +
+          // §10.1.6.3 merge) serves define → read → gOPD correctly (measured:
+          // the 15.2.3.6-4-75 / 4-82-* runner-wrapped family flips to pass).
+          // Standalone-gated: the host lane applies accessor defines through the
+          // live-mirror Proxy onto the real JS object (byte-inert there).
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneAccessorDefineTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
           // this receiver used a *dynamic* (non-inline-literal) descriptor, the
           // struct-widening fast path is unsound — the dynamic define is applied
@@ -462,6 +482,70 @@ function markStandaloneDeleteTargets(node: ts.Node, varName: string, poisonSet: 
     ts.forEachChild(n, visit);
   };
   visit(node);
+}
+
+/**
+ * (#2992 S5, standalone-only caller) Poison `varName` when it is the receiver
+ * of an accessor-descriptor `Object.defineProperty(varName, k, {get/set…})` or
+ * of an `Object.defineProperties(varName, {…})` whose any member descriptor
+ * literal carries a `get`/`set` key. A widened closed-struct field cannot hold
+ * an accessor (reads never invoke the getter; gOPD cannot see accessor-ness),
+ * so the receiver must stay a `$Object` for the #2893 accessor machinery.
+ *
+ * A PRESENT `get`/`set` key counts even when its value is `undefined` — the
+ * §10.1.6.3 semantics (and gOPD `hasOwnProperty("get")`) must still observe an
+ * accessor property, which the slice-3 explicit-undefined-half routing handles
+ * on the `$Object` path.
+ */
+function markStandaloneAccessorDefineTargets(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === "Object" &&
+      ts.isIdentifier(n.expression.name)
+    ) {
+      const method = n.expression.name.text;
+      const recv = n.arguments[0];
+      if (recv && ts.isIdentifier(recv) && recv.text === varName) {
+        if (method === "defineProperty" && n.arguments.length >= 3) {
+          if (descriptorHasAccessorKey(n.arguments[2]!)) poisonSet.add(varName);
+        } else if (method === "defineProperties" && n.arguments.length >= 2) {
+          const props = n.arguments[1]!;
+          if (ts.isObjectLiteralExpression(props)) {
+            for (const p of props.properties) {
+              if (ts.isPropertyAssignment(p) && descriptorHasAccessorKey(p.initializer)) {
+                poisonSet.add(varName);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
+/** (#2992 S5) Does a descriptor object literal carry a `get` or `set` key (any
+ * form: property assignment — including `get: undefined` —, method shorthand,
+ * or string-named)? Presence of the key is what makes the define an accessor
+ * define per §10.1.6.3, independent of the value. */
+function descriptorHasAccessorKey(descArg: ts.Expression): boolean {
+  if (!ts.isObjectLiteralExpression(descArg)) return false;
+  for (const prop of descArg.properties) {
+    if (
+      (ts.isPropertyAssignment(prop) || ts.isMethodDeclaration(prop)) &&
+      prop.name &&
+      (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+      (prop.name.text === "get" || prop.name.text === "set")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
