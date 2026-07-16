@@ -10,8 +10,12 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2985, 2667]
 oracle-ratchet-allow:
+  # S6 pre-pass stores raw ts.Type INSTANCES in objectHashConsumerTypes
+  # (identity-keyed, #2944 provenance guard via symbol.declarations) — oracle
+  # TypeFacts cannot express that; OracleTypeKey migration is #1930 Slice 5.
+  # property-access.ts needs NO allowance: its S6 callable-prop gate routes
+  # through ctx.oracle.signatureOf.
   - src/codegen/declarations/object-shape-widening.ts
-  - src/codegen/property-access.ts
 loc-budget-allow:
   - src/codegen/declarations.ts
   - src/codegen/object-runtime.ts
@@ -268,6 +272,7 @@ defineProperty/defineProperties) **0 flips, 0 regressions** vs base; host
 lane byte-identical (4/4 SHA probes).
 
 **Documented residuals (unchanged):**
+
 - gc/host-lane twin (the `delete-sentinel` string-property equivalence
   failure) — fails identically on base; host poison needs the #2937/#2944
   escape discipline (separate risk profile).
