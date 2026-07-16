@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -170,6 +170,370 @@ esac
     ).toMatchObject({ number: 100, status: "pending", headBranch: "agent/100" });
   });
 
+  it("does not rediscover an already handled merged PR for a branch", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-pr-branch-handled-"));
+    const fakeGh = join(tempDir, "gh");
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr list --head symphony/porffor/2953"*"--repo loopdive/js2"*)
+    printf '%s\\n' '[{"number":3128,"state":"MERGED","mergedAt":"2026-07-16T08:00:00Z","headRefName":"symphony/porffor/2953","headRefOid":"old-sha","statusCheckRollup":[]}]'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    chmodSync(fakeGh, 0o755);
+
+    expect(
+      readPullRequestForBranch({
+        branch: "symphony/porffor/2953",
+        command: fakeGh,
+        cwd: tempDir,
+        repository: "loopdive/js2",
+        excludeNumbers: [3128],
+      }),
+    ).toBeNull();
+  });
+
+  it("prefers a fresh open branch PR over an older merged PR", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-pr-branch-open-"));
+    const fakeGh = join(tempDir, "gh");
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr list --head symphony/porffor/2953-after-pr-3128"*"--repo loopdive/js2"*)
+    printf '%s\\n' '[{"number":3128,"state":"MERGED","mergedAt":"2026-07-16T08:00:00Z","headRefName":"symphony/porffor/2953-after-pr-3128","headRefOid":"old-sha","statusCheckRollup":[]},{"number":3130,"state":"OPEN","headRefName":"symphony/porffor/2953-after-pr-3128","headRefOid":"new-sha","statusCheckRollup":[]}]'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    chmodSync(fakeGh, 0o755);
+
+    expect(
+      readPullRequestForBranch({
+        branch: "symphony/porffor/2953-after-pr-3128",
+        command: fakeGh,
+        cwd: tempDir,
+        repository: "loopdive/js2",
+        excludeNumbers: [3128],
+      }),
+    ).toMatchObject({ number: 3130, status: "pending", headBranch: "symphony/porffor/2953-after-pr-3128" });
+  });
+
+  it("continues a merged Porffor slice on a fresh branch and requeues if no new PR appears", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-porffor-continuation-"));
+    const issuesDir = join(tempDir, "issues");
+    const workspaceRoot = join(tempDir, "workspaces");
+    const loggingRoot = join(tempDir, "logs");
+    const issueFile = join(issuesDir, "2953-porffor-runtime-lowering.md");
+    const workflow = join(tempDir, "WORKFLOW.md");
+    const fakeGh = join(tempDir, "gh");
+    const fakeAgent = join(tempDir, "agent");
+    const response = join(tempDir, "pr.json");
+    const marker = join(tempDir, "agent-runs.txt");
+
+    mkdirSync(issuesDir, { recursive: true });
+    writeFileSync(
+      issueFile,
+      `---
+id: 2953
+title: "Porffor runtime lowering"
+status: in-progress
+sprint: porffor-backend
+branch: symphony/porffor/2953
+pr: 3128
+---
+# Porffor runtime lowering
+`,
+    );
+    writeFileSync(
+      workflow,
+      `---
+tracker:
+  kind: markdown
+  issues_dir: ${issuesDir}
+  sprint: porffor-backend
+  active_states: [ready, in-progress, in-review]
+  claimable_states: [ready]
+  claim_state: in-progress
+  terminal_states: [done, wont-fix]
+polling:
+  interval_ms: 10
+pull_requests:
+  enabled: true
+  repository: loopdive/js2
+  command: ${fakeGh}
+  poll_interval_ms: 10
+  review_states: [in-progress, in-review]
+workspace:
+  kind: directory
+  root: ${workspaceRoot}
+  branch_prefix: symphony/porffor
+agent:
+  max_concurrent_agents: 1
+  max_turns: 1
+  lanes:
+    - name: fake-agent
+      kind: generic
+      command: ${fakeAgent}
+      prompt_mode: stdin
+      max_concurrent: 1
+logging:
+  root: ${loggingRoot}
+---
+Issue {{ issue.identifier }} branch {{ workspace.branch }}
+`,
+    );
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr view 3128"*"--repo loopdive/js2"*) cat "$PR_RESPONSE" ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    writeFileSync(
+      fakeAgent,
+      `#!/bin/sh\nprintf '%s %s\\n' "$SYMPHONY_ISSUE_ID" "$SYMPHONY_BRANCH" >> "$AGENT_MARKER"\ncat >/dev/null\n`,
+    );
+    chmodSync(fakeGh, 0o755);
+    chmodSync(fakeAgent, 0o755);
+    writeFileSync(
+      response,
+      JSON.stringify({
+        number: 3128,
+        state: "MERGED",
+        mergedAt: "2026-07-16T08:00:00Z",
+        headRefName: "symphony/porffor/2953",
+        headRefOid: "slice-one-sha",
+        statusCheckRollup: [],
+      }),
+    );
+
+    execFileSync(process.execPath, ["scripts/symphony.mjs", "--workflow", workflow, "--once"], {
+      cwd: process.cwd(),
+      env: { ...process.env, PR_RESPONSE: response, AGENT_MARKER: marker },
+      stdio: "pipe",
+    });
+
+    const issue = readFileSync(issueFile, "utf8");
+    expect(issue).toContain("status: ready");
+    expect(issue).toContain("pr: null");
+    expect(issue).toContain("last_merged_pr: 3128");
+    expect(issue).toContain("branch: symphony/porffor/2953-after-pr-3128");
+    expect(readFileSync(marker, "utf8")).toBe("2953 symphony/porffor/2953-after-pr-3128\n");
+    const events = readFileSync(join(loggingRoot, "events.jsonl"), "utf8");
+    expect(events).toContain('"event":"pull_request_merged_issue_requeued"');
+    expect(events).toContain('"event":"agent_missing_pull_request_requeued"');
+  });
+
+  it("records a fresh continuation PR when the worker missed PR metadata", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-porffor-discover-fresh-pr-"));
+    const issuesDir = join(tempDir, "issues");
+    const workspaceRoot = join(tempDir, "workspaces");
+    const loggingRoot = join(tempDir, "logs");
+    const issueFile = join(issuesDir, "2953-porffor-runtime-lowering.md");
+    const workflow = join(tempDir, "WORKFLOW.md");
+    const fakeGh = join(tempDir, "gh");
+    const fakeAgent = join(tempDir, "agent");
+    const response = join(tempDir, "pr.json");
+    const marker = join(tempDir, "agent-runs.txt");
+
+    mkdirSync(issuesDir, { recursive: true });
+    writeFileSync(
+      issueFile,
+      `---
+id: 2953
+title: "Porffor runtime lowering"
+status: in-progress
+sprint: porffor-backend
+branch: symphony/porffor/2953
+pr: 3128
+---
+# Porffor runtime lowering
+`,
+    );
+    writeFileSync(
+      workflow,
+      `---
+tracker:
+  kind: markdown
+  issues_dir: ${issuesDir}
+  sprint: porffor-backend
+  active_states: [ready, in-progress, in-review]
+  claimable_states: [ready]
+  claim_state: in-progress
+  terminal_states: [done, wont-fix]
+polling:
+  interval_ms: 10
+pull_requests:
+  enabled: true
+  repository: loopdive/js2
+  command: ${fakeGh}
+  poll_interval_ms: 10
+  review_states: [in-progress, in-review]
+workspace:
+  kind: directory
+  root: ${workspaceRoot}
+  branch_prefix: symphony/porffor
+agent:
+  max_concurrent_agents: 1
+  max_turns: 1
+  lanes:
+    - name: fake-agent
+      kind: generic
+      command: ${fakeAgent}
+      prompt_mode: stdin
+      max_concurrent: 1
+logging:
+  root: ${loggingRoot}
+---
+Issue {{ issue.identifier }} branch {{ workspace.branch }}
+`,
+    );
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr view 3128"*"--repo loopdive/js2"*) cat "$PR_RESPONSE" ;;
+  *"pr list --head symphony/porffor/2953-after-pr-3128"*"--repo loopdive/js2"*)
+    printf '%s\\n' '[{"number":3130,"state":"OPEN","headRefName":"symphony/porffor/2953-after-pr-3128","headRefOid":"slice-two-sha","statusCheckRollup":[]}]'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    writeFileSync(
+      fakeAgent,
+      `#!/bin/sh\nprintf '%s %s\\n' "$SYMPHONY_ISSUE_ID" "$SYMPHONY_BRANCH" >> "$AGENT_MARKER"\ncat >/dev/null\n`,
+    );
+    chmodSync(fakeGh, 0o755);
+    chmodSync(fakeAgent, 0o755);
+    writeFileSync(
+      response,
+      JSON.stringify({
+        number: 3128,
+        state: "MERGED",
+        mergedAt: "2026-07-16T08:00:00Z",
+        headRefName: "symphony/porffor/2953",
+        headRefOid: "slice-one-sha",
+        statusCheckRollup: [],
+      }),
+    );
+
+    execFileSync(process.execPath, ["scripts/symphony.mjs", "--workflow", workflow, "--once"], {
+      cwd: process.cwd(),
+      env: { ...process.env, PR_RESPONSE: response, AGENT_MARKER: marker },
+      stdio: "pipe",
+    });
+
+    const issue = readFileSync(issueFile, "utf8");
+    expect(issue).toContain("status: in-progress");
+    expect(issue).toContain("pr: 3130");
+    expect(issue).toContain("last_merged_pr: 3128");
+    expect(issue).toContain("branch: symphony/porffor/2953-after-pr-3128");
+    expect(readFileSync(marker, "utf8")).toBe("2953 symphony/porffor/2953-after-pr-3128\n");
+    const events = readFileSync(join(loggingRoot, "events.jsonl"), "utf8");
+    expect(events).toContain('"event":"pull_request_discovered"');
+    expect(events).not.toContain('"event":"agent_missing_pull_request_requeued"');
+  });
+
+  it("does not bind a restarted in-progress slice to its already handled merged PR", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-porffor-handled-discovery-"));
+    const issuesDir = join(tempDir, "issues");
+    const workspaceRoot = join(tempDir, "workspaces");
+    const loggingRoot = join(tempDir, "logs");
+    const issueFile = join(issuesDir, "2953-porffor-runtime-lowering.md");
+    const workflow = join(tempDir, "WORKFLOW.md");
+    const fakeGh = join(tempDir, "gh");
+    const fakeAgent = join(tempDir, "agent");
+    const marker = join(tempDir, "agent-runs.txt");
+
+    mkdirSync(issuesDir, { recursive: true });
+    writeFileSync(
+      issueFile,
+      `---
+id: 2953
+title: "Porffor runtime lowering"
+status: in-progress
+sprint: porffor-backend
+branch: symphony/porffor/2953
+last_merged_pr: 3128
+---
+# Porffor runtime lowering
+`,
+    );
+    writeFileSync(
+      workflow,
+      `---
+tracker:
+  kind: markdown
+  issues_dir: ${issuesDir}
+  sprint: porffor-backend
+  active_states: [ready, in-progress, in-review]
+  claimable_states: [ready]
+  claim_state: in-progress
+  terminal_states: [done, wont-fix]
+polling:
+  interval_ms: 10
+pull_requests:
+  enabled: true
+  repository: loopdive/js2
+  command: ${fakeGh}
+  poll_interval_ms: 10
+  review_states: [in-progress, in-review]
+workspace:
+  kind: directory
+  root: ${workspaceRoot}
+  branch_prefix: symphony/porffor
+agent:
+  max_concurrent_agents: 1
+  max_turns: 1
+  lanes:
+    - name: fake-agent
+      kind: generic
+      command: ${fakeAgent}
+      prompt_mode: stdin
+      max_concurrent: 1
+logging:
+  root: ${loggingRoot}
+---
+Issue {{ issue.identifier }}
+`,
+    );
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr list --head symphony/porffor/2953"*"--repo loopdive/js2"*)
+    printf '%s\\n' '[{"number":3128,"state":"MERGED","mergedAt":"2026-07-16T08:00:00Z","headRefName":"symphony/porffor/2953","headRefOid":"slice-one-sha","statusCheckRollup":[]}]'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    writeFileSync(fakeAgent, `#!/bin/sh\nprintf '%s\\n' "$SYMPHONY_ISSUE_ID" >> "$AGENT_MARKER"\ncat >/dev/null\n`);
+    chmodSync(fakeGh, 0o755);
+    chmodSync(fakeAgent, 0o755);
+
+    execFileSync(process.execPath, ["scripts/symphony.mjs", "--workflow", workflow, "--once"], {
+      cwd: process.cwd(),
+      env: { ...process.env, AGENT_MARKER: marker },
+      stdio: "pipe",
+    });
+
+    const issue = readFileSync(issueFile, "utf8");
+    expect(issue).toContain("status: in-progress");
+    expect(issue).toContain("last_merged_pr: 3128");
+    expect(issue).not.toMatch(/^pr: 3128$/m);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("continues an external dependency after merge and unblocks only its sprint root", () => {
     tempDir = mkdtempSync(join(tmpdir(), "symphony-reconcile-"));
     const issuesDir = join(tempDir, "issues");
@@ -314,17 +678,17 @@ fi
     );
     runSymphony();
     const continuedIssue = readFileSync(issueFile, "utf8");
-    expect(continuedIssue).toContain("status: in-progress");
+    expect(continuedIssue).toContain("status: ready");
     expect(continuedIssue).toContain("pr: null");
     expect(continuedIssue).toContain("last_ci_retry_head: null");
     expect(continuedIssue).toContain("last_merged_pr: 99");
-    expect(continuedIssue).toContain("branch: symphony/9001");
+    expect(continuedIssue).toContain("branch: symphony/9001-after-pr-99");
     expect(readFileSync(marker, "utf8")).toBe("9001\n9001\n");
     expect(readFileSync(join(loggingRoot, "events.jsonl"), "utf8")).not.toContain('"event":"retry_suppressed"');
 
     writeFileSync(
       issueFile,
-      continuedIssue.replace("status: in-progress", "status: in-review").replace("pr: null", "pr: 100"),
+      continuedIssue.replace("status: ready", "status: in-review").replace("pr: null", "pr: 100"),
     );
     writeFileSync(
       response,

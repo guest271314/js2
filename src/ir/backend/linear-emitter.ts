@@ -315,6 +315,12 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     notImplemented("emitFromExternref");
   }
 
+  // function materialization — a linear closure carries a table index or
+  // equivalent handle, not a WasmGC funcref (#2956, closures).
+  emitFuncRef(): void {
+    notImplemented("emitFuncRef");
+  }
+
   // typed-funcref call — `call_ref` over a GC funcref (#2956, closures). The
   // linear backend dispatches indirect calls through a table (`call_indirect`),
   // not a reference-typed funcref, so this needs distinct lowering.
