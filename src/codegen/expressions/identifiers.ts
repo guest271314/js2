@@ -7,6 +7,7 @@ import {
   getNullablePrimitiveInfo,
   isBigIntType,
   isBooleanType,
+  isDeclaredHeterogeneousPrimitiveUnion,
   isHeterogeneousUnion,
   isNumberType,
   isStringType,
@@ -28,7 +29,7 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { emitCapturedBoxGlobalRead, emitNullGuardedStructGet, getCapturedBoxGlobal } from "../property-access.js";
-import { coerceType, compileExpression } from "../shared.js";
+import { coerceType, compileExpression, ensureAnyHelpers, isAnyValue } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
@@ -660,6 +661,44 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
         if (declaredNullable) {
           const unboxed = emitNullablePrimitiveUnbox(ctx, fctx, declaredNullable.primitiveKind);
           if (unboxed) return unboxed;
+        }
+      }
+    }
+
+    // (#745 S4, flag-gated) The SAME narrowing hook for the `$AnyValue` union
+    // carrier: a heterogeneous-primitive-union local/param narrowed to a
+    // single kind at the use site unboxes AT THE READ, so downstream typed
+    // consumers (string `.length`/methods, arithmetic, call arguments) see
+    // the concrete rep instead of the carrier struct — the untyped read of a
+    // union PARAM previously reached string property access as a raw
+    // `$AnyValue` and emitted an invalid `struct.get` (the S4 callBoundary
+    // row). Oracle-classified (no raw-checker type query); the declared-union
+    // gate keeps `any`-typed $AnyValue locals (fast lane) on their existing
+    // read path. `typeof x` guard operands stay un-narrowed at their own use
+    // site, so the tag-dispatch reads are unaffected.
+    if (
+      ctx.unionAnyRep &&
+      (declaredType.kind === "ref_null" || declaredType.kind === "ref") &&
+      isAnyValue(declaredType, ctx) &&
+      isDeclaredHeterogeneousPrimitiveUnion(ctx.checker, id)
+    ) {
+      const fact = ctx.oracle.typeFactOf(id);
+      if (fact.kind === "number") {
+        ensureAnyHelpers(ctx);
+        const toF64 = ctx.funcMap.get("__any_to_f64");
+        if (toF64 !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: toF64 });
+          return { kind: "f64" };
+        }
+      } else if (fact.kind === "string" && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        coerceType(ctx, fctx, declaredType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+        return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+      } else if (fact.kind === "boolean") {
+        ensureAnyHelpers(ctx);
+        const unboxBool = ctx.funcMap.get("__any_unbox_bool");
+        if (unboxBool !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: unboxBool });
+          return { kind: "i32", boolean: true };
         }
       }
     }
