@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-07-16T19:23:16.228Z",
-  "baseline_generated_at": "2026-07-16T19:23:16.228Z",
-  "baseline_sha": "b8d951b823d12106f2b8e156646c8b2d071defb3",
+  "timestamp": "2026-07-16T20:59:22.783Z",
+  "baseline_generated_at": "2026-07-16T20:59:22.784Z",
+  "baseline_sha": "279731ac1a0df660ee9db291911b75f7c1f2596a",
   "oracle_version": 5,
   "mode": {
     "target": "standalone",
@@ -10,25 +10,25 @@
   },
   "summary": {
     "total": 43106,
-    "pass": 27720,
-    "fail": 14568,
+    "pass": 27722,
+    "fail": 14566,
     "compile_error": 785,
     "compile_timeout": 14,
     "skip": 19,
     "compilable": 42288,
-    "host_free_pass": 24642,
+    "host_free_pass": 24644,
     "leaky_pass": 3078,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42020,
-        "pass": 27456,
-        "fail": 13787,
+        "pass": 27458,
+        "fail": 13785,
         "compile_error": 744,
         "compile_timeout": 14,
         "skip": 19,
         "compilable": 41243,
-        "host_free_pass": 24379,
+        "host_free_pass": 24381,
         "leaky_pass": 3077,
         "stale": 0,
         "label": "ECMAScript current standard"
@@ -61,26 +61,26 @@
       },
       "official": {
         "total": 43106,
-        "pass": 27720,
-        "fail": 14568,
+        "pass": 27722,
+        "fail": 14566,
         "compile_error": 785,
         "compile_timeout": 14,
         "skip": 19,
         "compilable": 42288,
-        "host_free_pass": 24642,
+        "host_free_pass": 24644,
         "leaky_pass": 3078,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48088,
-        "pass": 27961,
-        "fail": 18985,
+        "pass": 27963,
+        "fail": 18983,
         "compile_error": 1004,
         "compile_timeout": 14,
         "skip": 124,
         "compilable": 46946,
-        "host_free_pass": 24877,
+        "host_free_pass": 24879,
         "leaky_pass": 3084,
         "stale": 0,
         "label": "standard + annex_b + proposals"
@@ -89,37 +89,37 @@
   },
   "official_summary": {
     "total": 43106,
-    "pass": 27720,
-    "fail": 14568,
+    "pass": 27722,
+    "fail": 14566,
     "compile_error": 785,
     "compile_timeout": 14,
     "skip": 19,
     "compilable": 42288,
-    "host_free_pass": 24642,
+    "host_free_pass": 24644,
     "leaky_pass": 3078,
     "stale": 0
   },
   "full_summary": {
     "total": 48088,
-    "pass": 27961,
-    "fail": 18985,
+    "pass": 27963,
+    "fail": 18983,
     "compile_error": 1004,
     "compile_timeout": 14,
     "skip": 124,
     "compilable": 46946,
-    "host_free_pass": 24877,
+    "host_free_pass": 24879,
     "leaky_pass": 3084,
     "stale": 0
   },
   "strict_summary": {
     "total": 40597,
-    "pass": 26792,
-    "fail": 13078,
+    "pass": 26794,
+    "fail": 13076,
     "compile_error": 694,
     "compile_timeout": 14,
     "skip": 19,
     "compilable": 39870,
-    "host_free_pass": 23737,
+    "host_free_pass": 23739,
     "leaky_pass": 3055,
     "stale": 0
   },
@@ -150,13 +150,13 @@
     },
     "standard": {
       "total": 42020,
-      "pass": 27456,
-      "fail": 13787,
+      "pass": 27458,
+      "fail": 13785,
       "compile_error": 744,
       "compile_timeout": 14,
       "skip": 19,
       "compilable": 41243,
-      "host_free_pass": 24379,
+      "host_free_pass": 24381,
       "leaky_pass": 3077,
       "stale": 0
     }
@@ -990,13 +990,13 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8238,
-      "fail": 2533,
+      "pass": 8240,
+      "fail": 2531,
       "compile_error": 246,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036,
-      "host_free_pass": 6796
+      "host_free_pass": 6798
     },
     {
       "name": "language/function-code",
@@ -1198,7 +1198,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 11698,
+    "assertion_fail": 11696,
     "illegal_cast": 566,
     "missing_builtin": 36,
     "missing_dependency": 77,
@@ -1223,8 +1223,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 20003,
-    "classified": 20003,
+    "total_non_pass_non_skip": 20001,
+    "classified": 20001,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1299,8 +1299,8 @@
         "error_categories": {
           "other": 2853,
           "assertion_fail": 1286,
-          "illegal_cast": 2,
           "wasm_compile": 53,
+          "illegal_cast": 2,
           "null_deref": 53,
           "type_error": 223
         },
@@ -1315,8 +1315,8 @@
           "other:ReferenceError: Temporal is not defined",
           "assertion_fail:returned # — assert ## at L#: assert.throws( RangeError, () => instance.round({ largestUnit: \"months\", relativeTo: { year: #, month: #, day: #, timeZone } }), \"reject minus zero as extended year\" );",
           "other:ReferenceError: TemporalHelpers is not defined",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]"
         ]
       },
       {
@@ -1334,8 +1334,8 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 46,
-          "other": 9,
+          "assertion_fail": 47,
+          "other": 8,
           "missing_builtin": 1,
           "type_error": 2
         },
@@ -1451,15 +1451,15 @@
         },
         "sample_files": [
           "test/built-ins/JSON/stringify/space-wrong-type.js",
-          "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
           "test/built-ins/JSON/stringify/replacer-array-empty.js",
+          "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
           "test/built-ins/JSON/stringify/space-string.js",
           "test/built-ins/JSON/stringify/value-number-object.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj), JSON.stringify(obj, null, null));",
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( JSON.stringify([#, {a: #}], []), '[#,{}]' );",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(obj, null, ' '), [ '{' , ' \"a1\": {' , ' \"b1\": [' , ' #,' , ' #,' , ' #,' , ' #' , ' ],' , ' \"b2\": {' , ' \"c1\": #,' , ' \"c2\": #'",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(JSON.stringify(new Number(#)), '#');"
         ]
@@ -1772,9 +1772,9 @@
         },
         "error_categories": {
           "runtime_error": 63,
-          "assertion_fail": 4485,
+          "assertion_fail": 4483,
           "type_error": 559,
-          "other": 122,
+          "other": 124,
           "illegal_cast": 159,
           "wasm_compile": 46,
           "missing_builtin": 2,
@@ -1926,10 +1926,10 @@
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 1294,
+          "assertion_fail": 1296,
           "type_error": 204,
           "wasm_compile": 3,
-          "other": 27,
+          "other": 25,
           "missing_dependency": 8,
           "negative_test_fail": 4,
           "illegal_cast": 18,
@@ -2014,8 +2014,8 @@
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/eval-code/direct/func-if-decl-else-stmt-eval-func-skip-early-err-for-in.js",
           "test/annexB/language/eval-code/direct/global-if-decl-no-else-eval-global-block-scoping.js",
-          "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
-          "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js"
+          "test/annexB/language/eval-code/indirect/global-if-decl-else-decl-b-eval-global-update.js",
+          "test/annexB/language/global-code/switch-case-global-no-skip-try.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
@@ -2265,18 +2265,18 @@
         "id": "eval-new-function",
         "issues": ["#1066", "#1073", "#990"],
         "label": "Eval and `new Function` semantics",
-        "count": 871,
+        "count": 870,
         "statuses": {
           "pass": 0,
-          "fail": 869,
+          "fail": 868,
           "compile_error": 2,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 871,
+          "total": 870,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 776,
+          "assertion_fail": 775,
           "type_error": 55,
           "null_deref": 23,
           "other": 5,
@@ -2356,15 +2356,15 @@
           "other": 2
         },
         "sample_files": [
-          "test/built-ins/Atomics/wait/bigint/no-spurious-wakeup-on-xor.js",
           "test/built-ins/Atomics/wait/bigint/was-woken-before-timeout.js",
+          "test/built-ins/Atomics/wait/bigint/no-spurious-wakeup-on-xor.js",
           "test/built-ins/Atomics/store/bigint/good-views.js",
           "test/language/expressions/left-shift/bigint-non-primitive.js",
           "test/built-ins/BigInt/tostring-throws.js"
         ],
         "sample_signatures": [
-          "type_error:TypeError: Atomics.xor requires a shared integer TypedArray, which is unsupported in --target standalone",
           "type_error:TypeError: Atomics.notify requires a shared integer TypedArray, which is unsupported in --target standalone",
+          "type_error:TypeError: Atomics.xor requires a shared integer TypedArray, which is unsupported in --target standalone",
           "illegal_cast:L#:## illegal cast [in __closure_2() ← testWithBigIntTypedArrayConstructors ← test]",
           "missing_dependency:L#:## No dependency provided for extern class \"BigInt\"",
           "assertion_fail:returned # — assert ## at L#: assert.throws(Test262Error, function() { BigInt({ toString: function() { throw new Test262Error(); } }); });"
@@ -2386,8 +2386,8 @@
         },
         "error_categories": {
           "other": 63,
-          "assertion_fail": 94,
           "type_error": 2,
+          "assertion_fail": 94,
           "promise_error": 4,
           "wasm_compile": 6,
           "negative_test_fail": 13,
@@ -2399,15 +2399,15 @@
         },
         "sample_files": [
           "test/built-ins/Atomics/xor/validate-arraytype-before-index-coercion.js",
-          "test/language/module-code/instn-local-bndng-cls.js",
           "test/language/module-code/namespace/internals/delete-non-exported.js",
+          "test/language/module-code/instn-local-bndng-cls.js",
           "test/language/expressions/prefix-decrement/operator-prefix-decrement-x-calls-putvalue-lhs-newvalue--1.js",
-          "test/built-ins/Atomics/sub/validate-arraytype-before-index-coercion.js"
+          "test/built-ins/Atomics/add/validate-arraytype-before-value-coercion.js"
         ],
         "sample_signatures": [
           "other:ReferenceError: nonAtomicsFriendlyTypedArrayConstructors is not defined",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
           "type_error:TypeError: Cannot destructure 'null' or 'undefined'",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof test262; }, 'Binding is created but not initialized.');",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, () => { count++; --x; count++; });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { typeof D; }, 'binding is created but not initialized');"
         ]
@@ -2437,8 +2437,8 @@
         },
         "sample_files": [
           "test/built-ins/Promise/allSettled/resolve-element-function-name.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/iter-next-val-err-reject.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js"
         ],
@@ -2631,19 +2631,19 @@
         "id": "super-spread-receiver",
         "issues": ["#843", "#1551"],
         "label": "`super`, spread, and receiver-evaluation semantics",
-        "count": 40,
+        "count": 41,
         "statuses": {
           "pass": 0,
-          "fail": 36,
+          "fail": 37,
           "compile_error": 4,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 40,
+          "total": 41,
           "host_free_pass": 0
         },
         "error_categories": {
           "assertion_fail": 34,
-          "other": 1,
+          "other": 2,
           "range_error": 1,
           "wasm_compile": 2,
           "null_deref": 1,
@@ -2658,10 +2658,10 @@
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "other:fail after retry",
           "other:L#:## ';' expected.",
           "range_error:L#:## Internal error compiling expression: Maximum call stack size exceeded; L#:## Internal error compiling expression: Maximum call stack size exceeded",
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error(\"base constructor\");",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { (function() {}(...iter)); });"
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error(\"base constructor\");"
         ]
       },
       {
@@ -2825,18 +2825,18 @@
         "id": "demasked-native-assertion",
         "issues": ["#2962"],
         "label": "De-masked native assertion failure (Test262Error rendered by the #2962 standalone exception renderer) — real assertion mismatch, re-triage by feature path",
-        "count": 121,
+        "count": 119,
         "statuses": {
           "pass": 0,
-          "fail": 121,
+          "fail": 119,
           "compile_error": 0,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 121,
+          "total": 119,
           "host_free_pass": 0
         },
         "error_categories": {
-          "assertion_fail": 121
+          "assertion_fail": 119
         },
         "sample_files": [
           "test/language/expressions/compound-assignment/S11.13.2_A5.2_T1.js",
