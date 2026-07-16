@@ -109,9 +109,15 @@ progresses past the trap but needs closed-struct property EXPANDO writes
 Unit tests: `tests/issue-3317.test.ts` (11/11, non-vacuous direct
 compile+run). Related suites re-run green: issue-3170-fromindex (21),
 issue-1360, issue-3169 (16), issue-1461-standalone-{search,reduce}-arraylike,
-issue-2583-any-array-method-brand — 102 tests total. issue-2036.test.ts has
+issue-2583-any-array-method-brand — 113 tests total. issue-2036.test.ts has
 7 pre-existing failures IDENTICAL on pristine main (verified side-by-side;
 its "refuses loudly" expectations were retired by #3169's refusal-set
-emptying — flagged to the tech lead, not caused here). Full
-includes/indexOf/lastIndexOf dir sweep diffed branch-vs-main (process-level
-runs) for zero regressions.
+emptying — flagged to the tech lead, not caused here).
+
+Full includes/indexOf/lastIndexOf dir sweep, branch vs pristine main
+(same-methodology standalone runs, 422 comparable files): **+11 fail→pass,
+0 regressions** (pass 265 → 276). An earlier blanket assert_throws-bail skip
+regressed `-9-b-i-31`/`-8-b-i-31` (element-accessor throws behind a plain
+closed-struct length, passing on main via the legacy bail's coincidental
+"not yet callable" TypeError) — recovered by the
+`receiverHasPlainClosedStructLength` narrowing.
