@@ -1,7 +1,9 @@
 ---
 id: 3303
 title: "CI: add a PR-scoped regressions-allow mechanism for honest verdict-logic reclassifications (unifies the #1668/#1897/#3086 gates, unblocks #3104's landing without the temporary-lever dance)"
-status: ready
+status: done
+assignee: ttraenkler/sendev-3303
+completed: 2026-07-16
 created: 2026-07-16
 priority: high
 feasibility: hard
@@ -177,3 +179,101 @@ so the allowance is self-documenting in `git blame`/PR review.)
 - No change to any committed baseline file as part of this PR.
 - `#3104`/`#3286` re-evaluated against the new mechanism as a FOLLOW-UP
   decision, not bundled into this PR.
+
+## Implementation Notes (2026-07-16, sendev-3303)
+
+What landed, and WHY each piece is shaped the way it is:
+
+1. **`scripts/lib/change-scope.mjs` — `changeSetNumericAllowances()` +
+   `parseFrontmatterCountReason()`** (new, purpose-built). The existing
+   `changeSetAllowances()` is list-of-paths shaped (`parseFrontmatterList`
+   cannot express a nested `count:`/`reason:` mapping), so extending it would
+   have contorted both call sites; the new reader reuses the SAME
+   `changedPaths()` change-set scoping, which is where the PR-scoping property
+   actually lives. `reason` is REQUIRED — a declaration missing a
+   positive-integer `count` or non-empty `reason` is reported as `invalid`
+   (loud warning downstream) and grants nothing. Block form only, frontmatter
+   only (a yaml example in an issue BODY — like the one in this file — parses
+   as absent; pinned by test).
+
+2. **`scripts/diff-test262.ts`** — `evaluateRebaseGate()` (pure, exported,
+   #1943-style) now carries the whole rebase-mode verdict:
+   - allowance present + `regressionsWasmChange <= count` → excusal note,
+     drift-tolerance AND bucket checks superseded (total ≤ ceiling ⇒ every
+     bucket's sum fits under it);
+   - allowance present + above the count → loud `GATE FAIL: regressions-allow
+     ceiling exceeded` (ceiling semantics — reality exceeding the declaration
+     is itself signal, re-measure and re-declare);
+   - no allowance → the pre-existing #3086 tolerance-25 + bucket-50 checks,
+     byte-identical messages (issue-2096 tests still pin them).
+   The allowance is read **lazily inside the rebase-mode branch only** —
+   deliberate containment: it has ZERO effect unless the same PR also bumps
+   `oracle_version` forward (or CI sets `ORACLE_REBASE=1`), so an ordinary PR
+   cannot use a declared allowance to sneak regressions past the
+   net/ratio/bucket gate. The raw printed `Regressions with wasm-hash change:
+   N` line is NEVER altered — the guards' fallback parse stays honest.
+   `REGRESSIONS_ALLOW_FILE` env reads the declaration from one explicit file
+   (hermetic test hook + emergency lever); `/dev/null` disables. The #3189
+   trap ratchet runs before and independent of this branch — untouched.
+
+3. **`test262-sharded.yml` #1668 + #1897 guards — the structural fix.** Both
+   now treat diff-test262.ts's exit code as **authoritative on PASS**:
+   - exit >1 → propagate (script crash / refusal), unchanged;
+   - exit 0 → guard passes regardless of the raw count (the script already
+     encoded net/ratio/bucket + #3086 rebase tolerance + #3303 allowance +
+     #3189 trap ratchet);
+   - exit 1 → the coarse threshold (200 raw / net < −15) applies EXACTLY as
+     before.
+   Deliberately NOT full exit-code delegation (fail on exit 1): the script's
+   normal-mode gate (net<0 / ratio≥10%) is far stricter than the guards'
+   coarse thresholds, and importing it into the required `merge shard
+   reports` check would park every PR on ordinary baseline drift — the
+   merge-queue-unsafe whole-tree-gate failure mode. In non-rebase mode
+   exit 0 ⇒ net ≥ 0 ⇒ both guards passed anyway, so ordinary PRs see zero
+   behaviour change; the only new pass shape is a deliberate re-baseline the
+   script approved (which the guards previously vetoed — the disagreement
+   this issue found).
+
+4. **`merge-report` checkout `fetch-depth: 2`** — load-bearing. The guards run
+   in that job; at the default depth 1 the synthetic merge commit's parents
+   are unreachable, `resolveChangeBase`'s ci-merge-parent arm (`HEAD^1`)
+   cannot resolve, and the allowance would be silently unreadable in exactly
+   the job that gates the merge queue (merge_group AND the post-merge push
+   run, whose green `merge shard reports` is what lets `promote-baseline`
+   re-seed). The regression-gate job already checks out at depth 0.
+
+5. **Tests (`tests/issue-3303.test.ts`, 32 tests, wired into ci.yml's quality
+   step alongside issue-3004)**: parser edge cases; pure-gate ceiling
+   exactness (30/30 passes, 31/30 fails); CLI end-to-end in rebase mode
+   (exact-count pass, +1 fail, raw-count honesty, no-allowance tolerance,
+   same-oracle inertness, trap-ratchet immunity, malformed-declaration
+   warning); the REAL git change-set read in a temp repo (untracked issue
+   file, LOC_GATE_BASE=HEAD); and a workflow-agreement harness that extracts
+   the two guards' actual `run:` bash from the YAML and executes it against
+   canned diff outputs (all 8 exit-code x raw-count combinations), so a
+   future YAML edit that breaks the exit-code contract fails `quality`
+   instead of silently re-wedging the queue. `tests/issue-2096.test.ts`
+   pins `REGRESSIONS_ALLOW_FILE=/dev/null` so its rebase-mode fixtures stay
+   hermetic once a real PR (e.g. #3104's landing) carries an ambient
+   allowance in its diff.
+
+6. **`scripts/check-verdict-oracle-bump.mjs` advisory text** updated: the
+   clean path is now "forward-bump auto-rebases (#3086); declare
+   `regressions-allow:` when the reclassification exceeds the 25-test
+   tolerance" (the old text told devs to land with `ORACLE_REBASE=1`, which
+   nothing in CI plumbs).
+
+Heads-up for the #3286 landing decision (NOT handled here): a large honest
+reclassification will also lower the standalone PASS COUNT, so the #2097
+absolute high-water floor (`benchmarks/results/test262-standalone-highwater.json`,
+checked by `check-standalone-highwater.mjs` in the same required job) may trip
+independently of the regression gates. If #3104's flips include standalone
+passes beyond that floor's tolerance, the landing PR must also adjust the
+committed high-water file (deliberately, in-diff, reviewable) — the
+regressions-allow ceiling does not and should not cover an absolute-floor
+gate.
+
+Follow-up candidates: the #3003 `VERDICT_SIGNAL_RE` false-negative (runtime
+verdict-logic changes inside shim bodies, e.g. #3104's `assert_throws`
+rewrite, are not matched) remains open, as noted in this issue's problem
+statement.
