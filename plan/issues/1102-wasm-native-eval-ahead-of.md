@@ -3,14 +3,15 @@ id: 1102
 title: "Wasm-native eval: ahead-of-time compilation strategy for eval() and Function()"
 status: ready
 created: 2026-04-12
-updated: 2026-04-12
-priority: medium
+updated: 2026-07-16
+priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: eval
 goal: spec-completeness
-sprint: Backlog
+model: fable
+sprint: current
 required_by: [1584]
 es_edition: ES5
 ---
