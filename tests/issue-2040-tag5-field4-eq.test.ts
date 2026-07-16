@@ -31,17 +31,20 @@ async function runStandalone(src: string, opts?: { tag5ValueEqClassifier?: boole
 }
 
 // (#2141 S2 / #2626) The classifier arms are now IN-TREE behind the
-// `tag5ValueEqClassifier` CompileOption (default OFF = legacy). The S2
+// `tag5ValueEqClassifier` CompileOption. The S2
 // root-cause work (2026-07-04) disproved the "dstr lowering relies on
 // always-false tag-5 eq" theory: the −162 eject was the classifier UNMASKING
 // latent failures — the eager-buffer generator-expression fixture ran its
 // body at creation (`iterations` already 1), and the legacy comparator's
 // fake-NaN self-inequality made `isSameValue` vacuously TRUE over lie-boxed
 // operands. With the #3032 lazy-first-resume fix the dstr canary stays green
-// with the classifier force-enabled. The previously `it.skip`ped cases below
-// now run WITH the flag; the default stays off until the remaining #3032
-// waves (method generators, paramful expressions) land and the floor A/B
-// clears (#2141 S3).
+// with the classifier force-enabled.
+//
+// (#2040 A1 DEFAULT-FLIP, 2026-07-16) The remaining #3032 waves landed
+// (W3 TDZ-native-threading PR #3115, #3302 capturing expressions PR #3126,
+// W4 method generators PR #3136), so the classifier is now DEFAULT-ON —
+// `CLASSIFIER_ON` below is redundant but kept to document which cases need
+// the classifier arms; the "default" cases at the bottom assert the flip.
 const CLASSIFIER_ON = { tag5ValueEqClassifier: true };
 
 describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", () => {
@@ -136,5 +139,50 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     expect(
       await runStandalone(`export function main(): number { const a:any=23; const b:any=23.0; return (a==b)?1:0; }`),
     ).toBe(1);
+  });
+
+  // ── #2040 A1 default-flip: classifier semantics WITHOUT the option ─────
+  it("DEFAULT: boxed-number self-eq is honest (a!==a false after 1/a)", async () => {
+    expect(
+      await runStandalone(
+        `function f(a:any){const _=1/a;return a!==a;} export function main(): number { return f(5)?1:0; }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("DEFAULT: object identity === via tag-5 boxes is true", async () => {
+    expect(
+      await runStandalone(
+        `export function main(): number { const p:any={x:1}; const o=Object.create(p); return (Object.getPrototypeOf(o)===p)?1:0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("OPT-OUT: tag5ValueEqClassifier:false is still honored (emits the legacy arm)", async () => {
+    // The RESULT of this shape is identical either way on current main (the
+    // operand is honestly boxed, so both regimes answer through the same
+    // non-tag-5 path) — what this locks is the SEAM: the option must still
+    // reach the emitter, so opting out produces a different `__any_*_eq`
+    // helper body (legacy string-only arm) than the default (classifier
+    // arms). Byte-compare the two modules to prove the flag is plumbed.
+    const src = `function f(a:any){const _=1/a;return a!==a;} export function main(): number { return f(5)?1:0; }`;
+    const on = await compile(src, { target: "standalone" } as never);
+    const off = await compile(src, { target: "standalone", tag5ValueEqClassifier: false } as never);
+    if (!on.success || !off.success) throw new Error("compile error in opt-out seam probe");
+    expect(Buffer.compare(Buffer.from(on.binary), Buffer.from(off.binary))).not.toBe(0);
+    // And the opt-out module still runs with the (shape-identical) result.
+    const { instance } = await WebAssembly.instantiate(off.binary, {});
+    expect((instance.exports as { main(): unknown }).main()).toBe(0);
+  });
+
+  it("HOST-LANE: the flip is byte-inert outside standalone/wasi", async () => {
+    // The emit gate (any-helpers.ts tag5ValueEqThen) only builds the
+    // classifier arms under standalone/wasi — a JS-host compile must be
+    // byte-identical whether the option is on or off.
+    const src = `function f(a:any){const _=1/a;return a!==a;} export function main(): number { return f(5)?1:0; }`;
+    const on = await compile(src, { tag5ValueEqClassifier: true } as never);
+    const off = await compile(src, { tag5ValueEqClassifier: false } as never);
+    if (!on.success || !off.success) throw new Error("compile error in host-lane identity probe");
+    expect(Buffer.compare(Buffer.from(on.binary), Buffer.from(off.binary))).toBe(0);
   });
 });
