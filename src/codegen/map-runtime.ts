@@ -1323,11 +1323,7 @@ export function ensureMapGroupBy(ctx: CodegenContext): number {
             { op: "local.get", index: 8 },
             { op: "ref.is_null" },
             ...((undefinedSingletonActive(ctx) && ctx.anyValueTypeIdx >= 0
-              ? [
-                  { op: "local.get", index: 8 },
-                  { op: "ref.test", typeIdx: ctx.anyValueTypeIdx },
-                  { op: "i32.or" },
-                ]
+              ? [{ op: "local.get", index: 8 }, { op: "ref.test", typeIdx: ctx.anyValueTypeIdx }, { op: "i32.or" }]
               : []) satisfies Instr[]),
             {
               op: "if",
