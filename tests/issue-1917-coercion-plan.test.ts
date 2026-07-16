@@ -67,9 +67,18 @@ describe("#1917 coercionPlan — numeric / box-unbox table", () => {
     expect(ops(coercionPlan(anyref, ext, H)!.instrs)).toEqual(["extern.convert_any"]);
   });
 
-  it("externref → anyref/eqref is any.convert_extern", () => {
+  it("externref → anyref is any.convert_extern; → eqref adds the #2878 eq-narrowing cast", () => {
     expect(ops(coercionPlan(ext, anyref, H)!.instrs)).toEqual(["any.convert_extern"]);
-    expect(ops(coercionPlan(ext, { kind: "eqref" }, H)!.instrs)).toEqual(["any.convert_extern"]);
+    // (#2878, updated by #3327) `any.convert_extern` yields ANYREF — the
+    // SUPERtype of eqref — so the bare conversion this pin originally froze was
+    // one representation step too wide: a consuming `struct.set`/`local.set`
+    // into an eqref slot failed Wasm validation ("expected eqref, found
+    // anyref" — the standalone `__set_member_*` / `__call_toString` invalid-
+    // binary bucket). The row now narrows with a nullable `ref.cast` to the
+    // abstract `eq` heap type (null passes through; every GC struct/array/i31
+    // is an eq-subtype). See tests/issue-2878-externref-eqref-narrow.test.ts
+    // for the dedicated coverage; this sibling pin was missed by that commit.
+    expect(ops(coercionPlan(ext, { kind: "eqref" }, H)!.instrs)).toEqual(["any.convert_extern", "ref.cast_null"]);
   });
 
   it("externref/ref_extern spellings are treated as the same type (no-op)", () => {
