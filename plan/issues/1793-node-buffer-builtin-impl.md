@@ -5,6 +5,8 @@ horizon: m
 status: done
 completed: 2026-07-16
 assignee: ttraenkler/fable-epsilon
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 sprint: current
 created: 2026-06-03
 updated: 2026-07-16
