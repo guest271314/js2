@@ -1,21 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunHost as compileAndRun } from "./helpers/compile.js";
 
 // #2002/#2003/#2004 — string-method spec-conformance trio:
 //   - startsWith/endsWith/includes must honour the position/endPosition arg
 //   - charCodeAt out-of-range returns NaN (not a trap)
 //   - codePointAt out-of-range observably yields undefined (so `?? x` fires)
-async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
-
 describe("#2002 — startsWith/endsWith/includes honour the position argument", () => {
   it('"hello".startsWith("ll", 2) === true', async () => {
     const e = await compileAndRun(`export function test(): boolean { return "hello".startsWith("ll", 2); }`);

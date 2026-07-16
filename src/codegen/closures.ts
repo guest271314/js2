@@ -1572,6 +1572,135 @@ export function genBodyReferencesThis(node: ts.Node): boolean {
 }
 
 /**
+ * (#3132 S2) True when `method` (an async-gen method being considered for the
+ * native drive) sits inside an enclosing FUNCTION whose scope declares a name
+ * that is ALSO declared at module scope, and the method body references that
+ * name. In that shadowing shape the nested-class/object-literal capture
+ * promotion mis-binds the method body to the MODULE-scope global while sibling
+ * closures (e.g. a `.then` callback) bind the shadowing function-local — two
+ * divergent storages for one JS binding (a PRE-EXISTING bug, observable on the
+ * JS-host lane today; test262's dstr `ary-elision-iter` template hits it via
+ * the wrapper's partial var-hoisting). Until the promotion bug is fixed, the
+ * carrier PRE-PASS treats such a method as non-drivable so the module keeps
+ * the host Promise pipeline — `.then` callbacks stay host-routed and the
+ * divergence is not newly exposed to the standalone floor (correct-or-legacy).
+ * Over-approximates in the exclusion direction (names declared ANYWHERE in the
+ * enclosing functions count, and own body locals are not filtered) — a false
+ * positive merely keeps a module on the legacy lane.
+ */
+export function methodBodyRefsShadowedOuterLocal(method: ts.FunctionLikeDeclaration): boolean {
+  if (!method.body) return false;
+  // Enclosing function-like chain (class/obj-literal at module scope → none).
+  const enclosing: ts.FunctionLikeDeclaration[] = [];
+  let sf: ts.SourceFile | undefined;
+  let p: ts.Node | undefined = method.parent;
+  while (p) {
+    if (ts.isSourceFile(p)) {
+      sf = p;
+      break;
+    }
+    if (
+      ts.isFunctionDeclaration(p) ||
+      ts.isFunctionExpression(p) ||
+      ts.isArrowFunction(p) ||
+      ts.isMethodDeclaration(p) ||
+      ts.isConstructorDeclaration(p) ||
+      ts.isGetAccessorDeclaration(p) ||
+      ts.isSetAccessorDeclaration(p)
+    ) {
+      enclosing.push(p);
+    }
+    p = p.parent;
+  }
+  if (sf === undefined || enclosing.length === 0) return false;
+
+  const addBindingNames = (name: ts.BindingName, out: Set<string>): void => {
+    if (ts.isIdentifier(name)) {
+      out.add(name.text);
+      return;
+    }
+    for (const el of name.elements) {
+      if (ts.isBindingElement(el)) addBindingNames(el.name, out);
+    }
+  };
+
+  // Module-scope declared names.
+  const moduleNames = new Set<string>();
+  for (const st of sf.statements) {
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) addBindingNames(d.name, moduleNames);
+    } else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) {
+      moduleNames.add(st.name.text);
+    }
+  }
+  if (moduleNames.size === 0) return false;
+
+  // Names declared anywhere within the enclosing functions (over-approx —
+  // includes nested scopes; excludes the method's own subtree).
+  const outerDecls = new Set<string>();
+  for (const fn of enclosing) {
+    for (const prm of fn.parameters) addBindingNames(prm.name, outerDecls);
+    const walk = (n: ts.Node): void => {
+      if (n === method) return;
+      if (ts.isVariableDeclaration(n)) addBindingNames(n.name, outerDecls);
+      else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) outerDecls.add(n.name.text);
+      forEachChild(n, walk);
+    };
+    if (fn.body) walk(fn.body);
+  }
+  if (outerDecls.size === 0) return false;
+
+  // Free-identifier scan of the method body (property names skipped).
+  let found = false;
+  const scan = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(n)) {
+      const par = n.parent;
+      const isPropertyName =
+        (ts.isPropertyAccessExpression(par) && par.name === n) ||
+        (ts.isPropertyAssignment(par) && par.name === n) ||
+        ((ts.isMethodDeclaration(par) || ts.isGetAccessorDeclaration(par) || ts.isSetAccessorDeclaration(par)) &&
+          par.name === n);
+      if (!isPropertyName && outerDecls.has(n.text) && moduleNames.has(n.text)) {
+        found = true;
+        return;
+      }
+    }
+    forEachChild(n, scan);
+  };
+  scan(method.body);
+  return found;
+}
+
+/**
+ * (#3132 S2) True when the body references `super` (only) from its own scope —
+ * same descend/stop rules as {@link genBodyReferencesThis}, but `this` reads do
+ * NOT count. The async-gen METHOD drive threads the receiver (`this`, the
+ * synthetic param 0) into the frame and restores it by name in the resume fn,
+ * so a `this`-reading method body IS drivable; `super` needs a home-object
+ * binding the resume fn does not carry, so it stays legacy (correct-or-legacy).
+ */
+export function genBodyReferencesSuper(node: ts.Node): boolean {
+  if (node.kind === ts.SyntaxKind.SuperKeyword) return true;
+  if (
+    ts.isFunctionExpression(node) ||
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isClassLike(node)
+  ) {
+    return false; // own `super` binding — not the generator method's
+  }
+  let found = false;
+  forEachChild(node, (child) => {
+    if (!found && genBodyReferencesSuper(child)) found = true;
+  });
+  return found;
+}
+
+/**
  * (#3046) True when the function-expression / arrow `fn` references `this`
  * from ITS OWN scope: descend through nested arrows (they inherit `fn`'s
  * `this`), but stop at nested function expressions / declarations / methods /
@@ -2069,6 +2198,34 @@ export function compileArrowAsClosure(
       /* synthesizedThis */ false,
       [{ name: "__self" }],
     );
+    // (#3302) CAPTURING fn-expr generator: hand the resume function the
+    // `__self` capture-struct rehydration recipe. The value-capture entries
+    // come from the prologue-recorded `selfCaptureLayout` (fields 1..N of the
+    // closure struct, exactly what the lifted body materialized above); the
+    // TDZ flag boxes follow at fields N+1..N+K (the #1177 prologue
+    // invariant). `boxedCaptures`/`boxedTdzFlags` snapshots re-apply the same
+    // cell registrations to the resume fctx so reads/writes/TDZ checks deref
+    // the SHARED cells — write-through visibility to the enclosing frame.
+    if (nativeGenExprInfo && captures.length > 0 && liftedFctx.selfCaptureLayout) {
+      const tdzFlaggedForGen = captures.filter((c) => c.hasTdzFlag);
+      const i32CellForGen = tdzFlaggedForGen.length > 0 ? getOrRegisterRefCellType(ctx, { kind: "i32" }) : -1;
+      nativeGenExprInfo.selfCaptureRehydration = {
+        selfParamName: "__self",
+        structTypeIdx: liftedFctx.selfCaptureLayout.structTypeIdx,
+        castToTypeIdx: liftedFctx.selfCaptureLayout.castToTypeIdx,
+        entries: liftedFctx.selfCaptureLayout.entries,
+        boxedCaptures: Array.from(liftedFctx.boxedCaptures ?? []).map(([name, b]) => ({
+          name,
+          refCellTypeIdx: b.refCellTypeIdx,
+          valType: b.valType,
+        })),
+        tdzFlags: tdzFlaggedForGen.map((c, ti) => ({
+          name: c.name,
+          fieldIdx: 1 + captures.length + ti,
+          refCellTypeIdx: i32CellForGen,
+        })),
+      };
+    }
   }
 
   if (

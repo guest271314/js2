@@ -45,6 +45,20 @@ export interface LocalsSnapshot {
   readonly mapEntries: ReadonlyArray<readonly [string, number]>;
   /** `boxedCaptures` names present at snapshot time (to drop added ones). */
   readonly boxedNames: ReadonlySet<string>;
+  /**
+   * (#3032) Exact `boxedTdzFlags` / `tdzFlagLocals` entries at snapshot time
+   * (`null` when the map was absent). The call-site TDZ-flag prepend
+   * (call-identifier.ts #1205 Stage 3 fresh-box arm) allocates a
+   * `__tdz_box_<name>` local and RE-AIMS both maps at it — the exact same
+   * mutation class as the closure-capture boxing above, but on the TDZ maps,
+   * which the pre-#3032 snapshot did not cover. A rolled-back probe then left
+   * both maps pointing at a truncated slot, and the committed re-compile's
+   * `existing` branch baked `local.get <stale slot>` — a slot later re-allocated
+   * at a DIFFERENT type (invalid wasm: `call[k] expected (ref null $cell)`;
+   * surfaced by a for-of over a TDZ-flagged-capture nested generator call).
+   */
+  readonly tdzBoxEntries: ReadonlyArray<readonly [string, { refCellTypeIdx: number; localIdx: number }]> | null;
+  readonly tdzFlagEntries: ReadonlyArray<readonly [string, number]> | null;
 }
 
 export function snapshotLocals(fctx: FunctionContext): LocalsSnapshot {
@@ -52,6 +66,8 @@ export function snapshotLocals(fctx: FunctionContext): LocalsSnapshot {
     localsLen: fctx.locals.length,
     mapEntries: Array.from(fctx.localMap.entries()),
     boxedNames: fctx.boxedCaptures ? new Set(fctx.boxedCaptures.keys()) : EMPTY_SET,
+    tdzBoxEntries: fctx.boxedTdzFlags ? Array.from(fctx.boxedTdzFlags.entries()) : null,
+    tdzFlagEntries: fctx.tdzFlagLocals ? Array.from(fctx.tdzFlagLocals.entries()) : null,
   };
 }
 
@@ -89,6 +105,30 @@ export function restoreLocals(fctx: FunctionContext, snap: LocalsSnapshot): void
   if (fctx.boxedCaptures) {
     for (const name of fctx.boxedCaptures.keys()) {
       if (!snap.boxedNames.has(name)) fctx.boxedCaptures.delete(name);
+    }
+  }
+  // (#3032) Restore `boxedTdzFlags` / `tdzFlagLocals` to their EXACT snapshot
+  // state — the call-site TDZ-flag prepend both ADDS entries and RE-AIMS
+  // existing ones (`tdzFlagLocals` from the raw i32 flag local to the fresh
+  // box local), so like `localMap` above the full entry set must be restored,
+  // not just added keys dropped. A leaked re-aim leaves the map pointing at a
+  // truncated slot that a later alloc re-uses at a different type.
+  if (fctx.boxedTdzFlags || snap.tdzBoxEntries) {
+    if (snap.tdzBoxEntries === null) {
+      fctx.boxedTdzFlags = undefined;
+    } else {
+      if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+      fctx.boxedTdzFlags.clear();
+      for (const [name, entry] of snap.tdzBoxEntries) fctx.boxedTdzFlags.set(name, entry);
+    }
+  }
+  if (fctx.tdzFlagLocals || snap.tdzFlagEntries) {
+    if (snap.tdzFlagEntries === null) {
+      fctx.tdzFlagLocals = undefined;
+    } else {
+      if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+      fctx.tdzFlagLocals.clear();
+      for (const [name, idx] of snap.tdzFlagEntries) fctx.tdzFlagLocals.set(name, idx);
     }
   }
   // Prune any temp-free-list entries that now point past the truncated vector.

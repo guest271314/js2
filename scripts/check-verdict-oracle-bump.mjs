@@ -275,8 +275,14 @@ function main() {
   log("");
   log("  Do ONE of:");
   log(`    (a) Bump ORACLE_VERSION in ${ORACLE_FILE} (increment the integer + append to`);
-  log("        ORACLE_VERSION_HISTORY) and land the PR with ORACLE_REBASE=1 so the diff gate");
-  log("        accepts the cross-version re-baseline. This is the clean path.");
+  log("        ORACLE_VERSION_HISTORY). A FORWARD bump auto-rebases the diff gate (#3086 — no env");
+  log("        var needed; ORACLE_REBASE=1 is only for backward/local diffs). If the intentional");
+  log("        reclassification exceeds the 25-test rebase drift tolerance, ALSO declare a");
+  log("        PR-scoped ceiling in your PR's own issue file frontmatter (#3303):");
+  log("          regressions-allow:");
+  log("            count: <N>");
+  log('            reason: "<why these flips are honest — cite the issue>"');
+  log("        This is the clean path.");
   log("    (b) If you have CONFIRMED this change flips ZERO existing rows, add an in-diff comment");
   log("        `// oracle-version-exempt: <reason>` next to the change to consciously override.");
   log("");

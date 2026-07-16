@@ -1,10 +1,11 @@
 ---
 id: 2903
 title: "standalone: residual env.__make_callback leak is host-backed builtin methods (Promise.then/.catch, Iterator helpers), NOT a callback-representation gap"
-status: ready
+status: done
+completed: 2026-07-16
 sprint: current
 created: 2026-06-30
-updated: 2026-07-13
+updated: 2026-07-16
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -40,6 +41,25 @@ coercion-sites-allow:
 ---
 
 # #2903 — residual `env::__make_callback` leak: root cause + decomposition
+
+## Reconcile note (2026-07-16, fable-interp)
+
+**Closed as drained** — probe-verified on current main (`bdb8491ee1`+):
+
+- All originally-cited `__make_callback` leak shapes are now **host-free**:
+  `built-ins/Iterator/prototype/find/predicate-returns-truthy.js` (zero fn
+  imports), both `named-dflt-params-ref-prior.js` async shapes (only the
+  harness `print` remains — not a compiler leak), dyn-view TypedArray HOFs
+  (`forEach`/`find` via #3162, done), `TypedArray.join`, `sort(comparator)`,
+  and the `any`-held TA `map` (host-free AND value-correct).
+- Sub-fronts landed: 1 (then/catch de-leak), finally, 2 (eager Iterator
+  helpers), R1 (non-inline executor), R3/R3b (lazy helpers + flatMap),
+  R4/R4b/R4c (TypedArray scalar HOFs + map/filter + clamp).
+- The two named remainders are explicitly **deferred elsewhere**: R2
+  (`class X extends Promise` statics) → the #2622 builtin-subclass track
+  (measured zero-yield, species load-bearing on every row); the `any`-held
+  clamp-vs-truncate distinction → value-rep substrate (needs a per-instance
+  kind tag). Neither is actionable under this issue.
 
 ## TL;DR (correct the framing first)
 
@@ -468,10 +488,11 @@ Promise_then`; `P.reject(7).catch` leaks `..., Promise_catch` — while plain
 (~L10112) explicitly excludes `isPromiseSubclassReceiver` — so subclass statics
 fall to the `Promise_{method}` / symbol-derived host import.
 
-**The 24 `built-ins/Promise/**` `extends Promise` tests, standalone baseline:**
-3 pass (all `prototype/finally/subclass-*` — already host-free via the finally
+**The 24 `built-ins/Promise/**` `extends Promise`tests, standalone baseline:**
+3 pass (all`prototype/finally/subclass-\*`— already host-free via the finally
 sub-front, untouched by this arm), 19 fail, 2 compile_error. EVERY failing row
-asserts constructor-chain/species that a plain native `$Promise` cannot satisfy:
+asserts constructor-chain/species that a plain native`$Promise` cannot satisfy:
+
 - `{resolve,reject,race,any,all,allSettled,withResolvers,try}/ctx-ctor.js` →
   `instance instanceof SubPromise === true`, `instance.constructor === SubPromise`,
   subclass `callCount === 1`, `typeof executor === 'function'` (NewPromiseCapability
@@ -546,7 +567,7 @@ via the already-working `__extern_get_idx`/`__extern_length` + `__apply_closure`
 (mirror `\_*hof**`/ the eager`**iter*hof*\*`bodies), and route the typed
 callback path there instead of the refusal stub /`**make_callback`. `map`/
 `filter`need typed-RESULT construction (a new typed vec with element-width
-wrapping per #2593) — split as **R4b**. Note: WAT symbolic-name grep is
+wrapping per #2593) — split as **R4b\*\*. Note: WAT symbolic-name grep is
 unreliable for confirming the runtime call target (numeric`call N` encoding,
 per the TL;DR trap) — use runtime instrumentation or read the proto-glue member
 routing directly.

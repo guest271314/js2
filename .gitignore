@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 dist/playground/
 dist/pages/
@@ -34,6 +34,7 @@ benchmarks/results/test262-current.jsonl
 benchmarks/results/test262-results.jsonl
 .pnpm-store/
 .claude/settings.local.json
+.claude/max-load
 .claude/worktrees/
 .claude/agents/
 .claude/agent-status/

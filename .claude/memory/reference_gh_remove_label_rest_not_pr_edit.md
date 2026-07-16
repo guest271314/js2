@@ -31,3 +31,10 @@ Verified 2026-06-20 removing `hold` from `loopdive/js2` PR #1787 — `gh pr edit
 reported success but left `["hold"]`; the REST DELETE removed it and it stayed
 removed (no automation was re-adding it; the gh bug was the whole story). Relevant
 when un-parking a held PR before enqueue.
+
+**Automation hazard (2026-07-16, PR #3111):** any bot whose dedupe/state check
+is keyed on a label that gets *added* via `gh pr edit` silently breaks — the
+label never sticks, so the "already handled" check always misses. The
+enqueue-bot stale-draft nag reposted the identical comment **38 times** this
+way. Fixed in PR #3139: marker-comment-body dedupe as the floor + REST label
+add. When writing bot logic, never gate solely on a label applied via gh CLI.

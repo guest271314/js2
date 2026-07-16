@@ -16,7 +16,6 @@
 //
 // What REMAINS `notImplemented` on LinearEmitter is only the genuinely
 // representation-divergent families, each annotated with the covering issue:
-//   - vec CONSTRUCTION (emitVecNewFixed) — bump-alloc store side (#1804)
 //   - aggregates (emitAggregateNew/emitFieldGet/emitFieldSet) — WasmGC
 //     `struct.*`; linear lowers objects to a memory layout (#2956)
 //   - ref-cells (emitRefCellNew/Get/Set) — 1-field mutable struct (#2953)
@@ -25,6 +24,8 @@
 //   - typed-funcref call (emitCallRef) — `call_ref` over a reference-typed
 //     funcref; the linear backend dispatches through a table, not a GC
 //     funcref (#2956, closures)
+//   - Promise aggregates — WasmGC `$Promise` structs become linear records
+//     once #2956 defines their handle and field representation
 //   - boxing / strings / closures — routed through the resolver in lower.ts,
 //     not this emitter (strings: #679 dual backend; boxing/closures: #2956)
 //
@@ -41,6 +42,8 @@
 //                       linear leaves an i32. lower.ts never inspects which.)
 //   - emitElemGet     : dataBase + i32 index on stack → element. Address =
 //                       dataBase + index*stride; load with the element's type.
+//   - emitVecNewFixed : number elements on stack → canonical `__arr_new`
+//                       allocation + indexed f64-slot initialization (#2956 L2).
 //
 // Contrast with WasmGcEmitter: there length is `struct.get $vec $length`,
 // data is `struct.get $vec $data` (a typed array ref), element is `array.get`.
@@ -57,6 +60,15 @@ import type { LinearVecLowering } from "./handles.js";
 const LINEAR_ARRAY_LEN_OFFSET = 8;
 /** Byte offset where the element data region begins (after the 16B header). */
 const LINEAR_ARRAY_DATA_OFFSET = 16;
+/** Direct linear array literals reserve this minimum capacity. */
+const LINEAR_ARRAY_MIN_CAPACITY = 16;
+
+export interface LinearEmitterOptions {
+  /** Existing `__arr_new(cap) -> ptr` runtime function. */
+  readonly vecNewFuncIdx?: number;
+  /** Flag-gated `(value:f64, ptr:i32, index:i32) -> void` initializer. */
+  readonly vecInitF64FuncIdx?: number;
+}
 
 /** Element byte size (stride) for a linear-memory element ValType. */
 function linearStride(elem: ValType): number {
@@ -101,6 +113,14 @@ function notImplemented(method: string): never {
  */
 export class LinearEmitter implements BackendEmitter<Instr[]> {
   readonly backend = "linear" as const;
+  private readonly vecScratchLocals = new Set<number>();
+
+  constructor(private readonly options: LinearEmitterOptions = {}) {}
+
+  /** Absolute local indices whose GC-shaped scratch must become an i32 pointer. */
+  getVecScratchLocalIndices(): readonly number[] {
+    return [...this.vecScratchLocals];
+  }
 
   // #1584: sink = Instr[], same as WasmGc (the linear backend also lowers to
   // the shared `Instr` union). Factory + raw escape hatch are array ops.
@@ -142,13 +162,43 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     } as Instr); // computed-op
   }
 
-  // #1804 — vec construction is not yet implemented for the linear backend.
-  // The read side (len/elem-get) is #1714 scope; the bump-allocated
-  // `[header][len][cap][elements…]` store sequence is a follow-up. WasmGC is
-  // the gate-tested default target, so a loud stub is acceptable here (matches
-  // the other out-of-scope linear stubs).
-  emitVecNewFixed(): void {
-    notImplemented("emitVecNewFixed");
+  // #1804 / #2956 L2 — fixed number-array construction. `lower.ts` has already
+  // pushed e0...eN. Allocate the canonical linear array, then consume values
+  // from the top of the stack and store each at its original index through the
+  // value-first helper. This preserves source order without changing the shared
+  // BackendEmitter contract or requiring one scratch local per element.
+  emitVecNewFixed(layout: LinearVecLowering, count: number, dataScratchLocal: number, out: Instr[]): void {
+    if (!layout) {
+      throw new Error("LinearEmitter: emitVecNewFixed requires a linear vec layout");
+    }
+    if (layout.elementValType.kind !== "f64") {
+      throw new Error(`LinearEmitter: emitVecNewFixed supports f64 elements only; got ${layout.elementValType.kind}`);
+    }
+    const { vecNewFuncIdx, vecInitF64FuncIdx } = this.options;
+    if (vecNewFuncIdx === undefined || vecInitF64FuncIdx === undefined) {
+      throw new Error("LinearEmitter: emitVecNewFixed requires the linear vec runtime");
+    }
+
+    this.vecScratchLocals.add(dataScratchLocal);
+
+    // Stack before: e0 ... eN. Stack after local.set: e0 ... eN, with ptr saved.
+    out.push({ op: "i32.const", value: Math.max(count, LINEAR_ARRAY_MIN_CAPACITY) });
+    out.push({ op: "call", funcIdx: vecNewFuncIdx });
+    out.push({ op: "local.set", index: dataScratchLocal });
+
+    // Consume eN first but write it to slot N, preserving literal order.
+    for (let index = count - 1; index >= 0; index--) {
+      out.push({ op: "local.get", index: dataScratchLocal });
+      out.push({ op: "i32.const", value: index });
+      out.push({ op: "call", funcIdx: vecInitF64FuncIdx });
+    }
+
+    // __arr_new initialized len=0. Publish the completed length atomically
+    // after all slots are initialized, then leave the base pointer as result.
+    out.push({ op: "local.get", index: dataScratchLocal });
+    out.push({ op: "i32.const", value: count });
+    out.push({ op: "i32.store", align: 2, offset: LINEAR_ARRAY_LEN_OFFSET });
+    out.push({ op: "local.get", index: dataScratchLocal });
   }
 
   // ---- core-op families (#2954) — CORE Wasm, byte-identical to WasmGc ------
@@ -252,11 +302,56 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   // emitVecNewFixed already declared above (the read side is #1714 scope; the
   // bump-allocated store sequence is #1804).
 
+  // ref-coercion / null family — nullable references and externref tagging need
+  // the linear value representation planned by #2956. Never leak WasmGC casts.
+  emitNull(): void {
+    notImplemented("emitNull");
+  }
+  emitToExternref(): void {
+    notImplemented("emitToExternref");
+  }
+  emitDowncast(): void {
+    notImplemented("emitDowncast");
+  }
+  emitFromExternref(): void {
+    notImplemented("emitFromExternref");
+  }
+
+  // function materialization — a linear closure carries a table index or
+  // equivalent handle, not a WasmGC funcref (#2956, closures).
+  emitFuncRef(): void {
+    notImplemented("emitFuncRef");
+  }
+
+  // Promise aggregate family — the linear Promise record layout and handle
+  // representation land with the remaining #2956 aggregate work.
+  emitPromiseNew(): void {
+    notImplemented("emitPromiseNew");
+  }
+  emitPromiseStateGet(): void {
+    notImplemented("emitPromiseStateGet");
+  }
+  emitPromiseValueGet(): void {
+    notImplemented("emitPromiseValueGet");
+  }
+
   // typed-funcref call — `call_ref` over a GC funcref (#2956, closures). The
   // linear backend dispatches indirect calls through a table (`call_indirect`),
   // not a reference-typed funcref, so this needs distinct lowering.
   emitCallRef(): void {
     notImplemented("emitCallRef");
+  }
+
+  // closure family — WasmGC wrapper structs become arena records + table
+  // indices in the linear backend (#2956), so no raw struct fallback is valid.
+  emitClosureNew(): void {
+    notImplemented("emitClosureNew");
+  }
+  emitClosureFuncGet(): void {
+    notImplemented("emitClosureFuncGet");
+  }
+  emitCaptureGet(): void {
+    notImplemented("emitCaptureGet");
   }
 
   // struct/object family — WasmGC `struct.new`/`struct.get`/`struct.set`; the

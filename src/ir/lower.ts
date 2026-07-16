@@ -1287,14 +1287,12 @@ export function lowerIrFunctionBody<S>(
             `ir/lower: resolver cannot lower union<${members.map((m) => m.kind).join(",")}> (${func.name})`,
           );
         }
-        const tag = union.tagFor(valueType);
-        // Struct field order: fields at indices tagFieldIdx / valFieldIdx.
-        // For V1 registry, tag=0, val=1, so push tag first, then value.
-        const pushes: Array<() => void> = [];
-        pushes[union.tagFieldIdx] = () => emitter.pushRaw(out, { op: "i32.const", value: tag });
-        pushes[union.valFieldIdx] = () => emitValue(instr.value, out);
-        for (const push of pushes) push();
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: union.typeIdx });
+        if (!emitter.emitBox) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union boxing (${func.name})`);
+        }
+        const boxedValue = emitter.newSink();
+        emitValue(instr.value, boxedValue);
+        emitter.emitBox(union, valueType, boxedValue, out);
         return;
       }
       case "unbox": {
@@ -1333,11 +1331,10 @@ export function lowerIrFunctionBody<S>(
           );
         }
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: union.typeIdx,
-          fieldIdx: union.valFieldIdx,
-        });
+        if (!emitter.emitUnbox) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union unboxing (${func.name})`);
+        }
+        emitter.emitUnbox(union, out);
         return;
       }
       case "tag.test": {
@@ -1386,13 +1383,21 @@ export function lowerIrFunctionBody<S>(
         }
         const tag = union.tagFor(instr.tag);
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: union.typeIdx,
-          fieldIdx: union.tagFieldIdx,
-        });
-        emitter.pushRaw(out, { op: "i32.const", value: tag });
-        emitter.pushRaw(out, { op: "i32.eq" });
+        if (!emitter.emitTagLoad) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union tag loads (${func.name})`);
+        }
+        emitter.emitTagLoad(union, out);
+        emitter.emitConst(
+          {
+            kind: "const",
+            result: null,
+            resultType: null,
+            value: { kind: "i32", value: tag },
+          },
+          func.name,
+          out,
+        );
+        emitter.emitBinary("i32.eq", out);
         return;
       }
       case "dyn.truthy": {
@@ -1584,9 +1589,9 @@ export function lowerIrFunctionBody<S>(
         }
         const liftedIdx = resolver.resolveFunc(instr.liftedFunc);
         // ref.func $lifted, push captures, struct.new <subtype>.
-        emitter.pushRaw(out, { op: "ref.func", funcIdx: liftedIdx });
+        emitter.emitFuncRef(liftedIdx, out);
         for (const cap of instr.captures) emitValue(cap, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: sub.structTypeIdx });
+        emitter.emitClosureNew(sub, instr.captures.length, out);
         return;
       }
       case "closure.cap": {
@@ -1602,12 +1607,8 @@ export function lowerIrFunctionBody<S>(
           throw new Error(`ir/lower: resolver cannot resolve closure subtype for ${func.name}`);
         }
         emitValue(instr.self, out);
-        emitter.pushRaw(out, { op: "ref.cast", typeIdx: sub.structTypeIdx });
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: sub.structTypeIdx,
-          fieldIdx: sub.capFieldIdx(instr.index),
-        });
+        emitter.emitDowncast({ typeIdx: sub.structTypeIdx }, out);
+        emitter.emitCaptureGet(sub, instr.index, out);
         return;
       }
       case "closure.call": {
@@ -1627,21 +1628,17 @@ export function lowerIrFunctionBody<S>(
         emitValue(instr.callee, out);
         for (const a of instr.args) emitValue(a, out);
         emitValue(instr.callee, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: cl.structTypeIdx,
-          fieldIdx: cl.funcFieldIdx,
-        });
+        emitter.emitClosureFuncGet(cl, out);
         // The struct's `func` field is typed as the abstract `funcref`
         // (matches the legacy `getOrCreateFuncRefWrapperTypes` pattern,
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
-        // The struct.get (a2 struct family) + ref.cast (a5 ref-coercion) before
-        // this stay on pushRaw until their families migrate; only the terminal
-        // call_ref is the (a1) call family → typed emitCallRef (byte-identical
-        // {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
-        emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
+        // The function-field read routes through the closure-family hook and
+        // the narrowing cast through the ref-coercion hook. The terminal
+        // call_ref is the (a1) call family → typed emitCallRef
+        // (byte-identical {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
+        emitter.emitDowncast({ typeIdx: cl.funcTypeIdx }, out);
         emitter.emitCallRef(cl.funcTypeIdx, out);
         return;
       }
@@ -2010,7 +2007,7 @@ export function lowerIrFunctionBody<S>(
           op: "local.get",
           index: slotWasmIdx(func.generatorBufferSlot),
         });
-        emitter.pushRaw(out, { op: "ref.null.extern" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fnIdx });
         return;
       }
@@ -2079,7 +2076,7 @@ export function lowerIrFunctionBody<S>(
             funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
           });
         } else if (valueT?.kind === "ref" || valueT?.kind === "ref_null") {
-          emitter.pushRaw(out, { op: "extern.convert_any" });
+          emitter.emitToExternref(out);
         }
         // externref: already the right Wasm type — no coercion.
         emitter.pushRaw(out, { op: "call", funcIdx: setReturnIdx });
@@ -2218,7 +2215,7 @@ export function lowerIrFunctionBody<S>(
           (opTy.kind === "val" && opTy.val.kind === "externref") ||
           (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
         if (!alreadyExternref) {
-          emitter.pushRaw(out, { op: "extern.convert_any" });
+          emitter.emitToExternref(out);
         }
         return;
       }
@@ -2851,9 +2848,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_FULFILLED,
         });
         emitValue(instr.value, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" });
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
+        emitter.emitPromiseNew(promiseTypeIdx, out);
+        emitter.emitToExternref(out);
         return;
       }
       case "async.throw": {
@@ -2869,9 +2866,9 @@ export function lowerIrFunctionBody<S>(
           value: PROMISE_STATE_REJECTED,
         });
         emitValue(instr.reason, out);
-        emitter.pushRaw(out, { op: "ref.null.extern" });
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
-        emitter.pushRaw(out, { op: "extern.convert_any" });
+        emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
+        emitter.emitPromiseNew(promiseTypeIdx, out);
+        emitter.emitToExternref(out);
         return;
       }
       case "await": {
@@ -2904,8 +2901,7 @@ export function lowerIrFunctionBody<S>(
         // Assert S = Instr[].
         const wasmOut = requireInstrSink(out);
         emitValue(instr.operand, out);
-        wasmOut.push({ op: "any.convert_extern" });
-        wasmOut.push({ op: "ref.cast", typeIdx: promiseTypeIdx });
+        emitter.emitFromExternref({ typeIdx: promiseTypeIdx }, out);
         // The next emit needs a scratch local. Reuse the
         // jsBitwiseTmp pattern: allocate lazily into `locals` and
         // remember the index for any further await in the same fn.
@@ -2917,11 +2913,7 @@ export function lowerIrFunctionBody<S>(
           });
         }
         wasmOut.push({ op: "local.tee", index: awaitScratchPromiseIdx });
-        wasmOut.push({
-          op: "struct.get",
-          typeIdx: promiseTypeIdx,
-          fieldIdx: 0,
-        }); // state: i32
+        emitter.emitPromiseStateGet(promiseTypeIdx, out); // state: i32
         // Build:
         //   if state == FULFILLED then
         //     local.get $await_promise
@@ -2940,11 +2932,7 @@ export function lowerIrFunctionBody<S>(
             op: "local.get",
             index: awaitScratchPromiseIdx,
           });
-          rejectedBranch.push({
-            op: "struct.get",
-            typeIdx: promiseTypeIdx,
-            fieldIdx: 1,
-          });
+          emitter.emitPromiseValueGet(promiseTypeIdx, rejectedBranch as unknown as S);
           // #1584 (a4): throw routes through the trait.
           emitter.emitThrow(exnTagIdx, rejectedBranch as unknown as S);
         }
@@ -2952,30 +2940,30 @@ export function lowerIrFunctionBody<S>(
         // PENDING / fall-through marker. Slice 2 (#1373b) replaces with
         // the CPS continuation synthesis once #1326c Phase 1C-B lands.
         const pendingBranch: Instr[] = [{ op: "unreachable" }];
+        const fulfilledBranch: Instr[] = [{ op: "local.get", index: awaitScratchPromiseIdx }];
+        emitter.emitPromiseValueGet(promiseTypeIdx, fulfilledBranch as unknown as S);
+        const unsettledBranch: Instr[] = [{ op: "local.get", index: awaitScratchPromiseIdx }];
+        emitter.emitPromiseStateGet(promiseTypeIdx, unsettledBranch as unknown as S);
+        unsettledBranch.push(
+          { op: "i32.const", value: PROMISE_STATE_REJECTED },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: {
+              kind: "val",
+              type: { kind: "externref" } as ValType,
+            },
+            then: rejectedBranch,
+            else: pendingBranch,
+          },
+        );
         wasmOut.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
         wasmOut.push({ op: "i32.eq" });
         wasmOut.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [
-            { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
-          ],
-          else: [
-            { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
-            { op: "i32.const", value: PROMISE_STATE_REJECTED },
-            { op: "i32.eq" },
-            {
-              op: "if",
-              blockType: {
-                kind: "val",
-                type: { kind: "externref" } as ValType,
-              },
-              then: rejectedBranch,
-              else: pendingBranch,
-            },
-          ],
+          then: fulfilledBranch,
+          else: unsettledBranch,
         });
         return;
       }
@@ -3612,26 +3600,8 @@ export function emitConstInstr(instr: Extract<IrInstr, { kind: "const" }>, out: 
     case "bool":
       out.push({ op: "i32.const", value: v.value ? 1 : 0 });
       return;
-    case "null": {
-      const valTy = instr.resultType ? asVal(instr.resultType) : null;
-      if (valTy && valTy.kind === "ref_null") {
-        out.push({
-          op: "ref.null",
-          typeIdx: (valTy as { typeIdx: number }).typeIdx,
-        });
-        return;
-      }
-      // Slice 7b (#1169f): bare `yield;` lowers to a `gen.push` of
-      // a null externref. The IrConst `{ kind: "null", ty:
-      // irVal({ kind: "externref" }) }` materializes here as a
-      // `ref.null.extern` Wasm op. Same shape the legacy generator
-      // path uses for the "no value" yield (see misc.ts:212-215).
-      if (valTy && valTy.kind === "externref") {
-        out.push({ op: "ref.null.extern" });
-        return;
-      }
-      throw new Error(`ir/lower: const null must have ref_null or externref resultType (${funcName})`);
-    }
+    case "null":
+      throw new Error(`ir/lower: const null must be emitted through BackendEmitter.emitNull (${funcName})`);
     case "undefined":
       throw new Error(`ir/lower: Phase 1 does not materialize 'undefined' constants (${funcName})`);
   }

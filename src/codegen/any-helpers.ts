@@ -602,7 +602,33 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+          // (#3174) EXCEPT the `$BoxedNumber` carrier: §7.2.16 IsStrictlyEqual
+          // routes both-Number operands to Number::equal (§6.1.6.1.13), whose
+          // step 1/2 make `NaN === NaN` FALSE even when both sides are the
+          // very same reference. The SAME `__box_number` box reaches both
+          // params whenever one `any` local is compared against itself —
+          // `a !== a` (the harness `isSameValue` NaN probe, and every
+          // `assert.sameValue(x, NaN)` in the standalone lane) — so an
+          // unconditional identity return answered `NaN === NaN` → true and
+          // silently failed ~50 `built-ins/Date` invalid-date/NaN rows. A
+          // same-ref non-NaN number box falls through to the tag-3 `f64.eq`
+          // primitive comparison below and stays `===` (true), so the ONLY
+          // behavioral flip is the spec-required NaN one. Object identity
+          // (#2734) and the $BigInt value arm (#3173) are untouched: neither
+          // can hold NaN.
+          then:
+            ctx.nativeBoxNumberTypeIdx >= 0
+              ? [
+                  { op: "local.get", index: 2 },
+                  { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                  { op: "i32.eqz" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+                  },
+                ]
+              : [{ op: "i32.const", value: 1 }, { op: "return" }],
         },
       ],
     },

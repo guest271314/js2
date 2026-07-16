@@ -28,10 +28,12 @@
  *      treats it identically.
  *
  * Scope guard: the pilot's builtins are pure-f64 leaf math. Their IR
- * must never reference globals, named types, strings, objects, closures,
- * or vecs — the resolver below throws on all of those, which turns any
- * accidental dialect growth in `src/stdlib/math.ts` into a loud compile
- * error instead of a miscompile.
+ * must never reference globals, objects, closures, or vecs — the resolver
+ * below throws on all of those, which turns any accidental dialect growth
+ * in `src/stdlib/math.ts` into a loud compile error instead of a miscompile.
+ * (#3256 widened the STRING arms — resolveString + the emitString* hooks +
+ * makeResolver's name-fallback in resolveFunc — for the Tier-1 string
+ * family; they are native-strings-mode-only and fail loudly elsewhere.)
  *
  * #3161 — generalized typed path (`SelfHostedFuncDef` / `emitSelfHostedFunc`):
  * the scale-up families (array-methods #3159, object-runtime #3160) need
@@ -60,8 +62,11 @@
  */
 
 import { ts } from "../ts-api.js";
-import { lowerFunctionAstToIr } from "../ir/from-ast.js";
+import { lowerFunctionAstToIr, type IrFromAstResolver } from "../ir/from-ast.js";
 import { irVal, type IrFunction, type IrType } from "../ir/nodes.js";
+import type { Instr, ValType } from "../ir/types.js";
+import { ensureNativeCharCodeAtHelper, NATIVE_CHARCODEAT_FN } from "./char-code-at-helpers.js";
+import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "./vec-elem-set.js";
 import { constantFold } from "../ir/passes/constant-fold.js";
 import { deadCode } from "../ir/passes/dead-code.js";
 import { simplifyCFG } from "../ir/passes/simplify-cfg.js";
@@ -111,6 +116,71 @@ export interface SelfHostedFuncDef {
    * compilation by `emitSelfHostedFunc`'s funcMap early-return.
    */
   readonly memoKey?: string;
+  /**
+   * (#3256 Tier-1) Opt-in from-ast dialect for the STRING family: installs a
+   * context-free native-strings `stringMethodPlan` resolver at BUILD time so
+   * the source may use string method syntax (`s.charCodeAt(i)`,
+   * `s.substring(a, b)`) and string-typed params/locals. When emitted through
+   * `emitSelfHostedFunc`, the build resolver ALSO carries the live ctx's
+   * `resolveString()` (mutated string `let`s bind as slots whose Wasm-local
+   * type is the ctx-bound `(ref $AnyString)`), so dialect defs must NOT set
+   * `memoKey` — the baked slot typeIdx is only meaningful in the registering
+   * CodegenContext. Families that don't set this build exactly as before (no
+   * resolver — any accidental string-method use remains a loud error), which
+   * keeps the math/timsort/object defs byte-inert by construction.
+   */
+  readonly dialect?: "native-strings";
+}
+
+/**
+ * (#3256) The native-mode string-method decision table the stdlib string
+ * sources are allowed to use. Deliberately a SUBSET of integration.ts's
+ * `stringMethodPlan` (only the methods the family's sources need), and
+ * context-free: every entry bakes only symbolic func names + index reps.
+ * Unknown methods return null, which from-ast surfaces as a loud build
+ * error — the same scope-guard discipline as the pilot's throwing resolver.
+ */
+const NATIVE_STRING_METHOD_PLANS: ReadonlyMap<
+  string,
+  {
+    funcName: string;
+    indexArgRep: "f64" | "i32";
+    padOmitted: "host" | "native-slice-len" | "native-substring" | "charcode-zero";
+  }
+> = new Map([
+  // (#3156) guarded `(recv, i32) -> f64` helper, materialized on demand by
+  // the driver's resolveFunc (ensureNativeCharCodeAtHelper).
+  ["charCodeAt", { funcName: NATIVE_CHARCODEAT_FN, indexArgRep: "i32", padOmitted: "charcode-zero" as const }],
+  // (#3156) `__str_substring` clamps both i32 indices to [0, len].
+  ["substring", { funcName: "__str_substring", indexArgRep: "i32", padOmitted: "native-substring" as const }],
+]);
+
+const NATIVE_STRINGS_FROMAST_RESOLVER: IrFromAstResolver = {
+  nativeStrings(): boolean {
+    return true;
+  },
+  stringMethodPlan(method: string) {
+    return NATIVE_STRING_METHOD_PLANS.get(method) ?? null;
+  },
+};
+
+/**
+ * (#3256) Build-time from-ast resolver for `dialect: "native-strings"` defs,
+ * bound to the live ctx: the plan table + `resolveString()` (needed by
+ * from-ast's string-SLOT binding for mutated string `let`s — it bakes the
+ * slot's `(ref $AnyString)` Wasm-local type into the IR, which is exactly why
+ * dialect defs carry no `memoKey`).
+ */
+function makeNativeStringsBuildResolver(ctx: CodegenContext): IrFromAstResolver {
+  return {
+    ...NATIVE_STRINGS_FROMAST_RESOLVER,
+    resolveString(): ValType {
+      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
+      }
+      return { kind: "externref" };
+    },
+  };
 }
 
 /** Process-lifetime cache: memoKey → immutable, context-free IR. */
@@ -131,8 +201,14 @@ const irCache = new Map<string, IrFunction>();
  * are unit-testable without constructing a CodegenContext (the build
  * stage is a pure function of the def).
  */
-export function buildSelfHostedIr(def: SelfHostedFuncDef): IrFunction {
+export function buildSelfHostedIr(def: SelfHostedFuncDef, fromAst?: IrFromAstResolver): IrFunction {
   if (def.memoKey !== undefined) {
+    // Soundness guard: a caller-supplied build resolver is ctx-bound (its
+    // resolveString() bakes a typeIdx into slot ValTypes) — memoizing that IR
+    // would leak the typeIdx across contexts.
+    if (fromAst !== undefined) {
+      throw new Error(`stdlib-selfhost: ${def.name} sets memoKey but was built with a ctx-bound resolver`);
+    }
     const cached = irCache.get(def.memoKey);
     if (cached) return cached;
   }
@@ -161,6 +237,10 @@ export function buildSelfHostedIr(def: SelfHostedFuncDef): IrFunction {
     calleeTypes: def.calleeTypes,
     paramTypeOverrides: def.paramTypes,
     returnTypeOverride: def.returnType,
+    // (#3256) string-family dialect: the caller-supplied ctx-bound resolver
+    // (emitSelfHostedFunc), or the context-free plan table for resolver-less
+    // unit builds; absent for every other family (see the field doc).
+    resolver: fromAst ?? (def.dialect === "native-strings" ? NATIVE_STRINGS_FROMAST_RESOLVER : undefined),
   });
   if (lifted.length > 0) {
     throw new Error(`stdlib-selfhost: ${def.name} unexpectedly produced ${lifted.length} lifted functions`);
@@ -237,32 +317,154 @@ export function emitSelfHostedFunc(ctx: CodegenContext, def: SelfHostedFuncDef):
   const existing = ctx.funcMap.get(def.name);
   if (existing !== undefined) return existing;
 
-  const ir = buildSelfHostedIr(def);
+  // (#3256) native-strings defs build against the live ctx (string-slot
+  // ValTypes need resolveString()); everything else stays resolver-less.
+  const fromAst = def.dialect === "native-strings" ? makeNativeStringsBuildResolver(ctx) : undefined;
+  const ir = buildSelfHostedIr(def, fromAst);
   const funcIdx = lowerAndRegister(ctx, def.name, ir);
   return funcIdx;
 }
 
+/**
+ * (#3256 Tier-1) Resolve a native-string runtime helper's CURRENT absolute
+ * funcIdx by name against `ctx.mod.functions` (post-shift — the
+ * `nativeStrHelpers` map bakes registration-time indices that late-import
+ * passes do not re-shift; mirrors `computeStringBackend` / `makeResolver`'s
+ * rationale in src/ir/integration.ts). Falls back to the helpers map for
+ * names that aren't defined functions. Returns null when unknown.
+ */
+function resolveNativeStrHelper(ctx: CodegenContext, helperName: string): number | null {
+  const idx = ctx.funcMap.get(helperName);
+  if (idx !== undefined) return idx;
+  for (let i = 0; i < ctx.mod.functions.length; i++) {
+    if (ctx.mod.functions[i]!.name === helperName) return ctx.numImportFuncs + i;
+  }
+  const helperIdx = ctx.nativeStrHelpers.get(helperName);
+  return helperIdx === undefined ? null : helperIdx;
+}
+
 /** Shared lowering + registration glue for both driver paths. */
 function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): number {
+  // (#3256) String-backend guard: the Tier-1 string hooks below serve the
+  // native-strings families ONLY (they are emitted from inside
+  // `ensureNativeStringHelpers`, which exists only in native mode). A string
+  // op reaching lowering in host-strings mode means a def was emitted from
+  // the wrong place — fail loudly rather than miscompile.
+  const requireNativeStrings = (what: string): void => {
+    if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) {
+      throw new Error(
+        `stdlib-selfhost: ${name} needs ${what} but the compilation is not in native-strings mode — ` +
+          `string-family builtins must be emitted from ensureNativeStringHelpers`,
+      );
+    }
+  };
   const resolver: IrLowerResolver = {
     resolveFunc(ref) {
-      const idx = ctx.funcMap.get(ref.name);
-      if (idx === undefined) {
-        throw new Error(
-          `stdlib-selfhost: ${name} calls "${ref.name}" but it is not registered yet — ` +
-            `emit callees leaf-first (check the family's phase ordering)`,
-        );
+      // (#3257 Tier-2) `__vec_elem_set_<vecTypeIdx>` — element-store helper
+      // with full legacy grow semantics, materialized on demand (mirrors
+      // integration.ts's arm: append-only defined function, never an import,
+      // idempotent via funcMap). NOTE for stdlib authors: the helper's real
+      // ABI takes an i32 index — a TS-source caller must declare that exact
+      // sig in calleeTypes and produce an i32 arg (e.g. a comparison result);
+      // f64 index arithmetic needs an `__arri_*`-style f64-ABI wrapper.
+      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`stdlib-selfhost: ${name} cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
       }
-      return idx;
+      // (#3256) Guarded native charCodeAt — materialized on demand, same
+      // append-only defined-function discipline as integration.ts's arm
+      // (never an import, no existing funcIdx shifts; idempotent via funcMap).
+      if (ref.name === NATIVE_CHARCODEAT_FN) {
+        const helperIdx = ensureNativeCharCodeAtHelper(ctx);
+        if (helperIdx === null) {
+          throw new Error(
+            `stdlib-selfhost: ${name} cannot materialize ${ref.name} (native-string helpers unavailable)`,
+          );
+        }
+        return helperIdx;
+      }
+      const idx = ctx.funcMap.get(ref.name);
+      if (idx !== undefined) return idx;
+      // (#3256 Tier-1) makeResolver's name-fallback: native-string kernels
+      // (`__str_flatten`, `__str_substring`, …) live in `ctx.nativeStrHelpers`,
+      // not `ctx.funcMap`; re-resolve by name against the post-shift function
+      // table first, helpers map last (see resolveNativeStrHelper).
+      const helperIdx = resolveNativeStrHelper(ctx, ref.name);
+      if (helperIdx !== null) return helperIdx;
+      throw new Error(
+        `stdlib-selfhost: ${name} calls "${ref.name}" but it is not registered yet — ` +
+          `emit callees leaf-first (check the family's phase ordering)`,
+      );
     },
     resolveGlobal(ref) {
       throw new Error(`stdlib-selfhost: ${name} must not reference globals (got "${ref.name}")`);
     },
     resolveType(ref) {
-      throw new Error(`stdlib-selfhost: ${name} must not reference named types (got "${ref.name}")`);
+      // (#3256 Tier-1) named-type name-scan, mirroring makeResolver. No
+      // current stdlib source emits a symbolic type ref (the string struct
+      // flows through resolveString as a ValType), but Tier-2+ families will.
+      const idx = ctx.mod.types.findIndex((t) => "name" in t && (t as { name?: string }).name === ref.name);
+      if (idx < 0) {
+        throw new Error(`stdlib-selfhost: ${name} references unknown named type "${ref.name}"`);
+      }
+      return idx;
     },
     internFuncType(type) {
       return addFuncType(ctx, type.params, type.results, type.name);
+    },
+    // -----------------------------------------------------------------
+    // (#3256 Tier-1) String backend — native-strings mode only. Mirrors
+    // the corresponding makeResolver arms (src/ir/integration.ts), resolving
+    // helper indices by post-shift name scan at emission time; later import
+    // shifts are repaired uniformly by reconcileNativeStrFinalizeShift,
+    // exactly as for the hand-emitted sibling bodies.
+    // -----------------------------------------------------------------
+    nativeStrings(): boolean {
+      return ctx.nativeStrings;
+    },
+    resolveString(): ValType {
+      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
+      }
+      return { kind: "externref" };
+    },
+    emitStringConst(value: string): readonly Instr[] {
+      requireNativeStrings("string.const");
+      // Inline WTF-16 literal — same shape as makeResolver's native arm /
+      // legacy compileNativeStringLiteral (i16 path; stdlib sources carry no
+      // utf8-storage alloc annotations).
+      const ops: Instr[] = [
+        { op: "i32.const", value: value.length },
+        { op: "i32.const", value: 0 },
+      ];
+      for (let i = 0; i < value.length; i++) {
+        ops.push({ op: "i32.const", value: value.charCodeAt(i) });
+      }
+      ops.push({ op: "array.new_fixed", typeIdx: ctx.nativeStrDataTypeIdx, length: value.length });
+      ops.push({ op: "struct.new", typeIdx: ctx.nativeStrTypeIdx });
+      return ops;
+    },
+    emitStringConcat(): readonly Instr[] {
+      requireNativeStrings("string.concat");
+      const idx = resolveNativeStrHelper(ctx, "__str_concat");
+      if (idx === null) throw new Error(`stdlib-selfhost: ${name} needs __str_concat but it is not registered`);
+      return [{ op: "call", funcIdx: idx }];
+    },
+    emitStringEquals(): readonly Instr[] {
+      requireNativeStrings("string.eq");
+      const idx = resolveNativeStrHelper(ctx, "__str_equals");
+      if (idx === null) throw new Error(`stdlib-selfhost: ${name} needs __str_equals but it is not registered`);
+      return [{ op: "call", funcIdx: idx }];
+    },
+    emitStringLen(): readonly Instr[] {
+      requireNativeStrings("string.len");
+      // AnyString.length is field 0 (cons strings carry the total length,
+      // so no flatten is needed — matches makeResolver's native arm).
+      return [{ op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 }];
     },
   };
 

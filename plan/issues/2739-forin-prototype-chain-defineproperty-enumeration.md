@@ -1,8 +1,9 @@
 ---
 id: 2739
 title: "for-in does not enumerate setPrototypeOf / constructor-prototype-chain properties; Object.defineProperty ordering"
+horizon: l
 status: ready
-sprint: Backlog
+sprint: current
 goal: test262-conformance
 feasibility: hard
 depends_on: []

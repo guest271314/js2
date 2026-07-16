@@ -80,8 +80,8 @@ function checkInstr(
 // CORE-OP families (const / arithmetic / locals-as-slots / structured control
 // flow / direct call). These lower to core Wasm and `LinearEmitter` emits them
 // byte-identically to `WasmGcEmitter`. The representation-DIVERGENT families
-// (objects, closures, boxing, strings, ref-cells, exceptions, vec CONSTRUCTION,
-// for-of iteration, promises) stay rejected here — the linear analogue lands
+// (objects, closures, boxing, strings, ref-cells, exceptions, non-fixed vec
+// mutation/iteration, promises) stay rejected here — the linear analogue lands
 // with the production wiring (#2956). This mirrors `bytecodeInstrError`'s
 // allow-list shape; the operand-type gate (`linearValTypeError`) independently
 // rejects any non-{i32,i64,f32,f64} value, so allowing an op kind here never
@@ -109,6 +109,11 @@ function linearInstrError(instr: IrInstr): string | null {
     case "global.set":
     case "slot.read":
     case "slot.write":
+    // #2956 L2: vec values are i32 arena pointers in the linear resolver.
+    // Fixed construction plus len/get are now representation-complete.
+    case "vec.new_fixed":
+    case "vec.len":
+    case "vec.get":
     case "while.loop":
     case "for.loop":
     // #2952 slice 2 — br.label lowers to a core-Wasm `br` (depth derived by
@@ -287,6 +292,9 @@ function checkInstrEmbeddedTypes(
       return;
     case "forof.vec":
       checkType(instr.elementType, block, "forof.vec element");
+      return;
+    case "vec.new_fixed":
+      checkType(instr.elementType, block, "vec.new_fixed element");
       return;
     default:
       return;

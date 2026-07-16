@@ -18,7 +18,12 @@ function runDiff(baseline: string, candidate: string, env: Record<string, string
     const out = execFileSync("npx", ["tsx", "scripts/diff-test262.ts", baseline, candidate, "--quiet"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...env },
+      // REGRESSIONS_ALLOW_FILE=/dev/null pins the #3303 regressions-allow read
+      // to an empty source so these rebase-mode fixtures stay hermetic: without
+      // it, a PR whose own diff declares an allowance in its issue file would
+      // leak that allowance into this CLI run (cwd = repo root) and flip the
+      // drift-tolerance expectations below.
+      env: { ...process.env, REGRESSIONS_ALLOW_FILE: "/dev/null", ...env },
     });
     return { code: 0, out };
   } catch (err: any) {
