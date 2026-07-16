@@ -78,8 +78,8 @@ const STUB_KIND: IrBackendKind = "bytecode";
 
 type StubVecLayout = IrVecLowering | LinearVecLowering;
 
-class StubEmitter implements BackendEmitter<StubSink> {
-  readonly backend: IrBackendKind = STUB_KIND;
+export class StubEmitter implements BackendEmitter<StubSink> {
+  constructor(readonly backend: IrBackendKind = STUB_KIND) {}
   newSink(): StubSink {
     return [];
   }

@@ -17,6 +17,9 @@ horizon: xl
 model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
+claimed_by: porffor-codex-developer
+claimed_at: 2026-07-16T19:10:21.475Z
+branch: symphony/porffor/3288
 ---
 
 # #3288 - Optional Porffor IR backend over the JS2 linear-memory plan
@@ -158,14 +161,14 @@ The Porffor adapter's first deliverable is an explicit API/tool such as
 This issue is the non-dispatchable tracking umbrella. Implementation proceeds
 through one PR per dependency-ordered child issue:
 
-| Slice | Issue                                                     | Dispatch gate     |
-| ----- | --------------------------------------------------------- | ----------------- |
+| Slice | Issue                                                     | Dispatch gate        |
+| ----- | --------------------------------------------------------- | -------------------- |
 | P0    | #3295 - freeze the optional Porffor compatibility surface | merged (#3107/#3109) |
-| P1    | #3296 - make generic lowering results non-Wasm            | #3295 and #2953   |
-| P2    | #3297 - scalar/control-flow Porffor proof                 | #3296             |
-| P3    | #3298 - extract shared `LinearMemoryPlan`                 | #3297 and #2956   |
-| P4    | #3299 - heap/layout proof through Porffor IR              | #3298             |
-| P5    | #3300 - prove allocation-policy leverage                  | #3299             |
+| P1    | #3296 - make generic lowering results non-Wasm            | #3295 and #2953      |
+| P2    | #3297 - scalar/control-flow Porffor proof                 | #3296                |
+| P3    | #3298 - extract shared `LinearMemoryPlan`                 | #3297 and #2956      |
+| P4    | #3299 - heap/layout proof through Porffor IR              | #3298                |
+| P5    | #3300 - prove allocation-policy leverage                  | #3299                |
 
 Do not mark #3288 complete until all six child issues are merged and the
 umbrella acceptance criteria below are revalidated.

@@ -44,7 +44,8 @@
 // historically declared now live in `backend/handles.js` and are re-exported
 // below for backwards compatibility.
 import type { BackendEmitter } from "./backend/emitter.js";
-import { verifyIrBackendLegality } from "./backend/legality.js";
+import type { TypeConverter } from "./backend/contract.js";
+import { type IrBackendKind, verifyIrBackendLegality } from "./backend/legality.js";
 import type {
   IrBoxedLowering,
   IrClassLowering,
@@ -291,21 +292,58 @@ export interface IrLowerResult {
 }
 
 /**
- * #1584 (a0-tail): the backend-agnostic lowering result. `lowerIrFunctionBody`
- * is generic over the emitter sink `S`; it returns the lowered body in that
- * sink plus the backend-independent function metadata (`typeIdx`, `locals`,
- * `name`, `exported`). The WasmGC wrapper (`lowerIrFunctionToWasm`, `S =
- * Instr[]`) assembles the concrete `WasmFunction` from this; a bytecode driver
- * consumes `body: BytecodeSink` directly. The `typeIdx`, `locals`, `name`, and
- * `exported` fields are identical regardless of `S` — only `body` changes
- * representation, which is exactly the #1715 sink-is-the-one-seam finding.
+ * One named logical value in backend slot form. A backend may represent one
+ * IR value with more than one slot; the grouping is retained here so the
+ * generic result never has to manufacture a Wasm local index or `ValType`.
  */
-export interface IrLoweredBody<S> {
+export interface IrLoweredValue<Slot> {
+  readonly name: string;
+  readonly slots: readonly Slot[];
+}
+
+/**
+ * #1584/#3296: backend-neutral function-lowering result. The sink and value
+ * slot types are independent generic parameters. Function type interning and
+ * concrete local numbering belong to the backend wrapper/assembler, not this
+ * result; consequently there is no mandatory Wasm `typeIdx`, `LocalDef`, or
+ * `Instr[]` anywhere in the shape.
+ */
+export interface IrLoweredBody<S, Slot> {
   readonly name: string;
   readonly body: S;
-  readonly locals: LocalDef[];
-  readonly typeIdx: number;
+  readonly params: readonly IrLoweredValue<Slot>[];
+  readonly locals: readonly IrLoweredValue<Slot>[];
+  readonly results: readonly (readonly Slot[])[];
   readonly exported: boolean;
+}
+
+/**
+ * Wasm-shaped type conversion lives at the Wasm adapter edge. Linear-Wasm
+ * also uses this converter today because its scalar slots are Wasm ValTypes;
+ * non-Wasm consumers pass their own `TypeConverter` to the generic lowerer.
+ */
+export function wasmValueTypeConverter(
+  backend: IrBackendKind,
+  resolver: IrLowerResolver,
+  funcName: string,
+): TypeConverter<ValType> {
+  return {
+    backend,
+    convertType: (type: IrType): readonly ValType[] => [lowerIrTypeToValType(type, resolver, funcName)],
+  };
+}
+
+function flattenWasmValues(values: readonly IrLoweredValue<ValType>[]): LocalDef[] {
+  return values.flatMap((value) =>
+    value.slots.map((type, slot) => ({
+      name: slot === 0 ? value.name : `${value.name}$${slot}`,
+      type,
+    })),
+  );
+}
+
+function flattenSlots<Slot>(values: readonly (readonly Slot[])[]): Slot[] {
+  return values.flatMap((slots) => [...slots]);
 }
 
 /**
@@ -323,12 +361,19 @@ export function lowerIrFunctionToWasm(
   // #1714/#1715 pass an explicit emitter selected by compile target.
   emitter: BackendEmitter = new WasmGcEmitter(),
 ): IrLowerResult {
-  const lowered = lowerIrFunctionBody<Instr[]>(func, resolver, emitter);
+  const lowered = lowerIrFunctionBody(
+    func,
+    resolver,
+    emitter,
+    wasmValueTypeConverter(emitter.backend, resolver, func.name),
+  );
+  const params = flattenWasmValues(lowered.params).map((param) => param.type);
+  const results = flattenSlots(lowered.results);
   return {
     func: {
       name: lowered.name,
-      typeIdx: lowered.typeIdx,
-      locals: lowered.locals,
+      typeIdx: resolver.internFuncType({ kind: "func", params, results }),
+      locals: flattenWasmValues(lowered.locals),
       body: lowered.body,
       exported: lowered.exported,
     },
@@ -347,14 +392,20 @@ export function lowerIrFunctionToWasm(
  * WasmGC-only: on a non-`Instr[]` sink they throw the not-yet-migrated boundary
  * loudly. Each migrates behind a typed trait primitive in §2a (a1..a6).
  */
-export function lowerIrFunctionBody<S>(
+export function lowerIrFunctionBody<S, Slot>(
   func: IrFunction,
   resolver: IrLowerResolver,
-  // #1713: the active backend. Defaults to WasmGcEmitter (S = Instr[]) so every
-  // existing caller is unchanged and Phase 1 stays zero-delta. #1584 passes an
-  // explicit emitter (e.g. BytecodeEmitter) selected by compile target.
-  emitter: BackendEmitter<S> = new WasmGcEmitter() as unknown as BackendEmitter<S>,
-): IrLoweredBody<S> {
+  // #1713: the active backend emitter and #3296 TypeConverter are separate
+  // contract parts. Keeping both explicit prevents a non-Wasm caller from
+  // inheriting the old WasmGC metadata default accidentally.
+  emitter: BackendEmitter<S>,
+  typeConverter: TypeConverter<Slot>,
+): IrLoweredBody<S, Slot> {
+  if (typeConverter.backend !== emitter.backend) {
+    throw new Error(
+      `ir/lower: backend contract mismatch for ${func.name}: emitter=${emitter.backend}, type-converter=${typeConverter.backend}`,
+    );
+  }
   const legalityErrors = verifyIrBackendLegality(func, emitter.backend);
   if (legalityErrors.length > 0) {
     const shown = legalityErrors.slice(0, 3).map((err) => err.message);
@@ -3100,19 +3151,26 @@ export function lowerIrFunctionBody<S>(
     }
   }
 
-  const paramTypes: ValType[] = func.params.map((p) => lowerIrTypeToValType(p.type, resolver, func.name));
-  const resultTypes: ValType[] = func.resultTypes.map((t) => lowerIrTypeToValType(t, resolver, func.name));
-  const typeIdx = resolver.internFuncType({
-    kind: "func",
-    params: paramTypes,
-    results: resultTypes,
-  });
+  const convertSlots = (type: IrType, where: string): readonly Slot[] => {
+    const slots = typeConverter.convertType(type);
+    if (slots.length === 0) {
+      throw new Error(`ir/lower: ${emitter.backend} type converter produced no slots for ${where} in ${func.name}`);
+    }
+    return [...slots];
+  };
 
   return {
     name: func.name,
     body,
-    locals,
-    typeIdx,
+    params: func.params.map((param) => ({
+      name: param.name,
+      slots: convertSlots(param.type, `param ${param.name}`),
+    })),
+    locals: locals.map((local) => ({
+      name: local.name,
+      slots: convertSlots({ kind: "val", val: local.type }, `local ${local.name}`),
+    })),
+    results: func.resultTypes.map((type, index) => convertSlots(type, `result ${index}`)),
     exported: func.exported,
   };
 }
