@@ -162,16 +162,22 @@ export interface BackendEmitter<S = Instr[]> {
   emitUnbox?(layout: IrUnionLowering, out: S): void;
   emitTagLoad?(layout: IrUnionLowering, out: S): void;
 
+  // ---- ref-coercion / null family — MIGRATED behind the trait (#2953) ----
+  // Typed nulls and reference casts are representation operations: WasmGC
+  // uses the nullable heap-type op family, while a linear or bytecode backend
+  // needs its own sentinel/tag representation. The caller owns operand
+  // evaluation and passes either an abstract IrType or an already-resolved
+  // runtime type handle; the emitter owns the terminal coercion sequence.
+  /** Push a typed null appropriate for `irType`. */
+  emitNull(irType: IrType, out: S): void;
+  /** anyref subtype on the stack -> externref. */
+  emitToExternref(out: S): void;
+  /** ref on the stack -> the same ref narrowed to `target`. */
+  emitDowncast(target: { typeIdx: number } | IrType, out: S): void;
+  /** externref on the stack -> a ref narrowed to `target`. */
+  emitFromExternref(target: { typeIdx: number } | IrType, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
-  // The following are part of the full seam the spec audited but are NOT
-  // routed through the trait in Phase 1 (#1713). They remain inline in
-  // lower.ts. Declared here so the staged groups (aggregate / union /
-  // closure / ref-coercion) have a stable signature to migrate against and
-  // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
-  // need not implement them until its group is wired.
-  emitNull?(irType: IrType, out: Instr[]): void;
-  emitToExternref?(out: Instr[]): void;
-  emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;
   emitFuncRef?(funcIdx: number, out: Instr[]): void;
 
   // ---- closure family — MIGRATED behind the trait (#2953) -----------------
