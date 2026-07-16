@@ -31,22 +31,16 @@
 // one and the WasmGC one) yields a better cut than a one-consumer refactor.
 // Recorded in plan/issues/2956 §"Execution status".
 //
-// SLICE-1 RESOLVER SCOPE: only the four REQUIRED `IrLowerResolver` methods
-// are implemented (resolveFunc / resolveGlobal / resolveType /
-// internFuncType) — name-based over the linear module tables (`ctx.funcMap`,
-// `ctx.moduleGlobals`, `ctx.mod.types`). Every optional shape hook
-// (union/boxed/object/closure/refcell/class/vec/string) is ABSENT: per the
-// documented resolver contract a function whose IR demands a missing hook
-// fails at lowering — and the linear legality gate (#2954,
-// `verifyIrBackendLegality(fn, "linear")`) rejects such functions FIRST, so
-// the absence is defense-in-depth, not a user-visible throw. Vec reads are
-// legal for the LinearEmitter but stay demoted in slice 1 because from-ast's
-// vec TYPING needs a linear `resolveVec` (an i32-pointer lowering handle,
-// not the WasmGC struct handle) — that is slice L2 territory (#1804).
+// RESOLVER SCOPE: L1 supplies the four required name/table methods. L2 adds
+// only the fixed-number-vec hooks: from-ast types the value as the linear
+// backend's i32 arena pointer, while lower/emitter consume the existing vec
+// layout contract. Union/boxed/object/closure/refcell/class/string hooks stay
+// absent and therefore demote through the same legality/build channel.
 
 import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
-import { lowerFunctionAstToIr, typeNodeToIr } from "../from-ast.js";
+import { LINEAR_IR_VEC_INIT_F64_FN } from "../../codegen-linear/runtime.js";
+import { lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
 import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
 import type { IrFuncRef, IrGlobalRef, IrType, IrTypeRef } from "../nodes.js";
 import { planIrCompilation } from "../select.js";
@@ -54,6 +48,7 @@ import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
 import { verifyIrBackendLegality } from "./legality.js";
 import { LinearEmitter } from "./linear-emitter.js";
+import type { IrVecLowering } from "./handles.js";
 
 /** One demoted claim: which function, and the bucketed reason. */
 export interface LinearIrRejection {
@@ -102,7 +97,6 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
   if (selection.funcs.size === 0) return result;
 
   const resolver = makeLinearIrResolver(ctx);
-  const emitter = new LinearEmitter();
 
   const claimedDecls: { name: string; decl: ts.FunctionDeclaration; exported: boolean }[] = [];
   for (const stmt of sourceFile.statements) {
@@ -152,15 +146,15 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
 
     for (const { name, decl, exported } of pending) {
       try {
-        // Build — the SAME shared from-ast the WasmGC IR path uses. No
-        // resolver is passed: shape-dependent lowerings (vec/string/object/
-        // closure) throw inside from-ast and demote here (`build`), which is
-        // correct for the slice-1 numeric/control-flow scope.
+        // Build through the SAME shared from-ast as WasmGC. The narrowed
+        // linear resolver exposes only the L2 fixed-number-vec shape; every
+        // other representation-dependent family still throws and demotes.
         const { main, lifted } = lowerFunctionAstToIr(decl, {
           checker: ctx.checker,
           exported,
           funcName: name,
           calleeTypes,
+          resolver,
         });
 
         // Slice 1 lowers into PRE-ASSIGNED slots only; a build that
@@ -194,11 +188,24 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
           continue;
         }
 
+        const emitter = new LinearEmitter({
+          vecNewFuncIdx: ctx.funcMap.get("__arr_new"),
+          vecInitF64FuncIdx: ctx.funcMap.get(LINEAR_IR_VEC_INIT_F64_FN),
+        });
         const body = lowerIrFunctionBody<Instr[]>(main, resolver, emitter);
+        const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
+        const locals = body.locals.map((local, index) => {
+          const absoluteIndex = main.params.length + index;
+          if (!vecScratchLocals.has(absoluteIndex)) return local;
+          // The shared lowerer allocates this scratch as a WasmGC array ref.
+          // LinearEmitter reuses the SAME contract slot for the arena pointer;
+          // normalize only that backend-private local before module insertion.
+          return { name: `$linear_vec_ptr_${index}`, type: { kind: "i32" as const } };
+        });
         lowered.set(name, {
           name: body.name,
           typeIdx: body.typeIdx,
-          locals: body.locals,
+          locals,
           body: body.body,
           exported: body.exported,
         });
@@ -254,11 +261,23 @@ function bucketFromLegalityMessage(message: string): string {
 }
 
 /**
- * The slice-1 linear `IrLowerResolver`: the four required, name-based
- * methods over the linear module tables. Optional shape hooks deliberately
- * absent — see the module header.
+ * The linear resolver: required name/table methods plus the L2 fixed-f64-vec
+ * subset. Other optional shape hooks remain absent — see the module header.
  */
-function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver {
+function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstResolver {
+  // Linear vecs have no module type indices: they are i32 pointers to the
+  // canonical `[header][len][cap][f64 slots...]` runtime layout. The shared
+  // resolver shape still carries the WasmGC index fields for lower.ts's
+  // scratch bookkeeping; LinearEmitter never emits those sentinel indices,
+  // and compileLinearIrFunctions rewrites that one scratch local to i32.
+  const f64VecLayout: IrVecLowering = {
+    vecStructTypeIdx: 0,
+    lengthFieldIdx: 0,
+    dataFieldIdx: 0,
+    arrayTypeIdx: 0,
+    elementValType: { kind: "f64" },
+  };
+
   return {
     resolveFunc(ref: IrFuncRef): number {
       const idx = ctx.funcMap.get(ref.name);
@@ -298,6 +317,28 @@ function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver {
       const idx = ctx.mod.types.length;
       ctx.mod.types.push(def);
       return idx;
+    },
+    resolveVec(valType: ValType): IrVecLowering | null {
+      return valType.kind === "i32" ? f64VecLayout : null;
+    },
+    resolveVecForElement(elementValType: ValType): IrVecLowering | null {
+      return elementValType.kind === "f64" ? f64VecLayout : null;
+    },
+    resolveVecValueTypeForElement(elementValType: ValType): ValType | null {
+      return elementValType.kind === "f64" ? { kind: "i32" } : null;
+    },
+    resolveVecOutOfBoundsConst(elementValType: ValType) {
+      return elementValType.kind === "f64" ? { kind: "f64" as const, value: 0 } : null;
+    },
+    isVecValueExpression(expr: ts.Expression): boolean {
+      try {
+        const type = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(expr));
+        if (!ctx.checker.isArrayType(type)) return false;
+        const [element] = ctx.checker.getTypeArguments(type as ts.TypeReference);
+        return element !== undefined && (element.flags & ts.TypeFlags.NumberLike) !== 0;
+      } catch {
+        return false;
+      }
     },
   };
 }
