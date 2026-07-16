@@ -3,6 +3,7 @@ id: 1102
 title: "Wasm-native eval: ahead-of-time compilation strategy for eval() and Function()"
 status: done
 completed: 2026-07-16
+pr: 3113
 assignee: ttraenkler/sendev-1102
 created: 2026-04-12
 updated: 2026-07-16
