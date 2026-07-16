@@ -2,10 +2,11 @@
 id: 1793
 title: "node:buffer + global Buffer — host class with from/concat/toString"
 horizon: m
-status: ready
+status: done
 sprint: current
 created: 2026-06-03
-updated: 2026-06-03
+updated: 2026-07-16
+completed: 2026-07-16
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -16,6 +17,7 @@ goal: npm-library-support
 parent: 1575
 related: [1044, 1032, 983]
 ---
+
 # node:buffer + global Buffer — host class with from/concat/toString
 
 ## Problem
