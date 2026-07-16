@@ -252,3 +252,46 @@ full CI/merge_group only (never scoped sweeps).
 - **#743/#744** (whole-program analysis / monomorphization, Backlog):
   complementary optimizations, NOT dependencies — TS checker union types
   suffice to identify candidates.
+
+## S2 landed (2026-07-16, fable-gamma) — opt-in mapping + measured consumer gap-list
+
+S2 shipped as an **opt-in** `unionAnyRep` flag (default OFF, mirroring the
+#2141 `honestAnyBoxing` pattern) rather than lane-default-on, because probing
+the mapping against real consumers measured exactly which ones are not yet
+carrier-agnostic. What landed:
+
+- `isHeterogeneousPrimitiveUnion` (`src/checker/type-mapper.ts`) — the narrow
+  predicate (≥2 distinct kinds among number/string/boolean after nullish
+  filtering; rejects bigint/symbol/enum/object members and homogeneous or
+  literal unions).
+- The `resolveWasmType` mapping (`src/codegen/index.ts`, union block):
+  qualifying unions → `ref_null $AnyValue` when `ctx.unionAnyRep`.
+- Flag plumbing: `CompileOptions.unionAnyRep` → `CodegenOptions` →
+  `ctx.unionAnyRep` (default false).
+- `tests/issue-745.test.ts` — byte-identity gates (flag-off ≡ legacy on
+  union-bearing input in BOTH lanes; flag-on ≡ flag-off on union-free,
+  nullable, and literal-union input) + flag-on standalone behaviour for
+  narrowed patterns + predicate unit tests.
+
+**Verified working with flag ON (standalone), via existing coercion arms
+alone**: typeof-narrowed reads/writes (`sum += x + 1` under a guard),
+narrowed `.length` string reads, `x === undefined` checks and
+undefined round-trips, cross-kind reassignment in loops. Zero host imports.
+
+**Measured NOT working with flag ON (standalone) — this is the concrete S3
+work list** (probe: `.tmp/probe-745-run.mts`):
+
+| Pattern                                  | Symptom                                               | Likely site                                                                                                                                                      |
+| ---------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x === "done"` (union vs string literal) | wrong result (0)                                      | binary-ops strict-eq path assumes externref union rep; must route `$AnyValue` operands to `__any_strict_eq`                                                      |
+| `if (x)` truthiness                      | wrong result                                          | truthiness coercion lacks a `$AnyValue` tag-switch arm                                                                                                           |
+| `x === true` (boolean\|string)           | wrong result                                          | same strict-eq path, boolean payload                                                                                                                             |
+| `"" + x` / `s + x` string concat         | `illegal cast` trap                                   | concat lowers via native-string cast on the raw ref; needs `$__any_to_string` for `$AnyValue` operands                                                           |
+| union-typed PARAM at call boundary       | Wasm validation error (`struct.get[0] expected type`) | param ValType flips to `$AnyValue` but call-site argument coercion emits the old shape — S4 territory; consider excluding params/returns until S4                |
+| `return k > 0 ? 7 : "neg"` union RETURN  | wrong result                                          | return-path coercion, same S4 territory                                                                                                                          |
+| union → `any` assignment                 | wrong result                                          | any-boundary coercion arm ($AnyValue→externref-any) mis-round-trips in standalone; check `ensureAnyToExternHelper` unwrap vs `extern.convert_any` of the carrier |
+
+S3 (revised): make the strict-eq / truthiness / concat consumers
+carrier-agnostic (first three rows). S4 (unchanged): params/returns +
+boundaries (last three rows). Flip `unionAnyRep` lane-default-on for
+standalone/nativeStrings only after BOTH, validated by full CI/merge_group.
