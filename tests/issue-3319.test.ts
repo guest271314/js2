@@ -35,14 +35,11 @@ async function run(src: string, target: "gc" | "standalone"): Promise<any> {
 
 for (const target of ["gc", "standalone"] as const) {
   describe(`#3319 — gOPD miss / descriptor undefined-observability (${target})`, () => {
-    // The two typed-receiver miss shapes run standalone-only: the gc/host
-    // lane has a PRE-EXISTING gap of its own here (the static miss emits
-    // null extern while host `undefined` is the __get_undefined sentinel) —
-    // out of this regime-gated slice's scope, noted as a residual in the
-    // #3319 issue file.
-    const typedRecvTarget = target === "standalone";
-
-    it.runIf(typedRecvTarget)("typed-receiver gOPD miss answers undefined (issue-2874 residual shape)", async () => {
+    // (#3321) The two typed-receiver miss shapes now run on BOTH lanes: the
+    // gc/host twin (static miss emitted null extern while host `undefined`
+    // is the __get_undefined sentinel) is fixed by routing the miss through
+    // `emitUndefined` — see the #3321 issue file.
+    it("typed-receiver gOPD miss answers undefined (issue-2874 residual shape)", async () => {
       const ret = await run(
         `export function test(): number {
   const o = { a: 5 };
@@ -81,7 +78,7 @@ for (const target of ["gc", "standalone"] as const) {
       expect(ret).toBe(1);
     });
 
-    it.runIf(typedRecvTarget)("gOPD miss is NOT null (undefined and null stay distinct)", async () => {
+    it("gOPD miss is NOT null (undefined and null stay distinct)", async () => {
       const ret = await run(
         `export function test(): number {
   const o = { a: 5 };
