@@ -15,6 +15,8 @@ created: 2026-06-27
 updated: 2026-07-16
 completed: 2026-07-16
 assignee: ttraenkler/fable-delta
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 # #2739 — for-in prototype-chain + defineProperty enumeration
