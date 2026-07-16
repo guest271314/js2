@@ -18,6 +18,8 @@ umbrella: 2860
 sprint: current
 horizon: s
 related: [3174, 1910, 3027, 2891]
+loc-budget-allow:
+  - src/codegen/property-access.ts
 origin: "root-caused during #3174 (Date brand/coercion) — blocks toISOString/15.9.5.43-0-5/11/12 and likely many non-Date rows"
 ---
 
