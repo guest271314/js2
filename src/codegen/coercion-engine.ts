@@ -484,7 +484,12 @@ function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
     // tag-4 carrier against a tag-2 box and answered false. `boxToAny`
     // already owns the type-aware hint; thread it only under `unionAnyRep`
     // so flag-off (and the whole any-lane today) stays byte-identical.
-    if (ctx.unionAnyRep && node !== undefined && t.kind === "i32" && isBooleanType(ctx.checker.getTypeAtLocation(node))) {
+    if (
+      ctx.unionAnyRep &&
+      node !== undefined &&
+      t.kind === "i32" &&
+      isBooleanType(ctx.checker.getTypeAtLocation(node))
+    ) {
       if (boxToAny(ctx, fctx, t, "boolean")) return;
     }
     coerceType(ctx, fctx, t, anyValueTarget);
