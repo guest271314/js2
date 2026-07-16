@@ -1,7 +1,7 @@
 {
-  "generated": "2026-07-15",
+  "generated": "2026-07-16",
   "threshold": 1500,
-  "totalCeiling": 414079,
+  "totalCeiling": 414600,
   "files": {
     "src/codegen-linear/index.ts": 5530,
     "src/codegen-linear/runtime.ts": 3589,
