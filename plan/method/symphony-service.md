@@ -43,9 +43,12 @@ missed, Symphony discovers the PR by its assigned head branch and writes the PR
 number itself. On every configured PR polling interval Symphony asks GitHub for
 the PR head and check rollup:
 
-- A merged PR changes the issue to `done`, records the merge date in
-  `completed`, releases any broker claim/retry, and immediately makes completed
-  dependencies visible to the normal candidate scan.
+- A merged PR for an `in-review` issue changes the issue to `done`, records the
+  merge date in `completed`, releases any broker claim/retry, and immediately
+  makes completed dependencies visible to the normal candidate scan.
+- A merged PR for an `in-progress` multi-slice issue clears the old PR, records
+  it in `last_merged_pr`, and returns the issue to `ready` for its next slice.
+  The durable merge key prevents restart from requeueing the same merged PR.
 - A failed check rollup changes the issue back to `in-progress` and dispatches
   a repair attempt in the same deterministic workspace. If that workspace does
   not exist, Symphony checks out the PR's actual head branch from `origin`.
@@ -125,6 +128,26 @@ pnpm run symphony:status
 Use `--dry-run` first. It exercises workflow loading, issue scanning, lane
 selection, and dispatch planning without creating worktrees or launching
 agents.
+
+## Scoped Porffor Workflow
+
+`WORKFLOW.porffor.md` isolates the optional Porffor backend chain in the
+`porffor-backend` sprint. It uses one `gpt-5.6-sol` lane, a dedicated worktree
+and log root, and initializes only the optional `vendor/Porffor` submodule in
+worker worktrees. Start and inspect it with:
+
+```bash
+pnpm run symphony -- --workflow WORKFLOW.porffor.md --dry-run --json
+pnpm run symphony -- --workflow WORKFLOW.porffor.md
+pnpm run symphony -- --workflow WORKFLOW.porffor.md --status --json
+```
+
+The workflow sets `pull_requests.sprint_only: true` and
+`pull_requests.include_dependencies: true`. Fresh candidate dispatch therefore
+ignores every issue outside `porffor-backend`, while PR reconciliation includes
+only that sprint and its transitive prerequisites. Symphony can repair or
+complete #2953/#2956 so P1/P3 unblock, but it cannot consume unrelated
+`in-progress` or `in-review` work from the broad `current` sprint.
 
 ## Safety Posture
 

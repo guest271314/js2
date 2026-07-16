@@ -53,15 +53,53 @@ export function classifyPullRequest(snapshot) {
 
 export function planPullRequestAction(
   state,
-  { handledFailureKey = null, busy = false, paused = false, hasCapacity = true } = {},
+  {
+    handledFailureKey = null,
+    issueState = "in-review",
+    lastMergedPr = null,
+    busy = false,
+    paused = false,
+    hasCapacity = true,
+  } = {},
 ) {
-  if (state.status === "merged") return { action: "mark_done", failureKey: null };
+  if (state.status === "merged") {
+    if (issueState === "in-progress") {
+      const mergeKey = state.number ? String(state.number) : state.headSha || "unknown-merge";
+      return {
+        action: String(lastMergedPr || "") === mergeKey ? "wait" : "continue",
+        failureKey: null,
+        mergeKey,
+      };
+    }
+    return { action: "mark_done", failureKey: null, mergeKey: null };
+  }
   if (state.status !== "failed") return { action: "wait", failureKey: null };
 
   const failureKey = state.headSha || `pr-${state.number || "unknown"}-unknown-head`;
   if (handledFailureKey === failureKey) return { action: "wait", failureKey };
   if (busy || paused || !hasCapacity) return { action: "defer", failureKey };
   return { action: "requeue", failureKey };
+}
+
+export function scopePullRequestIssues(issues, { sprintOnly = false, includeDependencies = false } = {}) {
+  if (!sprintOnly) return issues;
+  const byId = new Map(issues.map((issue) => [String(issue.id), issue]));
+  const selected = issues.filter((issue) => String(issue.sprint) === String(issue.selected_sprint));
+  if (!includeDependencies) return selected;
+
+  const included = new Set(selected.map((issue) => String(issue.id)));
+  const queue = [...selected];
+  for (let index = 0; index < queue.length; index++) {
+    const issue = queue[index];
+    for (const dependency of issue.blocked_by ?? []) {
+      const dependencyId = String(dependency?.id ?? dependency?.identifier ?? dependency);
+      const dependencyIssue = byId.get(dependencyId);
+      if (!dependencyIssue || included.has(dependencyId)) continue;
+      included.add(dependencyId);
+      queue.push(dependencyIssue);
+    }
+  }
+  return issues.filter((issue) => included.has(String(issue.id)));
 }
 
 export function readPullRequest({ command = "gh", cwd, number, repository = "", timeoutMs = 30_000 }) {
