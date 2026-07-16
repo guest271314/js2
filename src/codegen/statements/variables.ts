@@ -277,10 +277,13 @@ function nativeStringVecType(ctx: CodegenContext): ValType | null {
  * (#2106 S1 / PR-2) Will this `var` declaration's slot be retyped from the
  * hoist-time externref to a concrete non-any ref during its declaration compile?
  *
- * The ONLY arm that retypes a hoisted externref slot to a concrete ref is the
- * standalone-RegExp-match-array override below (`existingIsExternref && newIsRef`
- * — the general #962 guard refuses every other externref → ref retype). So this
- * predicate is exactly `inferStandaloneRegExpMatchArrayType(...) !== null`.
+ * TWO arms retype a hoisted externref slot to a concrete ref (the general #962
+ * guard refuses every other externref → ref retype):
+ *   1. the standalone-RegExp-match-array override below
+ *     (`existingIsExternref && newIsRef`), and
+ *   2. the #3037 CS1a any-object-carrier up-front retype (`var d: any = {k: v}`
+ *     reuses the hoisted externref slot and retypes it to `(ref null $Object)`
+ *     before the initializer compiles — `initIsAnyObjectCarrier`).
  *
  * Used by `hoistVarDecl` (index.ts): under the `undefinedSingleton` regime the
  * hoisted externref slot is initialized to the tag-1 `$undefined` singleton (a
@@ -288,12 +291,32 @@ function nativeStringVecType(ctx: CodegenContext): ValType | null {
  * `local-set-coerce` stack-balance fixup would splice an UNGUARDED
  * `any.convert_extern; ref.cast_null N` on that non-null singleton → "illegal
  * cast" trap at the first instruction of the function (the dominant flip-ON
- * RegExp regression cluster). A concrete-ref slot cannot represent the singleton
- * anyway (it is not `any`), so the hoist emits the flag-OFF `ref.null.extern`
- * value instead — which casts cleanly to `ref.null N`. Byte-inert flag-OFF.
+ * RegExp regression cluster; #3307 — the same trap on every
+ * `var d: any = { … }` carrier, e.g. dynamic property descriptors). A
+ * concrete-ref slot cannot represent the singleton anyway (it is not `any`), so
+ * the hoist emits the flag-OFF `ref.null.extern` value instead — which casts
+ * cleanly to `ref.null N`. Byte-inert flag-OFF.
+ *
+ * The carrier arm intentionally over-approximates the retype conditions: the
+ * declaration-site retype additionally requires the slot not be
+ * closure-captured (`boxedCaptures` / `capturedGlobals`), which is not reliably
+ * known at hoist time. For a captured carrier the hoist then emits
+ * `ref.null.extern` where the singleton would also have worked — degrading only
+ * that var's pre-declaration undefined-observability to the flag-OFF behavior,
+ * never trapping.
  */
 export function hoistedVarRetypesToConcreteRef(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
-  return inferStandaloneRegExpMatchArrayType(ctx, decl.initializer) !== null;
+  if (inferStandaloneRegExpMatchArrayType(ctx, decl.initializer) !== null) return true;
+  // (#3307) Mirror `initIsAnyObjectCarrier` (declaration compile, #3037 CS1a).
+  if (
+    decl.initializer !== undefined &&
+    ts.isObjectLiteralExpression(decl.initializer) &&
+    !(ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) &&
+    objectLiteralIsStandaloneAnyObjectCarrier(ctx, decl.initializer)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function inferStandaloneRegExpMatchArrayType(
