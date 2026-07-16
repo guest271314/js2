@@ -46,6 +46,7 @@ import {
   paramDefaultNeedsArgc,
 } from "./statements/nested-declarations.js";
 import { emitThrowReferenceError } from "./expressions/helpers.js";
+import { compileObjectLiteralAsExternref } from "./literals.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
@@ -865,9 +866,33 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
         ts.isObjectBindingPattern(param.name) && paramType.kind === "externref"
           ? structHintForBindingPattern(ctx, param.name)
           : undefined;
+      // (#3333) Host-free lanes, `any`-typed pattern (NO struct hint resolves —
+      // getTypeAtLocation(pattern) is `any`): compiling the default literal
+      // against the bare externref hint materializes a typed ANONYMOUS struct
+      // (`f64` fields, boxed via extern.convert_any) that the destructure's
+      // dynamic `__extern_get` reader cannot reflect — every binding read NaN
+      // (`function f({a,b}: any = {a:5,b:3}); f()`). Build the default through
+      // `compileObjectLiteralAsExternref` instead: the `__new_plain_object`
+      // dynamic carrier is exactly what the dynamic reader consumes (the
+      // module-var default control works for the same reason). Host lane keeps
+      // the existing shape — its `__extern_get` reflects wasm structs via the
+      // host wrapper, so it was never broken.
+      const useDynamicObjCarrier =
+        (ctx.standalone || ctx.wasi) &&
+        objectPatternStructHint === undefined &&
+        ts.isObjectBindingPattern(param.name) &&
+        paramType.kind === "externref" &&
+        param.initializer !== undefined &&
+        ts.isObjectLiteralExpression(param.initializer);
       let defaultResultType: ValType | null;
       try {
-        defaultResultType = compileExpression(ctx, fctx, param.initializer, objectPatternStructHint ?? paramType);
+        defaultResultType = useDynamicObjCarrier
+          ? compileObjectLiteralAsExternref(ctx, fctx, param.initializer as ts.ObjectLiteralExpression)
+          : compileExpression(ctx, fctx, param.initializer, objectPatternStructHint ?? paramType);
+        if (useDynamicObjCarrier && defaultResultType === null) {
+          // Carrier unavailable — fall back to the legacy shape.
+          defaultResultType = compileExpression(ctx, fctx, param.initializer, paramType);
+        }
       } finally {
         if (isArrayPatternExternref) {
           (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = prevForceVec;
