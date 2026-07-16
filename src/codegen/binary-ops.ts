@@ -9,6 +9,7 @@ import {
   getNullablePrimitiveInfo,
   isBigIntType,
   isBooleanType,
+  isHeterogeneousPrimitiveUnion,
   isNumberType,
   isStringType,
   isWrapperObjectType,
@@ -747,7 +748,45 @@ export function compileBinaryExpression(
   if (ctx.anyValueTypeIdx >= 0) {
     const leftIsAny = (leftTsType.flags & ts.TypeFlags.Any) !== 0;
     const rightIsAny = (rightTsType.flags & ts.TypeFlags.Any) !== 0;
-    if (leftIsAny && rightIsAny) {
+    // (#745 S3) A local whose static type is (or whose DECLARED symbol type
+    // is) a heterogeneous primitive union compiles to `ref_null $AnyValue`
+    // under `unionAnyRep` (S2 mapping) — no legacy path (string/numeric/
+    // ref-eq) can compare that carrier correctly, so route equality through
+    // the tag-aware `__any_strict_eq`/`__any_eq` helpers exactly like a
+    // both-`any` operand pair. The declared-type check matters because
+    // assignment/literal narrowing re-types the USE SITE (`x = "done";
+    // x === "done"` reports `"done"`) while the VALUE stays carried in the
+    // $AnyValue local. Statically nullish counter-operands are EXCLUDED —
+    // `=== undefined / null` already works via the nullish comparison paths.
+    // Flag-off (or no union operand): `unionRepEqInvolved` is false and the
+    // gate below is byte-identical to before.
+    const isUnionAnyRepUse = (t: ts.Type): boolean => ctx.unionAnyRep && isHeterogeneousPrimitiveUnion(t);
+    const declaredHetUnion = (node: ts.Expression): boolean => {
+      if (!ctx.unionAnyRep) return false;
+      let cur: ts.Expression = node;
+      while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+        cur = cur.expression;
+      }
+      if (!ts.isIdentifier(cur)) return false;
+      const sym = ctx.checker.getSymbolAtLocation(cur);
+      const decl = sym?.valueDeclaration;
+      if (!decl) return false;
+      try {
+        return isHeterogeneousPrimitiveUnion(ctx.checker.getTypeOfSymbolAtLocation(sym, decl));
+      } catch {
+        return false;
+      }
+    };
+    const nullishFlags = ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void;
+    const eqSideOk = (t: ts.Type): boolean => (t.flags & nullishFlags) === 0;
+    const unionRepEqInvolved =
+      (isUnionAnyRepUse(leftTsType) ||
+        isUnionAnyRepUse(rightTsType) ||
+        declaredHetUnion(expr.left) ||
+        declaredHetUnion(expr.right)) &&
+      eqSideOk(leftTsType) &&
+      eqSideOk(rightTsType);
+    if ((leftIsAny && rightIsAny) || unionRepEqInvolved) {
       const isPlusOp = op === ts.SyntaxKind.PlusToken;
       const isEqualityOp =
         op === ts.SyntaxKind.EqualsEqualsToken ||

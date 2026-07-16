@@ -7,7 +7,7 @@ import type { Instr, ValType } from "../ir/types.js";
  * and native string method calls.
  */
 import { ts } from "../ts-api.js";
-import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js";
+import { emitIsUndefinedSingletonExternAt, isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
 import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { compileAndEmitToString, emitToString, registerStringHelperEmitters } from "./coercion-engine.js";
@@ -183,7 +183,13 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
   // ARE migrated (js-host-only, standalone-gate-proven safe).
 
   // Already a native string operand (string-typed ref) — pass straight through.
-  if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType)) {
+  // (#745 S3) EXCEPT an `$AnyValue` carrier: a `number|string` union local
+  // narrowed to `string` still compiles to `ref_null $AnyValue` under
+  // `unionAnyRep`; passing it through made the caller `ref.cast $AnyString`
+  // an incompatible struct (an always-trapping nullref cast). Fall to the
+  // dynamic-ref arm below, whose `$__any_to_string` extracts the tag-5
+  // payload (and stringifies any other tag).
+  if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType) && !isAnyValue(opType, ctx)) {
     return true;
   }
 

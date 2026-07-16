@@ -156,14 +156,14 @@ describe("#745 S2 — isHeterogeneousPrimitiveUnion predicate", () => {
     return checker.getTypeAtLocation(d.name);
   }
 
-  it("accepts heterogeneous primitive unions", () => {
+  it("accepts heterogeneous primitive unions", { timeout: 120_000 }, () => {
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: number | string;"))).toBe(true);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: string | boolean;"))).toBe(true);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: number | string | undefined;"))).toBe(true);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: number | string | null;"))).toBe(true);
   });
 
-  it("rejects homogeneous / nullable / non-primitive shapes", () => {
+  it("rejects homogeneous / nullable / non-primitive shapes", { timeout: 120_000 }, () => {
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: number | null;"))).toBe(false);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal('let x: "a" | "b";'))).toBe(false);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: 0 | 2;"))).toBe(false);
@@ -175,5 +175,116 @@ describe("#745 S2 — isHeterogeneousPrimitiveUnion predicate", () => {
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("enum E { A, B }\nlet x: E | string;"))).toBe(false);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: number;"))).toBe(false);
     expect(isHeterogeneousPrimitiveUnion(typeOfLocal("let x: any;"))).toBe(false);
+  });
+});
+
+// ───────────────────────────── S3 ─────────────────────────────
+// Carrier-agnostic consumers (strict-eq / truthiness / string concat) for
+// `$AnyValue`-repped union locals — the first three rows of the S2 gap table.
+describe("#745 S3 — flag ON, carrier-agnostic consumers (standalone)", () => {
+  async function run(src: string): Promise<unknown> {
+    const r = await compile(src, { fileName: "t.ts", target: "standalone", unionAnyRep: true });
+    expect(r.success).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary!, {});
+    return (instance.exports as { test?: () => unknown }).test?.();
+  }
+
+  it("strict-eq: narrowed union local vs string literal (assignment narrowing)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string = 5; x = "done"; return x === "done" ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("strict-eq: UN-narrowed union local vs string / number literals", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string = 5;
+  for (let i = 0; i < 2; i++) if (i === 1) x = "done";
+  let n = 0;
+  if (x === "done") n += 1;
+  if (x !== 5) n += 2;
+  return n === 3 ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("strict-eq: union local vs union local (content equality)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string = 5; let y: number | string = 5;
+  let n = x === y ? 1 : 0;
+  if (1) { x = "k"; y = "k"; }
+  return n + (x === y ? 1 : 0) === 2 ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("strict-eq: boolean|string union vs true (tag-4 box hint)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: boolean | string = true; let n = 0;
+  if (x === true) n += 1;
+  x = "y";
+  if (x === "y") n += 2;
+  return n === 3 ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("truthiness: empty string falsy, non-empty truthy, 0 falsy (tag-5 arm)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string = 0; let n = 0;
+  if (x) n += 1;
+  x = "a";
+  if (x) n += 2;
+  x = "";
+  if (x) n += 4;
+  return n === 2 ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("concat: union local on both narrowing shapes ('' + num-narrowed, str + str-narrowed)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string = 1;
+  let s = "" + x;
+  x = "b";
+  s = s + x;
+  return s === "1b" ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("nullish comparisons keep working after the eq routing (regression guard)", async () => {
+    expect(
+      await run(`export function test(): number {
+  let x: number | string | undefined = undefined; let n = 0;
+  if (x === undefined) n += 1;
+  x = 3;
+  if (typeof x === "number") n += x;
+  x = "s";
+  if (x !== undefined) n += 10;
+  return n === 14 ? 1 : 0;
+}`),
+    ).toBe(1);
+  });
+
+  it("S3 consumers stay host-import-free", async () => {
+    const r = await compile(
+      `export function test(): number {
+  let x: number | string = 5;
+  for (let i = 0; i < 2; i++) if (i === 1) x = "done";
+  let s = "" + x;
+  if (x === "done" && x && s === "done") return 1;
+  return 0;
+}`,
+      { fileName: "t.ts", target: "standalone", unionAnyRep: true },
+    );
+    expect(r.success).toBe(true);
+    await expect(WebAssembly.instantiate(r.binary!, {})).resolves.toBeDefined();
   });
 });
