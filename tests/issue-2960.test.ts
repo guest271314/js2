@@ -30,9 +30,12 @@ async function hostResult(src: string): Promise<number> {
 
 describe("#2960 — host-mode dynamic new Function routes to the meta-circular shim", () => {
   it("dynamic immediate-call: new Function('a','b','return a'+op+'b')(1,2) === 3", async () => {
+    // (#1102) `let` + reassignment keeps this genuinely dynamic — a `const`
+    // string binding now const-folds into the Tier-0 compile-away, which
+    // would silently stop exercising the shim this test exists for.
     expect(
       await hostResult(
-        `export function test(): number { const op = "+"; return new Function("a","b","return a"+op+"b")(1,2); }`,
+        `export function test(): number { let op = "+"; op = op + ""; return new Function("a","b","return a"+op+"b")(1,2); }`,
       ),
     ).toBe(3);
   });
@@ -46,14 +49,14 @@ describe("#2960 — host-mode dynamic new Function routes to the meta-circular s
   it("dynamic value consumed host-side (Array.map) invokes the real callable", async () => {
     expect(
       await hostResult(
-        `export function test(): number { const op = "*"; const f: any = new Function("x","return x"+op+"2"); const a = [1,2,3].map(f as any); return a[0] + a[1] + a[2]; }`,
+        `export function test(): number { let op = "*"; op = op + ""; const f: any = new Function("x","return x"+op+"2"); const a = [1,2,3].map(f as any); return a[0] + a[1] + a[2]; }`,
       ),
     ).toBe(12);
   });
 
   it("emits an __extern_new_function import for the dynamic host path (no silent null stub)", async () => {
     const r = await compile(
-      `export function test(): any { const op = "+"; return new Function("a","b","return a"+op+"b"); }`,
+      `export function test(): any { let op = "+"; op = op + ""; return new Function("a","b","return a"+op+"b"); }`,
       { fileName: "t.ts" },
     );
     expect(r.success).toBe(true);
@@ -89,7 +92,7 @@ describe("#2960 — standalone dynamic eval: warning + host-free + catchable thr
 describe("#2960 — standalone dynamic new Function: construct-succeeds, throws only at call", () => {
   it("warns, stays host-free, and CONSTRUCTION does not throw (program not calling it keeps working)", async () => {
     const r = await compile(
-      `export function test(): number { const op = "+"; const f: any = new Function("a","b","return a"+op+"b"); return 7; }`,
+      `export function test(): number { let op = "+"; op = op + ""; const f: any = new Function("a","b","return a"+op+"b"); return 7; }`,
       { target: "standalone" },
     );
     expect(r.success, JSON.stringify(r.errors)).toBe(true);
@@ -103,7 +106,7 @@ describe("#2960 — standalone dynamic new Function: construct-succeeds, throws 
 
   it("CALLING the constructed standalone function throws CATCHABLY", async () => {
     const r = await compile(
-      `export function test(): number { const op = "+"; const f: any = new Function("a","b","return a"+op+"b"); try { return f(1,2); } catch (e) { return 99; } }`,
+      `export function test(): number { let op = "+"; op = op + ""; const f: any = new Function("a","b","return a"+op+"b"); try { return f(1,2); } catch (e) { return 99; } }`,
       { target: "standalone" },
     );
     expect(r.success, JSON.stringify(r.errors)).toBe(true);
