@@ -25,6 +25,12 @@ loc-budget-allow:
   - src/codegen/type-coercion.ts
   - src/codegen/any-helpers.ts
   - src/codegen/string-ops.ts
+# S3's declared-union equality routing needs SYMBOL resolution (declared vs
+# narrowed type) — explicitly outside the oracle's v1 scope (#1930 D3). The
+# predicate body lives in src/checker/type-mapper.ts; the single ctx.checker
+# occurrence below is the argument at the call site.
+oracle-ratchet-allow:
+  - src/codegen/binary-ops.ts
 files:
   src/codegen/index.ts:
     new:

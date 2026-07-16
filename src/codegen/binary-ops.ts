@@ -9,6 +9,7 @@ import {
   getNullablePrimitiveInfo,
   isBigIntType,
   isBooleanType,
+  isDeclaredHeterogeneousPrimitiveUnion,
   isHeterogeneousPrimitiveUnion,
   isNumberType,
   isStringType,
@@ -761,22 +762,8 @@ export function compileBinaryExpression(
     // Flag-off (or no union operand): `unionRepEqInvolved` is false and the
     // gate below is byte-identical to before.
     const isUnionAnyRepUse = (t: ts.Type): boolean => ctx.unionAnyRep && isHeterogeneousPrimitiveUnion(t);
-    const declaredHetUnion = (node: ts.Expression): boolean => {
-      if (!ctx.unionAnyRep) return false;
-      let cur: ts.Expression = node;
-      while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
-        cur = cur.expression;
-      }
-      if (!ts.isIdentifier(cur)) return false;
-      const sym = ctx.checker.getSymbolAtLocation(cur);
-      const decl = sym?.valueDeclaration;
-      if (!decl) return false;
-      try {
-        return isHeterogeneousPrimitiveUnion(ctx.checker.getTypeOfSymbolAtLocation(sym, decl));
-      } catch {
-        return false;
-      }
-    };
+    const declaredHetUnion = (node: ts.Expression): boolean =>
+      ctx.unionAnyRep && isDeclaredHeterogeneousPrimitiveUnion(ctx.checker, node);
     const nullishFlags = ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void;
     const eqSideOk = (t: ts.Type): boolean => (t.flags & nullishFlags) === 0;
     const unionRepEqInvolved =

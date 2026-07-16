@@ -432,6 +432,32 @@ export function isHeterogeneousUnion(type: ts.Type, checker: ts.TypeChecker, fas
  *   any/unknown — representation for those stays as-is until later slices;
  * - `T | null/undefined` single-kind nullables (the existing unwrap path).
  */
+/**
+ * (#745 S3) True when `node` (after unwrapping parens / `as` / `!`) is an
+ * identifier whose DECLARED symbol type is a heterogeneous primitive union
+ * (see {@link isHeterogeneousPrimitiveUnion}). Needed because assignment /
+ * literal narrowing re-types the USE SITE (`x = "done"; x === "done"` reports
+ * `"done"`) while the value stays in the `$AnyValue` carrier the S2 mapping
+ * chose from the declaration type. Takes the checker as a local param —
+ * symbol/binding resolution is explicitly outside the oracle's v1 scope
+ * (#1930 D3), mirroring `isHeterogeneousUnion`'s signature.
+ */
+export function isDeclaredHeterogeneousPrimitiveUnion(checker: ts.TypeChecker, node: ts.Expression): boolean {
+  let cur: ts.Expression = node;
+  while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+    cur = cur.expression;
+  }
+  if (!ts.isIdentifier(cur)) return false;
+  const sym = checker.getSymbolAtLocation(cur);
+  const decl = sym?.valueDeclaration;
+  if (!decl) return false;
+  try {
+    return isHeterogeneousPrimitiveUnion(checker.getTypeOfSymbolAtLocation(sym, decl));
+  } catch {
+    return false;
+  }
+}
+
 export function isHeterogeneousPrimitiveUnion(type: ts.Type): boolean {
   if (!type.isUnion()) return false;
   const nonNullish = type.types.filter(
