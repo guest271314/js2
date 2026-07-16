@@ -1538,6 +1538,26 @@ export interface CodegenContext {
    */
   argcGlobalIdx: number;
   /**
+   * (#2933) Canonical VARIADIC builtin value-closure convention, set when a
+   * genuinely-variadic builtin static method (`Math.max`/`Math.min`) is
+   * reified as a first-class value under `--target standalone`. The closure's
+   * lifted func type is `(self, (ref null $vec_externref)) -> externref` — one
+   * vec param carrying ALL call-site args — so a single any-callee dispatch
+   * arm (call-identifier.ts) serves every call-site arity. `undefined` when no
+   * variadic builtin value read occurred (the dispatch arm is then not
+   * emitted, keeping such modules byte-identical).
+   */
+  variadicBuiltinClosure?: {
+    /** Lifted func type of the variadic closures (`ref.test` discriminator). */
+    funcTypeIdx: number;
+    /** Wrapper struct type the closures' self param expects. */
+    structTypeIdx: number;
+    /** `$vec_externref` struct type (len + arr) used for the args-vec param. */
+    vecTypeIdx: number;
+    /** Underlying externref array type inside the vec. */
+    arrTypeIdx: number;
+  };
+  /**
    * Absolute Wasm global index for the `__current_this` (mut externref) module
    * global (#1636-S1). Set by `__call_fn_method_N` to the host-supplied
    * receiver before invoking the closure body; restored after the call.

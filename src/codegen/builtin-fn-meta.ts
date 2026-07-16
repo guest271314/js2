@@ -63,6 +63,11 @@ export const STANDALONE_STATIC_METHOD_META: Record<string, { name: string; lengt
   // value arg (replacer/space out of scope, matching the standalone call-path
   // narrowing), but `.length` reports the spec arity.
   "JSON.stringify": { name: "stringify", length: 3 },
+  // (#2933) Math.max/Math.min as VALUES — genuinely VARIADIC; reified with the
+  // canonical variadic closure convention (one `$vec_externref` args param, see
+  // `ctx.variadicBuiltinClosure`). Spec `.length` is 2 for both (§21.3.2.24/.25).
+  "Math.max": { name: "max", length: 2 },
+  "Math.min": { name: "min", length: 2 },
 };
 
 /**

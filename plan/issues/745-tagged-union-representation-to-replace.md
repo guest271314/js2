@@ -1,14 +1,17 @@
 ---
 id: 745
 title: "Tagged union representation to replace externref boxing"
-status: ready
+horizon: xl
+status: in-progress
+assignee: ttraenkler/fable-gamma
 created: 2026-03-22
-updated: 2026-04-28
+updated: 2026-07-16
 priority: high
 feasibility: hard
 reasoning_effort: max
 goal: performance
-sprint: Backlog
+sprint: current
+related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
 files:
   src/codegen/index.ts:
     new:
@@ -21,19 +24,21 @@ files:
     breaking:
       - "binary/unary ops on tagged unions: branch on tag, dispatch to typed path"
 ---
+
 # #745 — Tagged union representation to replace externref boxing
 
-## Status: open
+## Status: in-progress — design decided 2026-07-16, see `## Design Decision` below
 
 ## Problem
 
 Currently, any value whose type can't be resolved to a single Wasm primitive becomes `externref`. Operations on `externref` require JS host calls (`__box_number`, `__unbox_number`, `__any_add`, etc.) — each costing a cross-boundary call.
 
-For values that are a *known* union of Wasm-representable types (e.g., `number | string`, `number | null`), we can use a WasmGC struct with a type tag instead — keeping everything in pure Wasm with no host calls.
+For values that are a _known_ union of Wasm-representable types (e.g., `number | string`, `number | null`), we can use a WasmGC struct with a type tag instead — keeping everything in pure Wasm with no host calls.
 
 ## Approach
 
 ### Tagged union struct layout
+
 ```wasm
 (type $tagged_union (struct
   (field $tag (mut i32))         ;; 0=f64, 1=i32, 2=string, 3=null, 4=ref, ...
@@ -44,7 +49,9 @@ For values that are a *known* union of Wasm-representable types (e.g., `number |
 ```
 
 ### Operations on tagged unions
+
 Instead of calling `__any_add(externref, externref) → externref`:
+
 ```wasm
 ;; a + b where both are tagged unions
 (block $done (result f64)
@@ -62,19 +69,22 @@ Instead of calling `__any_add(externref, externref) → externref`:
 ```
 
 ### When to use
+
 - After whole-program analysis (#743): if a variable's type resolves to a union of 2-3 concrete types, use a tagged union instead of externref
 - For function parameters that receive different types at different call sites but monomorphization (#744) isn't worthwhile (large functions)
 - For collection elements: `Array<number | string>` → `vec (ref $tagged_union)` with fast numeric path
 
 ### Performance model
-| Operation | externref (current) | Tagged union |
-|-----------|-------------------|--------------|
-| Arithmetic | 2 JS host calls | 1 branch + native op |
-| Comparison | 1 JS host call | 1 branch + native op |
-| Type check | 1 JS host call | 1 i32 compare |
-| Boxing | 1 allocation + JS call | 1 struct.new (Wasm GC) |
+
+| Operation  | externref (current)    | Tagged union           |
+| ---------- | ---------------------- | ---------------------- |
+| Arithmetic | 2 JS host calls        | 1 branch + native op   |
+| Comparison | 1 JS host call         | 1 branch + native op   |
+| Type check | 1 JS host call         | 1 i32 compare          |
+| Boxing     | 1 allocation + JS call | 1 struct.new (Wasm GC) |
 
 ### Interaction with other issues
+
 - #743 (whole-program analysis) determines which variables are known unions vs truly dynamic
 - #744 (monomorphization) is preferred for small functions; tagged unions for large functions and collections
 - Replaces need for `__any_add`, `__any_sub` etc. host helpers for known-union cases
@@ -125,3 +135,120 @@ Map<signature, typeIdx>` to dedup.
 
 Two competing designs in the backlog. Decide before any code
 ships.
+
+---
+
+## Design Decision (slice 1, 2026-07-16, fable-gamma)
+
+**DECIDED: reject this issue's original per-union-signature structs. Known
+heterogeneous unions adopt the existing universal `$AnyValue` carrier**
+(`{tag:i32, i32val:i32, f64val:f64, refval:eqref, externval:externref}`,
+`ensureAnyValueType` in `src/codegen/any-helpers.ts`) **with the canonical
+`JsTag` enum** (`src/codegen/js-tag.ts`, #2104/#2949). The issue is NOT
+obsolete — its perf premise still reproduces on main (evidence below) — but
+its layout/design section above is superseded.
+
+### Stale cross-refs, corrected
+
+- The architect note above says "superseded by **#1552**". That design was
+  **renumbered to #1624** (`renumbered_from: 1552`; today's #1552 is an
+  unrelated, done catch-dstr issue). #1624 itself is `wont-fix`, superseded
+  by the 2026-06 value-rep program: #2104 (JsTag module, done), #2105
+  (boolean brand, done), #2106 (undefined observability, in-progress),
+  #2107 (standalone any-helper conformance, done).
+- #1624's supersede note cites "**#2140** (tag-5 ABI untangle)" — that id
+  was also reused; the tag-5 ABI untangle is **#2141** (in-progress,
+  sprint current). Fixed in #1624 in this PR.
+- The "#1552 universal `$Value`" design was never lost: it shipped
+  incrementally as `$AnyValue` + the value-rep program. What NEVER shipped
+  — and is the live remainder of THIS issue — is routing _statically-known_
+  heterogeneous unions onto that carrier.
+
+### Verified current-main reality (probe: `.tmp/probe-745-union.ts`, main 3186699e68)
+
+1. `resolveWasmType` (`src/codegen/index.ts:5462-5471`) only unwraps
+   `T | null/undefined/void` (2-member). Any other union falls through to
+   `mapTsTypeToWasm` → **externref, in every lane**.
+2. `any`/`unknown` already maps to `ref_null $AnyValue` — but **only under
+   `ctx.fast`** (`index.ts:5476-5479`). Non-fast lanes: externref.
+3. **Default (JS-host) lane WAT** for `let x: number | string`: every write
+   is a host `__box_number` call, every read `__unbox_number`, every
+   `typeof` guard `__typeof_number` — 1-2 JS boundary crossings per op.
+   This is the issue's original claim; it still holds verbatim.
+4. **Standalone lane** (#1471): same externref shape, but helpers are
+   Wasm-native — each op is still a call + `extern.convert_any`/
+   `any.convert_extern` round-trip + `ref.test` + a fresh single-field
+   box-struct allocation per write. No host calls, but none of the tag
+   fast paths this issue wants either.
+
+### Why $AnyValue, not per-union structs
+
+- **The D4 audit rule** (June audit, quoted in `src/codegen/js-tag.ts`):
+  "never mint a second tag/boxing table". Per-union structs are exactly
+  that — a parallel tagged rep needing its own eq/typeof/truthiness/
+  ToPrimitive machinery plus interconversion at every union↔any boundary
+  (assigning a union var into an `any` context is ubiquitous).
+- All consumers already exist and are hardened: `__any_strict_eq`,
+  `__any_typeof`, `$__any_to_string` conform to canonical tags (#2107);
+  tag-agnostic consumer work is #2141; `$undefined` singleton is #2106.
+- The IR lattice (#2949) grows `{kind: "dynamic", tag?: JsTag}` over the
+  SAME carrier — a known union is just a dynamic value with a statically
+  known tag SET (e.g. `number | string` ⇒ tags ⊆ {NumberI32, NumberF64,
+  String}), enabling 2-way branch codegen instead of full dispatch. The
+  per-union-struct design has no story there.
+- Space cost of unused $AnyValue fields is minor vs. a type per union
+  signature + parametric helper clones.
+
+### Migration strategy (per-rep-site, flagged, byte-diff-gated)
+
+Adoption is gated per lane and per site behind `ctx.unionAnyRep`
+(internal flag, like #2119's pattern), with a **byte-diff neutrality gate**
+in the #1917 style: modules containing no heterogeneous union must emit
+byte-identical wasm with the flag on. Broad-impact slices validate via
+full CI/merge_group only (never scoped sweeps).
+
+### Slice plan (dispatchable)
+
+- **S2 — standalone/nativeStrings locals** (L): in `resolveWasmType`, map
+  heterogeneous PRIMITIVE-ONLY unions (members ⊆ {number, string, boolean,
+  null, undefined} after literal widening) to `ref_null $AnyValue` when
+  `ctx.nativeStrings || target standalone`; producers route through
+  `boxToAny` (#2104); consumers: typeof lowering (`typeof-delete.ts`),
+  truthiness, `coerceType` unbox reads. Byte-diff gate for union-free
+  modules. Function-LOCAL variables only (no signature changes).
+- **S3 — narrowing fast paths** (M): typeof-guarded reads lower to
+  `struct.get $AnyValue tag` compare + direct payload `struct.get` (no
+  call, no alloc); `===`/`==` route to `__any_strict_eq`; arithmetic on
+  tag-narrowed values uses the f64val/i32val payload directly.
+- **S4 — union params/returns** (L): extend to function signatures +
+  union↔any (no-op — same carrier) and union↔host boundaries (externalize
+  only at the boundary, per the existing $AnyValue coercion paths in
+  `type-coercion.ts`). Watch `addUnionImports` index-shift (CLAUDE.md).
+- **S5 — default (JS-host) lane flip** (L, **gated on #2141 landing**):
+  same mapping without the nativeStrings gate. A union value flowing into
+  any-consumers must not recreate the #1888 tag-5 comparator incident
+  (−794 tests) — hence the hard gate on the ABI untangle.
+- **S6 — endgame** (M): retire `__box_number`/`__unbox_number`/
+  `__typeof_*` imports from modules that no longer reference them
+  (#1624 Phase D equivalent); simplify `addUnionImports`.
+
+### Risks
+
+- Blast radius: every union-typed path. Mitigation: flag + lane phasing +
+  byte-diff neutrality + full-CI validation per slice.
+- #1888-class ABI incidents at union↔any/host boundaries — S5 hard-gated
+  on #2141.
+- Late-import func-index shifts when helpers register — use the
+  name-based repoint patterns (#1461/#2191/#2193 memories).
+- #2040 dstr-default regression guard applies to any tag-classifier
+  change.
+
+### Coordination
+
+- **#2949** (IR dynamic rep, fable-11th, in-progress): shares the carrier
+  and JsTag; this issue is codegen-lane adoption, #2949 is IR-lattice
+  adoption. The tag-SET refinement idea above should feed #2949's spec.
+- **#2141** (tag-5 ABI untangle, in-progress): blocks S5 only.
+- **#743/#744** (whole-program analysis / monomorphization, Backlog):
+  complementary optimizations, NOT dependencies — TS checker union types
+  suffice to identify candidates.

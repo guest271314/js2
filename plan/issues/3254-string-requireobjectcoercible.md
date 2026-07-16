@@ -2,7 +2,8 @@
 id: 3254
 slug: string-requireobjectcoercible
 title: "Standalone: RequireObjectCoercible + ToString for borrowed String.prototype.<m>.call receiver"
-status: in-review
+status: done
+completed: 2026-07-13
 assignee: opus-tabrand
 sprint: current
 priority: high
