@@ -148,6 +148,29 @@ continuations are NOT dropped. Two verified mechanisms:
   even post-drain (e.g. `Array.fromAsync` thenable chains, some
   dynamic-import namespace shapes). Diagnose per-family after S2/S3 land.
 
+## S1 measured delta (sampled, for merge_group park-diagnosis)
+
+| Population                                | n sampled | Flip                                    | Extrapolated |
+| ----------------------------------------- | --------- | --------------------------------------- | ------------ |
+| 1,680 vacuous-callback records            | 60        | → honest **pass**                        | **+~420**    |
+| 1,680 vacuous-callback records            | 60        | → honest fail (already `fail` today)     | ~1,040 (no pass-count change; now carry real assert indices) |
+| 1,680 vacuous-callback records            | 60        | stay vacuous (S4 residual)               | ~140         |
+| 3,503 currently-passing async-flagged     | 80        | → honest **fail** (post-await asserts finally run) | **−~875** (CI 525–1,225) |
+
+Net raw pass ≈ **−455** (intentional honesty regression, lead-approved
+2026-07-16, precedent #3086). The −875 clusters are the S2/S3 work
+definitions:
+
+- **S2 cluster — await-NaN**: `class-elements async-gen … v.value === 42`
+  fails (value is NaN); root = `await <host promise>` reads NaN synchronously.
+- **S3 cluster — async-gen `.next().then(...)` IteratorResult**:
+  `yield-star-next-then-*` / `named-yield-*` fail assert #2 (`done` wrong) —
+  the IteratorResult crossing the host boundary delivers wrong `done`/`value`.
+
+ORACLE_VERSION: S1 takes **v4**; draft PR #3111 (standalone host-backed
+rejection) also drafted a 3→4 bump — whichever lands second must re-bump
+(4→5) and add its own history entry. S1 assumes it lands FIRST.
+
 ## Test Results (slice 1)
 
 - Issue-cited sample `async-generator/dstr/ary-ptrn-elem-id-iter-complete.js`:

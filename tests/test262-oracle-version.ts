@@ -87,6 +87,9 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "honest assert-fail where they expose real bugs (e.g. await <host " +
       "promise> reads NaN — slice 2), and some sync-pass → assert-fail where " +
       "a post-drain assertion genuinely fails. Cross-version diff is oracle " +
-      "skew; forward-monotonic bump auto-rebases in diff-test262.ts.",
+      "skew; forward-monotonic bump auto-rebases in diff-test262.ts. NOTE: " +
+      "draft PR #3111 (standalone host-backed-pass rejection) also drafted a " +
+      "3→4 bump; #3227 landed first, so #3111 (or any later oracle change) " +
+      "must re-bump to 5 with its own history entry.",
   },
 ];
