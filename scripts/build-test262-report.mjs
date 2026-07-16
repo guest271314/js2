@@ -57,18 +57,14 @@ function createCounts() {
     compile_timeout: 0,
     skip: 0,
     total: 0,
-    // (#2879) Host-free passes — `status === "pass"` AND the module emitted no
-    // host runtime import (`host_import_leak_class` absent). This is the HONEST
-    // *standalone* metric: a leaky pass that only passes because the JS host
-    // satisfied its `env::__*` imports is NOT counted here. The field is
-    // computed in both lanes (the gc/js-host lane legitimately uses host
-    // imports, so there `pass` stays the headline and `host_free_pass` is just
-    // informational); for `--target standalone` `host_free_pass` is the headline.
+    // Kept for the standalone high-water compatibility contract. Under the
+    // v4 oracle every standalone `pass` is host-free, so this equals `pass`.
+    // The gc/js-host lane still computes it as informational metadata.
     host_free_pass: 0,
   };
 }
 
-function buildSummary(counter) {
+function buildSummary(counter, target) {
   const hostFreePass = counter.host_free_pass ?? 0;
   return {
     total: counter.total,
@@ -78,9 +74,9 @@ function buildSummary(counter) {
     compile_timeout: counter.compile_timeout,
     skip: counter.skip,
     compilable: counter.pass + counter.fail,
-    // (#2879) honest standalone accounting — credit only host-free passes.
     host_free_pass: hostFreePass,
-    leaky_pass: (counter.pass ?? 0) - hostFreePass,
+    // Raw host-satisfied passes have no standalone meaning and are omitted.
+    ...(target === "standalone" ? {} : { leaky_pass: (counter.pass ?? 0) - hostFreePass }),
     stale: 0,
   };
 }
@@ -88,6 +84,22 @@ function buildSummary(counter) {
 function inferTarget(args) {
   if (args.target) return args.target;
   return `${args.input} ${args.output}`.includes("standalone") ? "standalone" : "gc";
+}
+
+function normalizeStandaloneVerdict(record, target) {
+  if (target !== "standalone" || record.status !== "pass") return record;
+  const imports = Array.isArray(record.imports) ? record.imports : [];
+  if (imports.length === 0 && !record.host_import_leak_class) return record;
+
+  const leaked = imports.length > 0 ? imports.join(", ") : record.host_import_leak_class;
+  const error = `standalone target emitted host imports: ${leaked} (#2961)`;
+  return {
+    ...record,
+    status: "compile_error",
+    error,
+    error_category: "host_import_leak",
+    error_signature: `host_import_leak:${error}`,
+  };
 }
 
 function textOf(record) {
@@ -771,6 +783,31 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) =>
       hasAny(text, ["uncaught wasm-gc exception (non-stringifiable payload)", "non-stringifiable payload"]),
   },
+  {
+    // #2961 — standalone host-import honesty reclassification. A legacy
+    // "leaky pass" (the compiled binary emits `env::__*` host imports, but the
+    // JS test262 harness satisfied them so the row read `pass`) is now scored
+    // `compile_error` at both the worker (scripts/test262-worker.mjs) and the
+    // report builder (`normalizeStandaloneVerdict`, defense-in-depth for
+    // legacy JSONL). The overwhelming majority of these rows are ALREADY
+    // classified by an earlier feature-path bucket above (e.g. a leaked
+    // `env::__temporal_*` import on a Temporal test still lands in
+    // `temporal-proposal` via its file path) — that's intentional and this
+    // bucket must stay LAST so `find`'s first-match never poaches those. This
+    // is the honest residual catch for imports with no dedicated feature
+    // bucket (`instanceof`, `AggregateError`, `SuppressedError`,
+    // `Error.isError`, …): the root cause of the FAILURE is the reclassification
+    // policy itself, not a per-feature codegen gap, so — unlike the other
+    // residual buckets above — a match here is not evidence of unclassified
+    // compiler behavior; it correctly satisfies the merge_group
+    // `--max-unclassified-root-causes 0` gate for the #2961 policy change.
+    id: "standalone-host-import-leak-reclassification",
+    issues: ["#2961"],
+    label:
+      "Standalone host-import honesty reclassification (#2961): legacy leaky-pass row (host-satisfied `env::` import) now scored compile_error — residual not matched by a feature-path bucket",
+    match: (record, text) =>
+      record.error_category === "host_import_leak" || hasAny(text, ["standalone target emitted host imports"]),
+  },
 ];
 
 function emptyRootCauseBucket(bucket) {
@@ -922,7 +959,11 @@ async function main() {
     );
   }
 
-  for (const record of recordsByFile.values()) {
+  for (const rawRecord of recordsByFile.values()) {
+    // Defense in depth for old JSONL or alternate runners: a host-satisfied
+    // result can never contribute a standalone pass, even if it arrived with
+    // the legacy `status: "pass"` verdict.
+    const record = normalizeStandaloneVerdict(rawRecord, target);
     const status = record.status;
     const scope = record.scope ?? "standard";
     const scopeOfficial = record.scope_official ?? scope !== "proposal";
@@ -994,11 +1035,11 @@ async function main() {
   // Add a `summary.by_category` map so clients (statusline, landing-page
   // toggle) can read both numbers from a single field without reaching
   // into multiple top-level objects.
-  const standardSummary = buildSummary(scopeCounts.get("standard") ?? createCounts());
-  const annexBSummary = buildSummary(scopeCounts.get("annex_b") ?? createCounts());
-  const proposalSummary = buildSummary(scopeCounts.get("proposal") ?? createCounts());
-  const officialSummaryBuilt = buildSummary(officialStatuses);
-  const fullSummaryBuilt = buildSummary(statuses);
+  const standardSummary = buildSummary(scopeCounts.get("standard") ?? createCounts(), target);
+  const annexBSummary = buildSummary(scopeCounts.get("annex_b") ?? createCounts(), target);
+  const proposalSummary = buildSummary(scopeCounts.get("proposal") ?? createCounts(), target);
+  const officialSummaryBuilt = buildSummary(officialStatuses, target);
+  const fullSummaryBuilt = buildSummary(statuses, target);
 
   const report = {
     timestamp: new Date().toISOString(),
@@ -1027,11 +1068,11 @@ async function main() {
     },
     official_summary: officialSummaryBuilt,
     full_summary: fullSummaryBuilt,
-    strict_summary: buildSummary(strictCounts),
+    strict_summary: buildSummary(strictCounts, target),
     scope_summaries: Object.fromEntries(
       [...scopeCounts.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([name, counter]) => [name, buildSummary(counter)]),
+        .map(([name, counter]) => [name, buildSummary(counter, target)]),
     ),
     categories: [...categories.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
