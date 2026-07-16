@@ -1,7 +1,8 @@
 ---
 id: 3315
 title: "standalone codegen: adding a 2nd argument to a call inside an object-method silently CORRUPTS sibling destructured bindings in the enclosing method (wrong values, no crash)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-a419
 created: 2026-07-16
 priority: high
 feasibility: hard
