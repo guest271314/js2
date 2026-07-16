@@ -1,0 +1,824 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * Method-ABI → closure-ABI trampoline machinery for js2wasm.
+ *
+ * Extracted verbatim from `closures.ts` (issue #3270) — the largest single
+ * cohesive removable subsystem: object-literal / cached method closures, the
+ * pending-trampoline finalize pass, and the shared null-`this` TypeError + `this`
+ * -slot prologue helpers. Depends on the extracted funcref-wrapper-types registry.
+ */
+
+import { ts } from "../../ts-api.js";
+import type { Instr, LocalDef, ValType } from "../../ir/types.js";
+import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
+import { inLiveShiftRange } from "../../emit/resolve-layout.js";
+import { addStringConstantGlobal } from "../registry/imports.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { noJsHost } from "../expressions/helpers.js";
+import { emitWasiErrorConstructor } from "../registry/error-types.js";
+import { allocTempLocal } from "../context/locals.js";
+import { ensureExnTag } from "../index.js";
+import { coercionInstrs } from "../type-coercion.js";
+import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
+import {
+  ensureLateImport as ensureLateImportShared,
+  flushLateImportShifts as flushLateImportShiftsShared,
+} from "../shared.js";
+import { getFuncSignature, getOrCreateFuncRefWrapperTypes } from "./funcref-wrapper-types.js";
+
+/**
+ * (#2015) Build the `this`-slot prologue for an object-method trampoline.
+ *
+ * Object-literal / cached method trampolines bridge the closure-value ABI
+ * `(closure_self, …userParams)` to the method ABI `(this_struct, …userParams)`.
+ * Historically they hardcoded `ref.null <objStruct>` for the method's `this`
+ * slot, implementing the unbound-`this` method-extraction case (`var f = o.m;
+ * f()` → `this === undefined`). But the SAME trampoline is reached when the
+ * closure is dispatched as a METHOD via `__call_fn_method_N`, which installs
+ * the receiver into the `__current_this` module global before the inner
+ * `call_ref` (#1636-S1). In that case the hardcoded null made `this.<field>`
+ * trap (the issue's bare `WebAssembly.Exception`).
+ *
+ * Read `__current_this` instead and use it as `this` when it `ref.test`s as the
+ * method's object struct; otherwise fall back to `ref.null` (preserving the
+ * unbound-extraction semantics, since plain `__call_fn_N` dispatch leaves the
+ * global null). This mirrors the null-guarded `__current_this` read that lifted
+ * closure bodies already use for `ThisKeyword` (`expressions.ts`, #1702).
+ *
+ * `anyTempLocalIdx` must reference a spare `anyref` local appended to the
+ * trampoline. Emits a sequence leaving exactly one `(ref null objStructTypeIdx)`
+ * on the stack.
+ */
+/**
+ * (#2025) Message thrown when an extracted method (`const f = a.m; f()`) is
+ * called with no receiver — `this` is `undefined`. Matches the spirit of
+ * Node's "Cannot read properties of undefined".
+ */
+const NULL_THIS_TYPEERROR_MSG = "Cannot read properties of undefined (reading a class field)";
+
+/**
+ * (#2025) Eagerly register the `__new_TypeError` import + the message string
+ * the first time an extractable method-as-closure trampoline is built, so the
+ * trampoline's null-`this` arm can emit a CATCHABLE TypeError throw with
+ * stable, shift-tracked indices (no late-import registration during the
+ * fragile finalize rebuild). Idempotent. Requires a live `fctx` so the flush
+ * lands the deferred index shift onto the surrounding function being compiled.
+ */
+export function ensureNullThisTypeError(ctx: CodegenContext, fctx: FunctionContext | null): void {
+  if (ctx.nullThisTypeErrorReady) return;
+  // In no-JS-host mode, define `__new_TypeError` in-module (no env import).
+  if (noJsHost(ctx)) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+  }
+  addStringConstantGlobal(ctx, NULL_THIS_TYPEERROR_MSG);
+  ensureLateImportShared(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShiftsShared(ctx, fctx);
+  ensureExnTag(ctx);
+  ctx.nullThisTypeErrorReady = true;
+}
+
+/**
+ * (#2025) The catchable-TypeError throw sequence for a genuinely-absent
+ * receiver, or `null` when the helpers were not eagerly registered (in which
+ * case the trampoline falls back to the legacy `ref.null` passthrough rather
+ * than risk an unregistered call). Pure lookups — no registration, so it is
+ * safe to call from the finalize rebuild (post-body, pre-freeze).
+ */
+function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
+  if (!ctx.nullThisTypeErrorReady) return null;
+  const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+  if (newTypeErrorIdx === undefined || ctx.exnTagIdx < 0) return null;
+  return [
+    ...stringConstantExternrefInstrs(ctx, NULL_THIS_TYPEERROR_MSG),
+    { op: "call", funcIdx: newTypeErrorIdx },
+    { op: "throw", tagIdx: ctx.exnTagIdx },
+  ];
+}
+
+/**
+ * (#2025) Does the method's compiled body read its receiver (`this` = param 0)?
+ * A method that never touches `this` is safely callable with a null receiver
+ * (no struct.get on null), so the trampoline must NOT throw for it. We detect a
+ * `local.get 0` anywhere in the body (including nested blocks). Conservative:
+ * if the body isn't available yet (idx out of range), assume it does use `this`
+ * so we don't silently regress the trap→TypeError fix.
+ */
+function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number): boolean {
+  const fn = definedFuncAt(ctx, methodFuncIdx);
+  if (!fn || !Array.isArray(fn.body)) return true;
+  const walk = (instrs: Instr[]): boolean => {
+    for (const instr of instrs) {
+      if (instr.op === "local.get" && (instr as { index?: number }).index === 0) return true;
+      for (const key of ["body", "then", "else", "catchAll"] as const) {
+        const nested = (instr as Record<string, unknown>)[key];
+        if (Array.isArray(nested) && walk(nested)) return true;
+      }
+      const catches = (instr as { catches?: { body?: Instr[] }[] }).catches;
+      if (Array.isArray(catches)) {
+        for (const c of catches) if (Array.isArray(c.body) && walk(c.body)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(fn.body);
+}
+
+function buildTrampolineThisSlot(
+  ctx: CodegenContext,
+  objStructTypeIdx: number,
+  anyTempLocalIdx: number,
+  methodUsesThis: boolean,
+): Instr[] {
+  const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+  const nullThis: Instr[] = [{ op: "ref.null", typeIdx: objStructTypeIdx }];
+  if (currentThisGlobalIdx < 0) return nullThis;
+  // (#2025) When the resolved `this` isn't the method's struct, distinguish a
+  // GENUINELY-ABSENT receiver (`__current_this` null — the unbound extraction
+  // `const f = a.m; f()`) from a merely structurally-different receiver (e.g. a
+  // subclass/boxed instance, where `__current_this` is non-null but doesn't
+  // `ref.test` as THIS exact struct). The first case is a spec TypeError; throw
+  // a CATCHABLE one instead of passing `ref.null` (which traps inside the
+  // method body on the first `this`-deref). The second case is left UNCHANGED
+  // (`ref.null` passthrough) — throwing there is what regressed PR #1571 (it
+  // fired for legitimate non-exact-struct receivers). Also only when the method
+  // actually READS `this` — a method that ignores its receiver (`m(){return 7}`)
+  // is callable with a null `this` (no deref, no trap), matching JS. Finally,
+  // only when the throw helpers were eagerly registered; else legacy passthrough.
+  const throwInstrs = methodUsesThis ? buildNullThisTypeErrorThrow(ctx) : null;
+  const elseArm: Instr[] = throwInstrs
+    ? [
+        { op: "local.get", index: anyTempLocalIdx },
+        { op: "ref.is_null" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
+          then: throwInstrs, // genuinely no receiver → catchable TypeError
+          else: nullThis, // different struct → unchanged passthrough
+        },
+      ]
+    : nullThis;
+  return [
+    { op: "global.get", index: currentThisGlobalIdx },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: anyTempLocalIdx },
+    { op: "ref.test", typeIdx: objStructTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
+      then: [
+        { op: "local.get", index: anyTempLocalIdx },
+        { op: "ref.cast", typeIdx: objStructTypeIdx },
+      ],
+      else: elseArm,
+    },
+  ];
+}
+
+/**
+ * #1118: Emit an object-literal method as a first-class closure value.
+ *
+ * Object-literal methods are compiled as Wasm functions with signature
+ * `(self_obj, ...userParams) → ret`. When the method is read as a value
+ * (e.g. `var f = obj.m;` or stored in the obj's own struct field), we
+ * need a closure-struct ref whose funcref takes `(closure_self, …userParams)`.
+ *
+ * The two signatures differ in their first param: the method expects the
+ * object's struct ref, the closure value passes its own closure struct.
+ * We bridge them with a trampoline that drops `closure_self` and pushes
+ * `ref.null <objStruct>` for the method's `self_obj` slot, then forwards
+ * the user params and tail-calls the method.
+ *
+ * The trampoline implements method extraction with unbound `this` — JS
+ * spec says `var f = obj.m; f();` invokes `m` with `this = undefined`
+ * (strict mode) or `this = globalThis` (sloppy). For methods that don't
+ * reference `this` (the common test262 yield-star pattern), the null
+ * `self_obj` is fine; methods that DO use `this` will trap inside the
+ * body, mirroring spec semantics.
+ *
+ * Returns the closure-struct ref ValType (which the caller can convert
+ * to externref via `extern.convert_any` if the field type expects it).
+ */
+export function emitObjectMethodAsClosure(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  methodName: string,
+  methodFuncIdx: number,
+  objStructTypeIdx: number,
+): ValType | null {
+  const sig = getFuncSignature(ctx, methodFuncIdx);
+  if (!sig) return null;
+  // Method signature: [(ref null objStruct), ...userParams] → results.
+  // Strip the leading self_obj to derive the closure value's user-visible
+  // signature.
+  if (sig.params.length === 0) return null;
+  const userParams = sig.params.slice(1);
+  const results = sig.results;
+
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  if (!wrapperTypes) return null;
+  const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
+
+  // Create the trampoline. Signature matches the wrapper's lifted func
+  // type: (closure_self, ...userParams) → ret. We ignore closure_self,
+  // resolve the method's self_obj from `__current_this` (#2015 — falls back
+  // to `ref.null` for the unbound method-extraction case), then forward the
+  // user params.
+  const trampolineName = `__obj_meth_tramp_${methodName}_${ctx.closureCounter++}`;
+  // anyref temp at the first slot past the params (closure_self + userParams).
+  const anyTempLocalIdx = 1 + userParams.length;
+  // (#2025) Decide whether the method reads `this` BEFORE registering the
+  // TypeError helpers — `ensureNullThisTypeError` adds a late import that shifts
+  // defined-function indices, which would make `methodFuncIdx` stale for the
+  // body lookup. Then register the helpers (with a live fctx so the import-index
+  // flush lands here) so the null-`this` arm throws instead of trapping and
+  // finalize never registers an import mid-rebuild.
+  // (#2025) Capture this-usage, then register the TypeError throw helpers. The
+  // registration may add a late import that shifts every DEFINED function index
+  // up by `ntShift`; the forwarding `call methodFuncIdx` we emit just below is in
+  // a body not yet attached to `ctx.mod.functions`, so the import-shift walker
+  // can't reach it — bump the captured index by the delta ourselves (import
+  // targets, < the pre-shift import count, are never shifted).
+  const methodUsesThis = methodBodyReadsThis(ctx, methodFuncIdx);
+  const importsBeforeNT = ctx.numImportFuncs;
+  ensureNullThisTypeError(ctx, fctx);
+  const ntShift = ctx.numImportFuncs - importsBeforeNT;
+  if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
+  const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
+  for (let i = 0; i < userParams.length; i++) {
+    // Skip closure_self at param 0; user params start at index 1
+    trampolineBody.push({ op: "local.get", index: i + 1 });
+  }
+  trampolineBody.push({ op: "call", funcIdx: methodFuncIdx });
+
+  const trampolineFuncIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, trampolineFuncIdx, {
+    name: trampolineName,
+    typeIdx: liftedFuncTypeIdx,
+    locals: [{ name: "__this_any", type: { kind: "anyref" } }],
+    body: trampolineBody,
+    exported: false,
+  });
+  ctx.funcMap.set(trampolineName, trampolineFuncIdx);
+
+  // (#1602) The method's `func.typeIdx` may be re-resolved after this point
+  // (generator/default-param methods finalize their param types/order during
+  // body compilation). The forwarding body built above snapshots the CURRENT
+  // signature; record it so a post-pass can rebuild it against the method's
+  // final signature once all function bodies are compiled.
+  ctx.pendingMethodTrampolines.push({
+    trampolineBody,
+    trampolineFuncIdx,
+    methodFuncIdx,
+    objStructTypeIdx,
+    userParamCount: userParams.length,
+    wrapperUserParams: userParams,
+    wrapperResult: results[0],
+    methodUsesThis, // (#2025) captured pre-shift; finalize reuses it
+    // (#1809) Record whether the target is already an import at registration.
+    // Import indices stay stable across late-import batches (new imports append
+    // at the end, so indices < importsBefore are never shifted), so an import
+    // target at finalize is EXPECTED, not a missed shift.
+    methodTargetsImport: methodFuncIdx < ctx.numImportFuncs,
+  });
+
+  // Emit: ref.func $trampoline, struct.new $closure_struct
+  fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
+  fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
+
+  return { kind: "ref", typeIdx: structTypeIdx };
+}
+
+/**
+ * (#1602) Rebuild every object-method-as-closure trampoline body against the
+ * method's FINAL signature. Must run after all function bodies are compiled
+ * (so `func.typeIdx` re-resolution has settled) and BEFORE late-import index
+ * shifting, since the rebuilt body re-emits `call methodFuncIdx` at the current
+ * (pre-shift) index — the shift machinery then walks it like any other body.
+ *
+ * The trampoline's own signature (its wrapper func type) is left untouched; we
+ * only fix the forwarding body so its `local.get` count and the `call`'s
+ * operand types match the method's resolved params. The wrapper's user-param
+ * count is invariant (derived from the same method), so the trampoline param
+ * indices stay valid; only the per-arg coercion is what could drift, and any
+ * coercion the call needs is applied by mirroring the method's param types.
+ */
+export function finalizeMethodTrampolines(ctx: CodegenContext): void {
+  for (const t of ctx.pendingMethodTrampolines) {
+    // (#1525b / #1809) If the captured methodFuncIdx resolves to an IMPORT at
+    // finalize (< ctx.numImportFuncs), there are two distinct cases:
+    //
+    //   1. The target was ALREADY an import at registration (`methodTargetsImport`)
+    //      — e.g. a host/DOM global (`resizeTo`, `scrollBy`) or a `declare`d
+    //      function used as a first-class value. Import indices never shift
+    //      (new late imports append at the end, so indices < importsBefore are
+    //      left untouched by every shift walker), so the trampoline still
+    //      forwards into the correct import. `getFuncSignature` below resolves
+    //      the import's signature, and `call methodFuncIdx` against an import is
+    //      valid Wasm. This is EXPECTED — proceed with the normal rebuild.
+    //
+    //   2. The target was a DEFINED function at registration but now lands in
+    //      the import range. That can only mean the late-import shift machinery
+    //      missed this entry — a real #1525b regression. Fail loudly rather
+    //      than emit invalid Wasm (it would `call` the wrong import).
+    if (t.methodFuncIdx < ctx.numImportFuncs && !t.methodTargetsImport) {
+      throw new Error(
+        `pendingMethodTrampolines: methodFuncIdx ${t.methodFuncIdx} ` +
+          `points at import "${ctx.mod.imports[t.methodFuncIdx]?.name}" — ` +
+          `shift walker missed this entry (#1525b regression)`,
+      );
+    }
+    const sig = getFuncSignature(ctx, t.methodFuncIdx);
+    if (!sig) continue;
+    // (#1340) Plain function decls have no hidden `this`; method sigs lead
+    // with `this` at param 0 and need it dropped. The legacy method path
+    // requires `sig.params.length >= 1` because it slices off `this`.
+    if (!t.noThisParam && sig.params.length === 0) continue;
+    const methodUserParams = t.noThisParam ? sig.params : sig.params.slice(1);
+    // Only rebuild when the user-param arity is unchanged. The trampoline's
+    // OWN func type (its wrapper type) was fixed at registration with
+    // `userParamCount` params and is shared/cached, so it cannot change here;
+    // forwarding a different number of params would violate that contract and
+    // produce an invalid `local.get` index. An arity change (e.g. async method
+    // param injection) is a separate concern handled by its own codegen path.
+    if (methodUserParams.length !== t.userParamCount) continue;
+
+    // (#1669) The trampoline's OWN signature (the wrapper func type, captured
+    // when the closure value was emitted) fixes the types of the `local.get`s
+    // the forwarding body reads. The method's signature may have been
+    // re-resolved during body compilation (default-param / generator / async
+    // methods finalize their param types and order then), so the wrapper param
+    // types and the method param types can DRIFT — e.g. a default-param method
+    // resolves its param to `f64` while the closure-value ABI typed the wrapper
+    // param `externref`, or two structurally-deduped sibling literals swap a
+    // param's `f64`/`externref` position. Forwarding the wrapper-typed value
+    // straight into `call methodFuncIdx` then emits an invalid `call`
+    // ("expected externref, found (ref null N)" / "expected externref, found
+    // f64"). The same drift can affect the RESULT: the wrapper's declared
+    // result is `externref` while the method now returns `(ref null N)`, which
+    // shows up as a `fallthru` type error.
+    //
+    // #1602 introduced this rebuild but forwarded the params verbatim with no
+    // coercion, which is correct only when the types did not drift. Re-emit the
+    // forwarding with a per-arg coercion from the WRAPPER param type to the
+    // METHOD param type, and a final coercion from the method result to the
+    // wrapper result, so the rebuilt body validates against both signatures.
+    // The wrapper signature is captured at emit time (the static types of the
+    // `local.get`s the body reads and the type it must return). Re-deriving it
+    // from `t.trampolineFuncIdx` is unsafe: late-import shifting can move that
+    // index relative to the recorded value, returning a different function's
+    // signature (observed for async methods).
+    const wrapperUserParams = t.wrapperUserParams;
+    const wrapperResult = t.wrapperResult;
+    const methodResult = sig.results[0];
+
+    // Build a minimal FunctionContext so coercions that need a scratch local
+    // (externref → ref/ref_null) can allocate one. Its `params` mirror the
+    // trampoline's wrapper signature exactly (closure_self at index 0, then the
+    // wrapper's user params at 1..N) so `allocTempLocal` computes a temp index
+    // past the real params; the allocated `localDefs` are attached to the
+    // registered trampoline function below.
+    const localDefs: LocalDef[] = [];
+    const tFctx: FunctionContext = {
+      name: `__obj_meth_tramp_finalize_${t.trampolineFuncIdx}`,
+      params: [
+        { name: "__self", type: { kind: "anyref" } },
+        ...wrapperUserParams.map((p, i) => ({ name: `__p${i}`, type: p })),
+      ],
+      locals: localDefs,
+      localMap: new Map(),
+      returnType: wrapperResult ?? null,
+      body: [],
+      blockDepth: 0,
+      breakStack: [],
+      continueStack: [],
+      labelMap: new Map(),
+      savedBodies: [],
+    };
+
+    // (#1340) Function-decl trampolines have no `this` prologue; method
+    // trampolines resolve the receiver from `__current_this` (#2015, falling
+    // back to `ref.null` for the unbound method-extraction case) before
+    // forwarding user params. The anyref scratch local is allocated through
+    // `tFctx` so it lands in `localDefs` (attached to the registered function
+    // below) and any later coercion temps allocate after it.
+    let newBody: Instr[];
+    if (t.noThisParam) {
+      newBody = [];
+    } else {
+      const anyTempLocalIdx = allocTempLocal(tFctx, { kind: "anyref" });
+      // (#2025) Reuse the registration-time `methodUsesThis` (captured before
+      // the TypeError-helper import shifted function indices, so it is reliable
+      // here where `t.methodFuncIdx` may be stale). Fall back to a fresh body
+      // scan only when it wasn't recorded.
+      const usesThis = t.methodUsesThis ?? methodBodyReadsThis(ctx, t.methodFuncIdx);
+      newBody = buildTrampolineThisSlot(ctx, t.objStructTypeIdx, anyTempLocalIdx, usesThis);
+    }
+    for (let i = 0; i < methodUserParams.length; i++) {
+      newBody.push({ op: "local.get", index: i + 1 });
+      const from = wrapperUserParams[i];
+      const to = methodUserParams[i]!;
+      if (from && from.kind !== to.kind) {
+        tFctx.body = newBody;
+        newBody.push(...coercionInstrs(ctx, from, to, tFctx));
+      } else if (
+        from &&
+        (from.kind === "ref" || from.kind === "ref_null") &&
+        (to.kind === "ref" || to.kind === "ref_null")
+      ) {
+        // Same kind but possibly different struct typeIdx — guarded re-cast.
+        const fromIdx = (from as { typeIdx?: number }).typeIdx;
+        const toIdx = (to as { typeIdx?: number }).typeIdx;
+        if (fromIdx !== toIdx && toIdx !== undefined) {
+          tFctx.body = newBody;
+          newBody.push(...coercionInstrs(ctx, from, to, tFctx));
+        }
+      }
+    }
+    newBody.push({ op: "call", funcIdx: t.methodFuncIdx });
+    // Reconcile the result arity/type with the wrapper's declared result.
+    if (methodResult && !wrapperResult) {
+      // Method now returns a value the void wrapper must discard.
+      newBody.push({ op: "drop" });
+    } else if (wrapperResult && methodResult && wrapperResult.kind !== methodResult.kind) {
+      tFctx.body = newBody;
+      newBody.push(...coercionInstrs(ctx, methodResult, wrapperResult, tFctx));
+    } else if (
+      wrapperResult &&
+      methodResult &&
+      (wrapperResult.kind === "ref" || wrapperResult.kind === "ref_null") &&
+      (methodResult.kind === "ref" || methodResult.kind === "ref_null") &&
+      (wrapperResult as { typeIdx?: number }).typeIdx !== (methodResult as { typeIdx?: number }).typeIdx
+    ) {
+      // (#1672) Both results are GC struct refs but with DIFFERENT typeIdx.
+      // This happens when the wrapper captured the method's result struct type
+      // at closure-emit time (`results[0]`), but the method body later resolved
+      // its return to a structurally-distinct struct type (e.g. two
+      // iterator-result-like struct shapes built at different points — the
+      // AsyncFromSyncIterator `next`/`return`/`throw` accessor path). `coercionInstrs`
+      // is a NO-OP for same-`kind` operands (`from.kind === to.kind`), so the
+      // earlier reliance on it left the body returning `ref methodTypeIdx` where
+      // the wrapper's func type declares `ref wrapperTypeIdx` — an invalid module
+      // ("fallthru" / result type error compiling `__obj_meth_tramp_*`). Emit an
+      // explicit cast to the wrapper's declared result type instead. The cast is
+      // routed through `anyref` so it works regardless of whether the two struct
+      // types share a supertype (a direct `ref.cast` between unrelated GC types is
+      // itself invalid). At runtime the method's generator/iterator-result object
+      // is a valid instance of the wrapper's result shape, so the cast succeeds.
+      const wrapperTypeIdx = (wrapperResult as { typeIdx: number }).typeIdx;
+      if (methodResult.kind === "ref") {
+        // Non-null source: cast directly.
+        newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx });
+      } else {
+        // Nullable source: a null must stay null; cast preserves nullability when
+        // the target is also nullable, else guard. Wrapper result kind dictates.
+        if (wrapperResult.kind === "ref_null") {
+          newBody.push({ op: "ref.cast_null", typeIdx: wrapperTypeIdx });
+        } else {
+          newBody.push({ op: "ref.cast", typeIdx: wrapperTypeIdx });
+        }
+      }
+    }
+
+    // Mutate the existing body array in place so the already-registered
+    // function keeps the same body reference, and attach any temp locals
+    // coercion allocated for this trampoline. The function is located by body
+    // identity (not by `trampolineFuncIdx`, which may have shifted): the
+    // registered trampoline holds the SAME `t.trampolineBody` array reference.
+    //
+    // (#2015) The rebuilt body's local indices are computed against `tFctx`,
+    // whose `locals` (`localDefs`) start empty — so the `__current_this` anyref
+    // scratch lands at the first slot past the wrapper params and any coercion
+    // temps after it. The initial emit pre-seeded the function with a single
+    // `__this_any` anyref local at that SAME index, so REPLACE the function's
+    // locals with `localDefs` (rather than append) to keep the persisted layout
+    // in lockstep with the rebuilt body; an append would shift every temp by one.
+    if (!t.noThisParam || localDefs.length > 0) {
+      const func = ctx.mod.functions.find((f) => f.body === t.trampolineBody);
+      if (func) func.locals = localDefs;
+    }
+    t.trampolineBody.length = 0;
+    t.trampolineBody.push(...newBody);
+  }
+  ctx.pendingMethodTrampolines.length = 0;
+}
+
+/**
+ * (#1394) Emit a cached singleton closure for a class method, preserving
+ * identity: every emit of `C.prototype.<method>` (or `instance.<method>`
+ * as a value) returns the same externref so JS's `===` works (e.g.
+ * `c.m === C.prototype.m`). 478 tests under
+ * `language/{expressions,statements}/class/elements/*` exercise this
+ * exact assertion via `verifyProperty(C.prototype, "m", { value: m })`.
+ *
+ * The cache is a per-class-method module-level externref global,
+ * lazily initialised on first access (matches the existing
+ * `emitLazyProtoGet` pattern). The canonical trampoline is registered
+ * once per method too — its name is
+ * `__obj_meth_tramp_${methodName}_cached`, distinct from the legacy
+ * per-call-site `__obj_meth_tramp_${methodName}_${counter}` that
+ * `emitObjectMethodAsClosure` emits.
+ *
+ * Returns `true` if the access was emitted; `false` if the method's
+ * signature couldn't be resolved (caller should fall back).
+ */
+/**
+ * (#3270 dedup) Emit the shared lazy externref-cache access kernel:
+ *
+ *   global.get $cache
+ *   ref.is_null
+ *   if (then: ref.func $tramp; struct.new $struct; extern.convert_any; global.set $cache)
+ *   global.get $cache
+ *
+ * builds the closure ONCE into the module-level cache global, then reads it.
+ * The func-decl caller appends its own `any.convert_extern` + `ref.cast`
+ * recovery after this returns.
+ */
+function emitLazyClosureCacheAccess(
+  fctx: FunctionContext,
+  cacheGlobalIdx: number,
+  trampolineFuncIdx: number,
+  structTypeIdx: number,
+): void {
+  const initBody: Instr[] = [
+    { op: "ref.func", funcIdx: trampolineFuncIdx },
+    { op: "struct.new", typeIdx: structTypeIdx },
+    { op: "extern.convert_any" },
+    { op: "global.set", index: cacheGlobalIdx },
+  ];
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: initBody,
+    else: [],
+  });
+  fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
+}
+
+export function emitCachedMethodClosureAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  methodName: string,
+  methodFuncIdx: number,
+  objStructTypeIdx: number,
+): boolean {
+  const singleton = ensureMethodClosureSingleton(ctx, fctx, methodName, methodFuncIdx, objStructTypeIdx);
+  if (!singleton) return false;
+  const { cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx } = singleton;
+
+  // Emit the lazy-init access (mirrors `emitLazyProtoGet`):
+  //   global.get $cache
+  //   ref.is_null
+  //   if (then: build closure, store in $cache)
+  //   global.get $cache
+  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx);
+  return true;
+}
+
+/**
+ * (#2963) The creation half of {@link emitCachedMethodClosureAccess}, split out
+ * so the member-get dispatcher (`member-get-dispatch.ts`) can pre-create the
+ * SAME canonical singleton machinery (trampoline + cache global) at reserve
+ * time — giving a DYNAMIC `any`-receiver method read (`c.m` where `c: any`)
+ * the identical value the typed read (`C.prototype.m`) yields, so
+ * `c.m === C.prototype.m` holds. Idempotent per `methodName`.
+ *
+ * Returns the handles, or `null` when the method signature is unresolvable
+ * (caller falls back / skips the candidate). NOTE: `trampolineFuncIdx` and
+ * `cacheGlobalIdx` are the CURRENT indices — late imports added after this
+ * call shift them. Compile-time callers baking instrs immediately (the typed
+ * read) are covered by the body walkers; FINALIZE-time consumers must
+ * re-resolve by name (`__obj_meth_tramp_<name>_cached` via funcMap,
+ * `ctx.methodClosureGlobals.get(methodName)` — both shift-maintained).
+ */
+export function ensureMethodClosureSingleton(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  methodName: string,
+  methodFuncIdx: number,
+  objStructTypeIdx: number,
+): { cacheGlobalIdx: number; trampolineFuncIdx: number; closureStructTypeIdx: number } | null {
+  // Resolve the user-visible signature so we know the wrapper struct's
+  // funcref shape. Method signature is [(ref null objStruct), ...userParams]
+  // → results; strip the leading `this` to derive the closure-callable
+  // user signature.
+  const sig = getFuncSignature(ctx, methodFuncIdx);
+  if (!sig || sig.params.length === 0) return null;
+  const userParams = sig.params.slice(1);
+  const results = sig.results;
+
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  if (!wrapperTypes) return null;
+  const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
+
+  // Reuse the canonical trampoline if one was already registered for
+  // this method; otherwise build it once.
+  const trampolineName = `__obj_meth_tramp_${methodName}_cached`;
+  let trampolineFuncIdx = ctx.funcMap.get(trampolineName);
+  if (trampolineFuncIdx === undefined) {
+    // Trampoline body: drop the closure-self arg (param 0), resolve the
+    // method's `this` from `__current_this` (#2015 — falls back to
+    // `ref.null` for the unbound method-extraction case `var fn = c.m;
+    // fn();` where JS strict mode calls with `this = undefined`, so the
+    // null receiver propagates the spec-mandated TypeError on `this.field`
+    // access), then forward user params, then call the method.
+    const anyTempLocalIdx = 1 + userParams.length;
+    // (#2025) Capture this-usage, register the throw helpers, then adjust the
+    // forwarding index by any import-shift the registration caused (see the
+    // matching note in emitObjectMethodAsClosure).
+    const methodUsesThisCached = methodBodyReadsThis(ctx, methodFuncIdx);
+    const importsBeforeNT = ctx.numImportFuncs;
+    ensureNullThisTypeError(ctx, fctx);
+    const ntShift = ctx.numImportFuncs - importsBeforeNT;
+    if (ntShift > 0 && inLiveShiftRange(methodFuncIdx, importsBeforeNT)) methodFuncIdx += ntShift;
+    const trampolineBody: Instr[] = buildTrampolineThisSlot(
+      ctx,
+      objStructTypeIdx,
+      anyTempLocalIdx,
+      methodUsesThisCached,
+    );
+    for (let i = 0; i < userParams.length; i++) {
+      trampolineBody.push({ op: "local.get", index: i + 1 });
+    }
+    trampolineBody.push({ op: "call", funcIdx: methodFuncIdx });
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
+      name: trampolineName,
+      typeIdx: liftedFuncTypeIdx,
+      locals: [{ name: "__this_any", type: { kind: "anyref" } }],
+      body: trampolineBody,
+      exported: false,
+    });
+    ctx.funcMap.set(trampolineName, trampolineFuncIdx);
+    ctx.mod.declaredFuncRefs.push(trampolineFuncIdx);
+
+    // (#1669) The method's `func.typeIdx` may still be re-resolved after this
+    // first cached access (the method body is compiled later in the same pass,
+    // and generator/default-param/async methods finalize their param types and
+    // order during that body compile). The trampoline body built above forwards
+    // `local.get`s typed by THIS wrapper signature into `call methodFuncIdx`,
+    // which validates against the method's FINAL signature. If they drift, the
+    // module is invalid. #1602 fixed exactly this for the per-call-site
+    // (non-cached) trampoline via `pendingMethodTrampolines`; the cached
+    // singleton trampoline was never enrolled, so it kept the stale forwarding.
+    // Enroll it so `finalizeMethodTrampolines` rebuilds the body against the
+    // method's final signature (with per-arg externref coercion).
+    ctx.pendingMethodTrampolines.push({
+      trampolineBody,
+      trampolineFuncIdx,
+      methodFuncIdx,
+      objStructTypeIdx,
+      userParamCount: userParams.length,
+      wrapperUserParams: userParams,
+      wrapperResult: results[0],
+      methodUsesThis: methodUsesThisCached, // (#2025) captured pre-shift
+      // (#1809) See the per-call-site push for rationale.
+      methodTargetsImport: methodFuncIdx < ctx.numImportFuncs,
+    });
+  }
+
+  // Reuse or allocate the cache global. Type is externref so the value
+  // is stable across access sites (the closure-struct ref is converted
+  // via `extern.convert_any` once at init).
+  let cacheGlobalIdx = ctx.methodClosureGlobals.get(methodName);
+  if (cacheGlobalIdx === undefined) {
+    cacheGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__method_closure_${methodName}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.methodClosureGlobals.set(methodName, cacheGlobalIdx);
+  }
+
+  return { cacheGlobalIdx, trampolineFuncIdx, closureStructTypeIdx: structTypeIdx };
+}
+
+/**
+ * (#1340) Emit a cached singleton closure for a top-level function declaration
+ * used as a first-class value. Mirrors `emitCachedMethodClosureAccess` (#1394)
+ * for the function-decl case.
+ *
+ * Without caching, every textual occurrence of `foo` (in value position)
+ * compiled a fresh `struct.new $closure_struct`, so `foo === foo` was false
+ * and sidecar writes on `foo.prototype` keyed by the struct identity never
+ * round-tripped (test262 Iterator helpers misclassified as `wasm_compile`).
+ *
+ * One externref cache global per function name, lazily initialised on first
+ * read; all later reads return the same externref. Call dispatch is unchanged
+ * (resolved via `funcMap` + direct `call funcIdx`); only the value-context
+ * read uses the cached closure.
+ *
+ * Only safe for captureless functions — captures must be filled at the
+ * per-construction site, not once at module init.
+ *
+ * Returns the closure struct's `ref` ValType when the cached access was
+ * emitted (so downstream consumers like array-methods.ts can take the
+ * direct `call_ref` fast path against the closure's funcref slot rather
+ * than the externref-bridge slow path through `__call_2_f64`). Returns
+ * `null` when the signature couldn't be resolved (caller falls back).
+ */
+export function emitCachedFuncClosureAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  funcName: string,
+  funcIdx: number,
+): ValType | null {
+  const sig = getFuncSignature(ctx, funcIdx);
+  if (!sig) return null;
+
+  const userParams = sig.params;
+  const results = sig.results;
+
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  if (!wrapperTypes) return null;
+  const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
+
+  // Reuse the canonical trampoline if one was already registered for this
+  // function; otherwise build it once.
+  const trampolineName = `__fn_tramp_${funcName}_cached`;
+  let trampolineFuncIdx = ctx.funcMap.get(trampolineName);
+  if (trampolineFuncIdx === undefined) {
+    // Forward user params (skip self at param 0) — function declarations
+    // don't have a hidden `this` param like methods do.
+    const trampolineBody: Instr[] = [];
+    for (let i = 0; i < userParams.length; i++) {
+      trampolineBody.push({ op: "local.get", index: i + 1 });
+    }
+    trampolineBody.push({ op: "call", funcIdx });
+    trampolineFuncIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, trampolineFuncIdx, {
+      name: trampolineName,
+      typeIdx: liftedFuncTypeIdx,
+      locals: [],
+      body: trampolineBody,
+      exported: false,
+    });
+    ctx.funcMap.set(trampolineName, trampolineFuncIdx);
+    ctx.mod.declaredFuncRefs.push(trampolineFuncIdx);
+
+    // (#1669-style) Mirror the late-finalization guard used by
+    // `emitCachedMethodClosureAccess`. The function's `func.typeIdx` may
+    // still be re-resolved after this first cached access (default-param /
+    // generator funcs finalize param types during body compile). Enroll
+    // the trampoline so `finalizeMethodTrampolines` rebuilds the body
+    // against the function's final signature.
+    ctx.pendingMethodTrampolines.push({
+      trampolineBody,
+      trampolineFuncIdx,
+      methodFuncIdx: funcIdx,
+      // No `this` param for a plain function decl — `noThisParam: true`
+      // tells the finalizer to skip both the `sig.params.slice(1)` strip
+      // and the `ref.null <objStruct>` prologue. `objStructTypeIdx` is
+      // unused on this path.
+      objStructTypeIdx: -1,
+      userParamCount: userParams.length,
+      wrapperUserParams: userParams,
+      wrapperResult: results[0],
+      noThisParam: true,
+      // (#1809) A name resolved through `funcMap` can point at a host import
+      // (e.g. a DOM/host global `resizeTo`/`scrollBy`, or a `declare`d function)
+      // used as a first-class value. The forwarding trampoline legitimately
+      // `call`s the import, and import indices never shift, so flag it so the
+      // finalizer does not mistake the import target for a missed shift.
+      methodTargetsImport: funcIdx < ctx.numImportFuncs,
+    });
+  }
+
+  // Reuse or allocate the cache global.
+  let cacheGlobalIdx = ctx.funcClosureGlobals.get(funcName);
+  if (cacheGlobalIdx === undefined) {
+    cacheGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: `__fn_closure_${funcName}`,
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" }],
+    });
+    ctx.funcClosureGlobals.set(funcName, cacheGlobalIdx);
+  }
+
+  // Emit the lazy-init access (mirrors emitCachedMethodClosureAccess), but
+  // recover the closure-struct ref on read so downstream consumers like
+  // `array-methods.ts:setupArrayCallback` take the direct `call_ref` fast
+  // path. Returning a bare externref forced the host-bridge slow path
+  // through `__call_2_f64`, which in JS expects a real Function — array
+  // callbacks via top-level fn decls (`[1,2].filter(fn)`) regressed with
+  // `TypeError: fn is not a function`. The externref global is preserved
+  // for stable cross-site identity (`foo === foo` and sidecar writes on
+  // `foo.prototype`); `any.convert_extern + ref.cast` is a cheap, stable
+  // bijection back to the struct ref view used by the call-site.
+  //   global.get $cache
+  //   ref.is_null
+  //   if (then: build closure, extern.convert_any, store in $cache)
+  //   global.get $cache
+  //   any.convert_extern
+  //   ref.cast (ref $struct)
+  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, structTypeIdx);
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
+  return { kind: "ref", typeIdx: structTypeIdx };
+}

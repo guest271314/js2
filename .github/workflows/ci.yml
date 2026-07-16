@@ -123,12 +123,24 @@ jobs:
         # plan/log/3090-phase0-legacy-delete-list.md.
         run: pnpm run check:dead-exports
 
-      - name: Oracle ratchet (#1930)
-        # Fails when direct TS-checker usage grows under src/codegen/ —
-        # new code must query ctx.oracle (src/checker/oracle.ts). Baseline:
-        # scripts/oracle-ratchet-baseline.json (--update for intentional
-        # reseeds; --update-on-decrease banks improvements).
-        run: pnpm run check:oracle-ratchet
+      - name: Oracle ratchet (#1930/#3273)
+        # CHANGE-SCOPED (#3273, same rework as check:loc-budget /
+        # check:coercion-sites): fails only when THIS change-set grows its NET
+        # (per-field, summed over the changed files) direct-checker count under
+        # src/codegen/ — new code must query ctx.oracle (src/checker/oracle.ts).
+        # A god-file split that relocates existing sites into a new module is
+        # net-neutral and passes; scoping to the change-set's own base (HEAD^1
+        # of the synthetic merge commit — see the checkout's fetch-depth
+        # comment) keeps an unrelated main advance from re-flagging a sibling
+        # split module the PR never touched (the #3069/#3067/#3066 wedge). The
+        # committed baseline (scripts/oracle-ratchet-baseline.json) is NOT read
+        # on this path and PRs must NOT commit changes to it. Intentional net
+        # growth is granted via an `oracle-ratchet-allow:` frontmatter list in
+        # the PR's own plan/issues/*.md file. The origin/main fetch only feeds
+        # the merge-base fallback for non-synthetic checkouts; best-effort.
+        run: |
+          git fetch --no-tags --depth=200 origin main 2>/dev/null || true
+          pnpm run check:oracle-ratchet
 
       - name: LOC-regrowth ratchet (#3102/#3131)
         # CHANGE-SCOPED AND SELF-CONTAINED: fails only when THIS change-set
@@ -181,16 +193,21 @@ jobs:
         # through snapshotSpeculative/rollbackSpeculative instead.
         run: pnpm run check:speculative-rollback
 
-      - name: Coercion-site drift gate (#2108/#3131)
+      - name: Coercion-site drift gate (#2108/#3131/#3279)
         # Fails when the JS-semantic coercion vocabulary (ToString/ToNumber/
         # ToPrimitive/equality/ToBoolean) is hand-rolled at a NEW site outside
         # the coercion engine (see plan/log/analysis-2026-06/03-coercion-engine
-        # -spec.md §5). CHANGE-SCOPED like check:loc-budget (#3131): judged
-        # against this change-set's own base (HEAD^1 of the synthetic merge),
-        # no committed-baseline read, no per-PR baseline bump (bump commits
-        # merge-conflicted with the post-merge refreshes on main). Intentional
-        # migration-step growth: `coercion-sites-allow:` frontmatter in the
-        # PR's own issue file. Fetch feeds the merge-base fallback only.
+        # -spec.md §5). CHANGE-SCOPED like check:loc-budget (#3131) AND
+        # NET-PER-VOCABULARY (#3279, mirroring check:oracle-ratchet #3070/#3273):
+        # judged against this change-set's own base (HEAD^1 of the synthetic
+        # merge); fails only when the change-set's NET count per vocabulary token
+        # (summed over the changed files) grew. A god-file split that relocates
+        # existing coercion sites into a new sibling module is net-neutral and
+        # passes with NO allowance (the #3076 treadmill). No committed-baseline
+        # read, no per-PR baseline bump (bump commits merge-conflicted with the
+        # post-merge refreshes on main). Intentional migration-step growth:
+        # `coercion-sites-allow:` frontmatter in the PR's own issue file. Fetch
+        # feeds the merge-base fallback only.
         run: |
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:coercion-sites
@@ -273,13 +290,18 @@ jobs:
           # files. See PR #432 investigation 2026-05-23.
           pnpm exec vitest run tests/host-import-allowlist-budget.test.ts tests/host-import-allowlist-gate.test.ts
 
-      - name: test262 regression-gate excusal tests (#3004)
+      - name: test262 regression-gate excusal tests (#3004, #3303)
         # The diff-test262 regression-gate logic (net/ratio/bucket + the #2879
         # leaky and #2940 vacuity excusals) is load-bearing for the merge queue
         # but sat outside CI — exactly the "gate logic runs nowhere" gap called
         # out below (#1974 class). Run the excusal tests directly so a break of
         # the vacuity excusal (or its TEMPORARY removal in #3001) is caught here.
-        run: pnpm exec vitest run tests/issue-3004.test.ts
+        # issue-3303 pins the PR-scoped regressions-allow ceiling (rebase-mode
+        # only, ceiling-exact, trap-ratchet-immune) AND executes the #1668/#1897
+        # guard bash from test262-sharded.yml against canned diff outputs, so a
+        # workflow edit that breaks the exit-code-authoritative contract fails
+        # here instead of silently re-wedging the queue.
+        run: pnpm exec vitest run tests/issue-3004.test.ts tests/issue-3303.test.ts
 
       - name: IR alloc-provenance checker (#1586)
         # Runs the AllocSiteRegistry + provenance tests with the debug-mode

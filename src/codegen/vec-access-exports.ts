@@ -1,0 +1,1075 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// vec-access-exports.ts — the `__vec_get` / `__vec_set` / `__vec_push` /
+// `__vec_pop` / `__vec_len` / `__vec_set_byte` / `__new_vec_f64` / `__dv_byte_*`
+// host-dispatch export subsystem (#3272, extracted verbatim from index.ts).
+// These emit ref.test/ref.cast shape-dispatch exports so a JS host can iterate
+// WasmGC vec structs coerced to externref. index.ts imports these back for the
+// finalize passes and re-exports `reserveVecMethodHelper` for its compile-time
+// callers (calls.ts, property-access.ts, closed-method-dispatch.ts).
+
+import { ts } from "../ts-api.js";
+import type { Instr, ValType } from "../ir/types.js";
+import type { CodegenContext } from "./context/types.js";
+import { addUnionImports } from "./registry/imports.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js";
+import { ensureGetUndefined } from "./expressions/late-imports.js";
+import { ensureHoleType } from "./array-holes.js";
+import { definedFuncAt } from "./func-space.js";
+import { flushLateImportShifts } from "./shared.js";
+import { exportFunc } from "./emit-helpers.js";
+
+/**
+ * Emit __vec_get(externref, i32) -> externref and __vec_len(externref) -> i32
+ * exports so the runtime can iterate WasmGC vec structs that were coerced to
+ * externref (e.g. arrays stored in `any`-typed variables).
+ *
+ * For each registered vec type, emits ref.test/ref.cast dispatch to extract
+ * the length or the indexed element, boxing the result to externref.
+ */
+/**
+ * (#2784 S3) Reserve a `__vec_push` / `__vec_pop` helper funcIdx UP FRONT so the
+ * native-vec method dispatch (calls.ts) can bake the call at compile time — the
+ * helper bodies are only built in the finalize `emitVecAccessExports` pass, which
+ * runs AFTER the method-call site compiles. Pushes a valid placeholder body +
+ * export + funcMap entry (shift-tracked); the finalize pass FILLS the body in
+ * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
+ */
+export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get" | "len"): number {
+  const name =
+    kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : kind === "len" ? "__vec_len" : "__vec_get";
+  const existing = ctx.funcMap.get(name);
+  if (existing !== undefined) return existing;
+  const typeIdx =
+    kind === "push"
+      ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
+      : kind === "pop"
+        ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
+        : kind === "len"
+          ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type")
+          : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
+  const idx = ctx.numImportFuncs + ctx.mod.functions.length;
+  // Placeholder body must match the declared result type.
+  const placeholder: Instr[] =
+    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 }] : [{ op: "ref.null.extern" }];
+  ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
+  exportFunc(ctx.mod, name, idx);
+  ctx.funcMap.set(name, idx);
+  // Mark that the finalize vec-export pass must run (so the placeholder gets filled
+  // even in a module that otherwise wouldn't emit vec helpers).
+  ctx.usesVecValue = true;
+  return idx;
+}
+
+export function emitVecAccessExports(ctx: CodegenContext): void {
+  // Emit vec access exports when the runtime may need to introspect WasmGC arrays:
+  // - for-of iteration on non-array types (__iterator)
+  // - JSON.stringify on arrays of structs (JSON_stringify)
+  // - Promise combinators (Promise_all / Promise_race / Promise_allSettled /
+  //   Promise_any) — runtime helper needs to materialise wasm vec iterables
+  //   into JS arrays so the native engine's GetIterator can drive them per
+  //   spec (#1465).
+  // - #1504: wrapExports marshaling of compiled array returns to plain JS,
+  //   which needs __vec_len / __vec_get unconditionally for any module that
+  //   declares vec types.
+  // - host-import paths that coerce a vec wrapper to externref and look up
+  //   `.constructor` — the runtime extern_get handler uses `__vec_len` to
+  //   identify vec wrappers and report `constructor === Array`
+  //   (#1441, #1057, #779c). Without the export, `["a","b"].constructor ===
+  //   Array` is silently false for split/map/filter/etc. results in modules
+  //   that don't otherwise use for-of or JSON.stringify. When `__extern_get`
+  //   is imported, the property-access lowering may need this discrimination
+  //   for `vec.constructor` lookups: the constructor path calls `__vec_len`
+  //   to positively distinguish vec wrappers from other null-prototype
+  //   WasmGC structs.
+  // (#2083) The final disjunct was `ctx.vecTypeMap.size === 0`, which could
+  // NEVER be true: `createCodegenContext` pre-registers the `externref` + `f64`
+  // vec struct types for type-index stability, so the map always has ≥ 2
+  // entries. As a result these six host-glue vec exports leaked into EVERY
+  // module — even arith-only / string-only programs with no arrays at all (the
+  // exact case flagged in #2083). Gate on `ctx.usesVecValue` instead — set only
+  // when a genuine array-usage site asks `getOrRegisterVecType` for a type (the
+  // two prereg calls are excluded). The host runtime guards every
+  // `exports.__vec_*` access with a `typeof === "function"` check, so a module
+  // that never materialises an array is safe without them.
+  if (
+    !ctx.funcMap.has("__iterator") &&
+    !ctx.funcMap.has("JSON_stringify") &&
+    !ctx.funcMap.has("__make_iterable") &&
+    !ctx.funcMap.has("Promise_all") &&
+    !ctx.funcMap.has("Promise_race") &&
+    !ctx.funcMap.has("Promise_allSettled") &&
+    !ctx.funcMap.has("Promise_any") &&
+    !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
+    !ctx.funcMap.has("__extern_get") &&
+    !ctx.usesVecValue
+  ) {
+    return;
+  }
+  try {
+    _emitVecAccessExportsInner(ctx);
+  } catch {
+    // Non-fatal: if emission fails, the iterator fallback just won't work
+  }
+}
+
+function _emitVecAccessExportsInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecEntries = Array.from(ctx.vecTypeMap.entries());
+  if (vecEntries.length === 0) return;
+
+  // Ensure __box_number is available for boxing f64/i32 elements in __vec_get (#854)
+  addUnionImports(ctx);
+
+  // (#2001 S1 regress) Pre-import `__get_undefined` BEFORE baking any funcIdx into
+  // `__vec_len`/`__vec_get`, so the externref `$Hole → undefined` host-boundary map
+  // below resolves it via funcMap and emits a real JS `undefined` (not the
+  // `ref.null.extern` null fallback — null does NOT satisfy `__extern_is_undefined`,
+  // so a marshaled hole would still suppress a destructuring default). Standalone /
+  // native-strings returns undefined here (no host) and the map falls back to
+  // `ref.null.extern`, which is the standalone undefined convention — and the host
+  // marshaling path that leaks holes does not exist there anyway. Gated on
+  // `usesArrayHoles` so hole-free modules add no import.
+  if (ctx.usesArrayHoles) {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, null);
+  }
+
+  // __vec_len(externref) -> i32
+  const lenTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type");
+  const lenFuncIdx = ctx.numImportFuncs + mod.functions.length;
+  {
+    // local 0 = externref param, local 1 = anyref converted
+    const body: Instr[] = [];
+    body.push({ op: "local.get", index: 0 });
+    body.push({ op: "any.convert_extern" });
+    body.push({ op: "local.set", index: 1 });
+
+    // Chain of ref.test / ref.cast for each vec type
+    let current: Instr[] = [
+      // Default: return 0 if no vec type matches
+      { op: "i32.const", value: 0 },
+      { op: "return" },
+    ];
+    for (let i = vecEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = vecEntries[i]!;
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "return" },
+      ];
+      current = [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+
+    // (#2773) FILL-or-build. The dynamic-index native-vec element read
+    // (property-access.ts) reserves a `__vec_len` placeholder before this
+    // finalize pass (so it can bake the length-guard call at compile time); fill
+    // it in place if reserved, else push a fresh definition.
+    const reservedLen = ctx.funcMap.get("__vec_len");
+    if (reservedLen !== undefined) {
+      const fn = definedFuncAt(ctx, reservedLen)! as {
+        locals: { name: string; type: ValType }[];
+        body: Instr[];
+      };
+      fn.locals = [{ name: "__any", type: { kind: "anyref" } as ValType }];
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_len",
+        typeIdx: lenTypeIdx,
+        locals: [{ name: "__any", type: { kind: "anyref" } }],
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_len",
+        desc: { kind: "func", index: lenFuncIdx },
+      });
+      ctx.funcMap.set("__vec_len", lenFuncIdx);
+    }
+  }
+
+  // __vec_get(externref, i32) -> externref
+  const getTypeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }],
+    [{ kind: "externref" }],
+    "$__vec_get_type",
+  );
+  const getFuncIdx = ctx.numImportFuncs + mod.functions.length;
+  {
+    // local 0 = externref param (vec), local 1 = i32 param (index), local 2 = anyref
+    const body: Instr[] = [];
+    body.push({ op: "local.get", index: 0 });
+    body.push({ op: "any.convert_extern" });
+    body.push({ op: "local.set", index: 2 });
+
+    // Chain of ref.test / ref.cast for each vec type
+    let current: Instr[] = [
+      // Default: return null if no vec type matches
+      { op: "ref.null.extern" },
+      { op: "return" },
+    ];
+    // Pre-check if __box_number is available (don't add late imports)
+    const boxNumIdx = ctx.funcMap.get("__box_number");
+    // (#2001 S1 regress) `__vec_get` is the chokepoint the HOST reads a vec
+    // element through (`__make_iterable`'s convertToJS, `__array_entries`,
+    // `wrapExports`, etc.). An externref slot may hold the `$Hole` sentinel for an
+    // `any[]` literal elision; per §ToObject/Get an absent index reads as
+    // `undefined`, NOT the opaque sentinel struct. Without mapping it here a hole
+    // crosses the host boundary as an opaque WasmGC struct → JS sees a
+    // non-`undefined` value → a destructuring `[x = d]` default (or any host-side
+    // hole read) never fires (the -39 regression in PR #1838 — `f([,])` where the
+    // hole is marshaled through `__make_iterable`). Map `$Hole → undefined` for
+    // externref elements only, gated on `usesArrayHoles`. Pre-resolve the funcIdx
+    // for the host `__get_undefined` (already imported when the module uses it;
+    // `funcMap` lookup only — no late import added here) and register `$Hole`.
+    const holeMapInVecGet = ctx.usesArrayHoles;
+    let holeTypeIdxForGet = -1;
+    if (holeMapInVecGet) {
+      ensureHoleType(ctx);
+      holeTypeIdxForGet = ctx.holeTypeIdx;
+    }
+    const getUndefIdxForGet = holeMapInVecGet ? ctx.funcMap.get("__get_undefined") : undefined;
+    for (let i = vecEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = vecEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      // (#2669) The REAL backing-array element kind, not the `elemKey` string,
+      // decides whether the read value needs converting to externref: a `ref_*`
+      // keyed vec stores its (boxed) elements as externref already.
+      const arrElemDef = ctx.mod.types[arrTypeIdx];
+      const arrElemIsExternref =
+        arrElemDef !== undefined &&
+        arrElemDef.kind === "array" &&
+        ((arrElemDef.element as ValType).kind === "externref" || (arrElemDef.element as ValType).kind === "ref_extern");
+      // Skip numeric element types if __box_number is not available
+      if (
+        (elemKey === "f64" ||
+          elemKey === "i32" ||
+          elemKey === "i32_byte" ||
+          elemKey === "i32_elem" || // (#2835) Int32/Uint32 element storage (split from i32_byte)
+          elemKey === "i8_byte") &&
+        boxNumIdx === undefined
+      )
+        continue;
+
+      // Inline boxing: avoid calling addUnionImports late
+      let boxInstrs: Instr[];
+      if (elemKey === "externref") {
+        // (#2001 S1 regress) Map a `$Hole` slot back to `undefined` before it
+        // leaves to the host. `[externref] → [externref]`: tee the slot, test it
+        // for `$Hole`; if it is the sentinel, substitute `undefined` (host
+        // `__get_undefined` when imported, else `ref.null.extern` — the standalone
+        // undefined convention), otherwise return the slot unchanged.
+        if (holeMapInVecGet && holeTypeIdxForGet >= 0) {
+          const undefInstrs: Instr[] =
+            getUndefIdxForGet !== undefined
+              ? [{ op: "call", funcIdx: getUndefIdxForGet }]
+              : [{ op: "ref.null.extern" }];
+          boxInstrs = [
+            { op: "local.tee", index: 3 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: holeTypeIdxForGet },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: undefInstrs,
+              else: [{ op: "local.get", index: 3 }],
+            },
+          ];
+        } else {
+          boxInstrs = [];
+        }
+      } else if (elemKey === "f64" && boxNumIdx !== undefined) {
+        boxInstrs = [{ op: "call", funcIdx: boxNumIdx }];
+      } else if (elemKey === "i32" && boxNumIdx !== undefined) {
+        boxInstrs = [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
+      } else if (
+        (elemKey === "i32_byte" ||
+          elemKey === "i32_elem" || // (#2835) Int32/Uint32 element storage — same dynamic read as i32_byte pre-split
+          elemKey === "i8_byte" ||
+          elemKey === "i16_byte") &&
+        boxNumIdx !== undefined
+      ) {
+        // ArrayBuffer/DataView/typed-array byte elements — convert unsigned then box.
+        // (#2835) `i32_elem` (Int32/Uint32 element storage, split from `i32_byte`)
+        // reads via the SAME generic arm i32_byte used before the split (plain
+        // `array.get` below — it is NOT packed — then unsigned i32→f64 box), so the
+        // dynamic-read behaviour is byte-for-byte preserved.
+        // (#2593) i16_byte joins here: the GENERIC dynamic-read path (`__vec_get`,
+        // for an `any`-typed read of a typed-array vec) reads the packed element
+        // zero-extended; the per-VIEW signedness for the typed `a[i]` read site is
+        // handled separately in property-access.ts (typedArrayViewSignedness).
+        boxInstrs = [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx }];
+      } else if (elemKey === "i64") {
+        // i64 (BigInt) is a value type, not a ref type — extern.convert_any expects anyref.
+        // Convert i64 -> f64 (lossy for large values) then box, or drop and return null.
+        if (boxNumIdx !== undefined) {
+          boxInstrs = [{ op: "f64.convert_i64_s" }, { op: "call", funcIdx: boxNumIdx }];
+        } else {
+          boxInstrs = [{ op: "drop" }, { op: "ref.null.extern" }];
+        }
+      } else if (arrElemIsExternref) {
+        // (#2669) A `ref_*` keyed vec (nested arrays/objects, e.g. `number[][]`)
+        // lowers its backing store to `(array (mut externref))` — the elements
+        // are already boxed to externref. `array.get` yields externref, so an
+        // `extern.convert_any` (whose operand MUST be an anyref) is invalid Wasm.
+        // Pass the externref slot through unchanged.
+        boxInstrs = [];
+      } else {
+        boxInstrs = [{ op: "extern.convert_any" }];
+      }
+      const thenBranch: Instr[] = [
+        // ref.cast to vec type, struct.get data array, then array.get with index
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 }, // index
+        // (#2593) Packed i8/i16 elements REQUIRE array.get_u/_s (plain array.get
+        // is invalid Wasm on a packed array); read zero-extended in this generic
+        // path. (#2835) `i32_byte` (the ArrayBuffer/DataView byte buffer) is now
+        // ALSO packed i8 — it joins the `array.get_u` branch (its box arm already
+        // does the unsigned i32→f64 conversion). `i32_elem` (Int32/Uint32 element
+        // storage) and `f64` stay on plain `array.get`.
+        {
+          op: elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte" ? "array.get_u" : "array.get",
+          typeIdx: arrTypeIdx,
+        },
+        ...boxInstrs,
+        { op: "return" },
+      ];
+      current = [
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+
+    // local 2 = __any (anyref). (#2001 S1 regress) When the module has holes,
+    // local 3 = __hole_scratch (externref) backs the `$Hole → undefined`
+    // read-boundary map (`local.tee 3` above). Declared ONLY then, so a
+    // hole-free module's `__vec_get` is byte-identical to pre-fix.
+    const getLocals = holeMapInVecGet
+      ? [
+          { name: "__any", type: { kind: "anyref" } as ValType },
+          { name: "__hole_scratch", type: { kind: "externref" } as ValType },
+        ]
+      : [{ name: "__any", type: { kind: "anyref" } as ValType }];
+    // (#2784 S3) FILL-or-build (see __vec_push). The native-vec element-read guard
+    // (property-access.ts) reserves a `__vec_get` placeholder before this finalize
+    // pass; fill it in place if reserved.
+    const reservedGet = ctx.funcMap.get("__vec_get");
+    if (reservedGet !== undefined) {
+      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
+      fn.locals = getLocals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_get",
+        typeIdx: getTypeIdx,
+        locals: getLocals,
+        body,
+        exported: true,
+      } as any);
+      mod.exports.push({
+        name: "__vec_get",
+        desc: { kind: "func", index: getFuncIdx },
+      });
+      ctx.funcMap.set("__vec_get", getFuncIdx);
+    }
+  }
+
+  // (#1712) Generic host-side vec MUTATORS. Compiled acorn mutates instance
+  // array fields through dynamic `this` dispatch (`this.scopeStack.push(
+  // new Scope(flags))` in enterScope): the receiver reaches the host's
+  // __extern_method_call as an opaque vec struct, and the host cannot grow a
+  // WasmGC array itself. These exports mirror the __vec_len/__vec_get
+  // per-vec-type ref.test dispatch and perform the mutation on the Wasm side
+  // (same grow discipline as compileArrayPush: newCap = max((len+1)*2, 4),
+  // array.new_default + array.copy + struct.set). Element-kind coverage is
+  // externref always, f64/i32 when __unbox_number/__box_number are imported;
+  // unsupported kinds return the -1 / 0 sentinel so the runtime falls
+  // through to its fail-loud TypeError instead of silently no-oping.
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  const boxNumIdx2 = ctx.funcMap.get("__box_number");
+  const mutEntries = vecEntries.filter(([elemKey]) => {
+    if (elemKey === "externref") return true;
+    if (elemKey === "f64" || elemKey === "i32") return unboxNumIdx !== undefined && boxNumIdx2 !== undefined;
+    return false;
+  });
+
+  // __is_vec(externref) -> i32 — POSITIVE vec discriminator over ALL
+  // registered vec types. `__vec_len` cannot serve this role (its not-a-vec
+  // default of 0 is indistinguishable from an empty vec), and `__is_closure`
+  // can FALSE-POSITIVE on a vec whose canonicalized layout collides with a
+  // closure capture struct — the runtime's callable-wrapping paths consult
+  // this export to veto bridging a vec into a JS function.
+  {
+    const isVecTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__is_vec_type");
+    const isVecFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
+    for (let i = vecEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = vecEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__is_vec",
+      typeIdx: isVecTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    exportFunc(mod, "__is_vec", isVecFuncIdx);
+  }
+
+  // __vec_mut_supported(externref) -> i32 (1 = push/pop cover this vec's elem kind)
+  {
+    const supTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_mut_supported_type");
+    const supFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = mutEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_mut_supported",
+      typeIdx: supTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    exportFunc(mod, "__vec_mut_supported", supFuncIdx);
+  }
+
+  // __vec_push(externref vec, externref value) -> i32 (new length, or -1 unsupported)
+  {
+    const pushTypeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      "$__vec_push_type",
+    );
+    const pushFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    // locals: 2 = anyref converted; per-arm typed locals appended below
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 2 }];
+    let current: Instr[] = [{ op: "i32.const", value: -1 }, { op: "return" }];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 2 + locals.length; // 2 params + locals so far
+      const vecL = base;
+      const dataL = base + 1;
+      const lenL = base + 2;
+      const ncapL = base + 3;
+      const ndataL = base + 4;
+      locals.push(
+        { name: `__vp_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vp_data_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+        { name: `__vp_len_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ncap_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+      );
+      // value unboxing per element kind (value param is local 1)
+      const valueInstrs: Instr[] =
+        elemKey === "externref"
+          ? [{ op: "local.get", index: 1 }]
+          : elemKey === "f64"
+            ? [
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: unboxNumIdx! },
+              ]
+            : [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
+        // len
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
+        // data + capacity check: cap < len+1 ?
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.tee", index: dataL },
+        { op: "array.len" },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // ncap = max((len+1)*2, 4)
+            { op: "local.get", index: lenL },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "local.get", index: lenL },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 4 },
+            { op: "i32.gt_s" },
+            { op: "select" },
+            { op: "local.set", index: ncapL },
+            // ndata = array.new_default(ncap); copy old; vec.data = ndata
+            { op: "local.get", index: ncapL },
+            { op: "array.new_default", typeIdx: arrTypeIdx },
+            { op: "local.set", index: ndataL },
+            { op: "local.get", index: ndataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: dataL },
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: lenL },
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx },
+            { op: "local.get", index: vecL },
+            { op: "local.get", index: ndataL },
+            { op: "ref.as_non_null" },
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 },
+            { op: "local.get", index: ndataL },
+            { op: "local.set", index: dataL },
+          ],
+        },
+        // data[len] = value
+        { op: "local.get", index: dataL },
+        { op: "local.get", index: lenL },
+        ...valueInstrs,
+        { op: "array.set", typeIdx: arrTypeIdx },
+        // vec.length = len + 1
+        { op: "local.get", index: vecL },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        // return len + 1
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "return" },
+      ];
+      current = [
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+    // (#2784 S3) FILL-or-build. The native-vec method dispatch (calls.ts) compiles
+    // BEFORE this finalize pass, so it RESERVES a `__vec_push` placeholder up front
+    // (`reserveVecMethodHelper`) and bakes that funcIdx. If reserved, fill the
+    // placeholder's body in place (index/export already set at reserve); else build
+    // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
+    const reservedPush = ctx.funcMap.get("__vec_push");
+    if (reservedPush !== undefined) {
+      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
+      fn.locals = locals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_push",
+        typeIdx: pushTypeIdx,
+        locals,
+        body,
+        exported: true,
+      } as any);
+      exportFunc(mod, "__vec_push", pushFuncIdx);
+      ctx.funcMap.set("__vec_push", pushFuncIdx);
+    }
+  }
+
+  // __vec_pop(externref) -> externref (boxed last element; null.extern when
+  // empty or unsupported — callers gate on __vec_mut_supported to tell apart)
+  {
+    const popTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type");
+    const popFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+    let current: Instr[] = [{ op: "ref.null.extern" }, { op: "return" }];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 1 + locals.length; // 1 param + locals so far
+      const vecL = base;
+      const lenL = base + 1;
+      locals.push(
+        { name: `__vpop_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vpop_len_${vecTypeIdx}`, type: { kind: "i32" } },
+      );
+      // (#2593) Packed i8/i16 elements need array.get_u and unsigned→f64; plain
+      // `array.get` is invalid Wasm on a packed array. Generic dynamic path reads
+      // zero-extended (the per-view signedness is at the typed `a[i]` site).
+      // (#2835) `i32_byte` (ArrayBuffer/DataView byte buffer) is now packed i8 too
+      // — same unsigned read/box. `i32_elem` (Int32/Uint32 element storage) stays
+      // full-width signed (plain `array.get`), preserving its pre-split behaviour.
+      const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte";
+      const boxInstrs: Instr[] =
+        elemKey === "externref"
+          ? []
+          : elemKey === "f64"
+            ? [{ op: "call", funcIdx: boxNumIdx2! }]
+            : isPackedByte
+              ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
+              : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "local.set", index: vecL },
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: lenL },
+        // empty → undefined
+        { op: "local.get", index: lenL },
+        { op: "i32.eqz" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        },
+        // value = data[len-1] (boxed)
+        { op: "local.get", index: vecL },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: isPackedByte ? "array.get_u" : "array.get", typeIdx: arrTypeIdx },
+        ...boxInstrs,
+        // vec.length = len - 1 (value stays beneath on the stack)
+        { op: "local.get", index: vecL },
+        { op: "local.get", index: lenL },
+        { op: "i32.const", value: 1 },
+        { op: "i32.sub" },
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "return" },
+      ];
+      current = [
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: vecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        },
+      ];
+    }
+    body.push(...current);
+    // (#2784 S3) FILL-or-build (see __vec_push above).
+    const reservedPop = ctx.funcMap.get("__vec_pop");
+    if (reservedPop !== undefined) {
+      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
+      fn.locals = locals;
+      fn.body = body;
+    } else {
+      mod.functions.push({
+        name: "__vec_pop",
+        typeIdx: popTypeIdx,
+        locals,
+        body,
+        exported: true,
+      } as any);
+      exportFunc(mod, "__vec_pop", popFuncIdx);
+      ctx.funcMap.set("__vec_pop", popFuncIdx);
+    }
+  }
+
+  // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]
+  // write-back exports (values into the vec, attributes in the sidecar — see
+  // src/codegen/vec-define-writeback.ts for the full rationale). Gated on a
+  // defineProperty import being present so modules that never define
+  // properties stay byte-identical.
+  const wantsDefineWriteback =
+    ctx.funcMap.has("__defineProperty_value") ||
+    ctx.funcMap.has("__defineProperty_desc") ||
+    ctx.funcMap.has("__defineProperty_accessor") ||
+    ctx.funcMap.has("__defineProperties");
+  if (wantsDefineWriteback) {
+    emitVecDefineWritebackExports(ctx, mutEntries, unboxNumIdx);
+  }
+}
+
+/**
+ * (#1503) Emit `__vec_set_byte(externref vec, i32 idx, i32 byte) -> ()` so
+ * the JS runtime can write bytes back into a WasmGC vec struct from inside
+ * `crypto.getRandomValues(...)`. Mirrors the dispatch pattern of
+ * `__vec_get` / `__dv_byte_set`: ref.test against every registered vec
+ * type, then ref.cast + struct.get the underlying array, then array.set the
+ * element. The element-type conversion depends on the vec's element kind:
+ *
+ *   - "f64"      → f64.convert_i32_u then array.set       (TypedArrays — Uint8Array etc.)
+ *   - "i32"      → array.set directly                     (plain JS arrays of numbers stored as i32 — rare)
+ *   - "i32_byte" → array.set directly                     (ArrayBuffer / DataView backing)
+ *   - other      → skipped (no safe coercion from a byte)
+ *
+ * Gated on `__crypto_get_random_values` being imported; otherwise we'd add
+ * a dead export and bloat every module.
+ */
+export function emitVecSetByteExport(ctx: CodegenContext): void {
+  // (#1503) Originally gated on `__crypto_get_random_values` so the export
+  // only appeared when crypto.getRandomValues was reachable.
+  // (#1700) Now also needed by the JS-host `wrapExports` to populate freshly
+  // allocated f64 vecs with Uint8Array bytes. Emit when either consumer is
+  // present.
+  if (!ctx.funcMap.has("__crypto_get_random_values") && !hasExportedVecParam(ctx)) return;
+  try {
+    _emitVecSetByteExportInner(ctx);
+  } catch {
+    // Non-fatal — if dispatch emission fails the runtime call will throw
+    // a descriptive TypeError when the export is missing.
+  }
+}
+
+function _emitVecSetByteExportInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecEntries = Array.from(ctx.vecTypeMap.entries());
+  if (vecEntries.length === 0) return;
+
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "i32" }, { kind: "i32" }],
+    [],
+    "$__vec_set_byte_type",
+  );
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // local 0 = vec externref, local 1 = idx i32, local 2 = byte i32, local 3 = anyref
+  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 3 }];
+
+  let current: Instr[] = [];
+  for (let i = vecEntries.length - 1; i >= 0; i--) {
+    const [elemKey, vecTypeIdx] = vecEntries[i]!;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) continue;
+    let writeInstrs: Instr[];
+    if (elemKey === "f64") {
+      writeInstrs = [
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 }, // idx
+        { op: "local.get", index: 2 }, // byte (i32)
+        { op: "f64.convert_i32_u" },
+        { op: "array.set", typeIdx: arrTypeIdx },
+      ];
+    } else if (elemKey === "i32" || elemKey === "i32_byte" || elemKey === "i32_elem") {
+      // (#2835) `i32_elem` (Int32/Uint32 element storage, split from `i32_byte`)
+      // takes the same direct `array.set` byte-write i32_byte used before the split
+      // (the i32 slot is wide enough for a byte) — preserves crypto.getRandomValues
+      // / wrapExports byte population into Int32/Uint32 vecs unchanged.
+      writeInstrs = [
+        { op: "local.get", index: 3 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 },
+        { op: "local.get", index: 2 },
+        { op: "array.set", typeIdx: arrTypeIdx },
+      ];
+    } else {
+      // Element types we don't know how to write a byte to (externref,
+      // i64, etc.) — skip silently. The runtime will TypeError if asked.
+      continue;
+    }
+    current = [
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: vecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [...writeInstrs, { op: "return" }],
+        else: current,
+      },
+    ];
+  }
+  body.push(...current);
+
+  mod.functions.push({
+    name: "__vec_set_byte",
+    typeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as any);
+  exportFunc(mod, "__vec_set_byte", funcIdx);
+}
+
+/**
+ * (#1700) Emit `__new_vec_f64(i32 len) -> externref` so the JS-host
+ * `wrapExports` can allocate a fresh f64-element vec struct and populate it
+ * with bytes from a JS `Uint8Array` argument. Without this export, callers
+ * have no JS entry point to construct a `(ref null $Vec[f64])` and hit
+ * "type incompatibility when transforming from/to JS" at the call boundary.
+ *
+ * The signature returns `externref` (not the typed vec ref) so the result
+ * is opaque on the JS side — callers pass it straight back to a compiled
+ * function param, which casts it to the right vec type internally.
+ *
+ * Gated: only emitted when (a) an `f64`-element vec is registered, AND
+ * (b) at least one exported user function accepts a vec-shaped ref param.
+ * Modules without TypedArray exports pay zero bytes.
+ */
+export function emitNewVecF64Export(ctx: CodegenContext): void {
+  if (!ctx.vecTypeMap.has("f64")) return;
+  if (!hasExportedVecParam(ctx)) return;
+  try {
+    _emitNewVecF64ExportInner(ctx);
+  } catch {
+    // Non-fatal — if dispatch emission fails the JS-side wrapper falls
+    // back to passing the raw arg (which raises the original TypeError),
+    // which is no worse than the pre-#1700 baseline.
+  }
+}
+
+function hasExportedVecParam(ctx: CodegenContext): boolean {
+  const mod = ctx.mod;
+  const vecTypeIdxs = new Set<number>(ctx.vecTypeMap.values());
+  for (const exp of mod.exports) {
+    if (exp.desc.kind !== "func") continue;
+    const fn = definedFuncAt(ctx, exp.desc.index);
+    if (!fn) continue;
+    const typeDef = mod.types[fn.typeIdx];
+    if (!typeDef) continue;
+    // Resolve sub-type wrappers (some FuncTypeDefs are nested under SubTypeDef).
+    const ft = typeDef.kind === "sub" ? typeDef.type : typeDef;
+    if (ft.kind !== "func") continue;
+    for (const p of ft.params) {
+      if ((p.kind === "ref" || p.kind === "ref_null") && vecTypeIdxs.has(p.typeIdx)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function _emitNewVecF64ExportInner(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const vecTypeIdx = ctx.vecTypeMap.get("f64")!;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return;
+  // Skip if the export is already emitted (defensive — multi-source paths
+  // may invoke the emit pass more than once; emitVecSetByteExport doesn't
+  // guard either but is gated by funcMap which prevents a second emit).
+  if (mod.exports.some((e) => e.name === "__new_vec_f64")) return;
+
+  // Return the typed vec ref directly (NOT externref). V8 and SpiderMonkey
+  // both reject the JS↔Wasm round-trip if we return externref and try to
+  // pass it back to a `(ref null $Vec)` param — the boundary will not
+  // narrow externref → concrete WasmGC ref. By returning the real type,
+  // JS sees an opaque WasmGC handle and the engine accepts it on the way
+  // back in (same type identity).
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "i32" }],
+    [{ kind: "ref_null", typeIdx: vecTypeIdx }],
+    "$__new_vec_f64_type",
+  );
+  const funcIdx = ctx.numImportFuncs + mod.functions.length;
+
+  // local 0 = len (i32 param)
+  // local 1 = $arr (ref null $arr_f64) — the zero-initialised data array
+  const arrRefType: ValType = { kind: "ref_null", typeIdx: arrTypeIdx };
+  const body: Instr[] = [
+    // arr = array.new_default $arr_f64 (len)
+    { op: "local.get", index: 0 },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: 1 },
+    // struct.new $Vec[f64] { length: len, data: arr }
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 1 },
+    { op: "struct.new", typeIdx: vecTypeIdx },
+  ];
+
+  mod.functions.push({
+    name: "__new_vec_f64",
+    typeIdx,
+    locals: [{ name: "__arr", type: arrRefType }],
+    body,
+    exported: true,
+  } as any);
+  exportFunc(mod, "__new_vec_f64", funcIdx);
+}
+
+/**
+ * Emit DataView byte-access exports for i32_byte vec structs (#1056).
+ *
+ * Adds three exports that operate on ArrayBuffer/DataView backing stores:
+ *   __dv_byte_len(externref) -> i32          — vec length, or -1 if not i32_byte
+ *   __dv_byte_get(externref, i32) -> i32     — unsigned byte at index
+ *   __dv_byte_set(externref, i32, i32) -> () — write byte at index
+ *
+ * The JS runtime uses these in __extern_method_call to implement
+ * DataView.prototype.{get,set}{Uint,Int,Float}{8,16,32,64} and friends
+ * by materializing a real DataView over a live byte array, invoking the
+ * native method, and writing bytes back for setters.
+ */
+export function emitDataViewByteExports(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+  const byteVecTypeIdx = ctx.vecTypeMap.get("i32_byte");
+  if (byteVecTypeIdx === undefined) return;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, byteVecTypeIdx);
+  if (arrTypeIdx < 0) return;
+
+  // __dv_byte_len(externref) -> i32
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__dv_byte_len_type");
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 },
+          { op: "return" },
+        ],
+        else: [],
+      },
+      { op: "i32.const", value: -1 },
+    ];
+    mod.functions.push({
+      name: "__dv_byte_len",
+      typeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    exportFunc(mod, "__dv_byte_len", funcIdx);
+  }
+
+  // __dv_byte_get(externref, i32) -> i32
+  {
+    const typeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$__dv_byte_get_type",
+    );
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
+          { op: "local.get", index: 1 },
+          // (#2835) packed i8 backing → unsigned zero-extended byte read.
+          { op: "array.get_u", typeIdx: arrTypeIdx },
+          { op: "return" },
+        ],
+        else: [],
+      },
+      { op: "i32.const", value: 0 },
+    ];
+    mod.functions.push({
+      name: "__dv_byte_get",
+      typeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    exportFunc(mod, "__dv_byte_get", funcIdx);
+  }
+
+  // __dv_byte_set(externref, i32, i32) -> ()
+  {
+    const typeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "i32" }, { kind: "i32" }],
+      [],
+      "$__dv_byte_set_type",
+    );
+    const funcIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 3 },
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: byteVecTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 3 },
+          { op: "ref.cast", typeIdx: byteVecTypeIdx },
+          { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 1 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "array.set", typeIdx: arrTypeIdx },
+        ],
+        else: [],
+      },
+    ];
+    mod.functions.push({
+      name: "__dv_byte_set",
+      typeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    exportFunc(mod, "__dv_byte_set", funcIdx);
+  }
+}

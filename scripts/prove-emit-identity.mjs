@@ -43,12 +43,25 @@ const REPO_ROOT = resolve(__dirname, "..");
 
 // The canonical, curated, known-compilable corpus — the same root
 // `check-ir-fallbacks.ts` walks. Extra roots may be added with `--root <dir>`.
-const DEFAULT_CORPUS_ROOTS = [join(REPO_ROOT, "website/playground/examples")];
+//
+// `scripts/emit-identity-corpus` (#3105 slice 1) holds small programs that
+// compile under the `linear` target too — every website/playground example is
+// DOM/Promise/class-field-oriented and CEs under the linear-memory backend, so
+// without this root the `linear` target would be all-CE and prove nothing about
+// the linear runtime scaffolds this issue dedups.
+const DEFAULT_CORPUS_ROOTS = [
+  join(REPO_ROOT, "website/playground/examples"),
+  join(REPO_ROOT, "scripts/emit-identity-corpus"),
+];
 
 // The full backend matrix this refactor must keep byte-identical. `gc` is the
 // default WasmGC lowering; `standalone`/`wasi` exercise the late-import +
-// string-constant-global paths that are exactly the index-shift bug surface.
-const TARGETS = /** @type {const} */ (["gc", "standalone", "wasi"]);
+// string-constant-global paths that are exactly the index-shift bug surface;
+// `linear` (#3105 slice 1) covers the separate linear-memory backend
+// (`src/codegen-linear/`) — its runtime scaffolds (map/set open-addressing,
+// counter loops) are a distinct emit-idiom dedup surface that gc/standalone/wasi
+// never exercise, so it must be proven independently.
+const TARGETS = /** @type {const} */ (["gc", "standalone", "wasi", "linear"]);
 
 const DEFAULT_BASELINE = join(REPO_ROOT, ".tmp/emit-identity-baseline.json");
 

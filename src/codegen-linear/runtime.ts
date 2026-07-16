@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/types.js";
+import { hashProbeAdvanceInstrs } from "./emit-idioms.js";
 
 /** Heap starts at byte offset 1024 (leave low addresses for null/sentinel) */
 const HEAP_START = 1024;
@@ -1064,6 +1065,32 @@ export function addArrayRuntime(mod: WasmModule): void {
     },
     2,
   );
+}
+
+/** Runtime helper used only by the flag-gated linear-IR vec constructor. */
+export const LINEAR_IR_VEC_INIT_F64_FN = "__linear_ir_vec_init_f64";
+
+/**
+ * Add the value-first indexed store needed by `LinearEmitter.emitVecNewFixed`.
+ *
+ * `lower.ts` leaves fixed-vec elements on the operand stack in source order.
+ * The emitter therefore consumes them from last to first; this helper accepts
+ * `(value, ptr, index)` so the pointer and index can be pushed after the value
+ * without a second element scratch local. The array is freshly allocated and
+ * cannot be forwarded, so the store intentionally targets its canonical slot
+ * directly.
+ */
+export function addLinearIrVecRuntime(mod: WasmModule): void {
+  if (mod.functions.some((fn) => fn.name === LINEAR_IR_VEC_INIT_F64_FN)) return;
+  addRuntimeFunc(mod, LINEAR_IR_VEC_INIT_F64_FN, [{ kind: "f64" }, { kind: "i32" }, { kind: "i32" }], [], [], () => [
+    { op: "local.get", index: 1 },
+    { op: "local.get", index: 2 },
+    { op: "i32.const", value: 8 },
+    { op: "i32.mul" },
+    { op: "i32.add" },
+    { op: "local.get", index: 0 },
+    { op: "f64.store", align: 3, offset: 16 },
+  ]);
 }
 
 /**
@@ -2278,12 +2305,7 @@ export function addMapRuntime(mod: WasmModule): void {
                   ],
                 },
                 // Advance: idx = (idx + 1) % cap
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -2369,12 +2391,7 @@ export function addMapRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -2455,12 +2472,7 @@ export function addMapRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -2648,12 +2660,7 @@ export function addSetRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -2733,12 +2740,7 @@ export function addSetRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -2940,12 +2942,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
                   ],
                 },
                 // Advance
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -3031,12 +3028,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -3117,12 +3109,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -3304,12 +3291,7 @@ export function addNumericSetRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },
@@ -3389,12 +3371,7 @@ export function addNumericSetRuntime(mod: WasmModule): void {
                     },
                   ],
                 },
-                { op: "local.get", index: idxLocal },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.get", index: capLocal },
-                { op: "i32.rem_u" },
-                { op: "local.set", index: idxLocal },
+                ...hashProbeAdvanceInstrs(idxLocal, capLocal),
                 { op: "br", depth: 0 },
               ],
             },

@@ -1,11 +1,13 @@
 ---
 name: reference_standalone_any_string_value_read_substrate
-description: Standalone $Object dynamic (any-typed) property read drops native-string values — the single root cause behind a whole cluster of standalone residuals
+description: "[RESOLVED 2026-07-09 — fixed on main] (historical) Standalone $Object dynamic string-value read USED TO drop native-string values; the drop is fixed. Kept for cluster context; verify before citing."
 metadata: 
   node_type: memory
   type: reference
   originSessionId: 54c1df0f-04d4-4026-b675-77fe695fb95c
 ---
+
+> **RESOLVED — verified FIXED on main 2026-07-09** (fable-arch probe: `const o:any={v:"hi"}; o.v.length` → 2; the standalone dynamic MOP is far stronger than this note claims). The drop below is **historical — do NOT re-chase it.** Also: the standalone test262 JSONL was ~5 leak-fixes stale — **run a fresh standalone harvest before scoping any standalone work.** Kept below for the cluster context only.
 
 Standalone (`--target standalone` / nativeStrings) **dynamic `any`-typed property read of a STRING value returns empty**. This single `$Object` value-reader bug (the `__extern_get` dynamic path) is the common root cause behind a large cluster of seemingly-separate standalone residuals.
 

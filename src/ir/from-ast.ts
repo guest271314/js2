@@ -41,7 +41,7 @@ import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call 
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
 // #2766 — reuse the legacy counted-loop proof predicates (pure AST analysis, no
 // codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
-import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loops.js";
+import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import {
@@ -64,6 +64,7 @@ import {
   type IrBinop,
   type IrClassShape,
   type IrClosureSignature,
+  type IrConst,
   type IrFunction,
   type IrInstr,
   type IrLabelId,
@@ -141,6 +142,16 @@ export interface IrFromAstResolver {
    * value as `{ kind: "ref", typeIdx: vecStructTypeIdx }`.
    */
   resolveVecForElement?(elementValType: ValType): IrVecLowering | null;
+  /**
+   * Backend value representation for a vec constructed from `elementValType`.
+   * WasmGC omits this and keeps the registered `(ref $vec)` default; linear
+   * returns `i32`, its canonical arena pointer representation.
+   */
+  resolveVecValueTypeForElement?(elementValType: ValType): ValType | null;
+  /** Backend-specific vec OOB carrier; omission keeps the shared default. */
+  resolveVecOutOfBoundsConst?(elementValType: ValType): IrConst | null;
+  /** True when the TS expression is a vec carried by a scalar backend value. */
+  isVecValueExpression?(expr: ts.Expression): boolean;
   /**
    * Slice 10 (#1169i) — return metadata for the named extern class, or
    * `undefined` if no such class is registered.
@@ -1307,13 +1318,19 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       if (d.type.elementType.kind !== ts.SyntaxKind.NumberKeyword) {
         throw new Error(`ir/from-ast: array annotation on '${name}' must be number[] in ${cx.funcName}`);
       }
-      const vec = cx.resolver?.resolveVecForElement?.({ kind: "f64" });
+      const elementValType: ValType = { kind: "f64" };
+      const vec = cx.resolver?.resolveVecForElement?.(elementValType);
       if (!vec) {
         throw new Error(
           `ir/from-ast: resolver cannot register vec for number[] annotation on '${name}' (${cx.funcName})`,
         );
       }
-      annotated = irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx });
+      annotated = irVal(
+        cx.resolver?.resolveVecValueTypeForElement?.(elementValType) ?? {
+          kind: "ref",
+          typeIdx: vec.vecStructTypeIdx,
+        },
+      );
     }
     const hint: IrType = annotated ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
@@ -1344,7 +1361,8 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // No checker → unchanged (#2780 / #2781's no-checker arm). `inferred` is the
     // bound representation here (an `annotated` mismatch already threw above),
     // and `d.name` is an Identifier (non-identifier decls threw earlier).
-    if (!proveUnboxedNumberLocal(d.name, inferred, cx)) {
+    const scalarVecValue = cx.resolver?.isVecValueExpression?.(d.initializer) === true;
+    if (!scalarVecValue && !proveUnboxedNumberLocal(d.name, inferred, cx)) {
       const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
       throw new Error(
         `ir/from-ast: local '${name}' is bound as an unboxed ${boundKind} but its TS type is not ` +
@@ -1974,7 +1992,10 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
     if (!vec) {
       throw new Error(`ir/from-ast: resolver cannot register vec for empty literal (${cx.funcName})`);
     }
-    return cx.builder.emitVecNewFixed([], hintElemIr, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
+    const vecValueType =
+      cx.resolver?.resolveVecValueTypeForElement?.(elemVT) ??
+      ({ kind: "ref", typeIdx: vec.vecStructTypeIdx } as ValType);
+    return cx.builder.emitVecNewFixed([], hintElemIr, irVal(vecValueType));
   }
 
   // #2780 (hybrid Row 6) — widening-escape proof, the PRIMARY HI gate (run
@@ -2029,7 +2050,9 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
   if (!vec) {
     throw new Error(`ir/from-ast: resolver cannot register vec for array literal (${cx.funcName})`);
   }
-  return cx.builder.emitVecNewFixed(elementIds, elementType, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
+  const vecValueType =
+    cx.resolver?.resolveVecValueTypeForElement?.(elemVT) ?? ({ kind: "ref", typeIdx: vec.vecStructTypeIdx } as ValType);
+  return cx.builder.emitVecNewFixed(elementIds, elementType, irVal(vecValueType));
 }
 
 /**
@@ -2410,7 +2433,8 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
   // branch only fires for `.length`. Method dispatch (`arr.push(...)`,
   // `arr.map(...)`, etc.) is handled in `lowerMethodCall`.
   const recvVal = asVal(recvType);
-  if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null")) {
+  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
       if (propName === "length") {
@@ -2563,22 +2587,27 @@ function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boo
 function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
   const elemIr = irVal(elemValType);
   let makeOobDefault: (() => IrValueId) | null = null;
-  switch (elemValType.kind) {
-    case "f64":
-      makeOobDefault = () => cx.builder.emitConst({ kind: "f64", value: NaN }, elemIr);
-      break;
-    case "i32":
-      makeOobDefault = () => cx.builder.emitConst({ kind: "i32", value: 0 }, elemIr);
-      break;
-    case "externref":
-    case "ref_null":
-      makeOobDefault = () => cx.builder.emitConst({ kind: "null", ty: elemIr }, elemIr);
-      break;
-    default:
-      throw new Error(
-        `ir/from-ast: SAFE OOB vec read for element kind '${elemValType.kind}' needs legacy ` +
-          `(no in-arm default without a result-type widen) in ${cx.funcName}`,
-      );
+  const backendDefault = cx.resolver?.resolveVecOutOfBoundsConst?.(elemValType);
+  if (backendDefault) {
+    makeOobDefault = () => cx.builder.emitConst(backendDefault, elemIr);
+  } else {
+    switch (elemValType.kind) {
+      case "f64":
+        makeOobDefault = () => cx.builder.emitConst({ kind: "f64", value: NaN }, elemIr);
+        break;
+      case "i32":
+        makeOobDefault = () => cx.builder.emitConst({ kind: "i32", value: 0 }, elemIr);
+        break;
+      case "externref":
+      case "ref_null":
+        makeOobDefault = () => cx.builder.emitConst({ kind: "null", ty: elemIr }, elemIr);
+        break;
+      default:
+        throw new Error(
+          `ir/from-ast: SAFE OOB vec read for element kind '${elemValType.kind}' needs legacy ` +
+            `(no in-arm default without a result-type widen) in ${cx.funcName}`,
+        );
+    }
   }
 
   // cond = (unsigned) idx < len. `emitVecLen` yields an f64 JS length; convert
@@ -2737,7 +2766,8 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   // sharpest hybrid-invariant violation (strictly worse than legacy, which at
   // least bounds-checks and returns a sentinel).
   const recvVal = asVal(recvType);
-  if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null")) {
+  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
       // Lower the index expression as f64 (JS Number semantics), then

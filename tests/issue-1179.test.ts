@@ -39,6 +39,7 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
+import { compileAndRunFn as compileAndRun } from "./helpers/compile.js";
 
 const ARRAY_SUM_SRC = `
   export function run(n) {
@@ -64,16 +65,6 @@ function jsOracle(n: number): number {
     sum = (sum + values[i]) | 0;
   }
   return sum | 0;
-}
-
-async function compileAndRun(src: string, fn: string, args: number[] = []): Promise<number> {
-  const r = await compile(src, { fileName: "t.js" });
-  if (!r.success) {
-    throw new Error(`Compile failed: ${r.errors.map((e) => e.message).join(", ")}`);
-  }
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  return (instance.exports[fn] as (...a: number[]) => number)(...args);
 }
 
 async function compileWat(src: string): Promise<string> {

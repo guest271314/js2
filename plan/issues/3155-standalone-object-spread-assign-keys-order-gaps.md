@@ -3,6 +3,8 @@ id: 3155
 title: "standalone: object spread / Object.assign / Object.keys-values order + object→primitive gaps (unmasked by the #86 vacuous-standalone audit)"
 status: ready
 sprint: current
+created: 2026-07-11
+updated: 2026-07-16
 priority: medium
 horizon: m
 feasibility: medium
@@ -50,6 +52,28 @@ Two clusters, both standalone-only:
    `Object.assign` on a dynamic `$Object` return empty / mis-ordered sets
    standalone (integer-key canonical order, insertion order). Likely the
    dynamic `$Object` own-key walk (#2162 substrate family).
+
+## 2026-07-16 harvest-errors measurement (test262 standalone lane)
+
+The `/harvest-errors` pass against the 2026-07-16 standalone baseline
+(`baseline_sha 6f89a7e8`, 27,408/43,106 pass) measured the residual
+`Cannot convert object to primitive value` bucket at **107 failing records**
+(official scope). Cluster-1 (object→primitive) is the dominant root, and its
+largest concrete slice is **ToPrimitive on arguments to the native URI
+functions** (all Wasm-native since #2500, but their argument-coercion path
+can't reduce a dynamic `$Object`):
+
+- `built-ins/decodeURI` 14, `built-ins/decodeURIComponent` 14,
+  `built-ins/encodeURI` 12, `built-ins/encodeURIComponent` 12,
+  `annexB/built-ins/escape`+`unescape` 8
+  (e.g. `test/built-ins/decodeURI/S15.1.3.1_A2.4_T1.js` — passes
+  `{toString(){…}}` to `decodeURI`)
+- `language/expressions/assignment/dstr` 14 (coercion of destructured values)
+- `built-ins/AggregateError` 8 + `built-ins/SuppressedError` 6 (message
+  ToString on object args)
+
+These belong to this issue's cluster-1 scope (shared #2160/#2358 substrate
+root); listing them here so the acceptance measurement includes them.
 
 ## Acceptance
 

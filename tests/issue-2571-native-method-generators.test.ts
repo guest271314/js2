@@ -109,22 +109,22 @@ export function test(): number { return (g().next().value as number); }`;
     expect(await runNative(src)).toBe(9);
   });
 
-  it("capturing class method generator BAILS to host cleanly (valid module, no native mis-lower)", async () => {
-    // Reads `cap` captured from the enclosing function — the native state struct
-    // has no capture slot, so it must keep the host path (the module still
-    // compiles to valid Wasm; it just carries the host imports here).
+  it("capturing class method generator lowers NATIVELY in standalone (#3032 W4 — was: bail to host)", async () => {
+    // (#3032 W4) Reads `cap` captured from the enclosing function. Pre-W4 this
+    // bailed to the eager host path (this test asserted the bail); the method
+    // body resolves captures through the #2029/#3039 promotion machinery
+    // (`ctx.capturedBoxGlobals`/`capturedGlobals` module globals), which is
+    // fctx-independent — so the resume function compiles the same body with
+    // the same global reads and the standalone lane routes native: zero host
+    // imports AND the value reads back correctly (the eager path also ran the
+    // body at creation, violating §27.5.3.1-3 suspend-at-start).
     const src = `function outer(): number {
   let cap = 3;
   class C { *m() { yield cap; } }
   return (new C().m().next().value as number);
 }
 export function test(): number { return outer(); }`;
-    const { binary, genImports } = await compileNoHost(src);
-    // Host imports ARE present (intentional bail) — assert the module is still
-    // structurally valid (compile succeeded above; just confirm it has the host
-    // generator imports rather than an undefined-funcidx invalid module).
-    expect(genImports.length, "capturing method generator keeps the host path").toBeGreaterThan(0);
-    expect(WebAssembly.validate(binary), "capturing-bail module must still be valid Wasm").toBe(true);
+    expect(await runNative(src)).toBe(3);
   });
 
   it("object-literal method generator now lowers natively (#2581 lifted the #2571 deferral)", async () => {

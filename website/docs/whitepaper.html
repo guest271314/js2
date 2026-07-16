@@ -1218,9 +1218,14 @@
         <p>
           The project tracks ECMAScript compatibility through Test262, the standard conformance suite for
           JavaScript implementations <a href="https://tc39.es/ecma262/">[2]</a>
-          <a href="https://github.com/tc39/test262/">[3]</a>. The current public milestone is
-          <strong>73.5% Test262 compliance</strong> (31,700 of 43,106 official conformance tests passing
-          in the current public report).
+          <a href="https://github.com/tc39/test262/">[3]</a>. Conformance is measured along two
+          independent paths (see §5), and both are reported publicly: the <strong>JS-host path</strong>
+          (default target, host imports allowed) is at <strong>76.5% Test262 compliance</strong>
+          (32,990 of 43,106 official conformance tests passing), and the <strong>standalone / host-free
+          path</strong> (pure WasmGC, no JS host) is at <strong>53.6%</strong> (23,109 of 43,106),
+          measured host-free on the same official denominator. These are distinct metrics on different
+          targets and are never summed; the JS-host figure is the headline number, and the standalone
+          gap is where the current effort concentrates (§5.2, §12.2).
         </p>
         <div class="callout">
           <p>
@@ -1273,7 +1278,7 @@
           <strong>js²</strong> occupies the last category.
         </p>
         <p>
-          As of May 2026, we are not aware of another AOT JavaScript-to-Wasm approach that both aims to
+          As of mid-2026, we are not aware of another AOT JavaScript-to-Wasm approach that both aims to
           implement the full ECMAScript standard and already has production-ready garbage collection. The
           closest direct-AOT efforts are important, but publicly visible projects either remain experimental,
           target a narrower language surface, or use core Wasm / linear-memory strategies rather than
@@ -1358,8 +1363,9 @@
         <h2>11. Current tradeoffs</h2>
         <p>A useful whitepaper cannot ignore the hard parts.</p>
         <p>
-          <strong>Conformance is still incomplete.</strong> At 73.5% Test262 compliance, the compiler is
-          credible but far from complete.
+          <strong>Conformance is still incomplete.</strong> At 76.5% Test262 compliance on the JS-host
+          path &mdash; and 53.6% on the standalone, host-free path &mdash; the compiler is credible but
+          far from complete, and the standalone gap in particular is a primary focus (§5.2, §12.2).
         </p>
         <p>
           <strong>Wasm GC support is required.</strong> The architecture depends on runtimes with Wasm GC
@@ -1445,7 +1451,7 @@
             <strong>Public surface</strong><br />
             <span class="muted">Project page:</span> <a href="https://js2.loopdive.com">js2.loopdive.com</a><br />
             <span class="muted">Playground:</span> <a href="https://js2.loopdive.com/playground">js2.loopdive.com/playground</a><br />
-            <span class="muted">Repository:</span> <a href="https://github.com/loopdive/js2wasm">github.com/loopdive/js2wasm</a>
+            <span class="muted">Repository:</span> <a href="https://github.com/loopdive/js2">github.com/loopdive/js2</a>
           </div>
           <div class="footer-right">
             <strong>Contact</strong><br />

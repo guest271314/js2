@@ -33,17 +33,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
-async function compileAndRun(src: string, fn: string, args: number[] = []): Promise<number> {
-  const r = await compile(src, { fileName: "t.js" });
-  if (!r.success) {
-    throw new Error(`Compile failed: ${r.errors.map((e) => e.message).join(", ")}`);
-  }
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  return (instance.exports[fn] as (...a: number[]) => number)(...args);
-}
+import { compileAndRunFn as compileAndRun } from "./helpers/compile.js";
 
 async function compileWat(src: string): Promise<string> {
   const r = await compile(src, { fileName: "t.js" });

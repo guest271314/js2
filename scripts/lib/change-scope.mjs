@@ -152,6 +152,82 @@ export function changeSetAllowances(repoRoot, base, key) {
   return allow;
 }
 
+/**
+ * #3303 — numeric-ceiling counterpart of `changeSetAllowances` for gates whose
+ * allowance is a single `count` + required `reason`, not a list of paths. A
+ * change-set declares it under `<key>:` in the YAML frontmatter of any
+ * `plan/issues/**.md` file the change-set itself adds or modifies:
+ *
+ *   regressions-allow:
+ *     count: 2700
+ *     reason: "#3285 assert_throws error-type tightening, see #3286"
+ *
+ * Same PR-scoping property as `changeSetAllowances`: only issue files IN THE
+ * DIFF are consulted, so an allowance that landed on main grants nothing to
+ * later PRs (a follow-up PR that re-touches a landed granting issue file
+ * should strip the key). `reason` is REQUIRED — a bare number is not
+ * self-documenting in review/blame, so a declaration missing either a
+ * positive-integer `count` or a non-empty `reason` is reported in `invalid`
+ * (callers warn loudly) and grants nothing.
+ *
+ * Returns { declarations: {count, reason, source}[], invalid: string[] }.
+ */
+export function changeSetNumericAllowances(repoRoot, base, key) {
+  const out = { declarations: [], invalid: [] };
+  const changed = changedPaths(repoRoot, base, "plan/issues");
+  if (!changed) return out;
+  for (const p of [...changed].sort()) {
+    if (!p.endsWith(".md")) continue;
+    const abs = join(repoRoot, p);
+    if (!existsSync(abs)) continue; // deleted by this change-set
+    let text;
+    try {
+      text = readFileSync(abs, "utf-8");
+    } catch {
+      continue;
+    }
+    const parsed = parseFrontmatterCountReason(text, key);
+    if (parsed === undefined) continue; // key absent in this file
+    if (parsed === null) {
+      out.invalid.push(p); // key present but malformed — surface, don't grant
+      continue;
+    }
+    out.declarations.push({ ...parsed, source: p });
+  }
+  return out;
+}
+
+/**
+ * Minimal YAML-frontmatter reader for a `key:` block carrying nested `count:`
+ * and `reason:` scalars (block form only — the shape documented on
+ * `changeSetNumericAllowances`). Returns:
+ *   - undefined        when `key:` is absent (no declaration at all),
+ *   - null             when `key:` is present but malformed (missing/invalid
+ *                      count or missing reason) — callers should warn loudly,
+ *   - {count, reason}  for a valid declaration.
+ */
+export function parseFrontmatterCountReason(text, key) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return undefined;
+  const lines = m[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(`${key}:`)) continue;
+    let count;
+    let reason;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*$/.test(lines[j]) || /^\s*#/.test(lines[j])) continue; // blank / comment line inside the block
+      const lm = lines[j].match(/^\s+([A-Za-z_-]+):\s*(.*)$/);
+      if (!lm) break; // dedent / list item ⇒ end of the nested block
+      const v = unquote(lm[2].trim());
+      if (lm[1] === "count") count = /^[0-9]+$/.test(v) ? Number.parseInt(v, 10) : NaN;
+      else if (lm[1] === "reason") reason = v;
+    }
+    const valid = Number.isInteger(count) && count > 0 && typeof reason === "string" && reason.length > 0;
+    return valid ? { count, reason } : null;
+  }
+  return undefined;
+}
+
 function unquote(v) {
   if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v.slice(1, -1);
   return v;
@@ -175,6 +251,7 @@ export function parseFrontmatterList(text, key) {
       out.push(unquote(rest));
     } else {
       for (let j = i + 1; j < lines.length; j++) {
+        if (/^\s*$/.test(lines[j]) || /^\s*#/.test(lines[j])) continue; // blank / comment line inside the block
         const lm = lines[j].match(/^\s+-\s+(.+)$/);
         if (!lm) break;
         const v = unquote(lm[1].trim());

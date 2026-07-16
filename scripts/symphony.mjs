@@ -12,6 +12,13 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  planPullRequestAction,
+  readPullRequest,
+  readPullRequestForBranch,
+  scopePullRequestIssues,
+  scopeSprintIssues,
+} from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
 const DEFAULT_WORKFLOW = path.join(ROOT, "WORKFLOW.md");
@@ -320,6 +327,13 @@ function sanitizeKey(s) {
     .slice(0, 120);
 }
 
+function continuationBranchName(issue, branchPrefix, mergeKey) {
+  const prefix = String(branchPrefix || "symphony").replace(/\/+$/, "") || "symphony";
+  const issueKey = sanitizeKey(issue.identifier || issue.id || "issue") || "issue";
+  const mergeSegment = sanitizeKey(mergeKey || "merged") || "merged";
+  return `${prefix}/${issueKey}-after-pr-${mergeSegment}`;
+}
+
 function parseFrontmatter(text) {
   const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
   if (!match) return { data: {}, body: text };
@@ -363,6 +377,12 @@ function readArrayField(fm, key) {
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean);
+}
+
+function readPullRequestNumber(fm) {
+  const raw = readScalarField(fm, "pr", "");
+  const match = raw.match(/\/pull\/(\d+)/i) || raw.match(/#(\d+)/) || raw.match(/^\s*(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
 }
 
 function walkIssueFiles(dir) {
@@ -417,6 +437,7 @@ function loadMarkdownIssues(config) {
     const id = readScalarField(fm, "id", basenameIssueId(file));
     const state = normalizeState(readScalarField(fm, "status", "ready"));
     const sprint = readScalarField(fm, "sprint", "");
+    const pullRequest = readPullRequestNumber(fm);
     const issue = {
       id,
       identifier: id,
@@ -425,7 +446,11 @@ function loadMarkdownIssues(config) {
       priority: priorityRank(fm.priority),
       priority_raw: fm.priority ?? null,
       state,
-      branch_name: null,
+      branch_name: readScalarField(fm, "branch", null),
+      pull_request: pullRequest,
+      pr: pullRequest,
+      last_ci_retry_head: readScalarField(fm, "last_ci_retry_head", null),
+      last_merged_pr: readScalarField(fm, "last_merged_pr", null),
       url: null,
       labels: [fm.area, fm.task_type, fm.language_feature, fm.goal].filter(Boolean).map((v) => String(v).toLowerCase()),
       blocked_by: readArrayField(fm, "depends_on").map((dep) => ({ id: dep, identifier: dep, state: null })),
@@ -462,12 +487,13 @@ class MarkdownTracker {
 
   fetchCandidateIssues() {
     const issues = this.allIssues();
-    const sprint = issues[0]?.selected_sprint ?? "latest";
     const candidateStates = this.resumeInProgress
       ? new Set([...this.claimableStates, ...this.activeStates])
       : this.claimableStates;
-    return issues
-      .filter((issue) => String(issue.sprint) === String(sprint))
+    const scopedIssues = scopeSprintIssues(issues, {
+      includeDependencies: Boolean(get(this.config, "tracker.include_dependencies", false)),
+    });
+    return scopedIssues
       .filter((issue) => candidateStates.has(issue.state))
       .filter((issue) => !activeDispatchClaim(issue.id))
       .filter((issue) => !this.isBlocked(issue, issues))
@@ -502,6 +528,14 @@ class MarkdownTracker {
     return this.updateIssueStatusFile(issue, workspaceIssueFile, claimState, {
       claimed_by: lane.name,
       claimed_at: new Date().toISOString(),
+      ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+      ...(issue.pull_request || issue.last_merged_pr
+        ? {
+            pr: issue.pull_request ?? null,
+            ...(issue.last_merged_pr ? { last_merged_pr: issue.last_merged_pr } : {}),
+          }
+        : {}),
+      ...(issue.last_ci_retry_head ? { last_ci_retry_head: issue.last_ci_retry_head } : {}),
     });
   }
 
@@ -615,13 +649,18 @@ class WorkspaceManager {
     if (!workspaceAbs.startsWith(`${rootAbs}${path.sep}`) && workspaceAbs !== rootAbs) {
       throw new Error(`workspace_outside_root: ${workspaceAbs}`);
     }
-    const branch = `${this.branchPrefix}/${key}`;
+    const branch = issue.branch_name || `${this.branchPrefix}/${key}`;
     const createdNow = !existsSync(workspaceAbs);
     if (createdNow) {
       mkdirSync(rootAbs, { recursive: true });
       if (this.kind === "git_worktree") this.createGitWorktree(workspaceAbs, branch);
       else mkdirSync(workspaceAbs, { recursive: true });
       this.runHook("after_create", workspaceAbs, issue);
+    } else if (this.kind === "git_worktree") {
+      const actualBranch = this.git(["branch", "--show-current"], workspaceAbs);
+      if (actualBranch !== branch) {
+        this.switchGitWorktreeBranch(workspaceAbs, branch, actualBranch, issue);
+      }
     }
     return { path: workspaceAbs, workspace_key: key, created_now: createdNow, branch };
   }
@@ -629,8 +668,35 @@ class WorkspaceManager {
   createGitWorktree(workspacePath, branch) {
     if (this.fetchBeforeCreate) this.git(["fetch", "origin"], ROOT);
     const branchExists = this.gitOptional(["show-ref", "--verify", `refs/heads/${branch}`], ROOT);
+    const remoteBranchExists = this.gitOptional(["show-ref", "--verify", `refs/remotes/origin/${branch}`], ROOT);
     if (branchExists) this.git(["worktree", "add", workspacePath, branch], ROOT);
+    else if (remoteBranchExists) this.git(["worktree", "add", workspacePath, "-b", branch, `origin/${branch}`], ROOT);
     else this.git(["worktree", "add", workspacePath, "-b", branch, this.baseRef], ROOT);
+  }
+
+  switchGitWorktreeBranch(workspacePath, branch, previousBranch, issue) {
+    const status = this.git(["status", "--porcelain"], workspacePath);
+    if (status.trim()) {
+      throw new Error(
+        `workspace_branch_mismatch_dirty: expected ${branch}, found ${previousBranch || "detached"} with local changes`,
+      );
+    }
+    if (this.fetchBeforeCreate) this.git(["fetch", "origin"], ROOT);
+    const branchExists = this.gitOptional(["show-ref", "--verify", `refs/heads/${branch}`], ROOT);
+    const remoteBranchExists = this.gitOptional(["show-ref", "--verify", `refs/remotes/origin/${branch}`], ROOT);
+    if (branchExists) this.git(["switch", branch], workspacePath);
+    else if (remoteBranchExists) this.git(["switch", "-c", branch, `origin/${branch}`], workspacePath);
+    else this.git(["switch", "-c", branch, this.baseRef], workspacePath);
+    const actualBranch = this.git(["branch", "--show-current"], workspacePath);
+    if (actualBranch !== branch) {
+      throw new Error(`workspace_branch_mismatch: expected ${branch}, found ${actualBranch || "detached"}`);
+    }
+    this.logger.event("workspace_branch_switched", {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      from: previousBranch || null,
+      branch,
+    });
   }
 
   remove(issue) {
@@ -889,6 +955,10 @@ class Orchestrator {
     this.claimed = new Set();
     this.retryAttempts = new Map();
     this.completed = new Set();
+    this.pullRequestStates = new Map();
+    this.handledFailedPrHeads = new Map();
+    this.pullRequestRetryCounts = new Map();
+    this.lastPullRequestPollAt = 0;
     this.codexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
     this.rateLimits = null;
     this.laneCursor = 0;
@@ -1007,6 +1077,37 @@ class Orchestrator {
     return Number(get(this.config, "polling.interval_ms", 30000)) || 30000;
   }
 
+  pullRequestPollInterval() {
+    return Number(get(this.config, "pull_requests.poll_interval_ms", this.pollInterval())) || this.pollInterval();
+  }
+
+  discoverPullRequestForIssueBranch(issue) {
+    if (!issue?.branch_name) return null;
+    const repository = String(get(this.config, "pull_requests.repository", ""));
+    const command = String(get(this.config, "pull_requests.command", "gh"));
+    const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
+    try {
+      return readPullRequestForBranch({
+        branch: issue.branch_name,
+        command,
+        cwd: ROOT,
+        repository,
+        timeoutMs,
+        excludeNumbers: [issue.last_merged_pr],
+      });
+    } catch (error) {
+      this.logger.event("pull_request_poll_failed", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        pr: issue.pull_request,
+        branch: issue.branch_name,
+        error: error.message,
+        quiet: true,
+      });
+      return null;
+    }
+  }
+
   validate() {
     const kind = get(this.config, "tracker.kind", "");
     if (kind !== "markdown") throw new Error(`unsupported_tracker_kind: ${kind || "(missing)"}`);
@@ -1020,8 +1121,9 @@ class Orchestrator {
 
   async tick() {
     this.processControls();
-    this.reconcileRunning();
     this.validate();
+    this.reconcilePullRequests();
+    this.reconcileRunning();
     if (this.stopping && this.running.size === 0) {
       this.shouldExit = true;
       this.writeState();
@@ -1118,6 +1220,8 @@ class Orchestrator {
         return;
       }
       workspace = this.workspaceManager.ensure(issue);
+      issue.branch_name = workspace.branch;
+      this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, { branch: workspace.branch });
       const workspaceClaim = this.tracker.claimIssueInWorkspace(issue, workspace, lane);
       if (workspaceClaim?.changed) {
         this.logger.event("workspace_issue_claimed", {
@@ -1269,7 +1373,44 @@ class Orchestrator {
         reason: this.stopping ? "stopping" : this.draining ? "draining" : "operator control",
       });
     } else if (result.status === "succeeded") {
-      this.completed.add(id);
+      const current = this.tracker.fetchIssueStatesByIds([id])[0];
+      if (current?.pull_request && ["in-progress", "in-review"].includes(current.state)) {
+        this.logger.event("agent_awaiting_pull_request", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: current.pull_request,
+        });
+      } else if (current?.state === "in-progress" && !current.pull_request) {
+        const discovered = this.discoverPullRequestForIssueBranch(current);
+        if (discovered?.number) {
+          current.pull_request = discovered.number;
+          current.pr = discovered.number;
+          if (discovered.headBranch) current.branch_name = discovered.headBranch;
+          this.tracker.updateIssueStatusFile(current, current.file, current.state, {
+            pr: discovered.number,
+            ...(current.branch_name ? { branch: current.branch_name } : {}),
+          });
+          this.logger.event("pull_request_discovered", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            pr: discovered.number,
+            branch: current.branch_name || null,
+          });
+        } else {
+          this.tracker.updateIssueStatusFile(current, current.file, "ready", {
+            ...(current.branch_name ? { branch: current.branch_name } : {}),
+            pr: null,
+          });
+          this.completed.delete(id);
+          this.logger.event("agent_missing_pull_request_requeued", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            branch: current.branch_name || null,
+          });
+        }
+      } else {
+        this.completed.add(id);
+      }
       const maxTurns = Number(get(this.config, "agent.max_turns", 1)) || 1;
       if ((attempt ?? 0) + 1 < maxTurns) this.scheduleRetry(issue, lane, "continuation", 1000, (attempt ?? 0) + 1);
     } else {
@@ -1365,6 +1506,168 @@ class Orchestrator {
       }
     }
   }
+
+  reconcilePullRequests() {
+    if (this.options.dryRun || get(this.config, "pull_requests.enabled", true) === false) return;
+    const now = Date.now();
+    if (now - this.lastPullRequestPollAt < this.pullRequestPollInterval()) return;
+    this.lastPullRequestPollAt = now;
+
+    const reviewStates = asArray(get(this.config, "pull_requests.review_states"), ["in-review", "in-progress"]);
+    const repository = String(get(this.config, "pull_requests.repository", ""));
+    const command = String(get(this.config, "pull_requests.command", "gh"));
+    const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
+    const wantedReviewStates = new Set(reviewStates.map(normalizeState));
+    const issues = scopePullRequestIssues(this.tracker.allIssues(), {
+      sprintOnly: Boolean(get(this.config, "pull_requests.sprint_only", false)),
+      includeDependencies: Boolean(get(this.config, "pull_requests.include_dependencies", false)),
+    }).filter((issue) => wantedReviewStates.has(issue.state));
+
+    for (const issue of issues) {
+      if (!issue.pull_request && !issue.branch_name) continue;
+      const id = String(issue.id);
+      let state;
+      try {
+        state = issue.pull_request
+          ? readPullRequest({
+              command,
+              cwd: ROOT,
+              number: issue.pull_request,
+              repository,
+              timeoutMs,
+            })
+          : this.discoverPullRequestForIssueBranch(issue);
+      } catch (error) {
+        this.logger.event("pull_request_poll_failed", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: issue.pull_request,
+          error: error.message,
+          quiet: true,
+        });
+        continue;
+      }
+      if (!state) continue;
+
+      this.pullRequestStates.set(id, state);
+      if (state.headBranch) issue.branch_name = state.headBranch;
+      if (!issue.pull_request && state.number) {
+        issue.pull_request = state.number;
+        issue.pr = state.number;
+        this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, {
+          pr: state.number,
+          ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+        });
+        this.logger.event("pull_request_discovered", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: state.number,
+          branch: issue.branch_name,
+        });
+      }
+      const planned = planPullRequestAction(state, {
+        handledFailureKey: this.handledFailedPrHeads.get(id) || issue.last_ci_retry_head,
+        issueState: issue.state,
+        lastMergedPr: issue.last_merged_pr,
+        busy: this.running.has(id) || this.claimed.has(id) || this.retryAttempts.has(id),
+        paused: this.paused || this.draining || this.stopping,
+        hasCapacity: this.running.size < this.maxConcurrent(),
+      });
+
+      if (planned.action === "mark_done") {
+        const completed = state.mergedAt ? state.mergedAt.slice(0, 10) : todayIsoDate();
+        const update = this.tracker.updateIssueStatusFile(issue, issue.file, "done", { completed });
+        const retry = this.retryAttempts.get(id);
+        if (retry?.timer_handle) clearTimeout(retry.timer_handle);
+        this.retryAttempts.delete(id);
+        this.claimed.delete(id);
+        this.completed.add(id);
+        this.handledFailedPrHeads.delete(id);
+        if (activeDispatchClaim(id)) releaseDispatchClaim(id, `PR #${issue.pull_request} merged`);
+        if (update?.changed) {
+          this.logger.event("pull_request_merged_issue_done", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            pr: issue.pull_request,
+            completed,
+          });
+        }
+        continue;
+      }
+
+      if (planned.action === "continue") {
+        const mergedBranch = issue.branch_name;
+        const branchPrefix = String(get(this.config, "workspace.branch_prefix", "symphony")).replace(/\/+$/, "");
+        const continuationBranch = continuationBranchName(issue, branchPrefix, planned.mergeKey);
+        const running = this.running.get(id);
+        const retry = this.retryAttempts.get(id);
+        if (retry?.timer_handle) clearTimeout(retry.timer_handle);
+        this.retryAttempts.delete(id);
+        this.pullRequestRetryCounts.delete(id);
+        this.handledFailedPrHeads.delete(id);
+        if (running && running.lane.kind !== "claude-channel") {
+          this.suppressedRetries.add(id);
+          running.child.kill("SIGTERM");
+        } else if (running && activeDispatchClaim(id)) {
+          releaseDispatchClaim(id, `PR #${state.number} merged; continuing issue`);
+        }
+        issue.last_merged_pr = planned.mergeKey;
+        issue.last_ci_retry_head = null;
+        issue.pull_request = null;
+        issue.pr = null;
+        issue.branch_name = continuationBranch;
+        this.tracker.updateIssueStatusFile(issue, issue.file, "ready", {
+          pr: null,
+          branch: continuationBranch,
+          last_ci_retry_head: null,
+          last_merged_pr: planned.mergeKey,
+        });
+        if (!running) this.claimed.delete(id);
+        this.completed.delete(id);
+        this.logger.event("pull_request_merged_issue_requeued", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: state.number,
+          branch: continuationBranch,
+          merged_branch: mergedBranch,
+        });
+        continue;
+      }
+
+      if (planned.action === "defer") {
+        this.logger.event("pull_request_failure_deferred", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: issue.pull_request,
+          head_sha: state.headSha,
+          quiet: true,
+        });
+        continue;
+      }
+      if (planned.action !== "requeue") continue;
+
+      const lane = this.nextAvailableLane();
+      if (!lane) continue;
+      issue.last_ci_retry_head = planned.failureKey;
+      this.tracker.updateIssueStatusFile(issue, issue.file, "in-progress", {
+        ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+        last_ci_retry_head: planned.failureKey,
+      });
+      this.handledFailedPrHeads.set(id, planned.failureKey);
+      const attempt = (this.pullRequestRetryCounts.get(id) ?? 0) + 1;
+      this.pullRequestRetryCounts.set(id, attempt);
+      this.logger.event("pull_request_ci_failed_requeued", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        pr: issue.pull_request,
+        head_sha: state.headSha,
+        failed_checks: state.failedChecks.join(", "),
+        lane: lane.name,
+      });
+      this.dispatch(issue, lane, attempt);
+    }
+  }
+
   reconcileRunning() {
     this.reconcileChannelDispatches();
     const stallMs = Number(get(this.config, "codex.stall_timeout_ms", 300000)) || 0;
@@ -1391,6 +1694,7 @@ class Orchestrator {
       const issue = current.get(id);
       if (!issue) continue;
       if (this.tracker.terminalStates.has(issue.state)) {
+        this.suppressedRetries.add(id);
         if (entry.lane.kind === "claude-channel") {
           this.running.delete(id);
           this.claimed.delete(id);
@@ -1454,6 +1758,7 @@ class Orchestrator {
       })),
       claimed: [...this.claimed],
       completed: [...this.completed],
+      pull_requests: Object.fromEntries(this.pullRequestStates),
       codex_totals: {
         ...this.codexTotals,
         seconds_running:

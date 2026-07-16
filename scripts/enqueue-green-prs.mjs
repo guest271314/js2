@@ -702,6 +702,20 @@ function runSweep() {
   const DRAFT_AGE_MS = DRAFT_AGE_HOURS * 60 * 60 * 1000;
   const STALE_DRAFT_LABEL = "stale-draft";
   const DRAFT_MARKER = "<!-- enqueue-bot:stale-draft -->";
+  // Marker-scoped issue-comments lookup, used to dedupe the nag below. This is
+  // the REQUIRED floor — the label alone is NOT reliable: `gh pr edit
+  // --add-label` silently no-ops (the GraphQL updatePullRequest mutation
+  // aborts on a deprecated projectCards field, returning rc=0 with the label
+  // left unapplied — see reference_gh_remove_label_rest_not_pr_edit memory),
+  // so relying on the label to detect "already flagged" let the comment
+  // repost on every single sweep (31x duplicate comments on PR #3111 before
+  // this fix). Always check comment bodies for DRAFT_MARKER regardless of
+  // whether the label stuck.
+  function hasStaleDraftComment(prNumber) {
+    const r = ghMaybe(["api", `repos/${REPO}/issues/${prNumber}/comments`, "--paginate", "-q", ".[].body"]);
+    if (!r.ok) return { found: false, checkFailed: true };
+    return { found: r.stdout.includes(DRAFT_MARKER), checkFailed: false };
+  }
   const draftFlagged = [];
   for (const pr of prs) {
     if (!pr.isDraft) continue;
@@ -715,12 +729,30 @@ function runSweep() {
     if (!Number.isFinite(ageMs) || ageMs < DRAFT_AGE_MS) continue; // too fresh
     const checks = visibleCheckState(pr.number);
     if (checks.error || checks.failed.length > 0 || checks.pending.length > 0) continue; // not green
+    // Marker dedupe: skip re-commenting if a prior nag is already on the PR,
+    // even though the label check above just said "not flagged" (label may
+    // have silently failed to apply last time). On a lookup failure, also
+    // skip posting — safer to miss a nag than to spam another duplicate.
+    const existing = hasStaleDraftComment(pr.number);
+    if (existing.found) {
+      draftFlagged.push([pr.number, "already-commented (label was stale — re-applying)"]);
+      // Best-effort: re-apply the label via REST so future sweeps short-circuit
+      // on the cheap label check instead of re-listing comments every time.
+      ghMaybe(["api", `repos/${REPO}/issues/${pr.number}/labels`, "-f", `labels[]=${STALE_DRAFT_LABEL}`]);
+      continue;
+    }
+    if (existing.checkFailed) {
+      draftFlagged.push([pr.number, "comment-lookup-failed — skip-to-be-safe"]);
+      continue;
+    }
     const ageH = (ageMs / 3_600_000).toFixed(1);
     if (DRY) {
       draftFlagged.push([pr.number, `would-flag (green draft ${ageH}h old)`]);
       continue;
     }
-    // Post one comment + add the label. Both are guarded so re-running is a no-op.
+    // Post one comment + add the label. Both are guarded so re-running is a
+    // no-op. Label add MUST go via REST — `gh pr edit --add-label` silently
+    // no-ops (see comment on hasStaleDraftComment above).
     const comment = ghMaybe([
       "pr",
       "comment",
@@ -730,7 +762,7 @@ function runSweep() {
       "--body",
       `${DRAFT_MARKER}\nThis PR has been a green draft for ${ageH}h. If it is ready, mark it **Ready for review** so auto-enqueue can pick it up; otherwise add a \`wip\`/\`hold\` label so it stops showing up here.`,
     ]);
-    const label = ghMaybe(["pr", "edit", String(pr.number), "--repo", REPO, "--add-label", STALE_DRAFT_LABEL]);
+    const label = ghMaybe(["api", `repos/${REPO}/issues/${pr.number}/labels`, "-f", `labels[]=${STALE_DRAFT_LABEL}`]);
     const why =
       comment.ok && label.ok
         ? `flagged (green draft ${ageH}h)`

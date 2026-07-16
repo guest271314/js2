@@ -1,21 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunHost as compileAndRun } from "./helpers/compile.js";
 
 // #1993 — default (no-comparator) Array.prototype.sort compares by ToString
 //         (§23.1.3.30), so [10,9,1,100].sort() is lexicographic, not numeric.
 // #2000 — Array(len) throws a catchable RangeError for non-integer / negative
 //         / out-of-range lengths (§23.1.1.1 step 4.b).
-async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
-
 describe("#1993 — default numeric sort is lexicographic (ToString order)", () => {
   it("[10,9,1,100].sort() === [1,10,100,9]", async () => {
     const e = await compileAndRun(
