@@ -149,6 +149,21 @@ class StubEmitter implements BackendEmitter<StubSink> {
   emitLoop(_blockType: BlockType, body: StubSink, out: StubSink): void {
     out.push("loop", ...body, "end");
   }
+  emitNull(irType: IrType, out: StubSink): void {
+    out.push(`null:${irType.kind}`);
+  }
+  emitToExternref(out: StubSink): void {
+    out.push("to.externref");
+  }
+  emitDowncast(_target: { typeIdx: number } | IrType, out: StubSink): void {
+    out.push("downcast");
+  }
+  emitFromExternref(_target: { typeIdx: number } | IrType, out: StubSink): void {
+    out.push("from.externref");
+  }
+  emitFuncRef(funcIdx: FuncHandle, out: StubSink): void {
+    out.push(`func.ref:${funcIdx}`);
+  }
   emitCall(funcIdx: FuncHandle, out: StubSink): void {
     out.push(`call:${funcIdx}`);
   }
