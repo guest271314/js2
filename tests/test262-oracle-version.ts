@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 5;
+export const ORACLE_VERSION = 6;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -138,5 +138,18 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "plan/issues/3227-*.md). Draft PR #3111 (standalone host-backed-pass " +
       "rejection, another drafted 3→4) — or any later oracle change — must " +
       "take 6 with its own history entry.",
+  },
+  {
+    version: 6,
+    note:
+      "#2961 standalone host-import honesty. A standalone binary that requests " +
+      "imports is rejected before the Test262 harness can satisfy those imports; " +
+      "legacy leaky-pass rows are reclassified as compile_error. Standalone pass " +
+      "now has one definition: the emitted binary is host-free and passes. " +
+      "NOTE: this PR was originally drafted as the v4 bump; v4 was consumed by " +
+      "#3104 (#3285 assert_throws precision) and v5 was reserved by #3227 (#3161, " +
+      "S1 async post-drain verdict re-read) — both landed/queued first, so this " +
+      "change re-bumps to v6 per the whichever-lands-later-re-bumps convention " +
+      "(v5 is intentionally skipped in this history, not reused: #3161 owns it).",
   },
 ];
