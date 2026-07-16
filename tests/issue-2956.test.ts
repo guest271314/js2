@@ -18,8 +18,9 @@ afterEach(() => {
   else process.env[FLAG] = savedFlag;
 });
 
-async function compileLinear(src: string, flag: boolean): Promise<Uint8Array> {
-  if (flag) process.env[FLAG] = "1";
+async function compileLinear(src: string, flag: boolean | "0"): Promise<Uint8Array> {
+  if (flag === true) process.env[FLAG] = "1";
+  else if (flag === "0") process.env[FLAG] = "0";
   else delete process.env[FLAG];
   const r = await compile(src, { target: "linear" });
   expect(r.success, r.success ? "" : r.errors.map((e) => e.message).join("; ")).toBe(true);
@@ -30,6 +31,17 @@ async function compileLinear(src: string, flag: boolean): Promise<Uint8Array> {
 async function run(binary: Uint8Array): Promise<unknown> {
   const { instance } = await WebAssembly.instantiate(binary, {});
   return (instance.exports as { test?: () => unknown }).test?.();
+}
+
+async function exportedFunctions(binary: Uint8Array): Promise<Record<string, unknown>> {
+  const { instance } = await WebAssembly.instantiate(binary, {});
+  return instance.exports as unknown as Record<string, unknown>;
+}
+
+function callNumber(exports: Record<string, unknown>, name: string): number {
+  const fn = exports[name];
+  if (typeof fn !== "function") throw new Error(`missing export ${name}`);
+  return (fn as () => number)();
 }
 
 const NUMERIC_SRC = `export function add(a: number, b: number): number { return a + b; }
@@ -43,6 +55,21 @@ export function loopSum(n: number): number {
   return s;
 }
 export function test(): number { return add(fib(10), loopSum(5)); }`;
+
+const VEC_SRC = `export function vecValue(): number {
+  const values = [1.25, 2.5, 4.75];
+  return values[1] + values.length;
+}
+export function vecAlias(): number {
+  const values = [7, 11];
+  const alias = values;
+  return alias === values ? alias[0] + values[1] + alias.length : -1;
+}
+export function vecBounds(): number {
+  const values = [3, 5];
+  return values[99];
+}
+export function test(): number { return vecValue() + vecAlias() + vecBounds(); }`;
 
 describe("#2956 L1: linear backend consumes IR for claimed numeric functions", () => {
   it("flag ON: claimed functions compile via IR (incl. self-recursion) and run correctly", async () => {
@@ -116,5 +143,45 @@ describe("#2956 L1: linear backend consumes IR for claimed numeric functions", (
     expect(report?.compiled).toContain("even");
     expect(report?.compiled).toContain("odd");
     expect(await run(binary)).toBe(1);
+  });
+});
+
+describe("#2956 L2: selector-claimed vec construction", () => {
+  it("flag ON lowers fixed number vecs with value, alias, and bounds parity", async () => {
+    const directBinary = await compileLinear(VEC_SRC, false);
+    const irBinary = await compileLinear(VEC_SRC, true);
+    const report = getLastLinearIrReport();
+    expect(report?.rejected ?? []).toEqual([]);
+    expect([...(report?.compiled ?? [])].sort()).toEqual(["test", "vecAlias", "vecBounds", "vecValue"]);
+
+    const direct = await exportedFunctions(directBinary);
+    const ir = await exportedFunctions(irBinary);
+    for (const name of ["vecValue", "vecAlias", "vecBounds", "test"]) {
+      expect(callNumber(ir, name), `${name} IR value`).toBe(callNumber(direct, name));
+    }
+    expect(callNumber(ir, "vecValue")).toBe(5.5);
+    expect(callNumber(ir, "vecAlias")).toBe(20);
+    // The selector path reuses the direct runtime's bounds sentinel.
+    expect(callNumber(ir, "vecBounds")).toBe(0);
+  });
+
+  it("JS2WASM_LINEAR_IR=0 keeps vec modules byte-identical to an unset flag", async () => {
+    const unset = await compileLinear(VEC_SRC, false);
+    const zero = await compileLinear(VEC_SRC, "0");
+    const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
+    expect(sha(zero)).toBe(sha(unset));
+  });
+
+  it("unsupported hintless-empty construction stays on the direct fallback", async () => {
+    const source = `export function emptyVec(): number {
+      const values = [];
+      return values.length;
+    }
+    export function test(): number { return emptyVec(); }`;
+    const binary = await compileLinear(source, true);
+    const report = getLastLinearIrReport();
+    expect(report?.compiled ?? []).not.toContain("emptyVec");
+    expect(report?.rejected.some((rejection) => rejection.func === "emptyVec")).toBe(true);
+    expect(await run(binary)).toBe(0);
   });
 });

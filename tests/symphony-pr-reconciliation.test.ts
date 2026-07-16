@@ -8,6 +8,7 @@ import {
   planPullRequestAction,
   readPullRequest,
   readPullRequestForBranch,
+  scopePullRequestIssues,
 } from "../scripts/symphony-pr-state.mjs";
 
 describe("Symphony pull-request reconciliation", () => {
@@ -61,6 +62,26 @@ describe("Symphony pull-request reconciliation", () => {
     ).toBe("passed");
   });
 
+  it("can scope pull-request reconciliation to the selected sprint", () => {
+    const issues = [
+      {
+        id: 1,
+        sprint: "porffor-backend",
+        selected_sprint: "porffor-backend",
+        blocked_by: [{ id: 3 }],
+      },
+      { id: 2, sprint: "current", selected_sprint: "porffor-backend" },
+      { id: 3, sprint: "current", selected_sprint: "porffor-backend", blocked_by: [{ id: 4 }] },
+      { id: 4, sprint: "foundation", selected_sprint: "porffor-backend" },
+    ];
+
+    expect(scopePullRequestIssues(issues, { sprintOnly: true }).map((issue) => issue.id)).toEqual([1]);
+    expect(
+      scopePullRequestIssues(issues, { sprintOnly: true, includeDependencies: true }).map((issue) => issue.id),
+    ).toEqual([1, 3, 4]);
+    expect(scopePullRequestIssues(issues).map((issue) => issue.id)).toEqual([1, 2, 3, 4]);
+  });
+
   it("requeues one failed head once and closes merged work", () => {
     const failed = classifyPullRequest({
       number: 44,
@@ -80,7 +101,19 @@ describe("Symphony pull-request reconciliation", () => {
     expect(planPullRequestAction(classifyPullRequest({ state: "MERGED" }))).toEqual({
       action: "mark_done",
       failureKey: null,
+      mergeKey: null,
     });
+    expect(
+      planPullRequestAction(classifyPullRequest({ number: 45, state: "MERGED" }), {
+        issueState: "in-progress",
+      }),
+    ).toEqual({ action: "continue", failureKey: null, mergeKey: "45" });
+    expect(
+      planPullRequestAction(classifyPullRequest({ number: 45, state: "MERGED" }), {
+        issueState: "in-progress",
+        lastMergedPr: 45,
+      }),
+    ).toEqual({ action: "wait", failureKey: null, mergeKey: "45" });
   });
 
   it("queries gh with the configured repository and classifies its response", () => {
@@ -134,7 +167,7 @@ esac
     ).toMatchObject({ number: 100, status: "pending", headBranch: "agent/100" });
   });
 
-  it("persists one repair per failed SHA and marks a later merge done", () => {
+  it("persists one repair per failed SHA, continues a merged slice, and marks the final merge done", () => {
     tempDir = mkdtempSync(join(tmpdir(), "symphony-reconcile-"));
     const issuesDir = join(tempDir, "issues");
     const workspaceRoot = join(tempDir, "workspaces");
@@ -251,9 +284,32 @@ fi
       }),
     );
     runSymphony();
+    const continuedIssue = readFileSync(issueFile, "utf8");
+    expect(continuedIssue).toContain("status: in-progress");
+    expect(continuedIssue).toContain("pr: null");
+    expect(continuedIssue).toContain("last_ci_retry_head: null");
+    expect(continuedIssue).toContain("last_merged_pr: 99");
+    expect(readFileSync(marker, "utf8")).toBe("run\nrun\n");
+
+    writeFileSync(
+      issueFile,
+      continuedIssue.replace("status: in-progress", "status: in-review").replace("pr: null", "pr: 100"),
+    );
+    writeFileSync(
+      response,
+      JSON.stringify({
+        number: 100,
+        state: "MERGED",
+        mergedAt: "2026-07-16T10:00:00Z",
+        headRefName: "agent/9001",
+        headRefOid: "final-sha",
+        statusCheckRollup: [],
+      }),
+    );
+    runSymphony();
     const mergedIssue = readFileSync(issueFile, "utf8");
     expect(mergedIssue).toContain("status: done");
     expect(mergedIssue).toContain("completed: 2026-07-16");
-    expect(readFileSync(marker, "utf8")).toBe("run\n");
+    expect(readFileSync(marker, "utf8")).toBe("run\nrun\n");
   });
 });

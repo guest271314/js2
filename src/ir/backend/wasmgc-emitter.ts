@@ -10,16 +10,20 @@
 // snapshot test.
 //
 // Phase 1 routes the pass-through group (locals / globals / const /
-// arithmetic / control flow) and the vec group. The remaining
-// (aggregate / union / closure / ref-coercion) primitives stay inline in
-// lower.ts for now (issue Scope permits a partial-but-clean seam); they
-// are added here as their group gets wired.
+// arithmetic / control flow) and the vec group. The remaining primitives
+// are added here as their groups get wired.
 
 import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
-import type { BlockType, Instr } from "../types.js";
+import type { BlockType, Instr, ValType } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
-import type { IrClassLowering, IrObjectStructLowering, IrRefCellLowering, IrVecLowering } from "./handles.js";
+import type {
+  IrClassLowering,
+  IrObjectStructLowering,
+  IrRefCellLowering,
+  IrUnionLowering,
+  IrVecLowering,
+} from "./handles.js";
 
 export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   readonly backend = "wasmgc" as const;
@@ -153,6 +157,24 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
 
   emitLoop(blockType: BlockType, body: Instr[], out: Instr[]): void {
     out.push({ op: "loop", blockType, body });
+  }
+
+  // ---- (a6) union/boxing family (#2953) — byte-identical to the prior
+  // inline field-order orchestration and struct.get pushes in lower.ts.
+  emitBox(layout: IrUnionLowering, member: ValType, value: Instr[], out: Instr[]): void {
+    const fields: Array<() => void> = [];
+    fields[layout.tagFieldIdx] = () => out.push({ op: "i32.const", value: layout.tagFor(member) });
+    fields[layout.valFieldIdx] = () => out.push(...value);
+    for (const emitField of fields) emitField();
+    out.push({ op: "struct.new", typeIdx: layout.typeIdx });
+  }
+
+  emitUnbox(layout: IrUnionLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.typeIdx, fieldIdx: layout.valFieldIdx });
+  }
+
+  emitTagLoad(layout: IrUnionLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.typeIdx, fieldIdx: layout.tagFieldIdx });
   }
 
   // ---- (a1) call family (#1584 §2a) — byte-identical to the prior inline
