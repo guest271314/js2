@@ -221,11 +221,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   emitStrCompareHelpers(methodShared);
   emitStrSliceCharHelpers(methodShared);
   emitStrSearchHelpers(methodShared);
-  // (#3256) The startsWith/endsWith, trim, and repeat/pad families are
-  // SELF-HOSTED: TS source in src/stdlib/strings.ts compiled through the
-  // compiler's own IR pipeline, registered under the same __str_* names
-  // (legacy i32 ABIs preserved by hand thunks where needed).
-  emitSelfHostedStringHelpers(methodShared);
+  emitSelfHostedStringHelpers(methodShared); // #3256 — trim/affix/pad/repeat from TS source (stdlib/strings.ts)
   emitStrCaseHelpers(methodShared);
   emitStrReplaceHelpers(methodShared);
   emitStrSplitHelper(methodShared);
