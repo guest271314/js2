@@ -320,6 +320,7 @@ fi
     expect(continuedIssue).toContain("last_merged_pr: 99");
     expect(continuedIssue).toContain("branch: symphony/9001");
     expect(readFileSync(marker, "utf8")).toBe("9001\n9001\n");
+    expect(readFileSync(join(loggingRoot, "events.jsonl"), "utf8")).not.toContain('"event":"retry_suppressed"');
 
     writeFileSync(
       issueFile,

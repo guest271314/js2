@@ -1527,10 +1527,10 @@ class Orchestrator {
         this.retryAttempts.delete(id);
         this.pullRequestRetryCounts.delete(id);
         this.handledFailedPrHeads.delete(id);
-        if (running?.lane.kind !== "claude-channel") {
+        if (running && running.lane.kind !== "claude-channel") {
           this.suppressedRetries.add(id);
-          running?.child.kill("SIGTERM");
-        } else if (activeDispatchClaim(id)) {
+          running.child.kill("SIGTERM");
+        } else if (running && activeDispatchClaim(id)) {
           releaseDispatchClaim(id, `PR #${state.number} merged; continuing issue`);
         }
         issue.last_merged_pr = planned.mergeKey;
