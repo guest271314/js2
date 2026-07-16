@@ -6,7 +6,9 @@ branch: codex/2956-l2-vec
 pr: 3110
 sprint: current
 created: 2026-07-02
-updated: 2026-07-10
+updated: 2026-07-16
+assignee: ttraenkler/codex-l2-vec
+branch: codex/2956-l2-vec
 priority: medium
 horizon: xl
 feasibility: hard
@@ -19,6 +21,10 @@ goal: backend-agnostic-ir
 depends_on: [2953, 2954]
 related: [1585, 1713, 2710, 1852]
 origin: "2026-07-02 July Fable audit §5 (production linear compilation consumes zero IR; #1585 is investigation-only)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/codegen-linear/runtime.ts
+  - src/codegen-linear/index.ts
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -239,10 +245,43 @@ extraction, owned there: "do it once, here"). When S3 lands, this driver
 becomes the `LinearIntegration` adapter implementation nearly verbatim —
 and the interface gets cut with TWO live consumers in view instead of one.
 
-**Remaining slices (unclaimed):** L2 (vec construction #1804-linear arm +
-linear `resolveVec` from-ast threading, refcells, aggregates via
-layout.ts), L3 (strings, after #2955), L4 (default-ON flip + fold the
-direct path's reject list into the ratchet). Acceptance criterion 2
+**Remaining after this sub-slice:** L2 refcells and aggregates via
+`layout.ts`, L3 (strings, after #2955), L4 (default-ON flip + fold the direct
+path's reject list into the ratchet). Acceptance criterion 2
 (cross-backend corpus rows flip `expectLinearUnsupported`) rides the L4
 default-ON flip — under the L1 flag the corpus rows are unchanged by
 construction.
+
+## Execution status — L2 vec-construction sub-slice implemented (2026-07-16, codex/2956-l2-vec)
+
+The #1804 `vec.new_fixed` arm now lowers selector-claimed fixed `number[]`
+literals through the production linear-IR overlay under
+`JS2WASM_LINEAR_IR=1`. The implementation stays on the shared AST-to-IR path;
+it does not clone array-literal analysis and does not change `BackendEmitter`,
+`lower.ts`, or the WasmGC emitter owned by the concurrent #2953 slice.
+
+- `LinearEmitter.emitVecNewFixed` allocates through the existing `__arr_new`
+  runtime, consumes the already-stacked values from last to first, and writes
+  each f64 value to its original slot through one value-first indexed helper.
+  It publishes `length` only after initialization and leaves the canonical i32
+  arena pointer on the stack. The linear resolver supplies the direct backend's
+  numeric OOB carrier (`0`) to the shared safe-read builder.
+- The linear resolver now threads the existing from-ast vec hooks, supplies an
+  i32 vec value representation, and recognizes TypeScript `number[]`
+  expressions before allowing scalar-carried `.length` / indexed reads. The
+  shared lowerer's GC-shaped construction scratch is normalized to an i32
+  pointer only in the returned linear function.
+- The linear legality profile admits `vec.new_fixed`, `vec.len`, and `vec.get`.
+  Other element layouts, mutation (`push`/set), for-of, aggregates, refcells,
+  strings, spread/sparse/hintless construction, and unsupported control-flow
+  shapes continue to demote to the direct linear path.
+- `tests/issue-2956.test.ts` adds flag-on differential value, strict-alias,
+  length/index, and out-of-bounds non-trapping coverage; a hintless-empty
+  build rejection proves direct fallback; and `JS2WASM_LINEAR_IR=0` is
+  SHA-256 byte-identical to an unset flag for the vec module.
+
+Measured ratchet result: `compiled 6 -> 6`, `build 4 -> 4` on the fixed
+playground corpus. There is no measured corpus improvement, so
+`scripts/linear-ir-baseline.json` is intentionally unchanged. The next L2
+work is the separately owned refcell/aggregate surface; this sub-slice does
+not claim it.
