@@ -15,6 +15,9 @@ language_feature: json
 goal: spec-completeness
 sprint: current
 related: [2933, 2106, 3008, 2166]
+# The fix must live at the toJSON guard inside the codec builder.
+loc-budget-allow:
+  - src/codegen/json-codec-native.ts
 ---
 
 # #3328 — standalone JSON.stringify object arg serialises "null" (toJSON miss-guard vs $undefined singleton)
