@@ -1,11 +1,11 @@
 {
   "generated": "2026-07-16",
   "threshold": 1500,
-  "totalCeiling": 419163,
+  "totalCeiling": 419177,
   "files": {
     "src/codegen-linear/index.ts": 5534,
     "src/codegen-linear/runtime.ts": 3615,
-    "src/codegen/any-helpers.ts": 2752,
+    "src/codegen/any-helpers.ts": 2755,
     "src/codegen/array-methods.ts": 7879,
     "src/codegen/array-object-proto.ts": 2451,
     "src/codegen/array-prototype-borrow.ts": 2333,
@@ -16,7 +16,7 @@
     "src/codegen/class-bodies.ts": 3140,
     "src/codegen/closed-method-dispatch.ts": 1562,
     "src/codegen/closures.ts": 2971,
-    "src/codegen/context/types.ts": 2684,
+    "src/codegen/context/types.ts": 2686,
     "src/codegen/dataview-native.ts": 5692,
     "src/codegen/declarations.ts": 2351,
     "src/codegen/declarations/import-collector.ts": 1979,
