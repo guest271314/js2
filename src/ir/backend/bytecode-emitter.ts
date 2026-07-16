@@ -671,6 +671,22 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
 
+  // ---- ref-coercion / null family (#2953) — the VM's boxed-value sentinel
+  // and cast semantics are not wired yet. Keep the representation boundary
+  // loud instead of admitting raw WasmGC ref instructions into the sink.
+  emitNull(): void {
+    throw new Error("BytecodeEmitter: null materialization not yet wired — see §2a ref-coercion family.");
+  }
+  emitToExternref(): void {
+    throw new Error("BytecodeEmitter: externref coercion not yet wired — see §2a ref-coercion family.");
+  }
+  emitDowncast(): void {
+    throw new Error("BytecodeEmitter: reference downcast not yet wired — see §2a ref-coercion family.");
+  }
+  emitFromExternref(): void {
+    throw new Error("BytecodeEmitter: externref conversion not yet wired — see §2a ref-coercion family.");
+  }
+
   // ---- closure family (#2953) — closure records and callable handles are not
   // yet represented by the bytecode VM. Keep the trait boundary loud instead
   // of falling back to WasmGC struct instructions through pushRaw.
