@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { planPullRequestAction, readPullRequest, readPullRequestForBranch } from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
 const DEFAULT_WORKFLOW = path.join(ROOT, "WORKFLOW.md");
@@ -365,6 +366,12 @@ function readArrayField(fm, key) {
     .filter(Boolean);
 }
 
+function readPullRequestNumber(fm) {
+  const raw = readScalarField(fm, "pr", "");
+  const match = raw.match(/\/pull\/(\d+)/i) || raw.match(/#(\d+)/) || raw.match(/^\s*(\d+)\s*$/);
+  return match ? Number(match[1]) : null;
+}
+
 function walkIssueFiles(dir) {
   if (!existsSync(dir)) return [];
   const out = [];
@@ -417,6 +424,7 @@ function loadMarkdownIssues(config) {
     const id = readScalarField(fm, "id", basenameIssueId(file));
     const state = normalizeState(readScalarField(fm, "status", "ready"));
     const sprint = readScalarField(fm, "sprint", "");
+    const pullRequest = readPullRequestNumber(fm);
     const issue = {
       id,
       identifier: id,
@@ -425,7 +433,10 @@ function loadMarkdownIssues(config) {
       priority: priorityRank(fm.priority),
       priority_raw: fm.priority ?? null,
       state,
-      branch_name: null,
+      branch_name: readScalarField(fm, "branch", null),
+      pull_request: pullRequest,
+      pr: pullRequest,
+      last_ci_retry_head: readScalarField(fm, "last_ci_retry_head", null),
       url: null,
       labels: [fm.area, fm.task_type, fm.language_feature, fm.goal].filter(Boolean).map((v) => String(v).toLowerCase()),
       blocked_by: readArrayField(fm, "depends_on").map((dep) => ({ id: dep, identifier: dep, state: null })),
@@ -502,6 +513,8 @@ class MarkdownTracker {
     return this.updateIssueStatusFile(issue, workspaceIssueFile, claimState, {
       claimed_by: lane.name,
       claimed_at: new Date().toISOString(),
+      ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+      ...(issue.last_ci_retry_head ? { last_ci_retry_head: issue.last_ci_retry_head } : {}),
     });
   }
 
@@ -615,13 +628,18 @@ class WorkspaceManager {
     if (!workspaceAbs.startsWith(`${rootAbs}${path.sep}`) && workspaceAbs !== rootAbs) {
       throw new Error(`workspace_outside_root: ${workspaceAbs}`);
     }
-    const branch = `${this.branchPrefix}/${key}`;
+    const branch = issue.branch_name || `${this.branchPrefix}/${key}`;
     const createdNow = !existsSync(workspaceAbs);
     if (createdNow) {
       mkdirSync(rootAbs, { recursive: true });
       if (this.kind === "git_worktree") this.createGitWorktree(workspaceAbs, branch);
       else mkdirSync(workspaceAbs, { recursive: true });
       this.runHook("after_create", workspaceAbs, issue);
+    } else if (this.kind === "git_worktree") {
+      const actualBranch = this.git(["branch", "--show-current"], workspaceAbs);
+      if (actualBranch !== branch) {
+        throw new Error(`workspace_branch_mismatch: expected ${branch}, found ${actualBranch || "detached"}`);
+      }
     }
     return { path: workspaceAbs, workspace_key: key, created_now: createdNow, branch };
   }
@@ -629,7 +647,9 @@ class WorkspaceManager {
   createGitWorktree(workspacePath, branch) {
     if (this.fetchBeforeCreate) this.git(["fetch", "origin"], ROOT);
     const branchExists = this.gitOptional(["show-ref", "--verify", `refs/heads/${branch}`], ROOT);
+    const remoteBranchExists = this.gitOptional(["show-ref", "--verify", `refs/remotes/origin/${branch}`], ROOT);
     if (branchExists) this.git(["worktree", "add", workspacePath, branch], ROOT);
+    else if (remoteBranchExists) this.git(["worktree", "add", workspacePath, "-b", branch, `origin/${branch}`], ROOT);
     else this.git(["worktree", "add", workspacePath, "-b", branch, this.baseRef], ROOT);
   }
 
@@ -889,6 +909,10 @@ class Orchestrator {
     this.claimed = new Set();
     this.retryAttempts = new Map();
     this.completed = new Set();
+    this.pullRequestStates = new Map();
+    this.handledFailedPrHeads = new Map();
+    this.pullRequestRetryCounts = new Map();
+    this.lastPullRequestPollAt = 0;
     this.codexTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 };
     this.rateLimits = null;
     this.laneCursor = 0;
@@ -1007,6 +1031,10 @@ class Orchestrator {
     return Number(get(this.config, "polling.interval_ms", 30000)) || 30000;
   }
 
+  pullRequestPollInterval() {
+    return Number(get(this.config, "pull_requests.poll_interval_ms", this.pollInterval())) || this.pollInterval();
+  }
+
   validate() {
     const kind = get(this.config, "tracker.kind", "");
     if (kind !== "markdown") throw new Error(`unsupported_tracker_kind: ${kind || "(missing)"}`);
@@ -1020,8 +1048,9 @@ class Orchestrator {
 
   async tick() {
     this.processControls();
-    this.reconcileRunning();
     this.validate();
+    this.reconcilePullRequests();
+    this.reconcileRunning();
     if (this.stopping && this.running.size === 0) {
       this.shouldExit = true;
       this.writeState();
@@ -1118,6 +1147,8 @@ class Orchestrator {
         return;
       }
       workspace = this.workspaceManager.ensure(issue);
+      issue.branch_name = workspace.branch;
+      this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, { branch: workspace.branch });
       const workspaceClaim = this.tracker.claimIssueInWorkspace(issue, workspace, lane);
       if (workspaceClaim?.changed) {
         this.logger.event("workspace_issue_claimed", {
@@ -1269,7 +1300,16 @@ class Orchestrator {
         reason: this.stopping ? "stopping" : this.draining ? "draining" : "operator control",
       });
     } else if (result.status === "succeeded") {
-      this.completed.add(id);
+      const current = this.tracker.fetchIssueStatesByIds([id])[0];
+      if (current?.pull_request && current.state === "in-review") {
+        this.logger.event("agent_awaiting_pull_request", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: current.pull_request,
+        });
+      } else {
+        this.completed.add(id);
+      }
       const maxTurns = Number(get(this.config, "agent.max_turns", 1)) || 1;
       if ((attempt ?? 0) + 1 < maxTurns) this.scheduleRetry(issue, lane, "continuation", 1000, (attempt ?? 0) + 1);
     } else {
@@ -1365,6 +1405,129 @@ class Orchestrator {
       }
     }
   }
+
+  reconcilePullRequests() {
+    if (this.options.dryRun || get(this.config, "pull_requests.enabled", true) === false) return;
+    const now = Date.now();
+    if (now - this.lastPullRequestPollAt < this.pullRequestPollInterval()) return;
+    this.lastPullRequestPollAt = now;
+
+    const reviewStates = asArray(get(this.config, "pull_requests.review_states"), ["in-review", "in-progress"]);
+    const repository = String(get(this.config, "pull_requests.repository", ""));
+    const command = String(get(this.config, "pull_requests.command", "gh"));
+    const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
+    const issues = this.tracker.fetchIssuesByStates(reviewStates);
+
+    for (const issue of issues) {
+      if (!issue.pull_request && !issue.branch_name) continue;
+      const id = String(issue.id);
+      let state;
+      try {
+        state = issue.pull_request
+          ? readPullRequest({
+              command,
+              cwd: ROOT,
+              number: issue.pull_request,
+              repository,
+              timeoutMs,
+            })
+          : readPullRequestForBranch({
+              branch: issue.branch_name,
+              command,
+              cwd: ROOT,
+              repository,
+              timeoutMs,
+            });
+      } catch (error) {
+        this.logger.event("pull_request_poll_failed", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: issue.pull_request,
+          error: error.message,
+          quiet: true,
+        });
+        continue;
+      }
+      if (!state) continue;
+
+      this.pullRequestStates.set(id, state);
+      if (state.headBranch) issue.branch_name = state.headBranch;
+      if (!issue.pull_request && state.number) {
+        issue.pull_request = state.number;
+        issue.pr = state.number;
+        this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, {
+          pr: state.number,
+          ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+        });
+        this.logger.event("pull_request_discovered", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: state.number,
+          branch: issue.branch_name,
+        });
+      }
+      const planned = planPullRequestAction(state, {
+        handledFailureKey: this.handledFailedPrHeads.get(id) || issue.last_ci_retry_head,
+        busy: this.running.has(id) || this.claimed.has(id) || this.retryAttempts.has(id),
+        paused: this.paused || this.draining || this.stopping,
+        hasCapacity: this.running.size < this.maxConcurrent(),
+      });
+
+      if (planned.action === "mark_done") {
+        const completed = state.mergedAt ? state.mergedAt.slice(0, 10) : todayIsoDate();
+        const update = this.tracker.updateIssueStatusFile(issue, issue.file, "done", { completed });
+        const retry = this.retryAttempts.get(id);
+        if (retry?.timer_handle) clearTimeout(retry.timer_handle);
+        this.retryAttempts.delete(id);
+        this.claimed.delete(id);
+        this.completed.add(id);
+        this.handledFailedPrHeads.delete(id);
+        if (activeDispatchClaim(id)) releaseDispatchClaim(id, `PR #${issue.pull_request} merged`);
+        if (update?.changed) {
+          this.logger.event("pull_request_merged_issue_done", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            pr: issue.pull_request,
+            completed,
+          });
+        }
+        continue;
+      }
+
+      if (planned.action === "defer") {
+        this.logger.event("pull_request_failure_deferred", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: issue.pull_request,
+          head_sha: state.headSha,
+          quiet: true,
+        });
+        continue;
+      }
+      if (planned.action !== "requeue") continue;
+
+      const lane = this.nextAvailableLane();
+      if (!lane) continue;
+      issue.last_ci_retry_head = planned.failureKey;
+      this.tracker.updateIssueStatusFile(issue, issue.file, "in-progress", {
+        ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+        last_ci_retry_head: planned.failureKey,
+      });
+      this.handledFailedPrHeads.set(id, planned.failureKey);
+      const attempt = (this.pullRequestRetryCounts.get(id) ?? 0) + 1;
+      this.pullRequestRetryCounts.set(id, attempt);
+      this.logger.event("pull_request_ci_failed_requeued", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        pr: issue.pull_request,
+        head_sha: state.headSha,
+        failed_checks: state.failedChecks.join(", "),
+        lane: lane.name,
+      });
+      this.dispatch(issue, lane, attempt);
+    }
+  }
+
   reconcileRunning() {
     this.reconcileChannelDispatches();
     const stallMs = Number(get(this.config, "codex.stall_timeout_ms", 300000)) || 0;
@@ -1391,6 +1554,7 @@ class Orchestrator {
       const issue = current.get(id);
       if (!issue) continue;
       if (this.tracker.terminalStates.has(issue.state)) {
+        this.suppressedRetries.add(id);
         if (entry.lane.kind === "claude-channel") {
           this.running.delete(id);
           this.claimed.delete(id);
@@ -1454,6 +1618,7 @@ class Orchestrator {
       })),
       claimed: [...this.claimed],
       completed: [...this.completed],
+      pull_requests: Object.fromEntries(this.pullRequestStates),
       codex_totals: {
         ...this.codexTotals,
         seconds_running:
