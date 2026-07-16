@@ -14,7 +14,7 @@
 // are added here as their groups get wired.
 
 import { emitConstInstr } from "../lower.js";
-import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
+import { asVal, type IrBinop, type IrInstr, type IrType, type IrUnop } from "../nodes.js";
 import type { BlockType, Instr, ValType } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
 import type {
@@ -79,6 +79,13 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   // ---- scalars / locals / globals / control flow ----------------------
 
   emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: Instr[]): void {
+    if (instr.value.kind === "null") {
+      if (!instr.resultType) {
+        throw new Error(`WasmGcEmitter: const null requires a result type (${funcName})`);
+      }
+      this.emitNull(instr.resultType, out);
+      return;
+    }
     // Delegate to the shared free function (unchanged) so the const-lowering
     // logic stays in one place. The arg order is the free fn's
     // `(instr, out, funcName)` -- the trait method's order is
@@ -178,9 +185,55 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
     out.push({ op: "struct.get", typeIdx: layout.typeIdx, fieldIdx: layout.tagFieldIdx });
   }
 
+  // ---- ref-coercion / null family (#2953) — byte-identical to the prior
+  // ref.null.*, extern.convert_any, any.convert_extern, and ref.cast pushes in
+  // lower.ts. Operand evaluation remains with the caller.
+  emitNull(irType: IrType, out: Instr[]): void {
+    const valType = asVal(irType);
+    switch (valType?.kind) {
+      case "ref":
+      case "ref_null":
+        out.push({ op: "ref.null", typeIdx: valType.typeIdx });
+        return;
+      case "externref":
+      case "ref_extern":
+        out.push({ op: "ref.null.extern" });
+        return;
+      case "eqref":
+        out.push({ op: "ref.null.eq" });
+        return;
+      case "funcref":
+        out.push({ op: "ref.null.func" });
+        return;
+      default:
+        throw new Error(`WasmGcEmitter: cannot materialize null for IrType '${irType.kind}'`);
+    }
+  }
+
+  emitToExternref(out: Instr[]): void {
+    out.push({ op: "extern.convert_any" });
+  }
+
+  emitDowncast(target: { typeIdx: number } | IrType, out: Instr[]): void {
+    out.push({ op: "ref.cast", typeIdx: refTargetTypeIdx(target) });
+  }
+
+  emitFromExternref(target: { typeIdx: number } | IrType, out: Instr[]): void {
+    out.push({ op: "any.convert_extern" });
+    this.emitDowncast(target, out);
+  }
+
+  // ---- function-reference family (#2953) — byte-identical to the prior
+  // inline ref.func push in lower.ts. Name/handle resolution and operand order
+  // remain with the caller.
+  emitFuncRef(funcIdx: number, out: Instr[]): void {
+    out.push({ op: "ref.func", funcIdx });
+  }
+
   // ---- closure family (#2953) — byte-identical to the prior inline
   // struct.new/get pushes in lower.ts. The caller has already emitted the
-  // lifted function reference, captures, and any required ref.cast.
+  // lifted function reference through emitFuncRef, captures, and any required
+  // ref.cast.
   emitClosureNew(layout: IrClosureLowering, _captureCount: number, out: Instr[]): void {
     out.push({ op: "struct.new", typeIdx: layout.structTypeIdx });
   }
@@ -280,4 +333,11 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
 /** The WasmGC struct typeIdx for an object (`typeIdx`) or class (`structTypeIdx`). */
 function structTypeIdxOf(layout: IrObjectStructLowering | IrClassLowering): number {
   return "typeIdx" in layout ? layout.typeIdx : layout.structTypeIdx;
+}
+
+function refTargetTypeIdx(target: { typeIdx: number } | IrType): number {
+  if ("typeIdx" in target) return target.typeIdx;
+  const valType = asVal(target);
+  if (valType?.kind === "ref" || valType?.kind === "ref_null") return valType.typeIdx;
+  throw new Error(`WasmGcEmitter: ref cast target must be a ref IrType, got '${target.kind}'`);
 }

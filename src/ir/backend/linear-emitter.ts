@@ -300,6 +300,27 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   // emitVecNewFixed already declared above (the read side is #1714 scope; the
   // bump-allocated store sequence is #1804).
 
+  // ref-coercion / null family — nullable references and externref tagging need
+  // the linear value representation planned by #2956. Never leak WasmGC casts.
+  emitNull(): void {
+    notImplemented("emitNull");
+  }
+  emitToExternref(): void {
+    notImplemented("emitToExternref");
+  }
+  emitDowncast(): void {
+    notImplemented("emitDowncast");
+  }
+  emitFromExternref(): void {
+    notImplemented("emitFromExternref");
+  }
+
+  // function materialization — a linear closure carries a table index or
+  // equivalent handle, not a WasmGC funcref (#2956, closures).
+  emitFuncRef(): void {
+    notImplemented("emitFuncRef");
+  }
+
   // typed-funcref call — `call_ref` over a GC funcref (#2956, closures). The
   // linear backend dispatches indirect calls through a table (`call_indirect`),
   // not a reference-typed funcref, so this needs distinct lowering.

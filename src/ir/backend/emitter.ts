@@ -162,17 +162,28 @@ export interface BackendEmitter<S = Instr[]> {
   emitUnbox?(layout: IrUnionLowering, out: S): void;
   emitTagLoad?(layout: IrUnionLowering, out: S): void;
 
-  // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
-  // The following are part of the full seam the spec audited but are NOT
-  // routed through the trait in Phase 1 (#1713). They remain inline in
-  // lower.ts. Declared here so the staged groups (aggregate / union /
-  // closure / ref-coercion) have a stable signature to migrate against and
-  // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
-  // need not implement them until its group is wired.
-  emitNull?(irType: IrType, out: Instr[]): void;
-  emitToExternref?(out: Instr[]): void;
-  emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;
-  emitFuncRef?(funcIdx: number, out: Instr[]): void;
+  // ---- ref-coercion / null family — MIGRATED behind the trait (#2953) ----
+  // Typed nulls and reference casts are representation operations: WasmGC
+  // uses the nullable heap-type op family, while a linear or bytecode backend
+  // needs its own sentinel/tag representation. The caller owns operand
+  // evaluation and passes either an abstract IrType or an already-resolved
+  // runtime type handle; the emitter owns the terminal coercion sequence.
+  /** Push a typed null appropriate for `irType`. */
+  emitNull(irType: IrType, out: S): void;
+  /** anyref subtype on the stack -> externref. */
+  emitToExternref(out: S): void;
+  /** ref on the stack -> the same ref narrowed to `target`. */
+  emitDowncast(target: { typeIdx: number } | IrType, out: S): void;
+  /** externref on the stack -> a ref narrowed to `target`. */
+  emitFromExternref(target: { typeIdx: number } | IrType, out: S): void;
+
+  // ---- function-reference family — MIGRATED behind the trait (#2953) ------
+  // The caller resolves the lifted function handle and owns its position in
+  // the closure-construction operand order. The backend owns how that handle
+  // becomes a first-class callable value (WasmGC: ref.func; linear/bytecode:
+  // table or VM-callable handle once those representations land).
+  /** Materialize compiled function `funcIdx` as a first-class callable value. */
+  emitFuncRef(funcIdx: number, out: S): void;
 
   // ---- closure family — MIGRATED behind the trait (#2953) -----------------
   // Closure construction and field reads are aggregate operations whose
@@ -180,8 +191,8 @@ export interface BackendEmitter<S = Instr[]> {
   // closure.new leaves the lifted function reference followed by each capture
   // on the stack; closure.cap performs its subtype downcast before the field
   // read; closure.call performs its typed-funcref cast after the function-field
-  // read. Those ref.func/ref.cast operations migrate in their dedicated #2953
-  // slices, while these hooks close the closure struct.new/get bypasses.
+  // read. Function materialization and narrowing route through their own
+  // representation hooks; these hooks own closure allocation and field reads.
   /** lifted function ref + captureCount captures on the stack -> closure value. */
   emitClosureNew(layout: IrClosureLowering, captureCount: number, out: S): void;
   /** closure ref on the stack -> its abstract funcref field. */
