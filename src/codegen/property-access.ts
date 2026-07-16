@@ -2618,8 +2618,11 @@ function tryStandaloneGrowableDynamicGet(
   ) {
     return undefined;
   }
-  const accessType = ctx.checker.getTypeAtLocation(expr);
-  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+  // Callable props keep their dedicated lowerings. Routed through the oracle
+  // (#1930): `signatureOf` is `undefined` exactly when the checker type has no
+  // call signature — the same gate tryEmitDeleteAwareDynamicGet expresses via
+  // the raw checker's `getCallSignatures().length > 0`.
+  if (ctx.oracle.signatureOf(expr) !== undefined) return undefined;
   const getIdx = ensureLateImport(
     ctx,
     "__extern_get",
