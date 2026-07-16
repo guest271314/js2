@@ -1781,7 +1781,19 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   if (
     ts.isMethodDeclaration(decl) &&
     decl.body &&
-    (bodyUsesArguments(decl.body) || methodBodyUsesSuper(decl.body) || generatorCapturesOuterScope(ctx, decl))
+    (bodyUsesArguments(decl.body) ||
+      methodBodyUsesSuper(decl.body) ||
+      // (#3032 W4) Outer-scope captures are ADMITTED for method generators in
+      // the standalone/wasi lane: a class / object-literal method body never
+      // receives captures as params — it resolves them through the
+      // #2029/#3039/#3121 promotion machinery (`ctx.capturedBoxGlobals` /
+      // `ctx.capturedGlobals` module globals), which is fctx-INDEPENDENT, so
+      // the resume function compiles the same body with the same global
+      // reads/writes — no threading needed. The promotion runs in the
+      // enclosing fctx before the class/literal members compile, hence before
+      // the resume fn emits. JS-host lane keeps the eager path (byte-identical;
+      // its laziness is the #3032 thunk track).
+      (!noJsHostTarget(ctx) && generatorCapturesOuterScope(ctx, decl)))
   ) {
     return false;
   }

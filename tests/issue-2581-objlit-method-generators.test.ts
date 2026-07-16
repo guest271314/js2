@@ -166,16 +166,18 @@ export function test(): number {
     expect(await runNative(src)).toBe(5);
   });
 
-  it("capturing object-literal method generator BAILS to host cleanly (valid module)", async () => {
+  it("capturing object-literal method generator lowers NATIVELY in standalone (#3032 W4 — was: bail to host)", async () => {
+    // (#3032 W4) Pre-W4 this asserted the eager-host bail; the method body
+    // resolves `cap` through the promotion globals (fctx-independent), so the
+    // standalone lane now routes native — zero host imports, lazy (§27.5),
+    // and the value reads back correctly.
     const src = `function outer(): number {
   let cap = 3;
   const o = { *m() { yield cap; } };
   return (o.m().next().value as number);
 }
 export function test(): number { return outer(); }`;
-    const { binary, genImports } = await compileNoHost(src);
-    expect(genImports.length, "capturing objlit method generator keeps the host path").toBeGreaterThan(0);
-    expect(WebAssembly.validate(binary), "capturing-bail module must still be valid Wasm").toBe(true);
+    expect(await runNative(src)).toBe(3);
   });
 
   it("class + free function* generators stay native (regression guard)", async () => {
