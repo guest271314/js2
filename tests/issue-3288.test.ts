@@ -11,6 +11,7 @@ import {
   asValueId,
   irVal,
   lowerIrFunctionBody,
+  verifyIrFunction,
   type IrFunction,
   type IrInstr,
   type IrLowerResolver,
@@ -18,6 +19,8 @@ import {
 
 const F64 = irVal({ kind: "f64" });
 const I32 = irVal({ kind: "i32" });
+const U32 = { kind: "val", val: { kind: "i32" }, signed: false } as const;
+const U64 = { kind: "val", val: { kind: "i64" }, signed: false } as const;
 
 function resolver(onIntern = (): void => {}): IrLowerResolver {
   return {
@@ -115,9 +118,54 @@ describe("#3288 P1 backend-neutral lowering metadata", () => {
     const types = new PorfforTypeConverter();
     expect(types.convertType(F64)).toEqual(["f64"]);
     expect(types.convertType(I32)).toEqual(["i32"]);
-    expect(types.convertType({ kind: "val", val: { kind: "i32" }, signed: false })).toEqual(["u32"]);
+    expect(types.convertType(U32)).toEqual(["u32"]);
     expect(types.convertType(irVal({ kind: "i64" }))).toEqual(["i64"]);
+    expect(types.convertType(U64)).toEqual(["u64"]);
     expect(() => types.convertType({ kind: "string" })).toThrow(/porffor backend does not support IR type 'string'/);
+  });
+
+  it.each([
+    ["u32", U32, { kind: "i32", value: 1 }],
+    ["u64", U64, { kind: "i64", value: 1n }],
+  ] as const)("preserves %s signedness when an SSA value is materialized as a local", (slot, type, value) => {
+    const fn: IrFunction = {
+      name: `${slot}Local`,
+      params: [{ value: asValueId(0), type: I32, name: "condition" }],
+      resultTypes: [type],
+      blocks: [
+        {
+          id: asBlockId(0),
+          blockArgs: [],
+          blockArgTypes: [],
+          instrs: [
+            {
+              kind: "const",
+              value,
+              result: asValueId(1),
+              resultType: type,
+            },
+            {
+              kind: "select",
+              condition: asValueId(0),
+              whenTrue: asValueId(1),
+              whenFalse: asValueId(1),
+              result: asValueId(2),
+              resultType: type,
+            },
+          ],
+          terminator: { kind: "return", values: [asValueId(2)] },
+        },
+      ],
+      exported: false,
+      valueCount: 3,
+    };
+
+    const lowered = lowerIrFunctionBody(fn, resolver(), new StubEmitter("porffor"), new PorfforTypeConverter());
+
+    expect(verifyIrFunction(fn)).toEqual([]);
+    expect(lowered.params).toEqual([{ name: "condition", slots: ["i32"] }]);
+    expect(lowered.locals).toEqual([{ name: "$ir1", slots: [slot] }]);
+    expect(lowered.results).toEqual([[slot]]);
   });
 
   it("requires the emitter and TypeConverter to identify the same backend", () => {

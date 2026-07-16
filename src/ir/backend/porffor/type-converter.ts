@@ -9,7 +9,7 @@ import type { TypeConverter } from "../contract.js";
  * P2's module adapter maps these names to the compatibility-checked ordinals
  * only at final Porffor assembly time.
  */
-export type PorfforValueSlot = "f64" | "i32" | "u32" | "i64";
+export type PorfforValueSlot = "f64" | "i32" | "u32" | "i64" | "u64";
 
 /** Narrow scalar converter matching the P1 Porffor legality profile. */
 export class PorfforTypeConverter implements TypeConverter<PorfforValueSlot> {
@@ -27,7 +27,7 @@ export class PorfforTypeConverter implements TypeConverter<PorfforValueSlot> {
       case "i32":
         return [type.kind === "val" && type.signed === false ? "u32" : "i32"];
       case "i64":
-        return ["i64"];
+        return [type.kind === "val" && type.signed === false ? "u64" : "i64"];
       default:
         throw new Error(`porffor backend does not support ValType '${value.kind}'`);
     }

@@ -738,10 +738,15 @@ export function lowerIrFunctionBody<S, Slot>(
 
   // --- local allocation ---------------------------------------------------
   // Stable order: scan blocks then instrs. Every `needsLocal` value gets one
-  // Wasm local slot, placed after the function's parameter slots. The slot's
-  // Wasm type is the lowered ValType of the IR resultType (wrap unions /
-  // boxed types as refs to the corresponding WasmGC struct).
-  const locals: LocalDef[] = [];
+  // internal emission slot, placed after the function's parameter slots.
+  // Keep both its current Wasm-facing ValType and its logical IrType: the
+  // former still drives the existing index-based emitters, while the latter
+  // is what TypeConverter must see when assembling backend-neutral metadata.
+  // Reconstructing an IrType from a ValType would erase facts such as unsigned
+  // i32/i64, making a materialized Porffor local disagree with the same value
+  // when carried as a parameter or result.
+  type InternalLocalDef = LocalDef & { readonly logicalType: IrType };
+  const locals: InternalLocalDef[] = [];
   const localIdx = new Map<IrValueId, number>();
   // Slice 6 (#1169e): walk into `forof.vec` body buffers so SSA values
   // defined inside a body get Wasm locals allocated alongside the
@@ -756,6 +761,7 @@ export function lowerIrFunctionBody<S, Slot>(
       locals.push({
         name: `$ir${instr.result}`,
         type: lowerIrTypeToValType(instr.resultType, resolver, func.name),
+        logicalType: instr.resultType,
       });
       localIdx.set(instr.result, idx);
     }
@@ -810,7 +816,7 @@ export function lowerIrFunctionBody<S, Slot>(
   const slotBase = func.params.length + locals.length;
   const slotDefs = func.slots ?? [];
   for (const slot of slotDefs) {
-    locals.push({ name: `$slot_${slot.name}`, type: slot.type });
+    locals.push({ name: `$slot_${slot.name}`, type: slot.type, logicalType: { kind: "val", val: slot.type } });
   }
   const slotWasmIdx = (slotIndex: number): number => slotBase + slotIndex;
 
@@ -844,25 +850,29 @@ export function lowerIrFunctionBody<S, Slot>(
     const existing = vecNewFixedDataScratch.get(arrayTypeIdx);
     if (existing !== undefined) return existing;
     const idx = func.params.length + locals.length;
-    locals.push({ name: `$vec_data_${arrayTypeIdx}`, type: { kind: "ref_null", typeIdx: arrayTypeIdx } });
+    const type: ValType = { kind: "ref_null", typeIdx: arrayTypeIdx };
+    locals.push({ name: `$vec_data_${arrayTypeIdx}`, type, logicalType: { kind: "val", val: type } });
     vecNewFixedDataScratch.set(arrayTypeIdx, idx);
     return idx;
   };
   const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
     if (jsBitwiseTmpIdx === null) {
       jsBitwiseTmpIdx = func.params.length + locals.length;
-      locals.push({ name: "$js_bitwise_tmp", type: { kind: "f64" } });
+      const type: ValType = { kind: "f64" };
+      locals.push({ name: "$js_bitwise_tmp", type, logicalType: { kind: "val", val: type } });
     }
     if (rhsIsI32) {
       if (jsBitwiseRhsIdxI32 === null) {
         jsBitwiseRhsIdxI32 = func.params.length + locals.length;
-        locals.push({ name: "$js_bitwise_rhs_i32", type: { kind: "i32" } });
+        const type: ValType = { kind: "i32" };
+        locals.push({ name: "$js_bitwise_rhs_i32", type, logicalType: { kind: "val", val: type } });
       }
       return { rhs: jsBitwiseRhsIdxI32, tmp: jsBitwiseTmpIdx };
     }
     if (jsBitwiseRhsIdxF64 === null) {
       jsBitwiseRhsIdxF64 = func.params.length + locals.length;
-      locals.push({ name: "$js_bitwise_rhs", type: { kind: "f64" } });
+      const type: ValType = { kind: "f64" };
+      locals.push({ name: "$js_bitwise_rhs", type, logicalType: { kind: "val", val: type } });
     }
     return { rhs: jsBitwiseRhsIdxF64, tmp: jsBitwiseTmpIdx };
   };
@@ -875,7 +885,7 @@ export function lowerIrFunctionBody<S, Slot>(
   const ensureDynTagScratch = (carrier: ValType): number => {
     if (dynTagScratchIdx === null) {
       dynTagScratchIdx = func.params.length + locals.length;
-      locals.push({ name: "$dyn_tag_scratch", type: carrier });
+      locals.push({ name: "$dyn_tag_scratch", type: carrier, logicalType: { kind: "val", val: carrier } });
     }
     return dynTagScratchIdx;
   };
@@ -887,7 +897,8 @@ export function lowerIrFunctionBody<S, Slot>(
   const ensureInstanceofTagScratch = (): number => {
     if (instanceofTagScratchIdx === null) {
       instanceofTagScratchIdx = func.params.length + locals.length;
-      locals.push({ name: "$instanceof_tag_scratch", type: { kind: "i32" } });
+      const type: ValType = { kind: "i32" };
+      locals.push({ name: "$instanceof_tag_scratch", type, logicalType: { kind: "val", val: type } });
     }
     return instanceofTagScratchIdx;
   };
@@ -2960,7 +2971,8 @@ export function lowerIrFunctionBody<S, Slot>(
           awaitScratchPromiseIdx = func.params.length + locals.length;
           locals.push({
             name: "$await_promise",
-            type: { kind: "ref", typeIdx: promiseTypeIdx } as ValType,
+            type: { kind: "ref", typeIdx: promiseTypeIdx },
+            logicalType: { kind: "val", val: { kind: "ref", typeIdx: promiseTypeIdx } },
           });
         }
         wasmOut.push({ op: "local.tee", index: awaitScratchPromiseIdx });
@@ -3168,7 +3180,7 @@ export function lowerIrFunctionBody<S, Slot>(
     })),
     locals: locals.map((local) => ({
       name: local.name,
-      slots: convertSlots({ kind: "val", val: local.type }, `local ${local.name}`),
+      slots: convertSlots(local.logicalType, `local ${local.name}`),
     })),
     results: func.resultTypes.map((type, index) => convertSlots(type, `result ${index}`)),
     exported: func.exported,
