@@ -119,7 +119,7 @@ require("events")` via `_resolveNamespacedClass`. Class-stubbed bindings
   (1), namespace form (7), addListener + two listeners (330), #1284 guard
   intact (user class still shadows).
 - tests/externref.test.ts: 5/5 (was 5/5 FAILING on main — pre-existing).
-- Residual filed: #3327 — two host-callbacks sharing ONE mutable captured
+- Residual filed: #3329 — two host-callbacks sharing ONE mutable captured
   local get separate ref cells (last writeback wins; pre-existing #859/#929
   design, also affects DisposableStack).
 - Standalone note: no new host imports without fallback — EventEmitter is
