@@ -3,7 +3,7 @@ id: 2927
 title: "Interpreter foundation: Acorn-via-js2wasm runtime parser + generic-built-in audit"
 status: ready
 created: 2026-07-02
-updated: 2026-07-04
+updated: 2026-07-16
 priority: medium
 horizon: l
 feasibility: hard
@@ -364,3 +364,32 @@ half of this foundation. See `## Suspended Work`.
   probe = slice **E0**; the #2853-A/B parser blockers = **P1/P2**; the Part-2
   gaps 1–3 = **G1/G3/G4** (plus **G2** args-passing/arity). Devs picking this
   up should claim one named slice, not the whole umbrella.
+
+## Slice decomposition (dev fable-interp, 2026-07-16)
+
+Every named slice now has its own issue file:
+
+| Slice | Issue | Status |
+|---|---|---|
+| E0 — in-Wasm AST consumer probe | **#3308** | ready (unblocked) |
+| P1/P2 — parser blockers | #2853 | **done** (sprint 71) |
+| G1 — Map/Set any-receiver brand arms | **#3309** | done (implemented in the #3309 PR) |
+| G2 — args on the standalone generic path + arity>4 | **#3310** | ready |
+| G3 — array-callback host-free (`__make_callback`) | #3098 (+ #3235 residual) | **done** |
+| G4 — `string[]` push/pop carrier | **#3311** | ready |
+
+**Mechanism correction (G1, verified 2026-07-16 on `bdb8491ee1`):** the audit's
+"root cause pinned" paragraph above (gap 1) is stale — the `env.WeakMap_*` /
+`Set_add` imports for an `any` receiver do NOT come from the
+`compileExternMethodCall` className interception (that lane requires a type
+symbol; `any` has none) nor from `registerBuiltinExternClasses` (all four
+collections are `!nativeStrings`-gated there). They come from
+`tryExternClassMethodOnAny` (`src/codegen/expressions/calls-closures.ts`
+~1479–1514), a first-match scan over `ctx.externClasses` whose standalone
+candidate pool still contains WeakMap/Set/WeakSet because the lib `.d.ts`
+declare-var scan (`collectExternFromDeclareVar`,
+`src/codegen/extern-declarations.ts:790`) nativeStrings-gates only `"Map"` —
+and which returns before the #2151 closed-method dispatcher lane
+(`call-receiver-method.ts:2601` vs `:2629`) is reached. Full corrected analysis
+and fix: **#3309**. (Also: G4's `mutEntries` lives in
+`src/codegen/vec-access-exports.ts:414`, not index.ts.)
