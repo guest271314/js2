@@ -144,6 +144,35 @@ function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallE
  * Only handles callbacks that compile to Wasm closures (arrow functions, function declarations).
  * Returns undefined if the pattern is not handled (caller should fall through).
  */
+/**
+ * (#3317) Whether the borrow receiver statically resolves to a CLOSED struct
+ * carrying a plain (numeric/string/externref — i.e. non-object-ref) own
+ * `length` field. Such a receiver's §23.1.3 length coercion cannot throw, so
+ * any abrupt completion a wrapping assert_throws expects must come from an
+ * ELEMENT read — which the standalone closed-struct `__extern_get_idx` arms
+ * cannot model when the element is a `defineProperty` accessor expando. Used
+ * to keep the legacy assert_throws bail for exactly that receiver class.
+ */
+function receiverHasPlainClosedStructLength(ctx: CodegenContext, receiverArg: ts.Expression): boolean {
+  const recvTsType = ctx.checker.getTypeAtLocation(receiverArg);
+  if (!recvTsType) return false;
+  const recvWasmType = resolveWasmType(ctx, recvTsType);
+  if (recvWasmType.kind !== "ref" && recvWasmType.kind !== "ref_null") return false;
+  const typeIdx = (recvWasmType as { typeIdx: number }).typeIdx;
+  const structName = ctx.typeIdxToStructName.get(typeIdx);
+  if (structName === undefined) return false;
+  const fields = ctx.structFields.get(structName);
+  if (!fields) return false;
+  const lengthField = fields.find((f) => f.name === "length");
+  if (!lengthField) return false;
+  // An object-ref length runs the (potentially abrupt) ToPrimitive walk in the
+  // native arm — that class must NOT keep the bail. String-ref lengths
+  // (`length: "2"`) coerce via StringToNumber (never abrupt) and count as plain.
+  if (lengthField.type.kind !== "ref" && lengthField.type.kind !== "ref_null") return true;
+  const lenTypeIdx = (lengthField.type as { typeIdx: number }).typeIdx;
+  return lenTypeIdx >= 0 && (lenTypeIdx === ctx.anyStrTypeIdx || lenTypeIdx === ctx.nativeStrTypeIdx);
+}
+
 export function compileArrayLikePrototypeCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -253,7 +282,22 @@ export function compileArrayLikePrototypeCall(
   // throws PROPAGATE. Bailing under standalone routes to the legacy
   // `__proto_method_call` host bridge — a host-import leak that can never work
   // there (includes/return-abrupt-get-length.js, return-abrupt-tonumber-length.js).
-  if (!((ctx.standalone || ctx.wasi) && ARRAY_LIKE_SEARCH_METHODS.has(methodName))) {
+  //
+  // NARROWING: the skip applies only when the receiver's abrupt completion can
+  // actually come from the native path's LENGTH read. A closed-struct receiver
+  // with a plain (non-object) own `length` field — `var obj = {length: 2}` plus
+  // `Object.defineProperty(obj, "0", {get(){throw …}})` — throws from an
+  // ELEMENT accessor the closed-struct `__extern_get_idx` arms cannot see
+  // (defineProperty expandos on closed structs are #3177 territory), so those
+  // KEEP the legacy assert_throws bail (indexOf/15.4.4.14-9-b-i-31.js,
+  // lastIndexOf/15.4.4.15-8-b-i-31.js pass through it on main).
+  if (
+    !(
+      (ctx.standalone || ctx.wasi) &&
+      ARRAY_LIKE_SEARCH_METHODS.has(methodName) &&
+      !receiverHasPlainClosedStructLength(ctx, receiverArg)
+    )
+  ) {
     let p: ts.Node | undefined = callExpr.parent;
     while (p) {
       if (
