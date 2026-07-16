@@ -2,13 +2,20 @@
 tracker:
   kind: markdown
   issues_dir: plan/issues
-  sprint: latest
-  active_states: [ready, in-progress]
+  sprint: current
+  active_states: [ready, in-progress, in-review]
   claimable_states: [ready]
   claim_state: in-progress
   terminal_states: [done, wont-fix]
 polling:
   interval_ms: 30000
+pull_requests:
+  enabled: true
+  repository: loopdive/js2
+  command: gh
+  poll_interval_ms: 30000
+  timeout_ms: 30000
+  review_states: [in-review, in-progress]
 workspace:
   kind: git_worktree
   root: .codex/worktrees/symphony
@@ -32,7 +39,7 @@ agent:
       prompt_mode: argument
       max_concurrent: 8
 codex:
-  command: codex exec -c approval_policy="never" --sandbox danger-full-access --skip-git-repo-check --json
+  command: codex exec -m gpt-5.6-sol -c approval_policy="never" --sandbox danger-full-access --skip-git-repo-check --json
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000
@@ -47,8 +54,13 @@ Issue file: {{ issue.file }}
 Sprint: {{ issue.sprint }}
 Workspace: {{ workspace.path }}
 Branch: {{ workspace.branch }}
+Pull request: {{ issue.pr }}
 Attempt: {{ attempt }}
 Agent lane: {{ agent.name }} ({{ agent.kind }} / {{ agent.role }})
+
+Issue specification:
+
+{{ issue.description }}
 
 Rules:
 
@@ -67,7 +79,10 @@ Rules:
 - Open a ready, non-draft pull request against `main`; do not mark the issue `done` until the PR
   exists.
 - Record the PR number in the issue frontmatter as `pr: <number>` and leave the issue
-  `status: in-review`; the PR-status poller flips it to `done` after GitHub reports the PR merged.
+  `status: in-review`; Symphony flips it to `done` after GitHub reports the PR merged.
+- On a retry attempt for an existing PR, inspect its failed checks first, repair the existing head
+  branch, push the fix, and keep the same PR. Preserve Symphony's `last_ci_retry_head` frontmatter
+  field and never open a duplicate PR for a CI repair.
 - Enqueue the PR in the merge queue when GitHub accepts it. If required checks are still pending,
   enable auto-merge/merge-queue entry so GitHub queues it as soon as checks pass.
 - Report changed files, validation, commit SHA, PR URL, and merge-queue or auto-merge state before

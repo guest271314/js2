@@ -1,0 +1,95 @@
+import { spawnSync } from "node:child_process";
+
+const FAILED_CONCLUSIONS = new Set(["ACTION_REQUIRED", "CANCELLED", "FAILURE", "STARTUP_FAILURE", "TIMED_OUT"]);
+const PENDING_STATUSES = new Set(["IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"]);
+
+function checkName(check) {
+  return String(check?.name ?? check?.context ?? "unknown check");
+}
+
+function checkConclusion(check) {
+  return String(check?.conclusion ?? check?.state ?? "").toUpperCase();
+}
+
+function checkStatus(check) {
+  return String(check?.status ?? "").toUpperCase();
+}
+
+export function classifyPullRequest(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") throw new Error("invalid_pull_request_snapshot");
+
+  const state = String(snapshot.state ?? "").toUpperCase();
+  const headSha = snapshot.headRefOid ? String(snapshot.headRefOid) : null;
+  const base = {
+    number: Number(snapshot.number) || null,
+    url: snapshot.url ? String(snapshot.url) : null,
+    headBranch: snapshot.headRefName ? String(snapshot.headRefName) : null,
+    headSha,
+  };
+
+  if (state === "MERGED" || snapshot.mergedAt) {
+    return {
+      ...base,
+      status: "merged",
+      mergedAt: snapshot.mergedAt ? String(snapshot.mergedAt) : null,
+      failedChecks: [],
+    };
+  }
+
+  const checks = Array.isArray(snapshot.statusCheckRollup) ? snapshot.statusCheckRollup : [];
+  const failedChecks = checks.filter((check) => FAILED_CONCLUSIONS.has(checkConclusion(check))).map(checkName);
+  if (failedChecks.length > 0) return { ...base, status: "failed", mergedAt: null, failedChecks };
+
+  if (state === "CLOSED") return { ...base, status: "closed", mergedAt: null, failedChecks: [] };
+
+  const pending =
+    checks.length === 0 ||
+    checks.some((check) => {
+      const conclusion = checkConclusion(check);
+      return !conclusion || PENDING_STATUSES.has(checkStatus(check));
+    });
+  return { ...base, status: pending ? "pending" : "passed", mergedAt: null, failedChecks: [] };
+}
+
+export function planPullRequestAction(
+  state,
+  { handledFailureKey = null, busy = false, paused = false, hasCapacity = true } = {},
+) {
+  if (state.status === "merged") return { action: "mark_done", failureKey: null };
+  if (state.status !== "failed") return { action: "wait", failureKey: null };
+
+  const failureKey = state.headSha || `pr-${state.number || "unknown"}-unknown-head`;
+  if (handledFailureKey === failureKey) return { action: "wait", failureKey };
+  if (busy || paused || !hasCapacity) return { action: "defer", failureKey };
+  return { action: "requeue", failureKey };
+}
+
+export function readPullRequest({ command = "gh", cwd, number, repository = "", timeoutMs = 30_000 }) {
+  const args = [
+    "pr",
+    "view",
+    String(number),
+    "--json",
+    "number,state,mergedAt,url,headRefName,headRefOid,statusCheckRollup",
+  ];
+  if (repository) args.push("--repo", repository);
+
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) throw new Error(`pull_request_query_failed: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new Error(`pull_request_query_failed: ${String(result.stderr || result.stdout || result.status).trim()}`);
+  }
+
+  let snapshot;
+  try {
+    snapshot = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`pull_request_query_invalid_json: ${error.message}`);
+  }
+  return classifyPullRequest(snapshot);
+}
