@@ -44,7 +44,7 @@
 
 import type { IrBackendKind } from "./legality.js";
 import type { IrBinop, IrInstr, IrType, IrUnop } from "../nodes.js";
-import type { BlockType, Instr } from "../types.js";
+import type { BlockType, Instr, ValType } from "../types.js";
 import type {
   IrClassLowering,
   IrClosureLowering,
@@ -152,6 +152,16 @@ export interface BackendEmitter<S = Instr[]> {
   /** Wrap `body` in a structured loop; `body` was built via `newSink()`. */
   emitLoop(blockType: BlockType, body: S, out: S): void;
 
+  // ---- (a6) union/boxing family — MIGRATED behind the trait (#2953) ----
+  // `emitBox` receives the already-lowered value in its own sink because the
+  // backend layout owns both the tag encoding and the tag/value field order.
+  // WasmGC appends those field sinks in layout order before `struct.new`;
+  // backends without a union representation leave these hooks absent and
+  // lower.ts rejects the family loudly before emitting backend-specific ops.
+  emitBox?(layout: IrUnionLowering, member: ValType, value: S, out: S): void;
+  emitUnbox?(layout: IrUnionLowering, out: S): void;
+  emitTagLoad?(layout: IrUnionLowering, out: S): void;
+
   // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
   // The following are part of the full seam the spec audited but are NOT
   // routed through the trait in Phase 1 (#1713). They remain inline in
@@ -159,9 +169,6 @@ export interface BackendEmitter<S = Instr[]> {
   // closure / ref-coercion) have a stable signature to migrate against and
   // #1714 knows the shape of the not-yet-moved surface. A `WasmGcEmitter`
   // need not implement them until its group is wired.
-  emitBox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitUnbox?(layout: IrUnionLowering, out: Instr[]): void;
-  emitTagLoad?(layout: IrUnionLowering, out: Instr[]): void;
   emitNull?(irType: IrType, out: Instr[]): void;
   emitToExternref?(out: Instr[]): void;
   emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;

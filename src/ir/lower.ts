@@ -1287,14 +1287,12 @@ export function lowerIrFunctionBody<S>(
             `ir/lower: resolver cannot lower union<${members.map((m) => m.kind).join(",")}> (${func.name})`,
           );
         }
-        const tag = union.tagFor(valueType);
-        // Struct field order: fields at indices tagFieldIdx / valFieldIdx.
-        // For V1 registry, tag=0, val=1, so push tag first, then value.
-        const pushes: Array<() => void> = [];
-        pushes[union.tagFieldIdx] = () => emitter.pushRaw(out, { op: "i32.const", value: tag });
-        pushes[union.valFieldIdx] = () => emitValue(instr.value, out);
-        for (const push of pushes) push();
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: union.typeIdx });
+        if (!emitter.emitBox) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union boxing (${func.name})`);
+        }
+        const boxedValue = emitter.newSink();
+        emitValue(instr.value, boxedValue);
+        emitter.emitBox(union, valueType, boxedValue, out);
         return;
       }
       case "unbox": {
@@ -1333,11 +1331,10 @@ export function lowerIrFunctionBody<S>(
           );
         }
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: union.typeIdx,
-          fieldIdx: union.valFieldIdx,
-        });
+        if (!emitter.emitUnbox) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union unboxing (${func.name})`);
+        }
+        emitter.emitUnbox(union, out);
         return;
       }
       case "tag.test": {
@@ -1386,13 +1383,21 @@ export function lowerIrFunctionBody<S>(
         }
         const tag = union.tagFor(instr.tag);
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: union.typeIdx,
-          fieldIdx: union.tagFieldIdx,
-        });
-        emitter.pushRaw(out, { op: "i32.const", value: tag });
-        emitter.pushRaw(out, { op: "i32.eq" });
+        if (!emitter.emitTagLoad) {
+          throw new Error(`ir/lower: ${emitter.backend} backend cannot lower union tag loads (${func.name})`);
+        }
+        emitter.emitTagLoad(union, out);
+        emitter.emitConst(
+          {
+            kind: "const",
+            result: null,
+            resultType: null,
+            value: { kind: "i32", value: tag },
+          },
+          func.name,
+          out,
+        );
+        emitter.emitBinary("i32.eq", out);
         return;
       }
       case "dyn.truthy": {
