@@ -8,8 +8,9 @@
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { ensureAnyValueType } from "./any-helpers.js";
 import { emitNativeHtmlWrapperHelpers } from "./html-wrapper-native.js";
-import { emitStrSearchHelpers, emitStrTrimHelpers } from "./native-strings-search.js";
-import { emitStrPadRepeatHelpers, emitStrCaseHelpers } from "./native-strings-transform.js";
+import { emitStrSearchHelpers } from "./native-strings-search.js";
+import { emitStrCaseHelpers } from "./native-strings-transform.js";
+import { emitSelfHostedStringHelpers } from "./native-strings-selfhost.js";
 import {
   emitStrReplaceHelpers,
   emitStrSplitHelper,
@@ -220,8 +221,11 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   emitStrCompareHelpers(methodShared);
   emitStrSliceCharHelpers(methodShared);
   emitStrSearchHelpers(methodShared);
-  emitStrTrimHelpers(methodShared);
-  emitStrPadRepeatHelpers(methodShared);
+  // (#3256) The startsWith/endsWith, trim, and repeat/pad families are
+  // SELF-HOSTED: TS source in src/stdlib/strings.ts compiled through the
+  // compiler's own IR pipeline, registered under the same __str_* names
+  // (legacy i32 ABIs preserved by hand thunks where needed).
+  emitSelfHostedStringHelpers(methodShared);
   emitStrCaseHelpers(methodShared);
   emitStrReplaceHelpers(methodShared);
   emitStrSplitHelper(methodShared);
