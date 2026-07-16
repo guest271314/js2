@@ -925,12 +925,41 @@ export function compileIrPathFunctions(
       // TCO and deep recursion overflowed the Wasm stack. Apply the conversion
       // here, where the full module type info is available to enforce the same
       // guards (param-count + return-type match, never inside a try-with-handler).
-      const tcoBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
+      //
+      // (#3142 Slice 2) EXCEPT for the module-init unit: later pipeline passes
+      // APPEND epilogue instrs to the `__module_init` body — most critically
+      // `finalizeInModuleInitFlag` (#2800), which wraps the body with
+      // `__in_module_init = 1 … = 0`. The legacy body FALLS THROUGH; an
+      // explicit trailing `return` (the IR's void-return lowering) or a
+      // `return_call` rewrite would make every appended epilogue instr
+      // unreachable — the flag stays 1 forever and every delete-aware read
+      // misroutes (the PR #3168 merge_group regression:
+      // language/statements/for-in/order-simple-object.js). So: no TCO for
+      // module-init, strip the trailing `return`, and if ANY other
+      // return-class op remains anywhere in the body, keep the legacy body.
+      let finalBody: Instr[];
+      if (entry.moduleInit) {
+        finalBody = [...wasmFunc.body];
+        while (finalBody.length > 0 && finalBody[finalBody.length - 1]!.op === "return") {
+          finalBody.pop();
+        }
+        if (bodyContainsReturnClassOp(finalBody)) {
+          errors.push({
+            func: name,
+            message:
+              "module-init body contains a non-trailing return-class op — appended init epilogues would be skipped; keeping legacy body",
+            kind: "lower",
+          });
+          continue;
+        }
+      } else {
+        finalBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
+      }
       replaceDefinedFuncAt(ctx, funcIdx, {
         name: existing.name,
         typeIdx: wasmFunc.typeIdx,
         locals: wasmFunc.locals,
-        body: tcoBody,
+        body: finalBody,
         exported: existing.exported,
       });
       compiled.push(name);
@@ -957,6 +986,30 @@ export function compileIrPathFunctions(
 
 function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
   return !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/**
+ * (#3142 Slice 2) Deep-scan a Wasm body for return-class ops (`return`,
+ * `return_call`, `return_call_ref`) inside nested blocks. The `__module_init`
+ * slot's body must FALL THROUGH — later passes append epilogue instrs
+ * (`finalizeInModuleInitFlag`'s flag-clear, #2800) that a mid-body return
+ * would skip. The selector's early-return barrier makes this unreachable in
+ * practice; the scan is the airtight backstop.
+ */
+function bodyContainsReturnClassOp(body: readonly Instr[]): boolean {
+  for (const instr of body) {
+    if (instr.op === "return" || instr.op === "return_call" || instr.op === "return_call_ref") return true;
+    const nested = instr as { then?: Instr[]; else?: Instr[]; body?: Instr[]; catchAll?: Instr[] };
+    if (nested.then && bodyContainsReturnClassOp(nested.then)) return true;
+    if (nested.else && bodyContainsReturnClassOp(nested.else)) return true;
+    if (nested.body && bodyContainsReturnClassOp(nested.body)) return true;
+    if (nested.catchAll && bodyContainsReturnClassOp(nested.catchAll)) return true;
+    const catches = (instr as { catches?: { body: Instr[] }[] }).catches;
+    if (catches) {
+      for (const c of catches) if (c.body && bodyContainsReturnClassOp(c.body)) return true;
+    }
+  }
+  return false;
 }
 
 /**

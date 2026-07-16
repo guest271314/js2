@@ -183,6 +183,40 @@ describe("#3142 Slice 2 — module-init lowers via IR and patches __module_init"
   });
 });
 
+describe("#3142 Slice 2 — patched __module_init must FALL THROUGH (PR #3168 merge_group park)", () => {
+  // Later passes APPEND epilogue instrs to the __module_init body — most
+  // critically finalizeInModuleInitFlag (#2800), which wraps it with
+  // `__in_module_init = 1 … = 0`. The IR void-return lowering emitted an
+  // explicit trailing `return`, making the appended flag-clear unreachable:
+  // the flag stayed 1 forever and every delete-aware read misrouted
+  // (language/statements/for-in/order-simple-object.js flipped pass→fail in
+  // the merge_group). The patch now strips the trailing return (and demotes
+  // on any non-trailing return-class op). This test replicates the failing
+  // shape: a CLAIMABLE module-init (numeric lets, like the test262 harness
+  // preamble) + a function whose for-in order depends on delete-aware reads
+  // gated on the flag being CLEARED after init.
+  it("delete/re-add for-in order stays correct with an IR-patched module-init", async () => {
+    const src = `
+      let __c1: number = 0;
+      __c1 = __c1 + 1;
+      export function test(): string {
+        var o = { p1: 'p1', p2: 'p2', p3: 'p3' };
+        delete (o as any).p1;
+        (o as any).p1 = 'p1';
+        var keys: string[] = [];
+        for (var k in o) { keys.push(k); }
+        return keys.join(",");
+      }
+    `;
+    const r = await compile(src, { fileName: "test.ts", experimentalIR: true, skipSemanticDiagnostics: true });
+    expect(r.success).toBe(true);
+    // The unit must be claimed (this is what arms the hazard).
+    expect(irCompiled(r).has(MI)).toBe(true);
+    const exports = await compileAndInstantiate(src);
+    expect(String((exports.test as () => unknown)())).toBe("p2,p3,p1");
+  });
+});
+
 describe("#3142 Slice 2 — demote guards (unit falls back to the legacy body, output stays correct)", () => {
   it("string module binding is NOT in Slice 2 scope — demotes, runtime stays correct", async () => {
     const src = `
