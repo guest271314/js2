@@ -32,7 +32,7 @@ import { nativeStringLiteralInstrs, stringConstantExternrefInstrs } from "./nati
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
-import { undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyValueType, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js";
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js";
 
@@ -1550,6 +1550,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     const L_VALUE = 8;
     const L_GETTER = 9;
     const L_SETTER = 10;
+    const L_DEFINE_RESULT = 11; // (#3177 slice 4) dyn-view rejection-sentinel thread-out
 
     const keyRef = (key: string): Instr[] => [...nativeStringLiteralInstrs(ctx, key), { op: "extern.convert_any" }];
     const hasField = (key: string): Instr[] => [
@@ -1788,7 +1789,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineAccessorIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
         else: [
           { op: "local.get", index: 0 },
@@ -1797,8 +1798,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineValueIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
+      },
+      // (#3177 slice 4) Thread the [[DefineOwnProperty]] REJECTION sentinel
+      // out: the dyn-view arms in __defineProperty_value/_accessor return
+      // ref.null.extern on a §10.4.5.3 false (every ordinary path returns the
+      // input obj, never null), so a null result propagates to the caller —
+      // Reflect.defineProperty's `__is_truthy` reads it as the spec `false`.
+      { op: "local.get", index: L_DEFINE_RESULT },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
     ];
@@ -1816,6 +1829,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         { name: "value", type: { kind: "externref" } },
         { name: "getter", type: { kind: "externref" } },
         { name: "setter", type: { kind: "externref" } },
+        { name: "defineResult", type: { kind: "externref" } },
       ],
       body,
     );
@@ -2035,6 +2049,142 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         ]
       : undefRet();
 
+    // (#2984 "primitive-string(s)") NON-`$Object` receiver arm. §19.1.2.8
+    // ToObject-coerces the receiver: undefined/null THROW TypeError (step 1;
+    // the ES5-era tests 15.2.3.3-1-{1,2} + gOPDs exception-not-object-coercible
+    // assert exactly this), a primitive STRING answers its String-exotic own
+    // properties (§10.4.3 — same synthesis as the #2987 wrapper arm, with
+    // [[StringData]] = the receiver itself), and every other primitive (boxed
+    // number/boolean/Symbol — wrappers own no properties) answers `undefined`.
+    // Standalone+nativeStrings gated exactly like `strExotic` so the gc/host
+    // registration of this runtime keeps byte-identical output.
+    const gopdTypeErrorCtorIdx = ctx.funcMap.get("__new_TypeError");
+    const gopdToPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
+    const gopdExnTagIdx = strExotic && gopdTypeErrorCtorIdx !== undefined ? ensureExnTag(ctx) : -1;
+    // Under the `$undefined` singleton regime (#2106/#3316) the arm's own miss
+    // returns must surface the singleton (a bare null externref is NOT observed
+    // as `undefined` there), and an `undefined` RECEIVER arrives as the non-null
+    // tag-1 `$AnyValue` box — so the ToObject-throw test is `ref.is_null` OR
+    // tag-1-singleton (receiver-as-any is already tee'd in local 2).
+    // (#3319 merge reconciliation) `undefRet` is now a singleton-aware
+    // FACTORY (miss → $undefined singleton under the regime, legacy
+    // null.extern) — exactly the dispatch #3154's `gopdUndefRet` open-coded
+    // via `undefExternGopd`, so it simply delegates.
+    const gopdUndefRet: Instr[] = undefRet();
+    const gopdUndefSingletonOr: Instr[] = (() => {
+      if (!undefinedSingletonActive(ctx)) return [];
+      ensureAnyValueType(ctx);
+      if (ctx.anyValueTypeIdx < 0) return [];
+      const t = ctx.anyValueTypeIdx;
+      return [
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: t },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx: t },
+            { op: "struct.get", typeIdx: t, fieldIdx: 0 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.eq" },
+          ],
+          else: [{ op: "i32.const", value: 0 }],
+        },
+        { op: "i32.or" },
+      ] satisfies Instr[];
+    })();
+    const primitiveReceiverArm: Instr[] =
+      strExotic && gopdTypeErrorCtorIdx !== undefined && gopdExnTagIdx >= 0 && gopdToPropertyKeyIdx !== undefined
+        ? [
+            // undefined/null receiver → ToObject throws TypeError (§19.1.2.8).
+            { op: "local.get", index: 0 },
+            { op: "ref.is_null" },
+            ...gopdUndefSingletonOr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...stringExternG("Cannot convert undefined or null to object"),
+                { op: "call", funcIdx: gopdTypeErrorCtorIdx } as Instr,
+                { op: "throw", tagIdx: gopdExnTagIdx } as Instr,
+              ],
+            },
+            // Primitive string receiver → String-exotic own properties.
+            { op: "local.get", index: 2 },
+            { op: "ref.test", typeIdx: anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // wStr = flatten(cast<$AnyString>(receiver)); wLen = wStr.len
+                { op: "local.get", index: 2 },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                { op: "call", funcIdx: strFlattenIdx },
+                { op: "local.tee", index: L_WSTR },
+                { op: "struct.get", typeIdx: nativeStrTypeIdx, fieldIdx: 0 },
+                { op: "local.set", index: L_WLEN },
+                // key = ToPropertyKey(key) — a numeric index arrives boxed
+                // (`gOPD('foo', 0)`); non-string keys own nothing → undefined.
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: gopdToPropertyKeyIdx },
+                { op: "any.convert_extern" },
+                { op: "local.tee", index: L_SVAL },
+                { op: "ref.test", typeIdx: anyStrTypeIdx },
+                { op: "i32.eqz" },
+                { op: "if", blockType: { kind: "empty" }, then: gopdUndefRet },
+                { op: "local.get", index: L_SVAL },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                { op: "call", funcIdx: strFlattenIdx },
+                { op: "local.set", index: L_KSTR },
+                // "length" → { value: len, w:false, e:false, c:false }
+                { op: "local.get", index: L_KSTR },
+                ...nativeStringLiteralInstrs(ctx, "length"),
+                { op: "call", funcIdx: strEqualsIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: exoticDataDesc(
+                    [
+                      { op: "local.get", index: L_WLEN },
+                      { op: "f64.convert_i32_s" },
+                      { op: "call", funcIdx: boxNumIdx },
+                    ],
+                    0,
+                  ),
+                },
+                // integer index in [0, len) → { value: char, w:false, e:true, c:false }
+                { op: "local.get", index: L_KSTR },
+                { op: "call", funcIdx: objIndexOfKeyIdx },
+                { op: "local.tee", index: L_KIDX },
+                { op: "i32.const", value: 0 },
+                { op: "i32.ge_s" },
+                { op: "local.get", index: L_KIDX },
+                { op: "local.get", index: L_WLEN },
+                { op: "i32.lt_s" },
+                { op: "i32.and" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: exoticDataDesc(
+                    [
+                      { op: "local.get", index: L_WSTR },
+                      { op: "ref.as_non_null" },
+                      { op: "local.get", index: L_KIDX },
+                      { op: "call", funcIdx: charAtIdx as number },
+                      { op: "extern.convert_any" } as Instr,
+                    ],
+                    1,
+                  ),
+                },
+                ...gopdUndefRet,
+              ],
+            },
+            // Other primitives (boxed number/boolean/Symbol) → no own props.
+            ...gopdUndefRet,
+          ]
+        : [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr];
+
     const body: Instr[] = [
       // (#2896) Builtin-fn metadata arm: gOPD over a builtin function value
       // synthesizes the spec data descriptor for its "name"/"length" own
@@ -2056,8 +2206,9 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
             },
           ] satisfies Instr[])
         : []),
-      // any = any.convert_extern(obj) ; if !$Object → return undefined
-      // (#3319: the singleton under the #2106 regime; legacy null.extern)
+      // any = any.convert_extern(obj) ; if !$Object → primitive-receiver arm
+      // (#2984: nullish → TypeError, string → §10.4.3 exotic, else undefined —
+      // where "undefined" is the #3319 singleton-aware miss return).
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 2 },
@@ -2066,7 +2217,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: undefRet(),
+        then: primitiveReceiverArm,
       },
       // o = cast<$Object>(any) ; e = __obj_find(o, key)
       { op: "local.get", index: 2 },

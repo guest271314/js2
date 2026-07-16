@@ -1,6 +1,7 @@
 ---
 id: 745
 title: "Tagged union representation to replace externref boxing"
+horizon: xl
 status: ready
 created: 2026-03-22
 updated: 2026-04-28
@@ -8,7 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: performance
-sprint: Backlog
+sprint: current
 files:
   src/codegen/index.ts:
     new:

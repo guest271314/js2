@@ -2,7 +2,7 @@
 id: 3142
 title: "IR module-level (top-level statement) adoption — clears gate G3 of the legacy-frontend retirement"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-11
 updated: 2026-07-11
 priority: high
