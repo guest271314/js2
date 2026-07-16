@@ -76,6 +76,7 @@ import {
   fillExternIsArray,
   fillProxyDispatch,
 } from "./object-runtime.js";
+import { fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177) dyn-view §10.4.5 MOP arms
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -2803,6 +2804,11 @@ export function generateModule(
     // reads (`arr[k]`, `arr["length"]`) instead of empty / undefined. Standalone
     // only (no-op otherwise).
     fillDynamicForinVecArms(ctx);
+
+    // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
+    // (each fill prepends at body[0]; last fill wins the front slot, and the
+    // dyn-view arm must beat the generic `$__vec_base` arms it subtypes).
+    fillTaDynViewMopArms(ctx);
 
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /

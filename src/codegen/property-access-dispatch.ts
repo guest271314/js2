@@ -77,6 +77,7 @@ import {
 import {
   dvDetachedThrowInstrs,
   emitTaCtorBytesPerElement,
+  emitTaCtorValue,
   emitTaViewAccessor,
   emitTaViewDynamicByteLength,
   getOrRegisterDvWindowType,
@@ -357,6 +358,41 @@ export function tryConstructorPrototypeIdentity(
         fctx.body.push({ op: "drop" });
       }
       return emitBuiltinConstructorIdentity(ctx, fctx, builtinName);
+    }
+  }
+
+  // (#3177) Standalone `.constructor` on a TYPEDARRAY-typed receiver —
+  // `Uint16Array.prototype.constructor` (the `.prototype` read's TS type IS the
+  // instance type) and `sample.constructor` for a statically-typed view — → the
+  // per-kind `$__ta_ctor` SINGLETON (`emitTaCtorValue`), the same object a bare
+  // `Uint16Array` identifier mention produces, so
+  // `Uint16Array.prototype.constructor === Uint16Array` is GENUINELY true by
+  // ref.eq and the cross-check against a different view ctor is genuinely
+  // false. Mirrors the #3006 arm above (same gates: ambient-declared receiver
+  // type only, so a user `class Uint8Array {}` keeps its own `.constructor`).
+  // Any-typed dyn-view receivers resolve at RUNTIME via the `__extern_get`
+  // dyn-view arm instead (kind → singleton switch).
+  // Guard: TA builtins are ambient `interface` + `var` declarations (NOT
+  // classes), so `isExternalDeclaredClass` never matches them — require every
+  // declaration to live in a `.d.ts` instead (a user `class Uint8Array {}`
+  // declares in the user file → falls through to its own `.constructor`).
+  if (ctx.standalone && propName === "constructor") {
+    const taSym = objType.getSymbol();
+    const taName = taSym?.name;
+    const taDecls = taSym?.getDeclarations();
+    if (
+      taName !== undefined &&
+      taCtorKindOf(taName) >= 0 &&
+      taDecls !== undefined &&
+      taDecls.length > 0 &&
+      taDecls.every((d) => d.getSourceFile().isDeclarationFile)
+    ) {
+      const objResult = compileExpression(ctx, fctx, expr.expression);
+      if (objResult) {
+        fctx.body.push({ op: "drop" });
+      }
+      const t = emitTaCtorValue(ctx, fctx, taName);
+      if (t) return t;
     }
   }
 
