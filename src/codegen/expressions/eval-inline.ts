@@ -44,11 +44,53 @@ export const EVAL_SOURCE_FILENAME = "<eval>.ts";
 /**
  * Recursively resolve a compile-time-constant string from an expression.
  * Returns the string value, or null if the expression is not a constant.
+ *
+ * (#1102) When a `checker` is supplied, the resolver additionally sees
+ * through:
+ *   - identifiers bound by a **`const` declaration** whose initializer is
+ *     itself a constant string (`const s = "1 + 2"; eval(s)`), guarded by the
+ *     execution-order checks in `resolveConstStringBinding` so a fold can
+ *     never erase a TDZ `ReferenceError`;
+ *   - **template literals with substitutions** where every substitution is a
+ *     constant string (`eval(\`1 + ${TWO}\`)`);
+ *   - TS-only assertion wrappers (`as` / `satisfies` / `<T>` / `!`).
+ * Callers pass the checker only where widening the constant frontier is
+ * SOUND: direct eval (the splice's caller-scope semantics are exactly
+ * §19.2.1.1 direct-eval semantics) and the `Function` constructor (the
+ * synthesized function is global-scoped regardless, §20.2.1.1). Indirect
+ * eval must NOT pass a checker — the splice runs in caller scope, which is
+ * wrong for indirect eval's global-scope semantics that the dynamic host
+ * shim implements correctly (routing rule 2, runtime-eval-interpreter §12).
  */
-export function resolveConstantString(expr: ts.Expression): string | null {
-  // Unwrap parentheses: ("foo") / (("foo"))
+export function resolveConstantString(expr: ts.Expression, checker?: ts.TypeChecker): string | null {
+  return resolveConstantStringDepth(expr, checker, 0);
+}
+
+/** Defensive recursion cap for pathological const-reference chains. */
+const CONST_STRING_MAX_DEPTH = 16;
+
+function resolveConstantStringDepth(
+  expr: ts.Expression,
+  checker: ts.TypeChecker | undefined,
+  depth: number,
+): string | null {
+  if (depth > CONST_STRING_MAX_DEPTH) return null;
+
+  // Unwrap parentheses and TS-only assertion wrappers, which have no runtime
+  // effect: ("foo"), "foo" as string, "foo" satisfies string, <string>"foo",
+  // s! — all evaluate to the inner expression's value.
   let e: ts.Expression = expr;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  for (;;) {
+    if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
+      e = e.expression;
+    } else if (ts.isSatisfiesExpression(e)) {
+      e = e.expression;
+    } else if (ts.isTypeAssertionExpression(e)) {
+      e = e.expression;
+    } else {
+      break;
+    }
+  }
 
   if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) {
     return e.text;
@@ -56,14 +98,217 @@ export function resolveConstantString(expr: ts.Expression): string | null {
 
   // String-literal concatenation: "a" + "b", possibly chained.
   if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = resolveConstantString(e.left);
+    const left = resolveConstantStringDepth(e.left, checker, depth + 1);
     if (left === null) return null;
-    const right = resolveConstantString(e.right);
+    const right = resolveConstantStringDepth(e.right, checker, depth + 1);
     if (right === null) return null;
     return left + right;
   }
 
+  // (#1102) Template literal with substitutions: `a${x}b` where every
+  // substitution resolves to a constant string.
+  if (ts.isTemplateExpression(e)) {
+    let out = e.head.text;
+    for (const span of e.templateSpans) {
+      const sub = resolveConstantStringDepth(span.expression, checker, depth + 1);
+      if (sub === null) return null;
+      out += sub + span.literal.text;
+    }
+    return out;
+  }
+
+  // (#1102) Identifier bound by a const declaration with a constant-string
+  // initializer. Requires the checker (real-SourceFile nodes only — foreign
+  // eval-body identifiers never resolve, see EVAL_SOURCE_FILENAME).
+  if (checker && ts.isIdentifier(e)) {
+    return resolveConstStringBinding(e, checker, depth);
+  }
+
   return null;
+}
+
+/**
+ * (#1102) Resolve an identifier to a compile-time-constant string through a
+ * `const` binding. The value is exactly the initializer's constant value —
+ * `const` guarantees no reassignment — but a fold is sound only if the read
+ * provably happens AFTER the initializer ran (otherwise it would erase a TDZ
+ * `ReferenceError`, changing observable semantics — routing rule 2). Three
+ * guards establish execution order statically:
+ *
+ *   1. **Textual precedence** — the whole declaration statement ends before
+ *      the use begins. Also kills self-references and reference cycles (any
+ *      cycle needs a backward reference).
+ *   2. **Same execution container** — the nearest enclosing function-like
+ *      body (or SourceFile / class static block) of use and declaration is
+ *      the same node. Without this, a hoisted inner function containing the
+ *      use can be invoked before the initializer runs
+ *      (`inner(); const s = "…"; function inner() { eval(s); }` — TDZ).
+ *   3. **Declaration block is an ancestor of the use** — within one
+ *      container, control cannot enter the middle of a block, so reaching a
+ *      use nested under a LATER statement of the declaration's own block
+ *      implies the declaration executed. Rejects sibling-scope skips like
+ *      `switch (x) { case 1: const s = "…"; case 2: eval(s); }` (shared
+ *      lexical scope, but case 2 is reachable without running case 1).
+ *
+ * Only plain `const s = <init>` variable statements qualify — destructuring
+ * bindings, `for (const … of …)` heads, imports, and multi-declaration merged
+ * symbols are all rejected.
+ */
+function resolveConstStringBinding(ident: ts.Identifier, checker: ts.TypeChecker, depth: number): string | null {
+  let sym: ts.Symbol | undefined;
+  try {
+    sym = checker.getSymbolAtLocation(ident);
+  } catch {
+    return null;
+  }
+  const decls = sym?.declarations;
+  if (!decls || decls.length !== 1) return null;
+  const decl = decls[0]!;
+  if (!ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name) || !decl.initializer) return null;
+
+  // Same file only (also excludes .d.ts declarations and foreign eval bodies).
+  if (decl.getSourceFile() !== ident.getSourceFile()) return null;
+
+  // `const` only — a `let`/`var` binding can be reassigned after init.
+  const declList = decl.parent;
+  if (!ts.isVariableDeclarationList(declList) || (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) === 0) {
+    return null;
+  }
+  // Plain variable statement only (not a for-of/for-in/for initializer head —
+  // those bind per-iteration).
+  const varStmt = declList.parent;
+  if (!ts.isVariableStatement(varStmt)) return null;
+
+  // Guard 1: textual precedence.
+  if (varStmt.end > ident.getStart()) return null;
+
+  // Guard 2: same execution container — OR the module-top-level relaxation.
+  //
+  // Same container: statements execute in source order, so precedence (guard
+  // 1) + ancestry (guard 3) imply the initializer ran before the read.
+  //
+  // Relaxation (#1102): when the declaration is a top-level statement of the
+  // SourceFile and the use is inside a (possibly nested) function, the read
+  // can only happen (a) during module evaluation — where source order rules
+  // — or (b) after instantiation, when ALL top-level statements (including
+  // the const) have run: exported functions are not callable until the start
+  // function completes. The only hazard is a top-level statement BEFORE the
+  // const that transfers control into user code (a call/new/getter-read)
+  // which could reach the use early — real JS would throw the TDZ
+  // `ReferenceError` the fold erases. So the relaxation requires the entire
+  // top-level prefix before the declaration to be inert (unable to invoke
+  // user code).
+  const useContainer = nearestExecutionContainer(ident);
+  const declContainer = nearestExecutionContainer(varStmt);
+  if (useContainer !== declContainer) {
+    if (!ts.isSourceFile(declContainer) || !topLevelPrefixIsInert(declContainer, varStmt)) return null;
+    // Fall through: guard 3 is trivially satisfied (the SourceFile is an
+    // ancestor of every node in it), but run it anyway for uniformity.
+  }
+
+  // Guard 3: the declaration's enclosing block must be an ancestor of the use
+  // — within one container, control cannot enter the middle of a block, so a
+  // use nested under a LATER statement of the declaration's own block implies
+  // the declaration executed. Rejects sibling-scope skips (switch clauses).
+  const declBlock: ts.Node = varStmt.parent;
+  let anc: ts.Node | undefined = ident.parent;
+  while (anc && anc !== declBlock) anc = anc.parent;
+  if (anc !== declBlock) return null;
+
+  return resolveConstantStringDepth(decl.initializer, checker, depth + 1);
+}
+
+/**
+ * (#1102) True when every top-level statement of `sf` strictly before
+ * `stopAt` is inert — provably unable to transfer control into user code.
+ * Whole-statement allowlist: imports, function declarations, and TS
+ * type-space declarations (nothing executes at their site). Variable
+ * statements are allowed only when their initializers contain no construct
+ * that can invoke user code: calls, `new`, tagged templates, property /
+ * element reads (user getters!), `await`, `yield`, decorators. A statement
+ * that could only either complete normally or throw is still REJECTED unless
+ * allowlisted — conservative simplicity over cleverness (a top-level throw
+ * would abort instantiation and make the fold unobservable, but proving
+ * "throw-only" per node kind is not worth the audit surface).
+ */
+function topLevelPrefixIsInert(sf: ts.SourceFile, stopAt: ts.Statement): boolean {
+  for (const stmt of sf.statements) {
+    if (stmt === stopAt) return true;
+    if (
+      ts.isImportDeclaration(stmt) ||
+      ts.isImportEqualsDeclaration(stmt) ||
+      ts.isFunctionDeclaration(stmt) ||
+      ts.isInterfaceDeclaration(stmt) ||
+      ts.isTypeAliasDeclaration(stmt) ||
+      stmt.kind === ts.SyntaxKind.EmptyStatement
+    ) {
+      continue;
+    }
+    if (ts.isVariableStatement(stmt) && !containsUserCodeInvoker(stmt)) continue;
+    return false;
+  }
+  // stopAt not found among the top-level statements — shouldn't happen for a
+  // top-level declaration; refuse the relaxation.
+  return false;
+}
+
+/**
+ * (#1102) Does the subtree contain any node that can invoke user code when
+ * evaluated? (See `topLevelPrefixIsInert`.)
+ */
+function containsUserCodeInvoker(root: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    switch (n.kind) {
+      case ts.SyntaxKind.CallExpression:
+      case ts.SyntaxKind.NewExpression:
+      case ts.SyntaxKind.TaggedTemplateExpression:
+      case ts.SyntaxKind.PropertyAccessExpression:
+      case ts.SyntaxKind.ElementAccessExpression:
+      case ts.SyntaxKind.AwaitExpression:
+      case ts.SyntaxKind.YieldExpression:
+      case ts.SyntaxKind.Decorator:
+        found = true;
+        return;
+      // Function bodies inside the initializer (arrow/function expressions)
+      // do NOT execute at the declaration site — skip their interiors.
+      case ts.SyntaxKind.ArrowFunction:
+      case ts.SyntaxKind.FunctionExpression:
+        return;
+      default:
+        n.forEachChild(visit);
+    }
+  };
+  visit(root);
+  return found;
+}
+
+/**
+ * (#1102) The nearest enclosing node that starts a fresh execution sequence:
+ * a function-like body, a class static block, or the SourceFile itself.
+ * Statements within one container execute in source order; code in a nested
+ * container can run at an arbitrary later (or, via hoisting, earlier) time.
+ */
+function nearestExecutionContainer(n: ts.Node): ts.Node {
+  let p: ts.Node | undefined = n.parent;
+  while (p) {
+    if (
+      ts.isFunctionDeclaration(p) ||
+      ts.isFunctionExpression(p) ||
+      ts.isArrowFunction(p) ||
+      ts.isMethodDeclaration(p) ||
+      ts.isConstructorDeclaration(p) ||
+      ts.isGetAccessorDeclaration(p) ||
+      ts.isSetAccessorDeclaration(p) ||
+      ts.isClassStaticBlockDeclaration(p) ||
+      ts.isSourceFile(p)
+    ) {
+      return p;
+    }
+    p = p.parent;
+  }
+  return n;
 }
 
 /**
@@ -120,10 +365,29 @@ export function tryStaticEvalInline(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
+  /**
+   * (#1102) True for DIRECT eval call sites only. Direct eval may widen the
+   * constant frontier through `const` string bindings (the splice's
+   * caller-scope semantics ARE §19.2.1.1 direct-eval semantics). Indirect
+   * eval must not: the splice runs in caller scope, which diverges from
+   * indirect eval's global-scope semantics for scope-sensitive bodies that
+   * the dynamic host shim handles correctly — so its constant surface stays
+   * literal-only (the pre-#1102 status quo).
+   */
+  allowConstBindings = false,
 ): InnerResult | undefined {
   if (expr.arguments.length === 0) return undefined;
 
-  const src = resolveConstantString(expr.arguments[0]!);
+  // Resolve WITHOUT the checker first so we know whether the constant was
+  // reachable pre-#1102 (`widened === false` → status-quo surface) or only
+  // through const-binding/template resolution (`widened === true` → newly
+  // reachable, held to a stricter bar below).
+  let src = resolveConstantString(expr.arguments[0]!);
+  let widened = false;
+  if (src === null && allowConstBindings) {
+    src = resolveConstantString(expr.arguments[0]!, ctx.checker);
+    widened = src !== null;
+  }
   if (src === null) return undefined;
 
   // Evaluate any additional arguments for side effects, then drop them.
@@ -177,6 +441,18 @@ export function tryStaticEvalInline(
   // (host eval enforces them).  See `allNodesInlineSupported` / #2923 park fix.
   const bodyIsStrict = evalBodyHasUseStrictDirective(stmts);
   if (!allNodesInlineSupported(sf, bodyIsStrict)) {
+    return undefined;
+  }
+
+  // (#1102) Stricter bar for WIDENED constants (const-binding / template
+  // resolution): shapes that were dynamic pre-#1102 must not flip onto a
+  // known splice defect. The foreign-node regex-literal arm produces a value
+  // whose dynamic `.flags` property read returns undefined (pre-existing on
+  // literal-eval shapes — tracked as #3301; remove this guard when it's
+  // fixed), so a newly-foldable body containing a regex literal keeps its
+  // previous (correct) dynamic-path behavior. Literal shapes keep the
+  // status quo.
+  if (widened && containsRegexLiteral(sf)) {
     return undefined;
   }
 
@@ -476,10 +752,20 @@ function synthesizeStaticNewFunction(
 ): { fnName: string; funcIdx: number; params: readonly ts.ParameterDeclaration[] } | undefined {
   // Every argument must be a compile-time-constant string. A single non-constant
   // arg → dynamic body → fall through (Tier-2 interpreter, #2928).
+  // (#1102) Const-binding resolution is always sound here: the synthesized
+  // function is GLOBAL-scoped regardless of where the string came from
+  // (§20.2.1.1), and the TDZ guards in resolveConstStringBinding apply.
+  // Track whether ANY argument needed the checker (`widened`) — newly
+  // reachable shapes hold the stricter regex bar below.
   const consts: string[] = [];
+  let widened = false;
   for (const a of args) {
-    const s = resolveConstantString(a);
-    if (s === null) return undefined;
+    let s = resolveConstantString(a);
+    if (s === null) {
+      s = resolveConstantString(a, ctx.checker);
+      if (s === null) return undefined;
+      widened = true;
+    }
     consts.push(s);
   }
 
@@ -516,6 +802,10 @@ function synthesizeStaticNewFunction(
   // duplicate params, …) the splice does NOT enforce — keep such bodies on the
   // existing fallback path.
   if (fnDecl.body && evalBodyHasUseStrictDirective(fnDecl.body.statements)) return undefined;
+
+  // (#1102) Stricter bar for widened (const-binding-resolved) arguments —
+  // see the matching guard in tryStaticEvalInline.
+  if (widened && containsRegexLiteral(fnDecl)) return undefined;
 
   // (#2924 park fix) A SLOPPY dynamic function's bare call must see
   // `this === globalThis` (§10.4.3 OrdinaryCallBindThis with a non-strict
@@ -565,6 +855,24 @@ function synthesizeStaticNewFunction(
   if (funcIdx === undefined) return undefined;
 
   return { fnName, funcIdx, params: fnDecl.parameters };
+}
+
+/**
+ * (#1102) Does the parsed (foreign) eval/Function body contain a regex
+ * literal? See the widened-constant guard in `tryStaticEvalInline`.
+ */
+function containsRegexLiteral(root: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (n.kind === ts.SyntaxKind.RegularExpressionLiteral) {
+      found = true;
+      return;
+    }
+    n.forEachChild(visit);
+  };
+  visit(root);
+  return found;
 }
 
 /** (#2924 park fix) Does the node tree contain a `this` expression? */

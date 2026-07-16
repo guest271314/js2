@@ -106,9 +106,12 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 3. Check `plan/method/file-locks.md` — if another dev owns your target file/function, message them directly
 4. Create worktree: `git worktree add /workspace/.claude/worktrees/issue-{N}-{slug} -b issue-{N}-{slug} origin/main`
    - **Branch base = `origin/main`, never the merge-queue tip (#2522).** Queued PRs are speculative and can eject; basing work on a `gh-readonly-queue` tip leaves phantom commits that force a forbidden rebase. The `git merge origin/main` you do before enqueue (steps below) already rebases your work onto future-main using only PRs that *landed*. **Exception:** if your task is known to depend on a specific in-flight PR, branch from *that PR's real branch* (explicit predecessor-stacking) and enqueue only after it lands.
-   Then write your active status for the tech lead's statusline:
+   Then write your active status for the tech lead's statusline. Fill `<model>`
+   with the model you're actually running on, exactly as your own system prompt
+   states it (e.g. `Fable 5`, `Sonnet 5`, `Opus 4.8`) — this is self-reported
+   from what you already know about yourself, not something to look up:
    ```bash
-   printf '{"name":"issue-{N}-{slug}","state":"active","issue":"#{N}","since":%s}\n' "$(date +%s)" \
+   printf '{"name":"issue-{N}-{slug}","state":"active","issue":"#{N}","model":"<model>","since":%s}\n' "$(date +%s)" \
      > "/workspace/.claude/agent-status/issue-{N}-{slug}.json"
    ```
 5. Implement fix in `src/`, write tests in `tests/issue-{N}.test.ts`
@@ -128,9 +131,9 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
    `gh pr create --base main --title "fix(#N): <description>" --body "..."`
    **The implementation PR sets the issue frontmatter `status: done` directly** (with `completed: <date>`) in `plan/issues/{N}-{slug}.md` — commit it on your branch as part of the PR. You are self-merging this PR, so by the time the merge queue lands it the issue IS done, and there is no separate observer who can flip the status afterward. Do NOT set `in-review` and plan a later flip: once the queue lands the PR you can't make a follow-up commit from `/workspace`, which orphans the issue at `in-review` (see #1602/#1603/#1606). (`status: in-review` is only for the handoff/external case where the PR author is NOT the merger.)
 5. **After `gh pr create` returns — background the CI watcher, then PIPELINE your next slice (do NOT idle):**
-   - Update your status file to show the open PR:
+   - Update your status file to show the open PR (keep the same `<model>` value from your Implement-step write):
      ```bash
-     printf '{"name":"issue-{N}-{slug}","state":"pr-open","issue":"#{N}","pr":<PR>,"since":%s}\n' "$(date +%s)" \
+     printf '{"name":"issue-{N}-{slug}","state":"pr-open","issue":"#{N}","pr":<PR>,"model":"<model>","since":%s}\n' "$(date +%s)" \
        > "/workspace/.claude/agent-status/issue-{N}-{slug}.json"
      ```
    - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Do NOT loop in-context or emit status pings while it runs.
