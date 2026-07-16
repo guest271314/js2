@@ -1032,7 +1032,10 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // lie-boxed operands — the vacuous-pass mask that made #1888's classifier
   // eject at −162: the arms don't break dstr, they UNMASK latent failures of
   // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
-  // Enable by default only after the #3032 waves land.
+  // DEFAULT-ON since the #2040 A1 flip (2026-07-16): the #3032 waves
+  // (W3 TDZ threading / #3302 capturing expressions / W4 method generators)
+  // landed, removing the eager-buffer vacuity. `JS2WASM_TAG5_CLASSIFIER=0`
+  // forces the legacy arm.
   // GATE (pitfall from sd-3's attempt, memory
   // reference_2040_tag5_field4_three_way_classifier: never gate the numeric
   // arm on string availability): the classifier builds whenever the flag is

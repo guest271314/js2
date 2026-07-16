@@ -20,6 +20,7 @@ import {
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
+import { undefinedExternInstrs } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import { emitVariadicStringConcat } from "../builtin-scaffold.js";
 import {
@@ -82,7 +83,7 @@ import { defaultValueInstrs, pushDefaultValue } from "../type-coercion.js";
 import { compileMathCall } from "./builtins.js";
 import { emitLazyProtoGet } from "./extern.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./helpers.js";
-import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { emitUndefined, ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import {
   BUILTIN_CLASS_NAMES,
@@ -2259,10 +2260,26 @@ export function compileBuiltinStaticCall(
                   if (createIdx2 !== undefined) thenInstrs.push({ op: "call", funcIdx: createIdx2 });
                   return thenInstrs;
                 })(),
-                else: [
-                  // Cast would fail — return undefined (property not own)
-                  { op: "ref.null.extern" },
-                ],
+                else: (() => {
+                  // (#3321) Cast would fail — the runtime miss must be JS
+                  // `undefined` on every lane: host/gc → the real
+                  // `__get_undefined` sentinel (bare null externref is `null`
+                  // there); standalone singleton regime → the tag-1
+                  // `$undefined` singleton; legacy standalone keeps the
+                  // byte-identical `ref.null.extern`. Resolved AFTER the
+                  // then-arm's late imports (source-order property eval) so
+                  // adding the import cannot skew the already-baked idxs —
+                  // and in gc all three are env imports (idx-stable), while
+                  // standalone adds no import at all here.
+                  const undefIdx = ensureGetUndefined(ctx);
+                  if (undefIdx !== undefined) {
+                    flushLateImportShifts(ctx, fctx);
+                    return [{ op: "call", funcIdx: undefIdx } satisfies Instr];
+                  }
+                  return (
+                    undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" } satisfies Instr]
+                  );
+                })(),
               });
               return { kind: "externref" };
             }
@@ -2347,10 +2364,18 @@ export function compileBuiltinStaticCall(
             // handle the method case via the host import.
           } else {
             // Property not found in struct — return undefined
-            // (own property doesn't exist on this shape)
+            // (own property doesn't exist on this shape). (#3319/#3321) The
+            // miss must be observable as JS `undefined` on EVERY lane:
+            // host/gc → the real `__get_undefined` sentinel (bare null
+            // externref is `null` there — `gOPD(o, missing) === undefined`
+            // answered false, the gc twin of the issue-2874 shape);
+            // standalone singleton regime → the tag-1 `$undefined` singleton;
+            // legacy standalone keeps the byte-identical `ref.null.extern`.
+            // `emitUndefined` is the canonical all-lane emitter for exactly
+            // this dispatch.
             const argResult = compileExpression(ctx, fctx, arg0);
             if (argResult) fctx.body.push({ op: "drop" });
-            fctx.body.push({ op: "ref.null.extern" });
+            emitUndefined(ctx, fctx);
             return { kind: "externref" };
           }
         }

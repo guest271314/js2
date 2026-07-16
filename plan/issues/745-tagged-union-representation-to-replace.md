@@ -12,6 +12,13 @@ reasoning_effort: max
 goal: performance
 sprint: current
 related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
+# S2 flag plumbing (CompileOptions -> CodegenOptions -> ctx) + the resolveWasmType
+# mapping necessarily touch the option/driver files; the predicate itself lives
+# in the subsystem module (src/checker/type-mapper.ts).
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/compiler.ts
 files:
   src/codegen/index.ts:
     new:
