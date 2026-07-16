@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 4;
+export const ORACLE_VERSION = 5;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -110,5 +110,33 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "assertion fails as uncatchable traps, false-positive-tripping the #3189 " +
       "trap ratchet (seen live: Temporal/Duration/subtract/result-out-of-range-1 " +
       "counted as a NEW oob on the #3104 measurement run). No pass/fail flips.",
+  },
+  {
+    version: 5,
+    note:
+      "#3227 async post-drain verdict re-read. The JS-host lane schedules " +
+      ".then/await continuations on the HOST microtask queue, which cannot " +
+      "drain while test() is still on the Wasm→JS stack — so async tests' " +
+      "sync return value was read BEFORE the assertion-bearing callbacks ran " +
+      "(they run right after test() returns; #2940 flagged 1,690 of these as " +
+      "vacuous). For async-flagged tests the wrapper now exports __result() " +
+      "(same verdict logic as the test() epilogue) and the runner yields to " +
+      "the event loop after a sync 1/-262, then re-reads the verdict. Flips: " +
+      "vacuous → honest pass where continuations assert correctly, vacuous → " +
+      "honest assert-fail where they expose real bugs (e.g. await <host " +
+      "promise> reads NaN — slice 2), and some sync-pass → assert-fail where " +
+      "a post-drain assertion genuinely fails. Cross-version diff is oracle " +
+      "skew; forward-monotonic bump auto-rebases in diff-test262.ts. NOTE: " +
+      "like v4/#3285, this change compiles INTO the wasm wrapper (the " +
+      "__result() export) for every async-flagged test, so the flips register " +
+      "as wasm-CHANGE regressions — the #3086 forward-bump auto-rebase " +
+      "excuses only SAME-wasm oracle-skew flips; this re-baseline needs a " +
+      "promote-baseline/force-refresh at v5 to seed the new-policy floor. " +
+      "ORDERING: #3227 originally drafted this as the 3→4 bump; #3285 " +
+      "(PR #3104) landed its own 3→4 first, so #3227 re-bumped to 5 per the " +
+      "whichever-lands-second-re-bumps rule (documented in " +
+      "plan/issues/3227-*.md). Draft PR #3111 (standalone host-backed-pass " +
+      "rejection, another drafted 3→4) — or any later oracle change — must " +
+      "take 6 with its own history entry.",
   },
 ];
