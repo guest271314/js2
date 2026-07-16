@@ -10,9 +10,11 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-sub1
+assignee: ttraenkler/fable-2
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/object-runtime-descriptors.ts
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
@@ -87,6 +89,72 @@ dynamic fallback, which routes a builtin-identifier receiver through
 - loc-budget: +20 in calls.ts (the thin gate) covered by the
   `loc-budget-allow` frontmatter above (#3131); the synthesis lives in the
   subsystem module.
+
+## Slice "primitive-string(s) + ToObject" LANDED (authored 2026-07-10 fable-16th; recovered from stranded local commit + landed 2026-07-16, fable-2984-resume) — non-$Object receiver arm in the gOPD native
+
+> PR: `issue-2984-gopd-toobject-receiver`. Takes the **primitive-string(s) +
+> 15.2.3.3-1-{1,2}** residuals. (Originally written on the
+> `issue-2984-gopd-key-dispatch` branch but never pushed — the commit was
+> stranded local-only when that PR merged; cherry-picked forward 6 days.)
+
+### Root cause + fix
+
+The `__getOwnPropertyDescriptor` native (object-runtime.ts) early-outs
+`undefined` for EVERY non-`$Object` receiver. §19.1.2.8 ToObject semantics:
+undefined/null must THROW TypeError, and a primitive STRING owns §10.4.3
+String-exotic index/length properties. New `primitiveReceiverArm` replaces the
+early-out — nullish → catchable TypeError (`__new_TypeError` + exn tag),
+`$AnyString` receiver → the SAME exotic descriptor synthesis as the #2987
+wrapper arm with [[StringData]] = the receiver (plus a `__to_property_key`
+pass so `gOPD('foo', 0)` works), any other primitive → `undefined` (unchanged).
+Gated exactly like `strExotic` (`ctx.standalone && ctx.nativeStrings`) — gc /
+wasi registrations byte-identical (`prove-emit-identity`: only the 4
+standalone-lane corpus entries drift, gc/wasi all match).
+
+**Recovery port (2026-07-16, fable-2):** the original commit targeted the gOPD
+builder inline in `object-runtime.ts`; the #3274 WAVE-B refactor extracted that
+builder to `object-runtime-descriptors.ts`, so the arm was ported there across
+the merge. Two singleton-regime adaptations (#2106/#3316 landed after the
+original base): (1) the arm's own miss returns use the `$undefined` singleton
+(`undefExternGopd`) — a bare `ref.null.extern` no longer observes as
+`undefined`; (2) the ToObject-throw receiver test is `ref.is_null` OR tag-1
+`$AnyValue` singleton, since an `undefined` receiver now arrives non-null.
+Scoped to THIS arm only — the pre-existing wrapper/ordinary miss arms'
+undef-observability is the sibling gOPD-undef-observability slice (fable-1).
+
+### Measured (real runner, standalone lane)
+
+gOPD dirs 281 → **284 pass** (+3: 15.2.3.3-1-1, -1-2, primitive-string), 0 CE,
+0 regressions. Reflect/getOwnPropertyDescriptor 10/3 — the 3 fails are the
+PRE-existing "called on non-object" struct-receiver rejection (object-ops.ts),
+untouched. `tests/issue-2984-primitive-string.test.ts` 8/8; all 2984 suites
+51/51.
+
+### Residual notes for the next owner (ground-checked 2026-07-10)
+
+- **`gOPDs` (plural) nullish/string receivers** don't flip: the plural driver
+  iterates `__getOwnPropertyNames(obj)` and never consults the singular's
+  receiver coercion — `exception-not-object-coercible` / `primitive-strings`
+  need the same ToObject arm (throw + string-exotic names) in the PLURAL
+  driver + `__getOwnPropertyNames`.
+- **`gOPD(<Builtin>.prototype, "constructor")` (~11 tests) is BLOCKED on
+  #2963**: `Date.prototype.constructor` reads back `undefined` and `Date` has
+  NO runtime value standalone (null externref + compile-time facades for
+  `typeof`/`===`), so the required `desc.value === X.prototype.constructor`
+  identity cannot hold until builtin ctors are reified as first-class values.
+- **Global receivers** (`var global = this; gOPD(global, "eval")`, -4-4..-11)
+  need a reified global object whose function props have stable values — same
+  #2963 family.
+- **`gOPD(<BuiltinIdent>, <dynamic key>)` still CEs** (`__get_builtin`
+  refusal) but is only ~26 test files, dominated by `Symbol.species` keys
+  (well-known-symbol accessors — the closed-universe policy refuses those
+  deliberately). Low yield until the species accessor model exists.
+  _(Superseded 2026-07-11: the "@@species key" slice above landed exactly
+  that accessor model — the residual is now only the RegExp annex-B legacy
+  accessors, deliberately refused.)_
+- **`verifyProperty(builtin, name)`-through-a-parameter** answers `undefined`
+  silently (receiver is a PARAM, so no syntactic synthesis applies) — runtime
+  dispatch needs runtime-identifiable builtin receivers (#2963 again).
 
 ## Slice "arg-2 name coercion" LANDED (2026-07-10, fable-16th) — struct-receiver runtime key dispatch
 

@@ -80,13 +80,39 @@ describe("#1888 S6-c — Math/Number constants reach native f64.const under stan
     expect((instance.exports as NumExports).run()).toBe(1);
   });
 
-  it("guardrail: unsupported Builtin.method value-read still refuses-loud (S6-b lever)", async () => {
+  // (#3320) The S6-b compile-refusal contract for unsupported Builtin.method
+  // value-reads was deliberately retired by #2984 (PR #2851, 2026-07-06):
+  // un-wired members now reify as IDENTITY-STABLE closures that throw a
+  // catchable error at CALL time (so gOPD descriptors are spec-shaped and
+  // `desc.value === <Builtin>.<m>` holds). Math.max itself then graduated to
+  // a genuine native variadic value closure (#2933). The two guardrails below
+  // assert the CURRENT contract: (a) a graduated pair computes natively,
+  // (b) a still-un-wired pair compiles to VALID host-free Wasm and throws
+  // catchably at call time — never routes through __get_builtin or emits
+  // invalid Wasm (the original S6-b hazard).
+  it("graduated Builtin.method value-read (Math.max, #2933) computes natively", async () => {
     const r = await compile(`export function run(): number { const f: any = Math.max; return f(1, 2); }`, {
       target: "standalone",
     });
-    // #1907 only enables selected static method values; unsupported pairs still
-    // refuse cleanly instead of routing through __get_builtin or invalid Wasm.
-    expect(r.success).toBe(false);
-    expect(r.errors.map((e) => e.message).join("\n")).toMatch(/#1907|#1888 S6-b/);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(2);
+  });
+
+  it("guardrail: un-wired Builtin.method value-read is a valid host-free module that throws catchably at call time (#2984 contract)", async () => {
+    const r = await compile(
+      `export function run(): number {
+  const f: any = JSON.parse;
+  try { f("1"); return 0; } catch (e) { return 1; }
+}`,
+      { target: "standalone" },
+    );
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
   });
 });
