@@ -92,6 +92,9 @@ Rules:
   issue `in-progress` with its PR so Symphony requeues it after merge. Use
   `in-review` only for the final slice; Symphony marks that issue `done` after
   GitHub reports the PR merged.
+- For a continuation slice, publish from the exact assigned branch. Symphony
+  creates a fresh branch after every merged non-final slice; do not reuse an
+  already-merged branch for the next Porffor slice.
 - Commit all changes with a Claude Code-style message and a
   `Co-authored-by: Codex <codex@openai.com>` trailer.
 - Merge current `origin/main` before implementation and merge it again before

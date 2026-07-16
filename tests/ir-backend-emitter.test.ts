@@ -171,6 +171,14 @@ describe("#2953 WasmGcEmitter — closure family byte-identity", () => {
   });
 });
 
+describe("#2953 WasmGcEmitter — function-reference family byte-identity", () => {
+  it("emitFuncRef → ref.func $lifted", () => {
+    const out: Instr[] = [];
+    emitter.emitFuncRef(23, out);
+    expect(out).toEqual([{ op: "ref.func", funcIdx: 23 }]);
+  });
+});
+
 describe("#2953 WasmGcEmitter — ref-coercion/null family byte-identity", () => {
   it("emitNull selects the canonical nullable-ref and externref ops", () => {
     const out: Instr[] = [];
