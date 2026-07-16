@@ -131,3 +131,32 @@ first, then wired integration in Phase B. Same sequencing here:
   legacy body with correct runtime output).
 - `tsc --noEmit`: clean. `check:ir-fallbacks`: moduleLevel baseline
   unchanged (assessment logic untouched; only the gating flipped).
+
+## merge_group park fix (PR #3168, 2026-07-17, commit d696143f)
+
+The PR parked twice with the identical single-test regression:
+`test/language/statements/for-in/order-simple-object.js` (pass → fail,
+"returned 2", byte-identical numbers both runs — real, not drift).
+
+**Root cause**: the IR lowering terminates the void module-init unit with an
+explicit `return` (the legacy body falls through). `finalizeInModuleInitFlag`
+(#2800, `src/codegen/index.ts`) runs AFTER the Phase-3 slot patch and wraps
+`__module_init`'s body with `__in_module_init = 1 … = 0` whenever a
+delete-aware any-receiver read recorded the flag. With the IR body's trailing
+`return`, the appended `= 0` reset became unreachable — the flag stayed 1
+forever, so every post-init flag-gated property access took the init-only arm
+(the test's `delete o.p1; o.p1 = 'p1'` re-add skipped `__dyn_set` and lost its
+re-insertion enumeration order; `p1` vanished from `for-in`).
+
+**Fix** (`src/ir/integration.ts` Phase 3, commit d696143f): the module-init
+patch skips `applyIrTailCalls` for the unit (a `return_call` would bypass the
+epilogue the same way), strips trailing bare `return`(s) so the body falls
+through exactly like legacy's, and demotes to the legacy body if any
+non-trailing return-class op remains (`bodyContainsReturnClassOp`, deep scan —
+defensive; the claimable population can't contain `return` statements).
+
+**Verification** (two independent reproductions converged on the same fix):
+the wrapped test's emitted WAT is byte-identical to main's; the test passes;
+a 70-test for-in/Object.keys/delete sweep has zero status diffs vs main;
+`tests/issue-3142.test.ts` 15/15 (incl. the new pinning test, which fails on
+the pre-fix code).
