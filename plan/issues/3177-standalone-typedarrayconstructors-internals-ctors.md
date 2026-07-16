@@ -30,6 +30,13 @@ loc-budget-allow:
   - src/codegen/dataview-native.ts
   - src/codegen/property-access-dispatch.ts
   - src/codegen/index.ts
+# coercion-sites-allow: the NEW module's 4 uses (number_toString ×2,
+# __str_to_number, __unbox_number) are the exact §7.1.21
+# CanonicalNumericIndexString round-trip + the finalize-safe ToNumber the
+# vec write arms already use — intentional REUSE of the existing coercion
+# natives (no hand-rolled coercion added), required by the §10.4.5 MOP arms.
+coercion-sites-allow:
+  - src/codegen/ta-dyn-mop.ts
 ---
 
 # #3177 — standalone: TypedArrayConstructors internals + constructor protocols
