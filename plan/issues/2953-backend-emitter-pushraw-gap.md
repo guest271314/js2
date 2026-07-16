@@ -3,8 +3,8 @@ id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
 status: in-progress
 assignee: ttraenkler/opus-1a
-branch: symphony/porffor/2953
-pr: 3129
+branch: symphony/porffor/2953-after-3129
+pr: null
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -21,8 +21,8 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T12:43:20.310Z
-last_merged_pr: 3128
+claimed_at: 2026-07-16T13:41:17.751Z
+last_merged_pr: 3129
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -111,7 +111,14 @@ value/aggregate families.
       allocation/field ops remain for their dedicated slice. Golden emitter tests,
       closure + cross-backend suites, equivalence, and the 56-record byte oracle
       are green. (porffor-codex-developer)
-- [ ] funcref (`emitFuncRef`)
+- [x] **funcref** (`emitFuncRef`) — promoted the optional, `Instr[]`-specific
+      hook to a required sink-generic primitive. `WasmGcEmitter` materializes
+      the resolved function index with the canonical `ref.func`; Linear and
+      Bytecode fail loudly until their table/VM-callable handle representations
+      land. The sole raw `ref.func` in `closure.new` now routes through the
+      trait, reducing `emitter.pushRaw` calls in `lower.ts` from 86 to 85.
+      Golden emitter coverage, closure + cross-backend suites, typecheck,
+      equivalence, and the 56-record byte oracle are green.
 - [ ] Promise ops
 - [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
 
@@ -185,3 +192,29 @@ value/aggregate families.
   `IDENTICAL — all 56 (file,target) emits match baseline`.
 - Slice acceptance: complete. The parent issue intentionally remains
   `in-progress` for funcref, Promise ops, and the pushRaw justification ratchet.
+
+## 2026-07-16 — funcref slice results
+
+- Re-grounded and fast-forwarded to `origin/main` at
+  `2a77b7131c6239e980029f5a870ab43b70f354ae` before implementation.
+- Made `emitFuncRef` required and generic over the backend sink. Lowering still
+  resolves the lifted function name and owns closure operand order; the backend
+  now owns materializing that resolved handle as a first-class callable value.
+  WasmGC emits the exact former `{ op: "ref.func", funcIdx }` instruction, while
+  Linear and Bytecode stop at explicit missing-representation errors instead of
+  accepting a raw WasmGC instruction.
+- Routed the `closure.new` materialization site through the trait and added a
+  Golden-Instr assertion for `WasmGcEmitter.emitFuncRef` in
+  `tests/ir-backend-emitter.test.ts`. The `emitter.pushRaw` call count in
+  `lower.ts` is now 85 (86 before this slice).
+- Focused verification:
+  `pnpm vitest run tests/ir-backend-emitter.test.ts tests/issue-1169c.test.ts tests/ir-bytecode-proof.test.ts`
+  (75 tests passed), plus `pnpm run typecheck` and
+  `pnpm run test:equivalence:gate` (1,607 passing, 36 known baseline failures,
+  zero new regressions).
+- Byte identity: rebuilt the existing `scripts/prove-emit-identity.mjs` harness
+  with esbuild, captured the pre-edit baseline, and compared the edited compiler
+  against it. Result:
+  `IDENTICAL — all 56 (file,target) emits match baseline`.
+- Slice acceptance: complete. The parent issue intentionally remains
+  `in-progress` for Promise ops and the pushRaw justification ratchet.
