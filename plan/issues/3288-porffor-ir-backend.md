@@ -340,3 +340,55 @@ backend's semantic emitter.
 - #3030's serialized interchange is related but not a blocker. Start in-tree
   through the backend contract so the allocation plan and legality hooks remain
   available; an out-of-tree adapter can consume serialized IR after T3/T5 land.
+
+## Slice execution record
+
+### P1 - backend-neutral generic lowering result (2026-07-16)
+
+Status: complete in this PR. The umbrella remains `in-progress`; P2-P5 were not
+started on this branch.
+
+#### Acceptance status
+
+- [x] Registered `porffor` as the fourth backend kind with a narrow legality
+      allow-list and localized `porffor backend does not support ...`
+      diagnostics.
+- [x] Replaced the generic lowerer's Wasm-shaped function metadata with
+      `IrLoweredBody<Sink, Slot>`: named parameters and locals, grouped backend
+      slots, grouped result slots, and an opaque backend sink.
+- [x] Moved Wasm function-type interning and local-slot flattening to the
+      WasmGC and linear-Wasm adapter edges. Bytecode now supplies its own
+      explicit `TypeConverter`.
+- [x] Rejected `raw.wasm`, slot ops, `Instr[]`-only loop/try/await families,
+      reference/heap families, and composite `js.*` arithmetic before a
+      Porffor emitter can reach `pushRaw`.
+- [x] Covered all four registered backend kinds in contract tests and added
+      focused Porffor metadata, legality, backend-mismatch, and unsigned-local
+      tests.
+
+#### Findings
+
+- Logical `IrType` must travel with every materialized SSA local until backend
+  slot conversion. Reconstructing it from the current Wasm-facing internal
+  local type loses the `signed: false` domain fact and would expose the same
+  `u32`/`u64` value as signed when it is materialized, but unsigned when it is
+  a parameter or result.
+- The generic result no longer interns a Wasm function type. Existing WasmGC
+  and linear-Wasm assembly still flatten the same one-slot values at their
+  adapter edges, so the default emission layout is unchanged.
+- P1 intentionally adds no Porffor sink, IR arrays, renderer import, C output,
+  heap layout, or allocation plan. Those remain dependency-ordered P2-P5 work.
+
+#### Validation
+
+- `pnpm run typecheck` - passed.
+- `tests/issue-3288.test.ts`, `tests/backend-contract.test.ts`, and
+  `tests/ir-bytecode-proof.test.ts` - 42 tests passed.
+- `pnpm run check:pushraw` - passed; 82 sites, `+0` versus the merge base.
+- `scripts/prove-emit-identity.mjs` against a sparse `origin/main` control -
+  all 56 `(file, target)` records identical across gc, standalone, WASI, and
+  linear.
+- Broad `tests/ir-*.test.ts` plus `tests/ir/*.test.ts` run - 419 passed and 18
+  failed in existing non-P1 harness paths (string/helper initialization,
+  missing host import stubs, and a stale AST-to-IR return-shape assertion); no
+  Porffor metadata, backend-contract, or bytecode proof assertion failed.
