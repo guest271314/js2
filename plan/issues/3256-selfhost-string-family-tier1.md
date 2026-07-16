@@ -1,7 +1,8 @@
 ---
 id: 3256
 title: "Self-host stdlib: convert native-strings.ts hand-emitted Instr[] to TS (Tier-1 resolver-widening)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-3256
 sprint: current
 priority: high
 horizon: xl
