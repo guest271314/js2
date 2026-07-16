@@ -77,6 +77,9 @@ Verified with three cases: the exact failing #3138 shape (now parses to
 `["src/codegen/type-coercion.ts"]`), a `regressions-allow` block with an
 inline comment (`count`/`reason` still parse), and a no-overrun check
 (a real trailing top-level key still terminates the scan correctly).
+Permanent repro: `tests/issue-3314.test.ts` (5 cases, covers both parser
+functions with and without interior comments, plus the no-over-read
+regression guard).
 
 ## Immediate unblock for #3138 (not part of this fix)
 
