@@ -276,7 +276,7 @@ tracking doc. Resolution decisions and WHY:
   the PR diff contains no `tests/test262-runner.ts` / oracle-file change.
 - **`src/codegen/async-cps.ts` / `expressions.ts`**: main did NOT modify
   either file since the S2 branch base (verified `git diff <base>
-  origin/main -- <files>` is empty), so the auto-merge trivially kept the S2
+origin/main -- <files>` is empty), so the auto-merge trivially kept the S2
   side — no cross-composition to reconcile in code. S1 (runner-side) and S2
   (compiler-side) compose by construction: S1 makes post-await assertions
   actually score; S2 makes `await Promise.resolve(x)` deliver x, so those
