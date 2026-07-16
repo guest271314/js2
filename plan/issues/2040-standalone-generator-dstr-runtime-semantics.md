@@ -789,3 +789,20 @@ Every remaining dstr/generator bucket is owned elsewhere (verified by #3283's
 consumption → #3164/#3032 residuals; B2 async-gen dstr → #3132/#3178 S4;
 fn-name/PropertyDescriptor rows → unowned track flagged to PO in #3283.
 A1 (this flip) was the last bucket owned HERE.
+
+### Salvage re-validation (fable-epsilon, 2026-07-16)
+
+fable-beta died at the session limit after committing the flip; salvaged via
+cherry-pick onto a fresh branch off origin/main @ ea91a1b0f4
+(`issue-2040-tag5-classifier-flip`). Independent re-validation:
+
+- `tests/issue-2040-tag5-field4-eq.test.ts`: **16/16 pass** (incl. the
+  OPT-OUT legacy-arm test and the HOST-LANE byte-inert test).
+- Fresh paired A/B (faithful `runTest262File(..., "standalone")`,
+  `JS2WASM_TAG5_CLASSIFIER=1` vs `=0`) over the 116-file eject-canary +
+  rest-id set (`*ary-ptrn-empty*` + `*ary-ptrn-rest-id` across
+  class/function stmt+expr and object dstr): **0 flips** — 115 pass/pass,
+  1 fail/fail (`function/dstr/dflt-ary-ptrn-empty.js`, pre-existing both
+  arms, matches fable-beta's note).
+
+Authoritative gate remains the merge_group standalone floor.
