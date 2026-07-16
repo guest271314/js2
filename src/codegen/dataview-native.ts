@@ -55,6 +55,7 @@ import {
   taCtorKindOf,
 } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#2872) __ta_dyn_fill minting
+import { undefinedExternInstrs } from "./any-helpers.js"; // (#3177) OOB read = undefined, not null
 import { ensureObjectRuntime } from "./object-runtime.js"; // (#2872) $Object array-like construct arm
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coerceType } from "./type-coercion.js";
@@ -448,7 +449,7 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
 }
 
 /** Lazily ensure the i32_byte vec type exists and return its struct/array indices. */
-function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: number } {
+export function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: number } {
   const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i8" }); // (#2835) packed byte buffer
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   return { vecTypeIdx, arrTypeIdx };
@@ -2422,7 +2423,7 @@ export function emitTaViewElementSet(
  * the self-contained instruction list (the caller splices it into a bounds-guarded
  * arm).
  */
-function emitDynDecodeDispatch(
+export function emitDynDecodeDispatch(
   ctx: CodegenContext,
   fctx: FunctionContext,
   kindLocal: number,
@@ -2467,7 +2468,7 @@ function emitDynDecodeDispatch(
  * (round-half-to-even + clamp `[0,255]`) into a temp before the write. An
  * unrecognised kind is a no-op. Returns the self-contained instruction list.
  */
-function emitDynEncodeDispatch(
+export function emitDynEncodeDispatch(
   ctx: CodegenContext,
   fctx: FunctionContext,
   kindLocal: number,
@@ -2627,6 +2628,8 @@ export function emitTaDynViewElementGet(
     { op: "local.set", index: resultLocal },
   ];
   // if ((unsigned)idx < len) { box(decode) } else { undefined }
+  // (#3177) OOB = the `undefined` SINGLETON, not ref.null.extern — a null read
+  // makes `ta[oob] === undefined` false (it compares as null; probe code 2).
   fctx.body.push({ op: "local.get", index: idxI32 });
   fctx.body.push({ op: "local.get", index: lenLocal });
   fctx.body.push({ op: "i32.lt_u" });
@@ -2634,7 +2637,10 @@ export function emitTaDynViewElementGet(
     op: "if",
     blockType: { kind: "empty" },
     then: inBounds,
-    else: [{ op: "ref.null.extern" }, { op: "local.set", index: resultLocal }],
+    else: [
+      ...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } as Instr]),
+      { op: "local.set", index: resultLocal },
+    ],
   });
   fctx.body = saved;
 
@@ -2800,7 +2806,12 @@ export function emitTaDynViewElementSet(
  * stale in-bounds value after a shrink — the #3057 regression on
  * out-of-bounds-get-and-set.js).
  */
-function pushTaDynViewInBoundsLen(ctx: CodegenContext, fctx: FunctionContext, dvLocal: number, esLocal: number): void {
+export function pushTaDynViewInBoundsLen(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  dvLocal: number,
+  esLocal: number,
+): void {
   const dynIdx = ctx.taDynViewTypeIdx;
   const { vecTypeIdx } = i32ByteVec(ctx);
   const storedLocal = allocLocal(fctx, `__tdvib_s_${fctx.locals.length}`, { kind: "i32" });
@@ -3050,12 +3061,44 @@ export function emitTaViewConstructWindowed(
 export function emitTaCtorValue(ctx: CodegenContext, fctx: FunctionContext, name: string): ValType | null {
   const kind = taCtorKindOf(name);
   if (kind < 0) return null;
-  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
-  fctx.body.push({ op: "i32.const", value: kind });
-  fctx.body.push({ op: "struct.new", typeIdx: taCtorTypeIdx });
+  // (#3177) Per-kind SINGLETON: every mention of the same ctor name must
+  // produce the SAME struct ref, or `Uint8Array === Uint8Array` (and
+  // `sample.constructor === TA`) fails ref.eq identity. `struct.new` per
+  // site (the pre-#3177 behavior) minted a fresh struct each time; the
+  // `taCtorSingletonGlobals` map (#3054 D) existed for exactly this but was
+  // never consumed. Immutable global, `struct.new` constant initializer —
+  // the `$Hole` singleton pattern (array-holes.ts).
+  const globalIdx = getOrRegisterTaCtorSingleton(ctx, kind);
+  fctx.body.push({ op: "global.get", index: globalIdx });
   // Box the struct ref to externref (ref → externref, per coerceType).
   fctx.body.push({ op: "extern.convert_any" });
   return { kind: "externref" };
+}
+
+/**
+ * (#3177) Get-or-register the per-kind `$__ta_ctor` singleton module-global:
+ * `(global $__ta_ctor_<kind> (ref $__ta_ctor) (i32.const <kind>) (struct.new
+ * $__ta_ctor))`. Returns the ABSOLUTE global index (imports included). Also
+ * used by the finalize-time dyn-view `.constructor` MOP arm (kind →
+ * singleton switch), so ctor identity holds across the instance→constructor
+ * read and the bare-identifier mention.
+ */
+export function getOrRegisterTaCtorSingleton(ctx: CodegenContext, kind: number): number {
+  const existing = ctx.taCtorSingletonGlobals.get(kind);
+  if (existing !== undefined) return existing;
+  const taCtorTypeIdx = getOrRegisterTaCtorType(ctx);
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: `__ta_ctor_singleton_${kind}`,
+    type: { kind: "ref", typeIdx: taCtorTypeIdx },
+    mutable: false,
+    init: [
+      { op: "i32.const", value: kind },
+      { op: "struct.new", typeIdx: taCtorTypeIdx },
+    ],
+  });
+  ctx.taCtorSingletonGlobals.set(kind, globalIdx);
+  return globalIdx;
 }
 
 /**
@@ -3142,7 +3185,7 @@ export function emitTaCtorBytesPerElement(
  * index into `TA_CTOR_KINDS`) via a `select` chain over `TA_CTOR_BYTES`. Leaves an
  * i32 on the stack; a kind out of range yields 1 (harmless default).
  */
-function pushElemSizeForKind(fctx: FunctionContext, kindLocal: number): void {
+export function pushElemSizeForKind(fctx: FunctionContext, kindLocal: number): void {
   fctx.body.push({ op: "i32.const", value: 1 }); // running result (val1) = 1
   for (let k = 0; k < TA_CTOR_BYTES.length; k++) {
     fctx.body.push({ op: "i32.const", value: TA_CTOR_BYTES[k]! }); // val2 = bytes[k]
