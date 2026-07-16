@@ -41,6 +41,8 @@ import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./a
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3125) IsCallable arms
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeArrayHof, NATIVE_HOF_METHODS } from "./hof-native.js";
+import { COLLECTION_KIND, ensureMapHelpers, MAP_LAYOUT } from "./map-runtime.js"; // (#3309) $Map brand arm
+import { ensureSetHelpers } from "./set-runtime.js"; // (#3309) __set_add for the `add` arm
 import { ensureNativeIterHof, isIterHofForm, NATIVE_ITER_HOF_METHODS } from "./iter-hof-native.js"; // (#2903)
 import { ensureNativeLazyIter, isLazyIterForm, LAZY_ITER_METHODS } from "./iter-lazy-native.js"; // (#2903 R3)
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -80,6 +82,37 @@ const VEC_MUTATE_METHODS = new Set(["push", "pop"]);
 /** True when `methodName`/`arity` is a supported native-vec mutation form. */
 function isVecMutateForm(methodName: string, arity: number): boolean {
   return (methodName === "push" && arity === 1) || (methodName === "pop" && arity === 0);
+}
+
+/**
+ * (#3309) The Map/Set/WeakMap/WeakSet collection methods that get a native
+ * `$Map` brand arm in the closed-method dispatcher so a genuinely-`any`
+ * collection receiver (`const m: any = new Map(); m.set(k, v)`) dispatches to
+ * the WasmGC-native Map/Set runtime instead of leaking `env.WeakMap_*` /
+ * `env.Set_*` host imports (unsatisfiable standalone — the
+ * `tryExternClassMethodOnAny` first-match hijack, refused there under
+ * standalone/wasi so the call reaches this dispatcher). All four collections
+ * share the `$Map` struct with an immutable `kind` brand tag
+ * (COLLECTION_KIND, #3171), so ONE `ref.test $Map` arm serves them with a
+ * per-method kind guard.
+ */
+const COLLECTION_METHODS = new Set(["get", "set", "has", "add", "delete", "clear"]);
+
+/** True when `methodName`/`arity` is a supported native-collection form. */
+function isCollectionMethodForm(methodName: string, arity: number): boolean {
+  switch (methodName) {
+    case "set":
+      return arity === 2;
+    case "get":
+    case "has":
+    case "add":
+    case "delete":
+      return arity === 1;
+    case "clear":
+      return arity === 0;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -167,6 +200,20 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   if ((ctx.standalone || ctx.wasi) && VEC_MUTATE_METHODS.has(methodName) && isVecMutateForm(methodName, arity)) {
     getOrRegisterVecBaseType(ctx);
     addUnionImportsViaRegistry(ctx); // __box_number for the push new-length result
+  }
+
+  // (#3309) For the collection methods (`get`/`set`/`has`/`add`/`delete`/
+  // `clear`), emit the native Map/Set runtime NOW — union imports first
+  // (`__box_boolean` for the has/delete results; imports before defined funcs,
+  // the #1677/#2043 index-shift hazard), then the `$Map` runtime helpers
+  // (defined funcs, append-only) — so `fillClosedMethodDispatch` only READS
+  // `ctx.mapHelpers`/`funcMap` (#1719). The module edge → map-runtime.ts is
+  // eval-time-cycle-safe (the hof-native.ts ↔ this-module precedent; all uses
+  // are inside function bodies). Standalone/wasi only.
+  if ((ctx.standalone || ctx.wasi) && COLLECTION_METHODS.has(methodName) && isCollectionMethodForm(methodName, arity)) {
+    addUnionImportsViaRegistry(ctx);
+    ensureMapHelpers(ctx);
+    ensureSetHelpers(ctx);
   }
 
   // (#3098) For the callback-taking array HOFs (map/filter/forEach/find*/
@@ -910,6 +957,122 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: mutArmBody,
+            else: current,
+          },
+        ];
+      }
+    }
+
+    // (#3309) `$Map` brand arm for the collection methods (`get`/`set`/`has`/
+    // `add`/`delete`/`clear`) on a genuinely-`any` receiver. All four
+    // collections (Map/Set/WeakMap/WeakSet) share the `$Map` struct; the
+    // immutable `kind` tag (COLLECTION_KIND, #3171) carries the brand, so a
+    // per-method kind guard routes only the kinds that actually declare the
+    // method — a guard miss returns `undefined` (`ref.null.extern`), matching
+    // the pre-#3309 open-`$Object` fall-through (`Set` has no `get`; the
+    // brand-check TypeError refinement is #2604-family follow-up territory).
+    // Helpers were emitted at reserve time (`ensureMapHelpers`/
+    // `ensureSetHelpers` — this fill only READS `ctx.mapHelpers`, #1719). Args
+    // arrive as externref and convert via `any.convert_extern` — the SAME
+    // boxed rep `coerceArgToAnyref` produces on the typed path (numbers boxed
+    // via `__box_number` at the dispatcher call site), so key hashing /
+    // SameValueZero agree across the typed and any-receiver lanes. Sits UNDER
+    // the closed-struct/field arms (a user `{ get(){…} }` still wins); a
+    // `$Map` never matches a vec/DV test, so order among brand arms is
+    // behavior-neutral. Standalone/wasi only.
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      ctx.mapTypeIdx >= 0 &&
+      COLLECTION_METHODS.has(methodName) &&
+      isCollectionMethodForm(methodName, arity)
+    ) {
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      // helper + allowed kinds per method (null kinds = no guard needed —
+      // all four collections declare has/delete).
+      let helperIdx: number | undefined;
+      let allowedKinds: number[] | null = null;
+      let resultShape: "anyref" | "bool" | "void" = "anyref";
+      switch (methodName) {
+        case "get":
+          helperIdx = ctx.mapHelpers.get("__map_get");
+          allowedKinds = [COLLECTION_KIND.MAP, COLLECTION_KIND.WEAKMAP];
+          break;
+        case "set":
+          helperIdx = ctx.mapHelpers.get("__map_set");
+          allowedKinds = [COLLECTION_KIND.MAP, COLLECTION_KIND.WEAKMAP];
+          break;
+        case "has":
+          helperIdx = ctx.mapHelpers.get("__map_has");
+          resultShape = "bool";
+          break;
+        case "delete":
+          helperIdx = ctx.mapHelpers.get("__map_delete");
+          resultShape = "bool";
+          break;
+        case "add":
+          helperIdx = ctx.mapHelpers.get("__set_add");
+          allowedKinds = [COLLECTION_KIND.SET, COLLECTION_KIND.WEAKSET];
+          break;
+        case "clear":
+          helperIdx = ctx.mapHelpers.get("__map_clear");
+          allowedKinds = [COLLECTION_KIND.MAP, COLLECTION_KIND.SET]; // weak collections have no clear
+          resultShape = "void";
+          break;
+      }
+      if (helperIdx !== undefined && (resultShape !== "bool" || boxBoolIdx !== undefined)) {
+        // receiver (ref $Map) + anyref-converted args → helper → externref.
+        const helperCall: Instr[] = [
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.cast", typeIdx: ctx.mapTypeIdx },
+        ];
+        for (let a = 0; a < arity; a++) {
+          helperCall.push({ op: "local.get", index: 1 + a });
+          helperCall.push({ op: "any.convert_extern" });
+        }
+        helperCall.push({ op: "call", funcIdx: helperIdx });
+        if (resultShape === "bool") {
+          helperCall.push({ op: "call", funcIdx: boxBoolIdx as number }); // i32 → externref
+        } else if (resultShape === "void") {
+          helperCall.push({ op: "ref.null.extern" }); // undefined
+        } else {
+          // anyref value (get) or the chainable `ref $Map` receiver (set/add)
+          // — both anyref subtypes.
+          helperCall.push({ op: "extern.convert_any" });
+        }
+        let mapArmBody: Instr[];
+        if (allowedKinds === null) {
+          mapArmBody = helperCall;
+        } else {
+          // ckind = recv.kind; (ckind == k0) | (ckind == k1) ? helper : undefined
+          const kindLocalIdx = arity + 1 + locals.length;
+          locals.push({ name: "__ckind", type: { kind: "i32" } });
+          mapArmBody = [
+            { op: "local.get", index: anyLocalIdx },
+            { op: "ref.cast", typeIdx: ctx.mapTypeIdx },
+            { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: MAP_LAYOUT.M_KIND },
+            { op: "local.set", index: kindLocalIdx },
+            { op: "local.get", index: kindLocalIdx },
+            { op: "i32.const", value: allowedKinds[0]! },
+            { op: "i32.eq" },
+            { op: "local.get", index: kindLocalIdx },
+            { op: "i32.const", value: allowedKinds[1]! },
+            { op: "i32.eq" },
+            { op: "i32.or" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: helperCall,
+              else: [{ op: "ref.null.extern" }],
+            },
+          ];
+        }
+        current = [
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: ctx.mapTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: mapArmBody,
             else: current,
           },
         ];

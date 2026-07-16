@@ -3549,7 +3549,14 @@ export function tryEmitInlineDynamicCall(
   const wantBoundArm =
     (ctx.standalone === true || ctx.wasi === true) &&
     (ctx.boundFnTypeIdx >= 0 || sourceHasBindCall(expr.getSourceFile()));
-  if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm) return null;
+  // (#3177 slice 3) §23.2.5.1 step 1: CALLING a TypedArray-constructor VALUE
+  // without `new` (undefined NewTarget) must throw TypeError — `TA(1)` inside
+  // `assert.throws(TypeError, …)` is the undefined-newtarget-throws corpus
+  // shape. Armed only when a `$__ta_ctor` value can exist in the module
+  // (byte-inert otherwise). Standalone/WASI lane; the host lane's callee is a
+  // real host constructor whose [[Call]] already throws.
+  const wantTaCtorArm = (ctx.standalone === true || ctx.wasi === true) && ctx.taCtorTypeIdx >= 0;
+  if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm) return null;
 
   // Dedupe by funcTypeIdx — concrete subtypes share funcTypeIdx with their
   // base wrapper; one dispatch arm per unique funcref type is enough.
@@ -3684,7 +3691,13 @@ export function tryEmitInlineDynamicCall(
     }
   }
 
-  if (candidates.length === 0 && proxyArm === undefined && boundArm === undefined && variadicArm === undefined)
+  if (
+    candidates.length === 0 &&
+    proxyArm === undefined &&
+    boundArm === undefined &&
+    variadicArm === undefined &&
+    !wantTaCtorArm
+  )
     return null;
 
   // Compile callee (externref) → anyref → temp local.
@@ -3947,6 +3960,28 @@ export function tryEmitInlineDynamicCall(
         op: "if",
         blockType: { kind: "val", type: { kind: "externref" } },
         then: armBody,
+        else: dispatch,
+      },
+    ];
+  }
+
+  // (#3177 slice 3) `$__ta_ctor` [[Call]] arm — outermost: a TypedArray
+  // constructor value invoked WITHOUT `new` throws TypeError (§23.2.5.1
+  // step 1, undefined NewTarget). Built here (immediately before the dispatch
+  // is attached) so the baked `__new_TypeError` funcIdx cannot go stale: on
+  // this lane the constructor is an in-module DEFINED function (append-only,
+  // no import shift) and `buildThrowJsErrorInstrs` self-flushes against fctx.
+  if (wantTaCtorArm) {
+    const throwInstrs = buildThrowJsErrorInstrs(ctx, "TypeError", "Constructor cannot be invoked without 'new'", {
+      flush: fctx,
+    });
+    dispatch = [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: ctx.taCtorTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: throwInstrs, // terminal throw — stack-polymorphic, validates as externref
         else: dispatch,
       },
     ];
