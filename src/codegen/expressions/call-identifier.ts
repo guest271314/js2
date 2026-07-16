@@ -1332,7 +1332,18 @@ export function compileIdentifierCall(
             fieldIdx: 0,
           });
 
-          if (funcCandidates.length <= 1) {
+          // (#2933) Variadic builtin value-closure arm. Only when a variadic
+          // builtin static method (`Math.max`/`Math.min`) was reified in this
+          // module (ctx flag set at value-read time — all of its types/helpers
+          // are then already registered, so the arm emits NO first-registrations
+          // mid-body, #2704) AND the callee arrived as externref (closureLocal
+          // is root-cast). Modules without such a value read are byte-identical.
+          const variadic =
+            (ctx.standalone || ctx.wasi) && innerResultType?.kind === "externref"
+              ? ctx.variadicBuiltinClosure
+              : undefined;
+
+          if (funcCandidates.length <= 1 && variadic === undefined) {
             // Single func type — push self+args back onto stack then call
             // Stack before: [funcref]
             // Need: [self, ...args, funcref] for call_ref
@@ -1390,6 +1401,91 @@ export function compileIdentifierCall(
 
             // Build dispatch chain bottom-up (innermost = throw TypeError)
             let funcDispatch: Instr[] = typeErrorThrowInstrs(ctx);
+
+            // (#2933) Innermost fallback BEFORE the TypeError: the variadic
+            // builtin value-closure arm. Its lifted func type has ONE
+            // `(ref null $vec_externref)` args param, so no fixed-arity
+            // candidate above can ever match it — this arm packs ALL true
+            // call-site args (declared-slot locals + overflow extras; padded
+            // defaults stay invisible) into a fresh vec and `call_ref`s the
+            // closure. Every op here is either pure or a call to an
+            // ALREADY-registered func (registered at value-read time), so the
+            // arm is dead-arm-safe (#2174 — no late-import index shifts).
+            if (variadic !== undefined) {
+              const armBody: Instr[] = [];
+              // self (root-typed local → the variadic wrapper struct)
+              armBody.push({ op: "local.get", index: closureLocal });
+              if (variadic.structTypeIdx !== closureCastStructIdx) {
+                armBody.push({ op: "ref.cast", typeIdx: variadic.structTypeIdx });
+              }
+              // Pack args: declared-slot locals up to the TRUE call-site count
+              // (argLocals beyond expr.arguments.length are synthesized padding),
+              // then the overflow extras (already externref).
+              let packed = 0;
+              for (let ai = 0; ai < Math.min(expr.arguments.length, argLocals.length); ai++) {
+                armBody.push({ op: "local.get", index: argLocals[ai]! });
+                const at = matchedClosureInfo.paramTypes[ai]!;
+                if (at.kind === "f64" || at.kind === "i32") {
+                  if (at.kind === "i32") armBody.push({ op: "f64.convert_i32_s" });
+                  const boxIdx = ctx.funcMap.get("__box_number");
+                  if (boxIdx !== undefined) {
+                    armBody.push({ op: "call", funcIdx: boxIdx });
+                  } else {
+                    armBody.push({ op: "drop" }, { op: "ref.null.extern" });
+                  }
+                } else if (at.kind === "ref" || at.kind === "ref_null") {
+                  armBody.push({ op: "extern.convert_any" });
+                }
+                packed++;
+              }
+              for (const exLocal of cpExtrasLocals) {
+                armBody.push({ op: "local.get", index: exLocal });
+                packed++;
+              }
+              armBody.push({ op: "array.new_fixed", typeIdx: variadic.arrTypeIdx, length: packed });
+              const varArrTmp = allocLocal(fctx, `__vararg_arr_${fctx.locals.length}`, {
+                kind: "ref",
+                typeIdx: variadic.arrTypeIdx,
+              });
+              armBody.push({ op: "local.set", index: varArrTmp });
+              armBody.push({ op: "i32.const", value: packed });
+              armBody.push({ op: "local.get", index: varArrTmp });
+              armBody.push({ op: "struct.new", typeIdx: variadic.vecTypeIdx });
+              // typed funcref + call
+              armBody.push({ op: "local.get", index: funcrefLocal });
+              armBody.push({ op: "ref.cast", typeIdx: variadic.funcTypeIdx });
+              armBody.push({ op: "call_ref", typeIdx: variadic.funcTypeIdx });
+              // Coerce the externref result to the block's expected type using
+              // only already-registered engine helpers (pure on dead arms).
+              if (expectedReturn === null) {
+                armBody.push({ op: "drop" });
+              } else if (expectedReturn.kind === "f64" || expectedReturn.kind === "i32") {
+                const feIdx = ctx.funcMap.get("__any_from_extern");
+                const tfIdx = ctx.funcMap.get("__any_to_f64");
+                if (feIdx !== undefined && tfIdx !== undefined) {
+                  armBody.push({ op: "call", funcIdx: feIdx }, { op: "call", funcIdx: tfIdx });
+                  if (expectedReturn.kind === "i32") {
+                    armBody.push({ op: "i32.trunc_sat_f64_s" });
+                  }
+                } else {
+                  armBody.push({ op: "drop" });
+                  armBody.push(...defaultValueInstrs(expectedReturn));
+                }
+              } else if (expectedReturn.kind !== "externref") {
+                armBody.push({ op: "drop" });
+                armBody.push(...defaultValueInstrs(expectedReturn));
+              }
+              funcDispatch = [
+                { op: "local.get", index: funcrefLocal },
+                { op: "ref.test", typeIdx: variadic.funcTypeIdx },
+                {
+                  op: "if",
+                  blockType: retBlockType,
+                  then: armBody,
+                  else: funcDispatch,
+                },
+              ];
+            }
 
             for (const fc of [...funcCandidates].reverse()) {
               // Each candidate needs: push self, push args, push typed funcref, call_ref
