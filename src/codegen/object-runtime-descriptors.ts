@@ -1890,6 +1890,31 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "call", funcIdx: boxBoolIdx },
     ];
 
+    // (#3316) Materialize an accessor HALF (e.get = field 4 / e.set = field 5)
+    // as an externref descriptor value. Under the `undefinedSingleton` regime a
+    // NULL stored half must surface as the `$undefined` singleton (null ≠
+    // undefined there); legacy lanes keep the bare `extern.convert_any`
+    // byte-identical (null externref is their undefined representation).
+    const undefExternGopd = undefinedSingletonActive(ctx) ? undefinedExternInstrs(ctx) : undefined;
+    const readHalf = (fieldIdx: number): Instr[] => [
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx },
+    ];
+    const accessorHalfInstrs = (fieldIdx: number): Instr[] =>
+      undefExternGopd
+        ? [
+            ...readHalf(fieldIdx),
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: [...undefExternGopd],
+              else: [...readHalf(fieldIdx), { op: "extern.convert_any" }],
+            },
+          ]
+        : [...readHalf(fieldIdx), { op: "extern.convert_any" }];
+
     // (#2987) String-wrapper exotic own-property arm — runs when the ordinary
     // `__obj_find` misses. Locals: 7=sEnt(ref null $PropEntry) 8=sVal(anyref)
     // 9=wStr(ref null $NativeString) 10=wLen(i32) 11=kStr(ref null $NativeString)
@@ -2052,21 +2077,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         op: "if",
         blockType: { kind: "empty" },
         // accessor: { get, set, enumerable, configurable }
+        //
+        // (#3316) Empty accessor halves are stored as NULL anyref. Legacy
+        // regime: null externref *is* the undefined representation, so a bare
+        // `extern.convert_any` sufficed. Under the `undefinedSingleton` regime
+        // (#2106) null is DISTINCT from undefined — `desc.get === undefined`
+        // on an explicit `{get: undefined}` define read back null and answered
+        // false (15.2.3.6-4-439 shape). Materialize a null half as the
+        // singleton so gOPD observes `undefined`; non-null halves are
+        // unchanged. Legacy lanes keep the byte-identical bare conversion.
         then: [
-          // desc.get = extern.convert_any(e.get)  (null anyref → undefined)
-          ...setKey("get", [
-            { op: "local.get", index: 4 },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
-            { op: "extern.convert_any" },
-          ]),
-          // desc.set = extern.convert_any(e.set)
-          ...setKey("set", [
-            { op: "local.get", index: 4 },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
-            { op: "extern.convert_any" },
-          ]),
+          // desc.get = e.get == null ? undefined : extern.convert_any(e.get)
+          ...setKey("get", accessorHalfInstrs(4)),
+          // desc.set = e.set == null ? undefined : extern.convert_any(e.set)
+          ...setKey("set", accessorHalfInstrs(5)),
         ],
         // data: { value, writable }
         else: [
