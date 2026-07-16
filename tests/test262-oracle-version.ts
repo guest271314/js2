@@ -80,10 +80,17 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "`assert.throws(TypeError, fn)` became a bare `assert_throws(fn)` that only " +
       "checked 'did anything throw', so a codegen bug throwing the WRONG error " +
       "type (e.g. RangeError where the spec mandates TypeError) read as a false " +
-      "pass. The runner now threads the expected type through — " +
-      "`assert_throws(ErrorCtor, fn)` verifies the caught error MATCHES the " +
-      "expected type (`e instanceof ErrorCtor`, `.name` fallback for host-opaque " +
-      "shapes) before counting a pass. This reclassifies previously-inflated " +
+      "pass. The runner now threads the expected type through — via a GLOBAL " +
+      'NAME side channel (`__expected_throw_name = "TypeError"; ' +
+      "assert_throws(fn);`), NOT a second call argument: any class-as-value in " +
+      "the method body (2nd arg, matcher closure, or even a global ctor " +
+      "assignment) deterministically triggers the #3315 standalone codegen " +
+      "corruption of sibling destructured bindings. The shim verifies the " +
+      "caught error's `.name` matches the expected constructor name (strict: " +
+      "nameless/null payloads are NOT the required type; the check itself is " +
+      "guarded so it can never crash the harness; complex ctor EXPRESSIONS — " +
+      "3 corpus tests — stay legacy-untyped since evaluating them would " +
+      "re-trigger #3315). This reclassifies previously-inflated " +
       "false-passes to honest fails (owner-approved per #3285 acceptance " +
       "criteria — the drop is the correct signal, not a regression). NOTE: because " +
       "the synthetic harness/preamble compiles INTO the wasm, this shim change " +

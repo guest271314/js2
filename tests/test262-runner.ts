@@ -733,13 +733,32 @@ function transformAssertThrows(code: string, outputFnName: string = "assert_thro
       endPos++;
 
     // args[0] = ErrorType, args[1] = fn, args[2] = optional message.
-    // (#3285) Keep BOTH the expected error constructor (args[0]) and the
-    // callback (args[1]) so the shim can verify the caught error MATCHES the
-    // expected type. The optional 3rd message arg is intentionally not
-    // forwarded. Previously only args[1] was kept, discarding the type — so a
-    // wrong-but-present throw counted as a pass.
+    // (#3285/#3104) The expected error type is threaded through a GLOBAL NAME
+    // side channel (`__expected_throw_name = "TypeError"; assert_throws(fn);`)
+    // instead of a second call argument. The two-arg form
+    // `assert_throws(ErrorCtor, fn)` — and even a plain global assignment of
+    // the ctor VALUE — deterministically triggers #3315 in standalone: any
+    // class-as-value in the method body silently CORRUPTS sibling destructured
+    // bindings in the enclosing method (A/B-verified 2026-07-16; the
+    // name-string assignment is the only validated-clean shape). The name
+    // literal is derived at WRAP time for simple ctor identifiers; a complex
+    // ctor EXPRESSION (e.g. `typeof(x)==='y' ? RangeError : TypeError`, 3
+    // corpus tests) would have to be EVALUATED in the method body — the #3315
+    // trigger — so those emit `null` and keep the legacy untyped any-throw
+    // semantics (documented narrow limitation).
     if (args.length >= 2 && args[0] && args[1]) {
-      result += `${outputFnName}(${args[0]}, ${args[1]});`;
+      const nameLiteral = /^[A-Za-z_$][\w$]*$/.test(args[0]) ? JSON.stringify(args[0]) : "null";
+      // Statement-position splice: the original call can be prefixed by
+      // `await ` (assert.throwsAsync sites). The assignment must land BEFORE
+      // the whole statement, not between `await` and the call expression.
+      const trailingAwait = /(^|[\s;{}()])await\s*$/.test(result);
+      if (trailingAwait) {
+        const awaitStart = result.lastIndexOf("await");
+        result = result.slice(0, awaitStart) + `__expected_throw_name = ${nameLiteral}; ` + result.slice(awaitStart);
+        result += `${outputFnName}(${args[1]});`;
+      } else {
+        result += `__expected_throw_name = ${nameLiteral}; ${outputFnName}(${args[1]});`;
+      }
     }
     // If we couldn't parse args properly, just strip the call (fallback)
     i = endPos;
@@ -1593,6 +1612,11 @@ let __harness_cb_dead: number = 0;
 
 class Test262Error {
   message: string;
+  // (#3104) \`name\` field so the assert_throws side-channel name check
+  // (\`(e as any).name === "Test262Error"\`) can verify a caught Test262Error —
+  // the poisoned-iterator dstr-err family throws these and must keep passing
+  // under the #3285 typed-throw tightening.
+  name: string = "Test262Error";
   constructor(msg: string = "") {
     this.message = msg;
   }
@@ -1635,25 +1659,56 @@ function assert_true(value: any, _msg?: any): void {
   }
 }`;
 
+  if (needsAssertThrows || needsAssertThrowsAsync) {
+    // (#3285/#3104) The expected-error-type NAME side channel. wrapTest emits
+    // `__expected_throw_name = "TypeError"; assert_throws(fn);` — a string
+    // assignment plus the ORIGINAL single-argument call shape. Threading the
+    // ctor through as a value (a 2nd call argument, a matcher closure, or even
+    // a plain global assignment of the ctor) deterministically triggers #3315
+    // in standalone: a class-as-value in the method body silently corrupts
+    // sibling destructured bindings in the enclosing method. The name-string
+    // assignment is the only A/B-validated clean shape (2026-07-16).
+    p += `
+
+let __expected_throw_name: any = null;`;
+  }
+
   if (needsAssertThrows) {
     p += `
 
-function assert_throws(ErrorCtor: any, fn: () => void): void {
+function assert_throws(fn: () => void): void {
   __assert_count = __assert_count + 1;
+  // Consume the side-channel value so it can never leak into a later
+  // (untyped) assert_throws call emitted by other transforms.
+  const __expected: any = __expected_throw_name;
+  __expected_throw_name = null;
   try {
     fn();
   } catch (e) {
-    // (#3285) A caught error only counts as a pass when it MATCHES the expected
-    // type. \`instanceof\` handles in-module errors and subclass relationships
-    // (assert.throws(Error, …) matches a TypeError); comparing the error's
-    // \`.name\` to the constructor's \`.name\` is the fallback for host-opaque
-    // error representations where the in-module constructor identity isn't
-    // shared. A throw of the WRONG type is a real failure, not a pass.
-    if (e instanceof ErrorCtor) return;
-    const en: any = (e as any).name;
-    const cn: any = ErrorCtor.name;
-    if (en === cn) return;
-    if (!__fail) __fail = __assert_count;
+    // (#3285) A caught error only counts as a pass when its \`.name\` matches
+    // the expected constructor name (strict: a nameless payload — bare-string
+    // throw, null exception carrier — is NOT the required error type, so it
+    // fails honestly). The check itself must never throw: a null/opaque
+    // payload previously blew up the harness with its own TypeError
+    // (the "Cannot access property on null at 81:21" family) — guarded now.
+    // No expected name (legacy untyped call sites, or a complex ctor
+    // expression wrapTest could not resolve at wrap time) ⇒ any throw passes,
+    // matching the pre-#3285 semantics for exactly those sites.
+    let __wrong: boolean = false;
+    try {
+      if (__expected != null) {
+        if (e == null) __wrong = true;
+        else {
+          const en: any = (e as any).name;
+          if (en !== __expected) __wrong = true;
+        }
+      }
+    } catch (_ignore) {
+      __wrong = true;
+    }
+    if (__wrong) {
+      if (!__fail) __fail = __assert_count;
+    }
     return;
   }
   if (!__fail) __fail = __assert_count;
@@ -1663,8 +1718,10 @@ function assert_throws(ErrorCtor: any, fn: () => void): void {
   if (needsAssertThrowsAsync) {
     p += `
 
-function assert_throwsAsync(ErrorCtor: any, fn: () => any): void {
+function assert_throwsAsync(fn: () => any): void {
   __assert_count = __assert_count + 1;
+  const __expected: any = __expected_throw_name;
+  __expected_throw_name = null;
   try {
     const res = fn();
     // Accept thenable returns (Promise rejections from async generators .throw()).
@@ -1675,13 +1732,22 @@ function assert_throwsAsync(ErrorCtor: any, fn: () => any): void {
       return;
     }
   } catch (e) {
-    // (#3285) Verify the synchronously-thrown error matches the expected type —
-    // same rule as assert_throws (instanceof, then .name fallback).
-    if (e instanceof ErrorCtor) return;
-    const en: any = (e as any).name;
-    const cn: any = ErrorCtor.name;
-    if (en === cn) return;
-    if (!__fail) __fail = __assert_count;
+    // (#3285) Same strict name-match rule as assert_throws (see there).
+    let __wrong: boolean = false;
+    try {
+      if (__expected != null) {
+        if (e == null) __wrong = true;
+        else {
+          const en: any = (e as any).name;
+          if (en !== __expected) __wrong = true;
+        }
+      }
+    } catch (_ignore) {
+      __wrong = true;
+    }
+    if (__wrong) {
+      if (!__fail) __fail = __assert_count;
+    }
     return;
   }
   if (!__fail) __fail = __assert_count;

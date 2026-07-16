@@ -262,6 +262,28 @@ re-derive them:
   Projected post-fix trap growth vs today's baseline: host oob +3 (the known
   #3202 BigInt `TypedArray.prototype.set` flap, within the tolerance-4 repo
   var), everything else shrinks.
+- **Shim rework (2026-07-16 second round, coordinator-approved)**: the
+  original two-arg `assert_throws(ErrorCtor, fn)` form deterministically
+  triggered **#3315** — a pre-existing standalone codegen bug where ANY
+  class-as-value in the method body (2nd argument, matcher closure, or even a
+  global ctor assignment) silently corrupts sibling destructured bindings in
+  the enclosing method. The shim now threads the expected type through a
+  GLOBAL NAME side channel (`__expected_throw_name = "TypeError";
+assert_throws(fn);` — the only A/B-validated clean shape) with a strict,
+  guarded name check (nameless/null payloads fail honestly instead of
+  crashing the harness — fixes the 9 standalone + 13 host "Cannot access
+  property on null at 81:21" flips); the preamble `Test262Error` gained a
+  `name` field so the poisoned-iterator dstr-err family verifies; complex
+  ctor EXPRESSIONS (3 corpus tests) stay legacy-untyped (evaluating them
+  would re-trigger #3315). Probe results on the reworked shim (standalone):
+  corruption repro `meth-obj-ptrn-prop-ary` RET=1 (assert #2 clean AND the
+  typed check passes); `gen-meth-static-ary-ptrn-elem-id-iter-val-err`
+  (Test262Error family) RET=1; `non-bigint64-typedarray-throws` RET=1 — its
+  earlier "honest correction" fail was itself a #3315 corruption artifact
+  (clean codegen restores correct evaluation order and the real TypeError);
+  `obj-id-put-unresolvable-strict` fails honestly (returned 2) instead of the
+  harness TypeError; `await assert.throwsAsync` splice verified
+  syntactically and behaviorally (await-using probe RET=1).
 - **#3307 dependency**: the guards' diff must run at the same
   `TRAP_RATCHET_TOLERANCE` as the regression-gate job or the oob flap's
   exit 1 re-litigates the raw count and vetoes the allowance in the guards.
