@@ -18,7 +18,7 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T23:40:30.263Z
+claimed_at: 2026-07-16T23:48:32.572Z
 branch: symphony/porffor/3288
 pr: 3166
 loc-budget-allow:
@@ -424,3 +424,7 @@ started on this branch.
   GitHub's HTTP 503 response while downloading Node 25 for `cla-check`.
   `origin/main` remained at the already-merged `6e1f780c07c`; no P1 behavior
   changed and P2-P5 remain unstarted.
+- Attempt 4 succeeded on head `f314715a523`: every PR-level check passed,
+  including CLA, quality, linear, equivalence, cross-backend parity, and
+  test262 relevance. The branch still contains only P1, and the umbrella stays
+  `in-progress` for dependency-ordered P2-P5 follow-up branches.
