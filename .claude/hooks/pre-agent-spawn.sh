@@ -20,7 +20,11 @@ INPUT=$(cat)
 CORES=$(nproc 2>/dev/null || echo 4)
 # Default ceiling = cores-2 (leave headroom), floor of 1.
 DEFAULT_MAX_LOAD=$(( CORES > 2 ? CORES - 2 : 1 ))
-MAX_LOAD=${JS2WASM_MAX_LOAD:-$DEFAULT_MAX_LOAD}
+# Override precedence: env var > .claude/max-load file > cores-2 default.
+# The file knob exists because the hook runs in its own process — an agent
+# session cannot inject JS2WASM_MAX_LOAD into it mid-session. Per-box, gitignored.
+FILE_MAX_LOAD=$(cat "${CLAUDE_PROJECT_DIR:-/workspace}/.claude/max-load" 2>/dev/null | tr -cd '0-9.')
+MAX_LOAD=${JS2WASM_MAX_LOAD:-${FILE_MAX_LOAD:-$DEFAULT_MAX_LOAD}}
 MIN_RAM_MB=${JS2WASM_MIN_RAM_MB:-1500}
 
 AVAIL_MB=$(free -m | awk '/Mem/{print $7}')
