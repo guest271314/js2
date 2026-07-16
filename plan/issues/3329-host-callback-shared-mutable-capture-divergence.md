@@ -1,5 +1,5 @@
 ---
-id: 3330
+id: 3329
 title: "host-callback closures: two closures sharing one mutable captured local get SEPARATE ref cells — writes diverge (last writeback wins)"
 horizon: m
 status: ready
