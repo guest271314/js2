@@ -2,7 +2,7 @@
 id: 3227
 title: "default (JS-host) lane: async-completion harness callbacks never execute → 1,690 vacuous fails (#2940 detector), dominated by for-await-of / dynamic-import / Promise"
 status: in-progress
-assignee: ttraenkler/fable-3
+assignee: ttraenkler/sendev-3161-conflict
 sprint: current
 priority: high
 horizon: xl
@@ -15,6 +15,9 @@ related: [3074, 3086, 3001, 2940, 2903, 2939, 1014, 1116, 1326c]
 created: 2026-07-13
 updated: 2026-07-16
 origin: "2026-07-13 /harvest-errors. Baselines run 20260713-085257 (gitHash bb27494f, 32,990 pass), default lane test262-current.jsonl. Count unchanged from run 179d73ca."
+regressions-allow:
+  count: 1300
+  reason: "#3227 S1 async post-drain verdict re-read (oracle v5), lead-approved honesty regression 2026-07-16 (precedent #3086/#3285) — post-await assertions in currently-passing async-flagged tests finally execute and expose real bugs (S2 await-NaN / S3 IteratorResult clusters). Measured on 80-record sample: ~875 host pass->fail expected, CI 525-1225; ceiling = CI upper bound 1225 + ~75 drift margin. Standalone lane expects ~0 flips (its __drain_microtasks drains synchronously pre-epilogue, so the re-read is verdict-neutral there). NOTE: the ceiling assumes the baseline is already re-seeded at v4 (post-#3104 promote-baseline); against a stale pre-#3104 baseline the diff would also carry #3104's ~1358 flips and exceed this ceiling - that is a wait-for-promote-baseline park, not a regression."
 ---
 
 # #3227 — default-lane async harness callbacks are vacuous (no assertion runs)
@@ -121,14 +124,15 @@ continuations are NOT dropped. Two verified mechanisms:
 
 ## Slice plan (dispatchable)
 
-- **S1 (this PR, fable-3) — async post-drain verdict re-read + ORACLE_VERSION 4.**
+- **S1 (this PR, fable-3) — async post-drain verdict re-read + ORACLE_VERSION 5.**
   `wrapTest` exports `__result()` (same verdict logic as the `test()` epilogue)
   for async-flagged tests; `runTest262File` yields 2× `setImmediate` after a
   sync `1`/`-262` and re-reads. A deferred continuation THROW during the drain
   window is captured via temporary `uncaughtException`/`unhandledRejection`
   handlers and scored a fail for that test (pre-S1 it fired unattributed
   between tests and could kill the fork worker). Verdict-logic change ⇒
-  ORACLE_VERSION bumped 3→4 (forward-monotonic auto-rebase in diff-test262).
+  ORACLE_VERSION bumped (drafted as 3→4; landed as 4→5 — see the merge
+  reconciliation note below; forward-monotonic auto-rebase in diff-test262).
   Measured on samples: 1,680 vacuous-callback records → ~25% flip to honest
   PASS (~420), ~62% to honest assert-fail (real signal, already scored fail
   today), ~8% stay vacuous; BUT ~25% of the 3,503 currently-passing
@@ -167,9 +171,37 @@ definitions:
   `yield-star-next-then-*` / `named-yield-*` fail assert #2 (`done` wrong) —
   the IteratorResult crossing the host boundary delivers wrong `done`/`value`.
 
-ORACLE_VERSION: S1 takes **v4**; draft PR #3111 (standalone host-backed
-rejection) also drafted a 3→4 bump — whichever lands second must re-bump
-(4→5) and add its own history entry. S1 assumes it lands FIRST.
+ORACLE_VERSION: S1 drafted **v4** assuming it landed first — it did NOT.
+#3285 (PR #3104, assert_throws error-type precision) landed its own 3→4 bump
+first, so per the whichever-lands-second-re-bumps rule S1 landed as **v5**
+(see the merge reconciliation note below). Draft PR #3111 (standalone
+host-backed rejection, another drafted 3→4) — or any later oracle change —
+must take **v6** with its own history entry.
+
+## Merge reconciliation with #3285 / PR #3104 (2026-07-16, sendev-3161-conflict)
+
+PR #3161 went DIRTY when #3104 merged — both PRs bumped ORACLE_VERSION 3→4
+and both touched `tests/test262-runner.ts`. Resolution decisions and WHY:
+
+- **Oracle version**: main's v4 entry (#3285) kept verbatim; S1's entry
+  re-labeled **v5** and `ORACLE_VERSION = 5`. Each verdict-logic change needs
+  its own bump — re-claiming 4 would make v4 rows ambiguous between two
+  different verdict policies, breaking same-version row comparability (the
+  entire point of the version stamp).
+- **Runner**: git auto-merged cleanly and the composition was verified by
+  hand, not assumed. #3104's shim rework (name-string side channel
+  `__expected_throw_name`, strict `.name` match — deliberately avoiding the
+  2-arg call shape that triggers the #3315 standalone corruption) is
+  untouched. #3227's `__result()` export + post-drain re-read is untouched.
+  They compose additively: the shims consume `__expected_throw_name`
+  synchronously at entry (no clobber risk inside the #3227 drain window), and
+  shim failures set the sticky `__fail` that `__result()` re-reads — so an
+  `assert.throws` inside a deferred continuation now gets #3104's type
+  precision AND #3227's post-drain visibility.
+- **Carried-over caveat**: like #3104's shim, the `__result()` export
+  compiles INTO the wasm wrapper, so wasm_sha changes for every async-flagged
+  test — the #3086 same-wasm auto-rebase does NOT excuse these flips; the v5
+  note documents the promote-baseline/force-refresh requirement, mirroring v4.
 
 ## Test Results (slice 1)
 
