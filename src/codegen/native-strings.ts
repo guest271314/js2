@@ -8,8 +8,9 @@
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { ensureAnyValueType } from "./any-helpers.js";
 import { emitNativeHtmlWrapperHelpers } from "./html-wrapper-native.js";
-import { emitStrSearchHelpers, emitStrTrimHelpers } from "./native-strings-search.js";
-import { emitStrPadRepeatHelpers, emitStrCaseHelpers } from "./native-strings-transform.js";
+import { emitStrSearchHelpers } from "./native-strings-search.js";
+import { emitStrCaseHelpers } from "./native-strings-transform.js";
+import { emitSelfHostedStringHelpers } from "./native-strings-selfhost.js";
 import {
   emitStrReplaceHelpers,
   emitStrSplitHelper,
@@ -220,8 +221,7 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   emitStrCompareHelpers(methodShared);
   emitStrSliceCharHelpers(methodShared);
   emitStrSearchHelpers(methodShared);
-  emitStrTrimHelpers(methodShared);
-  emitStrPadRepeatHelpers(methodShared);
+  emitSelfHostedStringHelpers(methodShared); // #3256 — trim/affix/pad/repeat from TS source (stdlib/strings.ts)
   emitStrCaseHelpers(methodShared);
   emitStrReplaceHelpers(methodShared);
   emitStrSplitHelper(methodShared);
