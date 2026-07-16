@@ -5,6 +5,9 @@ status: done
 completed: 2026-07-16
 assignee: ttraenkler/fable-beta
 sprint: current
+loc-budget-allow:
+  - src/codegen/any-helpers.ts
+  - src/codegen/context/types.ts
 created: 2026-06-10
 updated: 2026-07-16
 priority: critical
