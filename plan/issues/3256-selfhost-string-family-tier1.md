@@ -4,6 +4,7 @@ title: "Self-host stdlib: convert native-strings.ts hand-emitted Instr[] to TS (
 status: done
 assignee: ttraenkler/sendev-3256
 completed: 2026-07-16
+pr: 3119
 sprint: current
 priority: high
 horizon: xl
