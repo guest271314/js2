@@ -17,6 +17,7 @@ import {
   readPullRequest,
   readPullRequestForBranch,
   scopePullRequestIssues,
+  scopeSprintIssues,
 } from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
@@ -479,12 +480,13 @@ class MarkdownTracker {
 
   fetchCandidateIssues() {
     const issues = this.allIssues();
-    const sprint = issues[0]?.selected_sprint ?? "latest";
     const candidateStates = this.resumeInProgress
       ? new Set([...this.claimableStates, ...this.activeStates])
       : this.claimableStates;
-    return issues
-      .filter((issue) => String(issue.sprint) === String(sprint))
+    const scopedIssues = scopeSprintIssues(issues, {
+      includeDependencies: Boolean(get(this.config, "tracker.include_dependencies", false)),
+    });
+    return scopedIssues
       .filter((issue) => candidateStates.has(issue.state))
       .filter((issue) => !activeDispatchClaim(issue.id))
       .filter((issue) => !this.isBlocked(issue, issues))

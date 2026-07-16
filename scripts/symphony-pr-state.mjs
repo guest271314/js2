@@ -81,8 +81,7 @@ export function planPullRequestAction(
   return { action: "requeue", failureKey };
 }
 
-export function scopePullRequestIssues(issues, { sprintOnly = false, includeDependencies = false } = {}) {
-  if (!sprintOnly) return issues;
+export function scopeSprintIssues(issues, { includeDependencies = false } = {}) {
   const byId = new Map(issues.map((issue) => [String(issue.id), issue]));
   const selected = issues.filter((issue) => String(issue.sprint) === String(issue.selected_sprint));
   if (!includeDependencies) return selected;
@@ -100,6 +99,11 @@ export function scopePullRequestIssues(issues, { sprintOnly = false, includeDepe
     }
   }
   return issues.filter((issue) => included.has(String(issue.id)));
+}
+
+export function scopePullRequestIssues(issues, { sprintOnly = false, includeDependencies = false } = {}) {
+  if (!sprintOnly) return issues;
+  return scopeSprintIssues(issues, { includeDependencies });
 }
 
 export function readPullRequest({ command = "gh", cwd, number, repository = "", timeoutMs = 30_000 }) {

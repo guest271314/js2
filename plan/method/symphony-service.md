@@ -35,6 +35,12 @@ fresh dispatch and keeps `ready`, `in-progress`, and `in-review` active for
 reconciliation. A published issue is therefore monitored without being picked
 again as fresh work.
 
+By default, candidate dispatch is limited to the selected sprint. A scoped
+workflow can set `tracker.include_dependencies: true` to add only that sprint's
+transitive `depends_on` closure to the candidate pool. Normal state, claim,
+blocking, and priority checks still apply, and unrelated work from another
+sprint remains out of scope.
+
 ## Pull Request Reconciliation
 
 Symphony records the assigned `branch` at dispatch. Workers record
@@ -142,12 +148,15 @@ pnpm run symphony -- --workflow WORKFLOW.porffor.md
 pnpm run symphony -- --workflow WORKFLOW.porffor.md --status --json
 ```
 
-The workflow sets `pull_requests.sprint_only: true` and
-`pull_requests.include_dependencies: true`. Fresh candidate dispatch therefore
-ignores every issue outside `porffor-backend`, while PR reconciliation includes
-only that sprint and its transitive prerequisites. Symphony can repair or
-complete #2953/#2956 so P1/P3 unblock, but it cannot consume unrelated
-`in-progress` or `in-review` work from the broad `current` sprint.
+The workflow sets `tracker.include_dependencies: true`,
+`pull_requests.sprint_only: true`, and
+`pull_requests.include_dependencies: true`. Fresh candidate dispatch and PR
+reconciliation therefore include the Porffor sprint plus its transitive
+prerequisites. Symphony can continue multi-slice #2953/#2956 work until P1/P3
+unblock, but it cannot consume unrelated work from the broad `current` sprint.
+Workers leave a multi-slice prerequisite `in-progress` while unchecked slices
+remain so each merged PR requeues the next slice; only the final PR uses
+`in-review` and closes the issue on merge.
 
 ## Safety Posture
 

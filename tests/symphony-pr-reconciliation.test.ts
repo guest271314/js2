@@ -9,6 +9,7 @@ import {
   readPullRequest,
   readPullRequestForBranch,
   scopePullRequestIssues,
+  scopeSprintIssues,
 } from "../scripts/symphony-pr-state.mjs";
 
 describe("Symphony pull-request reconciliation", () => {
@@ -80,6 +81,8 @@ describe("Symphony pull-request reconciliation", () => {
       scopePullRequestIssues(issues, { sprintOnly: true, includeDependencies: true }).map((issue) => issue.id),
     ).toEqual([1, 3, 4]);
     expect(scopePullRequestIssues(issues).map((issue) => issue.id)).toEqual([1, 2, 3, 4]);
+    expect(scopeSprintIssues(issues).map((issue) => issue.id)).toEqual([1]);
+    expect(scopeSprintIssues(issues, { includeDependencies: true }).map((issue) => issue.id)).toEqual([1, 3, 4]);
   });
 
   it("requeues one failed head once and closes merged work", () => {
@@ -167,12 +170,14 @@ esac
     ).toMatchObject({ number: 100, status: "pending", headBranch: "agent/100" });
   });
 
-  it("persists one repair per failed SHA, continues a merged slice, and marks the final merge done", () => {
+  it("continues an external dependency after merge and unblocks only its sprint root", () => {
     tempDir = mkdtempSync(join(tmpdir(), "symphony-reconcile-"));
     const issuesDir = join(tempDir, "issues");
     const workspaceRoot = join(tempDir, "workspaces");
     const loggingRoot = join(tempDir, "logs");
     const issueFile = join(issuesDir, "9001-pr-retry.md");
+    const sprintIssueFile = join(issuesDir, "9002-sprint-root.md");
+    const unrelatedIssueFile = join(issuesDir, "9003-unrelated.md");
     const workflow = join(tempDir, "WORKFLOW.md");
     const fakeGh = join(tempDir, "gh");
     const fakeAgent = join(tempDir, "agent");
@@ -186,10 +191,33 @@ esac
 id: 9001
 title: "PR retry probe"
 status: in-review
-sprint: probe
+sprint: foundation
 branch: agent/9001
 ---
 # PR retry probe
+`,
+    );
+    writeFileSync(
+      sprintIssueFile,
+      `---
+id: 9002
+title: "Sprint root"
+status: ready
+sprint: probe
+depends_on: [9001]
+---
+# Sprint root
+`,
+    );
+    writeFileSync(
+      unrelatedIssueFile,
+      `---
+id: 9003
+title: "Unrelated current work"
+status: ready
+sprint: current
+---
+# Unrelated current work
 `,
     );
     writeFileSync(
@@ -203,6 +231,7 @@ tracker:
   claimable_states: [ready]
   claim_state: in-progress
   terminal_states: [done, wont-fix]
+  include_dependencies: true
 polling:
   interval_ms: 10
 pull_requests:
@@ -241,7 +270,7 @@ else
 fi
 `,
     );
-    writeFileSync(fakeAgent, `#!/bin/sh\nprintf 'run\\n' >> "$AGENT_MARKER"\ncat >/dev/null\n`);
+    writeFileSync(fakeAgent, `#!/bin/sh\nprintf '%s\\n' "$SYMPHONY_ISSUE_ID" >> "$AGENT_MARKER"\ncat >/dev/null\n`);
     chmodSync(fakeGh, 0o755);
     chmodSync(fakeAgent, 0o755);
 
@@ -267,10 +296,10 @@ fi
     expect(failedIssue).toContain("pr: 99");
     expect(failedIssue).toContain("last_ci_retry_head: failed-sha");
     expect(failedIssue).toContain("branch: agent/9001");
-    expect(readFileSync(marker, "utf8")).toBe("run\n");
+    expect(readFileSync(marker, "utf8")).toBe("9001\n");
 
     runSymphony();
-    expect(readFileSync(marker, "utf8")).toBe("run\n");
+    expect(readFileSync(marker, "utf8")).toBe("9001\n");
 
     writeFileSync(
       response,
@@ -289,7 +318,7 @@ fi
     expect(continuedIssue).toContain("pr: null");
     expect(continuedIssue).toContain("last_ci_retry_head: null");
     expect(continuedIssue).toContain("last_merged_pr: 99");
-    expect(readFileSync(marker, "utf8")).toBe("run\nrun\n");
+    expect(readFileSync(marker, "utf8")).toBe("9001\n9001\n");
 
     writeFileSync(
       issueFile,
@@ -310,6 +339,7 @@ fi
     const mergedIssue = readFileSync(issueFile, "utf8");
     expect(mergedIssue).toContain("status: done");
     expect(mergedIssue).toContain("completed: 2026-07-16");
-    expect(readFileSync(marker, "utf8")).toBe("run\nrun\n");
+    expect(readFileSync(marker, "utf8")).toBe("9001\n9001\n9002\n");
+    expect(readFileSync(unrelatedIssueFile, "utf8")).toContain("status: ready");
   });
 });
