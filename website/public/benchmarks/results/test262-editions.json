@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11626,
-    "fail": 3625,
+    "pass": 11627,
+    "fail": 3624,
     "ce": 134,
     "skip": 1,
     "total": 15386,
@@ -1462,8 +1462,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 897,
-    "fail": 963,
+    "pass": 898,
+    "fail": 962,
     "ce": 18,
     "skip": 18,
     "total": 1896,
@@ -1615,12 +1615,12 @@
       },
       {
         "name": "optional-chaining",
-        "pass": 26,
-        "fail": 12,
+        "pass": 27,
+        "fail": 11,
         "ce": 6,
         "skip": 0,
         "total": 44,
-        "pct": 59
+        "pct": 61
       },
       {
         "name": "async-iteration",
