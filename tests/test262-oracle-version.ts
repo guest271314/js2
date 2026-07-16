@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 3;
+export const ORACLE_VERSION = 4;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -71,5 +71,13 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "function'. LABEL-ONLY: zero pass/fail flips (net_per_test 0). The " +
       "regression-gate bucket diff is label-noise; landed with ORACLE_REBASE so " +
       "the guards treat the cross-policy relabel as a re-baseline.",
+  },
+  {
+    version: 4,
+    note:
+      "#2961 standalone host-import honesty. A standalone binary that requests " +
+      "imports is rejected before the Test262 harness can satisfy those imports; " +
+      "legacy leaky-pass rows are reclassified as compile_error. Standalone pass " +
+      "now has one definition: the emitted binary is host-free and passes.",
   },
 ];

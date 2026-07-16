@@ -1302,6 +1302,20 @@ process.on("message", async (msg) => {
     return;
   }
 
+  // Standalone verdicts must describe binaries that can actually run without
+  // the JS harness. Do not satisfy leaked imports through buildImports and then
+  // report the resulting execution as a pass.
+  if (target === "standalone" && compileMetadata.imports?.length > 0) {
+    sendResult({
+      id,
+      status: "compile_error",
+      error: `standalone target emitted host imports: ${compileMetadata.imports.join(", ")} (#2961)`,
+      compileMs,
+      ...compileMetadata,
+    });
+    return;
+  }
+
   const execStart = performance.now();
   let instance;
   try {
