@@ -3533,6 +3533,26 @@ export interface TestResult {
   hardErrorKind?: "malformed_wasm" | "missing_test_export";
 }
 
+/**
+ * A standalone Test262 verdict may never depend on imports supplied by the JS
+ * harness. Returning a diagnostic here lets every runner path reject the
+ * binary before `buildImports` can turn it into a host-satisfied pseudo-pass.
+ */
+export function standaloneHostImportError(target: string | undefined, imports: readonly unknown[] | undefined) {
+  if (target !== "standalone" || !Array.isArray(imports) || imports.length === 0) return undefined;
+
+  const names = imports.map((value) => {
+    if (typeof value === "string") return value;
+    if (!value || typeof value !== "object") return String(value);
+    const desc = value as Record<string, unknown>;
+    const moduleName = desc.module ?? desc.moduleName ?? desc.module_name ?? "env";
+    const name = desc.name ?? desc.field ?? desc.fieldName ?? desc.importName ?? "unknown";
+    return `${String(moduleName)}::${String(name)}`;
+  });
+
+  return `standalone target emitted host imports: ${[...new Set(names)].sort().join(", ")} (#2961)`;
+}
+
 /** Default per-test timeout in milliseconds (prevents infinite-loop hangs) */
 const TEST_TIMEOUT_MS = 15000;
 
@@ -3979,9 +3999,8 @@ export async function runTest262File(
   timeoutMs = TEST_TIMEOUT_MS,
   // (#2095) Optional compile target so the baseline validator can exercise the
   // STANDALONE lane, not just the default JS-host (gc) lane. `undefined` keeps
-  // the historical host-mode behaviour. The instantiation path below is
-  // mode-agnostic — `buildImports` produces an empty import object for a
-  // standalone binary — so only the `compile()` target needs to change.
+  // the historical host-mode behaviour. Before instantiation the standalone
+  // path rejects any non-empty import manifest, matching the sharded worker.
   target?: "standalone",
 ): Promise<TestResult> {
   const totalStart = performance.now();
@@ -4217,6 +4236,24 @@ export async function runTest262File(
       file: relPath,
       category,
       status: "pass",
+      timing: {
+        totalMs: round2(totalMs),
+        compileMs: round2(compileMs),
+        instantiateMs: 0,
+        executeMs: 0,
+      },
+      wasm_sha,
+    };
+  }
+
+  const standaloneImportError = standaloneHostImportError(target, result.imports);
+  if (standaloneImportError) {
+    const totalMs = performance.now() - totalStart;
+    return {
+      file: relPath,
+      category,
+      status: "compile_error",
+      error: standaloneImportError,
       timing: {
         totalMs: round2(totalMs),
         compileMs: round2(compileMs),
@@ -4545,6 +4582,8 @@ function round2(n: number): number {
  *                     ("No dependency provided for …") — NOT invalid-Wasm
  *   missing_builtin — (#3187) an unimplemented builtin / runtime feature
  *                     ("… is not a function") — NOT invalid-Wasm
+ *   host_import_leak — standalone output requested imports that only the JS
+ *                     harness could satisfy; the binary is never executed
  *   harness_shape   — (#3187) module compiled but exposes no `test` export
  *                     ("no test export") — NOT invalid-Wasm
  *   negative_test_fail — Negative test that should have failed but passed
@@ -4559,6 +4598,7 @@ function round2(n: number): number {
  */
 export function classifyError(errorMsg: string | undefined): string | undefined {
   if (!errorMsg) return undefined;
+  if (/standalone target emitted host imports/i.test(errorMsg)) return "host_import_leak";
 
   // (#3285) Wrapper return-code protocol FIRST — before the trap patterns. A
   // message beginning with "returned <N>" is by construction the synthetic
