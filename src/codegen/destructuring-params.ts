@@ -17,6 +17,8 @@ import {
   ensureStructForType,
   resolveWasmType,
 } from "./index.js";
+import { isUndefWidenedBindingElement, resolveBindingElementType } from "../checker/type-mapper.js";
+import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { compileObjectLiteralAsExternref } from "./literals.js";
@@ -411,7 +413,14 @@ export function emitObjectPatternRestFromVec(
   }
 }
 
-function boxToExternref(ctx: CodegenContext, elemKey: string, srcElemType?: ValType): Instr[] {
+function boxToExternref(
+  ctx: CodegenContext,
+  elemKey: string,
+  srcElemType?: ValType,
+  // (#3315) When provided, the f64 arm emits the UNDEF_F64-sentinel →
+  // undefined map (needs a scratch local).
+  fctx?: FunctionContext,
+): Instr[] {
   // (#2669) When the backing array ALREADY stores externref elements, the value
   // produced by `array.get` is already an externref and needs no conversion.
   // The vec-type-map key alone is misleading here: a `ref_*` keyed vec (a vec of
@@ -453,6 +462,44 @@ function boxToExternref(ctx: CodegenContext, elemKey: string, srcElemType?: ValT
     addUnionImports(ctx);
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx !== undefined) {
+      // (#3315) Sentinel-aware box: an f64-vec element can carry the
+      // UNDEF_F64_BITS signaling-NaN sentinel for `undefined`
+      // (`[7, undefined, ]` — see the #1024 note in literals.ts). A raw
+      // `__box_number` turns it into a boxed NUMBER carrying NaN, so the
+      // destructured binding loses undefined identity (inline
+      // `y === undefined` still passes via the #2979 $BoxedNumber-sentinel
+      // observer arm, but the generic any-`===` classifies it a number —
+      // `assert_sameValue(y, undefined)` reads false). Map the sentinel to
+      // the real `undefined` (standalone singleton / host `__get_undefined`)
+      // before boxing. funcMap-lookup only for the host getter (this site is
+      // late-shift-fragile — see the #1890 notes below); when neither is
+      // available, keep the pre-fix plain box.
+      if (fctx) {
+        const undefInstrs: Instr[] | undefined =
+          undefinedExternInstrs(ctx) ??
+          (() => {
+            const gu = ctx.funcMap.get("__get_undefined");
+            return gu !== undefined ? [{ op: "call", funcIdx: gu } as Instr] : undefined;
+          })();
+        if (undefInstrs !== undefined) {
+          const tmp = allocLocal(fctx, `__f64_sent_${fctx.locals.length}`, { kind: "f64" });
+          return [
+            { op: "local.tee", index: tmp },
+            { op: "i64.reinterpret_f64" },
+            { op: "i64.const", value: UNDEF_F64_BITS },
+            { op: "i64.eq" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: undefInstrs.map((instr) => ({ ...instr })),
+              else: [
+                { op: "local.get", index: tmp },
+                { op: "call", funcIdx: boxIdx },
+              ],
+            },
+          ];
+        }
+      }
       return [{ op: "call", funcIdx: boxIdx }];
     }
     // Fallback: drop and push null
@@ -1115,7 +1162,19 @@ export function destructureParamObject(
         const name = element.name.text;
         if (!fctx.localMap.has(name)) {
           const elemType = ctx.checker.getTypeAtLocation(element);
-          allocLocal(fctx, name, resolveWasmType(ctx, elemType));
+          // (#3315) Route through resolveBindingElementType (NOT bare
+          // resolveWasmType) so parameter array-pattern elements without a
+          // default get the undefined-preserving externref rep — keeping the
+          // local's type consistent regardless of which allocation site runs
+          // first (ensureBindingLocals applies the same rule).
+          allocLocal(
+            fctx,
+            name,
+            resolveBindingElementType(element as ts.BindingElement, elemType, (t) => resolveWasmType(ctx, t)),
+          );
+          if (isUndefWidenedBindingElement(element as ts.BindingElement, resolveWasmType(ctx, elemType))) {
+            (fctx.undefWidenedLocals ??= new Set()).add(name);
+          }
         }
       }
     }
@@ -1135,7 +1194,19 @@ export function destructureParamObject(
         const name = element.name.text;
         if (!fctx.localMap.has(name)) {
           const elemType = ctx.checker.getTypeAtLocation(element);
-          allocLocal(fctx, name, resolveWasmType(ctx, elemType));
+          // (#3315) Route through resolveBindingElementType (NOT bare
+          // resolveWasmType) so parameter array-pattern elements without a
+          // default get the undefined-preserving externref rep — keeping the
+          // local's type consistent regardless of which allocation site runs
+          // first (ensureBindingLocals applies the same rule).
+          allocLocal(
+            fctx,
+            name,
+            resolveBindingElementType(element as ts.BindingElement, elemType, (t) => resolveWasmType(ctx, t)),
+          );
+          if (isUndefWidenedBindingElement(element as ts.BindingElement, resolveWasmType(ctx, elemType))) {
+            (fctx.undefWidenedLocals ??= new Set()).add(name);
+          }
         }
       }
     }
@@ -1594,7 +1665,7 @@ export function destructureParamArray(
                     typeIdx: srcArrTypeIdx,
                   },
                   // Box primitive types before storing as externref
-                  ...boxToExternref(ctx, key, srcElemType),
+                  ...boxToExternref(ctx, key, srcElemType, fctx),
                   { op: "array.set", typeIdx: extArrTypeIdx },
                   // idx++
                   { op: "local.get", index: idxTmp },
@@ -1762,7 +1833,19 @@ export function destructureParamArray(
         const name = ((element as ts.BindingElement).name as ts.Identifier).text;
         if (!fctx.localMap.has(name)) {
           const elemType = ctx.checker.getTypeAtLocation(element);
-          allocLocal(fctx, name, resolveWasmType(ctx, elemType));
+          // (#3315) Route through resolveBindingElementType (NOT bare
+          // resolveWasmType) so parameter array-pattern elements without a
+          // default get the undefined-preserving externref rep — keeping the
+          // local's type consistent regardless of which allocation site runs
+          // first (ensureBindingLocals applies the same rule).
+          allocLocal(
+            fctx,
+            name,
+            resolveBindingElementType(element as ts.BindingElement, elemType, (t) => resolveWasmType(ctx, t)),
+          );
+          if (isUndefWidenedBindingElement(element as ts.BindingElement, resolveWasmType(ctx, elemType))) {
+            (fctx.undefWidenedLocals ??= new Set()).add(name);
+          }
         }
       }
     }
@@ -1955,7 +2038,19 @@ export function destructureParamArray(
         const name = ((element as ts.BindingElement).name as ts.Identifier).text;
         if (!fctx.localMap.has(name)) {
           const elemType = ctx.checker.getTypeAtLocation(element);
-          allocLocal(fctx, name, resolveWasmType(ctx, elemType));
+          // (#3315) Route through resolveBindingElementType (NOT bare
+          // resolveWasmType) so parameter array-pattern elements without a
+          // default get the undefined-preserving externref rep — keeping the
+          // local's type consistent regardless of which allocation site runs
+          // first (ensureBindingLocals applies the same rule).
+          allocLocal(
+            fctx,
+            name,
+            resolveBindingElementType(element as ts.BindingElement, elemType, (t) => resolveWasmType(ctx, t)),
+          );
+          if (isUndefWidenedBindingElement(element as ts.BindingElement, resolveWasmType(ctx, elemType))) {
+            (fctx.undefWidenedLocals ??= new Set()).add(name);
+          }
         }
       }
     }

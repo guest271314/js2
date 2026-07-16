@@ -590,6 +590,16 @@ export interface FunctionContext {
   readsCurrentThis?: boolean;
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
+  /**
+   * (#3315) Parameter array-pattern bindings widened from a scalar checker
+   * type (f64) to an undefined-preserving externref local — see
+   * `resolveBindingElementType`. Identifier reads of these names must NOT
+   * apply the checker-type unbox narrowing (the checker type is the pattern
+   * default's fiction; unboxing would degrade a runtime `undefined` to NaN
+   * before any `=== undefined` / `typeof` observation). Reads return the raw
+   * externref; numeric consumers coerce per ToNumber at their own use site.
+   */
+  undefWidenedLocals?: Set<string>;
   /** Const boolean aliases for null guards, e.g. `const ok = x !== null`. */
   nullGuardAliases?: Map<string, NullGuardFact>;
   /** Variables narrowed through a const boolean null-guard alias in the active branch. */

@@ -651,7 +651,13 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
 
     // Narrowing: if the declared type is externref (boxed union) but the
     // checker narrows it to a concrete type, emit an unbox call.
-    if (declaredType.kind === "externref") {
+    // (#3315) EXCEPT for undefined-widened parameter-destructured bindings:
+    // their checker type is the pattern default's fiction (`number` for
+    // `{ w: [x, y, z] = [4, 5, 6] }`), and unboxing here would degrade a
+    // runtime `undefined` to NaN before `=== undefined` / any-param uses can
+    // observe it. Return the raw externref; numeric consumers coerce at
+    // their own use site (ToNumber(undefined) = NaN matches JS).
+    if (declaredType.kind === "externref" && !fctx.undefWidenedLocals?.has(name)) {
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;

@@ -8,7 +8,7 @@
 
 import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir/types.js";
 import { coercionPlan } from "./coercion-plan.js";
-import { boxToAny } from "./value-tags.js";
+import { boxToAny, UNDEF_F64_BITS } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
@@ -1922,6 +1922,47 @@ export function coerceType(
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__box_number");
     if (funcIdx !== undefined) {
+      // (#3315) Undefined-sentinel-aware boxing. An f64 carrier can hold the
+      // UNDEF_F64_BITS signaling-NaN sentinel (value-tags.ts) — e.g. an
+      // `undefined` element inside an f64-lowered array literal
+      // (`[7, undefined, ]`), an OOB destructure read, or a missing optional
+      // arg. Boxing the raw bits through `__box_number` degrades that
+      // `undefined` to a plain NaN NUMBER — undefined identity is lost and
+      // `y === undefined` / `assert_sameValue(y, undefined)` read false (the
+      // #3315 corruption). The standalone any-box already recovers exactly
+      // this sentinel to the tag-1 undefined singleton (any-helpers.ts
+      // "$BoxedNumber carrying the UNDEF_F64 sentinel" arm); this wires the
+      // SAME observer into the generic box so both lanes agree. JS arithmetic
+      // only produces the quiet NaN 0x7FF8…, never this signaling pattern, so
+      // genuine computed NaNs still box as numbers.
+      const singletonUndef = undefinedExternInstrs(ctx);
+      const getUndefIdx =
+        singletonUndef !== undefined
+          ? undefined
+          : ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
+      const undefInstrs: Instr[] | undefined =
+        singletonUndef ?? (getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx }] : undefined);
+      if (undefInstrs !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        // Re-resolve the box target AFTER the potential late-import shift.
+        const boxIdx = ctx.funcMap.get("__box_number") ?? funcIdx;
+        const tmp = allocTempLocal(fctx, { kind: "f64" });
+        fctx.body.push({ op: "local.tee", index: tmp });
+        fctx.body.push({ op: "i64.reinterpret_f64" });
+        fctx.body.push({ op: "i64.const", value: UNDEF_F64_BITS });
+        fctx.body.push({ op: "i64.eq" });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: undefInstrs,
+          else: [
+            { op: "local.get", index: tmp },
+            { op: "call", funcIdx: boxIdx },
+          ],
+        });
+        releaseTempLocal(fctx, tmp);
+        return;
+      }
       fctx.body.push({ op: "call", funcIdx });
       return;
     }
