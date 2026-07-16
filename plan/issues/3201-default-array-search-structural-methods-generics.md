@@ -18,14 +18,13 @@ umbrella: 3185
 related: [3185, 3169, 3180, 2036]
 # expando-method slice (fable-b): unknown-method host delegation lives in the
 # receiver-method ladder + the shared #3123 emitter; the vec host view's
-# sidecar traps live in runtime.ts.
+# sidecar traps live in runtime.ts. NOTE: keep this a block list — the
+# gate's parseFrontmatterList does not read multi-line flow arrays.
 loc-budget-allow:
-  [
-    src/codegen/array-methods.ts,
-    src/codegen/expressions/call-receiver-method.ts,
-    src/codegen/expressions/calls.ts,
-    src/runtime.ts,
-  ]
+  - src/codegen/array-methods.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/calls.ts
+  - src/runtime.ts
 origin: "2026-07-12 Fable codebase audit §F2; method-family slice of #3185"
 ---
 
