@@ -65,8 +65,8 @@
       "skip": 0
     },
     "ES2015": {
-      "pass": 75,
-      "fail": 36,
+      "pass": 69,
+      "fail": 42,
       "ce": 0,
       "skip": 0
     },
@@ -219,8 +219,8 @@
   },
   "built-ins/Object": {
     "ES5": {
-      "pass": 2262,
-      "fail": 570,
+      "pass": 2261,
+      "fail": 571,
       "ce": 0,
       "skip": 0
     },
@@ -1123,18 +1123,18 @@
       "skip": 0
     }
   },
-  "built-ins/Uint8Array": {
-    "ES2015": {
-      "pass": 26,
-      "fail": 42,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/decodeURIComponent": {
     "ES2015": {
       "pass": 53,
       "fail": 3,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/Uint8Array": {
+    "ES2015": {
+      "pass": 26,
+      "fail": 42,
       "ce": 0,
       "skip": 0
     }
@@ -1305,14 +1305,6 @@
       "skip": 0
     }
   },
-  "built-ins/encodeURIComponent": {
-    "ES2015": {
-      "pass": 29,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "language/computed-property-names": {
     "ES5": {
       "pass": 2,
@@ -1327,9 +1319,9 @@
       "skip": 0
     }
   },
-  "built-ins/decodeURI": {
+  "built-ins/encodeURIComponent": {
     "ES2015": {
-      "pass": 53,
+      "pass": 29,
       "fail": 2,
       "ce": 0,
       "skip": 0
@@ -1353,6 +1345,14 @@
     "ES2015": {
       "pass": 1,
       "fail": 0,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/decodeURI": {
+    "ES2015": {
+      "pass": 53,
+      "fail": 2,
       "ce": 0,
       "skip": 0
     }
@@ -1511,6 +1511,26 @@
       "skip": 0
     }
   },
+  "language/white-space": {
+    "ES5": {
+      "pass": 40,
+      "fail": 0,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 25,
+      "fail": 0,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2016": {
+      "pass": 2,
+      "fail": 0,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "language/comments": {
     "ES5": {
       "pass": 16,
@@ -1542,26 +1562,6 @@
       "pass": 33,
       "fail": 0,
       "ce": 8,
-      "skip": 0
-    }
-  },
-  "language/white-space": {
-    "ES5": {
-      "pass": 40,
-      "fail": 0,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 25,
-      "fail": 0,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2016": {
-      "pass": 2,
-      "fail": 0,
-      "ce": 0,
       "skip": 0
     }
   },
@@ -1731,18 +1731,18 @@
       "skip": 0
     }
   },
-  "built-ins/MapIteratorPrototype": {
-    "ES2015": {
-      "pass": 11,
-      "fail": 0,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/ThrowTypeError": {
     "ES2015": {
       "pass": 6,
       "fail": 8,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/MapIteratorPrototype": {
+    "ES2015": {
+      "pass": 11,
+      "fail": 0,
       "ce": 0,
       "skip": 0
     }
