@@ -66,6 +66,7 @@ import { lowerFunctionAstToIr, type IrFromAstResolver } from "../ir/from-ast.js"
 import { irVal, type IrFunction, type IrType } from "../ir/nodes.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { ensureNativeCharCodeAtHelper, NATIVE_CHARCODEAT_FN } from "./char-code-at-helpers.js";
+import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "./vec-elem-set.js";
 import { constantFold } from "../ir/passes/constant-fold.js";
 import { deadCode } from "../ir/passes/dead-code.js";
 import { simplifyCFG } from "../ir/passes/simplify-cfg.js";
@@ -359,6 +360,21 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
   };
   const resolver: IrLowerResolver = {
     resolveFunc(ref) {
+      // (#3257 Tier-2) `__vec_elem_set_<vecTypeIdx>` — element-store helper
+      // with full legacy grow semantics, materialized on demand (mirrors
+      // integration.ts's arm: append-only defined function, never an import,
+      // idempotent via funcMap). NOTE for stdlib authors: the helper's real
+      // ABI takes an i32 index — a TS-source caller must declare that exact
+      // sig in calleeTypes and produce an i32 arg (e.g. a comparison result);
+      // f64 index arithmetic needs an `__arri_*`-style f64-ABI wrapper.
+      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`stdlib-selfhost: ${name} cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return helperIdx;
+      }
       // (#3256) Guarded native charCodeAt — materialized on demand, same
       // append-only defined-function discipline as integration.ts's arm
       // (never an import, no existing funcIdx shifts; idempotent via funcMap).
