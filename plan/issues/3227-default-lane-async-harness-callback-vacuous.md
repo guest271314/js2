@@ -27,17 +27,17 @@ regressions-allow:
 The `#2940` vacuous-pass detector ("harness-wrapper callback never executed —
 no assertion ran") fires **1,690 times in the DEFAULT (JS-host) lane**, making
 it the single largest cited pattern in that lane's failing set. These were
-previously *dishonest* passes (the test compiled + ran to completion but its
+previously _dishonest_ passes (the test compiled + ran to completion but its
 assertion-bearing callback never executed, so nothing was actually checked);
 the detector now honestly reclassifies them to `fail`.
 
 This is **distinct from #3074** (done 2026-07-08), which cleared the
-*TypedArray* harness-wrapper vacuous cluster (`testWithTypedArrayConstructors`)
+_TypedArray_ harness-wrapper vacuous cluster (`testWithTypedArrayConstructors`)
 — that family is now gone from the top buckets. What remains, and what this
 issue tracks, is the **async-completion** harness family (`.then` continuations
 / `$DONE` / for-await-of bodies). It is also distinct from the standalone
 host-independence work in **#2903 / #2940** — that tracks removing the
-`env::__make_callback` host *import* in `--target standalone`. Here the host import **is available**, yet
+`env::__make_callback` host _import_ in `--target standalone`. Here the host import **is available**, yet
 the async-completion callback still never runs. That points to a genuine
 dropped-async-continuation correctness bug in the JS-host lane, not a
 host-leak/representation problem. No existing issue tracks the default-lane
@@ -45,17 +45,18 @@ side of this.
 
 ## Distribution (top feature buckets, default lane, 1,690 total)
 
-| Count | Feature area |
-|-------|--------------|
-| 383 | `language/statements/for-await-of` |
-| 234 | `language/expressions/dynamic-import` |
-| 168 | `annexB/language/eval-code` |
-| 180 | `language/{statements,expressions}/class` (async methods) |
-| 218 | `built-ins/Promise/{any,race,all,allSettled,prototype}` |
-| 46  | `language/expressions/async-function`, `async-generator` |
-| …   | remainder across Temporal ZonedDateTime/Instant async harness, direct eval |
+| Count | Feature area                                                               |
+| ----- | -------------------------------------------------------------------------- |
+| 383   | `language/statements/for-await-of`                                         |
+| 234   | `language/expressions/dynamic-import`                                      |
+| 168   | `annexB/language/eval-code`                                                |
+| 180   | `language/{statements,expressions}/class` (async methods)                  |
+| 218   | `built-ins/Promise/{any,race,all,allSettled,prototype}`                    |
+| 46    | `language/expressions/async-function`, `async-generator`                   |
+| …     | remainder across Temporal ZonedDateTime/Instant async harness, direct eval |
 
 Sample files:
+
 - `language/expressions/dynamic-import/namespace/promise-then-ns-set-prototype-of.js`
 - `language/expressions/async-function/nameless-dflt-params-ref-later.js`
 - `language/expressions/async-generator/dstr/ary-ptrn-elem-id-iter-complete.js`
@@ -68,9 +69,9 @@ only invokes once a promise settles (the `$DONE` / `asyncTest` /
 `.then(assertions)` pattern). The dominant buckets — `for-await-of`,
 `dynamic-import` `.then` continuations, and the `Promise` combinators — all
 depend on a microtask-scheduled callback firing. The callback body compiling
-but never being *invoked* is the same failure family flagged in #2903's TL;DR
+but never being _invoked_ is the same failure family flagged in #2903's TL;DR
 ("host-backed builtin methods: Promise.then/.catch, Iterator helpers"), but
-manifesting as a *dropped continuation* in the default lane rather than a host
+manifesting as a _dropped continuation_ in the default lane rather than a host
 leak. Likely candidates: the async continuation / microtask scheduling path
 (`async-scheduler.ts`) not driving the queued `.then` callback for these
 harness shapes, or the dynamic-dispatch arity/type tolerance from **#2939**
@@ -96,7 +97,7 @@ harness shapes, or the dynamic-dispatch arity/type tolerance from **#2939**
   targets the JS-host continuation path.
 - **Not** covered by #3086 (honest-vacuity oracle scorer / rebaseline,
   in-progress) or #3001 (remove #2940 reclassification excusal, blocked) — those
-  are detector/oracle *infrastructure*; #3227 is the underlying *feature* fix
+  are detector/oracle _infrastructure_; #3227 is the underlying _feature_ fix
   (make the async continuation actually run).
 
 ## Root cause — VERIFIED (2026-07-16, fable-3, slice 1)
@@ -110,14 +111,14 @@ continuations are NOT dropped. Two verified mechanisms:
    JS-host lane, `.then`/await continuations are scheduled on the HOST
    microtask queue, which structurally cannot drain while `test()` is still on
    the Wasm→JS stack. `__drain_microtasks()` is a deliberate no-op on this
-   lane (#2895 PATH B). So the callbacks run — *immediately after `test()`
-   returns* — but the verdict was already read: `__assert_count === 1` → -262
+   lane (#2895 PATH B). So the callbacks run — _immediately after `test()`
+   returns_ — but the verdict was already read: `__assert_count === 1` → -262
    → "vacuous". Empirically verified: `Promise.resolve(42).then(v => count =
-   v)` shows count=0 sync, count=42 one macrotask later.
+v)` shows count=0 sync, count=42 one macrotask later.
 
 2. **`await <host promise>` yields NaN, synchronously (value corruption).**
-   `const v = await Promise.resolve(7); count = v` sets count=NaN *before
-   test() returns* — the continuation runs eagerly with a garbage value
+   `const v = await Promise.resolve(7); count = v` sets count=NaN _before
+   test() returns_ — the continuation runs eagerly with a garbage value
    (externref→f64 read of the promise, not its settled value). `await 7`
    (non-promise) is fine. This is a separate compiler bug (slice 2) and is
    the root of most honest-fail flips below (`v.value` NaN, `done` wrong).
@@ -154,12 +155,12 @@ continuations are NOT dropped. Two verified mechanisms:
 
 ## S1 measured delta (sampled, for merge_group park-diagnosis)
 
-| Population                                | n sampled | Flip                                    | Extrapolated |
-| ----------------------------------------- | --------- | --------------------------------------- | ------------ |
-| 1,680 vacuous-callback records            | 60        | → honest **pass**                        | **+~420**    |
-| 1,680 vacuous-callback records            | 60        | → honest fail (already `fail` today)     | ~1,040 (no pass-count change; now carry real assert indices) |
-| 1,680 vacuous-callback records            | 60        | stay vacuous (S4 residual)               | ~140         |
-| 3,503 currently-passing async-flagged     | 80        | → honest **fail** (post-await asserts finally run) | **−~875** (CI 525–1,225) |
+| Population                            | n sampled | Flip                                               | Extrapolated                                                 |
+| ------------------------------------- | --------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| 1,680 vacuous-callback records        | 60        | → honest **pass**                                  | **+~420**                                                    |
+| 1,680 vacuous-callback records        | 60        | → honest fail (already `fail` today)               | ~1,040 (no pass-count change; now carry real assert indices) |
+| 1,680 vacuous-callback records        | 60        | stay vacuous (S4 residual)                         | ~140                                                         |
+| 3,503 currently-passing async-flagged | 80        | → honest **fail** (post-await asserts finally run) | **−~875** (CI 525–1,225)                                     |
 
 Net raw pass ≈ **−455** (intentional honesty regression, lead-approved
 2026-07-16, precedent #3086). The −875 clusters are the S2/S3 work
