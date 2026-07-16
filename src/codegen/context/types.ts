@@ -93,8 +93,9 @@ export interface CodegenOptions {
    * see plan/issues/2141-tag5-abi-untangle-honest-boxing.md.
    */
   honestAnyBoxing?: boolean;
-  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — see the
-   *  `CompileOptions.tag5ValueEqClassifier` doc. Default false (legacy). */
+  /** (#2141 S2/S3, #2626, #2040 A1) Tag-5 boxed-VALUE equality classifier —
+   *  see the `CompileOptions.tag5ValueEqClassifier` doc. Default TRUE
+   *  (#2040 flip); `JS2WASM_TAG5_CLASSIFIER=0` forces the legacy regime. */
   tag5ValueEqClassifier?: boolean;
   /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime — see the
    *  `CompileOptions.undefinedSingleton` doc. Default TRUE (#2106 flip);
@@ -2326,11 +2327,12 @@ export interface CodegenContext {
    *  `CodegenOptions.honestAnyBoxing` doc. Default false (legacy tag-5
    *  box-the-externref ABI, byte-identical). */
   honestAnyBoxing: boolean;
-  /** (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — three-way
-   *  true-class dispatch in the both-tags-5 eq arm (numeric `f64.eq` /
-   *  string content / object `ref.eq`). Default false (legacy `0` for
-   *  non-string tag-5 pairs). `JS2WASM_TAG5_CLASSIFIER=1` env defaults it on
-   *  for runner-level A/B. */
+  /** (#2141 S2/S3, #2626, #2040 A1) Tag-5 boxed-VALUE equality classifier —
+   *  three-way true-class dispatch in the both-tags-5 eq arm (numeric
+   *  `f64.eq` / string content / object `ref.eq`). Default TRUE since the
+   *  #2040 A1 flip (unblocked by the #3032 lazy-generator waves); the emit
+   *  site stays standalone/wasi-gated so host mode is byte-identical.
+   *  `JS2WASM_TAG5_CLASSIFIER=0` forces the legacy always-`0` arm. */
   tag5ValueEqClassifier: boolean;
   /** (#2106 S1) Standalone `$undefined` tag-1 singleton regime flag — see the
    *  `CompileOptions.undefinedSingleton` doc. Default TRUE (#2106 flip);

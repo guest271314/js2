@@ -263,9 +263,17 @@ export function createCodegenContext(
     // (#2141 S1) Honest generic any-boxing regime — default OFF (legacy tag-5
     // box-the-externref ABI, byte-identical modules). Flips in S4.
     honestAnyBoxing: options?.honestAnyBoxing ?? false,
-    // (#2141 S2/S3, #2626) tag-5 boxed-VALUE eq classifier — default OFF
-    // (legacy); JS2WASM_TAG5_CLASSIFIER=1 env defaults it on for runner A/B.
-    tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER === "1",
+    // (#2141 S2/S3, #2626, #2040 A1 default-flip) tag-5 boxed-VALUE eq
+    // classifier — default ON. The #3032 lazy-generator waves (W3 TDZ
+    // threading, #3302 capturing expressions, W4 method generators) removed
+    // the eager-buffer vacuity that made the classifier's honest answers
+    // unmask latent dstr failures (the 2026-06-22 −162 merge_group eject).
+    // A/B-validated 2026-07-16: 0 flips across the eject canaries, the dstr
+    // notSameValue family, the equality/search blast radius, and an
+    // every-97th cross-tree control (see #2040). The emit site remains
+    // standalone/wasi-gated (any-helpers.ts) — host lane byte-identical.
+    // Set JS2WASM_TAG5_CLASSIFIER=0 to force the legacy always-false arm.
+    tag5ValueEqClassifier: options?.tag5ValueEqClassifier ?? process.env.JS2WASM_TAG5_CLASSIFIER !== "0",
     // (#2106 S1 default-flip) standalone $undefined tag-1 singleton regime —
     // default ON. The complete lockstep producer+consumer sweep landed behind
     // this flag in PR #2633; this flip makes the singleton the default
