@@ -1,13 +1,14 @@
 ---
 id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
-status: in-review
+status: done
+completed: 2026-07-16
 assignee: ttraenkler/opus-1a
 branch: symphony/porffor/2953-after-pr-3146
 pr: 3159
 sprint: current
 created: 2026-07-02
-updated: 2026-07-16
+updated: 2026-07-17
 priority: high
 horizon: l
 feasibility: medium
