@@ -1591,7 +1591,7 @@ export function lowerIrFunctionBody<S>(
         // ref.func $lifted, push captures, struct.new <subtype>.
         emitter.pushRaw(out, { op: "ref.func", funcIdx: liftedIdx });
         for (const cap of instr.captures) emitValue(cap, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: sub.structTypeIdx });
+        emitter.emitClosureNew(sub, instr.captures.length, out);
         return;
       }
       case "closure.cap": {
@@ -1608,11 +1608,7 @@ export function lowerIrFunctionBody<S>(
         }
         emitValue(instr.self, out);
         emitter.pushRaw(out, { op: "ref.cast", typeIdx: sub.structTypeIdx });
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: sub.structTypeIdx,
-          fieldIdx: sub.capFieldIdx(instr.index),
-        });
+        emitter.emitCaptureGet(sub, instr.index, out);
         return;
       }
       case "closure.call": {
@@ -1632,20 +1628,16 @@ export function lowerIrFunctionBody<S>(
         emitValue(instr.callee, out);
         for (const a of instr.args) emitValue(a, out);
         emitValue(instr.callee, out);
-        emitter.pushRaw(out, {
-          op: "struct.get",
-          typeIdx: cl.structTypeIdx,
-          fieldIdx: cl.funcFieldIdx,
-        });
+        emitter.emitClosureFuncGet(cl, out);
         // The struct's `func` field is typed as the abstract `funcref`
         // (matches the legacy `getOrCreateFuncRefWrapperTypes` pattern,
         // which avoids a circular type reference between the struct and
         // its lifted func type). `call_ref` requires a typed funcref, so
         // we emit `ref.cast` to convert.
-        // The struct.get (a2 struct family) + ref.cast (a5 ref-coercion) before
-        // this stay on pushRaw until their families migrate; only the terminal
-        // call_ref is the (a1) call family → typed emitCallRef (byte-identical
-        // {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
+        // The function-field read now routes through the closure-family hook.
+        // The ref.cast stays on pushRaw until the coercion family migrates; the
+        // terminal call_ref is the (a1) call family → typed emitCallRef
+        // (byte-identical {op:"call_ref"} on WasmGC, OP.CALL_REF on bytecode).
         emitter.pushRaw(out, { op: "ref.cast", typeIdx: cl.funcTypeIdx });
         emitter.emitCallRef(cl.funcTypeIdx, out);
         return;

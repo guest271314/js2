@@ -19,6 +19,7 @@ import type { BlockType, Instr, ValType } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
 import type {
   IrClassLowering,
+  IrClosureLowering,
   IrObjectStructLowering,
   IrRefCellLowering,
   IrUnionLowering,
@@ -175,6 +176,21 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
 
   emitTagLoad(layout: IrUnionLowering, out: Instr[]): void {
     out.push({ op: "struct.get", typeIdx: layout.typeIdx, fieldIdx: layout.tagFieldIdx });
+  }
+
+  // ---- closure family (#2953) — byte-identical to the prior inline
+  // struct.new/get pushes in lower.ts. The caller has already emitted the
+  // lifted function reference, captures, and any required ref.cast.
+  emitClosureNew(layout: IrClosureLowering, _captureCount: number, out: Instr[]): void {
+    out.push({ op: "struct.new", typeIdx: layout.structTypeIdx });
+  }
+
+  emitClosureFuncGet(layout: IrClosureLowering, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: layout.funcFieldIdx });
+  }
+
+  emitCaptureGet(layout: IrClosureLowering, index: number, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: layout.structTypeIdx, fieldIdx: layout.capFieldIdx(index) });
   }
 
   // ---- (a1) call family (#1584 §2a) — byte-identical to the prior inline

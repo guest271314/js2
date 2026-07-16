@@ -3,8 +3,8 @@ id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
 status: in-progress
 assignee: ttraenkler/opus-1a
-branch: agent/2953-unions-boxing
-pr: 3108
+branch: symphony/porffor/2953
+pr: null
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -20,6 +20,9 @@ related: [1852, 1713, 2954, 2956, 2949]
 origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text had no issue)"
 loc-budget-allow:
   - src/ir/lower.ts
+claimed_by: porffor-codex-developer
+claimed_at: 2026-07-16T11:55:48.323Z
+last_merged_pr: 3108
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -86,7 +89,16 @@ value/aggregate families.
   104 → 98. Golden union lowering stayed instruction-identical, and the emitted
   Wasm oracle matched clean main for all 56 `(file,target)` records across gc,
   standalone, wasi, and linear. (ttraenkler/codex-2953-unions-boxing)
-- [ ] closures (`emitClosureNew`/`emitClosureFuncGet`/`emitCaptureGet`)
+- [x] **closures** (`emitClosureNew`/`emitClosureFuncGet`/`emitCaptureGet`) —
+  promoted from declared-optional to required on `BackendEmitter`, implemented
+  byte-identically on `WasmGcEmitter` (`struct.new` for construction and the
+  canonical `struct.get` fields for function/capture reads), and stubbed loudly
+  on Linear + Bytecode until their closure representations land. The 3 closure
+  aggregate `pushRaw` sites now use the trait, reducing `emitter.pushRaw` calls
+  in `lower.ts` from 98 to 95. The existing `ref.func` and `ref.cast` sites stay
+  in their dependency-ordered funcref/coercion slices. Golden emitter tests,
+  the 31-case IR closure suite, cross-backend proof, equivalence gate, and the
+  56-record byte oracle are green. (porffor-codex-developer)
 - [ ] coercions/null (`emitNull`/`emitToExternref`/`emitFromExternref`)
 - [ ] funcref (`emitFuncRef`)
 - [ ] Promise ops
@@ -109,3 +121,26 @@ value/aggregate families.
 - Byte identity: `scripts/prove-emit-identity.mjs` was run against a detached
   clean-main baseline via Vite's TypeScript loader because `tsx` is not installed
   in this checkout. Result: `IDENTICAL — all 56 (file,target) emits match baseline`.
+
+## 2026-07-16 — closure slice results
+
+- Re-grounded and fast-forwarded to `origin/main` at
+  `b2b30a02336c1cf6deaa8941a383598ead35d586` before implementation.
+- Made the three closure aggregate hooks required and sink-generic. Lowering
+  continues to own evaluation order: it emits the lifted `ref.func`, captures,
+  and subtype/typed-funcref casts in the same positions, while the backend owns
+  only the terminal closure allocation or field read. Linear and Bytecode
+  implementations throw instead of falling through to WasmGC-shaped raw ops.
+- Added Golden-Instr coverage for closure construction, function-field reads,
+  and capture-index mapping in `tests/ir-backend-emitter.test.ts`.
+- Focused verification:
+  `pnpm vitest run tests/ir-backend-emitter.test.ts tests/issue-1169c.test.ts tests/ir-bytecode-proof.test.ts`
+  (69 tests passed), plus `pnpm run typecheck`, focused Biome + Prettier checks,
+  and `pnpm run test:equivalence:gate`.
+- Byte identity: bundled the existing `scripts/prove-emit-identity.mjs` harness
+  with esbuild because `tsx` is absent, captured the pre-edit baseline, and
+  checked the edited compiler against it. Result:
+  `IDENTICAL — all 56 (file,target) emits match baseline`.
+- Slice acceptance: complete. The parent issue intentionally remains
+  `in-progress` for coercions/null, funcref, Promise ops, and the pushRaw
+  justification ratchet.

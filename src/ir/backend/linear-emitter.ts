@@ -307,6 +307,18 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     notImplemented("emitCallRef");
   }
 
+  // closure family — WasmGC wrapper structs become arena records + table
+  // indices in the linear backend (#2956), so no raw struct fallback is valid.
+  emitClosureNew(): void {
+    notImplemented("emitClosureNew");
+  }
+  emitClosureFuncGet(): void {
+    notImplemented("emitClosureFuncGet");
+  }
+  emitCaptureGet(): void {
+    notImplemented("emitCaptureGet");
+  }
+
   // struct/object family — WasmGC `struct.new`/`struct.get`/`struct.set`; the
   // linear backend lowers objects to a bump-allocated memory layout (#2956).
   emitAggregateNew(): void {
