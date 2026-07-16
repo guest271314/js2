@@ -81,6 +81,8 @@ Rules:
 - Record the PR number in the issue frontmatter as `pr: <number>` and leave the issue
   `status: in-review`; Symphony also discovers the PR from the assigned branch if this metadata
   write is missed, then flips the issue to `done` after GitHub reports the PR merged.
+- For a continuation slice, use the exact assigned branch. Symphony creates a fresh branch after
+  every merged non-final slice; do not push another slice to an already-merged branch.
 - On a retry attempt for an existing PR, inspect its failed checks first, repair the existing head
   branch, push the fix, and keep the same PR. Preserve Symphony's `last_ci_retry_head` frontmatter
   field and never open a duplicate PR for a CI repair.
