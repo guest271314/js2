@@ -20,6 +20,8 @@ related: [2860, 2671, 2891, 3171]
 loc-budget-allow:
   - src/codegen/any-helpers.ts
   - src/codegen/array-object-proto.ts
+coercion-sites-allow:
+  - src/codegen/date-reflective-setters.ts
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; slices the Date area of tracking issue #2671"
 ---
 
