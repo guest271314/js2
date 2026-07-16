@@ -349,6 +349,19 @@ export interface NativeGeneratorInfo {
    * shared cell — writes propagate to the enclosing frame.
    */
   leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
+  /**
+   * (#3032 W3) TDZ-flag boxes riding as leading synthetic params. Each entry
+   * names a TDZ-flagged capture (`name` = the ORIGINAL captured binding) and
+   * the index into `paramNames`/`paramTypes` of its `ref $cell<i32>` flag-box
+   * param (named `__tdz_box_<name>`, minted by nested-declarations.ts after
+   * the value-capture params — the #1205 Stage 3 layout
+   * `[valueCaps, tdzFlagBoxes, userParams]`). The resume function registers
+   * the rehydrated flag-box local in `boxedTdzFlags` + `tdzFlagLocals` under
+   * the original name so TDZ-checked identifier reads inside resume states
+   * (`emitLocalTdzCheck`) deref the shared i32 cell, exactly like a lifted
+   * capturing closure body.
+   */
+  leadingTdzFlags?: { name: string; paramIdx: number }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";

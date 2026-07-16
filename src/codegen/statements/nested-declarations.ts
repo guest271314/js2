@@ -798,27 +798,38 @@ export function compileNestedFunctionDeclaration(
     const captureParamTypes: ValType[] = [...valueCaptureParamTypes, ...tdzFlagParamTypes];
     const allParamTypes = [...captureParamTypes, ...paramTypes];
 
-    // (#3050) CAPTURING nested `function*` whose body needs the try-region
-    // machinery (catch across yield / yielding finally — shapes the eager
-    // buffer PROVABLY cannot express, GeneratorPrototype/throw/try-*): lower it
-    // on the native state machine with the captures riding as leading synthetic
-    // params. Mutable captures are already `ref $cell` params here, so writes
-    // inside resume states propagate to the enclosing frame through the shared
-    // cell; the state struct stores the cells/values as ordinary `param_*`
-    // fields and the call site's existing `nestedFuncCaptures` prepend supplies
-    // them — no call-site changes. Scope bails (keep today's eager path):
-    //   - TDZ-flagged captures (flag-box plumbing not modeled in the resume fn);
-    //   - async generators;
-    //   - anything the plan builder rejects (isNativeGeneratorCandidate).
-    // Generators withOUT a new-region shape keep the eager path in BOTH lanes —
-    // this is deliberately try-region-scoped so working eager/shim generators
-    // are untouched (#2172's no-capture native path is also unchanged).
+    // (#3050) CAPTURING nested `function*` — lower it on the native state
+    // machine with the captures riding as leading synthetic params. Mutable
+    // captures are already `ref $cell` params here, so writes inside resume
+    // states propagate to the enclosing frame through the shared cell; the
+    // state struct stores the cells/values as ordinary `param_*` fields and
+    // the call site's existing `nestedFuncCaptures` prepend supplies them —
+    // no call-site changes.
+    //
+    // Lane split (#3032 W3):
+    //   - STANDALONE/WASI: candidate-gated ONLY (`isNativeGeneratorCandidate`
+    //     has no try-region requirement in this lane), matching the
+    //     no-captures branch above. TDZ-flagged captures are now threaded:
+    //     their flag boxes ride as additional leading `ref $cell<i32>` params
+    //     (`tdzFlagFor` entries below), restoring §27.5 suspend-at-start —
+    //     the eager-buffer path ran the WHOLE body at generator creation
+    //     (EvaluateGeneratorBody suspends before the first body statement;
+    //     nothing may run until the first `next()`), which is the root of the
+    //     tag-5 comparator vacuity (#2141 S2 / #2626).
+    //   - JS HOST: byte-identical to #3050 — try-region shapes only (the
+    //     eager buffer PROVABLY cannot express `.throw()` into a try-region:
+    //     GeneratorPrototype/throw/try-*), no TDZ-flagged captures (the
+    //     host-lane A/B for the wider population is a separate wave; see
+    //     plan/issues/3032). `isNativeGeneratorCandidate` additionally
+    //     requires FunctionDeclaration + use-site safety under a JS host.
+    // Other bails (both lanes): async generators; anything the plan builder
+    // rejects (isNativeGeneratorCandidate → buildNativeGeneratorPlan).
     let capturingNativeGen: ReturnType<typeof registerNativeGenerator> = null;
+    const capGenStandaloneLane = ctx.standalone || ctx.wasi;
     if (
       isGenerator &&
       !isAsync &&
-      tdzFlaggedCaptures.length === 0 &&
-      bodyHasNewTryRegionAcrossYield(stmt) &&
+      (capGenStandaloneLane || (tdzFlaggedCaptures.length === 0 && bodyHasNewTryRegionAcrossYield(stmt))) &&
       isNativeGeneratorCandidate(ctx, stmt)
     ) {
       const leadingCaptures: NativeGeneratorCaptureParam[] = captures.map((c, i) => {
@@ -845,6 +856,18 @@ export function compileNestedFunctionDeclaration(
         }
         return { name: c.name };
       });
+      // (#3032 W3) TDZ-flag boxes ride as ADDITIONAL leading synthetic params
+      // AFTER the value captures — aligned with `allParamTypes`'s
+      // [valueCap_0..N-1, tdzFlagBox_0..K-1, userParams] layout (the #1205
+      // Stage 3 lifted-fn contract; the call site's `nestedFuncCaptures`
+      // prepend already pushes them in exactly this order). They are NOT
+      // value cells: `boxed` stays unset so they never enter the resume
+      // fctx's `boxedCaptures`; `tdzFlagFor` routes them into
+      // `boxedTdzFlags`/`tdzFlagLocals` instead (registerNativeGenerator →
+      // resume prelude). Empty on the JS-host lane (gated tdz===0 above).
+      for (const c of tdzFlaggedCaptures) {
+        leadingCaptures.push({ name: `__tdz_box_${c.name}`, tdzFlagFor: c.name });
+      }
       capturingNativeGen = registerNativeGenerator(ctx, stmt, funcName, allParamTypes, false, leadingCaptures);
       if (capturingNativeGen) {
         // The generator factory returns the state struct, not a JS Generator object.
