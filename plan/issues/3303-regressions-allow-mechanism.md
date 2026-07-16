@@ -21,7 +21,7 @@ related: [3104, 3286, 3202, 3003, 3086, 1668, 1897]
 ## Problem
 
 PR `#3104` (#3285 slice 1's `assert_throws` error-type tightening) has been
-stuck for this entire session because landing an intentional, *correct*
+stuck for this entire session because landing an intentional, _correct_
 reclassification (2615 residual non-excused wasm-change regressions —
 previously-inflated false passes becoming honest fails, see #3286 for the
 full story) currently requires a risky, multi-step "temporary-lever dance":
@@ -202,19 +202,19 @@ What landed, and WHY each piece is shaped the way it is:
      drift-tolerance AND bucket checks superseded (total ≤ ceiling ⇒ every
      bucket's sum fits under it);
    - allowance present + above the count → loud `GATE FAIL: regressions-allow
-     ceiling exceeded` (ceiling semantics — reality exceeding the declaration
+ceiling exceeded` (ceiling semantics — reality exceeding the declaration
      is itself signal, re-measure and re-declare);
    - no allowance → the pre-existing #3086 tolerance-25 + bucket-50 checks,
      byte-identical messages (issue-2096 tests still pin them).
-   The allowance is read **lazily inside the rebase-mode branch only** —
-   deliberate containment: it has ZERO effect unless the same PR also bumps
-   `oracle_version` forward (or CI sets `ORACLE_REBASE=1`), so an ordinary PR
-   cannot use a declared allowance to sneak regressions past the
-   net/ratio/bucket gate. The raw printed `Regressions with wasm-hash change:
-   N` line is NEVER altered — the guards' fallback parse stays honest.
-   `REGRESSIONS_ALLOW_FILE` env reads the declaration from one explicit file
-   (hermetic test hook + emergency lever); `/dev/null` disables. The #3189
-   trap ratchet runs before and independent of this branch — untouched.
+     The allowance is read **lazily inside the rebase-mode branch only** —
+     deliberate containment: it has ZERO effect unless the same PR also bumps
+     `oracle_version` forward (or CI sets `ORACLE_REBASE=1`), so an ordinary PR
+     cannot use a declared allowance to sneak regressions past the
+     net/ratio/bucket gate. The raw printed `Regressions with wasm-hash change:
+N` line is NEVER altered — the guards' fallback parse stays honest.
+     `REGRESSIONS_ALLOW_FILE` env reads the declaration from one explicit file
+     (hermetic test hook + emergency lever); `/dev/null` disables. The #3189
+     trap ratchet runs before and independent of this branch — untouched.
 
 3. **`test262-sharded.yml` #1668 + #1897 guards — the structural fix.** Both
    now treat diff-test262.ts's exit code as **authoritative on PASS**:
@@ -224,15 +224,15 @@ What landed, and WHY each piece is shaped the way it is:
      #3189 trap ratchet);
    - exit 1 → the coarse threshold (200 raw / net < −15) applies EXACTLY as
      before.
-   Deliberately NOT full exit-code delegation (fail on exit 1): the script's
-   normal-mode gate (net<0 / ratio≥10%) is far stricter than the guards'
-   coarse thresholds, and importing it into the required `merge shard
-   reports` check would park every PR on ordinary baseline drift — the
-   merge-queue-unsafe whole-tree-gate failure mode. In non-rebase mode
-   exit 0 ⇒ net ≥ 0 ⇒ both guards passed anyway, so ordinary PRs see zero
-   behaviour change; the only new pass shape is a deliberate re-baseline the
-   script approved (which the guards previously vetoed — the disagreement
-   this issue found).
+     Deliberately NOT full exit-code delegation (fail on exit 1): the script's
+     normal-mode gate (net<0 / ratio≥10%) is far stricter than the guards'
+     coarse thresholds, and importing it into the required `merge shard
+reports` check would park every PR on ordinary baseline drift — the
+     merge-queue-unsafe whole-tree-gate failure mode. In non-rebase mode
+     exit 0 ⇒ net ≥ 0 ⇒ both guards passed anyway, so ordinary PRs see zero
+     behaviour change; the only new pass shape is a deliberate re-baseline the
+     script approved (which the guards previously vetoed — the disagreement
+     this issue found).
 
 4. **`merge-report` checkout `fetch-depth: 2`** — load-bearing. The guards run
    in that job; at the default depth 1 the synthetic merge commit's parents
@@ -277,3 +277,16 @@ Follow-up candidates: the #3003 `VERDICT_SIGNAL_RE` false-negative (runtime
 verdict-logic changes inside shim bodies, e.g. #3104's `assert_throws`
 rewrite, are not matched) remains open, as noted in this issue's problem
 statement.
+
+Follow-up (from the 2026-07-16 #3104 landing, coordinator condition): the
+#2097 standalone high-water floor has no sanctioned path for an HONEST
+downward adjustment — its `--update` reseed runs post-merge only, but the
+merge_group re-validates PRE-merge, so a legitimate reclassification that
+lowers `host_free_pass` (the #3104 case) can only land via an ad hoc in-PR
+edit of the committed mark. #3104 did this once as an explicitly-reviewed,
+sign-off-recorded exception (−518 backed by a bucketed root-cause analysis;
+an earlier unreviewed −3716 draft was rejected). If this class of situation
+recurs, build the #2097 checker a proper reviewed-exception mechanism — a
+per-PR, diff-scoped declaration with a required reason and an authorship/
+review trail, analogous to what this issue built for the regression-count
+gates — instead of repeating ad hoc mark edits.
