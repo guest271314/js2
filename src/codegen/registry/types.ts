@@ -404,6 +404,13 @@ export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
     { name: "buf", type: { kind: "ref_null" as const, typeIdx: bufVecTypeIdx }, mutable: false },
     { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
     { name: "kind", type: { kind: "i32" as const }, mutable: false },
+    // (#3177 slice 4) Expando side-table: non-index own props defined on the
+    // view (`Object.defineProperty(sample, "foo", …)`, symbol keys, and the
+    // preventExtensions state) live on a lazily-created `$Object` boxed as
+    // externref (no `$Object` type dependency at registration — the MOP arms
+    // cast on use). APPEND-ONLY: existing field indices and the `$__vec_base`
+    // supertype prefix stay valid.
+    { name: "expando", type: { kind: "externref" as const }, mutable: true },
   ];
   ctx.mod.types.push({ kind: "struct", name, superTypeIdx: vecBaseIdx, fields });
   ctx.taDynViewTypeIdx = idx;

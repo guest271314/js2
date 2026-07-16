@@ -1546,6 +1546,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     const L_VALUE = 8;
     const L_GETTER = 9;
     const L_SETTER = 10;
+    const L_DEFINE_RESULT = 11; // (#3177 slice 4) dyn-view rejection-sentinel thread-out
 
     const keyRef = (key: string): Instr[] => [...nativeStringLiteralInstrs(ctx, key), { op: "extern.convert_any" }];
     const hasField = (key: string): Instr[] => [
@@ -1781,7 +1782,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineAccessorIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
         else: [
           { op: "local.get", index: 0 },
@@ -1790,8 +1791,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineValueIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
+      },
+      // (#3177 slice 4) Thread the [[DefineOwnProperty]] REJECTION sentinel
+      // out: the dyn-view arms in __defineProperty_value/_accessor return
+      // ref.null.extern on a §10.4.5.3 false (every ordinary path returns the
+      // input obj, never null), so a null result propagates to the caller —
+      // Reflect.defineProperty's `__is_truthy` reads it as the spec `false`.
+      { op: "local.get", index: L_DEFINE_RESULT },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
     ];
@@ -1809,6 +1822,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         { name: "value", type: { kind: "externref" } },
         { name: "getter", type: { kind: "externref" } },
         { name: "setter", type: { kind: "externref" } },
+        { name: "defineResult", type: { kind: "externref" } },
       ],
       body,
     );
