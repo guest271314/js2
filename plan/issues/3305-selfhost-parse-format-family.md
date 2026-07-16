@@ -2,7 +2,6 @@
 id: 3305
 title: "Self-host stdlib: convert parse-number-native.ts + number-format-native.ts hand-emitted Instr[] to TS (family #2)"
 status: in-progress
-assignee: ttraenkler/sendev-3256
 sprint: current
 priority: high
 horizon: xl
@@ -126,3 +125,50 @@ carry the ctx-bound `$__str_data` typeIdx in callee sigs ⇒ no memoKey.
 `number_toPrecision` (format side — reuse `__nfd_*`); `parseFloat`,
 `__str_to_number`, `parseInt` (parse side — charCodeAt scans, needs the
 #3256 string dialect flag).
+
+## HANDOFF (2026-07-16, sendev-3256 → developer; coordinator-directed)
+
+Units 2-6 are handed to a regular developer — the pattern is de-risked and
+this file is the spec. sendev-3256 keeps ONLY the slice-1 PR (#3125, draft
+until predecessor #3122 lands; sendev un-drafts and self-merges it). The
+issue-assignments claim is RELEASED — re-claim with your own agent name.
+
+**Resume instructions:**
+
+1. Branch from `origin/main` AFTER PR #3125 lands (watch for it), or stack
+   on the real branch `issue-3305-selfhost-parse-format` if you must start
+   sooner (then enqueue only after #3125 merges).
+2. Work ONE unit per PR, in this order: `number_toFixed` →
+   `number_toExponential` → `number_toPrecision` → `parseFloat` →
+   `__str_to_number` → `parseInt` (leaf-first; toPrecision calls
+   toFixed/toExponential by funcMap name — keep those callees registered
+   before it, which `emitNativeNumberFormat`'s ordering already guarantees).
+3. Per unit: mirror the hand body OP-FOR-OP in TS (see
+   `TOSTRING_RADIX_SOURCE` in src/stdlib/number-format.ts as the template),
+   emit via `emitSelfHostedFunc` + legacy-ABI thunk in
+   number-format-selfhost.ts, DELETE the hand emitter, then run the
+   VALIDATION LADDER: (a) the 6,195-style main-vs-branch A/B hash sweep
+   (adapt `.tmp/probe-3305-ab.mts` — it is the acceptance oracle; V8-exact
+   only where main already matched), (b) existing suites
+   (issue-1335/1321/1759/1836), (c) host-containment SHA, (d)
+   `node scripts/profile-godfiles.mjs --update`.
+
+**Unit-2 recon (toFixed, already done — emitToFixed at
+number-format-native.ts:529-745):** structure is prologue → 1e21 ToString
+fallback → scale=10^fdig loop → scaled=floor(abs*scale+0.5)
+(round-half-away) → int/frac split → '-' → integer digits
+(`emitIntegerDigits` — SHARED with toExponential/toPrecision; convert it as
+a `__sh_*` sibling or keep hand until its last user converts) → '.' + fdig
+fractional digits via pow=scale/10 descending loop. TRAP-PARITY note: none
+(no unreachable arm). **ABI gotcha:** the §21.1.3.3 step-5 fallback calls
+`number_toString` (returns externref) — an sh body returning `string`
+cannot type that call; keep the 1e21 check + `number_toString` call in the
+LEGACY THUNK (hand instrs, ~10) and let the sh body handle only the
+|x| < 1e21 path.
+
+**Parse-side notes:** sources need `dialect: "native-strings"` on the def
+(charCodeAt/substring method plans) — see src/stdlib/strings.ts; whitespace
+skip can declare the self-hosted `__sh_str_isWs` `(f64) -> i32` callee
+(registered by ensureNativeStringHelpers, which parse-number emission
+already runs after). parseInt's radix-36 digit table and sign/prefix scan
+are pure charCodeAt f64 loops.
