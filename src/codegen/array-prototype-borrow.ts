@@ -153,10 +153,11 @@ function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallE
  * cannot model when the element is a `defineProperty` accessor expando. Used
  * to keep the legacy assert_throws bail for exactly that receiver class.
  */
-function receiverHasPlainClosedStructLength(ctx: CodegenContext, receiverArg: ts.Expression): boolean {
-  const recvTsType = ctx.checker.getTypeAtLocation(receiverArg);
-  if (!recvTsType) return false;
-  const recvWasmType = resolveWasmType(ctx, recvTsType);
+function receiverHasPlainClosedStructLength(ctx: CodegenContext, recvWasmType: ValType | undefined): boolean {
+  // The receiver's wasm type is resolved ONCE by the caller's `__vec_`/`__arr_`
+  // bailout block and threaded here — no additional checker access (the
+  // oracle-ratchet gate forbids net-new direct checker usage).
+  if (!recvWasmType) return false;
   if (recvWasmType.kind !== "ref" && recvWasmType.kind !== "ref_null") return false;
   const typeIdx = (recvWasmType as { typeIdx: number }).typeIdx;
   const structName = ctx.typeIdxToStructName.get(typeIdx);
@@ -215,10 +216,14 @@ export function compileArrayLikePrototypeCall(
   // Those must be allowed through — the prior blanket bailout routed them
   // to `__proto_method_call`, which passes the callback as a `__fn_wrap`
   // externref that the host cannot invoke (regression from PR #195, #1152).
+  // The resolved receiver wasm type is reused by the (#3317) assert_throws
+  // narrowing below — resolved once here, no second checker access.
+  let borrowRecvWasmType: ValType | undefined;
   {
     const recvTsType = ctx.checker.getTypeAtLocation(receiverArg);
     if (recvTsType) {
       const recvWasmType = resolveWasmType(ctx, recvTsType);
+      borrowRecvWasmType = recvWasmType;
       if (recvWasmType.kind === "ref" || recvWasmType.kind === "ref_null") {
         const typeIdx = (recvWasmType as { typeIdx: number }).typeIdx;
         const typeDef = ctx.mod.types[typeIdx];
@@ -295,7 +300,7 @@ export function compileArrayLikePrototypeCall(
     !(
       (ctx.standalone || ctx.wasi) &&
       ARRAY_LIKE_SEARCH_METHODS.has(methodName) &&
-      !receiverHasPlainClosedStructLength(ctx, receiverArg)
+      !receiverHasPlainClosedStructLength(ctx, borrowRecvWasmType)
     )
   ) {
     let p: ts.Node | undefined = callExpr.parent;
