@@ -65,7 +65,7 @@ function rendererProbe(retType = 0): PorfforRendererInput {
   };
 }
 
-describe("#3288 Porffor compatibility fingerprint", () => {
+describe("#3295 Porffor compatibility fingerprint", () => {
   it("accepts the frozen K/T/FX enums and six-slot node layout", () => {
     expect(() => assertPorfforIrCompatibility(compatibleIrModule())).not.toThrow();
   });
@@ -85,7 +85,7 @@ describe("#3288 Porffor compatibility fingerprint", () => {
   });
 });
 
-describe("#3288 Porffor renderer records", () => {
+describe("#3295 Porffor renderer records", () => {
   it("accepts the frozen module and function record shape", () => {
     expect(() => assertPorfforRendererInput(rendererProbe())).not.toThrow();
   });
@@ -112,7 +112,7 @@ describe("#3288 Porffor renderer records", () => {
   });
 });
 
-describe("#3288 optional Porffor loader", () => {
+describe("#3295 optional Porffor loader", () => {
   it("gives an actionable unavailable diagnostic without making Porffor mandatory", async () => {
     const missingRoot = join(here, "fixtures/porffor-intentionally-absent");
     await expect(loadOptionalPorffor({ root: missingRoot })).rejects.toThrow(
