@@ -5175,6 +5175,29 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
     }
   };
   const target: any[] = [];
+  // (#3201) Expando sidecar lookup. Compiled writes of non-index properties
+  // onto a vec (`arr.getClass = Object.prototype.toString;` — the Sputnik
+  // classifier idiom, 65+ test262 files across splice/slice/concat) land in
+  // `_wasmStructProps` keyed by the RAW vec struct via `__extern_set*` →
+  // `_safeSet`. The array-backed view must surface them: an own expando
+  // shadows `Array.prototype` per ordinary property lookup order. Values were
+  // callable-wrapped at write time (`_maybeWrapCallableUnknownArity`); a raw
+  // struct value read back is defensively host-wrapped.
+  const sidecarGet = (key: string | symbol): { hit: boolean; value?: any } => {
+    const sc = _wasmStructProps.get(vec);
+    if (!sc || !(key in sc)) return { hit: false };
+    const val = (sc as Record<string | symbol, any>)[key as any];
+    if (val != null && typeof val === "object" && _isWasmStruct(val)) {
+      // A closure struct stored BEFORE setExports (module-init writes run
+      // during instantiation) could not be callable-wrapped at write time —
+      // wrap at read time, when the exports exist. Mirrors
+      // `__extern_method_call`'s wrapHostValue.
+      const callable = _maybeWrapCallableUnknownArity(val, { getExports: () => exports });
+      if (callable !== val) return { hit: true, value: callable };
+      return { hit: true, value: _wrapForHost(val, exports) };
+    }
+    return { hit: true, value: val };
+  };
   const handler: ProxyHandler<any[]> = {
     get(_t, key) {
       if (key === "length") return liveLen();
@@ -5182,6 +5205,8 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
         const idx = _asArrayIndex(key);
         if (idx !== undefined) return idx < liveLen() ? elemAt(idx) : undefined;
       }
+      const sc = sidecarGet(key);
+      if (sc.hit) return sc.value;
       // Array.prototype methods, Symbol.iterator, constructor, etc. — read from
       // the array target; native generics operate via the length/index traps.
       return (target as Record<string | symbol, any>)[key as any];
@@ -5192,6 +5217,7 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
         const idx = _asArrayIndex(key);
         if (idx !== undefined) return idx < liveLen();
       }
+      if (sidecarGet(key).hit) return true;
       return key in target;
     },
     ownKeys() {

@@ -3182,7 +3182,18 @@ export function compileReceiverMethodCall(
     const recvTsTypeLate = ctx.checker.getTypeAtLocation(propAccess.expression);
     const recvWasmLate = resolveWasmType(ctx, recvTsTypeLate);
     if (recvWasmLate.kind === "ref" || recvWasmLate.kind === "ref_null") {
-      const delegated = emitFnctorSubclassDynamicMethodCall(ctx, fctx, expr, propAccess, propAccess.name.text);
+      // rawStructReceiver: the expando sidecar (`_wasmStructProps`) is keyed
+      // by the RAW struct ref — an externref expected-type compile would
+      // route a vec receiver through `__make_iterable`'s copy, losing the
+      // identity the sidecar lookup needs.
+      const delegated = emitFnctorSubclassDynamicMethodCall(
+        ctx,
+        fctx,
+        expr,
+        propAccess,
+        propAccess.name.text,
+        /* rawStructReceiver */ true,
+      );
       if (delegated !== undefined) return delegated;
     }
   }
