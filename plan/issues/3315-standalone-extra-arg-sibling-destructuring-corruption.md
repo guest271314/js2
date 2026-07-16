@@ -13,6 +13,15 @@ area: codegen-standalone
 goal: standalone
 sprint: current
 related: [3285, 3104, 2379, 2873]
+# (#3102/#3131) Intended growth: the fix lands in the modules that own the
+# broken logic (rep decision, coercion arm, destructure conversion loop,
+# identifier narrowing skip) — moving it out would split one mechanism
+# across new files for no cohesion gain.
+loc-budget-allow:
+  - src/codegen/destructuring-params.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/context/types.ts
+  - src/codegen/expressions/identifiers.ts
 ---
 
 # #3315 — extra call-argument corrupts sibling destructuring in standalone methods
