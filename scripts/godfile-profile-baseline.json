@@ -6,7 +6,7 @@
   "src/codegen/expressions/calls.ts#compileConditionalCallee": 195,
   "src/codegen/expressions/calls.ts#compileExpressionCallee": 188,
   "src/codegen/expressions/calls.ts#tryEmitJsonStringifyPrimitive": 154,
-  "src/codegen/index.ts#generateModule": 1028,
+  "src/codegen/index.ts#generateModule": 1033,
   "src/codegen/index.ts#emitToPrimitiveMethodExports": 419,
   "src/codegen/index.ts#emitDispatchForMethod": 411,
   "src/codegen/index.ts#generateMultiModule": 374,

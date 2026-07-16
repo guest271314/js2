@@ -84,3 +84,45 @@ resolver machinery:
 
 - `array-methods.ts` (re-scoped, see #3257 §Result), object/map/iterator
   families (Tier-3, #3258 and later).
+- `number_toString` (no-radix): delegates to Ryu (`number-ryu.ts`) —
+  precision-critical shortest-representation kernel, stays hand-written per
+  the escape hatch (scale-up plan §mechanism 3).
+
+## Slice 1 — number_toString_radix (2026-07-16, sendev-3256)
+
+**Landed:** `__sh_num_toString_radix` TS source (`src/stdlib/number-format.ts`)
+
+- the shared `__nfd_*` f64-ABI buffer micro-kernels and emission glue
+  (`src/codegen/number-format-selfhost.ts`) + 4-instr legacy thunk. Hand
+  `emitToStringRadix` deleted: `number-format-native.ts` 1,712 → 1,361 (−351);
+  additions +302, of which ~130 (emitFunc + `__nfd_new/get/set/fin` +
+  `__num_fmt_trap`) is family-shared infrastructure that amortizes over the
+  remaining units. **Slice net −49; expected family net strongly negative from
+  unit 2 on** (same shape as #3256: the strings family's driver cost amortized
+  the same way).
+
+**Validation:**
+
+- **Bit-exact hand-equivalence**: 6,195-case A/B hash sweep (main-built vs
+  branch-built compilers, same probe source; 177 values incl. NaN/±Inf/±0/
+  denormals/MAX_SAFE_INTEGER-trap parity × radices 2..36) — 0 diffs
+  (`.tmp/probe-3305-ab.mts`).
+- `tests/issue-3305.test.ts`: in-wasm V8-exact corpus, standalone + wasi.
+- Existing suites green: issue-1335-standalone, issue-1836(-exp),
+  issue-1321(-standalone), issue-1759 (83 tests).
+- Host-mode containment: byte-identical SHA (helpers only emit in
+  native/standalone modes).
+- Known pre-existing V8 divergence inherited unchanged (full f64 fraction
+  expansion vs shortest-roundtrip tail, e.g. `(0.1).toString(3)`,
+  `(42.42).toString(36)`) — verified failing identically on main; tracked
+  under #1335 Phase 2, NOT a regression.
+
+**Dialect notes for the remaining units:** `Math.floor` lowers to the
+`f64.floor` intrinsic (#1371 whitelist — no funcMap dependency); the
+`__num_fmt_trap()` micro-kernel preserves hand `unreachable` parity; defs
+carry the ctx-bound `$__str_data` typeIdx in callee sigs ⇒ no memoKey.
+
+**Remaining units:** `number_toFixed`, `number_toExponential`,
+`number_toPrecision` (format side — reuse `__nfd_*`); `parseFloat`,
+`__str_to_number`, `parseInt` (parse side — charCodeAt scans, needs the
+#3256 string dialect flag).
