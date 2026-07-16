@@ -83,10 +83,10 @@ Mechanism (no new imports, no funcidx shifts, no body-splitting):
 - **Eligibility gates (learned from PR #2625's first merge_group cycle —
   41 regressions in three buckets, all fixed by gating):** lazy only when
   `!isAsync && parameters.length === 0 && !closureBodyUsesArguments(body)
-  && !genBodyReferencesThis(body)`. `arguments` (zero-declared-param
+&& !genBodyReferencesThis(body)`. `arguments` (zero-declared-param
   generators still see call-site args — `gen-func-expr-args-trailing-comma-*`)
   and `this`/`super` (`Array.prototype[Symbol.iterator] = function*(){
-  ...this[0]... }` — the `iter-val-array-prototype` cluster) are call-time
+...this[0]... }` — the `iter-val-array-prototype` cluster) are call-time
   state the deferred `__call_fn_0` re-invocation cannot rebind; W2 spills
   them. ALSO: the cached `ctx.genEagerFlagGlobalIdx` MUST be kept in step by
   `fixupModuleGlobalIndices` (registry/imports.ts) — a string-constant
@@ -175,12 +175,13 @@ for a gc-host generator FUNCTION DECLARATION (`function* g() {...}` nested
 inside the test wrapper falls here after failing native candidacy).
 
 **Change**:
+
 1. Extract the Slice-1 wrap into a shared helper
    `wrapGeneratorEagerSeqLazy(ctx, fctx, bodyEmitter, selfClosureEmitter)`
    in closures.ts (parameterize what :2886-2960 does inline today): capture
    the eager sequence into a fresh `Instr[]`, then emit
    `if (global.get $__gen_eager_mode) { <eager seq, clears flag at top> }
-   else { <return __create_generator(<self as externref>, null)> }`.
+else { <return __create_generator(<self as externref>, null)> }`.
 2. Apply it in the function-body.ts arm. The one W3-specific problem is the
    THUNK SELF value: a declaration-form generator is a plain defined func,
    not a closure struct, so there is no `__self` param to pass to
@@ -198,6 +199,7 @@ inside the test wrapper falls here after failing native candidacy).
    `parameters.length === 0` until W2 lands.
 
 **Hazards** (from the Slice-1 PR #2625 lessons, all still live):
+
 - `ctx.genEagerFlagGlobalIdx` staleness across string-constant imports —
   `fixupModuleGlobalIndices` (src/codegen/registry/imports.ts) already
   covers the cached idx; any NEW cached global here must be added there.
@@ -358,7 +360,7 @@ cannot.
    which never had a try-region gate at its call site); the JS-host lane is
    byte-identical to #3050. TDZ-flag boxes ride as additional leading
    `NativeGeneratorCaptureParam` entries (`{name: "__tdz_box_<n>",
-   tdzFlagFor: n}`) appended AFTER the value captures — aligned with
+tdzFlagFor: n}`) appended AFTER the value captures — aligned with
    `allParamTypes`'s `[valueCaps, tdzFlagBoxes, userParams]` (#1205 Stage 3)
    layout, which the call-site `nestedFuncCaptures` prepend already produces.
    NO call-site changes were needed: the factory IS the lifted function.
@@ -404,13 +406,13 @@ cannot.
   TDZ capture).
 - Scoped test262 sweep (GeneratorPrototype + statements/expressions/
   generators + GeneratorFunction, 640 files): **standalone +15 net (15
-  fail→pass, 0 pass→fail)** — GeneratorPrototype/return/try-* +
+  fail→pass, 0 pass→fail)** — GeneratorPrototype/return/try-\* +
   from-state-suspended-start + the gen dstr elision clusters; **gc lane 0
   diffs** vs main.
 - Canary battery 32/32 pass (dstr `ary-ptrn-empty` family both lanes, PR-#2625
   regression buckets `gen-func-expr-args-trailing-comma-*`, #3050
-  GeneratorPrototype/throw/try-*).
-- Suites: issue-3050/2203/1177/1847/1919/2029-tagged-template/tdz-* +
+  GeneratorPrototype/throw/try-\*).
+- Suites: issue-3050/2203/1177/1847/1919/2029-tagged-template/tdz-\* +
   generator suites — green (the one `generator-yield-contexts` fn-expr
   failure reproduces identically on clean main: a slice-1 setExports harness
   wiring gap, NOT this change).
@@ -421,7 +423,7 @@ cannot.
    `try { const it = probe(); it.next(); } catch {}` with `probe` capturing a
    TDZ `let` traps instead of throwing catchable ReferenceError.
 2. **Creation-before-init pre-call static TDZ throw**: `const it = probe();
-   let x = 42; it.next()` throws at CREATION (the #1177 pre-call check — an
+let x = 42; it.next()` throws at CREATION (the #1177 pre-call check — an
    eager-era approximation). Under lazy §27.5 creation must not throw; the
    flag-box read at first resume already handles the TDZ case correctly.
    Fix = suppress the pre-call TDZ check when the callee is a registered
