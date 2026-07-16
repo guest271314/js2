@@ -29,7 +29,7 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { emitCapturedBoxGlobalRead, emitNullGuardedStructGet, getCapturedBoxGlobal } from "../property-access.js";
-import { coerceType, compileExpression, ensureAnyHelpers, isAnyValue } from "../shared.js";
+import { coerceType, compileExpression, isAnyValue } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
@@ -682,24 +682,23 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
       isAnyValue(declaredType, ctx) &&
       isDeclaredHeterogeneousPrimitiveUnion(ctx.checker, id)
     ) {
+      // All three arms route through the single coercion engine (#2108 drift
+      // gate): its $AnyValue→f64 arm is the tag-complete inline unbox
+      // (undefined→NaN, boolean→i32val), $AnyValue→i32 reads the i32val
+      // payload (tags 2/4), and the string arm is the S3-fixed externval
+      // extraction. No hand-rolled helper-call vocabulary here.
       const fact = ctx.oracle.typeFactOf(id);
       if (fact.kind === "number") {
-        ensureAnyHelpers(ctx);
-        const toF64 = ctx.funcMap.get("__any_to_f64");
-        if (toF64 !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: toF64 });
-          return { kind: "f64" };
-        }
-      } else if (fact.kind === "string" && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        coerceType(ctx, fctx, declaredType, { kind: "f64" });
+        return { kind: "f64" };
+      }
+      if (fact.kind === "string" && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
         coerceType(ctx, fctx, declaredType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
         return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
-      } else if (fact.kind === "boolean") {
-        ensureAnyHelpers(ctx);
-        const unboxBool = ctx.funcMap.get("__any_unbox_bool");
-        if (unboxBool !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxBool });
-          return { kind: "i32", boolean: true };
-        }
+      }
+      if (fact.kind === "boolean") {
+        coerceType(ctx, fctx, declaredType, { kind: "i32" });
+        return { kind: "i32", boolean: true };
       }
     }
 
