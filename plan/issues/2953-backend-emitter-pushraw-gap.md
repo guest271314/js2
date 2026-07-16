@@ -3,8 +3,8 @@ id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
 status: in-progress
 assignee: ttraenkler/opus-1a
-branch: symphony/porffor/2953-after-3129
-pr: 3134
+branch: symphony/porffor/2953-after-pr-3134
+pr: null
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -21,8 +21,8 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T13:41:17.751Z
-last_merged_pr: 3129
+claimed_at: 2026-07-16T14:18:50.817Z
+last_merged_pr: 3134
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -119,7 +119,18 @@ value/aggregate families.
       trait, reducing `emitter.pushRaw` calls in `lower.ts` from 86 to 85.
       Golden emitter coverage, closure + cross-backend suites, typecheck,
       equivalence, and the 56-record byte oracle are green.
-- [ ] Promise ops
+- [x] **Promise aggregate ops**
+      (`emitPromiseNew`/`emitPromiseStateGet`/`emitPromiseValueGet`) — added
+      required, sink-generic primitives for Promise construction and semantic
+      state/value reads. `WasmGcEmitter` preserves the canonical `$Promise`
+      `struct.new` and field 0/1 `struct.get` instructions; Linear + Bytecode
+      fail loudly until their Promise record representations land. All six
+      Promise aggregate operations in `async.return`, `async.throw`, and
+      `await` now route through the trait. The two allocation conversions reduce
+      `emitter.pushRaw` calls in `lower.ts` from 85 to 83; await's raw structured
+      `if` remains intentionally out of scope. Golden emitter coverage, the
+      86-test focused suite, typecheck, equivalence, and the 56-record byte
+      oracle are green. (porffor-codex-developer)
 - [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
 
 ## 2026-07-16 — unions/boxing slice results
@@ -218,3 +229,33 @@ value/aggregate families.
   `IDENTICAL — all 56 (file,target) emits match baseline`.
 - Slice acceptance: complete. The parent issue intentionally remains
   `in-progress` for Promise ops and the pushRaw justification ratchet.
+
+## 2026-07-16 — Promise aggregate slice results
+
+- Re-grounded and fast-forwarded to `origin/main` at
+  `f52edb61510b9c404ef8807e662e9d3023a14f72` before implementation; PR #3134's
+  funcref slice was already present, so this continuation advanced to Promise
+  aggregate operations without duplicating landed work.
+- Added required `emitPromiseNew`, `emitPromiseStateGet`, and
+  `emitPromiseValueGet` hooks. Lowering retains Promise type resolution,
+  operand evaluation, state comparisons, and await's structured control flow;
+  the backend now owns aggregate allocation and the semantic state/value field
+  mapping. Linear and Bytecode stop at explicit missing-representation errors.
+- Routed two `$Promise` allocations and four state/value reads through the
+  trait. No Promise `struct.new`/`struct.get` remains in `lower.ts`, while the
+  out-of-scope await `if` construction is unchanged. The `emitter.pushRaw` call
+  count is now 83 (85 before this slice).
+- Added Golden-Instr coverage for Promise construction, state reads, and value
+  reads in `tests/ir-backend-emitter.test.ts`.
+- Focused verification:
+  `pnpm vitest run tests/ir-backend-emitter.test.ts tests/ir/issue-1373b.test.ts tests/issue-1169c.test.ts tests/ir-bytecode-proof.test.ts`
+  (86 tests passed), plus `pnpm run typecheck` and
+  `pnpm run test:equivalence:gate` (1,607 passing, 36 known baseline failures,
+  zero new regressions).
+- Byte identity: rebuilt the existing `scripts/prove-emit-identity.mjs` harness
+  with esbuild, captured the pre-edit baseline, and compared the edited
+  compiler against it. Result:
+  `IDENTICAL — all 56 (file,target) emits match baseline`.
+- Slice acceptance: complete. The parent issue intentionally remains
+  `in-progress` for the pushRaw justification ratchet, which must land on the
+  next fresh continuation branch.
