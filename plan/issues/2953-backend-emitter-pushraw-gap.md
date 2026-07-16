@@ -23,6 +23,7 @@ loc-budget-allow:
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-16T16:19:15.299Z
 last_merged_pr: 3146
+last_ci_retry_head: ce8c13d8bcf42d854e182211621adef9aede6fe9
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
