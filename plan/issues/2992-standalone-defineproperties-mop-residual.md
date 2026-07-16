@@ -9,6 +9,9 @@ feasibility: hard
 area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2985, 2667]
+oracle-ratchet-allow:
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/property-access.ts
 loc-budget-allow:
   - src/codegen/declarations.ts
   - src/codegen/object-runtime.ts
