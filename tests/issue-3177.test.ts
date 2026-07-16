@@ -123,6 +123,133 @@ describe("#3177 — dyn-view integer-indexed MOP arms (§10.4.5)", () => {
   });
 });
 
+describe("#3177 slice 2 — §23.2.5.1 ctor-arg protocol throws (buffer/length args)", () => {
+  // The statically-ArrayBuffer-typed arg0 path (emitDynamicTaViewConstruct).
+  it("negative offset → RangeError instance", async () => {
+    expect(
+      await run(
+        `const buffer = new ArrayBuffer(8); try { new TA(buffer, -1); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("misaligned offset (step 3) → RangeError", async () => {
+    expect(
+      await run(
+        `const T2: any = Uint16Array; const buffer = new ArrayBuffer(8); try { new T2(buffer, 1); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("auto-length buffer modulo (step 13.a) → RangeError", async () => {
+    expect(
+      await run(
+        `const T2: any = Uint16Array; const buffer = new ArrayBuffer(1); try { new T2(buffer); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("explicit `undefined` length counts as absent (still the step-13 arm)", async () => {
+    expect(
+      await run(
+        `const T2: any = Uint16Array; const buffer = new ArrayBuffer(1); try { new T2(buffer, 0, undefined); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("offset beyond buffer end (step 13.c) → RangeError", async () => {
+    expect(
+      await run(
+        `const buffer = new ArrayBuffer(1); try { new TA(buffer, 2); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("offset + length×es > bufferByteLength (step 14.c) → RangeError", async () => {
+    expect(
+      await run(
+        `const buffer = new ArrayBuffer(1); try { new TA(buffer, 0, 2); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("detached buffer at construction (step 6) → TypeError", async () => {
+    expect(
+      await run(
+        `const buffer = new ArrayBuffer(8); (buffer as any).__detached__ = true; try { new TA(buffer); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("detach DURING length valueOf is observed (fresh byte-length re-read) → TypeError", async () => {
+    expect(
+      await run(
+        `const buffer = new ArrayBuffer(8); const len = { valueOf: function(): number { (buffer as any).__detached__ = true; return 4; } }; try { new TA(buffer, 0, len as any); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("statically-symbol offset → TypeError (§7.1.4 ToNumber(Symbol))", async () => {
+    expect(
+      await run(
+        // NOTE: no `as any` on `sym` — the oracle's static-symbol detection reads
+        // the identifier's own (unique symbol) type, which is exactly the corpus
+        // shape (`var byteOffset = Symbol("1"); new TA(buffer, byteOffset)`). An
+        // `as any` cast erases the brand and falls to the (pre-existing)
+        // generic-coercion throw path instead.
+        `const buffer = new ArrayBuffer(8); const sym = Symbol("1"); try { new TA(buffer, sym); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("runtime symbol count arg (pre-boxed argv path) → TypeError", async () => {
+    expect(
+      await run(
+        `const sym: any = Symbol("1"); try { new TA(sym); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("-0 offset constructs (ToIndex(-0) = 0)", async () => {
+    expect(
+      await run(`const buffer = new ArrayBuffer(8); const t: any = new TA(buffer, -0); return t.length === 8 ? 1 : 0;`),
+    ).toBe(1);
+  });
+
+  it("valid windowed construct is unchanged", async () => {
+    expect(
+      await run(
+        `const T2: any = Uint16Array; const buffer = new ArrayBuffer(8); const t: any = new T2(buffer, 2, 2); return (t.length === 2 && t.byteOffset === 2) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("valid auto-length construct is unchanged", async () => {
+    expect(
+      await run(
+        `const T2: any = Uint16Array; const buffer = new ArrayBuffer(8); const t: any = new T2(buffer, 4); return t.length === 2 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("count form negative → RangeError INSTANCE (upgraded from bare-string throw)", async () => {
+    expect(
+      await run(`try { new TA(-1); return 0; } catch (e) { return (e as any) instanceof RangeError ? 1 : 2; }`),
+    ).toBe(1);
+  });
+
+  it("guard: copy-from-int8-view pun shape does NOT throw (skipAutoModulo containment)", async () => {
+    // A static Int8Array value is a bare byte vec — indistinguishable from an
+    // ArrayBuffer in the pre-evaluated-argv arm. The step-13.a modulo check is
+    // suppressed there so this (already-wrong-length) shape stays non-throwing.
+    expect(
+      await run(
+        `const F8: any = Float64Array; const src = new Int8Array(10); try { const t: any = new F8(src as any); return 1; } catch (e) { return 0; }`,
+      ),
+    ).toBe(1);
+  });
+});
+
 describe("#3177 — non-view receivers keep their behavior (arms fall through)", () => {
   it("plain any-typed array element/length are unchanged", async () => {
     // NOTE: `Object.keys(<any-typed plain array>)` returns [] on main (the
