@@ -20,6 +20,7 @@ import {
   emitTypedArrayIntrinsicCtorObject,
   isWiredTypedArrayViewName,
 } from "../array-object-proto.js";
+import { emitUndefinedExtern } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
 import { emitVariadicStringConcat } from "../builtin-scaffold.js";
 import {
@@ -2347,10 +2348,15 @@ export function compileBuiltinStaticCall(
             // handle the method case via the host import.
           } else {
             // Property not found in struct — return undefined
-            // (own property doesn't exist on this shape)
+            // (own property doesn't exist on this shape). (#3319) Under the
+            // #2106 `undefinedSingleton` regime "undefined" is the tag-1
+            // singleton, NOT null externref (null ≠ undefined there —
+            // `gOPD(o, missing) === undefined` answered false, the
+            // issue-2874 typed-receiver shape); legacy lanes keep the
+            // byte-identical `ref.null.extern`.
             const argResult = compileExpression(ctx, fctx, arg0);
             if (argResult) fctx.body.push({ op: "drop" });
-            fctx.body.push({ op: "ref.null.extern" });
+            if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
             return { kind: "externref" };
           }
         }

@@ -1297,14 +1297,18 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
               { op: "i32.eqz" },
               { op: "if", blockType: { kind: "empty" }, then: throwUnsupported() },
 
-              // Reset descriptor accumulators.
+              // Reset descriptor accumulators. (#3319) The VALUE default is
+              // `undefined` (§10.1.6.3 fresh-define [[Value]] default) — the
+              // singleton under the #2106 regime, legacy null.extern
+              // otherwise. The GETTER/SETTER null resets stay null: null is
+              // the appliers' "absent half" convention (do not change).
               { op: "i32.const", value: 0 },
               { op: "local.set", index: L_FLAGS },
               { op: "i32.const", value: 0 },
               { op: "local.set", index: L_HAS_DATA },
               { op: "i32.const", value: 0 },
               { op: "local.set", index: L_HAS_ACCESSOR },
-              { op: "ref.null.extern" },
+              ...(undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" } satisfies Instr]),
               { op: "local.set", index: L_VALUE },
               { op: "ref.null.extern" },
               { op: "local.set", index: L_GETTER },
@@ -1723,14 +1727,17 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "local.get", index: 2 },
       { op: "local.set", index: L_DESC },
 
-      // Reset accumulators.
+      // Reset accumulators. (#3319) The VALUE default is `undefined`
+      // (§10.1.6.3 fresh-define [[Value]] default) — the singleton under the
+      // #2106 regime, legacy null.extern otherwise. The GETTER/SETTER null
+      // resets stay null: null is the appliers' "absent half" convention.
       { op: "i32.const", value: 0 },
       { op: "local.set", index: L_FLAGS },
       { op: "i32.const", value: 0 },
       { op: "local.set", index: L_HAS_DATA },
       { op: "i32.const", value: 0 },
       { op: "local.set", index: L_HAS_ACCESSOR },
-      { op: "ref.null.extern" },
+      ...(undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" } satisfies Instr]),
       { op: "local.set", index: L_VALUE },
       { op: "ref.null.extern" },
       { op: "local.set", index: L_GETTER },
@@ -1939,7 +1946,21 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     const L_WLEN = 10;
     const L_KSTR = 11;
     const L_KIDX = 12;
-    const undefRet: Instr[] = [{ op: "ref.null.extern" }, { op: "return" }];
+    // (#3319) A gOPD MISS (no own property / non-`$Object` receiver) answers
+    // `undefined`. Under the `undefinedSingleton` regime (#2106 flip) that
+    // must be the `$undefined` singleton — a bare null externref is `null`,
+    // DISTINCT from `undefined` there, so `gOPD(o, missing) === undefined`
+    // answered false (the issue-2874 typed-receiver and issue-2896
+    // post-delete residual shapes documented in #3316). Legacy lanes keep the
+    // byte-identical `[ref.null.extern, return]`. FACTORY returning fresh
+    // instruction objects, not one shared array — the singleton arm carries
+    // an index-bearing `global.get` and this sequence lands in several
+    // branches (aliasing one Instr[] into branches double-remaps on shifts).
+    const missUndefExtern = undefinedSingletonActive(ctx) ? undefinedExternInstrs(ctx) : undefined;
+    const undefRet = (): Instr[] => [
+      ...(missUndefExtern ? missUndefExtern.map((i) => ({ ...i })) : [{ op: "ref.null.extern" } satisfies Instr]),
+      { op: "return" },
+    ];
     // Build a fresh data descriptor into `desc` (local 6) and return it.
     const exoticDataDesc = (valueInstrs: Instr[], enumerable: number): Instr[] => [
       { op: "call", funcIdx: newPlainObjectIdx },
@@ -1959,7 +1980,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.tee", index: 2 },
           { op: "ref.test", typeIdx: anyStrTypeIdx },
           { op: "i32.eqz" },
-          { op: "if", blockType: { kind: "empty" }, then: undefRet },
+          { op: "if", blockType: { kind: "empty" }, then: undefRet() },
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx: anyStrTypeIdx },
           { op: "call", funcIdx: strFlattenIdx },
@@ -1971,7 +1992,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "call", funcIdx: objFindIdx },
           { op: "local.tee", index: L_SENT },
           { op: "ref.is_null" },
-          { op: "if", blockType: { kind: "empty" }, then: undefRet },
+          { op: "if", blockType: { kind: "empty" }, then: undefRet() },
           // sVal = slotEnt.value; a String wrapper's [[StringData]] is a string.
           { op: "local.get", index: L_SENT },
           { op: "ref.as_non_null" },
@@ -1979,7 +2000,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.tee", index: L_SVAL },
           { op: "ref.test", typeIdx: anyStrTypeIdx },
           { op: "i32.eqz" },
-          { op: "if", blockType: { kind: "empty" }, then: undefRet },
+          { op: "if", blockType: { kind: "empty" }, then: undefRet() },
           // wStr = flatten([[StringData]]); wLen = wStr.len
           { op: "local.get", index: L_SVAL },
           { op: "ref.cast", typeIdx: anyStrTypeIdx },
@@ -2024,9 +2045,9 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
             ),
           },
           // no exotic own property matched → undefined
-          ...undefRet,
+          ...undefRet(),
         ]
-      : undefRet;
+      : undefRet();
 
     // (#2984 "primitive-string(s)") NON-`$Object` receiver arm. §19.1.2.8
     // ToObject-coerces the receiver: undefined/null THROW TypeError (step 1;
@@ -2045,7 +2066,11 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     // as `undefined` there), and an `undefined` RECEIVER arrives as the non-null
     // tag-1 `$AnyValue` box — so the ToObject-throw test is `ref.is_null` OR
     // tag-1-singleton (receiver-as-any is already tee'd in local 2).
-    const gopdUndefRet: Instr[] = undefExternGopd ? [...undefExternGopd, { op: "return" } as Instr] : undefRet;
+    // (#3319 merge reconciliation) `undefRet` is now a singleton-aware
+    // FACTORY (miss → $undefined singleton under the regime, legacy
+    // null.extern) — exactly the dispatch #3154's `gopdUndefRet` open-coded
+    // via `undefExternGopd`, so it simply delegates.
+    const gopdUndefRet: Instr[] = undefRet();
     const gopdUndefSingletonOr: Instr[] = (() => {
       if (!undefinedSingletonActive(ctx)) return [];
       ensureAnyValueType(ctx);
@@ -2182,7 +2207,8 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           ] satisfies Instr[])
         : []),
       // any = any.convert_extern(obj) ; if !$Object → primitive-receiver arm
-      // (#2984: nullish → TypeError, string → §10.4.3 exotic, else undefined).
+      // (#2984: nullish → TypeError, string → §10.4.3 exotic, else undefined —
+      // where "undefined" is the #3319 singleton-aware miss return).
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 2 },
@@ -2393,13 +2419,35 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "call", funcIdx: boxBoolIdx },
     ];
 
+    // (#3319) A NULL get/set param is every caller's "absent half →
+    // undefined" convention (per §6.2.5.6 a present `{get: null}` throws
+    // before reaching here, so null is unambiguous). Under the #2106
+    // `undefinedSingleton` regime null ≠ undefined — `desc.set === undefined`
+    // answered false for the @@species / intrinsic-accessor synthesis shapes —
+    // so materialize a null half as the `$undefined` singleton; legacy lanes
+    // keep the byte-identical raw store. (Mirrors the #3316 gOPD half fix.)
+    const undefExternAcc = undefinedSingletonActive(ctx) ? undefinedExternInstrs(ctx) : undefined;
+    const accHalf = (paramIdx: number): Instr[] =>
+      undefExternAcc
+        ? [
+            { op: "local.get", index: paramIdx },
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: undefExternAcc.map((i) => ({ ...i })),
+              else: [{ op: "local.get", index: paramIdx }],
+            },
+          ]
+        : [{ op: "local.get", index: paramIdx }];
+
     const body: Instr[] = [
       // desc = __new_plain_object()
       { op: "call", funcIdx: newPlainObjectIdx },
       { op: "local.set", index: 3 },
-      // desc.get = get (param 0) ; desc.set = set (param 1)
-      ...setKeyAcc("get", [{ op: "local.get", index: 0 }]),
-      ...setKeyAcc("set", [{ op: "local.get", index: 1 }]),
+      // desc.get = get (param 0) ; desc.set = set (param 1) — null → undefined
+      ...setKeyAcc("get", accHalf(0)),
+      ...setKeyAcc("set", accHalf(1)),
       // desc.enumerable / configurable = box(flags & bit)
       ...setKeyAcc("enumerable", boolFlagAcc(FLAG_ENUMERABLE)),
       ...setKeyAcc("configurable", boolFlagAcc(FLAG_CONFIGURABLE)),
