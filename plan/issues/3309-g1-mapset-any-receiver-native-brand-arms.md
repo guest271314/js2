@@ -16,6 +16,13 @@ goal: runtime-eval
 sprint: current
 parent: 2927
 related: [2928, 1584, 2151, 1103, 2162, 3171, 3098]
+# (#3102/#3131) intended growth: the standalone refusal must live in the
+# any-receiver extern-class scan (calls-closures.ts, mirrors the existing
+# slice/replace/forEach/fill refusals) and the $Map brand arm in the
+# closed-method dispatcher (same home as the #2583/#2927/#3098/#3173 arms).
+loc-budget-allow:
+  - src/codegen/expressions/calls-closures.ts
+  - src/codegen/closed-method-dispatch.ts
 ---
 
 # #3309 — G1: native Map/Set dispatch for a genuinely-`any` receiver (standalone)
