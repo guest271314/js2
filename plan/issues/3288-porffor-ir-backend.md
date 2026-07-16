@@ -2,21 +2,20 @@
 id: 3288
 title: "Optional Porffor IR backend: prove the target-neutral JS2 linear-memory plan"
 status: in-progress
-assignee: ttraenkler/codex-senior-3288
-sprint: Backlog
 created: 2026-07-16
 updated: 2026-07-16
 priority: high
-horizon: xl
 feasibility: hard
 reasoning_effort: max
-model: fable
 task_type: architecture
 area: ir, codegen-linear, backend
 language_feature: compiler-internals
 goal: backend-agnostic-ir
+sprint: current
 depends_on: []
-related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141]
+horizon: xl
+model: gpt-5.6-sol
+related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 ---
 
@@ -154,6 +153,23 @@ The Porffor adapter's first deliverable is an explicit API/tool such as
 `lowerIrModuleToPorffor()` plus an IR/C artifact test. It does not add a public
 `compile()` target until the proof establishes a stable output contract.
 
+## Dispatch structure
+
+This issue is the non-dispatchable tracking umbrella. Implementation proceeds
+through one PR per dependency-ordered child issue:
+
+| Slice | Issue                                                     | Dispatch gate     |
+| ----- | --------------------------------------------------------- | ----------------- |
+| P0    | #3295 - freeze the optional Porffor compatibility surface | ready immediately |
+| P1    | #3296 - make generic lowering results non-Wasm            | #3295 and #2953   |
+| P2    | #3297 - scalar/control-flow Porffor proof                 | #3296             |
+| P3    | #3298 - extract shared `LinearMemoryPlan`                 | #3297 and #2956   |
+| P4    | #3299 - heap/layout proof through Porffor IR              | #3298             |
+| P5    | #3300 - prove allocation-policy leverage                  | #3299             |
+
+Do not mark #3288 complete until all six child issues are merged and the
+umbrella acceptance criteria below are revalidated.
+
 ## Implementation slices
 
 ### P0 - Freeze the compatibility surface
@@ -166,82 +182,6 @@ The Porffor adapter's first deliverable is an explicit API/tool such as
 3. Define the optional-loader boundary. Core builds use only JS2-owned types;
    Porffor modules are dynamically imported only by the adapter tool and
    optional integration tests.
-
-#### P0 implementation record (2026-07-16)
-
-**Status: complete in the first dependency-safe slice.** The compatibility
-surface is intentionally separate from backend registration and lowering:
-
-- `src/ir/backend/porffor/compat.ts` owns the pin and JS2-side structural
-  vocabulary. It freezes all 56 `K` names/ordinals, all eight `T` entries, all
-  six `FX` entries, the six node-slot constants, and the required renderer
-  module/function fields. It validates a real `Const` constructor probe as
-  `[kind, type, effects, a, b, c]` before accepting the upstream module.
-- `src/ir/backend/porffor/loader.ts` is the optional Node-side boundary. It
-  checks the checkout commit first, dynamically imports only
-  `compiler/ir.js` and `compiler/render.js`, validates JS2-owned renderer input
-  records before invocation, and wraps upstream import/render failures in an
-  actionable pin-migration diagnostic. There is no static production import
-  from `vendor/Porffor` and the loader is not on the public `src/index.ts`
-  export graph.
-- `tests/issue-3288-porffor-compat.test.ts` covers the frozen fingerprint,
-  first-difference diagnostics, six-slot nodes, function/module renderer
-  records, output shape, and the absent-checkout path. Its integration case is
-  skipped when no checkout exists and can be enabled with
-  `JS2WASM_PORFFOR_ROOT=<checkout>`.
-
-Pinned-checkout findings from
-`60a1d41d60580ff4faa38ffd5f7783d23df68bad`:
-
-- `compiler/ir.js` exports `T`, `FX`, `K`, `KNames`, `N_KIND` through `N_C`,
-  and constructors that produce six-slot arrays. The frozen scalar surface is
-  `none/f64/i32/u32/i64/u64/jsval/ptr`; effects are
-  `none/readMem/writeMem/call/readGlobal/writeLocal`.
-- `compiler/render.js` has a one-argument default renderer. Its module record
-  is `{ funcs, data, globals, entry, prefs, usedTypes }`; each live function
-  requires `{ name, index, params, retType, locals, body }`, parameters and
-  globals use `{ name, type }`, and function indices equal their `funcs` array
-  slots. The integration proof passes that exact record and receives C text
-  containing the probe function.
-
-Current-main feasibility audit:
-
-- `src/ir/backend/contract.ts` still exposes the five-part target-neutral
-  contract, and `src/ir/lower.ts` accepts a generic sink. The result remains
-  Wasm-shaped through `LocalDef[]` and `typeIdx`; `IrBackendKind` remains
-  `wasmgc | linear | bytecode`. Those are P1 changes, not P0 prerequisites.
-- `src/ir/lower.ts` currently contains 104 actual `emitter.pushRaw` calls plus
-  explicit `Instr[]`-only nested-buffer guards. P1/P2 can support only migrated
-  scalar/control-flow families and must reject the rest; each later Porffor op
-  family depends on the corresponding #2953 migration rather than all of
-  #2953 closing.
-- #2956 L1 is present in `src/ir/backend/linear-integration.ts` and proves a
-  flag-gated IR-to-linear consumer. No `LinearMemoryPlan` exists yet. The
-  remaining #2956 vec/aggregate/string/default-on slices constrain later plan
-  extraction and production-linear edits, not this compatibility layer or a
-  separately owned scalar proof.
-- The assignment ref showed active ownership for #2953 unions/boxing and
-  #2956 L2 vec work during this audit. This slice therefore adds only new
-  Porffor files/tests and does not edit `lower.ts`, emitter/legality contracts,
-  `linear-integration.ts`, or `codegen-linear/**`.
-
-Validation completed in an isolated worktree whose `vendor/Porffor` path is
-absent:
-
-- `pnpm run typecheck` - pass.
-- `pnpm run build` - pass; 297 modules transformed and declarations emitted.
-- `pnpm exec biome lint src/ir/backend/porffor/compat.ts src/ir/backend/porffor/loader.ts tests/issue-3288-porffor-compat.test.ts --diagnostic-level=error`
-  - pass.
-- `pnpm exec vitest run tests/issue-3288-porffor-compat.test.ts` - 7 passed,
-  1 optional integration test skipped.
-- `JS2WASM_PORFFOR_ROOT=<parent-read-only-checkout> pnpm exec vitest run tests/issue-3288-porffor-compat.test.ts`
-  - 8 passed, including fingerprint validation and real renderer invocation.
-
-P0 limitations are deliberate: the compatibility modules are not yet a public
-compile target; there is no `porffor` backend kind, JS2-IR lowering, shared
-`LinearMemoryPlan`, generated-C compilation, runtime differential test, or
-submodule registration in this branch. The optional loader also expects a Git
-checkout so it can prove the exact commit before importing unstable internals.
 
 ### P1 - Make the generic lowering result genuinely non-Wasm
 
@@ -388,18 +328,12 @@ backend's semantic emitter.
 
 ## Dependency notes
 
-- P0 has no whole-issue blocker, so frontmatter `depends_on` is empty. It uses
-  only new compatibility/loader files and the read-only pinned checkout.
-- #2953 is a per-operation-family dependency for P1/P2 and later. Scalar and
-  control-flow work may proceed through already typed emitter operations while
-  failing legality for unmigrated families. Union/boxing, closure, coercion,
-  funcref, Promise, and other raw-Wasm families wait only for their matching
-  #2953 migrations; they do not block unrelated Porffor slices.
-- #2956 L1 has landed and supplies the shared-IR linear-consumer precedent.
-  Its remaining L2 aggregate/vec work, L3 strings, and L4 default-on work do
-  not block P0 or the separately owned scalar/control-flow proof. P3 shared
-  `LinearMemoryPlan` extraction must recheck ownership and coordinate with the
-  production-linear slice touching the same layout/integration files.
+- The umbrella has no whole-issue blocker; dependency gates belong to its
+  dispatchable children.
+- P0 #3295 has no blocker. P1 #3296 waits for #3295 and #2953. This makes
+  #2953 a generic-lowering/op-family dependency rather than a P0 dependency.
+- #2956 L1 already supplies the production linear-IR precedent. Its remaining
+  work gates shared-plan extraction through #3298, not #3295 through #3297.
 - #3030's serialized interchange is related but not a blocker. Start in-tree
   through the backend contract so the allocation plan and legality hooks remain
   available; an out-of-tree adapter can consume serialized IR after T3/T5 land.
