@@ -18,12 +18,12 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T22:53:00.105Z
+claimed_at: 2026-07-16T23:26:22.974Z
 branch: symphony/porffor/3288
 pr: 3166
 loc-budget-allow:
   - src/ir/lower.ts
-last_ci_retry_head: 0c2b1d696d856bae36855fe1b090481b0763c6f1
+last_ci_retry_head: f9bd48a8a8f10fbec3b45375f6571bcfd52e6716
 ---
 
 # #3288 - Optional Porffor IR backend over the JS2 linear-memory plan
