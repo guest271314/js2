@@ -1,17 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
-
-async function compileAndRun(source: string): Promise<number> {
-  const result = await compile(source, { fileName: "test.ts" });
-  if (!result.success) {
-    throw new Error(`Compilation failed: ${result.errors[0]?.message}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const mod = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(mod, imports);
-  return (instance.exports as any).test();
-}
+import { compileAndRunTestSyncNumber as compileAndRun } from "./helpers/compile.js";
 
 describe("Negative zero preservation (#1132)", () => {
   it("-0 literal produces IEEE 754 negative zero", async () => {

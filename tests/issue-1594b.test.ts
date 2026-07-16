@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { compile } from "../src/index.js";
+import { compileAndRunGetResult as compileAndRun } from "./helpers/compile.js";
 
 /**
  * Issue #1594B — class name in its own `extends` expression is in the TDZ.
@@ -8,30 +8,6 @@ import { compile } from "../src/index.js";
  * evaluated. Referencing the class name inside `extends` must throw
  * ReferenceError: `class x extends x {}`.
  */
-
-function buildImports(wasmModule: WebAssembly.Module): Record<string, Record<string, any>> {
-  const importObj: Record<string, Record<string, any>> = {};
-  for (const imp of WebAssembly.Module.imports(wasmModule)) {
-    if (!importObj[imp.module]) importObj[imp.module] = {};
-    if (imp.kind === "function") {
-      importObj[imp.module]![imp.name] = (...args: any[]) => args[0];
-    } else if (imp.kind === "global") {
-      importObj[imp.module]![imp.name] = imp.name;
-    } else if (imp.kind === "tag") {
-      importObj[imp.module]![imp.name] = new WebAssembly.Tag({ parameters: ["externref"] });
-    }
-  }
-  return importObj;
-}
-
-async function compileAndRun(code: string): Promise<number> {
-  const result = await compile(code);
-  expect(result.success).toBe(true);
-  const wasmModule = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(wasmModule, buildImports(wasmModule));
-  const exports = instance.exports as any;
-  return exports.getResult();
-}
 
 describe("class name in own extends expression is TDZ (#1594B)", () => {
   test("class x extends x {} throws ReferenceError", { timeout: 15000 }, async () => {

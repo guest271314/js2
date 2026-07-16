@@ -1,17 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
-async function compileAndRun(source: string) {
-  const result = await compile(source);
-  expect(
-    result.success,
-    `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-  ).toBe(true);
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
+import { compileAndRunBuildImportsExpect as compileAndRun } from "./helpers/compile.js";
 
 describe("stdlib: Math methods", () => {
   it("Math.trunc", async () => {

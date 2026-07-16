@@ -1,18 +1,7 @@
 import { describe, test, expect } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
 import { bodyUsesArguments } from "../src/codegen/helpers/body-uses-arguments.ts";
 import ts from "typescript";
-
-async function compileAndRun(src: string): Promise<number> {
-  const r = await compile(src, { fileName: "test.ts" });
-  if (!r.success) {
-    throw new Error(`Compile error: ${r.errors[0]?.message}`);
-  }
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  return (instance.exports as Record<string, Function>).test() as number;
-}
+import { compileAndRunTestNumber as compileAndRun } from "./helpers/compile.js";
 
 describe("#1085 — bodyUsesArguments iterative walker", () => {
   test("arguments.length works in regular function", async () => {
