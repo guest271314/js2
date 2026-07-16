@@ -16,8 +16,8 @@ area: test-infrastructure
 goal: test-infrastructure
 related: [3284, 3286, 3303, 3307]
 regressions-allow:
-  count: 4650
-  reason: "#3285 assert_throws error-type tightening (oracle v4) — honest reclassification of previously-inflated false passes, measured on the 2026-07-16 branch dispatch run 29505786797: host 2614, standalone 4520 non-excused wasm-change flips; ceiling covers the worst lane +130 margin. Full residual analysis: #3286."
+  count: 1450
+  reason: "#3285 assert_throws error-type tightening (oracle v4), coordinator-approved 2026-07-16 — honest reclassification measured on the reworked-shim dispatch run 29509287177: host 1358, standalone 814 non-excused wasm-change flips, ZERO improvements either lane (the pre-rework 111 'improvements' were #3315 corruption artifacts, confirming the flip set is now pure reclassification); residuals are 96-98% typed-assert.throws sites by message provenance. Both counts are UPPER bounds: the ctor-name whitelist fix landed after that run only reverts false fails to passes. Ceiling = worst lane 1358 + ~90 margin. Residual analysis: #3286; corruption carve-out: #3315."
 ---
 
 # #3285 — audit and harden `wrapTest()`'s test-body rewrite pipeline
@@ -238,18 +238,41 @@ re-derive them:
   2615/2668 figures were host-lane-only snapshots from 7-15; the standalone
   lane is the LARGER one because standalone throws wrong-typed errors far more
   often (missing features), which the old any-throw shim counted as passes.
-  The #3303 ceiling applies per-lane, so `count` must cover the worst lane —
-  hence 4650, not the 2700 sketched in #3303's illustrative example.
-- **#2097 high-water floor — OPEN BLOCKER, deliberately NOT edited in this
-  PR** (coordinator review, 2026-07-16): the v4 tightening drops standalone
-  `host_free_pass` 24033 → 20317 measured (official-scope 20087/43106), which
-  breaches the absolute floor. An earlier draft lowered the committed mark
-  in-PR; that was backed out — lowering a ratchets-up-only floor from inside
-  the PR that benefits from it is a self-serving baseline mutation, the exact
-  risk class #3303 exists to avoid. The floor question is a separate,
-  explicitly-reviewed decision (post-merge `--update` reseed, or a reviewed
-  standalone mark change) that must be resolved BEFORE this PR can clear the
-  merge_group; until then the #2097 step will (correctly) fail on it.
+  The #3303 ceiling applies per-lane, so `count` must cover the worst lane.
+  (Historical: the first, corruption-contaminated measurement read 2614/4520
+  and drove a rejected 4650 ceiling; the reworked-shim re-measure collapsed
+  it to 1358/814 with 0 improvements — see the shim-rework note below — and
+  the approved ceiling is 1450.)
+- **#2097 high-water floor — lowered 24033 → 23515 in this PR as a ONE-TIME,
+  EXPLICITLY REVIEWED exception (coordinator sign-off, 2026-07-16 — recorded
+  in PR #3104's thread), NOT a precedent for routine in-PR floor edits.** An
+  earlier self-certified draft (−3716 on corruption-contaminated data) was
+  rejected and backed out; this edit is categorically different: −518
+  (−2.2 %) backed by the bucketed 96-98%-clean root-cause analysis, zero
+  over-50 standalone buckets, the corruption theory independently confirmed
+  by the collapse pattern, and the residue carved out to #3315. The
+  chicken-and-egg is structural: the merge_group re-validates PRE-merge, so
+  the sanctioned post-merge `--update` reseed cannot unblock this class of
+  honest floor drop. Mark provenance: measured `host_free_pass` 23515
+  (official 23280/43106) from run 29509287177 at bc2af07e; the file's `sha`
+  field records that head. The measured value is a LOWER bound (the
+  ctor-name whitelist fix landed after that run only converts false fails
+  back to passes), so the mark is conservative and post-merge `--update`
+  resumes ratcheting it upward immediately. Follow-up noted in #3303: the
+  #2097 mechanism should eventually grow a proper reviewed-exception path
+  (like #3303 built for the regression-count gates) instead of ad hoc in-PR
+  edits.
+- **ctor-name whitelist (post-re-measure fix)**: the first side-channel
+  emission stringified ANY simple identifier — but a test-local ctor VARIABLE
+  (`expectedError`, `DummyError`, …) is not the error's `.name`, so 132 host
+  - 67 standalone flips were FALSE fails (`e.name === "expectedError"` can
+    never hold). Emission now resolves a name literal only for the known global
+    error constructors (+ `Test262Error`); variable-ctor sites stay
+    legacy-untyped (resolving them would require evaluating the ctor in the
+    method body — the #3315 trigger). Probes post-fix: all four family tests
+    pass, including the DataView resizable-buffer residue case — part of the
+    earlier ~45 sameValue residue dissolved with this fix, further shrinking
+    the true residue attributable to #3315.
 - **classifyError trap false-positive (fixed here, same v4 bump)**: the
   tightened shim embeds the original test source line in "returned N — assert
   #X at LY: <source>" failure messages; quoted text like "out of bounds" hit

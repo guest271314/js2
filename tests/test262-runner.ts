@@ -675,6 +675,22 @@ function replaceOtherThrows(code: string): string {
  *
  * Uses paren-counting to handle nested parens in the function argument.
  */
+// (#3285/#3104) Global error constructors whose NAME can be derived at wrap
+// time for the assert_throws side channel (`ErrCtor.name === identifier` holds
+// for exactly these). Everything else (test-local ctor variables) stays
+// legacy-untyped — see the emission comment in transformAssertThrows.
+const KNOWN_ERROR_CTOR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "Test262Error",
+]);
+
 function transformAssertThrows(code: string, outputFnName: string = "assert_throws"): string {
   const pattern = "assert.throws(";
   let result = "";
@@ -747,7 +763,15 @@ function transformAssertThrows(code: string, outputFnName: string = "assert_thro
     // trigger — so those emit `null` and keep the legacy untyped any-throw
     // semantics (documented narrow limitation).
     if (args.length >= 2 && args[0] && args[1]) {
-      const nameLiteral = /^[A-Za-z_$][\w$]*$/.test(args[0]) ? JSON.stringify(args[0]) : "null";
+      // Only KNOWN GLOBAL error constructors resolve to a name literal at wrap
+      // time. A test-local ctor VARIABLE (`expectedError`, `DummyError`, …)
+      // must NOT be stringified — the identifier is not the error's .name, so
+      // the check would false-fail every honest throw (132 host + 67
+      // standalone false fails measured on the 2026-07-16 re-measure run
+      // before this whitelist). Resolving a variable's value would require
+      // evaluating it in the method body — the #3315 trigger — so those sites
+      // stay legacy-untyped (null).
+      const nameLiteral = KNOWN_ERROR_CTOR_NAMES.has(args[0]) ? JSON.stringify(args[0]) : "null";
       // Statement-position splice: the original call can be prefixed by
       // `await ` (assert.throwsAsync sites). The assignment must land BEFORE
       // the whole statement, not between `await` and the call expression.
