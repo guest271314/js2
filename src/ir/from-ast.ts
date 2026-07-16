@@ -157,6 +157,23 @@ export interface IrFromAstResolver {
    * true abstract op (tracked in #2955's remaining-slices map).
    */
   stringIsExternref?(): boolean;
+  /**
+   * (#2955 slice 4) Capability predicate: does this compile's lane own the
+   * `number_toString` `(f64) -> externref` host import (pre-registered by
+   * the legacy source scan whenever a checker-number `.toString()` appears
+   * in source)? The from-ast `<number>.toString()` arm previously read
+   * `nativeStrings?.() === false` as a PROXY for this — the import is
+   * host-lane-only AND its return is host-mode's string carrier
+   * (externref), so the mode read was doing capability duty. Same shape as
+   * `hasHostNumberBox`: the answer MUST stay a build-time answer (the
+   * native arm is a demote — no lower-time demote channel), the
+   * implementation is intentionally `!ctx.nativeStrings` today (byte-inert
+   * relocation), and widening (a native number formatter whose return is
+   * the `(ref $AnyString)` carrier) is a semantic follow-up tracked in
+   * #2955's remaining-slices map, to be validated against the standalone
+   * floor.
+   */
+  hasHostNumberToString?(): boolean;
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
    * #1804 — register-or-recover the vec struct for an element ValType so
@@ -3600,18 +3617,22 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // (#2856) `<number>.toString()` (no radix) on an f64 receiver → the
   // `number_toString` `(f64) -> externref` host import, pre-registered by the
   // legacy source scan whenever a checker-number `.toString()` appears in
-  // source (src/codegen/index.ts ~9100). Host-strings mode only: the import
-  // returns a HOST string (externref), which is exactly `IrType.string`'s
+  // source (src/codegen/index.ts ~9100). The import is host-lane-only and
+  // its return is a HOST string (externref), which is exactly `IrType.string`'s
   // carrier there — so the result composes with the string `+` proof arms
-  // (`"n=" + i.toString()`). Native-strings mode has a `(ref $AnyString)`
-  // carrier and demotes here (native number formatting is a follow-up arm);
+  // (`"n=" + i.toString()`). (#2955 slice 4: that availability question is
+  // resolver-owned — `hasHostNumberToString` — so from-ast reads no
+  // `nativeStrings` here. The `=== true` polarity preserves the legacy
+  // resolver-absent default of this site's old `nativeStrings?.() === false`
+  // read: no resolver → demote.) Lanes without the import (native strings:
+  // `(ref $AnyString)` carrier, no native number formatter yet) demote here;
   // radix args likewise demote.
   if (
     methodName === "toString" &&
     expr.arguments.length === 0 &&
     recvType.kind === "val" &&
     recvType.val.kind === "f64" &&
-    cx.resolver?.nativeStrings?.() === false
+    cx.resolver?.hasHostNumberToString?.() === true
   ) {
     const r = cx.builder.emitCall({ kind: "func", name: "number_toString" }, [recv], { kind: "string" });
     if (r === null) {

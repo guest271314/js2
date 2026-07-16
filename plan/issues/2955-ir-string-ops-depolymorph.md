@@ -283,3 +283,31 @@ unrelated).
 **Remaining after slice 3** (from-ast functional `nativeStrings` reads, 2):
 the number-`toString` capability site (~3600, slice 4 next) and the for-of
 strategy switch (~4470, slice 5). `status` stays `ready`.
+
+## Slice 4 (2026-07-17, fable-e) — number-`toString` capability → `hasHostNumberToString`
+
+The `<number>.toString()` arm in `lowerMethodCall` read
+`nativeStrings?.() === false` as a PROXY for "does this lane own the
+`number_toString` `(f64) -> externref` host import?" (host-lane-only, and its
+return IS host-mode's string carrier — the mode read was doing capability
+duty). It now consults `IrFromAstResolver.hasHostNumberToString()`,
+implemented in `integration.ts` as exactly `!ctx.nativeStrings` — the
+boolean-capability shape of `hasHostNumberBox`, byte-inert truth table
+including the resolver-absent case (old `undefined === false` and new
+`undefined === true` are both false → demote).
+
+Same recorded constraints as the number-box slice: the answer stays a
+build-time answer (the native arm is a demote; no lower-time demote channel),
+and widening — a native number formatter returning the `(ref $AnyString)`
+carrier — is a semantic follow-up that must be validated against the
+standalone floor.
+
+**Verification**: sha256-identical compiled binaries vs the slice-3 parent
+commit in ALL THREE regimes (host / native / standalone) over the same
+20-source corpus; mutation check (predicate inverted) changes the
+number-toString snippet + dom/style example hashes in host mode — the site is
+genuinely exercised. `tsc --noEmit` clean; prettier clean;
+`check:ir-fallbacks` unchanged.
+
+**Remaining after slice 4** (from-ast functional `nativeStrings` reads, 1):
+the for-of strategy switch (~4470, slice 5 — last). `status` stays `ready`.
