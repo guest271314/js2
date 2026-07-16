@@ -568,6 +568,15 @@ Environment:
                                 the diff would read oracle skew as regressions. Set this only on the
                                 oracle-flip PR (e.g. #1945) to intentionally re-seed the baseline at
                                 the new oracle version.
+  REGRESSIONS_ALLOW_FILE=<path> (#3303) Read the rebase-mode 'regressions-allow:' ceiling from ONE
+                                explicit file instead of the change-set's own plan/issues diff.
+                                Test/emergency hook; /dev/null disables the allowance entirely.
+                                In rebase mode ONLY, a PR may declare in its own issue file:
+                                  regressions-allow:
+                                    count: <N>
+                                    reason: "<why these flips are honest>"
+                                which supersedes the drift-tolerance + bucket checks up to count
+                                (hard-fails above it; #3189 trap ratchet is never excused).
   --path-filter <patterns>      Restrict the diff to tests whose path contains any of the
                                 pipe-separated substrings (same semantics as TEST262_PATH_FILTER).
                                 Used by #1954 scoped PR-time runs: the candidate JSONL only covers
