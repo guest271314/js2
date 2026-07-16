@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import { WasmGcEmitter } from "../src/ir/backend/wasmgc-emitter.js";
-import type { IrRefCellLowering, IrVecLowering } from "../src/ir/backend/handles.js";
+import type { IrClosureLowering, IrRefCellLowering, IrVecLowering } from "../src/ir/backend/handles.js";
 import type { Instr } from "../src/ir/types.js";
 
 const emitter = new WasmGcEmitter();
@@ -141,5 +141,32 @@ describe("#2953 WasmGcEmitter — ref-cell family byte-identity", () => {
     const out: Instr[] = [];
     emitter.emitRefCellSet(cell, out);
     expect(out).toEqual([{ op: "struct.set", typeIdx: 11, fieldIdx: 0 }]);
+  });
+});
+
+describe("#2953 WasmGcEmitter — closure family byte-identity", () => {
+  const closure: IrClosureLowering = {
+    structTypeIdx: 17,
+    funcFieldIdx: 0,
+    capFieldIdx: (index) => index + 1,
+    funcTypeIdx: 29,
+  };
+
+  it("emitClosureNew → struct.new $closure (function and captures already on the stack)", () => {
+    const out: Instr[] = [];
+    emitter.emitClosureNew(closure, 2, out);
+    expect(out).toEqual([{ op: "struct.new", typeIdx: 17 }]);
+  });
+
+  it("emitClosureFuncGet → struct.get $closure $func", () => {
+    const out: Instr[] = [];
+    emitter.emitClosureFuncGet(closure, out);
+    expect(out).toEqual([{ op: "struct.get", typeIdx: 17, fieldIdx: 0 }]);
+  });
+
+  it("emitCaptureGet maps the capture position through the layout", () => {
+    const out: Instr[] = [];
+    emitter.emitCaptureGet(closure, 2, out);
+    expect(out).toEqual([{ op: "struct.get", typeIdx: 17, fieldIdx: 3 }]);
   });
 });

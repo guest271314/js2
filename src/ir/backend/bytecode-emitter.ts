@@ -671,6 +671,19 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
 
+  // ---- closure family (#2953) — closure records and callable handles are not
+  // yet represented by the bytecode VM. Keep the trait boundary loud instead
+  // of falling back to WasmGC struct instructions through pushRaw.
+  emitClosureNew(): void {
+    throw new Error("BytecodeEmitter: closure construction not yet wired — see §2a closure family.");
+  }
+  emitClosureFuncGet(): void {
+    throw new Error("BytecodeEmitter: closure function reads not yet wired — see §2a closure family.");
+  }
+  emitCaptureGet(): void {
+    throw new Error("BytecodeEmitter: closure capture reads not yet wired — see §2a closure family.");
+  }
+
   // ---- (a5) ref-cell family (#2953) — a 1-field mutable struct. Not yet wired
   // into the VM heap model; a future wiring mirrors the (a2) struct family
   // (STRUCT_NEW fieldCount=1 / STRUCT_GET|SET fieldIdx=0).

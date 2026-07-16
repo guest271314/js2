@@ -173,9 +173,21 @@ export interface BackendEmitter<S = Instr[]> {
   emitToExternref?(out: Instr[]): void;
   emitFromExternref?(layout: { typeIdx: number } | IrType, out: Instr[]): void;
   emitFuncRef?(funcIdx: number, out: Instr[]): void;
-  emitClosureNew?(layout: IrClosureLowering, captureCount: number, out: Instr[]): void;
-  emitClosureFuncGet?(layout: IrClosureLowering, out: Instr[]): void;
-  emitCaptureGet?(layout: IrClosureLowering, index: number, out: Instr[]): void;
+
+  // ---- closure family — MIGRATED behind the trait (#2953) -----------------
+  // Closure construction and field reads are aggregate operations whose
+  // representation differs by backend. The caller still owns operand order:
+  // closure.new leaves the lifted function reference followed by each capture
+  // on the stack; closure.cap performs its subtype downcast before the field
+  // read; closure.call performs its typed-funcref cast after the function-field
+  // read. Those ref.func/ref.cast operations migrate in their dedicated #2953
+  // slices, while these hooks close the closure struct.new/get bypasses.
+  /** lifted function ref + captureCount captures on the stack -> closure value. */
+  emitClosureNew(layout: IrClosureLowering, captureCount: number, out: S): void;
+  /** closure ref on the stack -> its abstract funcref field. */
+  emitClosureFuncGet(layout: IrClosureLowering, out: S): void;
+  /** downcast closure-subtype ref on the stack -> capture at `index`. */
+  emitCaptureGet(layout: IrClosureLowering, index: number, out: S): void;
 
   // ---- (a1) call family — MIGRATED behind the trait (#1584 §2a) -----------
   // The first op-family to move from inline `lower.ts` pushes to typed trait
