@@ -25,8 +25,10 @@ import {
   type SharedRefCellMap,
   emitMethodParamDefaults,
   emitObjectMethodAsClosure,
+  genBodyReferencesSuper,
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
+import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#3132 S2) obj-literal async-gen method drive
 import { addFunctionOwnLocals } from "./binding-info.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
@@ -2955,6 +2957,27 @@ export function compileObjectLiteralForStruct(
         // `.next()/.return()/.throw()` dispatch on the returned ref is already
         // representation-agnostic. No host imports — instantiates standalone.
         compileNativeGeneratorFunction(ctx, methodFctx, prop, objMethNativeGen);
+        methodFctx.body.push({ op: "return" });
+      } else if (
+        isGeneratorMethod &&
+        isAsyncMethod &&
+        prop.body &&
+        // (#3132 S2) Bounded async-generator OBJECT-LITERAL METHOD drive —
+        // same interception as class-bodies.ts. The receiver is the synthetic
+        // param 0 (`this`, typed `ref structTypeIdx`), captured into the
+        // `$AsyncFrame` as a param field and restored BY NAME into the resume
+        // fn's localMap, so a `this`-reading body resolves it exactly as the
+        // entry body does. Still legacy (correct-or-legacy): `super`
+        // (home-object binding not threaded) and `arguments` (entry-fn vec
+        // struct). `isAsyncGenDriveCandidate` self-limits to standalone/wasi
+        // and enforces the bounded body + stem-collision rules — a sibling
+        // literal sharing the method name collides on the stem and keeps the
+        // legacy buffer below.
+        !genBodyReferencesSuper(prop.body) &&
+        !bodyUsesArguments(prop.body) &&
+        isAsyncGenDriveCandidate(ctx, prop)
+      ) {
+        emitAsyncGenerator(ctx, methodFctx, prop);
         methodFctx.body.push({ op: "return" });
       } else if (isGeneratorMethod && prop.body) {
         // Generator method: eagerly evaluate body, collect yields into a buffer,
