@@ -2,7 +2,7 @@
 id: 3032
 title: "Lazy-first-resume generator thunks: stop running eager-buffer generator bodies at creation (unblocks #2141 S3 / #2626 classifier)"
 status: ready
-assignee:
+assignee: ttraenkler/sendev-3032-w3
 sprint: current
 created: 2026-07-04
 priority: high
@@ -15,7 +15,7 @@ language_feature: generators, destructuring defaults, equality
 goal: test262-conformance
 related: [2141, 2626, 2040, 2585, 928, 2203, 991, 3050]
 origin: "2026-07-04 #2141 S2 root-cause (fable-tag5): the −162 dstr eject was never a dstr/eq dependency — it was eager generator bodies + comparator vacuity"
-note: "FRESH-WINDOW BIG ROCK (sendev-3032, 2026-07-14): the remaining W3 work is threading TDZ-flag capture boxes through the native generator state machine (~4-6 tightly-coupled offset sites in generators-native.ts + nested-declarations.ts; merge_group-only validation; HIGH floor-risk). Slot at a budget-window START, NOT a tail — a partial window guarantees a stranded half-done native-generator change. See '## W3 — CORRECTED ROUTE + THE REAL BLOCKER'. Slice 1 (zero-param gen expressions) already LANDED; this issue is NOT done."
+note: "W3 (TDZ-native-threading) LANDED (sendev-3032-w3, 2026-07-16) — see '## W3 landed'. The A1/tag-5-vacuity unblock this issue was prioritized for is delivered. Remaining banked waves: W2 (paramful gen expressions — MEASURE FIRST, predicted wont-build), W4 (method generators), W5 (retVal marshalling), W6 (retire the buffer / host-lane laziness for non-try-region shapes). Issue stays open for those; they are NOT fresh-window-critical the way W3 was."
 ---
 
 # #3032 — eager-buffer generators run their body AT CREATION; the tag-5 comparator vacuity is the only thing hiding it
@@ -338,3 +338,94 @@ guarantees it.
 **Risk:** HIGH-floor, native-generator machinery, ~4-6 tightly-coupled offset
 sites; a subtle `param_*`/offset misalignment only surfaces in merge_group.
 Budget it as a full fresh window, not a tail slice.
+
+## W3 landed (sendev-3032-w3, 2026-07-16, branch `issue-3032-tdz-native-threading`)
+
+Implemented exactly the corrected route above, plus one root-cause fix the
+work exposed. Spec basis: ECMA-262 §27.5.3.1-3 — EvaluateGeneratorBody
+performs GeneratorStart, which SUSPENDS the generator at the start of its
+body; no body statement may run until the first `next()`, and
+GeneratorResumeAbrupt on `suspendedStart` never runs the body at all. Native
+state-machine generators satisfy this by construction; the eager buffer
+cannot.
+
+### What changed (4 files + tests)
+
+1. **`src/codegen/statements/nested-declarations.ts`** — the has-captures
+   capturingNativeGen gate is now lane-split:
+   `(standalone || (tdz===0 && tryRegion)) && isNativeGeneratorCandidate`.
+   Standalone/WASI is candidate-gated ONLY (matching the no-captures branch,
+   which never had a try-region gate at its call site); the JS-host lane is
+   byte-identical to #3050. TDZ-flag boxes ride as additional leading
+   `NativeGeneratorCaptureParam` entries (`{name: "__tdz_box_<n>",
+   tdzFlagFor: n}`) appended AFTER the value captures — aligned with
+   `allParamTypes`'s `[valueCaps, tdzFlagBoxes, userParams]` (#1205 Stage 3)
+   layout, which the call-site `nestedFuncCaptures` prepend already produces.
+   NO call-site changes were needed: the factory IS the lifted function.
+2. **`src/codegen/generators-native.ts`** — `NativeGeneratorCaptureParam`
+   gained `tdzFlagFor`; `registerNativeGenerator` records
+   `leadingTdzFlags: {name, paramIdx}[]` on the info (paramIdx = position in
+   leadingCaptures ⇒ `paramNames`/`paramTypes` index; `leadingCaptureCount`
+   naturally includes the flag boxes so `thisOffset`/pattern-param offsets
+   stay aligned — the exact misalignment #3050 gated `=== 0` against). The
+   resume fn registers each rehydrated flag-box param local in
+   `resumeFctx.boxedTdzFlags` + `tdzFlagLocals` under the ORIGINAL captured
+   name (refCellTypeIdx read from the param's own ValType, so it always
+   matches the state-struct field). `emitLocalTdzCheck`/`emitLocalTdzInit`
+   consumers need no changes — they already deref `boxedTdzFlags` boxes.
+3. **`src/codegen/context/types.ts`** — `NativeGeneratorInfo.leadingTdzFlags`.
+4. **`src/codegen/context/locals.ts` — THE ROOT-CAUSE FIX the work exposed
+   (#1847/#1919 lineage, pre-existing in BOTH lanes):** `restoreLocals`
+   restored `localMap` + `boxedCaptures` but NOT
+   `boxedTdzFlags`/`tdzFlagLocals`. The call-site TDZ-flag prepend
+   (call-identifier.ts fresh-box arm) allocates a `__tdz_box_<n>` local and
+   RE-AIMS both maps at it — the same mutation class as closure-capture
+   boxing (#2029), on maps the snapshot didn't cover. A rolled-back
+   speculative probe (e.g. the for-of subject probe) left both maps aimed at
+   truncated slots; the committed re-compile's `existing` branch then baked
+   `local.get <stale slot>` — re-allocated later at a different type →
+   invalid wasm. Verified pre-existing on main in BOTH lanes for
+   `for (const v of g())` over a TDZ-capturing nested generator (host:
+   `any.convert_extern[0] expected externref, found anyref`; branch pre-fix:
+   `call[3] expected (ref null $cell<i32>)`). `LocalsSnapshot` now carries
+   exact `tdzBoxEntries`/`tdzFlagEntries` and `restoreLocals` restores both
+   maps to their exact snapshot state.
+
+### Validation (local; merge_group standalone-floor is still the decider)
+
+- Probe battery (`.tmp` probes, both lanes, branch vs main): V1 lazy-creation
+  201→**1** (standalone), V3 first-resume 111→**11** (standalone), V2
+  for-of drain+captures INVALID-WASM→**233** (BOTH lanes — the locals.ts
+  fix), V4 no-capture control 3→3, host lane V1/V3 byte-identical (still
+  eager — deliberate).
+- `tests/issue-3032-w3-tdz-native-threading.test.ts` — 10/10 (lazy creation,
+  first-resume ordering, drain+capture-write propagation, TDZ
+  init-then-drain, try-region+TDZ capture laziness, `next(v)` two-way with a
+  TDZ capture).
+- Scoped test262 sweep (GeneratorPrototype + statements/expressions/
+  generators + GeneratorFunction, 640 files): **standalone +15 net (15
+  fail→pass, 0 pass→fail)** — GeneratorPrototype/return/try-* +
+  from-state-suspended-start + the gen dstr elision clusters; **gc lane 0
+  diffs** vs main.
+- Canary battery 32/32 pass (dstr `ary-ptrn-empty` family both lanes, PR-#2625
+  regression buckets `gen-func-expr-args-trailing-comma-*`, #3050
+  GeneratorPrototype/throw/try-*).
+- Suites: issue-3050/2203/1177/1847/1919/2029-tagged-template/tdz-* +
+  generator suites — green (the one `generator-yield-contexts` fn-expr
+  failure reproduces identically on clean main: a slice-1 setExports harness
+  wiring gap, NOT this change).
+
+### Adjacent pre-existing bugs found (verified identical on clean main — NOT regressions, follow-up candidates)
+
+1. **try/catch around a TDZ-read/TDZ-call → null-pointer trap** (both lanes):
+   `try { const it = probe(); it.next(); } catch {}` with `probe` capturing a
+   TDZ `let` traps instead of throwing catchable ReferenceError.
+2. **Creation-before-init pre-call static TDZ throw**: `const it = probe();
+   let x = 42; it.next()` throws at CREATION (the #1177 pre-call check — an
+   eager-era approximation). Under lazy §27.5 creation must not throw; the
+   flag-box read at first resume already handles the TDZ case correctly.
+   Fix = suppress the pre-call TDZ check when the callee is a registered
+   native generator factory. Small, scoped follow-up.
+3. **`(yield e) as T` initializer** doesn't match the plan builder's
+   resume-binding pattern — `next(v)` sent value reads 0. The untyped-cast
+   shape only; `const got = yield e` in a typed generator works.
