@@ -30,11 +30,11 @@ Two independent caps on the standalone generic `(any, …) → any` call surface
    (`src/codegen/expressions/calls.ts:2696`) builds the args vector only when
    `!ctx.standalone && !ctx.wasi` (line ~2712:
    `const wantArgs = callExpr !== undefined && callExpr.arguments.length > 0 &&
-   !ctx.standalone && !ctx.wasi`). Under standalone the generic
+!ctx.standalone && !ctx.wasi`). Under standalone the generic
    `__extern_method_call(recv, name, argsVec)` path is invoked with an EMPTY
    args vector — a dynamic method call that reaches this lane silently drops
    its arguments. (The #2151 fixed-arity/vararg dispatchers cover the
-   closed-struct + brand-arm receivers; this gap is the *open-`$Object`* lane
+   closed-struct + brand-arm receivers; this gap is the _open-`$Object`_ lane
    — e.g. a method stored on an open object and invoked with args through the
    wrapper path.)
 2. **Arity ceiling.** The native `__extern_method_call` → `__apply_closure`
@@ -59,8 +59,8 @@ Two independent caps on the standalone generic `(any, …) → any` call surface
      `__call_fn_method_vec(recv, fn, argsVec)` that the closure-struct arms
      read positionally via `__extern_get_idx` (mirror of the #2151 vararg
      dispatcher's arg sourcing, `closed-method-dispatch.ts:1136-1152`).
-   The spill arm is the better long-term shape — it is exactly the calling
-   convention #2928's `CallBuiltin` wants (recv + boxed args vec).
+     The spill arm is the better long-term shape — it is exactly the calling
+     convention #2928's `CallBuiltin` wants (recv + boxed args vec).
 3. **Reserve/fill discipline (#1719)**: all new helpers minted at reserve
    time; fills only READ funcMap.
 4. Probe fixtures: open-`$Object` receiver with a stored closure invoked with

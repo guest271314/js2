@@ -29,16 +29,19 @@ dispatch — not interpreter-only.
 
 ```ts
 const m: any = new Map();
-m.set("k", 42); m.get("k"); m.has("k");
+m.set("k", 42);
+m.get("k");
+m.has("k");
 const s: any = new Set();
-s.add(7); s.has(7);
+s.add(7);
+s.has(7);
 ```
 
 Under `target: "standalone"` this emits **`env.WeakMap_set` / `env.WeakMap_get`
 / `env.WeakMap_has` / `env.Set_add`** function imports — unsatisfiable host
 imports (module fails the host-free floor / traps), even though the WasmGC-native
 Map/Set runtime (`src/codegen/map-runtime.ts`, `set-runtime.ts`) fully serves the
-*typed*-receiver case.
+_typed_-receiver case.
 
 ## Root cause — CORRECTED mechanism (the #2927 narrative was stale)
 
@@ -87,9 +90,9 @@ registered. The real path:
    - `add_1` (SET|WEAKSET) → `__set_add`, chainable
    - `clear_0` (MAP|SET; weak collections have no clear) → `__map_clear` →
      `ref.null.extern`
-   Kind-guard misses return `ref.null.extern` (`undefined`), matching the
-   pre-fix open-`$Object` fall-through (a brand-check TypeError refinement is
-   #2604-family follow-up territory, host-free either way).
+     Kind-guard misses return `ref.null.extern` (`undefined`), matching the
+     pre-fix open-`$Object` fall-through (a brand-check TypeError refinement is
+     #2604-family follow-up territory, host-free either way).
 3. **Reserve-then-fill discipline (#1719)**: `ensureMapHelpers` +
    `ensureSetHelpers` + `addUnionImportsViaRegistry` (`__box_boolean`) run at
    RESERVE time in `reserveClosedMethodDispatch`, so
@@ -114,6 +117,24 @@ args via `__box_number` + the arm converts `any.convert_extern` — the same rep
 - [x] `delete`/`clear` on `any` receivers work host-free.
 - [x] Typed-receiver Map/Set paths and JS-host mode byte-stable (scoped suites
       green: #2151/#2583/#2604 families, map/set tests).
+
+## Test Results (2026-07-16, branch `issue-2927-g1-mapset-brand`)
+
+- `tsc --noEmit` clean.
+- `tests/issue-3309-standalone-any-mapset.test.ts` — **12/12** (host + host-free
+  standalone; 0-fn-import asserted per standalone case).
+- Neighbor suites green: #2927 push/pop (7), #2151 + nary + dynamic-spread,
+  #1103a standalone-map, #2162 standalone-set/weak/map-foreach/set-algebra/
+  iterators/set-foreach/entries-foreach, #2583 (17), #2605/#2606, #3098, #3117.
+- 3 failures reproduce IDENTICALLY on clean main (pre-existing, not this PR):
+  `issue-2151.test.ts` "custom iterable driven via any-method .next()"
+  (standalone+wasi, Wasm exception) and `issue-3098.test.ts`
+  "find/findIndex/findLast/findLastIndex".
+- Substrate caveats verified pre-existing on clean main (not this fix): a miss
+  result compares `== null` but not `=== undefined` (same for TYPED `Map.get`
+  miss and the open-`$Object` bottom arm — #2106-family); typed inline
+  `m.get(k) === 7` fails standalone while the same compare through a
+  `const g: any` binding passes.
 
 ## Notes
 

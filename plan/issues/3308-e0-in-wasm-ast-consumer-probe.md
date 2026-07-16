@@ -38,7 +38,7 @@ different failure classes:
 Under strategy 2(a) the bytecode emitter consumes the AST **in-Wasm** via
 dynamic `$Object` field reads — never through `wrapExports`. If the fields are
 intact in-Wasm, those four issues drop off the interpreter's critical path
-entirely. *Suspected — not proven.* E0 is the arbitration measurement, and it
+entirely. _Suspected — not proven._ E0 is the arbitration measurement, and it
 doubles as the maturity metric for the dynamic-`$Object`-reader substrate the
 emitter will inherit (compiled-acorn `Node`s are open `$Object`s with
 dynamically-assigned fields; every emitter field read goes through the
@@ -49,7 +49,7 @@ name-keyed dynamic read path).
 1. **Author a small TS walker** (strictly-typed js2wasm-compilable subset) that
    is compiled **alongside Acorn** in the same module — extend the #1710
    harness under `tests/dogfood/`. Entry points, all returning scalars so no
-   marshalling is involved in the *measurement* itself:
+   marshalling is involved in the _measurement_ itself:
    - `probeNodeCount(src: string): number` — parse + full recursive walk,
      count nodes (objects with a `type` field).
    - `probeParamCount(src: string): number` — parse, walk to the first

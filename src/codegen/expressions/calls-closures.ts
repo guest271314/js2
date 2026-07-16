@@ -1428,6 +1428,34 @@ export function tryExternClassMethodOnAny(
   // resolves by runtime shape. Mirrors the `fill` refusal above.
   if (methodName === "copyWithin" || methodName === "reverse") return null;
 
+  // (#3309) Collection methods (`get`/`set`/`has`/`add`/`delete`/`clear`) on an
+  // `any` receiver under standalone/wasi. The candidate pool below still
+  // contains the WeakMap/Set/WeakSet extern classes even in nativeStrings mode
+  // (the lib .d.ts declare-var scan gates only `"Map"` —
+  // `collectExternFromDeclareVar`, extern-declarations.ts), so first-match
+  // bound `m.set(k, v)` on a Map held in `any` to `env.WeakMap_set` /
+  // `env.WeakMap_get` / `env.WeakMap_has` and `s.add(v)` to `env.Set_add` —
+  // host imports the standalone runtime cannot satisfy, while the WasmGC-native
+  // Map/Set runtime (map-runtime.ts / set-runtime.ts) sits unused. Refuse
+  // extern-class dispatch so the call falls through to the #2151 closed-method
+  // dispatcher, whose `$Map` brand arm (closed-method-dispatch.ts) resolves by
+  // runtime shape: all four collections share the `$Map` struct with a `kind`
+  // brand tag (#3171). Closed-struct/user-object receivers with these method
+  // names keep their arms; open-`$Object` receivers keep the
+  // `__extern_method_call` bottom arm. JS-host mode is untouched (the generic
+  // WeakMap_* host bridge is satisfiable and correct there).
+  if (
+    (ctx.standalone || ctx.wasi) &&
+    (methodName === "get" ||
+      methodName === "set" ||
+      methodName === "has" ||
+      methodName === "add" ||
+      methodName === "delete" ||
+      methodName === "clear")
+  ) {
+    return null;
+  }
+
   // (#3033) If the program's OWN code defines a function-valued member of this
   // name (prototype-method assignment, function-valued property, object-literal
   // method, class method), the receiver is far more plausibly a user object
