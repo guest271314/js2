@@ -4,7 +4,7 @@ title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coe
 status: in-review
 assignee: ttraenkler/opus-1a
 branch: symphony/porffor/2953-after-pr-3146
-pr: null
+pr: 3159
 sprint: current
 created: 2026-07-02
 updated: 2026-07-16
@@ -289,4 +289,4 @@ value/aggregate families.
   and equivalence (1,607 passing, 36 known baseline failures, zero new
   regressions) are green. Per the issue rules, no full local test262 was run.
 - Slice acceptance: complete; all issue-defined slices are now implemented and
-  the issue is ready for final review.
+  the issue is ready for final review in PR #3159.
