@@ -3,8 +3,8 @@ id: 2933
 title: "Standalone: Math/JSON/Reflect/Atomics namespace static VALUE reads refuse — fold constants / native static-method closures"
 status: ready
 created: 2026-07-02
-updated: 2026-07-06
-assignee: ttraenkler/opus-2933
+updated: 2026-07-16
+assignee: ttraenkler/fable-eqfix
 priority: medium
 feasibility: medium
 task_type: feature
@@ -14,6 +14,13 @@ sprint: current
 horizon: m
 related: [2860, 2861, 1907, 1888]
 umbrella: 2860
+loc-budget-allow:
+  - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/context/types.ts
+coercion-sites-allow:
+  - src/codegen/builtin-value-read.ts
+  - src/codegen/expressions/call-identifier.ts
 ---
 
 # Standalone: namespace static VALUE reads refuse
@@ -62,9 +69,12 @@ Still refusing / wrong (this issue):
 
 ## Acceptance criteria
 
-- [ ] `const f: any = JSON.stringify; f({a:1})` works in standalone (returns the
-      JSON string), zero host imports.
-- [ ] `const g: any = Math.max; g(1,2,3) === 3` in standalone.
+- [x] `const f: any = JSON.stringify; f({a:1})` works in standalone (returns the
+      JSON string), zero host imports. — landed 2026-07-06 (opus-2933); **but
+      see the 2026-07-16 note below: the object-arg case has since regressed on
+      main** (pre-existing relative to the variadic slice, needs re-root-cause).
+- [x] `const g: any = Math.max; g(1,2,3) === 3` in standalone. — landed
+      2026-07-16, see Progress (fable-eqfix).
 - [x] `Math["PI"]` (reflective, `any`-typed key) reads π, not 0. — landed
       2026-07-02, see Progress.
 - [x] No host-mode regression (`ctx.standalone`-gated). — the reflective fold is
@@ -111,13 +121,14 @@ static-method closure and calls host-free.
 externref/i32 native (`calls.ts` §"Reflect API": `__extern_get` / `__extern_has`
 / `__reflect_set` / `__object_keys`). This slice adds the matching cases to
 `ensureStandaloneBuiltinStaticMethodClosure` (`src/codegen/property-access.ts`)
-+ `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`), so the
-value closure calls the SAME native → observationally identical to the call
-form. `Reflect.get`/`set` are fixed at arity 2/3 (no explicit-receiver slot),
-matching the call path which already refuses the receiver form under standalone
-(#2046). Standalone-gated only — host mode (which reads the real JS `Reflect.get`
-via `__get_builtin`/`__extern_get`) is untouched; identity is singleton-stable
-via the existing `pushBuiltinFnSingletonValueInstrs` path (#2963).
+
+- `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`), so the
+  value closure calls the SAME native → observationally identical to the call
+  form. `Reflect.get`/`set` are fixed at arity 2/3 (no explicit-receiver slot),
+  matching the call path which already refuses the receiver form under standalone
+  (#2046). Standalone-gated only — host mode (which reads the real JS `Reflect.get`
+  via `__get_builtin`/`__extern_get`) is untouched; identity is singleton-stable
+  via the existing `pushBuiltinFnSingletonValueInstrs` path (#2963).
 
 Covered by `tests/issue-2933-reflect-static-method-value.test.ts` (10 cases:
 get/has/set/ownKeys value calls, identity stability, distinct-method
@@ -152,14 +163,15 @@ serialises via the existing 1-arg native `__json_stringify_root`
 
 **Mechanism** — added a `JSON.stringify` case to
 `ensureStandaloneBuiltinStaticMethodClosure` (`src/codegen/property-access.ts`)
-+ `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`). The value
-closure is fixed 1-arg (externref value in): `local.get; any.convert_extern;
+
+- `STANDALONE_STATIC_METHOD_META` (`src/codegen/builtin-fn-meta.ts`). The value
+  closure is fixed 1-arg (externref value in): `local.get; any.convert_extern;
 call __json_stringify_root; extern.convert_any`. It calls `emitJsonStringifyValue`
-(idempotent) to register the codec, then boxes the `$AnyString` result back to
-externref at the any-call boundary. Standalone-gated; identity is singleton-stable
-via `pushBuiltinFnSingletonValueInstrs` (#2963). Objects / numbers / strings /
-nested objects serialise correctly and reify **zero host imports** (a
-standalone-floor-visible CE-to-run flip).
+  (idempotent) to register the codec, then boxes the `$AnyString` result back to
+  externref at the any-call boundary. Standalone-gated; identity is singleton-stable
+  via `pushBuiltinFnSingletonValueInstrs` (#2963). Objects / numbers / strings /
+  nested objects serialise correctly and reify **zero host imports** (a
+  standalone-floor-visible CE-to-run flip).
 
 **Known limitation (inherited, NOT a regression):** an array reaching the closure
 through `any`-boxing serialises to `"null"` — but this is the SAME pre-existing
@@ -182,6 +194,76 @@ green.
 2. Top-level `any`-boxed **array** → JSON.stringify serialises `"null"`
    (substrate: $Object/array dynamic reader) — shared with the direct any-path,
    tracked separately.
+3. `globalThis.Math.PI` still TRAPs (niche).
+
+## Progress (2026-07-16, fable-eqfix) — variadic Math.max/Math.min value closures landed
+
+Sub-part 2's remaining `Math.max`/`Math.min` **as a value** now works host-free
+under `--target standalone`, at EVERY call-site arity: `const g: any =
+Math.max; g(1,2,3) === 3` (the acceptance criterion), plus `g()` → `-Infinity`,
+NaN propagation (`g(1, NaN, 3)` → NaN, `ToNumber(undefined)` → NaN), signed-zero
+ordering (`max(+0,-0)=+0` / `min(+0,-0)=-0`), boolean ToNumber coercion, and
+singleton identity (`Math.max === Math.max`, `Math.max !== Math.min`).
+
+**Mechanism — canonical VARIADIC closure convention** (value-closures are
+fixed-arity, so a per-arity family was impossible without breaking identity):
+
+- `ensureStandaloneBuiltinStaticMethodClosure` (`builtin-value-read.ts`) reifies
+  `Math.max`/`Math.min` with lifted func type
+  `(self, (ref null $vec_externref)) -> externref` — ONE args-vec param instead
+  of positional formals. The body folds the vec with `f64.max`/`f64.min`
+  (Wasm semantics are §21.3.2.24/.25-exact: NaN propagates, signed zeros order
+  correctly), seeding ±Infinity; every element runs the ENGINE ToNumber
+  pipeline `__any_from_extern` → `__any_to_f64` (no hand-rolled coercion
+  matrix); the result is boxed with the native `$BoxedNumber` carrier
+  (`__box_number`) — the same box every dynamic-dispatch return arm uses, so
+  call-site unboxing and `__any_strict_eq` (NaN ≠ NaN, #3174) recover it.
+  Substrate is pre-registered via `addUnionImports` BEFORE the wrapper/func
+  creation (#2704 first-registration-mid-body hazard).
+- The convention is published as `ctx.variadicBuiltinClosure`; BOTH methods
+  share the one lifted func type (`call_ref` dispatches via the funcref value).
+- `tryEmitInlineDynamicCall` (`expressions/calls.ts`) gains an INNERMOST
+  dispatch arm (just above the null default, so exact-arity candidates stay
+  preferred): funcref `ref.test` against the variadic type → pack ALL saved
+  arg locals (already externref, true call-site count, no padding) into a
+  fresh vec → `call_ref`. The variadic closure is FILTERED out of the generic
+  candidate scan (its vec formal must not be marshalled positionally — the
+  generic arm would `ref.cast` arg0 to the vec type → illegal cast).
+- The callable-param dispatch (`expressions/call-identifier.ts`) gains the
+  matching arm for declared-signature callees.
+- `STANDALONE_STATIC_METHOD_META` adds `Math.max`/`Math.min` (`length: 2` per
+  spec) so `.name`/`.length`/gOPD meta stays correct.
+
+**Byte-neutrality**: everything is gated on `ctx.variadicBuiltinClosure` being
+set (only at a Math.max/min VALUE read, standalone/wasi only) —
+`prove-emit-identity check` over the 56-entry (file,target) corpus is
+IDENTICAL vs main. Host mode untouched (the host dynamic-call
+`const g: any = Math.max; g(...)` silently returns 0 on clean main —
+pre-existing, verified, separate host gap).
+
+**Gate allowances (#3131)**: `loc-budget-allow` (calls.ts /
+call-identifier.ts / context/types.ts) + `coercion-sites-allow`
+(builtin-value-read.ts, call-identifier.ts). The `__any_to_f64` count growth
+is engine USAGE (routing ToNumber through the #1917 keystone helpers), not a
+fresh hand-rolled matrix — same reviewed-step argument as #90/#3154.
+
+Covered by `tests/issue-2933-variadic-math-value.test.ts` (7 tests: all
+arities, NaN/undefined, signed zero, booleans, identity, direct-call + fixed-
+arity value-read regression guards). `#2933`/Reflect/base suites green.
+
+**Remaining (this issue stays open):**
+
+1. **REGRESSION (found 2026-07-16, pre-existing on clean main):**
+   `tests/issue-2933-json-stringify-value.test.ts` — 3 of 9 tests now FAIL on
+   main: `const f: any = JSON.stringify; f({a:1})` serialises `"null"` (4
+   chars) instead of `{"a":1}`; numbers/strings still work. The 2026-07-06
+   slice was green when it landed, so a later substrate change regressed the
+   OBJECT-arg path (the known limitation note only covered any-boxed ARRAYS).
+   Not caught by CI because issue tests are not in required CI (#3008).
+   Needs re-root-cause.
+2. Top-level `any`-boxed **array** → JSON.stringify serialises `"null"`
+   (substrate: $Object/array dynamic reader) — shared with the direct
+   any-path, tracked separately.
 3. `globalThis.Math.PI` still TRAPs (niche).
 
 ## Notes

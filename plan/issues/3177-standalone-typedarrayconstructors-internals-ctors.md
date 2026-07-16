@@ -32,10 +32,29 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; the 'TypedAr
 # index.ts: +6 — one import + the fillTaDynViewMopArms(ctx) call, which MUST
 # sit in the barrel's finalize sequence (ordering vs the other fills is
 # load-bearing); the implementation itself is in the new module.
+# (slice 3, calls.ts +29): the §23.2.5.1-step-1 without-`new` TypeError arm
+# must live INSIDE tryEmitInlineDynamicCall's dynamic-callee dispatch chain
+# (it is one `ref.test $__ta_ctor` arm prepended to the same chain the
+# proxy/bound-fn arms extend — extracting the chain builder to a module is
+# the #3182 consolidation epic's call, not this slice's); the proto/
+# isExtensible arms themselves live in ta-dyn-mop.ts.
+# (slice 4): the descriptor arms + expando live in ta-dyn-mop.ts (non-god);
+# the god-file growth is glue that MUST sit at the owning sites:
+# object-ops.ts +44 — the shared emitDefinePropertyRejectionThrow helper +
+# its 4 call-site wirings (§20.1.2.4 step 3: Object.defineProperty converts
+# the dyn-view [[DefineOwnProperty]]-false sentinel to TypeError — the
+# Object-vs-Reflect distinction only exists at the call sites);
+# object-runtime-descriptors.ts +14 — __obj_define_from_desc threads the
+# sentinel out (one scratch local + null-check, inside the native's body);
+# dataview-native.ts +3 — the three dyn-view struct.new sites push the new
+# expando field's null initializer.
 loc-budget-allow:
   - src/codegen/dataview-native.ts
   - src/codegen/property-access-dispatch.ts
   - src/codegen/index.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-ops.ts
+  - src/codegen/object-runtime-descriptors.ts
 # coercion-sites-allow: the NEW module's 4 uses (number_toString ×2,
 # __str_to_number, __unbox_number) are the exact §7.1.21
 # CanonicalNumericIndexString round-trip + the finalize-safe ToNumber the
@@ -244,20 +263,145 @@ the upgraded static-windowed RangeError path.
   static count `new Int8Array(-1)` ToIndex asymmetry) — low corpus value,
   the harness always constructs through dynamic ctor values.
 
+### Slice 3 — proto identity + without-new + isExtensible (PR: issue-3177-slice3-proto-identity, 2026-07-16, fable-3177)
+
+Directory sweep (411 non-bigint files, standalone): 134 → **154 pass (+20),
+0 regressions** (every diff line fail→pass vs the slice-2 result).
+
+What landed:
+
+- **`Object.getPrototypeOf(view) === TA.prototype` identity**
+  (ta-dyn-mop.ts): the per-kind proto object IS the per-view-brand
+  `$NativeProto` glue SINGLETON that a static `<View>.prototype` value read
+  already yields (`emitLazyNativeProtoGet` global, #2651/#2901 lineage) — no
+  new object shape. The fill registers the glue for all 9 kinds
+  (`ensureTypedArrayViewNativeProtoGlue`, idempotent; shared memberCsv) and
+  prepends: (a) a `__getPrototypeOf` dyn-view arm (runtime kind → glue
+  global, lazy-init inline), (b) an `__extern_get` `$__ta_ctor` receiver arm
+  serving `prototype` (same switch — identity closes) and
+  `BYTES_PER_ELEMENT`; other keys fall through to the original body.
+- **`TA(1)` without `new` → TypeError** (§23.2.5.1 step 1,
+  calls.ts `tryEmitInlineDynamicCall`): an outermost `ref.test $__ta_ctor`
+  arm in the dynamic-callee dispatch throws a real TypeError instance;
+  gated on `ctx.taCtorTypeIdx >= 0` (byte-inert without TA ctor values) and
+  added to the empty-candidates early-outs so it fires even in closure-free
+  modules. Flipped all 7 undefined-newtarget/invoked-with-undefined-newtarget
+  rows (incl. one `-sab` — the call throws before any SAB cast).
+- **`Object.isExtensible(view)` → true** (`__object_isExtensible` dyn-view
+  arm) — flipped all 5 new-instance-extensibility rows.
+
+Flipped (20): defined-length(+-and-offset)/defined-offset,
+returns-new-instance, returns-object ×2, as-array-returns,
+same-ctor-returns-new-cloned-typedarray, new-instance-extensibility ×5,
+undefined-newtarget-throws ×4, invoked-with-undefined-newtarget ×2 (+sab),
+object-arg/length-throws (collateral of the ctor-receiver [[Get]] arm).
+
+Verified: tests/issue-3177.test.ts 45/45 (11 new — incl. plain-object
+getPrototypeOf/isExtensible/closure-dispatch fall-through guards); scoped
+suites 2186/2190/2872/3006/3054\*/3057/3058/3133 all green (197 tests).
+
+Known residuals (documented, low corpus value):
+
+- The `__extern_get` ctor arm lives inside the dyn-view-gated fill, so a
+  module that mentions a TA ctor but never CONSTRUCTS a view gets no
+  `TA.prototype`/`BYTES_PER_ELEMENT` runtime read (corpus always
+  constructs).
+- `getProto(ta).constructor` chained-dyn reads land on the glue struct
+  (whose `$ctor` field is null, #2651 S1) → undefined; the corpus asserts
+  `ta.constructor` (slice 1) and `<TA>.prototype.constructor` (static arm)
+  instead.
+- Statically-typed receivers (`getPrototypeOf(new Uint8Array(4))` with a
+  B1 `$__ta_view` rep) don't reach the dyn-view arm — harness shapes are
+  all any-typed.
+
+### Slice 4 — descriptor MOP arms + expando side-table (PR: issue-3177-slice4-descriptor-expando, 2026-07-16, fable-3177)
+
+Directory sweep (411 non-bigint files, standalone): 154 → **196 pass (+42),
+0 regressions** (every diff line fail→pass vs the slice-3 result; cumulative
+#3177: 124 → 196). Ordinary-object blast radius verified against a clean
+origin/main baseline worktree: `built-ins/Reflect/defineProperty` identical
+(9/12), `built-ins/Object/defineProperty` +1 bonus flip (coerced-P-shrink),
+0 regressions.
+
+What landed:
+
+- **Expando side-table**: `$__ta_dyn_view` gains an APPEND-ONLY 5th field
+  `expando (mut externref)` (registry/types.ts; externref so the type has no
+  `$Object` registration dependency — `$__bound_fn` precedent). The three
+  creation sites push a null initializer; a lazily-created `$Object` carries
+  every non-index own prop + the preventExtensions state.
+- **Ordinary-key delegation in the slice-1 arms** (ta-dyn-mop.ts
+  `buildStringKeyArm` miss paths): non-canonical string keys AND symbol keys
+  now delegate to the expando by RECURSING the same native (the expando is a
+  `$Object`, so the dyn-view arm declines and the ordinary body runs —
+  no new machinery). get/has/delete keep legacy miss results when no expando
+  exists; set/reflect_set lazily create it. Flipped the whole
+  `key-is-not-numeric-index` / `key-is-not-canonical-index` /
+  `detached-buffer-key-is-*` / `key-is-symbol` families across
+  Get/Set/Delete/HasProperty (§10.4.5 "Otherwise, return Ordinary*").
+- **§10.4.5.1 [[GetOwnProperty]]** — `__getOwnPropertyDescriptor` dyn-view
+  arm: valid canonical index → fresh data descriptor `{value, w:T, e:T,
+  c:T}` (via `__new_plain_object`/`__extern_set`/`__box_boolean`); invalid →
+  undefined; ordinary keys → expando read-back.
+- **§10.4.5.3 [[DefineOwnProperty]]** — dyn-view arms in
+  `__defineProperty_value` (validate: invalid index / accessor bit /
+  attribute specified-and-false via the host flags' specified-bits → REJECT;
+  else element write) and `__defineProperty_accessor` (canonical index →
+  always REJECT). **Rejection channel**: the natives return the input obj on
+  every ordinary path and never null, so a `ref.null.extern` SENTINEL
+  signals the spec `false`: `__obj_define_from_desc` threads it out
+  (+scratch local), Reflect.defineProperty's existing `__is_truthy` reads it
+  as `false`, and the compile-time Object.defineProperty sites (literal
+  paths in emitExternDefinePropertyValue/NoValue + the two dynamic-desc
+  sites) convert it to the §20.1.2.4 TypeError via the new shared
+  `emitDefinePropertyRejectionThrow` (standalone/wasi-gated; ordinary
+  receivers never return null so host/ordinary behavior is untouched).
+  This serves BOTH test shapes: `…-throws.js` (Object.defineProperty →
+  TypeError) and the Reflect `→ false` twins.
+- **preventExtensions/isExtensible over the expando**:
+  `__object_preventExtensions` dyn-view arm lazily creates the expando and
+  flags it; the slice-3 isExtensible arm now recurses on the expando; a NEW
+  key on a non-extensible expando pre-checks (`__hasOwnProperty` +
+  `__object_isExtensible`) and rejects with the sentinel (this-is-not-
+  extensible: Reflect → false ✓).
+
+Verified: tests/issue-3177.test.ts 61/61 (16 new); suites 2186/2190/2872/
+3054\*/3057/3058 + 1629-S6/1629b (descriptor lineage) all green;
+DefineOwnProperty bucket 1 → 24/28, GetOwnProperty 1 → 5/12 (rest are
+#2940-vacuous rows + the symbol-key descriptor READ-BACK residual below).
+
+Known residuals:
+
+- Ordinary `$Object` gOPD has no symbol-key read-back (string-keyed
+  `$PropEntry` lookup) — `gOPD(view, sym)` after a symbol-keyed define
+  returns undefined (internals/GetOwnProperty/key-is-symbol.js). The
+  WRITE/READ MOP paths handle symbols (#2866 interning); only the
+  descriptor reflection misses.
+- `desc-value-throws.js`: element-write ToNumber uses `__unbox_number`,
+  which does not invoke user `valueOf` (slice-2 finding) — the Test262Error
+  from a throwing valueOf can't propagate.
+- Reflect.defineProperty on a SEALED ORDINARY object still throws instead
+  of returning false (pre-existing: the ordinary S4 preflight throws and
+  Reflect has no catch channel; fixing it needs the ordinary path moved to
+  the same sentinel discipline — a follow-on, NOT this issue).
+- `__object_keys` does not append expando keys yet (OwnPropertyKeys
+  enumeration of non-index own props).
+
 ### Remaining (next slices — release+reclaim per phase)
 
 - ~~**Ctor-arg protocol throws**~~ — DONE in slice 2 (above), EXCEPT the
   `Object.getPrototypeOf(ta) === TA.prototype` identity part (moved to the
   "found while probing" list — it is a proto-graph mechanism, not a throw)
   and the static-lane parity noted there.
-- **Descriptor MOP arms** (~70 rows, `internals/DefineOwnProperty` +
-  `GetOwnProperty`): dyn-view arms in `__defineProperty_*` + the GOPD
-  call-site guard — COORDINATE with in-flight #2984 (builtin-descriptor
-  MOP owner).
-- **Expando side-table**: non-index own props on views
-  (`Object.defineProperty(sample, "bar", …)` + delete-configurability) —
-  needs an `expando (mut ref null $Object)` field appended to
-  `$__ta_dyn_view` (append-only keeps `$__vec_base` prefix valid).
+- ~~**Descriptor MOP arms**~~ — DONE in slice 4 (above). #2984 coordination
+  note: no in-flight #2984 PR existed at implementation time (its GOPD
+  builtin-key slice had landed); the arms EXTEND the #2984/#2965 natives
+  (`__getOwnPropertyDescriptor`/`__defineProperty_*`) per the anti-bloat
+  directive — no parallel descriptor path was created.
+- ~~**Expando side-table**~~ — DONE in slice 4 (above; field is
+  `mut externref`, not `ref null $Object`, avoiding an `$Object` type
+  dependency at dyn-view registration). Residual: `__object_keys` expando
+  enumeration (see slice-4 residuals).
 - **BigInt kinds** (~150 rows, everything `*-bigint`/`BigInt`): BigInt64/
   BigUint64 need i64 elements + ToBigInt — gated on the #1349/#1644
   i64-brand ValType decision; NOT schedulable until that ADR lands.

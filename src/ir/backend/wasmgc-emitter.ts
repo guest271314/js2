@@ -223,9 +223,32 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
     this.emitDowncast(target, out);
   }
 
+  // ---- function-reference family (#2953) — byte-identical to the prior
+  // inline ref.func push in lower.ts. Name/handle resolution and operand order
+  // remain with the caller.
+  emitFuncRef(funcIdx: number, out: Instr[]): void {
+    out.push({ op: "ref.func", funcIdx });
+  }
+
+  // ---- Promise aggregate family (#2953) — byte-identical to the prior
+  // inline struct.new/get pushes in lower.ts. The canonical WasmGC Promise
+  // layout is { state: i32, value: externref, callbacks: externref }.
+  emitPromiseNew(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  }
+
+  emitPromiseStateGet(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 });
+  }
+
+  emitPromiseValueGet(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 });
+  }
+
   // ---- closure family (#2953) — byte-identical to the prior inline
   // struct.new/get pushes in lower.ts. The caller has already emitted the
-  // lifted function reference, captures, and any required ref.cast.
+  // lifted function reference through emitFuncRef, captures, and any required
+  // ref.cast.
   emitClosureNew(layout: IrClosureLowering, _captureCount: number, out: Instr[]): void {
     out.push({ op: "struct.new", typeIdx: layout.structTypeIdx });
   }

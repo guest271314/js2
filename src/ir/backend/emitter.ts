@@ -28,14 +28,11 @@
 //     call sites and the existing `emitValue(v, out)` helper. The emitter does
 //     NOT return `Instr[]` to be spliced.
 //
-// Phase 1 (#1713) implements only the pass-through group (locals / globals /
-// const / arithmetic / control flow) and the vec group; `WasmGcEmitter`
-// produces a byte-identical `Instr` stream. The remaining methods
-// (aggregate / union / closure / ref-coercion) are declared so #1714 / a
-// later stage can route them, and are implemented in `WasmGcEmitter` as
-// they get wired. Async (Promise) + string groups stay where they are in
-// `lower.ts` for Phase 1 (strings are already behind `emit*` resolver
-// methods; Promise/await is WasmGC-only with no linear analogue yet).
+// Phase 1 (#1713) began with the pass-through and vec groups;
+// `WasmGcEmitter` produces a byte-identical `Instr` stream. Later slices route
+// aggregate, union, closure, ref-coercion, and Promise operations as their
+// representation contracts become explicit. Strings remain behind the
+// existing `emit*` resolver methods.
 //
 // The `out: Instr[]` sink is WasmGC/linear-shaped (both backends share the
 // `Instr` union -- see codegen-axes "types.ts stays shared"). It does NOT fit
@@ -177,8 +174,25 @@ export interface BackendEmitter<S = Instr[]> {
   /** externref on the stack -> a ref narrowed to `target`. */
   emitFromExternref(target: { typeIdx: number } | IrType, out: S): void;
 
-  // ---- NOT YET MOVED (declared for #1714+ staging; see issue Scope) ----
-  emitFuncRef?(funcIdx: number, out: Instr[]): void;
+  // ---- function-reference family — MIGRATED behind the trait (#2953) ------
+  // The caller resolves the lifted function handle and owns its position in
+  // the closure-construction operand order. The backend owns how that handle
+  // becomes a first-class callable value (WasmGC: ref.func; linear/bytecode:
+  // table or VM-callable handle once those representations land).
+  /** Materialize compiled function `funcIdx` as a first-class callable value. */
+  emitFuncRef(funcIdx: number, out: S): void;
+
+  // ---- Promise aggregate family — MIGRATED behind the trait (#2953) ------
+  // The caller resolves the backend's Promise type and owns operand order:
+  // construction leaves state, value, and callbacks on the stack; await
+  // leaves the Promise reference on the stack before selecting a semantic
+  // field. The backend owns the concrete aggregate allocation and field map.
+  /** state + value + callbacks on the stack -> a new Promise value. */
+  emitPromiseNew(promiseTypeIdx: number, out: S): void;
+  /** Promise ref on the stack -> its settlement-state discriminator. */
+  emitPromiseStateGet(promiseTypeIdx: number, out: S): void;
+  /** Promise ref on the stack -> its fulfillment value or rejection reason. */
+  emitPromiseValueGet(promiseTypeIdx: number, out: S): void;
 
   // ---- closure family — MIGRATED behind the trait (#2953) -----------------
   // Closure construction and field reads are aggregate operations whose
@@ -186,8 +200,8 @@ export interface BackendEmitter<S = Instr[]> {
   // closure.new leaves the lifted function reference followed by each capture
   // on the stack; closure.cap performs its subtype downcast before the field
   // read; closure.call performs its typed-funcref cast after the function-field
-  // read. Those ref.func/ref.cast operations migrate in their dedicated #2953
-  // slices, while these hooks close the closure struct.new/get bypasses.
+  // read. Function materialization and narrowing route through their own
+  // representation hooks; these hooks own closure allocation and field reads.
   /** lifted function ref + captureCount captures on the stack -> closure value. */
   emitClosureNew(layout: IrClosureLowering, captureCount: number, out: S): void;
   /** closure ref on the stack -> its abstract funcref field. */

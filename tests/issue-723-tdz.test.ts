@@ -1,35 +1,12 @@
 import { describe, test, expect } from "vitest";
 import { compile } from "../src/index.js";
+import { compileAndRunGetResult as compileAndRun } from "./helpers/compile.js";
 
 /**
  * Issue #723 — TDZ (Temporal Dead Zone) runtime enforcement for let/const.
  * When a let/const variable is accessed before its declaration runs,
  * a ReferenceError should be thrown at runtime.
  */
-
-function buildImports(wasmModule: WebAssembly.Module): Record<string, Record<string, any>> {
-  const importObj: Record<string, Record<string, any>> = {};
-  for (const imp of WebAssembly.Module.imports(wasmModule)) {
-    if (!importObj[imp.module]) importObj[imp.module] = {};
-    if (imp.kind === "function") {
-      importObj[imp.module]![imp.name] = (...args: any[]) => args[0];
-    } else if (imp.kind === "global") {
-      importObj[imp.module]![imp.name] = imp.name;
-    } else if (imp.kind === "tag") {
-      importObj[imp.module]![imp.name] = new WebAssembly.Tag({ parameters: ["externref"] });
-    }
-  }
-  return importObj;
-}
-
-async function compileAndRun(code: string): Promise<number> {
-  const result = await compile(code);
-  expect(result.success).toBe(true);
-  const wasmModule = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(wasmModule, buildImports(wasmModule));
-  const exports = instance.exports as any;
-  return exports.getResult();
-}
 
 describe("TDZ runtime enforcement (#723)", () => {
   test("module-level: reading let before declaration throws ReferenceError", { timeout: 15000 }, async () => {

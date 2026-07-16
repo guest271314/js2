@@ -1,6 +1,5 @@
 import { test, expect, describe } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
+import { compileAndRunTestSync as compileAndRun } from "./helpers/compile.js";
 
 /**
  * #1453 — Per-iteration fresh let/const binding in `for` statements.
@@ -15,14 +14,6 @@ import { buildImports } from "../src/runtime.ts";
  * codegen issue unrelated to per-iteration semantics. Instead, we snapshot
  * the closures into individual locals/variables.
  */
-
-async function compileAndRun(src: string): Promise<any> {
-  const r = await compile(src, { fileName: "test.ts" });
-  if (!r.success) throw new Error(`Compile error: ${r.errors?.[0]?.message}`);
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(r.binary), imports);
-  return (instance.exports as any).test();
-}
 
 describe("#1453 — for (let) per-iteration fresh binding", () => {
   test("each iteration's closure observes its own binding (digits-of-i pattern)", async () => {

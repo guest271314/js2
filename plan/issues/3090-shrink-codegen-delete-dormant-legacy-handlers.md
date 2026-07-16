@@ -1,14 +1,18 @@
 ---
 id: 3090
 title: "Shrink codegen: delete dormant legacy direct-codegen handlers superseded by IR (~40–55K net LOC)"
-status: ready
-# Phase 0 (audit) landed 2026-07-10 by ttraenkler/fable-6th — see
-# "## Phase 0 audit landed" below. Umbrella stays open: next claimable slice
-# is Phase 2 (knip + unreferenced deletions, ~2.1K); handler deletions are
-# GATED (see the audit doc's G1–G4) — do not start Phase 1 before the gates.
+status: blocked
+# Phase 0 (audit) landed 2026-07-10; Phase 2 (unreferenced/dead deletions,
+# slices 2a/2b/2d/2e) is EXHAUSTED as of the 2026-07-16 Phase 2f re-run — the
+# residue is exactly the 16 deliberate keeps in the dead-export baseline (see
+# "## Phase 2f" below). Every remaining deletion is Phase 1 (handler
+# deletions), hard-GATED on G1–G4 (audit doc): G2 claim coverage (#2856
+# rejection buckets → 0), skip-allowlist widening (#3203 sequels), G3
+# top-level IR adoption. BLOCKED until a gate-clearing track closes a file's
+# last gate — do NOT claim for ad-hoc deletion hunting.
 sprint: current
 created: 2026-07-08
-updated: 2026-07-13
+updated: 2026-07-16
 priority: high
 horizon: xl
 feasibility: medium
@@ -211,6 +215,33 @@ cross-check: the null/undefined equivalence batch (11 files, 83 cases)
 produces the **same 8 pre-existing failures** (`null-dereference-guards`
 #396) with and without the change — **zero delta**. typecheck / prettier /
 `check:dead-exports` / `check:ir-fallbacks` / `check:loc-budget` all green.
+
+## Phase 2f — audit re-run: Phase 2 EXHAUSTED (2026-07-16, fable-3132-s2)
+
+Fresh `audit-legacy-reachability.mjs` run @ current main (post-#3129):
+
+- FRONTEND legacy-only **59,676** fn-lines (down from 61,889 post-flip /
+  61,118 @ Phase 2d — the WAVE-C extractions and #3287-style deletions are
+  shrinking the front-end even while gated).
+- Unreferenced/dead residue across ALL buckets: **335 fn-lines in 16
+  functions — every one a documented deliberate keep**: `regex/vm.ts`
+  (runAt/search/classMatch/asciiFold/isLineTerminator/isWordChar — the
+  executable reference spec, oracle for `tests/regex-bytecode.test.ts`), and
+  the test-imported set (value-tags trio, `getBuiltinParent`,
+  `withSpeculativeCompile`, fallback-telemetry pair,
+  `quickJsLibRegexpEngineConfig`, extern-declarations pair). `pnpm run
+check:dead-exports`: **OK, 16 known entries, 0 new**.
+
+**Conclusion: there is no deletable-today residue left.** Phase 2 (2a −1,474 /
+2b −332 / 2d −198 / 2e −14) has fully harvested the unconditional lane. All
+remaining shrinkage is Phase 1 handler deletion, which per the audit's
+post-flip status unlocks per-file only when that file's LAST gate closes —
+the levers live in OTHER tracks (G2: #2856 rejection buckets → 0 +
+skip-allowlist widening; G3: top-level IR adoption; G4: IR→runtime entry
+points). Umbrella set `status: blocked` with those unblock conditions; the
+first file expected to close is an all-`ir-owned`-kind file
+(`literals.ts` / `expressions/identifiers.ts`) once claim coverage
+approaches 100%.
 
 ## Guardrails / hazards
 

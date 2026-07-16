@@ -1546,6 +1546,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     const L_VALUE = 8;
     const L_GETTER = 9;
     const L_SETTER = 10;
+    const L_DEFINE_RESULT = 11; // (#3177 slice 4) dyn-view rejection-sentinel thread-out
 
     const keyRef = (key: string): Instr[] => [...nativeStringLiteralInstrs(ctx, key), { op: "extern.convert_any" }];
     const hasField = (key: string): Instr[] => [
@@ -1781,7 +1782,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineAccessorIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
         else: [
           { op: "local.get", index: 0 },
@@ -1790,8 +1791,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "local.get", index: L_FLAGS },
           { op: "f64.convert_i32_s" },
           { op: "call", funcIdx: defineValueIdx },
-          { op: "drop" },
+          { op: "local.set", index: L_DEFINE_RESULT },
         ],
+      },
+      // (#3177 slice 4) Thread the [[DefineOwnProperty]] REJECTION sentinel
+      // out: the dyn-view arms in __defineProperty_value/_accessor return
+      // ref.null.extern on a §10.4.5.3 false (every ordinary path returns the
+      // input obj, never null), so a null result propagates to the caller —
+      // Reflect.defineProperty's `__is_truthy` reads it as the spec `false`.
+      { op: "local.get", index: L_DEFINE_RESULT },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null.extern" }, { op: "return" }],
       },
       { op: "local.get", index: 0 },
     ];
@@ -1809,6 +1822,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         { name: "value", type: { kind: "externref" } },
         { name: "getter", type: { kind: "externref" } },
         { name: "setter", type: { kind: "externref" } },
+        { name: "defineResult", type: { kind: "externref" } },
       ],
       body,
     );
@@ -1889,6 +1903,31 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       { op: "i32.ne" },
       { op: "call", funcIdx: boxBoolIdx },
     ];
+
+    // (#3316) Materialize an accessor HALF (e.get = field 4 / e.set = field 5)
+    // as an externref descriptor value. Under the `undefinedSingleton` regime a
+    // NULL stored half must surface as the `$undefined` singleton (null ≠
+    // undefined there); legacy lanes keep the bare `extern.convert_any`
+    // byte-identical (null externref is their undefined representation).
+    const undefExternGopd = undefinedSingletonActive(ctx) ? undefinedExternInstrs(ctx) : undefined;
+    const readHalf = (fieldIdx: number): Instr[] => [
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx },
+    ];
+    const accessorHalfInstrs = (fieldIdx: number): Instr[] =>
+      undefExternGopd
+        ? [
+            ...readHalf(fieldIdx),
+            { op: "ref.is_null" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: [...undefExternGopd],
+              else: [...readHalf(fieldIdx), { op: "extern.convert_any" }],
+            },
+          ]
+        : [...readHalf(fieldIdx), { op: "extern.convert_any" }];
 
     // (#2987) String-wrapper exotic own-property arm — runs when the ordinary
     // `__obj_find` misses. Locals: 7=sEnt(ref null $PropEntry) 8=sVal(anyref)
@@ -2052,21 +2091,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
         op: "if",
         blockType: { kind: "empty" },
         // accessor: { get, set, enumerable, configurable }
+        //
+        // (#3316) Empty accessor halves are stored as NULL anyref. Legacy
+        // regime: null externref *is* the undefined representation, so a bare
+        // `extern.convert_any` sufficed. Under the `undefinedSingleton` regime
+        // (#2106) null is DISTINCT from undefined — `desc.get === undefined`
+        // on an explicit `{get: undefined}` define read back null and answered
+        // false (15.2.3.6-4-439 shape). Materialize a null half as the
+        // singleton so gOPD observes `undefined`; non-null halves are
+        // unchanged. Legacy lanes keep the byte-identical bare conversion.
         then: [
-          // desc.get = extern.convert_any(e.get)  (null anyref → undefined)
-          ...setKey("get", [
-            { op: "local.get", index: 4 },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
-            { op: "extern.convert_any" },
-          ]),
-          // desc.set = extern.convert_any(e.set)
-          ...setKey("set", [
-            { op: "local.get", index: 4 },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
-            { op: "extern.convert_any" },
-          ]),
+          // desc.get = e.get == null ? undefined : extern.convert_any(e.get)
+          ...setKey("get", accessorHalfInstrs(4)),
+          // desc.set = e.set == null ? undefined : extern.convert_any(e.set)
+          ...setKey("set", accessorHalfInstrs(5)),
         ],
         // data: { value, writable }
         else: [

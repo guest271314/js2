@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunHost as compileAndRun } from "./helpers/compile.js";
 
 /**
  * #2669 — ES2015 destructuring correctness residual (nested-array default).
@@ -30,16 +29,6 @@ import { buildImports } from "../src/runtime.js";
  *
  * The closure-capture-box surface of this umbrella was fixed separately by #2692.
  */
-
-async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
 
 describe("#2669 — nested-array destructuring default (Bug 0: malformed Wasm)", () => {
   it("direct: nested array default fires when outer source is empty", async () => {

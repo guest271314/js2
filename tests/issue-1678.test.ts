@@ -1,21 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunHost as compileAndRun } from "./helpers/compile.js";
 
 // #1678 — Array.isArray(x) on a rest/array binding whose DEFAULT VALUE is
 // statically `any` (externref) was folded to a compile-time constant `false`,
 // even though the binding materialises a real array at runtime. The fold now
 // becomes a runtime ref.test against vec struct types for externref args.
-
-async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
 
 describe("#1678 externref-typed array/rest binding default + Array.isArray", () => {
   it("static method rest binding, any-typed default → Array.isArray true", async () => {

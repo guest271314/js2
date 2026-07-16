@@ -24,6 +24,8 @@
 //   - typed-funcref call (emitCallRef) — `call_ref` over a reference-typed
 //     funcref; the linear backend dispatches through a table, not a GC
 //     funcref (#2956, closures)
+//   - Promise aggregates — WasmGC `$Promise` structs become linear records
+//     once #2956 defines their handle and field representation
 //   - boxing / strings / closures — routed through the resolver in lower.ts,
 //     not this emitter (strings: #679 dual backend; boxing/closures: #2956)
 //
@@ -313,6 +315,24 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   }
   emitFromExternref(): void {
     notImplemented("emitFromExternref");
+  }
+
+  // function materialization — a linear closure carries a table index or
+  // equivalent handle, not a WasmGC funcref (#2956, closures).
+  emitFuncRef(): void {
+    notImplemented("emitFuncRef");
+  }
+
+  // Promise aggregate family — the linear Promise record layout and handle
+  // representation land with the remaining #2956 aggregate work.
+  emitPromiseNew(): void {
+    notImplemented("emitPromiseNew");
+  }
+  emitPromiseStateGet(): void {
+    notImplemented("emitPromiseStateGet");
+  }
+  emitPromiseValueGet(): void {
+    notImplemented("emitPromiseValueGet");
   }
 
   // typed-funcref call — `call_ref` over a GC funcref (#2956, closures). The

@@ -250,6 +250,206 @@ describe("#3177 slice 2 — §23.2.5.1 ctor-arg protocol throws (buffer/length a
   });
 });
 
+describe("#3177 slice 3 — proto identity, without-new TypeError, isExtensible", () => {
+  it("Object.getPrototypeOf(dynview) === TA.prototype (static read) — THE identity", async () => {
+    expect(
+      await run(
+        `const p: any = Object.getPrototypeOf(s); const sp: any = Uint8Array.prototype; return p === sp ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Object.getPrototypeOf(dynview) === Reflect.get(TA, 'prototype') (runtime read)", async () => {
+    expect(
+      await run(
+        `const p: any = Object.getPrototypeOf(s); const q: any = Reflect.get(TA, "prototype"); return p === q ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("cross-kind protos stay distinct: getProto(new Uint16Array) !== Uint8Array.prototype", async () => {
+    expect(
+      await run(
+        `const T16: any = Uint16Array; const t: any = new T16(4); const sp: any = Uint8Array.prototype; return Object.getPrototypeOf(t) === sp ? 0 : 1;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("TA(1) without new → TypeError instance (§23.2.5.1 step 1)", async () => {
+    expect(await run(`try { TA(1); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`)).toBe(1);
+  });
+
+  it("without-new throw fires inside a closure (the assert.throws harness shape)", async () => {
+    expect(
+      await run(
+        `const f = function(): number { try { TA(1); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; } }; return f();`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Object.isExtensible(dynview) → true", async () => {
+    expect(await run(`return Object.isExtensible(s) ? 1 : 0;`)).toBe(1);
+  });
+
+  it("TA.BYTES_PER_ELEMENT via runtime [[Get]] (construct present in module)", async () => {
+    expect(
+      await run(
+        `const T16: any = Uint16Array; const b: any = Reflect.get(T16, "BYTES_PER_ELEMENT"); return b === 2 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: getPrototypeOf on a plain object keeps the $proto walk", async () => {
+    expect(
+      await run(
+        `const base: any = { x: 1 }; const o: any = Object.create(base); return Object.getPrototypeOf(o) === base ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: isExtensible on a plain object stays true / false after preventExtensions", async () => {
+    expect(
+      await run(
+        `const o: any = {}; const a = Object.isExtensible(o); Object.preventExtensions(o); const b = Object.isExtensible(o); return (a && !b) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: unknown key on a TA-ctor receiver falls through to undefined", async () => {
+    expect(await run(`const v: any = Reflect.get(TA, "someUnknownKey"); return v === undefined ? 1 : 0;`)).toBe(1);
+  });
+
+  it("guard: a non-ctor dynamic callee still dispatches (closures unaffected)", async () => {
+    expect(await run(`const f: any = (x: number): number => x + 1; const r: any = f(2); return r === 3 ? 1 : 0;`)).toBe(
+      1,
+    );
+  });
+});
+
+describe("#3177 slice 4 — descriptor MOP arms (§10.4.5.1/.3) + expando side-table", () => {
+  it("Reflect.defineProperty on a valid index writes the element and returns true", async () => {
+    expect(
+      await run(
+        `const r: any = Reflect.defineProperty(s, "0", { value: 9, writable: true, enumerable: true, configurable: true }); const v: any = s[0]; return (r === true && v === 9) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty index with writable:false → false (§10.4.5.3 v)", async () => {
+    expect(
+      await run(
+        `const r: any = Reflect.defineProperty(s, "0", { value: 9, writable: false }); return r === false ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Object.defineProperty index with writable:false → TypeError (§20.1.2.4 step 3)", async () => {
+    expect(
+      await run(
+        `try { Object.defineProperty(s, "0", { value: 9, writable: false }); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty OOB index → false (IsValidIntegerIndex)", async () => {
+    expect(await run(`const r: any = Reflect.defineProperty(s, "5", { value: 9 }); return r === false ? 1 : 0;`)).toBe(
+      1,
+    );
+  });
+
+  it("defineProperty a NON-index key lands on the expando and reads back via [[Get]]", async () => {
+    expect(
+      await run(
+        `Object.defineProperty(s, "foo", { value: 42 }); const v: any = (s as any).foo; return v === 42 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("symbol-keyed [[Set]]/[[Get]] round-trips through the expando", async () => {
+    expect(
+      await run(
+        `const sym: any = Symbol("k"); s[sym] = "test262"; const v: any = s[sym]; return v === "test262" ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("[[Delete]] of an expando prop → true and the prop is gone", async () => {
+    expect(
+      await run(
+        `s.bar = 7; const d: any = delete s.bar; const v: any = s.bar; return (d === true && v === undefined) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("[[HasProperty]] sees expando props", async () => {
+    expect(await run(`s.baz = 1; return Reflect.has(s, "baz") ? 1 : 0;`)).toBe(1);
+  });
+
+  it("gOPD on a valid index → {value, writable:true, enumerable:true, configurable:true}", async () => {
+    expect(
+      await run(
+        `const d: any = Object.getOwnPropertyDescriptor(s, "0"); return (d.value === 42 && d.writable === true && d.enumerable === true && d.configurable === true) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("gOPD on an OOB / '-0' key → undefined", async () => {
+    expect(
+      await run(
+        `const a: any = Object.getOwnPropertyDescriptor(s, "5"); const b: any = Object.getOwnPropertyDescriptor(s, "-0"); return (a === undefined && b === undefined) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("gOPD reads back an expando prop's descriptor", async () => {
+    expect(
+      await run(
+        `Object.defineProperty(s, "foo", { value: 42 }); const d: any = Object.getOwnPropertyDescriptor(s, "foo"); return d.value === 42 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("accessor descriptor on a canonical index → TypeError via Object.defineProperty (§10.4.5.3 ii)", async () => {
+    expect(
+      await run(
+        `try { Object.defineProperty(s, "0", { get: function(): number { return 1; } }); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("preventExtensions(view) → isExtensible false; new expando define rejected", async () => {
+    expect(
+      await run(
+        `Object.preventExtensions(s); const x = Object.isExtensible(s); const r: any = Reflect.defineProperty(s, "nope", { value: 1 }); return (!x && r === false) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("detached buffer: index define → TypeError (IsValidIntegerIndex step 2)", async () => {
+    expect(
+      await run(
+        `const b: any = s.buffer; (b as any).__detached__ = true; try { Object.defineProperty(s, "0", { value: 8 }); return 0; } catch (e) { return (e as any) instanceof TypeError ? 1 : 2; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: plain-object defineProperty/gOPD unchanged", async () => {
+    expect(
+      await run(
+        `const o: any = {}; Object.defineProperty(o, "x", { value: 5, writable: true, enumerable: true, configurable: true }); const d: any = Object.getOwnPropertyDescriptor(o, "x"); return (o.x === 5 && d.value === 5) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("guard: Reflect.defineProperty on a plain object still returns true", async () => {
+    expect(
+      await run(
+        `const o: any = {}; const r: any = Reflect.defineProperty(o, "x", { value: 1 }); return r === true ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+});
+
 describe("#3177 — non-view receivers keep their behavior (arms fall through)", () => {
   it("plain any-typed array element/length are unchanged", async () => {
     // NOTE: `Object.keys(<any-typed plain array>)` returns [] on main (the

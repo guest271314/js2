@@ -14,18 +14,18 @@ area: codegen, runtime, generators, value-rep
 language_feature: generators, destructuring defaults, equality
 goal: test262-conformance
 related: [2141, 2626, 2040, 2585, 928, 2203, 991, 3050]
-# (#3032 W3) Intended growth at the canonical sites: TDZ-flag capture boxes
-# threaded through the native generator state machine — generators-native.ts
-# (+42: NativeGeneratorCaptureParam.tdzFlagFor, leadingTdzFlags registration,
-# resume-fn boxedTdzFlags/tdzFlagLocals rehydration), nested-declarations.ts
-# (+23: lane-split gate + tdz leadingCaptures entries), context/types.ts
-# (+13: NativeGeneratorInfo.leadingTdzFlags docs). No barrel/driver growth.
+# (#3032 W3+W4) Intended growth at the canonical sites: W3 — TDZ-flag capture
+# boxes threaded through the native generator state machine
+# (generators-native.ts, nested-declarations.ts, context/types.ts). W4 —
+# the method-generator capture-bail lane split in isNativeGeneratorCandidate
+# (generators-native.ts +12: the standalone-lane arm + rationale comment).
+# No barrel/driver growth.
 loc-budget-allow:
   - src/codegen/generators-native.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
 origin: "2026-07-04 #2141 S2 root-cause (fable-tag5): the −162 dstr eject was never a dstr/eq dependency — it was eager generator bodies + comparator vacuity"
-note: "W3 (TDZ-native-threading) LANDED (sendev-3032-w3, 2026-07-16) — see '## W3 landed'. The A1/tag-5-vacuity unblock this issue was prioritized for is delivered. Remaining banked waves: W2 (paramful gen expressions — MEASURE FIRST, predicted wont-build), W4 (method generators), W5 (retVal marshalling), W6 (retire the buffer / host-lane laziness for non-try-region shapes). Issue stays open for those; they are NOT fresh-window-critical the way W3 was."
+note: "W3 (TDZ-native-threading) + W4 (method generators, standalone lane) LANDED (sendev-3032-w3/-w4, 2026-07-16) — see '## W3 landed' / '## W4 landed'; #3302 covered capturing fn-EXPRESSIONS in between. The A1/tag-5-vacuity unblock is fully delivered on the standalone side. Remaining banked waves: W2 (paramful gen expressions — MEASURE FIRST, predicted wont-build), W5 (retVal marshalling), W6 (retire the buffer / host-lane laziness; next(v) two-way under the buffer stays broken until W6). Issue stays open for those."
 ---
 
 # #3032 — eager-buffer generators run their body AT CREATION; the tag-5 comparator vacuity is the only thing hiding it
@@ -441,3 +441,52 @@ let x = 42; it.next()` throws at CREATION (the #1177 pre-call check — an
 3. **`(yield e) as T` initializer** doesn't match the plan builder's
    resume-binding pattern — `next(v)` sent value reads 0. The untyped-cast
    shape only; `const got = yield e` in a typed generator works.
+
+## W4 landed (sendev-3032-w4, 2026-07-16, branch `issue-3032-w4-method-generators`)
+
+**One gate-term change.** The banked W4 plan ("class-bodies.ts:2309 eager arm
+wrap; not a pure wrap — param instantiation stays outside the flag branch")
+described the HOST-lane thunk route. The standalone lane turned out to need
+NO wrap and NO capture threading at all:
+
+- **The insight (verified by probe before relaxing anything):** a class /
+  object-literal method body never receives captures as params — it resolves
+  them through the #2029/#3039/#3121 promotion machinery
+  (`ctx.capturedBoxGlobals` / `ctx.capturedGlobals` MODULE GLOBALS), which is
+  fctx-INDEPENDENT. So the resume function compiles the same body statements
+  with the same global reads/writes — the #2571 native method machinery
+  (synthesizedThis + state struct) works unchanged for capturing methods.
+- **Change:** `isNativeGeneratorCandidate`'s method-bail
+  (`generatorCapturesOuterScope` term) is now HOST-lane-only. `arguments` /
+  `super` bails stay. JS-host lane byte-identical — method generators are
+  never candidates under a JS host anyway (the host-lane candidate block
+  admits only FunctionDeclarations), so its eager path is untouched.
+- Promotion ordering holds: capturing classes/literals compile DEFERRED in
+  standalone until captures initialize (#3123), so the globals exist before
+  the resume fn emits.
+
+**Validation:** probes — class/objlit method with `let` capture: standalone
+101→**1** (lazy, §27.5), 4→**0** `__gen_*` imports, `instantiate({})`
+FAIL→**OK**; objlit drain NaN→**233** (write-through); capture+this 316;
+capture+param 107; static 74; `next(7)`→107 two-way; try/finally+capture
+1111; two-methods 12. `tests/issue-3032-w4-method-generators.test.ts` 11/11.
+Method suites (2571/2581/2938/2641/generator-methods/-destructuring/3050)
+57/57 — the two #2571/#2581 tests that ASSERTED the old capture-bail now
+assert the native lowering. **gen-meth dstr family A/B (930 files, standalone,
+branch vs main): exactly ZERO flips either direction** — the family's pass
+rate is shim-neutral (the runner supplies `__gen_*` shims), so W4's win is
+the leak metric (host-free instantiate) + §27.5 laziness, with **no
+regressions**.
+
+**Known same-wrong, different-mode:** a TDZ/promotion-timing shape
+(`class C { *m() { yield z; } } const z = 42;` — class compiled before `z`
+initializes) read a stale NaN via the value-global on main (both lanes,
+silent); the native path now throws a loud TDZ ReferenceError at first
+resume in standalone. Neither matches spec (42) — the promotion-timing
+limitation predates W4 (#3123 lineage), surfaced loudly instead of silently.
+
+**Remaining after W4:** W2 (paramful gen EXPRESSIONS — measure-first,
+predicted wont-build), W5 (retVal marshalling), W6 (retire the buffer —
+host-lane laziness for the shapes the thunk model doesn't cover; `next(v)`
+two-way under the buffer stays broken until then). The tag-5/A1 unblock is
+fully delivered by W3+#3302+W4 on the standalone side.

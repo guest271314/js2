@@ -17,7 +17,14 @@ import { ensureWrapperTypes } from "../any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "../async-cps.js";
 import { asyncFnNeedsHostDrive, asyncGenDrivableUnderCarrier, asyncGenStem } from "../async-frame.js";
 import { isStandalonePromiseActive } from "../async-scheduler.js";
-import { functionBodyReferencesThis } from "../closures.js";
+import {
+  functionBodyReferencesThis,
+  genBodyReferencesSuper,
+  genBodyReferencesThis,
+  methodBodyRefsShadowedOuterLocal,
+} from "../closures.js";
+import { hasStaticModifier } from "../ast-modifiers.js"; // (#3132 S2) method-drive pre-pass gates
+import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { emitNativeEscape, emitNativeUnescape } from "../escape-native.js";
 import { isNativeGeneratorCandidate, sourceNeedsGeneratorHostImports } from "../generators-native.js";
 import {
@@ -1039,8 +1046,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     // mirrors emit's stem-collision guard.
     if (!ctx.moduleHasNonDrivableAsyncGen) {
       let drivable: boolean;
-      if (ts.isMethodDeclaration(node)) {
-        drivable = false; // async-gen methods stay legacy (S2 not yet wired)
+      // (#3132 S2) Async-gen METHODS are now wired to the drive (class bodies
+      // — class-bodies.ts; object-literal methods — literals.ts), so a method
+      // is drivable under the SAME preconditions those emit sites apply in
+      // front of `isAsyncGenDriveCandidate`: no `super` (home-object binding
+      // not threaded into the resume fn), no `arguments` (entry-fn vec
+      // struct), and no STATIC body reading `this` (static `this` resolves
+      // via the class-object-global fallback the resume FunctionContext does
+      // not carry). An INSTANCE (or object-literal) `this`-reading body IS
+      // drivable — the receiver rides as frame param field 0 and restores by
+      // name. Any method the emit paths SKIP entirely (dynamic computed name,
+      // duplicate-name dedup) emits NO legacy buffer, so judging it drivable
+      // here is still mix-safe (the hazard is only a legacy `__gen_*` buffer
+      // coexisting with the native carrier).
+      const methodExclusion =
+        ts.isMethodDeclaration(node) &&
+        (genBodyReferencesSuper(node.body) ||
+          bodyUsesArguments(node.body) ||
+          (hasStaticModifier(node) && genBodyReferencesThis(node.body)) ||
+          // Shadowed-outer-local shape: the capture promotion mis-binds the
+          // method body vs sibling closures (pre-existing bug) — keep the
+          // module on the host Promise pipeline so `.then` callbacks are not
+          // newly exposed to the divergence (see methodBodyRefsShadowedOuterLocal).
+          methodBodyRefsShadowedOuterLocal(node));
+      if (methodExclusion) {
+        drivable = false;
       } else if (asyncGenDrivableUnderCarrier(ctx, node)) {
         const stem = asyncGenStem(node);
         if (state.asyncGenDrivableStems.has(stem)) {

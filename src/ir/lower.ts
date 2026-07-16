@@ -1589,7 +1589,7 @@ export function lowerIrFunctionBody<S>(
         }
         const liftedIdx = resolver.resolveFunc(instr.liftedFunc);
         // ref.func $lifted, push captures, struct.new <subtype>.
-        emitter.pushRaw(out, { op: "ref.func", funcIdx: liftedIdx });
+        emitter.emitFuncRef(liftedIdx, out);
         for (const cap of instr.captures) emitValue(cap, out);
         emitter.emitClosureNew(sub, instr.captures.length, out);
         return;
@@ -2849,7 +2849,7 @@ export function lowerIrFunctionBody<S>(
         });
         emitValue(instr.value, out);
         emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
+        emitter.emitPromiseNew(promiseTypeIdx, out);
         emitter.emitToExternref(out);
         return;
       }
@@ -2867,7 +2867,7 @@ export function lowerIrFunctionBody<S>(
         });
         emitValue(instr.reason, out);
         emitter.emitNull({ kind: "val", val: { kind: "externref" } }, out);
-        emitter.pushRaw(out, { op: "struct.new", typeIdx: promiseTypeIdx });
+        emitter.emitPromiseNew(promiseTypeIdx, out);
         emitter.emitToExternref(out);
         return;
       }
@@ -2913,11 +2913,7 @@ export function lowerIrFunctionBody<S>(
           });
         }
         wasmOut.push({ op: "local.tee", index: awaitScratchPromiseIdx });
-        wasmOut.push({
-          op: "struct.get",
-          typeIdx: promiseTypeIdx,
-          fieldIdx: 0,
-        }); // state: i32
+        emitter.emitPromiseStateGet(promiseTypeIdx, out); // state: i32
         // Build:
         //   if state == FULFILLED then
         //     local.get $await_promise
@@ -2936,11 +2932,7 @@ export function lowerIrFunctionBody<S>(
             op: "local.get",
             index: awaitScratchPromiseIdx,
           });
-          rejectedBranch.push({
-            op: "struct.get",
-            typeIdx: promiseTypeIdx,
-            fieldIdx: 1,
-          });
+          emitter.emitPromiseValueGet(promiseTypeIdx, rejectedBranch as unknown as S);
           // #1584 (a4): throw routes through the trait.
           emitter.emitThrow(exnTagIdx, rejectedBranch as unknown as S);
         }
@@ -2948,30 +2940,30 @@ export function lowerIrFunctionBody<S>(
         // PENDING / fall-through marker. Slice 2 (#1373b) replaces with
         // the CPS continuation synthesis once #1326c Phase 1C-B lands.
         const pendingBranch: Instr[] = [{ op: "unreachable" }];
+        const fulfilledBranch: Instr[] = [{ op: "local.get", index: awaitScratchPromiseIdx }];
+        emitter.emitPromiseValueGet(promiseTypeIdx, fulfilledBranch as unknown as S);
+        const unsettledBranch: Instr[] = [{ op: "local.get", index: awaitScratchPromiseIdx }];
+        emitter.emitPromiseStateGet(promiseTypeIdx, unsettledBranch as unknown as S);
+        unsettledBranch.push(
+          { op: "i32.const", value: PROMISE_STATE_REJECTED },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: {
+              kind: "val",
+              type: { kind: "externref" } as ValType,
+            },
+            then: rejectedBranch,
+            else: pendingBranch,
+          },
+        );
         wasmOut.push({ op: "i32.const", value: PROMISE_STATE_FULFILLED });
         wasmOut.push({ op: "i32.eq" });
         wasmOut.push({
           op: "if",
           blockType: { kind: "val", type: { kind: "externref" } as ValType },
-          then: [
-            { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 },
-          ],
-          else: [
-            { op: "local.get", index: awaitScratchPromiseIdx },
-            { op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 },
-            { op: "i32.const", value: PROMISE_STATE_REJECTED },
-            { op: "i32.eq" },
-            {
-              op: "if",
-              blockType: {
-                kind: "val",
-                type: { kind: "externref" } as ValType,
-              },
-              then: rejectedBranch,
-              else: pendingBranch,
-            },
-          ],
+          then: fulfilledBranch,
+          else: unsettledBranch,
         });
         return;
       }

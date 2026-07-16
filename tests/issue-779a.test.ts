@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunHost as compileAndRun } from "./helpers/compile.js";
 
 // #779a — class-method destructuring-param trampoline emitted invalid Wasm.
 //
@@ -18,16 +17,6 @@ import { buildImports } from "../src/runtime.js";
 // typed binding-pattern param whose body mutates an enclosing-scope variable
 // (forcing capture-to-global promotion) AND whose param destructure adds the
 // null-guard string constant.
-
-async function compileAndRun(source: string): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return instance.exports as Record<string, Function>;
-}
 
 describe("#779a class-method dstr-param global-index drift", () => {
   it("instance method, typed array pattern, captured enclosing var", async () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.ts";
 import { buildImports } from "../src/runtime.ts";
+import { compileAndRunTestSyncJoined as compileAndRun } from "./helpers/compile.js";
 
 async function compileAndValidate(source: string): Promise<{ valid: boolean; error?: string }> {
   const result = await compile(source, { fileName: "test.ts" });
@@ -19,17 +20,6 @@ async function compileAndValidate(source: string): Promise<{ valid: boolean; err
   } catch (e: any) {
     return { valid: false, error: e.message };
   }
-}
-
-async function compileAndRun(source: string): Promise<any> {
-  const result = await compile(source, { fileName: "test.ts" });
-  if (!result.success) {
-    throw new Error(`Compile error: ${result.errors?.map((e) => e.message).join("; ")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const mod = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(mod, imports);
-  return (instance.exports as any).test();
 }
 
 describe("#1070 — Intl.ListFormat / Intl.NumberFormat extern class", () => {
