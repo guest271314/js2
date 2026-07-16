@@ -2,7 +2,7 @@
 id: 3177
 title: "standalone: TypedArrayConstructors internals + ctors — integer-indexed MOP internals, ctor arg protocols, from/of, per-ctor identity (356 gap tests)"
 status: in-progress
-assignee: ttraenkler/sendev-1102
+assignee: ttraenkler/fable-3177
 created: 2026-07-12
 updated: 2026-07-16
 priority: high
@@ -22,6 +22,12 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; the 'TypedAr
 # $__ta_ctor singleton registrar + the inline OOB-read undefined fix
 # (+ 5 export keywords for the shared codec helpers ta-dyn-mop.ts imports);
 # property-access-dispatch gains the <TA>.prototype.constructor static arm.
+# (slice 2, +319): dataview-native gains the shared §23.2.5.1 buffer-arg
+# validation core (emitTaOffsetAlignmentCheck + emitTaBufferBoundsAndLength)
+# wired into both dynamic construct paths, the ToIndex Symbol/f64-out
+# extensions, and the RangeError-instance throw upgrade — all owned by this
+# file's TA-construct subsystem; no new module is warranted for arms that
+# splice into existing emitters.
 # The bulk of the new code lives in the NEW file src/codegen/ta-dyn-mop.ts.
 # index.ts: +6 — one import + the fillTaDynViewMopArms(ctx) call, which MUST
 # sit in the barrel's finalize sequence (ordering vs the other fills is
@@ -150,15 +156,100 @@ Verified: tests/issue-3177.test.ts (19), scoped suites 2872/2186/2190/3054\*/
 3057/3058/3169/3183/3190 — failures identical to clean main (4 pre-existing
 issue-3183 rows fail on main HEAD too; noted for triage, unrelated).
 
+### Slice 2 — ctor-arg protocol throws (PR: issue-3177-slice2-ctor-arg-protocols, 2026-07-16, fable-3177)
+
+Directory sweep (all 411 non-bigint files under TypedArrayConstructors/,
+standalone): 124 → **134 pass (+10), 0 regressions** (every before/after diff
+line is fail→pass; verified against the PR-#3118-tip baseline worktree).
+
+What landed (`src/codegen/dataview-native.ts` only):
+
+- **§23.2.5.1 InitializeTypedArrayFromArrayBuffer protocol** on BOTH dynamic
+  construct paths (`emitDynamicTaViewConstruct` — statically-ArrayBuffer-typed
+  arg0; the ArrayBuffer arm of `emitTaDynCtorConstructFromLocals` —
+  pre-evaluated argv): ToIndex(byteOffset) → offset%elementSize RangeError
+  (NEW `emitTaOffsetAlignmentCheck`, runtime es) → ToIndex(length) →
+  detached-buffer TypeError → bounds RangeError / auto-length (NEW shared
+  `emitTaBufferBoundsAndLength`). Key semantics:
+  - bufferByteLength is RE-READ after the arg coercions, so a valueOf that
+    detaches mid-construction is observed (byteoffset/length-to-number-
+    detachbuffer.js) — detach ≡ `buf.length < 0` sentinel.
+  - explicit-length bounds compare runs in **f64** (pre-narrowing ToIndex
+    value): a spec-legal length ≤ 2^53−1 overflows i32 and wrap-around would
+    pass the check.
+  - length-tracking (`-1` sentinel) now keyed on a RUNTIME
+    `ref.test $__resizable_ab` — the old static "module registers a RAB type"
+    flag skipped fixed-buffer auto-length validation module-wide.
+  - "length is undefined" (step 13): a literal-`undefined` third arg counts
+    as absent on the expression path (syntactic check); the argv path probes
+    nullish at RUNTIME via `__nullish_to_null` + `ref.is_null`
+    (`new TA(buffer, 0, undefined)` takes the length-omitted arm).
+- **ToNumber(Symbol) → TypeError (§7.1.4)** in ToIndex: static-type check in
+  `emitToIndexI32` (oracle `staticJsTypeOf === "symbol"`, DataView-setter
+  pattern) + RUNTIME `ref.test $Symbol` in `emitToIndexI32FromArgLocal`
+  (pre-boxed argv; byte-inert when no Symbol carrier is registered). Covers
+  byteoffset-is-symbol / length-is-symbol / length-arg is-symbol-throws.
+- **`emitThrowRangeErrorIf` upgraded to real RangeError INSTANCES** (was bare
+  string throws) via `buildThrowJsErrorInstrs` — #3104/#3285-proofing: the
+  incoming typed assert_throws (`e instanceof RangeError`) rejects a bare
+  string. Applies to every ToIndex/bounds throw in this file, both lanes.
+
+**Containment (`skipAutoModulo`)**: a STATIC `new Int8Array(n)` value is a
+bare `$__vec_i32_byte` — the SAME struct as an ArrayBuffer (the pun `.buffer`
+identity relies on) — so the argv arm cannot tell a genuine buffer from an
+int8-family view used as a copy source (`new Float64Array(int8x10)`,
+ctors/typedarray-arg/\*). The step-13.a buffer-modulo throw is therefore
+SUPPRESSED on the argv arm only (it would turn that pre-existing
+silent-wrong-length into an UNCAUGHT RangeError); the statically-typed path —
+where every corpus modulo test lives — keeps the full check. Fixing the pun
+(per-kind static views vs bare vecs) is substrate work, not this slice.
+
+Flipped: byteoffset-is-symbol, byteoffset-to-number-detachbuffer,
+detachedbuffer, excessive-length, excessive-offset (+resizable-ab),
+length-is-symbol, length-to-number-detachbuffer, resizable-out-of-bounds,
+length-arg/is-symbol-throws.
+
+Verified: tests/issue-3177.test.ts 34/34 (19 slice-1 + 15 new); scoped suites
+2186/2190/2872\*/3054\*/3057/3058/3169 identical to the branch-base baseline
+(1 pre-existing 3169 row fails on base too); host lane emits valid Wasm on
+the upgraded static-windowed RangeError path.
+
+**Found while probing (NOT this slice, for the next owner):**
+
+- `byteoffset-throws-from-modulo-element-size.js` +
+  `bufferbyteoffset-throws-from-modulo-element-size.js` fail on a HARNESS
+  gap, not codegen: the `testWithTypedArrayConstructors` shim
+  (tests/test262-runner.ts ~1986) IGNORES the explicit ctor-list second arg
+  (`floatArrayConstructors.concat([...])`) and always iterates all 8 ctors
+  starting with Int8Array — for which es=1 legitimately does NOT throw, so
+  assert #1 fails. Honoring an array-valued `selected` arg would flip both
+  (+ other explicit-list tests suite-wide), but it changes compiled-harness
+  wasm for many tests → needs an oracle_version bump and COORDINATION with
+  in-flight #3104 (which already bumps to v4 and edits the same shims).
+- The `-sab` variants fail earlier with `illegal cast` — SharedArrayBuffer
+  values aren't recoverable as byte vecs (separate representation slice).
+- `Object.getPrototypeOf(ta) === TA.prototype` identity (≈10 rows across
+  ctors/\*: defined-length/-offset, returns-new-instance, returns-object,
+  as-array-returns, same-ctor-returns-new-cloned…) needs per-kind PROTO
+  $Object singletons + a "prototype" [[Get]] arm on `$__ta_ctor` + a
+  `__getPrototypeOf` dyn-view arm — the W-C mechanism; composes #2901's
+  intrinsic-ctor pattern (`emitTypedArrayIntrinsicCtorObject`).
+- `TA(1)` WITHOUT new → TypeError (§23.2.5.1 step 1, undefined-newtarget-
+  throws ×8): calling a `$__ta_ctor` value as a function currently returns
+  undefined silently — needs a `ref.test $__ta_ctor → throw TypeError` arm
+  in the dynamic call fallback.
+- `Object.isExtensible(dynview)` → false (new-instance-extensibility ×5).
+- Static-lane parity for the new checks (statically-NAMED ctors,
+  `emitTaViewConstructWindowed` has alignment/bounds but no detached check;
+  static count `new Int8Array(-1)` ToIndex asymmetry) — low corpus value,
+  the harness always constructs through dynamic ctor values.
+
 ### Remaining (next slices — release+reclaim per phase)
 
-- **Ctor-arg protocol throws** (~60–90 rows, `ctors/buffer-arg` +
-  `length-arg`): ToIndex RangeError on offset/length, offset%elemSize
-  RangeError, Symbol-offset TypeError, detached-at-construction TypeError,
-  `Object.getPrototypeOf(ta) === TA.prototype` — extend
-  `emitDynamicTaViewConstruct` / `emitTaDynCtorConstructFromLocals`
-  (dataview-native.ts ~3296/~3494). Also the static literal `new TA(len)`
-  ToIndex asymmetry (explore finding — no validation at all).
+- ~~**Ctor-arg protocol throws**~~ — DONE in slice 2 (above), EXCEPT the
+  `Object.getPrototypeOf(ta) === TA.prototype` identity part (moved to the
+  "found while probing" list — it is a proto-graph mechanism, not a throw)
+  and the static-lane parity noted there.
 - **Descriptor MOP arms** (~70 rows, `internals/DefineOwnProperty` +
   `GetOwnProperty`): dyn-view arms in `__defineProperty_*` + the GOPD
   call-site guard — COORDINATE with in-flight #2984 (builtin-descriptor

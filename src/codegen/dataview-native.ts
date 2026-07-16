@@ -40,6 +40,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
+import { ts } from "../ts-api.js"; // (#3177 slice 2) literal-`undefined` length detection
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./index.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
@@ -2875,14 +2876,26 @@ export function pushTaDynViewInBoundsLen(
 // engine change. An offset-0 window is byte-identical to B1 (offsetLocal = 0).
 // ---------------------------------------------------------------------------
 
-/** Emit an `if (cond) throw RangeError(msg)` — the i32 condition is on the stack. */
+/**
+ * Emit an `if (cond) throw RangeError(msg)` — the i32 condition is on the stack.
+ *
+ * (#3177 slice 2) Throws a real RangeError INSTANCE (was: a bare string
+ * payload). The #3104/#3285 assert_throws harness threads the expected error
+ * TYPE (`e instanceof RangeError` + `.name` fallback) — a bare string matches
+ * neither, so every ToIndex/bounds RangeError this file emits would read as
+ * "threw the wrong thing" once that lands. `buildThrowJsErrorInstrs`
+ * self-flushes late-import shifts against `fctx` (host lane) and mints the
+ * in-module `__new_RangeError` DEFINED constructor on the standalone lane
+ * (append-only — no funcIdx shift), so it is safe inside detached arm builds
+ * as long as the returned instrs are attached before any further compile
+ * (they are: the very next statement pushes the `if`).
+ */
 function emitThrowRangeErrorIf(ctx: CodegenContext, fctx: FunctionContext, msg: string): void {
-  addStringConstantGlobal(ctx, msg);
-  const tagIdx = ensureExnTag(ctx);
+  const throwInstrs = buildThrowJsErrorInstrs(ctx, "RangeError", msg, { flush: fctx });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: [...stringConstantExternrefInstrs(ctx, msg), { op: "throw", tagIdx }],
+    then: throwInstrs,
     else: [],
   });
 }
@@ -2891,6 +2904,14 @@ function emitThrowRangeErrorIf(ctx: CodegenContext, fctx: FunctionContext, msg: 
  * ToIndex (§7.1.22) into `outLocal` (i32): compile `expr` → f64, NaN → 0,
  * truncate toward 0, RangeError if < 0 or > 2^53-1, then narrow to i32. Used by
  * the windowing ctor for both byteOffset and (element) length args.
+ *
+ * (#3177 slice 2) Two additions:
+ *  - `outF64Local` (optional) also receives the TRUNCATED PRE-NARROWING f64 —
+ *    the bounds math (`offset + length×elemSize > bufferByteLength`) must run
+ *    in f64 because a spec-legal length (≤ 2^53−1) overflows i32.
+ *  - a statically-`symbol` operand throws TypeError per §7.1.4 ToNumber(Symbol)
+ *    (the DataView setter pattern) — `new TA(buffer, Symbol())` must be a
+ *    TypeError, not a silent NaN→0 (byteoffset-is-symbol-throws.js).
  */
 function emitToIndexI32(
   ctx: CodegenContext,
@@ -2899,7 +2920,22 @@ function emitToIndexI32(
   compileExpr: (expr: import("../ts-api.js").ts.Expression, hint?: ValType) => ValType | null,
   outLocal: number,
   rangeErrMsg: string,
+  outF64Local?: number,
 ): void {
+  if (ctx.oracle.staticJsTypeOf(expr) === "symbol") {
+    // Evaluate the operand for side effects, drop, throw (unary.ts pattern).
+    const t = compileExpr(expr);
+    if (t !== null) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
+    // Unreachable-but-validated: keep the locals defined for downstream reads.
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: outLocal });
+    if (outF64Local !== undefined) {
+      fctx.body.push({ op: "f64.const", value: 0 });
+      fctx.body.push({ op: "local.set", index: outF64Local });
+    }
+    return;
+  }
   const f64Local = allocLocal(fctx, `__tav_ti_${fctx.locals.length}`, { kind: "f64" });
   const vt = compileExpr(expr, { kind: "f64" });
   if (vt && vt.kind !== "f64") coerceType(ctx, fctx, vt, { kind: "f64" });
@@ -2933,6 +2969,10 @@ function emitToIndexI32(
   fctx.body.push({ op: "local.get", index: f64Local });
   fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: outLocal });
+  if (outF64Local !== undefined) {
+    fctx.body.push({ op: "local.get", index: f64Local });
+    fctx.body.push({ op: "local.set", index: outF64Local });
+  }
 }
 
 /**
@@ -3320,6 +3360,211 @@ function pushTaDynViewEffectiveLen(
 }
 
 /**
+ * (#3177 slice 2) §23.2.5.1 InitializeTypedArrayFromArrayBuffer step 3:
+ * `if (offset modulo elementSize ≠ 0) throw RangeError`. Runtime `es` (the
+ * dynamic-ctor paths only know the kind at runtime). Emitted AFTER
+ * ToIndex(byteOffset) and BEFORE ToIndex(length), exactly the spec order.
+ */
+function emitTaOffsetAlignmentCheck(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  offLocal: number,
+  esLocal: number,
+): void {
+  fctx.body.push({ op: "local.get", index: offLocal });
+  fctx.body.push({ op: "local.get", index: esLocal });
+  fctx.body.push({ op: "i32.rem_u" });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ne" });
+  emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset should be a multiple of the element size");
+}
+
+/**
+ * (#3177 slice 2) §23.2.5.1 InitializeTypedArrayFromArrayBuffer steps 6–14 —
+ * the POST-COERCION half of the buffer-arg constructor protocol, shared by
+ * both dynamic construct paths ({@link emitDynamicTaViewConstruct} and the
+ * ArrayBuffer arm of {@link emitTaDynCtorConstructFromLocals}):
+ *
+ *   6.  IsDetachedBuffer(buffer) → TypeError. The byte length is RE-READ here
+ *       (not reused from an earlier load) because a `valueOf` inside the
+ *       preceding ToIndex(byteOffset)/ToIndex(length) coercions may have
+ *       detached the buffer (byteoffset-to-number-detachbuffer.js /
+ *       length-to-number-detachbuffer.js) — detach ≡ `buf.length < 0`
+ *       ($DETACHBUFFER sentinel, see {@link emitDvDetachedCheck}).
+ *   14. explicit length: `offset + newLength×elementSize > bufferByteLength`
+ *       → RangeError. Computed in f64 (`lenF64Local` is the pre-narrowing
+ *       ToIndex result): a spec-legal length up to 2^53−1 overflows i32, and
+ *       i32 wrap-around would silently PASS the check.
+ *   7.b resizable backing + length omitted → length-tracking: only
+ *       `offset > bufferByteLength` throws (RangeError); the stored length is
+ *       the `-1` auto-length sentinel (live length derives from `buf.length`).
+ *       Distinguished at RUNTIME via `ref.test $__resizable_ab` — the previous
+ *       code keyed length-tracking on the STATIC "module registers a resizable
+ *       buffer type" flag, which skipped the fixed-buffer modulo validation
+ *       for every buffer in such modules.
+ *   13. fixed backing + length omitted: `bufferByteLength modulo elementSize
+ *       ≠ 0` → RangeError, then `newByteLength = bufferByteLength − offset
+ *       < 0` → RangeError, else length = newByteLength / elementSize.
+ *
+ * `hasLen` selects the arm: compile-time absent (`"static-no"`), compile-time
+ * present (`"static-yes"`), or runtime-nullish-tested (`"runtime"`, the
+ * pre-evaluated-argv path where `new TA(buffer, 0, undefined)` must take the
+ * length-omitted arm per spec — "length is undefined", §23.2.5.1 step 13).
+ * Writes the final element length (or the `-1` tracking sentinel) to
+ * `lenOutLocal`. Standalone-lane only (both callers are noJsHost-gated).
+ *
+ * `skipAutoModulo` — the pre-evaluated-argv caller sets this. A STATIC
+ * `new Int8Array(n)` value is represented as a bare `$__vec_i32_byte` — the
+ * SAME struct as an ArrayBuffer (the representational pun the `.buffer`
+ * identity relies on) — so its `ref.test $__vec_i32_byte` arm cannot tell a
+ * genuine buffer from an int8-family VIEW used as a copy SOURCE
+ * (`new Float64Array(int8x10)`, ctors/typedarray-arg/*). For that pun shape
+ * the step-13.a modulo throw would convert a pre-existing silent-wrong-length
+ * into an UNCAUGHT RangeError; the statically-ArrayBuffer-typed path (where
+ * every corpus modulo test lives) keeps the full check. The other checks
+ * (detached, offset-OOB, explicit-length bounds) are vacuously safe for the
+ * pun shape (offset/length args are only passed with genuine buffers).
+ */
+function emitTaBufferBoundsAndLength(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufLocal: number,
+  offLocal: number,
+  esLocal: number,
+  lenOutLocal: number,
+  hasLen:
+    | { kind: "static-no" }
+    | { kind: "static-yes"; lenLocal: number; lenF64Local: number }
+    | { kind: "runtime"; flagLocal: number; lenLocal: number; lenF64Local: number },
+  skipAutoModulo = false,
+): void {
+  const { vecTypeIdx } = i32ByteVec(ctx);
+
+  // Fresh bufferByteLength read (post-coercion — see doc block).
+  const bufBlLocal = allocLocal(fctx, `__tabl_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: bufLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: bufBlLocal });
+
+  // Step 6: detached → TypeError.
+  const detachedThrow = dvTypeErrorThrow(ctx, DV_DETACHED_MESSAGE);
+  fctx.body.push({ op: "local.get", index: bufBlLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: detachedThrow, else: [] });
+
+  // Detached arm builders — the shared `savedBody` is registered in
+  // `liveBodies` during each swap (#2182 pattern) so a late-import funcIdx
+  // shift (host lane; standalone mints defined funcs only) still walks it.
+  const buildExplicitArm = (lenLocal: number, lenF64Local: number): Instr[] => {
+    const arm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = arm;
+    ctx.liveBodies.add(saved);
+    try {
+      // off + len×es > bufBl → RangeError (f64 — see doc block).
+      fctx.body.push({ op: "local.get", index: offLocal });
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      fctx.body.push({ op: "local.get", index: lenF64Local });
+      fctx.body.push({ op: "local.get", index: esLocal });
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      fctx.body.push({ op: "f64.mul" });
+      fctx.body.push({ op: "f64.add" });
+      fctx.body.push({ op: "local.get", index: bufBlLocal });
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      fctx.body.push({ op: "f64.gt" });
+      emitThrowRangeErrorIf(ctx, fctx, "RangeError: Invalid typed array length");
+      fctx.body.push({ op: "local.get", index: lenLocal });
+      fctx.body.push({ op: "local.set", index: lenOutLocal });
+    } finally {
+      fctx.body = saved;
+      ctx.liveBodies.delete(saved);
+    }
+    return arm;
+  };
+
+  const buildAutoArm = (): Instr[] => {
+    const arm: Instr[] = [];
+    const saved = fctx.body;
+    fctx.body = arm;
+    ctx.liveBodies.add(saved);
+    try {
+      // Fixed-backing auto-length (steps 13.a–c).
+      const fixedArm: Instr[] = [];
+      const savedFixed = fctx.body;
+      fctx.body = fixedArm;
+      try {
+        if (!skipAutoModulo) {
+          fctx.body.push({ op: "local.get", index: bufBlLocal });
+          fctx.body.push({ op: "local.get", index: esLocal });
+          fctx.body.push({ op: "i32.rem_u" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "i32.ne" });
+          emitThrowRangeErrorIf(
+            ctx,
+            fctx,
+            "RangeError: Byte length of the buffer should be a multiple of the element size",
+          );
+        }
+        fctx.body.push({ op: "local.get", index: bufBlLocal });
+        fctx.body.push({ op: "local.get", index: offLocal });
+        fctx.body.push({ op: "i32.lt_s" });
+        emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset is outside the bounds of the buffer");
+        fctx.body.push({ op: "local.get", index: bufBlLocal });
+        fctx.body.push({ op: "local.get", index: offLocal });
+        fctx.body.push({ op: "i32.sub" });
+        fctx.body.push({ op: "local.get", index: esLocal });
+        fctx.body.push({ op: "i32.div_u" });
+        fctx.body.push({ op: "local.set", index: lenOutLocal });
+      } finally {
+        fctx.body = savedFixed;
+      }
+
+      if (ctx.resizableAbTypeIdx >= 0) {
+        // Length-tracking over a resizable backing (step 7.b): runtime brand
+        // test — a FIXED buffer in a resizable-bearing module keeps the full
+        // fixed-arm validation.
+        const trackArm: Instr[] = [];
+        const savedTrack = fctx.body;
+        fctx.body = trackArm;
+        try {
+          fctx.body.push({ op: "local.get", index: offLocal });
+          fctx.body.push({ op: "local.get", index: bufBlLocal });
+          fctx.body.push({ op: "i32.gt_s" });
+          emitThrowRangeErrorIf(ctx, fctx, "RangeError: Start offset is outside the bounds of the buffer");
+          fctx.body.push({ op: "i32.const", value: -1 });
+          fctx.body.push({ op: "local.set", index: lenOutLocal });
+        } finally {
+          fctx.body = savedTrack;
+        }
+        fctx.body.push({ op: "local.get", index: bufLocal });
+        fctx.body.push({ op: "ref.test", typeIdx: ctx.resizableAbTypeIdx });
+        fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: trackArm, else: fixedArm });
+      } else {
+        for (const instr of fixedArm) fctx.body.push(instr);
+      }
+    } finally {
+      fctx.body = saved;
+      ctx.liveBodies.delete(saved);
+    }
+    return arm;
+  };
+
+  if (hasLen.kind === "static-yes") {
+    const arm = buildExplicitArm(hasLen.lenLocal, hasLen.lenF64Local);
+    for (const instr of arm) fctx.body.push(instr);
+  } else if (hasLen.kind === "static-no") {
+    const arm = buildAutoArm();
+    for (const instr of arm) fctx.body.push(instr);
+  } else {
+    const explicitArm = buildExplicitArm(hasLen.lenLocal, hasLen.lenF64Local);
+    const autoArm = buildAutoArm();
+    fctx.body.push({ op: "local.get", index: hasLen.flagLocal });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: explicitArm, else: autoArm });
+  }
+}
+
+/**
  * (#3054 D) Dynamic `new <ctorVal>(buffer[, byteOffset[, length]])` where
  * `ctorVal` is a first-class `$__ta_ctor` value (the kind is only known at
  * runtime — test262 `CreateRabForTest`, `for (ctor of ctors) new ctor(rab, …)`).
@@ -3331,10 +3576,18 @@ function pushTaDynViewEffectiveLen(
  * `ref.null.extern` (declines gracefully — same as the pre-D host-import drop).
  *
  * `ctorAnyLocal` is an anyref local already holding `any.convert_extern(ctorValue)`.
- * Strict RangeError validation (offset alignment / bounds) is intentionally omitted
- * on this dynamic path — B1's bounds-checked view read/write already degrades OOB
- * to NaN/no-op, so an out-of-range window can't trap. Byte-inert: only reachable
- * once a `$__ta_ctor` value exists in the module.
+ * Byte-inert: only reachable once a `$__ta_ctor` value exists in the module.
+ *
+ * (#3177 slice 2) Full §23.2.5.1 InitializeTypedArrayFromArrayBuffer argument
+ * protocol: ToIndex(byteOffset) → offset%elementSize RangeError →
+ * ToIndex(length) → detached TypeError (fresh byte-length read, observing a
+ * detach-during-valueOf) → bounds RangeError / auto-length computation (see
+ * {@link emitTaBufferBoundsAndLength}). The alignment/bounds/detached checks
+ * live INSIDE the kind-gated arm (they need the runtime element size and must
+ * not fire for a non-TA callee); the ToIndex coercions stay unconditional,
+ * matching the pre-slice-2 behavior. A literal-`undefined` length argument
+ * counts as ABSENT (`new TA(buffer, 0, undefined)` takes the length-omitted
+ * validation arm, per spec "length is undefined").
  */
 export function emitDynamicTaViewConstruct(
   ctx: CodegenContext,
@@ -3370,12 +3623,6 @@ export function emitDynamicTaViewConstruct(
   const bufLocal = allocLocal(fctx, `__dtav_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
   fctx.body.push({ op: "local.set", index: bufLocal });
 
-  // bufByteLen = buf.length (field0).
-  const bufByteLenLocal = allocLocal(fctx, `__dtav_blen_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: bufLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
-  fctx.body.push({ op: "local.set", index: bufByteLenLocal });
-
   // byteOffset = ToIndex(offsetExpr) (0 when omitted). Element-count length arg is
   // kind-independent, so compute it ONCE (shared across all arms).
   const offsetLocal = allocLocal(fctx, `__dtav_off_${fctx.locals.length}`, { kind: "i32" });
@@ -3385,10 +3632,24 @@ export function emitDynamicTaViewConstruct(
     fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.set", index: offsetLocal });
   }
-  const lenGiven = lengthExpr !== undefined;
+  // A syntactic literal-`undefined` length is ABSENT per spec (§23.2.5.1 "If
+  // length is undefined"). Restricted to the side-effect-free identifier shape
+  // so a `void`-typed call expression is still evaluated.
+  const lengthIsLiteralUndefined =
+    lengthExpr !== undefined && ts.isIdentifier(lengthExpr) && lengthExpr.text === "undefined";
+  const lenGiven = lengthExpr !== undefined && !lengthIsLiteralUndefined;
   const lenElemsLocal = allocLocal(fctx, `__dtav_len_${fctx.locals.length}`, { kind: "i32" });
-  if (lengthExpr) {
-    emitToIndexI32(ctx, fctx, lengthExpr, compileExpr, lenElemsLocal, "RangeError: Invalid typed array length");
+  const lenF64Local = allocLocal(fctx, `__dtav_lenf_${fctx.locals.length}`, { kind: "f64" });
+  if (lengthExpr && lenGiven) {
+    emitToIndexI32(
+      ctx,
+      fctx,
+      lengthExpr,
+      compileExpr,
+      lenElemsLocal,
+      "RangeError: Invalid typed array length",
+      lenF64Local,
+    );
   }
 
   // kind = ref.test $__ta_ctor ? struct.get 0 : -1  (a non-ctor callee → -1 → the
@@ -3413,34 +3674,40 @@ export function emitDynamicTaViewConstruct(
   // Build ONE `$__ta_dyn_view` carrying the runtime kind (B1's per-kind
   // `$__ta_view_<K>` canonicalize together, so a boxed view can't recover its kind
   // via `ref.test` — the dynamic path stores it). Only when `kind >= 0`.
+  // (#3177 slice 2) The arm now runs the full §23.2.5.1 validation protocol:
+  // alignment RangeError → detached TypeError → bounds RangeError / auto-length.
   const dynIdx = getOrRegisterTaDynViewType(ctx);
-  const resizable = ctx.resizableAbTypeIdx >= 0;
   const buildArm: Instr[] = [];
   const savedBody = fctx.body;
   fctx.body = buildArm;
-  // length (field0):
-  if (lenGiven) {
-    fctx.body.push({ op: "local.get", index: lenElemsLocal });
-  } else if (resizable) {
-    // Auto-length over a possibly-resizable buffer → -1 sentinel so the effective
-    // length is derived live from `buf.length / elemSize` (length-tracking).
-    fctx.body.push({ op: "i32.const", value: -1 });
-  } else {
-    // Fixed auto length = (bufByteLen - offset) / elemSize(kind).
-    fctx.body.push({ op: "local.get", index: bufByteLenLocal });
-    fctx.body.push({ op: "local.get", index: offsetLocal });
-    fctx.body.push({ op: "i32.sub" });
+  ctx.liveBodies.add(savedBody);
+  try {
+    const esLocal = allocLocal(fctx, `__dtav_es_${fctx.locals.length}`, { kind: "i32" });
     pushElemSizeForKind(fctx, kindLocal);
-    fctx.body.push({ op: "i32.div_u" });
+    fctx.body.push({ op: "local.set", index: esLocal });
+    emitTaOffsetAlignmentCheck(ctx, fctx, offsetLocal, esLocal);
+    const lenOutLocal = allocLocal(fctx, `__dtav_lo_${fctx.locals.length}`, { kind: "i32" });
+    emitTaBufferBoundsAndLength(
+      ctx,
+      fctx,
+      bufLocal,
+      offsetLocal,
+      esLocal,
+      lenOutLocal,
+      lenGiven ? { kind: "static-yes", lenLocal: lenElemsLocal, lenF64Local } : { kind: "static-no" },
+    );
+    // view = {length (elements | -1 tracking), buf, byteOffset, kind}.
+    fctx.body.push({ op: "local.get", index: lenOutLocal });
+    fctx.body.push({ op: "local.get", index: bufLocal });
+    fctx.body.push({ op: "local.get", index: offsetLocal });
+    fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "local.set", index: resultLocal });
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
   }
-  // buf (shared vec ref) + byteOffset + kind.
-  fctx.body.push({ op: "local.get", index: bufLocal });
-  fctx.body.push({ op: "local.get", index: offsetLocal });
-  fctx.body.push({ op: "local.get", index: kindLocal });
-  fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
-  fctx.body.push({ op: "extern.convert_any" });
-  fctx.body.push({ op: "local.set", index: resultLocal });
-  fctx.body = savedBody;
 
   fctx.body.push({ op: "local.get", index: kindLocal });
   fctx.body.push({ op: "i32.const", value: 0 });
@@ -3456,6 +3723,13 @@ export function emitDynamicTaViewConstruct(
  * (§7.1.22): unbox → NaN→0 → truncate toward zero → RangeError when negative or
  * above 2^53−1. Mirrors {@link emitToIndexI32} but sources from a pre-boxed
  * externref local instead of compiling an expression.
+ *
+ * (#3177 slice 2) A runtime `$Symbol`-carrier operand throws TypeError per
+ * §7.1.4 ToNumber(Symbol) — the arg is pre-boxed so the static-type check the
+ * expression variant uses can't fire; test the carrier brand at runtime
+ * (byte-inert when the module never registers the Symbol carrier). Also
+ * optionally preserves the truncated pre-narrowing f64 in `outF64Local` for
+ * overflow-safe bounds math (see {@link emitToIndexI32}).
  */
 function emitToIndexI32FromArgLocal(
   ctx: CodegenContext,
@@ -3463,7 +3737,17 @@ function emitToIndexI32FromArgLocal(
   argLocal: number,
   outLocal: number,
   rangeErrMsg: string,
+  outF64Local?: number,
 ): void {
+  if (ctx.symbolTypeIdx >= 0) {
+    fctx.body.push({ op: "local.get", index: argLocal });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.test", typeIdx: ctx.symbolTypeIdx });
+    const symThrow = buildThrowJsErrorInstrs(ctx, "TypeError", "Cannot convert a Symbol value to a number", {
+      flush: fctx,
+    });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: symThrow, else: [] });
+  }
   const f64Local = allocLocal(fctx, `__dtac_ti_${fctx.locals.length}`, { kind: "f64" });
   fctx.body.push({ op: "local.get", index: argLocal });
   coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
@@ -3495,6 +3779,10 @@ function emitToIndexI32FromArgLocal(
   fctx.body.push({ op: "local.get", index: f64Local });
   fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: outLocal });
+  if (outF64Local !== undefined) {
+    fctx.body.push({ op: "local.get", index: f64Local });
+    fctx.body.push({ op: "local.set", index: outF64Local });
+  }
 }
 
 /**
@@ -3805,62 +4093,93 @@ export function emitTaDynCtorConstructFromLocals(
 
     // ── ArrayBuffer arm (outermost test): shared-backing view over the byte vec
     // (`$__resizable_ab` is a subtype, so resizable buffers match too).
+    // (#3177 slice 2) Full §23.2.5.1 argument protocol: ToIndex(byteOffset) →
+    // alignment RangeError → runtime-nullish length probe (a PRESENT-but-
+    // `undefined` third arg — `new TA(buffer, 0, undefined)` — takes the
+    // length-omitted arm per spec) → ToIndex(length) → detached TypeError /
+    // bounds RangeError / auto-length via emitTaBufferBoundsAndLength. This
+    // replaces the old clamp-offset + static-resizable-flag heuristics.
     {
       const bufArm: Instr[] = [];
       const saved = fctx.body;
       fctx.body = bufArm;
-      const bufLocal = allocLocal(fctx, `__dtac_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: byteVecIdx });
-      const bufBlLocal = allocLocal(fctx, `__dtac_bbl_${fctx.locals.length}`, { kind: "i32" });
-      const offLocal = allocLocal(fctx, `__dtac_off_${fctx.locals.length}`, { kind: "i32" });
-      fctx.body.push({ op: "local.get", index: a0AnyLocal });
-      fctx.body.push({ op: "ref.cast", typeIdx: byteVecIdx });
-      fctx.body.push({ op: "local.tee", index: bufLocal });
-      fctx.body.push({ op: "struct.get", typeIdx: byteVecIdx, fieldIdx: 0 });
-      fctx.body.push({ op: "local.set", index: bufBlLocal });
-      if (argLocals.length >= 2) {
-        emitToIndexI32FromArgLocal(ctx, fctx, argLocals[1]!, offLocal, "RangeError: Invalid typed array offset");
-      } else {
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "local.set", index: offLocal });
-      }
-      // Clamp off to the buffer byte length so the fixed auto-length subtraction
-      // below can't wrap negative.
-      fctx.body.push({ op: "local.get", index: offLocal });
-      fctx.body.push({ op: "local.get", index: bufBlLocal });
-      fctx.body.push({ op: "i32.gt_u" });
-      fctx.body.push({
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: bufBlLocal },
-          { op: "local.set", index: offLocal },
-        ],
-        else: [],
-      });
-      if (argLocals.length >= 3) {
-        emitToIndexI32FromArgLocal(ctx, fctx, argLocals[2]!, dstNLocal, "RangeError: Invalid typed array length");
-      } else if (ctx.resizableAbTypeIdx >= 0) {
-        // Auto-length over a possibly-resizable buffer → -1 length-tracking
-        // sentinel (mirrors emitDynamicTaViewConstruct).
-        fctx.body.push({ op: "i32.const", value: -1 });
-        fctx.body.push({ op: "local.set", index: dstNLocal });
-      } else {
-        fctx.body.push({ op: "local.get", index: bufBlLocal });
+      ctx.liveBodies.add(saved);
+      try {
+        const bufLocal = allocLocal(fctx, `__dtac_buf_${fctx.locals.length}`, { kind: "ref", typeIdx: byteVecIdx });
+        const offLocal = allocLocal(fctx, `__dtac_off_${fctx.locals.length}`, { kind: "i32" });
+        fctx.body.push({ op: "local.get", index: a0AnyLocal });
+        fctx.body.push({ op: "ref.cast", typeIdx: byteVecIdx });
+        fctx.body.push({ op: "local.set", index: bufLocal });
+        if (argLocals.length >= 2) {
+          emitToIndexI32FromArgLocal(ctx, fctx, argLocals[1]!, offLocal, "RangeError: Invalid typed array offset");
+        } else {
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.set", index: offLocal });
+        }
+        emitTaOffsetAlignmentCheck(ctx, fctx, offLocal, esLocal);
+        if (argLocals.length >= 3) {
+          // Runtime "length is undefined" probe (§23.2.5.1 step 13): normalize
+          // the #2106 $undefined singleton to null when the helper exists,
+          // then null-test. ToIndex(length) runs ONLY on a non-nullish value.
+          const hasLenFlag = allocLocal(fctx, `__dtac_hl_${fctx.locals.length}`, { kind: "i32" });
+          const lenF64Local = allocLocal(fctx, `__dtac_lf_${fctx.locals.length}`, { kind: "f64" });
+          const nullishIdx = ctx.funcMap.get("__nullish_to_null");
+          fctx.body.push({ op: "local.get", index: argLocals[2]! });
+          if (nullishIdx !== undefined) fctx.body.push({ op: "call", funcIdx: nullishIdx });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({ op: "i32.eqz" });
+          fctx.body.push({ op: "local.set", index: hasLenFlag });
+          const toIndexArm: Instr[] = [];
+          const savedTi = fctx.body;
+          fctx.body = toIndexArm;
+          try {
+            emitToIndexI32FromArgLocal(
+              ctx,
+              fctx,
+              argLocals[2]!,
+              dstNLocal,
+              "RangeError: Invalid typed array length",
+              lenF64Local,
+            );
+          } finally {
+            fctx.body = savedTi;
+          }
+          fctx.body.push({ op: "local.get", index: hasLenFlag });
+          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: toIndexArm, else: [] });
+          emitTaBufferBoundsAndLength(
+            ctx,
+            fctx,
+            bufLocal,
+            offLocal,
+            esLocal,
+            dstNLocal,
+            { kind: "runtime", flagLocal: hasLenFlag, lenLocal: dstNLocal, lenF64Local },
+            /* skipAutoModulo — bare-byte-vec pun, see helper doc */ true,
+          );
+        } else {
+          emitTaBufferBoundsAndLength(
+            ctx,
+            fctx,
+            bufLocal,
+            offLocal,
+            esLocal,
+            dstNLocal,
+            { kind: "static-no" },
+            /* skipAutoModulo — bare-byte-vec pun, see helper doc */ true,
+          );
+        }
+        // view = {n, sharedBuf, off, kind}
+        fctx.body.push({ op: "local.get", index: dstNLocal });
+        fctx.body.push({ op: "local.get", index: bufLocal });
         fctx.body.push({ op: "local.get", index: offLocal });
-        fctx.body.push({ op: "i32.sub" });
-        fctx.body.push({ op: "local.get", index: esLocal });
-        fctx.body.push({ op: "i32.div_u" });
-        fctx.body.push({ op: "local.set", index: dstNLocal });
+        fctx.body.push({ op: "local.get", index: kindLocal });
+        fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
+        fctx.body.push({ op: "extern.convert_any" });
+        fctx.body.push({ op: "local.set", index: resultLocal });
+      } finally {
+        fctx.body = saved;
+        ctx.liveBodies.delete(saved);
       }
-      // view = {n, sharedBuf, off, kind}
-      fctx.body.push({ op: "local.get", index: dstNLocal });
-      fctx.body.push({ op: "local.get", index: bufLocal });
-      fctx.body.push({ op: "local.get", index: offLocal });
-      fctx.body.push({ op: "local.get", index: kindLocal });
-      fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
-      fctx.body.push({ op: "extern.convert_any" });
-      fctx.body.push({ op: "local.set", index: resultLocal });
-      fctx.body = saved;
       chain = [
         { op: "local.get", index: a0AnyLocal },
         { op: "ref.test", typeIdx: byteVecIdx },
