@@ -2,7 +2,11 @@
 id: 3227
 title: "default (JS-host) lane: async-completion harness callbacks never execute → 1,690 vacuous fails (#2940 detector), dominated by for-await-of / dynamic-import / Promise"
 status: in-progress
-assignee: ttraenkler/sendev-3161-conflict
+assignee: ttraenkler/fable-s2
+loc-budget-allow:
+  - src/codegen/async-cps.ts
+  - src/codegen/expressions.ts
+  - src/runtime.ts
 sprint: current
 priority: high
 horizon: xl
@@ -15,9 +19,6 @@ related: [3074, 3086, 3001, 2940, 2903, 2939, 1014, 1116, 1326c]
 created: 2026-07-13
 updated: 2026-07-16
 origin: "2026-07-13 /harvest-errors. Baselines run 20260713-085257 (gitHash bb27494f, 32,990 pass), default lane test262-current.jsonl. Count unchanged from run 179d73ca."
-regressions-allow:
-  count: 1300
-  reason: "#3227 S1 async post-drain verdict re-read (oracle v5), lead-approved honesty regression 2026-07-16 (precedent #3086/#3285) — post-await assertions in currently-passing async-flagged tests finally execute and expose real bugs (S2 await-NaN / S3 IteratorResult clusters). Measured on 80-record sample: ~875 host pass->fail expected, CI 525-1225; ceiling = CI upper bound 1225 + ~75 drift margin. Standalone lane expects ~0 flips (its __drain_microtasks drains synchronously pre-epilogue, so the re-read is verdict-neutral there). NOTE: the ceiling assumes the baseline is already re-seeded at v4 (post-#3104 promote-baseline); against a stale pre-#3104 baseline the diff would also carry #3104's ~1358 flips and exceed this ceiling - that is a wait-for-promote-baseline park, not a regression."
 ---
 
 # #3227 — default-lane async harness callbacks are vacuous (no assertion runs)
@@ -125,7 +126,7 @@ v)` shows count=0 sync, count=42 one macrotask later.
 
 ## Slice plan (dispatchable)
 
-- **S1 (this PR, fable-3) — async post-drain verdict re-read + ORACLE_VERSION 5.**
+- **S1 (PR #3161, fable-3, merged 2026-07-16) — async post-drain verdict re-read + ORACLE_VERSION 5.**
   `wrapTest` exports `__result()` (same verdict logic as the `test()` epilogue)
   for async-flagged tests; `runTest262File` yields 2× `setImmediate` after a
   sync `1`/`-262` and re-reads. A deferred continuation THROW during the drain
@@ -140,11 +141,15 @@ v)` shows count=0 sync, count=42 one macrotask later.
   async-flagged tests flip pass→honest-fail (~875, CI 525–1,225) because their
   post-await assertions finally run and hit real bugs. Net raw pass ≈ −455.
   Needs lead/PO sign-off (precedent: #3086 owner-approved honesty regression).
-- **S2 — `await <host promise>` NaN corruption (JS-host lane).** Fix the await
+  **Post-merge observed net (promote-baseline at oracle v5, baseline_sha
+  `bba9ac76`, 2026-07-16 19:43Z): 32,493 → 32,494 host — the corpus-scale
+  flips nearly cancelled; the sampled −455 net did not materialize.**
+- **S2 (PR #3165) — `await <host promise>` NaN corruption (JS-host lane).** Fix the await
   value read so the settled value is delivered (repro above; also the likely
   root of the `class-elements async-gen … v.value = 42` flip cluster). Expect
   this to recover a large share of the S1 pass→fail flips + convert many of
   the 1,680 into passes. Repro: `.tmp/repro-3227c.mts` shapes C1/C2/C4/C5.
+  Fixed — see the S2 section below.
 - **S3 — async-generator `.next().then(...)` result delivery.** Flip cluster
   `yield-star-next-then-*` / `named-yield-*`: `done`/`value` read wrong in the
   `.then` continuation (assert #2 `done === false/true` fails). Distinct
@@ -213,3 +218,98 @@ and both touched `tests/test262-runner.ts`. Resolution decisions and WHY:
 - 80-record currently-passing async sample: 60 pass / 20 fail (all honest
   post-await assertion failures; clusters above).
 - wrapTest consumer unit tests: issue-1049/1450/1385/1567/1318-locator — 24/24 pass.
+
+## S2 — `await Promise.resolve(x)` yields NaN (JS-host lane) — FIXED (PR #3165)
+
+**Root cause (verified 2026-07-16, fable-s2, current main).** The
+static-resolution census (`awaitIsStaticallyResolved`, #1936) classifies
+`await Promise.resolve(<static>)` as a no-suspension await, so the async fn
+skips the CPS/$AsyncFrame lanes entirely and the await reaches the legacy
+JS-host passthrough in `src/codegen/expressions.ts` (the #2613 arm). That
+passthrough compiled the OPERAND — a host call returning the Promise OBJECT
+(externref) — while claiming "already the resolved value on the stack"; a
+numeric consumer's externref→f64 coercion then read **NaN, synchronously**.
+Differential proof (predecessor probes `.tmp/repro-3227{c,d}.mts`): `await p`
+(variable), `await ….then(…)`, `await new Promise(…)` all take the real
+suspension lane and deliver 7; only the `Promise.resolve(…)`-operand forms
+(declaration/expression/arrow, 1 or 2 awaits) read NaN.
+
+**Fix.** New `staticPromiseResolveSettledExpr` (async-cps.ts, next to the
+census predicate) maps the recognised `Promise.resolve(...)` operand to the
+expression it settles to — the single resolve argument (nested
+`Promise.resolve(Promise.resolve(x))` unwraps), or `undefined` for the
+zero-arg form — and the passthrough arm in expressions.ts compiles THAT with
+the caller's `expectedType` instead of the operand. Non-`Promise.resolve`
+operands keep the identity passthrough; standalone/WASI lane untouched (its
+`emitStandaloneAwaitUnwrap` branch returns earlier).
+
+### Test Results (S2)
+
+- Probes: C1–C5 all `7` (were NaN except C3); D3 `7`, D5 `34` (were NaN);
+  genuinely-suspending D1/D2/D4 unchanged (`0` sync → `7` drained).
+- `tests/issue-3227-s2.test.ts`: 6/6 pass (declaration/expression/arrow,
+  sequential awaits, zero-arg → undefined, nested resolve, suspension guards).
+- Regression sweep: async-await, async-census, issue-2895-async-frame,
+  issue-2906-async-multiawait, issue-2967-engine-convergence — all pass.
+  issue-2865-standalone (WASI) has 2 failures **pre-existing on main**
+  (verified on the main checkout; untouched lane).
+
+## S3 — async-gen `yield*` delegation drained zero values — FIXED (PR #3165)
+
+**Root cause (verified 2026-07-16, fable-s2).** `yield* <async generator>`
+inside an `async function*`: `__gen_yield_star` (src/runtime.ts) drains the
+inner iterable with a sync `for...of` gated on `Symbol.iterator` — but an
+async-generator object carries only `Symbol.asyncIterator`, so ZERO values
+were pushed and the outer async generator reported `{value: undefined,
+done: true}` on the first `.next()` (probe S3-3). Plain `.next().then`
+(S3-1/2) and `yield*` over arrays / `yield* await <array>` — including the
+class-elements static-async-gen shape (S3-4/5) — were already correct.
+
+**Fix.** Our async generators are EAGERLY buffered (`_AsyncGeneratorState` →
+`{buf, index, pendingThrow}`), so the settled values are synchronously
+available: `__gen_yield_star` now drains the remaining inner buffer directly
+and rethrows a `pendingThrow` (§27.6.3.8 — inner abrupt completion propagates
+out of the `yield*`; probe S3-6 confirms reject delivery). Non-asyncgen
+iterables keep the exact prior path. Residual (S4 territory): custom host
+async iterables (promise-returning `next`) still can't be drained in the
+eager model.
+
+### Test Results (S3)
+
+- Probes `.tmp/repro-3227-s3.mts`: S3-3 `value=5,done=false` (was
+  `undefined,true`); S3-6 `[1,false][reject]` (inner throw propagates);
+  S3-1/2/4/5 unchanged-correct.
+- `tests/issue-3227-s3.test.ts`: asyncgen-inner delegation, chained
+  exhaustion, inner-throw propagation, array-inner control.
+
+## Merge reconciliation for S2 / PR #3165 (2026-07-16, sendev-3165-conflict)
+
+PR #3165 went DIRTY when S1 (PR #3161) merged — both slices extend this
+tracking doc. Resolution decisions and WHY:
+
+- **Issue body**: S1's landed sections (root cause, slice plan, measured
+  delta, #3104 reconciliation, slice-1 results) kept verbatim; S2's section
+  appended after them. Frontmatter deduplicated (S2's pre-S1 copy had a
+  duplicate `horizon:` and a stale assignee).
+- **`regressions-allow` STRIPPED, deliberately.** S1's `count: 1300`
+  declaration served exactly one purpose: covering S1's own wasm-change
+  honest-tightening flips while the committed baseline was still pre-v5. That
+  re-seed HAS happened — promote-baseline at oracle v5, baseline_sha
+  `bba9ac76`, 2026-07-16 19:43Z. `changeSetNumericAllowances` (#3303) is
+  PR-scoped: it consults only issue files IN THE PR DIFF, and its contract
+  says a follow-up PR re-touching a landed granting issue file should strip
+  the key — otherwise this PR would silently inherit a 1,300-regression mask.
+  S2 is a pure compiler fix diffing v5-vs-v5 against the post-S1 baseline; it
+  must be judged unmasked (expected net-positive: it recovers the await-NaN
+  fail flips). If S2 somehow needs its own allowance, that is a new, measured
+  declaration — not S1's leftover.
+- **No oracle bump for S2.** S2 touches only `src/codegen/` (compiler
+  output), not the runner/verdict logic — `ORACLE_VERSION` stays 5. Verified:
+  the PR diff contains no `tests/test262-runner.ts` / oracle-file change.
+- **`src/codegen/async-cps.ts` / `expressions.ts`**: main did NOT modify
+  either file since the S2 branch base (verified `git diff <base>
+origin/main -- <files>` is empty), so the auto-merge trivially kept the S2
+  side — no cross-composition to reconcile in code. S1 (runner-side) and S2
+  (compiler-side) compose by construction: S1 makes post-await assertions
+  actually score; S2 makes `await Promise.resolve(x)` deliver x, so those
+  assertions now pass.

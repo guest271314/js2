@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10281,
-    "fail": 2702,
+    "pass": 10283,
+    "fail": 2700,
     "ce": 92,
     "skip": 0,
     "total": 13075,
