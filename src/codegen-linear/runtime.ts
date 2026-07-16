@@ -1067,6 +1067,32 @@ export function addArrayRuntime(mod: WasmModule): void {
   );
 }
 
+/** Runtime helper used only by the flag-gated linear-IR vec constructor. */
+export const LINEAR_IR_VEC_INIT_F64_FN = "__linear_ir_vec_init_f64";
+
+/**
+ * Add the value-first indexed store needed by `LinearEmitter.emitVecNewFixed`.
+ *
+ * `lower.ts` leaves fixed-vec elements on the operand stack in source order.
+ * The emitter therefore consumes them from last to first; this helper accepts
+ * `(value, ptr, index)` so the pointer and index can be pushed after the value
+ * without a second element scratch local. The array is freshly allocated and
+ * cannot be forwarded, so the store intentionally targets its canonical slot
+ * directly.
+ */
+export function addLinearIrVecRuntime(mod: WasmModule): void {
+  if (mod.functions.some((fn) => fn.name === LINEAR_IR_VEC_INIT_F64_FN)) return;
+  addRuntimeFunc(mod, LINEAR_IR_VEC_INIT_F64_FN, [{ kind: "f64" }, { kind: "i32" }, { kind: "i32" }], [], [], () => [
+    { op: "local.get", index: 1 },
+    { op: "local.get", index: 2 },
+    { op: "i32.const", value: 8 },
+    { op: "i32.mul" },
+    { op: "i32.add" },
+    { op: "local.get", index: 0 },
+    { op: "f64.store", align: 3, offset: 16 },
+  ]);
+}
+
 /**
  * Add String runtime functions to the module.
  * Layout: [header 8B][len:u32 at +8][utf8 bytes at +12...]

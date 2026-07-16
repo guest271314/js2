@@ -11,6 +11,7 @@ import { computeClassLayout } from "./layout.js";
 import {
   addArrayRuntime,
   addFmodRuntime,
+  addLinearIrVecRuntime,
   addMapRuntime,
   addNumericMapRuntime,
   addNumericSetRuntime,
@@ -85,6 +86,9 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   addNumericMapRuntime(mod);
   addNumericSetRuntime(mod);
   addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
+  // #2956 L2: construction needs one value-first indexed store helper.
+  // Register it only for the opt-in overlay so flag-off output stays byte-identical.
+  if (linearIrEnabled()) addLinearIrVecRuntime(mod);
 
   // Add __closure_env global (mutable i32, init 0) for closure support
   const closureEnvGlobalIdx = mod.globals.length;

@@ -12,7 +12,12 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { planPullRequestAction, readPullRequest, readPullRequestForBranch } from "./symphony-pr-state.mjs";
+import {
+  planPullRequestAction,
+  readPullRequest,
+  readPullRequestForBranch,
+  scopePullRequestIssues,
+} from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
 const DEFAULT_WORKFLOW = path.join(ROOT, "WORKFLOW.md");
@@ -437,6 +442,7 @@ function loadMarkdownIssues(config) {
       pull_request: pullRequest,
       pr: pullRequest,
       last_ci_retry_head: readScalarField(fm, "last_ci_retry_head", null),
+      last_merged_pr: readScalarField(fm, "last_merged_pr", null),
       url: null,
       labels: [fm.area, fm.task_type, fm.language_feature, fm.goal].filter(Boolean).map((v) => String(v).toLowerCase()),
       blocked_by: readArrayField(fm, "depends_on").map((dep) => ({ id: dep, identifier: dep, state: null })),
@@ -1416,7 +1422,11 @@ class Orchestrator {
     const repository = String(get(this.config, "pull_requests.repository", ""));
     const command = String(get(this.config, "pull_requests.command", "gh"));
     const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
-    const issues = this.tracker.fetchIssuesByStates(reviewStates);
+    const wantedReviewStates = new Set(reviewStates.map(normalizeState));
+    const issues = scopePullRequestIssues(this.tracker.allIssues(), {
+      sprintOnly: Boolean(get(this.config, "pull_requests.sprint_only", false)),
+      includeDependencies: Boolean(get(this.config, "pull_requests.include_dependencies", false)),
+    }).filter((issue) => wantedReviewStates.has(issue.state));
 
     for (const issue of issues) {
       if (!issue.pull_request && !issue.branch_name) continue;
@@ -1468,6 +1478,8 @@ class Orchestrator {
       }
       const planned = planPullRequestAction(state, {
         handledFailureKey: this.handledFailedPrHeads.get(id) || issue.last_ci_retry_head,
+        issueState: issue.state,
+        lastMergedPr: issue.last_merged_pr,
         busy: this.running.has(id) || this.claimed.has(id) || this.retryAttempts.has(id),
         paused: this.paused || this.draining || this.stopping,
         hasCapacity: this.running.size < this.maxConcurrent(),
@@ -1491,6 +1503,39 @@ class Orchestrator {
             completed,
           });
         }
+        continue;
+      }
+
+      if (planned.action === "continue") {
+        const running = this.running.get(id);
+        const retry = this.retryAttempts.get(id);
+        if (retry?.timer_handle) clearTimeout(retry.timer_handle);
+        this.retryAttempts.delete(id);
+        this.pullRequestRetryCounts.delete(id);
+        this.handledFailedPrHeads.delete(id);
+        if (running?.lane.kind !== "claude-channel") {
+          this.suppressedRetries.add(id);
+          running?.child.kill("SIGTERM");
+        } else if (activeDispatchClaim(id)) {
+          releaseDispatchClaim(id, `PR #${state.number} merged; continuing issue`);
+        }
+        issue.last_merged_pr = planned.mergeKey;
+        issue.last_ci_retry_head = null;
+        issue.pull_request = null;
+        issue.pr = null;
+        this.tracker.updateIssueStatusFile(issue, issue.file, "ready", {
+          pr: null,
+          last_ci_retry_head: null,
+          last_merged_pr: planned.mergeKey,
+        });
+        if (!running) this.claimed.delete(id);
+        this.completed.delete(id);
+        this.logger.event("pull_request_merged_issue_requeued", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: state.number,
+          branch: issue.branch_name,
+        });
         continue;
       }
 
