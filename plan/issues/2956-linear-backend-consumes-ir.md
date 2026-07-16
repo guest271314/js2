@@ -283,3 +283,35 @@ playground corpus. There is no measured corpus improvement, so
 `scripts/linear-ir-baseline.json` is intentionally unchanged. The next L2
 work is the separately owned refcell/aggregate surface; this sub-slice does
 not claim it.
+
+## Execution status — L2 vec-MUTATION sub-slice (2026-07-17, fable-epsilon)
+
+Element store (`a[i] = v`) and single-arg `a.push(v)` on selector-claimed
+`number[]` receivers now lower through the linear-IR overlay under
+`JS2WASM_LINEAR_IR=1`. No new IR instr kinds and no emitter changes — the
+sub-slice rides the existing C2 element-store helper call:
+
+- `src/ir/from-ast.ts`: the element-store and push receiver gates admit the
+  linear scalar-i32 vec receiver via the same `isVecValueExpression` probe
+  the read arms (`.length`, element access) already use. WasmGC lane
+  unaffected (its vec receivers are always refs; `check:ir-fallbacks` OK).
+- `src/ir/backend/linear-integration.ts` `resolveFunc`: intercepts the
+  `__vec_elem_set_<typeIdx>` helper name (sentinel 0 on linear) and maps it
+  to the direct runtime's `__arr_set(ptr:i32, idx:i32, val:f64)` — same
+  signature, same grow-on-OOB / zero-fill-gap / len-extension semantics as
+  the WasmGC `ensureVecElemSet` helper (negative-idx no-op + #1977
+  forwarding resolution are safe supersets). Name-based, funcIdx-shift safe.
+
+Validated: `tests/issue-2956.test.ts` 11/11 (parity vs direct for
+setInBounds/setGrow/pushStmt; OOB-growth len-extension 507; flag-off SHA
+byte-identity; multi-arg push demotes to direct); linear-array/basic +
+cross-backend-diff 43/43; tsc clean; ratchet 6→6 / build 4→4 (corpus has
+no mutation-gated rows — baseline intentionally unchanged).
+
+**Found + filed #3332**: the DIRECT linear path returns 0 from
+expression-position push (spec: new length) and drops multi-arg push
+extras — the overlay is spec-correct where claimed, so the tests document
+the divergence with #3332-referencing assertions instead of masking it.
+
+**Remaining after this sub-slice**: refcells + aggregates via `layout.ts`
+(the L2 remainder), L3 strings (after #2955), L4 default-ON flip.
