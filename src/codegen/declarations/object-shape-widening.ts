@@ -504,9 +504,7 @@ function isObjectMopCallArg(id: ts.Identifier): boolean {
   if (!ts.isCallExpression(p) || !p.arguments.includes(id)) return false;
   const callee = p.expression;
   return (
-    ts.isPropertyAccessExpression(callee) &&
-    ts.isIdentifier(callee.expression) &&
-    callee.expression.text === "Object"
+    ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Object"
   );
 }
 

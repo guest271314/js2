@@ -76,7 +76,9 @@ describe("#2992 S6 — standalone delete on non-empty literal receivers", () => 
 
   it("delete then redefine restores the value", async () => {
     expect(
-      await runStandalone(mk(`const o = { a: 1 };\n  delete o.a;\n  o.a = 5;\n  if (o.a !== 5) return 1;\n  return 42;`)),
+      await runStandalone(
+        mk(`const o = { a: 1 };\n  delete o.a;\n  o.a = 5;\n  if (o.a !== 5) return 1;\n  return 42;`),
+      ),
     ).toBe(42);
   });
 
