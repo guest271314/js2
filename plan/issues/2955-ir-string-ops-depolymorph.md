@@ -4,8 +4,8 @@ title: "De-polymorph the IR front-end on string mode: abstract IR string ops res
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-10
-assignee: ttraenkler/fable-2856
+updated: 2026-07-17
+assignee: ttraenkler/fable-e
 priority: medium
 horizon: m
 feasibility: medium
@@ -236,3 +236,50 @@ number-`toString` capability site (string-rep-coupled: the host import's
 return IS host-mode's string carrier), `lowerStringMethodCall` (Slice 2, PR
 #2857, landed 2026-07-10), and the for-of strategy switch. `status` stays
 `ready`.
+
+## Slice 3 (2026-07-17, fable-e) — the string-rep externref-shaped class → `stringIsExternref`
+
+Re-measured against `upstream/main` @ `19e287460b`: the map had drifted again —
+the standalone "string→externref arm" sites (old 3402/4124) are **gone from
+main**, leaving 4 functional reads: 3366 (`coerceToExpectedExtern` string
+arm), 3586 (number-`toString` capability), 4454 (for-of strategy), 6332
+(`tryLowerUndefinedCompare` externref-shaped test). This slice takes the
+string-rep class the Slice-2 wrap-up grouped together: **3366 + 6332**.
+
+Both sites ask the identical rep question — "is `IrType.string`'s carrier
+externref (host strings), so a string SSA value can flow unchanged into an
+externref-expected position?" Following the Slice-2/number-box pattern, that
+question is now a resolver-owned predicate,
+`IrFromAstResolver.stringIsExternref()`, implemented in `integration.ts`
+(`makeFromAstResolver`) as exactly `!ctx.nativeStrings` (byte-inert
+relocation). The from-ast reads preserve each site's **legacy resolver-absent
+default**, which differed between the two sites:
+
+- 3366 read `!== false` (old `!cx.resolver?.nativeStrings?.()`: absent →
+  host-shaped → pass-through); its native arm falls to the demote throw —
+  a build-time claim/demote decision (no lower-time demote channel, same
+  constraint as `stringMethodPlan`/`hasHostNumberBox`). Unlike the
+  number-box capability there is **no widening follow-up** on this arm: a
+  native `(ref $AnyString)` can never satisfy an externref host-arg position.
+- 6332 read `=== true` (old `nativeStrings?.() === false`: absent → NOT
+  externref-shaped → fold path / demote). The native fold arm could later
+  move to a true abstract "is-undefined-on-string" op (the map's Slice-4
+  promotion); this slice relocates the mode knowledge only.
+
+**Verification**: sha256-identical compiled binaries vs pristine base in ALL
+THREE regimes (host / native / standalone) over a 20-source corpus (13
+playground examples + 7 targeted snippets covering: string→extern-class-arg,
+strict `===`/`!==  undefined` on `string` and `string | undefined`, string
+methods, string for-of, generator-yield-string, number-toString). Mutation
+check: inverting the predicate CHANGES host-mode hashes (t2-undef-cmp +
+dom/calendar/algorithms examples) — the corpus genuinely exercises both
+sites. `tsc --noEmit` clean; prettier clean; `check:ir-fallbacks` gate
+unchanged (0 post-claim demotions); `ir-frontend-widening` +
+`issue-2856-extern-in-ir` + `ir-algorithms-cluster` + `issue-2949-s5-2-eq`
+62/62; `logical-conditional-identity` 20/23 with the same 3 pre-existing
+`void x` TS-diagnostic failures on pristine base (verified base-vs-branch,
+unrelated).
+
+**Remaining after slice 3** (from-ast functional `nativeStrings` reads, 2):
+the number-`toString` capability site (~3600, slice 4 next) and the for-of
+strategy switch (~4470, slice 5). `status` stays `ready`.
