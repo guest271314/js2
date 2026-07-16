@@ -21,9 +21,9 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T17:41:52.148Z
+claimed_at: 2026-07-16T18:05:52.080Z
 last_merged_pr: 3146
-last_ci_retry_head: ce8c13d8bcf42d854e182211621adef9aede6fe9
+last_ci_retry_head: ad68ab2760e5cb152f05f60420088103aea803da
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -289,5 +289,10 @@ value/aggregate families.
   TypeScript typecheck, full Biome lint, Prettier, issue integrity, LOC budget,
   and equivalence (1,607 passing, 36 known baseline failures, zero new
   regressions) are green. Per the issue rules, no full local test262 was run.
+- Merge-queue retry: the first two final-slice queue attempts reached green
+  compiler/ratchet checks but were ejected by a stale #2097 standalone
+  high-water mark and external test262 baseline drift. The branch was merged
+  forward to main's targeted #3322 high-water correction without changing the
+  ratchet implementation; `last_ci_retry_head` records the handled failed head.
 - Slice acceptance: complete; all issue-defined slices are now implemented and
   the issue is ready for final review in PR #3159.
