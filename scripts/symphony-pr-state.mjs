@@ -93,3 +93,39 @@ export function readPullRequest({ command = "gh", cwd, number, repository = "", 
   }
   return classifyPullRequest(snapshot);
 }
+
+export function readPullRequestForBranch({ branch, command = "gh", cwd, repository = "", timeoutMs = 30_000 }) {
+  const args = [
+    "pr",
+    "list",
+    "--head",
+    String(branch),
+    "--state",
+    "all",
+    "--limit",
+    "1",
+    "--json",
+    "number,state,mergedAt,url,headRefName,headRefOid,statusCheckRollup",
+  ];
+  if (repository) args.push("--repo", repository);
+
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) throw new Error(`pull_request_query_failed: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new Error(`pull_request_query_failed: ${String(result.stderr || result.stdout || result.status).trim()}`);
+  }
+
+  let snapshots;
+  try {
+    snapshots = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`pull_request_query_invalid_json: ${error.message}`);
+  }
+  if (!Array.isArray(snapshots)) throw new Error("pull_request_query_invalid_json: expected an array");
+  return snapshots.length > 0 ? classifyPullRequest(snapshots[0]) : null;
+}

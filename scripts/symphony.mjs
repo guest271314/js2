@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { planPullRequestAction, readPullRequest } from "./symphony-pr-state.mjs";
+import { planPullRequestAction, readPullRequest, readPullRequestForBranch } from "./symphony-pr-state.mjs";
 
 const ROOT = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), ".."));
 const DEFAULT_WORKFLOW = path.join(ROOT, "WORKFLOW.md");
@@ -1147,6 +1147,8 @@ class Orchestrator {
         return;
       }
       workspace = this.workspaceManager.ensure(issue);
+      issue.branch_name = workspace.branch;
+      this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, { branch: workspace.branch });
       const workspaceClaim = this.tracker.claimIssueInWorkspace(issue, workspace, lane);
       if (workspaceClaim?.changed) {
         this.logger.event("workspace_issue_claimed", {
@@ -1417,17 +1419,25 @@ class Orchestrator {
     const issues = this.tracker.fetchIssuesByStates(reviewStates);
 
     for (const issue of issues) {
-      if (!issue.pull_request) continue;
+      if (!issue.pull_request && !issue.branch_name) continue;
       const id = String(issue.id);
       let state;
       try {
-        state = readPullRequest({
-          command,
-          cwd: ROOT,
-          number: issue.pull_request,
-          repository,
-          timeoutMs,
-        });
+        state = issue.pull_request
+          ? readPullRequest({
+              command,
+              cwd: ROOT,
+              number: issue.pull_request,
+              repository,
+              timeoutMs,
+            })
+          : readPullRequestForBranch({
+              branch: issue.branch_name,
+              command,
+              cwd: ROOT,
+              repository,
+              timeoutMs,
+            });
       } catch (error) {
         this.logger.event("pull_request_poll_failed", {
           issue_id: issue.id,
@@ -1438,9 +1448,24 @@ class Orchestrator {
         });
         continue;
       }
+      if (!state) continue;
 
       this.pullRequestStates.set(id, state);
       if (state.headBranch) issue.branch_name = state.headBranch;
+      if (!issue.pull_request && state.number) {
+        issue.pull_request = state.number;
+        issue.pr = state.number;
+        this.tracker.updateIssueStatusFile(issue, issue.file, issue.state, {
+          pr: state.number,
+          ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+        });
+        this.logger.event("pull_request_discovered", {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          pr: state.number,
+          branch: issue.branch_name,
+        });
+      }
       const planned = planPullRequestAction(state, {
         handledFailureKey: this.handledFailedPrHeads.get(id) || issue.last_ci_retry_head,
         busy: this.running.has(id) || this.claimed.has(id) || this.retryAttempts.has(id),

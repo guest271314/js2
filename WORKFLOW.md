@@ -79,7 +79,8 @@ Rules:
 - Open a ready, non-draft pull request against `main`; do not mark the issue `done` until the PR
   exists.
 - Record the PR number in the issue frontmatter as `pr: <number>` and leave the issue
-  `status: in-review`; Symphony flips it to `done` after GitHub reports the PR merged.
+  `status: in-review`; Symphony also discovers the PR from the assigned branch if this metadata
+  write is missed, then flips the issue to `done` after GitHub reports the PR merged.
 - On a retry attempt for an existing PR, inspect its failed checks first, repair the existing head
   branch, push the fix, and keep the same PR. Preserve Symphony's `last_ci_retry_head` frontmatter
   field and never open a duplicate PR for a CI repair.

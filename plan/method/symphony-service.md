@@ -37,9 +37,11 @@ again as fresh work.
 
 ## Pull Request Reconciliation
 
-Workers record `pr: <number>` and leave the issue `in-review`. On every
-configured PR polling interval Symphony asks GitHub for the PR head and check
-rollup:
+Symphony records the assigned `branch` at dispatch. Workers record
+`pr: <number>` and leave the issue `in-review`; if that metadata write is
+missed, Symphony discovers the PR by its assigned head branch and writes the PR
+number itself. On every configured PR polling interval Symphony asks GitHub for
+the PR head and check rollup:
 
 - A merged PR changes the issue to `done`, records the merge date in
   `completed`, releases any broker claim/retry, and immediately makes completed

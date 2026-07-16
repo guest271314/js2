@@ -3,7 +3,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { classifyPullRequest, planPullRequestAction, readPullRequest } from "../scripts/symphony-pr-state.mjs";
+import {
+  classifyPullRequest,
+  planPullRequestAction,
+  readPullRequest,
+  readPullRequestForBranch,
+} from "../scripts/symphony-pr-state.mjs";
 
 describe("Symphony pull-request reconciliation", () => {
   let tempDir: string | undefined;
@@ -103,6 +108,32 @@ esac
     });
   });
 
+  it("discovers an agent PR from its assigned branch", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "symphony-pr-branch-"));
+    const fakeGh = join(tempDir, "gh");
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+case "$*" in
+  *"pr list --head agent/100"*"--repo loopdive/js2"*)
+    printf '%s\\n' '[{"number":100,"state":"OPEN","headRefName":"agent/100","headRefOid":"sha100","statusCheckRollup":[]}]'
+    ;;
+  *) exit 64 ;;
+esac
+`,
+    );
+    chmodSync(fakeGh, 0o755);
+
+    expect(
+      readPullRequestForBranch({
+        branch: "agent/100",
+        command: fakeGh,
+        cwd: tempDir,
+        repository: "loopdive/js2",
+      }),
+    ).toMatchObject({ number: 100, status: "pending", headBranch: "agent/100" });
+  });
+
   it("persists one repair per failed SHA and marks a later merge done", () => {
     tempDir = mkdtempSync(join(tmpdir(), "symphony-reconcile-"));
     const issuesDir = join(tempDir, "issues");
@@ -123,7 +154,7 @@ id: 9001
 title: "PR retry probe"
 status: in-review
 sprint: probe
-pr: https://github.com/loopdive/js2/pull/99
+branch: agent/9001
 ---
 # PR retry probe
 `,
@@ -165,7 +196,18 @@ logging:
 Issue {{ issue.identifier }} attempt {{ attempt }}
 `,
     );
-    writeFileSync(fakeGh, `#!/bin/sh\ncat "$PR_RESPONSE"\n`);
+    writeFileSync(
+      fakeGh,
+      `#!/bin/sh
+if [ "$2" = "list" ]; then
+  printf '['
+  cat "$PR_RESPONSE"
+  printf ']\\n'
+else
+  cat "$PR_RESPONSE"
+fi
+`,
+    );
     writeFileSync(fakeAgent, `#!/bin/sh\nprintf 'run\\n' >> "$AGENT_MARKER"\ncat >/dev/null\n`);
     chmodSync(fakeGh, 0o755);
     chmodSync(fakeAgent, 0o755);
@@ -189,6 +231,7 @@ Issue {{ issue.identifier }} attempt {{ attempt }}
     );
     runSymphony();
     const failedIssue = readFileSync(issueFile, "utf8");
+    expect(failedIssue).toContain("pr: 99");
     expect(failedIssue).toContain("last_ci_retry_head: failed-sha");
     expect(failedIssue).toContain("branch: agent/9001");
     expect(readFileSync(marker, "utf8")).toBe("run\n");
