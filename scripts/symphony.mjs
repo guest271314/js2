@@ -327,6 +327,13 @@ function sanitizeKey(s) {
     .slice(0, 120);
 }
 
+function continuationBranchName(issue, branchPrefix, mergeKey) {
+  const prefix = String(branchPrefix || "symphony").replace(/\/+$/, "") || "symphony";
+  const issueKey = sanitizeKey(issue.identifier || issue.id || "issue") || "issue";
+  const mergeSegment = sanitizeKey(mergeKey || "merged") || "merged";
+  return `${prefix}/${issueKey}-after-pr-${mergeSegment}`;
+}
+
 function parseFrontmatter(text) {
   const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
   if (!match) return { data: {}, body: text };
@@ -652,7 +659,7 @@ class WorkspaceManager {
     } else if (this.kind === "git_worktree") {
       const actualBranch = this.git(["branch", "--show-current"], workspaceAbs);
       if (actualBranch !== branch) {
-        throw new Error(`workspace_branch_mismatch: expected ${branch}, found ${actualBranch || "detached"}`);
+        this.switchGitWorktreeBranch(workspaceAbs, branch, actualBranch, issue);
       }
     }
     return { path: workspaceAbs, workspace_key: key, created_now: createdNow, branch };
@@ -665,6 +672,31 @@ class WorkspaceManager {
     if (branchExists) this.git(["worktree", "add", workspacePath, branch], ROOT);
     else if (remoteBranchExists) this.git(["worktree", "add", workspacePath, "-b", branch, `origin/${branch}`], ROOT);
     else this.git(["worktree", "add", workspacePath, "-b", branch, this.baseRef], ROOT);
+  }
+
+  switchGitWorktreeBranch(workspacePath, branch, previousBranch, issue) {
+    const status = this.git(["status", "--porcelain"], workspacePath);
+    if (status.trim()) {
+      throw new Error(
+        `workspace_branch_mismatch_dirty: expected ${branch}, found ${previousBranch || "detached"} with local changes`,
+      );
+    }
+    if (this.fetchBeforeCreate) this.git(["fetch", "origin"], ROOT);
+    const branchExists = this.gitOptional(["show-ref", "--verify", `refs/heads/${branch}`], ROOT);
+    const remoteBranchExists = this.gitOptional(["show-ref", "--verify", `refs/remotes/origin/${branch}`], ROOT);
+    if (branchExists) this.git(["switch", branch], workspacePath);
+    else if (remoteBranchExists) this.git(["switch", "-c", branch, `origin/${branch}`], workspacePath);
+    else this.git(["switch", "-c", branch, this.baseRef], workspacePath);
+    const actualBranch = this.git(["branch", "--show-current"], workspacePath);
+    if (actualBranch !== branch) {
+      throw new Error(`workspace_branch_mismatch: expected ${branch}, found ${actualBranch || "detached"}`);
+    }
+    this.logger.event("workspace_branch_switched", {
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      from: previousBranch || null,
+      branch,
+    });
   }
 
   remove(issue) {
@@ -1049,6 +1081,33 @@ class Orchestrator {
     return Number(get(this.config, "pull_requests.poll_interval_ms", this.pollInterval())) || this.pollInterval();
   }
 
+  discoverPullRequestForIssueBranch(issue) {
+    if (!issue?.branch_name) return null;
+    const repository = String(get(this.config, "pull_requests.repository", ""));
+    const command = String(get(this.config, "pull_requests.command", "gh"));
+    const timeoutMs = Number(get(this.config, "pull_requests.timeout_ms", 30000)) || 30000;
+    try {
+      return readPullRequestForBranch({
+        branch: issue.branch_name,
+        command,
+        cwd: ROOT,
+        repository,
+        timeoutMs,
+        excludeNumbers: [issue.last_merged_pr],
+      });
+    } catch (error) {
+      this.logger.event("pull_request_poll_failed", {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        pr: issue.pull_request,
+        branch: issue.branch_name,
+        error: error.message,
+        quiet: true,
+      });
+      return null;
+    }
+  }
+
   validate() {
     const kind = get(this.config, "tracker.kind", "");
     if (kind !== "markdown") throw new Error(`unsupported_tracker_kind: ${kind || "(missing)"}`);
@@ -1315,12 +1374,40 @@ class Orchestrator {
       });
     } else if (result.status === "succeeded") {
       const current = this.tracker.fetchIssueStatesByIds([id])[0];
-      if (current?.pull_request && current.state === "in-review") {
+      if (current?.pull_request && ["in-progress", "in-review"].includes(current.state)) {
         this.logger.event("agent_awaiting_pull_request", {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           pr: current.pull_request,
         });
+      } else if (current?.state === "in-progress" && !current.pull_request) {
+        const discovered = this.discoverPullRequestForIssueBranch(current);
+        if (discovered?.number) {
+          current.pull_request = discovered.number;
+          current.pr = discovered.number;
+          if (discovered.headBranch) current.branch_name = discovered.headBranch;
+          this.tracker.updateIssueStatusFile(current, current.file, current.state, {
+            pr: discovered.number,
+            ...(current.branch_name ? { branch: current.branch_name } : {}),
+          });
+          this.logger.event("pull_request_discovered", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            pr: discovered.number,
+            branch: current.branch_name || null,
+          });
+        } else {
+          this.tracker.updateIssueStatusFile(current, current.file, "ready", {
+            ...(current.branch_name ? { branch: current.branch_name } : {}),
+            pr: null,
+          });
+          this.completed.delete(id);
+          this.logger.event("agent_missing_pull_request_requeued", {
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            branch: current.branch_name || null,
+          });
+        }
       } else {
         this.completed.add(id);
       }
@@ -1449,13 +1536,7 @@ class Orchestrator {
               repository,
               timeoutMs,
             })
-          : readPullRequestForBranch({
-              branch: issue.branch_name,
-              command,
-              cwd: ROOT,
-              repository,
-              timeoutMs,
-            });
+          : this.discoverPullRequestForIssueBranch(issue);
       } catch (error) {
         this.logger.event("pull_request_poll_failed", {
           issue_id: issue.id,
@@ -1517,10 +1598,7 @@ class Orchestrator {
       if (planned.action === "continue") {
         const mergedBranch = issue.branch_name;
         const branchPrefix = String(get(this.config, "workspace.branch_prefix", "symphony")).replace(/\/+$/, "");
-        const continuationBranch =
-          mergedBranch && (mergedBranch === branchPrefix || mergedBranch.startsWith(`${branchPrefix}/`))
-            ? mergedBranch
-            : null;
+        const continuationBranch = continuationBranchName(issue, branchPrefix, planned.mergeKey);
         const running = this.running.get(id);
         const retry = this.retryAttempts.get(id);
         if (retry?.timer_handle) clearTimeout(retry.timer_handle);

@@ -54,10 +54,11 @@ the PR head and check rollup:
   makes completed dependencies visible to the normal candidate scan.
 - A merged PR for an `in-progress` multi-slice issue clears the old PR, records
   it in `last_merged_pr`, and returns the issue to `ready` for its next slice.
-  The durable merge key prevents restart from requeueing the same merged PR.
-  Branches outside the workflow's configured prefix are cleared during this
-  handoff so the next slice starts from current main on a Symphony-owned
-  branch; an existing Symphony branch remains reusable by later slices.
+  The next slice always receives a fresh Symphony branch named from the issue
+  and merged PR, such as `symphony/porffor/2953-after-pr-3128`. The durable
+  merge key prevents restart from requeueing the same merged PR, and branch PR
+  discovery ignores that already-handled PR so it cannot bind the next slice to
+  a stale merged review.
 - A failed check rollup changes the issue back to `in-progress` and dispatches
   a repair attempt in the same deterministic workspace. If that workspace does
   not exist, Symphony checks out the PR's actual head branch from `origin`.
@@ -70,6 +71,11 @@ the PR head and check rollup:
   dispatch loop.
 - Pending or passing open PRs remain `in-review`. Symphony leaves merge-queue
   enrollment to the worker contract.
+- If a worker exits successfully while the issue remains `in-progress` without
+  a PR, Symphony first checks the assigned branch for a fresh PR. If none
+  exists, it moves the issue back to `ready` instead of treating the run as
+  complete. That keeps a missed PR creation from stranding the slice outside
+  the claimable queue.
 
 PR polling errors are logged without changing issue state. The standalone
 `issues:pr-status` poller remains useful for non-Symphony issues, but Symphony
@@ -159,7 +165,9 @@ prerequisites. Symphony can continue multi-slice #2953/#2956 work until P1/P3
 unblock, but it cannot consume unrelated work from the broad `current` sprint.
 Workers leave a multi-slice prerequisite `in-progress` while unchecked slices
 remain so each merged PR requeues the next slice; only the final PR uses
-`in-review` and closes the issue on merge.
+`in-review` and closes the issue on merge. Every continuation slice gets a new
+branch after the previous PR merges; workers must publish from the branch named
+in their prompt rather than pushing another slice to an already-merged branch.
 
 ## Safety Posture
 
