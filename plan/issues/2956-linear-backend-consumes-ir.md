@@ -19,6 +19,10 @@ goal: backend-agnostic-ir
 depends_on: [2953, 2954]
 related: [1585, 1713, 2710, 1852]
 origin: "2026-07-02 July Fable audit §5 (production linear compilation consumes zero IR; #1585 is investigation-only)"
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/codegen-linear/runtime.ts
+  - src/codegen-linear/index.ts
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
