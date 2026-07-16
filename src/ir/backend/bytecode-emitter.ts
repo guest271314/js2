@@ -693,6 +693,18 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     throw new Error("BytecodeEmitter: function references not yet wired — see §2a closure family.");
   }
 
+  // ---- Promise aggregate family (#2953) — the VM needs a Promise record
+  // representation before construction or semantic field reads are valid.
+  emitPromiseNew(): void {
+    throw new Error("BytecodeEmitter: Promise construction not yet wired — see §2a struct/object family.");
+  }
+  emitPromiseStateGet(): void {
+    throw new Error("BytecodeEmitter: Promise state reads not yet wired — see §2a struct/object family.");
+  }
+  emitPromiseValueGet(): void {
+    throw new Error("BytecodeEmitter: Promise value reads not yet wired — see §2a struct/object family.");
+  }
+
   // ---- closure family (#2953) — closure records and callable handles are not
   // yet represented by the bytecode VM. Keep the trait boundary loud instead
   // of falling back to WasmGC struct instructions through pushRaw.

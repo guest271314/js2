@@ -1,24 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { compileAndRunInstance as compileAndRun } from "./helpers/compile.js";
 
 // Helper to compile and run a generator test with the standard runtime imports
-async function compileAndRun(source: string): Promise<{
-  exports: Record<string, Function>;
-  instance: WebAssembly.Instance;
-}> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    );
-  }
-
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return { exports: instance.exports as any, instance };
-}
-
 describe("yield expression in various generator contexts (#628)", () => {
   it("yield in a basic generator function declaration", async () => {
     const { exports } = await compileAndRun(`

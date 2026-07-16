@@ -230,6 +230,21 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
     out.push({ op: "ref.func", funcIdx });
   }
 
+  // ---- Promise aggregate family (#2953) — byte-identical to the prior
+  // inline struct.new/get pushes in lower.ts. The canonical WasmGC Promise
+  // layout is { state: i32, value: externref, callbacks: externref }.
+  emitPromiseNew(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.new", typeIdx: promiseTypeIdx });
+  }
+
+  emitPromiseStateGet(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 0 });
+  }
+
+  emitPromiseValueGet(promiseTypeIdx: number, out: Instr[]): void {
+    out.push({ op: "struct.get", typeIdx: promiseTypeIdx, fieldIdx: 1 });
+  }
+
   // ---- closure family (#2953) — byte-identical to the prior inline
   // struct.new/get pushes in lower.ts. The caller has already emitted the
   // lifted function reference through emitFuncRef, captures, and any required

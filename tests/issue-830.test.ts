@@ -10,22 +10,9 @@
  * runtime works gracefully on older Node.js that may not have them.
  */
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
+import { compileAndRunResultObject } from "./helpers/compile.js";
 
-async function compileAndRun(source: string): Promise<{ success: boolean; result?: number; error?: string }> {
-  const compiled = await compile(source, { fileName: "test.ts" });
-  if (!compiled.success) return { success: false, error: compiled.errors[0]?.message };
-  try {
-    const imports = buildImports(compiled.imports, undefined, compiled.stringPool);
-    const mod = new WebAssembly.Module(compiled.binary);
-    const inst = new WebAssembly.Instance(mod, imports);
-    const ret = (inst.exports as any).test?.();
-    return { success: true, result: ret };
-  } catch (e: any) {
-    return { success: false, error: `${e.constructor.name}: ${e.message}` };
-  }
-}
+const compileAndRun = (src: string) => compileAndRunResultObject(src, true);
 
 describe("Issue #830: DisposableStack host import", () => {
   it("DisposableStack can be constructed (no CE)", async () => {

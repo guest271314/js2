@@ -1,14 +1,5 @@
 import { test, expect, describe } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
-
-async function compileAndRun(src: string): Promise<any> {
-  const r = await compile(src, { fileName: "test.ts" });
-  if (!r.success) throw new Error(`Compile error: ${r.errors?.[0]?.message}`);
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const instance = new WebAssembly.Instance(new WebAssembly.Module(r.binary), imports);
-  return (instance.exports as any).test();
-}
+import { compileAndRunTestSync as compileAndRun } from "./helpers/compile.js";
 
 describe("#1134 — __any_eq cross-tag loose equality (§7.2.15)", () => {
   test("null == undefined returns true for any-typed values", async () => {
