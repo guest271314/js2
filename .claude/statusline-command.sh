@@ -266,9 +266,16 @@ free_bar() {
 
 # Agent summary (only on tech-lead/main — state counts from agent-status/*.json)
 # Shows: Nactive Mci-wait, colored by freshness via last_seen heartbeat where available.
+# Active count gets a per-model breakdown (e.g. "3▶(2×Fable 5 1×Sonnet 5)") when
+# every active agent's status file carries a "model" field (self-reported by the
+# agent per developer.md's write template — the parent statusline's own .model.id
+# only reflects the ORCHESTRATOR session, not spawned subagents, so this is the
+# only place per-subagent model is visible). Falls back to a flat count when any
+# active file predates the model field or omits it.
 if [ -z "$in_worktree" ] && [ "$branch" = "main" ] && [ -d "/workspace/.claude/agent-status" ]; then
   _now=$(date +%s)
   _n_active=0; _n_ciwait=0; _n_stale=0
+  _active_models=""
   for _f in /workspace/.claude/agent-status/*.json; do
     [ -f "$_f" ] || continue
     [ "$(basename "$_f")" = "tech-lead.json" ] && continue
@@ -289,13 +296,25 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ] && [ -d "/workspace/.claude/a
       _n_stale=$(( _n_stale + 1 ))
     elif [ "$_state" = "active" ]; then
       _n_active=$(( _n_active + 1 ))
+      _model=$(jq -r '.model // empty' "$_f" 2>/dev/null)
+      [ -n "$_model" ] && _active_models="${_active_models}${_model}
+"
     else
       _n_ciwait=$(( _n_ciwait + 1 ))
     fi
   done
   _total=$(( _n_active + _n_ciwait + _n_stale ))
   if [ "$_total" -gt 0 ]; then
-    [ "$_n_active" -gt 0 ] && printf ' \033[00;32m%d▶\033[00m' "$_n_active"
+    if [ "$_n_active" -gt 0 ]; then
+      _model_lines=$(printf '%s' "$_active_models" | grep -c -v '^$')
+      if [ "$_model_lines" -eq "$_n_active" ]; then
+        _model_breakdown=$(printf '%s' "$_active_models" | grep -v '^$' | sort | uniq -c | \
+          awk '{c=$1; $1=""; sub(/^[ \t]+/,""); printf "%s%s×%s", (NR>1?" ":""), c, $0}')
+        printf ' \033[00;32m%d▶\033[00m(%s)' "$_n_active" "$_model_breakdown"
+      else
+        printf ' \033[00;32m%d▶\033[00m' "$_n_active"
+      fi
+    fi
     [ "$_n_ciwait" -gt 0 ] && printf ' \033[00;33m%d⏸\033[00m' "$_n_ciwait"
     [ "$_n_stale"  -gt 0 ] && printf ' \033[00;90m%d✕\033[00m'  "$_n_stale"
   fi

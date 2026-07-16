@@ -24,15 +24,44 @@ added later without changing the orchestrator or runner contracts.
 
 - `ready`: claimable by Symphony.
 - `in-progress`: claimed, running, or resumable by an existing retry.
-- `in-review`: worker published a PR or handed off for lead review.
+- `in-review`: worker published a PR; Symphony monitors it until merge or a
+  failed-CI repair dispatch.
 - `done` / `wont-fix`: terminal.
 
 On dispatch, Symphony immediately flips the issue frontmatter from `ready` to
 `in-progress` in the main checkout and mirrors that status into the assigned
 worktree issue file. `WORKFLOW.md` uses `tracker.claimable_states: [ready]` for
-fresh dispatch and `tracker.active_states: [ready, in-progress]` for
-reconciliation/retries, so a claimed issue is not picked again as fresh work and
-is not cancelled just because the claim state changed.
+fresh dispatch and keeps `ready`, `in-progress`, and `in-review` active for
+reconciliation. A published issue is therefore monitored without being picked
+again as fresh work.
+
+## Pull Request Reconciliation
+
+Symphony records the assigned `branch` at dispatch. Workers record
+`pr: <number>` and leave the issue `in-review`; if that metadata write is
+missed, Symphony discovers the PR by its assigned head branch and writes the PR
+number itself. On every configured PR polling interval Symphony asks GitHub for
+the PR head and check rollup:
+
+- A merged PR changes the issue to `done`, records the merge date in
+  `completed`, releases any broker claim/retry, and immediately makes completed
+  dependencies visible to the normal candidate scan.
+- A failed check rollup changes the issue back to `in-progress` and dispatches
+  a repair attempt in the same deterministic workspace. If that workspace does
+  not exist, Symphony checks out the PR's actual head branch from `origin`.
+- Each failed head SHA is dispatched at most once. Symphony persists the
+  handled SHA as `last_ci_retry_head` in the issue and mirrors it into the
+  worker branch, together with the discovered PR `branch`. Restart or a
+  transient workspace failure therefore cannot reset the guard or switch the
+  repair onto a new branch. A subsequent push gets a new SHA and can trigger
+  another repair if its checks fail; an unchanged stale failure cannot create a
+  dispatch loop.
+- Pending or passing open PRs remain `in-review`. Symphony leaves merge-queue
+  enrollment to the worker contract.
+
+PR polling errors are logged without changing issue state. The standalone
+`issues:pr-status` poller remains useful for non-Symphony issues, but Symphony
+does not depend on it for its own workers.
 
 ## Agent Lanes
 
@@ -53,7 +82,8 @@ that can receive the rendered prompt and run in the assigned workspace.
 
 By default:
 
-- Codex uses `codex.command` unless `SYMPHONY_CODEX_COMMAND` overrides it.
+- Codex uses `gpt-5.6-sol` through `codex.command` unless
+  `SYMPHONY_CODEX_COMMAND` overrides the full command.
 - Claude uses a `claude-channel` lane. Symphony sends dispatch events to an interactive Claude Code team lead instead of launching `claude -p` workers.
 
 Start Claude Code with the project channel enabled:
@@ -121,6 +151,7 @@ Implemented:
 - structured JSONL logs
 - runtime state snapshot
 - retry/backoff and stall reconciliation
+- merged-PR completion and failed-CI repair reconciliation
 
 Not implemented yet:
 
