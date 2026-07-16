@@ -32,7 +32,7 @@ import { nativeStringLiteralInstrs, stringConstantExternrefInstrs } from "./nati
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addUnionImportsViaRegistry } from "./shared.js";
-import { undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
+import { ensureAnyValueType, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js";
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js";
 
@@ -2026,12 +2026,42 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
     const gopdTypeErrorCtorIdx = ctx.funcMap.get("__new_TypeError");
     const gopdToPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
     const gopdExnTagIdx = strExotic && gopdTypeErrorCtorIdx !== undefined ? ensureExnTag(ctx) : -1;
+    // Under the `$undefined` singleton regime (#2106/#3316) the arm's own miss
+    // returns must surface the singleton (a bare null externref is NOT observed
+    // as `undefined` there), and an `undefined` RECEIVER arrives as the non-null
+    // tag-1 `$AnyValue` box — so the ToObject-throw test is `ref.is_null` OR
+    // tag-1-singleton (receiver-as-any is already tee'd in local 2).
+    const gopdUndefRet: Instr[] = undefExternGopd ? [...undefExternGopd, { op: "return" } as Instr] : undefRet;
+    const gopdUndefSingletonOr: Instr[] = (() => {
+      if (!undefinedSingletonActive(ctx)) return [];
+      ensureAnyValueType(ctx);
+      if (ctx.anyValueTypeIdx < 0) return [];
+      const t = ctx.anyValueTypeIdx;
+      return [
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: t },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx: t },
+            { op: "struct.get", typeIdx: t, fieldIdx: 0 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.eq" },
+          ],
+          else: [{ op: "i32.const", value: 0 }],
+        },
+        { op: "i32.or" },
+      ] satisfies Instr[];
+    })();
     const primitiveReceiverArm: Instr[] =
       strExotic && gopdTypeErrorCtorIdx !== undefined && gopdExnTagIdx >= 0 && gopdToPropertyKeyIdx !== undefined
         ? [
             // undefined/null receiver → ToObject throws TypeError (§19.1.2.8).
             { op: "local.get", index: 0 },
             { op: "ref.is_null" },
+            ...gopdUndefSingletonOr,
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -2063,7 +2093,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
                 { op: "local.tee", index: L_SVAL },
                 { op: "ref.test", typeIdx: anyStrTypeIdx },
                 { op: "i32.eqz" },
-                { op: "if", blockType: { kind: "empty" }, then: undefRet },
+                { op: "if", blockType: { kind: "empty" }, then: gopdUndefRet },
                 { op: "local.get", index: L_SVAL },
                 { op: "ref.cast", typeIdx: anyStrTypeIdx },
                 { op: "call", funcIdx: strFlattenIdx },
@@ -2108,11 +2138,11 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
                     1,
                   ),
                 },
-                ...undefRet,
+                ...gopdUndefRet,
               ],
             },
             // Other primitives (boxed number/boolean/Symbol) → no own props.
-            ...undefRet,
+            ...gopdUndefRet,
           ]
         : [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr];
 

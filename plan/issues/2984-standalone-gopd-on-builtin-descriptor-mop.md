@@ -10,10 +10,11 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-sub1
+assignee: ttraenkler/fable-2
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
   - src/codegen/object-runtime.ts
+  - src/codegen/object-runtime-descriptors.ts
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
@@ -109,6 +110,17 @@ pass so `gOPD('foo', 0)` works), any other primitive → `undefined` (unchanged)
 Gated exactly like `strExotic` (`ctx.standalone && ctx.nativeStrings`) — gc /
 wasi registrations byte-identical (`prove-emit-identity`: only the 4
 standalone-lane corpus entries drift, gc/wasi all match).
+
+**Recovery port (2026-07-16, fable-2):** the original commit targeted the gOPD
+builder inline in `object-runtime.ts`; the #3274 WAVE-B refactor extracted that
+builder to `object-runtime-descriptors.ts`, so the arm was ported there across
+the merge. Two singleton-regime adaptations (#2106/#3316 landed after the
+original base): (1) the arm's own miss returns use the `$undefined` singleton
+(`undefExternGopd`) — a bare `ref.null.extern` no longer observes as
+`undefined`; (2) the ToObject-throw receiver test is `ref.is_null` OR tag-1
+`$AnyValue` singleton, since an `undefined` receiver now arrives non-null.
+Scoped to THIS arm only — the pre-existing wrapper/ordinary miss arms'
+undef-observability is the sibling gOPD-undef-observability slice (fable-1).
 
 ### Measured (real runner, standalone lane)
 
