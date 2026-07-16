@@ -1,7 +1,8 @@
 ---
 id: 3257
 title: "Self-host stdlib: convert array-methods.ts hand-emitted Instr[] to TS (Tier-2)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-3256
 sprint: current
 priority: high
 horizon: xl
@@ -60,3 +61,48 @@ Use the god-file profiler from #3259 as the acceptance instrument:
 ## Non-goals
 
 - Object-family / any-elem helpers (Tier-3, #3258).
+
+## Corrected scoping (2026-07-16, sendev-3256 — pre-implementation recon)
+
+**The issue premise needs one correction:** `array-methods.ts` registers ZERO
+discrete runtime helper functions (verified: 0 `pushDefinedFunc`/
+`mintDefinedFunc`, 211 `allocLocal`s) — every `compileArray*` is a call-site
+INLINE emitter. There are no "discrete fixed-ABI array runtime helpers" to
+convert; Tier-2 must MINT them, following the `ensureTimsortHelper` template
+already in this file's dispatch (array-methods.ts:6533 — thunk at call site +
+self-hosted kernel, #3159).
+
+**Net-negative seams** (per `reference_selfhost_netnegative_needs_full_elemkind_dialect`
+— an inline arm only deletes if ALL its element kinds route to kernels):
+
+1. **Move-only ops** — `reverse`, `fill`, `copyWithin` (+ `toReversed`/`with`
+   if time allows): never inspect element VALUES, so ONE elemKind-generic TS
+   kernel template instantiated per element ValType (f64/i32/externref/
+   `ref_<typeIdx>`, keyed like `getOrRegisterVecType`'s elemKind) covers the
+   WHOLE dialect → full inline-arm deletion. Needs `ensureArrayIntrinsics`
+   (timsort.ts, currently private) lifted + generalized from k∈{f64,i32} to
+   arbitrary (elemKindKey, elementValType). `copyWithin` reduces to clamps +
+   one `__arri_copy_<k>` (array.copy is overlap-safe).
+2. **Numeric equality scans** — `indexOf`/`lastIndexOf`/`includes` f64/i32
+   arms via `__arri_get_<k>`; SameValueZero NaN arm is TS-expressible
+   (`t !== t && x !== x`). externref arms MAY also convert (EXT params +
+   `__extern_strict_eq`/`__extern_same_value_zero` as declared callees, the
+   #3160 pattern); `ref_<typeIdx>`-element arms need extern.convert_any (not
+   in dialect) — keep inline unless measured net-negative.
+
+**Driver Tier-2 widening** (stdlib-selfhost.ts): add the
+`__vec_elem_set_<vecTypeIdx>` on-demand resolveFunc arm (mirror
+integration.ts:1306) per this issue's scope; vec-struct types flow as
+ctx-bound `ref_null { typeIdx }` paramTypes (the #3161 path — no memoKey),
+so no new resolveType machinery is needed beyond Tier-1's name-scan.
+
+**Emission-window difference vs #3256:** kernels mint ON DEMAND at call-site
+compile time (like `ensureTimsortHelper`), NOT inside a finalize window —
+append-only defined funcs are safe there (timsort precedent), but any host
+IMPORT callee (`__host_eq`) must be `ensureLateImport`'d BEFORE kernel
+lowering to avoid mid-body funcIdx shifts.
+
+**Out of scope confirmed by recon:** `compileArrayLikePrototypeCall`
+(host-import iteration, borrow file), `join*` (string dialect), callback HOFs
+(closure bridge), `splice`/comparator-`sort`/`defaultToStringSort` (vec
+mutation + string dialect).
