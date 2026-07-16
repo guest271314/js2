@@ -1,12 +1,13 @@
 ---
 id: 3142
 title: "IR module-level (top-level statement) adoption — clears gate G3 of the legacy-frontend retirement"
-status: in-progress
-assignee: ttraenkler/fable-alpha
+status: done
+completed: 2026-07-16
+assignee: ttraenkler/fable-b
 sprint: current
 created: 2026-07-11
 updated: 2026-07-16
-note: "Slice 1 (selector + telemetry) landing via PR; Slice 2 (lowering + __module_init patch) remains — issue stays in-progress until Slice 2."
+note: "Slice 1 (selector + telemetry) landed via PR #3160; Slice 2 (claim-feeding lowering + __module_init patch, f64/i32 module bindings) lands in this PR."
 priority: high
 horizon: l
 feasibility: hard
@@ -21,8 +22,13 @@ origin: "plan/bloat-reduction-battle-plan.md slice 6; gate G3 in plan/log/3090-p
 # in select.ts because it reads the module-level isPhase1* walk state
 # (earlyReturnLoopDepth / barrier / forInitLeakedNames) that is deliberately
 # not exported (see the threading rationale on currentHostGlobalResolver).
+# Slice 2 wires the module-init build/patch into the integration pipeline
+# (integration.ts: build block + moduleBindings map + Phase-3 slot patch)
+# and forwards the claim through planIrOverlay's safeSelection (index.ts).
 loc-budget-allow:
   - src/ir/select.ts
+  - src/ir/integration.ts
+  - src/codegen/index.ts
 ---
 
 # #3142 — IR adoption for module-level statements (gate G3)
@@ -84,10 +90,43 @@ first, then wired integration in Phase B. Same sequencing here:
   - `tests/issue-3142.test.ts`: unit tests over `planIrCompilation`
     (empty population, claimable init, body-shape reject, external-call,
     call-graph-closure).
-- **Slice 2 (follow-up) — lowering + integration.** Build the synthetic
+- **Slice 2 (this PR, fable-b) — lowering + integration.** Build the synthetic
   module-init through from-ast/lower with a module-scope outermost LowerCtx
   (bindings → symbolic `global.get/set`, reusing the existing global/export
   machinery in `declarations.ts`), patch the `__module_init` slot in
   `compileIrPathFunctions`, and demote whole-module to legacy on any
   build/verify failure (the existing warning channel). Flip the selector
   assessment from telemetry-only to claim-feeding.
+
+## Slice 2 record (fable-b, 2026-07-16)
+
+- `src/ir/from-ast.ts`: `moduleInitUnit` mode on `lowerFunctionAstToIr` —
+  constructor-body precedent (every statement via `lowerStmt`, implicit empty
+  return). New `moduleGlobal` ScopeBinding: top-level `let`/`const` in the
+  unit write the legacy `__mod_<name>` global via symbolic `global.set`
+  (TDZ flag mirrored per legacy `emitTdzInit`), reads/writes/`++`/`+=`
+  route through global get/set. Demote throws for: module-level closures,
+  destructuring declarations, `var` anywhere in the unit.
+- `src/ir/integration.ts`: module-init build block (gates: legacy
+  `__module_init` slot exists, no static class initializers / live-func
+  seeds, f64/i32-backed bindings only, no top-level `throw` outside WASI —
+  legacy drops those), `buildModuleBindingsMap`, BuiltFn.moduleInit threading
+  through Phases 2–3, Phase-3 slot patch by NAME with typeIdx parity guard.
+- `src/ir/select.ts`: assessment now runs on production (`!trackFallbacks`)
+  paths — claim-feeding; exported `MODULE_INIT_UNIT_NAME` /
+  `collectModuleInitPopulation` / `makeModuleInitSynthetic` (one population
+  definition for selector + integration).
+- `src/codegen/index.ts`: `safeSelection.moduleInit` forwarding (cleared
+  under the `new.target` coarse gate).
+
+## Test Results
+
+- `tests/issue-3142.test.ts`: 14/14 pass — S1 selector verdicts (updated:
+  production selections now carry `moduleInit`), S2 genuine emission
+  (`irCompiledFuncs` has `<module-init>`; runtime values correct through
+  the patched init: numeric decl+assign+claimed-call, `++`/`+=`
+  module-init-only claim, boolean i32 binding), demote guards (string
+  binding, top-level `var`, module-level closure — all fall back to the
+  legacy body with correct runtime output).
+- `tsc --noEmit`: clean. `check:ir-fallbacks`: moduleLevel baseline
+  unchanged (assessment logic untouched; only the gating flipped).
