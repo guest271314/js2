@@ -363,6 +363,11 @@ export const BUILTIN_CLASS_NAMES = new Set([
   "Float64Array",
   "BigInt64Array",
   "BigUint64Array",
+  // (#1793) Node's global Buffer — host class (JS-host lane only; the
+  // `__get_builtin` resolver reads `globalThis.Buffer`). Statics
+  // (from/alloc/concat/...) dispatch via __extern_method_call like any
+  // other builtin; instances are plain externrefs.
+  "Buffer",
 ]);
 
 /**
