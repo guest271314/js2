@@ -14,6 +14,16 @@ area: codegen, runtime, generators, value-rep
 language_feature: generators, destructuring defaults, equality
 goal: test262-conformance
 related: [2141, 2626, 2040, 2585, 928, 2203, 991, 3050]
+# (#3032 W3) Intended growth at the canonical sites: TDZ-flag capture boxes
+# threaded through the native generator state machine — generators-native.ts
+# (+42: NativeGeneratorCaptureParam.tdzFlagFor, leadingTdzFlags registration,
+# resume-fn boxedTdzFlags/tdzFlagLocals rehydration), nested-declarations.ts
+# (+23: lane-split gate + tdz leadingCaptures entries), context/types.ts
+# (+13: NativeGeneratorInfo.leadingTdzFlags docs). No barrel/driver growth.
+loc-budget-allow:
+  - src/codegen/generators-native.ts
+  - src/codegen/statements/nested-declarations.ts
+  - src/codegen/context/types.ts
 origin: "2026-07-04 #2141 S2 root-cause (fable-tag5): the −162 dstr eject was never a dstr/eq dependency — it was eager generator bodies + comparator vacuity"
 note: "W3 (TDZ-native-threading) LANDED (sendev-3032-w3, 2026-07-16) — see '## W3 landed'. The A1/tag-5-vacuity unblock this issue was prioritized for is delivered. Remaining banked waves: W2 (paramful gen expressions — MEASURE FIRST, predicted wont-build), W4 (method generators), W5 (retVal marshalling), W6 (retire the buffer / host-lane laziness for non-try-region shapes). Issue stays open for those; they are NOT fresh-window-critical the way W3 was."
 ---
