@@ -204,6 +204,37 @@ export interface IrSelection {
    *  individually claimed); callers must treat a missing map as "no edge
    *  information" and behave conservatively. */
   readonly localCallees?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** (#3142 Slice 1) Module-level (top-level statement) claim assessment —
+   *  gate G3 of the legacy-frontend retirement. Selector-only for now
+   *  (mirrors #1370 Phase A): the assessment is REPORTED so the
+   *  `check:ir-fallbacks` gate can ratchet a `module-level` bucket, but
+   *  `compileIrPathFunctions` does not yet lower the module-init unit —
+   *  Slice 2 wires the integration. Populated only when
+   *  `IrSelectionOptions.trackFallbacks` is true (production compiles skip
+   *  the extra walk entirely). */
+  readonly moduleInit?: IrModuleInitAssessment;
+}
+
+/**
+ * (#3142 Slice 1) Result of assessing the module-level statement list as a
+ * synthetic IR claim unit (`<module-init>`). The population is every
+ * top-level statement that is not a function / class / type / import /
+ * export declaration — i.e. the statements the legacy path routes into
+ * `__module_init` (approximated syntactically; the legacy collection in
+ * `declarations.ts` additionally drops some side-effect-free forms, which
+ * only makes this assessment conservative, never unsound).
+ */
+export interface IrModuleInitAssessment {
+  /** Number of statements in the module-init population. `0` means the
+   *  module is all declarations — vacuously claimable, nothing to adopt. */
+  readonly stmtCount: number;
+  /** `null` = claimable under the same per-kind rules as function bodies;
+   *  otherwise the rejection reason (reuses `IrFallbackReason`, per the
+   *  architect plan). */
+  readonly reason: IrFallbackReason | null;
+  /** (#2856 Step-1 parity) Reject-arm detail for `body-shape-rejected`,
+   *  populated only when `JS2WASM_IR_SHAPE_DIAG=1`. */
+  readonly detail?: string;
 }
 
 export interface IrSelectionOptions {
@@ -551,10 +582,13 @@ export function planIrCompilation(
     const fallbacks: IrFallback[] = [];
     for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
     for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
+    // (#3142 Slice 1) Module-init assessment — no top-level function is
+    // claimed on this path, so any local callee rejects the unit.
+    const moduleInit = assessModuleInit(sourceFile, new Set<string>(), declByName, localClasses);
     if (individuallyClaimedClassMembers.size === 0) {
-      return { funcs: new Set<string>(), fallbacks };
+      return { funcs: new Set<string>(), fallbacks, moduleInit };
     }
-    return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers, fallbacks };
+    return { funcs: new Set<string>(), classMembers: individuallyClaimedClassMembers, fallbacks, moduleInit };
   }
 
   // -------------------------------------------------------------------------
@@ -677,9 +711,13 @@ export function planIrCompilation(
   const fallbacks: IrFallback[] = [];
   for (const [name, reason] of fallbackReasons) fallbacks.push({ name, reason, detail: fallbackDetails.get(name) });
   for (let i = 0; i < unnamedCount; i++) fallbacks.push({ name: `<unnamed:${i}>`, reason: "unnamed" });
+  // (#3142 Slice 1) Module-init assessment against the FINAL claimed set —
+  // runs after the Step-2 closure so `call-graph-closure` verdicts match
+  // what Slice 2's lowering will actually be able to link against.
+  const moduleInit = assessModuleInit(sourceFile, claimed, declByName, localClasses);
   return classMembers
-    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees }
-    : { funcs: claimed, fallbacks, localCallees: callees };
+    ? { funcs: claimed, classMembers, fallbacks, localCallees: callees, moduleInit }
+    : { funcs: claimed, fallbacks, localCallees: callees, moduleInit };
 }
 
 // ---------------------------------------------------------------------------
@@ -3086,6 +3124,102 @@ function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
 // ---------------------------------------------------------------------------
 // Call graph (local edges only)
 // ---------------------------------------------------------------------------
+
+/**
+ * (#3142 Slice 1) Assess the module-level statement list as a synthetic IR
+ * claim unit. See `IrModuleInitAssessment` for the population definition.
+ *
+ * Two gates, mirroring the per-function claim exactly:
+ *   1. **Shape** — every population statement must pass
+ *      `isPhase1BodyStatement` (the constructor-body precedent: the unit is
+ *      void, has no tail requirement, and the early-return barrier is armed
+ *      because a top-level `return` is never claimable). Scope starts empty;
+ *      top-level `var`/`let`/`const` names enter it in document order via
+ *      `isPhase1VarDecl`, so in-order reads of module bindings pass and
+ *      use-before-declaration conservatively rejects.
+ *   2. **Call graph** — run the SAME `buildLocalCallGraph` scan over
+ *      `declByName ∪ {<module-init>}`: an external callee rejects with
+ *      `external-call`; a local callee outside the FINAL claimed set rejects
+ *      with `call-graph-closure` (the unit is lowerable only when every
+ *      callee's signature lives on the IR side of the fence — identical to
+ *      the Step-2 closure for ordinary functions).
+ *
+ * Called only under `trackFallbacks` (telemetry), AFTER every per-function
+ * body walk — so resetting the module-level walk state here mirrors
+ * `whyNotIrClaimable`'s per-subject reset without clobbering anything.
+ */
+function assessModuleInit(
+  sourceFile: ts.SourceFile,
+  claimedFuncs: ReadonlySet<string>,
+  declByName: ReadonlyMap<string, ts.FunctionDeclaration>,
+  localClasses: ReadonlySet<string>,
+): IrModuleInitAssessment {
+  const population: ts.Statement[] = [];
+  for (const stmt of sourceFile.statements) {
+    if (
+      ts.isFunctionDeclaration(stmt) ||
+      ts.isClassDeclaration(stmt) ||
+      ts.isInterfaceDeclaration(stmt) ||
+      ts.isTypeAliasDeclaration(stmt) ||
+      ts.isImportDeclaration(stmt) ||
+      ts.isImportEqualsDeclaration(stmt) ||
+      ts.isExportDeclaration(stmt) ||
+      ts.isExportAssignment(stmt) ||
+      ts.isEmptyStatement(stmt)
+    ) {
+      // Declaration statements are owned by the existing declaration
+      // machinery (`compileDeclarations` / class collection / export glue) —
+      // not module-init work. NOTE: `enum` and `namespace` declarations
+      // deliberately STAY in the population (they generate runtime code) and
+      // reject via the body-shape gate's unhandled-statement arm.
+      continue;
+    }
+    population.push(stmt);
+  }
+  if (population.length === 0) return { stmtCount: 0, reason: null };
+
+  // Gate 1 — shape.
+  if (SHAPE_DIAG_ON) shapeRejectDetail = null;
+  earlyReturnLoopDepth = 0;
+  earlyReturnBarrierDepth = 1;
+  forInitLeakedNames = new Set();
+  currentFnIsGenerator = false;
+  currentFnIsVoidReturn = true;
+  const scope = new Set<string>();
+  for (const stmt of population) {
+    if (!isPhase1BodyStatement(stmt, scope, localClasses)) {
+      const detail = SHAPE_DIAG_ON ? (takeShapeRejectDetail() ?? "unattributed-arm:helper-internal") : undefined;
+      return { stmtCount: population.length, reason: "body-shape-rejected", detail };
+    }
+  }
+
+  // Gate 2 — call graph. The synthetic wrapper reuses `buildLocalCallGraph`
+  // verbatim (zero parity drift with the Step-2 scan); factory nodes are
+  // only ever walked downward via `forEachChild`, so the missing
+  // parent/position info on the wrapper is inert.
+  const syntheticName = "<module-init>";
+  const synthetic = ts.factory.createFunctionDeclaration(
+    /* modifiers */ undefined,
+    /* asteriskToken */ undefined,
+    syntheticName,
+    /* typeParameters */ undefined,
+    /* parameters */ [],
+    /* type */ undefined,
+    ts.factory.createBlock(population, /* multiLine */ true),
+  );
+  const decls = new Map(declByName);
+  decls.set(syntheticName, synthetic);
+  const graph = buildLocalCallGraph(decls, localClasses);
+  if (graph.hasExternalCall.has(syntheticName)) {
+    return { stmtCount: population.length, reason: "external-call" };
+  }
+  for (const callee of graph.callees.get(syntheticName) ?? []) {
+    if (!claimedFuncs.has(callee)) {
+      return { stmtCount: population.length, reason: "call-graph-closure" };
+    }
+  }
+  return { stmtCount: population.length, reason: null };
+}
 
 function buildLocalCallGraph(
   decls: ReadonlyMap<string, ts.FunctionDeclaration>,
