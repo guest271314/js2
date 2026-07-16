@@ -1,17 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
-
-async function compileAndRun(source: string): Promise<any> {
-  const result = await compile(source, { fileName: "test.ts" });
-  if (!result.success) {
-    throw new Error(`Compile error: ${result.errors?.map((e) => e.message).join("; ")}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const mod = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(mod, imports);
-  return (instance.exports as any).test();
-}
+import { compileAndRunTestSyncJoined as compileAndRun } from "./helpers/compile.js";
 
 describe("#1068 — await as label identifier in non-async contexts", () => {
   it("await: label in regular function should compile", async () => {

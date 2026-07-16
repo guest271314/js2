@@ -122,3 +122,27 @@ other signature variants (result-object shapes, `Promise<number>`,
 Migrate additional identical-body clusters the same way; keep non-equivalent
 local helpers local (or thread the extra via an `opts` param). This issue stays
 `ready` until ≥100 of 132 removed (acceptance criterion 1).
+
+### Slice 2 (ttraenkler/fable-interp, 2026-07-16) — 39 files, 14 clusters
+
+Same identical-body-cluster method, applied to every remaining exact-duplicate
+cluster (body-hash grouping over the `async function compileAndRun` block):
+13 new helpers in `tests/helpers/compile.ts` (`compileAndRunHost` ×7,
+`compileAndRunInstance` ×5, `compileAndRunTestSync` ×4,
+`compileAndRunResultObject` ×5 — the `.test?.()` pair threads
+`optionalTest: true` via a one-line local wrapper — plus nine 2-file shapes:
+TestSyncSetExports, RuntimeDeps, BuildImportsExpect, StubsCallback,
+TestSyncNumber, TestSyncJoined, GetResult, Fn, TestNumber).
+
+**Parity proof:** the 39 files ran with `vitest --reporter=json` before and
+after — identical per-test result set (287 tests, 258 pass / 29 pre-existing
+main-state fails). One non-equivalence the hash clustering missed was CAUGHT
+by exactly this gate and fixed: issue-1594b/issue-723-tdz's local
+`buildImports(wasmModule)` is a **reflected no-op stub synthesizer**, not
+src/runtime's `buildImports` — moved verbatim into the helper as the private
+`reflectedStubImports` (all 12 tests re-verified green). Scoped tsc + prettier
+clean. Zero `src/` changes.
+
+**Count:** 132 → 19 (slice 1) → 39 (this slice) removed; **~67 local
+definitions remain** (all singleton bodies by exact hash — next slice needs
+normalized/semantic clustering or opts-threading).

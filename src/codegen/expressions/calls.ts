@@ -3672,7 +3672,33 @@ export function tryEmitInlineDynamicCall(
       vecPushIdx: vecBuilders.pushIdx,
     };
   }
-  if (candidates.length === 0 && proxyArm === undefined && boundArm === undefined && !wantTaCtorArm) return null;
+  // (#2933) Variadic builtin value-closure arm pieces. Set at Math.max/Math.min
+  // value-read time (all of its types + the closure func are then already
+  // registered — DEFINED funcs only, no import, no index shift). One lifted
+  // func type `(self, (ref null $vec_externref)) -> externref` serves BOTH
+  // methods and EVERY call-site arity (the arm packs the saved arg locals into
+  // a fresh vec). Modules without such a value read are byte-identical.
+  const variadicArm = ctx.standalone || ctx.wasi ? ctx.variadicBuiltinClosure : undefined;
+  if (variadicArm !== undefined) {
+    // The variadic closure registers in `closureInfoByTypeIdx` like any other
+    // wrapper signature, so the generic candidate scan can pick it up — but its
+    // single `(ref null $vec_externref)` formal must NOT be marshalled like a
+    // positional param (the generic arm would `ref.cast` the first ARG to the
+    // vec type → illegal cast, and its funcref test would shadow the dedicated
+    // variadic arm below). It is served exclusively by the dedicated arm.
+    for (let ci = candidates.length - 1; ci >= 0; ci--) {
+      if (candidates[ci]!.info.funcTypeIdx === variadicArm.funcTypeIdx) candidates.splice(ci, 1);
+    }
+  }
+
+  if (
+    candidates.length === 0 &&
+    proxyArm === undefined &&
+    boundArm === undefined &&
+    variadicArm === undefined &&
+    !wantTaCtorArm
+  )
+    return null;
 
   // Compile callee (externref) → anyref → temp local.
   const calleeType = compileExpression(ctx, fctx, expr.expression);
@@ -3701,6 +3727,67 @@ export function tryEmitInlineDynamicCall(
   // Build dispatch chain (innermost = default, outermost = first).
   // Default: ref.null.extern (matches existing fallback semantics).
   let dispatch: Instr[] = [{ op: "ref.null.extern" }];
+
+  // (#2933) Variadic builtin value-closure arm — INNERMOST (just above the
+  // null default), so any exact-arity candidate stays preferred. The saved arg
+  // locals are already externref, exactly what the closure's vec carries: pack
+  // ALL of them (true call-site count, no padding) into a fresh
+  // `$vec_externref` and `call_ref` the closure. Result is already externref.
+  if (variadicArm !== undefined) {
+    const vFuncTypeDef = ctx.mod.types[variadicArm.funcTypeIdx];
+    const vSelfParam = vFuncTypeDef?.kind === "func" ? vFuncTypeDef.params[0] : undefined;
+    const vSelfTypeIdx =
+      vSelfParam && (vSelfParam.kind === "ref" || vSelfParam.kind === "ref_null")
+        ? (vSelfParam as { typeIdx: number }).typeIdx
+        : variadicArm.structTypeIdx;
+    const vArrLocal = allocLocal(fctx, `__dyn_varargs_${fctx.locals.length}`, {
+      kind: "ref",
+      typeIdx: variadicArm.arrTypeIdx,
+    });
+    const armBody: Instr[] = [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.cast", typeIdx: vSelfTypeIdx },
+    ];
+    for (const argLocal of argLocals) {
+      armBody.push({ op: "local.get", index: argLocal });
+    }
+    armBody.push({ op: "array.new_fixed", typeIdx: variadicArm.arrTypeIdx, length: argLocals.length });
+    armBody.push({ op: "local.set", index: vArrLocal });
+    armBody.push({ op: "i32.const", value: argLocals.length });
+    armBody.push({ op: "local.get", index: vArrLocal });
+    armBody.push({ op: "struct.new", typeIdx: variadicArm.vecTypeIdx });
+    armBody.push({ op: "local.get", index: anyLocal });
+    armBody.push({ op: "ref.cast", typeIdx: vSelfTypeIdx });
+    armBody.push({ op: "struct.get", typeIdx: vSelfTypeIdx, fieldIdx: 0 });
+    armBody.push({ op: "ref.cast", typeIdx: variadicArm.funcTypeIdx });
+    armBody.push({ op: "call_ref", typeIdx: variadicArm.funcTypeIdx });
+    // Same funcref-signature discrimination as the candidate arms below: the
+    // struct guard alone matches every wrapper arity, so test field 0 against
+    // the variadic func type.
+    const vRootStructIdx =
+      (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx ?? vSelfTypeIdx;
+    dispatch = [
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: vRootStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: vRootStructIdx },
+          { op: "struct.get", typeIdx: vRootStructIdx, fieldIdx: 0 },
+          { op: "ref.test", typeIdx: variadicArm.funcTypeIdx },
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: armBody,
+        else: dispatch,
+      },
+    ];
+  }
 
   for (const cand of candidates) {
     const funcTypeDef = ctx.mod.types[cand.info.funcTypeIdx];

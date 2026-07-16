@@ -16,7 +16,7 @@
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { TYPED_ARRAY_NAMES, typedArrayPackedSignedness } from "./index.js";
+import { addUnionImports, TYPED_ARRAY_NAMES, typedArrayPackedSignedness } from "./index.js";
 import {
   coerceType,
   compileStringLiteral,
@@ -68,6 +68,9 @@ import {
 import { getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { emitJsonStringifyValue } from "./json-codec-native.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
+import { ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
+import { getArrTypeIdxFromVec } from "./registry/types.js";
+import { ensureAnyFromExternHelper, ensureAnyHelpers } from "./any-helpers.js";
 
 export const BUILTIN_CTOR_NAMES = new Set([
   "Object",
@@ -878,6 +881,43 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    // (#2933) Math.max / Math.min as VALUES — genuinely VARIADIC. Reified with
+    // the canonical variadic closure convention: ONE `(ref null $vec_externref)`
+    // args param carrying every call-site argument (packed by the variadic
+    // dispatch arm in call-identifier.ts), so a single closure serves every
+    // call-site arity — `g()`, `g(a)`, `g(a,b,c,…)`. The body folds the vec
+    // with `f64.max`/`f64.min`, whose Wasm semantics are exactly §21.3.2.24/.25
+    // (NaN propagates; max(+0,-0)=+0 / min(+0,-0)=-0), seeded with ±Infinity.
+    // Result is boxed via the engine's `__any_box_f64` (→ externref). Falls
+    // through to the Phase-3 generic throw body when the any-value substrate
+    // (native box types / $AnyValue helpers) is unavailable.
+    case "Math.max":
+    case "Math.min": {
+      // Pre-register EVERYTHING the body + call-site arm need, BEFORE the
+      // wrapper/func creation (first-registration-mid-body desyncs codegen —
+      // #2704). `addUnionImports` registers the native `$BoxedNumber`/
+      // `$BoxedBoolean` substrate (`nativeBoxNumberTypeIdx`) that
+      // `ensureAnyFromExternHelper` requires — in standalone these are DEFINED
+      // funcs (no import, no index shift). If the substrate is still
+      // unavailable, degrade to the generic catchable-TypeError body
+      // (identity/meta still work).
+      addUnionImports(ctx);
+      const fromExternIdx = ensureAnyFromExternHelper(ctx);
+      if (fromExternIdx === undefined) {
+        const genericArity = BUILTIN_STATIC_METHOD_ARITY[builtinName]?.[propName];
+        if (genericArity === undefined) return null;
+        paramTypes = [];
+        for (let i = 0; i < genericArity; i++) paramTypes.push({ kind: "externref" });
+        returnType = { kind: "externref" };
+        genericThrowBody = true;
+        break;
+      }
+      ensureAnyHelpers(ctx); // __any_to_f64 / __any_box_f64
+      const { vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+      paramTypes = [{ kind: "ref_null", typeIdx: vecTypeIdx }];
+      returnType = { kind: "externref" };
+      break;
+    }
     default: {
       // (#2984 Phase 3) Any OTHER standard builtin static method — the
       // `BUILTIN_STATIC_METHOD_ARITY` membership is the complete own
@@ -998,6 +1038,84 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "any.convert_extern" });
       closureFctx.body.push({ op: "call", funcIdx: rootIdx });
       closureFctx.body.push({ op: "extern.convert_any" });
+    } else if ((key === "Math.max" || key === "Math.min") && !genericThrowBody) {
+      // (#2933) Variadic fold body. Params: 0=self, 1=argsVec
+      // (ref null $vec_externref: field0 = i32 len, field1 = externref array).
+      // acc seeds -Infinity (max) / +Infinity (min); every element runs the
+      // engine ToNumber pipeline (`__any_from_extern` → `__any_to_f64` —
+      // no hand-rolled coercion matrix), then folds with `f64.max`/`f64.min`
+      // (spec-exact: NaN propagation, signed-zero ordering). Result boxed via
+      // `__any_box_f64` → externref.
+      const { vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      const fromExternIdx = ctx.funcMap.get("__any_from_extern");
+      const toF64Idx = ctx.funcMap.get("__any_to_f64");
+      // Result boxing: the native `$BoxedNumber` carrier (`__box_number`,
+      // f64 → externref) — the SAME box every dynamic-dispatch return arm uses,
+      // so call-site unboxing (`__unbox_number`), `__any_from_extern` (tag-3)
+      // and `__any_strict_eq` (NaN ≠ NaN, #3174) all recover it correctly. An
+      // `__any_box_f64` $AnyValue box here would read back NaN through
+      // `__unbox_number`.
+      const boxNumIdx = ctx.funcMap.get("__box_number");
+      if (fromExternIdx === undefined || toF64Idx === undefined || boxNumIdx === undefined) return null;
+      const foldOp = key === "Math.max" ? ("f64.max" as const) : ("f64.min" as const);
+      const seed = key === "Math.max" ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
+      const iLocal = allocLocal(closureFctx, "i", { kind: "i32" });
+      const nLocal = allocLocal(closureFctx, "n", { kind: "i32" });
+      const accLocal = allocLocal(closureFctx, "acc", { kind: "f64" });
+      const arrLocal = allocLocal(closureFctx, "arr", { kind: "ref_null", typeIdx: arrTypeIdx });
+      closureFctx.body.push(
+        { op: "f64.const", value: seed },
+        { op: "local.set", index: accLocal },
+        // argsVec null → empty fold (Math.max() = -Infinity / Math.min() = +Infinity)
+        { op: "local.get", index: 1 },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 },
+            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+            { op: "local.set", index: nLocal },
+            { op: "local.get", index: 1 },
+            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+            { op: "local.set", index: arrLocal },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: iLocal },
+                    { op: "local.get", index: nLocal },
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: accLocal },
+                    { op: "local.get", index: arrLocal },
+                    { op: "ref.as_non_null" },
+                    { op: "local.get", index: iLocal },
+                    { op: "array.get", typeIdx: arrTypeIdx },
+                    { op: "call", funcIdx: fromExternIdx },
+                    { op: "call", funcIdx: toF64Idx },
+                    { op: foldOp },
+                    { op: "local.set", index: accLocal },
+                    { op: "local.get", index: iLocal },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: iLocal },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { op: "local.get", index: accLocal },
+        { op: "call", funcIdx: boxNumIdx },
+      );
     } else if (genericThrowBody) {
       // (#2984 Phase 3) Degrade-to-catchable body: a real TypeError instance +
       // `throw` — the EXACT helper the Phase-2 proto refusal bodies use,
@@ -1016,6 +1134,21 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       exported: false,
     });
     ctx.funcMap.set(funcName, funcIdx);
+  }
+
+  // (#2933) Publish the variadic calling convention so any-callee call sites
+  // (call-identifier.ts) emit the variadic dispatch arm. Both Math.max and
+  // Math.min share the SAME lifted func type (one vec param → one `ref.test`
+  // arm serves both; `call_ref` dispatches to the right body via the funcref
+  // value). Idempotent — the wrapper types are cached per signature.
+  if ((key === "Math.max" || key === "Math.min") && !genericThrowBody) {
+    const { vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
+    ctx.variadicBuiltinClosure = {
+      funcTypeIdx: wrapperTypes.liftedFuncTypeIdx,
+      structTypeIdx: wrapperTypes.structTypeIdx,
+      vecTypeIdx,
+      arrTypeIdx: getArrTypeIdxFromVec(ctx, vecTypeIdx),
+    };
   }
 
   // (#2896) The value struct is the UNIQUE per-(builtin, method) metadata

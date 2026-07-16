@@ -1,22 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
-async function compileAndRun(source: string): Promise<{
-  exports: Record<string, Function>;
-  instance: WebAssembly.Instance;
-}> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    );
-  }
-
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, imports as unknown as WebAssembly.Imports);
-  return { exports: instance.exports as any, instance };
-}
+import { compileAndRunInstance as compileAndRun } from "./helpers/compile.js";
 
 describe("for-of string in generator (#590)", () => {
   it("yields each character of a string", async () => {
