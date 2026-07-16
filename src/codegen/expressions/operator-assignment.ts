@@ -1826,8 +1826,13 @@ export function compileCompoundAssignment(
       ((boxed.valType as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
         (boxed.valType as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx)
     ) {
-      const rhsIsStringN = isStringType(ctx.checker.getTypeAtLocation(expr.right));
-      const lhsIsStringN = isStringType(ctx.checker.getTypeAtLocation(expr.left));
+      // Oracle-routed (#1930 ratchet): fact kind "string" covers String |
+      // StringLiteral; the String wrapper object (`new String("x")`)
+      // classifies as builtin "String" — same coverage as isStringType.
+      const rhsFactN = ctx.oracle.typeFactOf(expr.right);
+      const lhsFactN = ctx.oracle.typeFactOf(expr.left);
+      const rhsIsStringN = rhsFactN.kind === "string" || (rhsFactN.kind === "builtin" && rhsFactN.name === "String");
+      const lhsIsStringN = lhsFactN.kind === "string" || (lhsFactN.kind === "builtin" && lhsFactN.name === "String");
       const varHasStringAssignN = hasStringAssignment(name, expr) || hasStringAssignmentInParentScopes(name, expr);
       const concatIdxN = ctx.nativeStrHelpers.get("__str_concat");
       if (concatIdxN !== undefined && (rhsIsStringN || lhsIsStringN || varHasStringAssignN)) {
