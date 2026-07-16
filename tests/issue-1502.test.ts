@@ -10,26 +10,7 @@
 // generated Wasm still runs end-to-end in Node / Bun / WASI.
 
 import { describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
-import { buildImports as buildRuntimeImports } from "../src/runtime.js";
-
-async function compileAndRun(source: string, deps?: Record<string, unknown>): Promise<Record<string, Function>> {
-  const result = await compile(source);
-  if (!result.success) {
-    throw new Error(
-      `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}\nWAT:\n${result.wat}`,
-    );
-  }
-  if (!WebAssembly.validate(result.binary)) {
-    throw new Error(`Invalid Wasm binary\nWAT:\n${result.wat}`);
-  }
-  const runtimeResult = buildRuntimeImports(result.imports ?? [], deps, result.stringPool);
-  const { instance } = await WebAssembly.instantiate(result.binary, runtimeResult);
-  if (runtimeResult.setExports) {
-    runtimeResult.setExports(instance.exports as Record<string, Function>);
-  }
-  return instance.exports as Record<string, Function>;
-}
+import { compileAndRunRuntimeDeps as compileAndRun } from "./helpers/compile.js";
 
 /** Hide an ambient global (without `delete`) for the duration of a callback,
  *  so the runtime falls through to the in-memory polyfill path. */

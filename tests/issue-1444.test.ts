@@ -1,18 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compile } from "../src/index.ts";
-import { buildImports } from "../src/runtime.ts";
-
-async function compileAndRun(source: string): Promise<any> {
-  const result = await compile(source, { fileName: "test.ts" });
-  if (!result.success) {
-    throw new Error(`Compile error: ${result.errors?.[0]?.message}`);
-  }
-  const imports = buildImports(result.imports, undefined, result.stringPool);
-  const mod = new WebAssembly.Module(result.binary);
-  const instance = new WebAssembly.Instance(mod, imports);
-  imports.setExports?.(instance.exports as Record<string, Function>);
-  return (instance.exports as any).test();
-}
+import { compileAndRunTestSyncSetExports as compileAndRun } from "./helpers/compile.js";
 
 describe("#1444 — RegExp named groups: `in` on result.groups", () => {
   describe("`in` operator on host externref objects", () => {
