@@ -7,7 +7,7 @@ branch: agent/2953-unions-boxing
 pr: 3108
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-16
 priority: high
 horizon: l
 feasibility: medium
@@ -18,6 +18,8 @@ language_feature: compiler-internals
 goal: backend-agnostic-ir
 related: [1852, 1713, 2954, 2956, 2949]
 origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text had no issue)"
+loc-budget-allow:
+  - src/ir/lower.ts
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
@@ -74,12 +76,36 @@ value/aggregate families.
   converted to trait calls. pushRaw in lower.ts: 77 → 74. Golden-Instr unit
   coverage added (`tests/ir-backend-emitter.test.ts`); cross-backend + closure
   runtime suites green. (opus-1a)
-- [ ] unions/boxing (`emitBox`/`emitUnbox`/`emitTagLoad`) — note the box arm
-  interleaves an emitter-synthesized tag const with the caller's value push by
-  field order; needs a small orchestration decision (tag const stays
-  emitter-owned for the backend-agnostic tag encoding).
+- [x] **(a6) unions/boxing** (`emitBox`/`emitUnbox`/`emitTagLoad`) —
+  `emitBox` now receives the already-lowered value in a dedicated backend sink,
+  allowing `WasmGcEmitter` to synthesize the canonical tag and append tag/value
+  in layout field order before `struct.new`. Unbox and tag loads route through
+  typed primitives; tag constants/comparisons use existing typed core methods.
+  Backends without a union representation fail through legality/missing-hook
+  errors, with no raw Wasm fallback. `emitter.pushRaw` sites in `lower.ts`:
+  104 → 98. Golden union lowering stayed instruction-identical, and the emitted
+  Wasm oracle matched clean main for all 56 `(file,target)` records across gc,
+  standalone, wasi, and linear. (ttraenkler/codex-2953-unions-boxing)
 - [ ] closures (`emitClosureNew`/`emitClosureFuncGet`/`emitCaptureGet`)
 - [ ] coercions/null (`emitNull`/`emitToExternref`/`emitFromExternref`)
 - [ ] funcref (`emitFuncRef`)
 - [ ] Promise ops
 - [ ] ratchet: pushRaw count check + `// pushraw-ok(#issue)` justification tag
+
+## 2026-07-16 — unions/boxing slice results
+
+- Re-grounded against `main` at `398c59e6c418306b86b14e5ceab41c0ad8e7d37e`;
+  the current seam uses generic backend sinks and optional representation hooks,
+  rather than the older string-emission shape described by stale line numbers.
+- Implemented `WasmGcEmitter.emitBox`, `emitUnbox`, and `emitTagLoad`. The box
+  primitive owns `IrUnionLowering.tagFor(member)` and field ordering; lowering
+  owns operand evaluation and passes its emitted sink to the backend.
+- Kept `linear-emitter.ts`, `linear-integration.ts`, `codegen-linear/**`, and
+  #2956-specific tests untouched. Linear/Bytecode union nodes are rejected by
+  backend legality; a focused test locks the Linear loud-failure boundary.
+- Focused verification:
+  `pnpm vitest run tests/issue-2953-unions-boxing.test.ts tests/ir-backend-emitter.test.ts tests/ir-frontend-widening.test.ts tests/ir/phase3c.test.ts`
+  (51 tests passed), plus `pnpm run typecheck`.
+- Byte identity: `scripts/prove-emit-identity.mjs` was run against a detached
+  clean-main baseline via Vite's TypeScript loader because `tsx` is not installed
+  in this checkout. Result: `IDENTICAL — all 56 (file,target) emits match baseline`.
