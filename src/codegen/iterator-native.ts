@@ -2251,7 +2251,15 @@ function buildIteratorNextBody(
     },
   ];
 
-  if (!deps && !objDeps && !hostDeps && !agDeps) {
+  // (#3302) `!sgDeps` is load-bearing: a module whose ONLY step-driven carrier
+  // is a native SYNC generator (a minimal capturing fn-expr module — no user /
+  // obj / host / async-gen carrier) used to hit this vec-only early return,
+  // silently dropping the GENSTATE step from `__iterator_next` while
+  // `__iterator` still wrapped the frame in a GENSTATE record → the vec step
+  // read `rec.vec` (null for GENSTATE) through `ref.as_non_null` → null-deref
+  // trap on the first for-of resume. Latent since #3164 (every prior module
+  // with a driven native generator happened to also carry `deps`/`objDeps`).
+  if (!deps && !objDeps && !hostDeps && !agDeps && !sgDeps) {
     // Vec-only carrier: kind is always VEC, so emit the vec step directly with no
     // kind branch — byte-identical to the pre-#2038 runtime.
     return [
