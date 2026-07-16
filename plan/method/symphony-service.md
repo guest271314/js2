@@ -43,9 +43,12 @@ missed, Symphony discovers the PR by its assigned head branch and writes the PR
 number itself. On every configured PR polling interval Symphony asks GitHub for
 the PR head and check rollup:
 
-- A merged PR changes the issue to `done`, records the merge date in
-  `completed`, releases any broker claim/retry, and immediately makes completed
-  dependencies visible to the normal candidate scan.
+- A merged PR for an `in-review` issue changes the issue to `done`, records the
+  merge date in `completed`, releases any broker claim/retry, and immediately
+  makes completed dependencies visible to the normal candidate scan.
+- A merged PR for an `in-progress` multi-slice issue clears the old PR, records
+  it in `last_merged_pr`, and returns the issue to `ready` for its next slice.
+  The durable merge key prevents restart from requeueing the same merged PR.
 - A failed check rollup changes the issue back to `in-progress` and dispatches
   a repair attempt in the same deterministic workspace. If that workspace does
   not exist, Symphony checks out the PR's actual head branch from `origin`.

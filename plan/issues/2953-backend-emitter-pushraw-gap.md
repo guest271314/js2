@@ -3,6 +3,8 @@ id: 2953
 title: "Close the BackendEmitter pushRaw gap: route unions/closures/refcells/coercions/null/funcref through the trait"
 status: in-progress
 assignee: ttraenkler/opus-1a
+branch: agent/2953-unions-boxing
+pr: 3108
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
