@@ -15,10 +15,22 @@ related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
 # S2 flag plumbing (CompileOptions -> CodegenOptions -> ctx) + the resolveWasmType
 # mapping necessarily touch the option/driver files; the predicate itself lives
 # in the subsystem module (src/checker/type-mapper.ts).
+# (S3 adds the consumer-site fixes — each must live at its existing dispatch
+# site in these budgeted modules.)
 loc-budget-allow:
   - src/codegen/context/types.ts
   - src/codegen/index.ts
   - src/compiler.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/any-helpers.ts
+  - src/codegen/string-ops.ts
+# S3's declared-union equality routing needs SYMBOL resolution (declared vs
+# narrowed type) — explicitly outside the oracle's v1 scope (#1930 D3). The
+# predicate body lives in src/checker/type-mapper.ts; the single ctx.checker
+# occurrence below is the argument at the call site.
+oracle-ratchet-allow:
+  - src/codegen/binary-ops.ts
 files:
   src/codegen/index.ts:
     new:
@@ -302,3 +314,39 @@ S3 (revised): make the strict-eq / truthiness / concat consumers
 carrier-agnostic (first three rows). S4 (unchanged): params/returns +
 boundaries (last three rows). Flip `unionAnyRep` lane-default-on for
 standalone/nativeStrings only after BOTH, validated by full CI/merge_group.
+
+## S3 landed (2026-07-16, fable-gamma successor) — carrier-agnostic eq / truthiness / concat
+
+The first three rows of the S2 gap table now behave correctly with the flag ON
+(standalone), via five consumer-site fixes (all flag-gated except the first,
+which is a #1988-class latent bug fix):
+
+1. **type-coercion** `ref_null $AnyValue → ref_null $X` unbox arm: reads the
+   tag-5 payload from `externval` (field 4) for native-string targets —
+   mirroring the #1988 fix that only covered the `→ ref` (non-null) arm. Root
+   cause of `union === "lit"` answering false after assignment narrowing.
+2. **binary-ops** equality gate: an operand whose use-site OR declared symbol
+   type is a heterogeneous primitive union routes `==/===/!=/!==` through
+   `__any_strict_eq`/`__any_eq` (the both-`any` dispatch). Declared-type check
+   needed because assignment/literal narrowing re-types the use site while the
+   value stays in the $AnyValue carrier. Nullish counter-operands excluded
+   (their existing paths work).
+3. **any-helpers** `__any_unbox_bool`: corrected tag-5 truthiness arm
+   (ToBoolean("") is false) — recovers externval, `flatten().length > 0`;
+   non-string tag-5 carriers keep legacy truthy. Native lane, flag-gated.
+4. **coercion-engine** eq marshal: statically-boolean i32 operands box tag-4
+   via the `boxToAny` "boolean" hint (kind-keyed boxing produced tag-2, so
+   `union === true` compared tag-4 vs tag-2 → false). Flag-gated.
+5. **string-ops** concat operand: `$AnyValue` carriers are excluded from the
+   string passthrough and route via `$__any_to_string` (the passthrough made
+   the caller emit an always-trapping incompatible cast).
+
+Verified (probes + `tests/issue-745.test.ts` S3 suite, 19/19): narrowed and
+un-narrowed strict-eq vs string/number literals, union-vs-union eq, boolean
+union `=== true`, empty/non-empty/0 truthiness, both concat narrowing shapes,
+nullish regression guard, host-import-free. Flag-off byte-identity to pristine
+main re-verified after the changes.
+
+**S4 (unchanged scope)** — params/returns + boundaries (rows: union PARAM at
+call boundary Wasm validation error; union RETURN wrong result; union → `any`
+assignment wrong result).
