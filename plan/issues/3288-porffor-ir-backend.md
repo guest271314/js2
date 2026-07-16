@@ -18,12 +18,12 @@ model: gpt-5.6-sol
 related: [1585, 1713, 1715, 1851, 1852, 3029, 3030, 3141, 3295, 3296, 3297, 3298, 3299, 3300]
 origin: "2026-07-16 user directive: add Porffor IR as an optional backend and share JS2 linear-memory allocation strategy work"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T22:20:31.606Z
+claimed_at: 2026-07-16T22:53:00.105Z
 branch: symphony/porffor/3288
 pr: 3166
 loc-budget-allow:
   - src/ir/lower.ts
-last_ci_retry_head: dc6e03a54f097bb2e6dcda0457235cb970884981
+last_ci_retry_head: 0c2b1d696d856bae36855fe1b090481b0763c6f1
 ---
 
 # #3288 - Optional Porffor IR backend over the JS2 linear-memory plan
@@ -407,3 +407,8 @@ started on this branch.
   typecheck, the 42 focused tests, the `pushRaw` and LOC ratchets, and a fresh
   56-record emit-identity comparison against that exact main commit. The prior
   PR head `0e65d083f90` was fully green before the required main catch-up.
+- PR head `0c2b1d696d8` passed every implementation, linear, equivalence, and
+  test262 relevance check. Its standalone `cla-check` failed only because the
+  gate's GitHub org-membership request received a transient HTTP 503; the
+  recorded retry head preserves that infrastructure failure for the same-PR
+  retry.
