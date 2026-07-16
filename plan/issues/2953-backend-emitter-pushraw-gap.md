@@ -16,6 +16,8 @@ language_feature: compiler-internals
 goal: backend-agnostic-ir
 related: [1852, 1713, 2954, 2956, 2949]
 origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text had no issue)"
+loc-budget-allow:
+  - src/ir/lower.ts
 ---
 
 # #2953 — 40% of IR lowering bypasses the backend trait
