@@ -55,6 +55,9 @@ the PR head and check rollup:
 - A merged PR for an `in-progress` multi-slice issue clears the old PR, records
   it in `last_merged_pr`, and returns the issue to `ready` for its next slice.
   The durable merge key prevents restart from requeueing the same merged PR.
+  Branches outside the workflow's configured prefix are cleared during this
+  handoff so the next slice starts from current main on a Symphony-owned
+  branch; an existing Symphony branch remains reusable by later slices.
 - A failed check rollup changes the issue back to `in-progress` and dispatches
   a repair attempt in the same deterministic workspace. If that workspace does
   not exist, Symphony checks out the PR's actual head branch from `origin`.

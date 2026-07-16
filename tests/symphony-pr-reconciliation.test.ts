@@ -318,6 +318,7 @@ fi
     expect(continuedIssue).toContain("pr: null");
     expect(continuedIssue).toContain("last_ci_retry_head: null");
     expect(continuedIssue).toContain("last_merged_pr: 99");
+    expect(continuedIssue).toContain("branch: symphony/9001");
     expect(readFileSync(marker, "utf8")).toBe("9001\n9001\n");
 
     writeFileSync(

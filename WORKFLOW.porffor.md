@@ -94,8 +94,9 @@ Rules:
   GitHub reports the PR merged.
 - Commit all changes with a Claude Code-style message and a
   `Co-authored-by: Codex <codex@openai.com>` trailer.
-- Merge or rebase current `origin/main` before publishing, then push the
-  assigned branch to `origin` and open a ready, non-draft PR against `main`.
+- Merge current `origin/main` before implementation and merge it again before
+  publishing if it advanced. Then push the assigned branch to `origin` and
+  open a ready, non-draft PR against `main`.
 - On a retry for an existing PR, inspect the failed checks, repair the same
   head branch, preserve `last_ci_retry_head`, and never open a duplicate PR.
 - Enqueue the PR through the normal merge queue when GitHub accepts it. Never

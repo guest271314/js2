@@ -522,6 +522,12 @@ class MarkdownTracker {
       claimed_by: lane.name,
       claimed_at: new Date().toISOString(),
       ...(issue.branch_name ? { branch: issue.branch_name } : {}),
+      ...(issue.pull_request || issue.last_merged_pr
+        ? {
+            pr: issue.pull_request ?? null,
+            ...(issue.last_merged_pr ? { last_merged_pr: issue.last_merged_pr } : {}),
+          }
+        : {}),
       ...(issue.last_ci_retry_head ? { last_ci_retry_head: issue.last_ci_retry_head } : {}),
     });
   }
@@ -1509,6 +1515,12 @@ class Orchestrator {
       }
 
       if (planned.action === "continue") {
+        const mergedBranch = issue.branch_name;
+        const branchPrefix = String(get(this.config, "workspace.branch_prefix", "symphony")).replace(/\/+$/, "");
+        const continuationBranch =
+          mergedBranch && (mergedBranch === branchPrefix || mergedBranch.startsWith(`${branchPrefix}/`))
+            ? mergedBranch
+            : null;
         const running = this.running.get(id);
         const retry = this.retryAttempts.get(id);
         if (retry?.timer_handle) clearTimeout(retry.timer_handle);
@@ -1525,8 +1537,10 @@ class Orchestrator {
         issue.last_ci_retry_head = null;
         issue.pull_request = null;
         issue.pr = null;
+        issue.branch_name = continuationBranch;
         this.tracker.updateIssueStatusFile(issue, issue.file, "ready", {
           pr: null,
+          branch: continuationBranch,
           last_ci_retry_head: null,
           last_merged_pr: planned.mergeKey,
         });
@@ -1536,7 +1550,8 @@ class Orchestrator {
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           pr: state.number,
-          branch: issue.branch_name,
+          branch: continuationBranch,
+          merged_branch: mergedBranch,
         });
         continue;
       }
