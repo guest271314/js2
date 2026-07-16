@@ -2510,9 +2510,12 @@ export function compileReceiverMethodCall(
   // Fallback for method calls on any-typed / externref / unresolvable receivers.
   // This handles patterns like: ref(args).next(), anyObj.someMethod(), etc.
   // Common in test262 where variables are typed as `any` or inferred as `any`.
+  // (#3201) recvTsType/recvWasm are hoisted out of the arm's block so the
+  // end-of-ladder native-receiver arm below reuses the SAME checker resolution
+  // (oracle ratchet #1930/#3273: no net-new direct checker usage).
+  const recvTsType = ctx.checker.getTypeAtLocation(propAccess.expression);
+  const recvWasm = resolveWasmType(ctx, recvTsType);
   {
-    const recvTsType = ctx.checker.getTypeAtLocation(propAccess.expression);
-    const recvWasm = resolveWasmType(ctx, recvTsType);
     const isAnyOrExternref = (recvTsType.flags & ts.TypeFlags.Any) !== 0 || recvWasm.kind === "externref";
 
     if (isAnyOrExternref) {
@@ -3179,9 +3182,9 @@ export function compileReceiverMethodCall(
   // acceptance forbids standalone regressions (the native dispatcher's
   // struct-expando coverage is a follow-up).
   if (!ctx.standalone && !ctx.wasi) {
-    const recvTsTypeLate = ctx.checker.getTypeAtLocation(propAccess.expression);
-    const recvWasmLate = resolveWasmType(ctx, recvTsTypeLate);
-    if (recvWasmLate.kind === "ref" || recvWasmLate.kind === "ref_null") {
+    // recvWasm hoisted above the any-arm block — one checker resolution
+    // serves both fallbacks (oracle ratchet #1930/#3273).
+    if (recvWasm.kind === "ref" || recvWasm.kind === "ref_null") {
       // rawStructReceiver: the expando sidecar (`_wasmStructProps`) is keyed
       // by the RAW struct ref — an externref expected-type compile would
       // route a vec receiver through `__make_iterable`'s copy, losing the
