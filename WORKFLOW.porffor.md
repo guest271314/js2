@@ -7,6 +7,7 @@ tracker:
   claimable_states: [ready]
   claim_state: in-progress
   terminal_states: [done, wont-fix]
+  include_dependencies: true
 polling:
   interval_ms: 30000
 pull_requests:
@@ -86,13 +87,16 @@ Rules:
 - Write focused tests in `tests/issue-{{ issue.identifier }}.test.ts` unless the
   issue specifies a more appropriate existing suite. Do not run full local
   test262.
-- Update the issue file with findings and acceptance status. Leave it
-  `in-review` after publishing the completed slice; Symphony marks it `done`
-  only after GitHub reports the PR merged.
+- Complete exactly one issue-defined slice per PR and update the issue file
+  with findings and acceptance status. If unchecked slices remain, leave the
+  issue `in-progress` with its PR so Symphony requeues it after merge. Use
+  `in-review` only for the final slice; Symphony marks that issue `done` after
+  GitHub reports the PR merged.
 - Commit all changes with a Claude Code-style message and a
   `Co-authored-by: Codex <codex@openai.com>` trailer.
-- Merge or rebase current `origin/main` before publishing, then push the
-  assigned branch to `origin` and open a ready, non-draft PR against `main`.
+- Merge current `origin/main` before implementation and merge it again before
+  publishing if it advanced. Then push the assigned branch to `origin` and
+  open a ready, non-draft PR against `main`.
 - On a retry for an existing PR, inspect the failed checks, repair the same
   head branch, preserve `last_ci_retry_head`, and never open a duplicate PR.
 - Enqueue the PR through the normal merge queue when GitHub accepts it. Never
