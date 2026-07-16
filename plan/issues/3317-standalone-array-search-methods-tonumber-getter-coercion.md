@@ -15,6 +15,13 @@ goal: standalone-mode
 umbrella: 2860
 related: [3170, 2860]
 origin: "PO re-scope split of #3170 (2026-07-16) — buckets 3 and 5 of the verified 42-test residual, the two judged most tractable"
+# (#3102) Genuine growth: the #3317 fixes live exactly in these two files —
+# the closed-struct __extern_length arm (object-runtime.ts) and the borrow
+# routing/narrowing (array-prototype-borrow.ts). +89/+69 lines, mostly
+# rationale comments per house style.
+loc-budget-allow:
+  - src/codegen/array-prototype-borrow.ts
+  - src/codegen/object-runtime.ts
 ---
 
 # #3317 — array search methods: object-valued length/fromIndex ToNumber + includes abrupt getters
