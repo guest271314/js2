@@ -3163,5 +3163,28 @@ export function compileReceiverMethodCall(
       }
     }
   }
+
+  // (#3201) Unknown-method fallback for NATIVE (ref/ref_null) receivers on
+  // the JS-host lane. Every arm above has declined — historically this fell
+  // through to the calls.ts "graceful fallback" (compile callee + args for
+  // side effects, return null), which silently nulled Sputnik's expando-
+  // classifier idiom (`arr.getClass = Object.prototype.toString;
+  // arr.getClass()` — 65+ test262 fails across splice/slice/concat) and any
+  // other method stored as an expando on a struct/vec. The host mirror DOES
+  // carry expando writes (`__extern_set_strict`) and reads (`__extern_get`),
+  // so delegate to the same `__extern_method_call(recv, name, args)` generic
+  // the any/externref ladder (#799 WI3) and the fnctor-subclass miss (#3123)
+  // use — `fn.apply(recv, args)` with correct `this` binding on the host
+  // side. Host (gc) lane only: #3201's scope is the default lane and its
+  // acceptance forbids standalone regressions (the native dispatcher's
+  // struct-expando coverage is a follow-up).
+  if (!ctx.standalone && !ctx.wasi) {
+    const recvTsTypeLate = ctx.checker.getTypeAtLocation(propAccess.expression);
+    const recvWasmLate = resolveWasmType(ctx, recvTsTypeLate);
+    if (recvWasmLate.kind === "ref" || recvWasmLate.kind === "ref_null") {
+      const delegated = emitFnctorSubclassDynamicMethodCall(ctx, fctx, expr, propAccess, propAccess.name.text);
+      if (delegated !== undefined) return delegated;
+    }
+  }
   return undefined;
 }
