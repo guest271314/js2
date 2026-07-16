@@ -1,6 +1,7 @@
 ---
 id: 773
 title: "Monomorphize functions: compile with call-site types, not generic externref"
+horizon: xl
 status: ready
 created: 2026-03-22
 updated: 2026-06-19
@@ -11,7 +12,7 @@ task_type: performance
 area: codegen
 language_feature: monomorphization
 goal: compiler-architecture
-sprint: Backlog
+sprint: current
 depends_on: [1124]
 test262_pass_impact: high
 ---
