@@ -21,7 +21,7 @@ origin: "2026-07-02 July Fable audit §5 (77 pushRaw sites; #1852-G1 slice text 
 loc-budget-allow:
   - src/ir/lower.ts
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-16T16:19:15.299Z
+claimed_at: 2026-07-16T17:41:52.148Z
 last_merged_pr: 3146
 last_ci_retry_head: ce8c13d8bcf42d854e182211621adef9aede6fe9
 ---
