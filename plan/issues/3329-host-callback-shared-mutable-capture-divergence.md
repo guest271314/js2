@@ -2,8 +2,10 @@
 id: 3329
 title: "host-callback closures: two closures sharing one mutable captured local get SEPARATE ref cells — writes diverge (last writeback wins)"
 horizon: m
-status: ready
-sprint: Backlog
+status: done
+completed: 2026-07-17
+assignee: ttraenkler/fable-s2
+sprint: current
 created: 2026-07-16
 priority: medium
 feasibility: medium

@@ -2886,7 +2886,15 @@ export function compileArrowAsCallback(
         // getter, which kept reading the creation-time snapshot. The orphaned
         // original local slot keeps receiving writebacks — harmless (no reads
         // resolve to it once localMap points at the box).
-        if (needsThis) {
+        // (#3329) DEFERRED (stored) callbacks get the same rebind: the callback
+        // fires from a LATER host call, and a SIBLING stored callback capturing
+        // the same local must alias ONE cell — without the rebind each creation
+        // minted its own cell and the last writeback won (`body += chunk` in a
+        // "data" listener was invisible to the "end" listener: the #1795 http
+        // Tier 0 shape, and the #1794 multi-listener shape). After the rebind
+        // the sibling's capture analysis sees the local as already-boxed and
+        // pushes the SAME cell.
+        if (needsThis || options?.deferredInvocation === true) {
           fctx.localMap.set(cap.name, refCellLocal);
           (fctx.boxedCaptures ??= new Map()).set(cap.name, { refCellTypeIdx, valType: cap.type });
         }

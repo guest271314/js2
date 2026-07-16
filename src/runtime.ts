@@ -6646,7 +6646,12 @@ function _warnTimerCallbackUnresolvable(mode: "timeout" | "interval"): void {
  *   shim does not have to special-case Buffer.
  * - All other functions are passed through unchanged.
  */
-function makeNodeBuiltinFnAdapter(moduleName: string, fnName: string, raw: (...args: any[]) => any): Function {
+function makeNodeBuiltinFnAdapter(
+  moduleName: string,
+  fnName: string,
+  raw: (...args: any[]) => any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): Function {
   if (moduleName === "crypto" && fnName === "randomBytes") {
     return (n: number) => {
       const out = raw(n);
@@ -6660,7 +6665,15 @@ function makeNodeBuiltinFnAdapter(moduleName: string, fnName: string, raw: (...a
       return new Uint8Array(0);
     };
   }
-  return raw;
+  if (!callbackState) return raw;
+  // (#1795) Callback-taking node-builtin functions (http/https get/request,
+  // and any future callback-shaped surface): a compiled callback arrives as a
+  // WasmGC closure STRUCT (no [[Call]]); Node either throws on it or silently
+  // never invokes it. Wrap closure-shaped args as JS callables via the
+  // identity-cached dynamic bridge; non-closure args pass through untouched
+  // (`_maybeWrapCallableUnknownArity` uses the `__is_closure` export as the
+  // authoritative discriminator, so plain structs/values are unaffected).
+  return (...args: any[]) => raw(...args.map((a) => _maybeWrapCallableUnknownArity(a, callbackState)));
 }
 
 let _warnedNodeBuiltinFnFallback = false;
@@ -14048,7 +14061,7 @@ assert._isSameValue = isSameValue;
       const fnName = intent.name;
       const depMod = deps?.[moduleName] as Record<string, unknown> | undefined;
       if (depMod && typeof depMod[fnName] === "function") {
-        return makeNodeBuiltinFnAdapter(moduleName, fnName, (depMod[fnName] as Function).bind(depMod));
+        return makeNodeBuiltinFnAdapter(moduleName, fnName, (depMod[fnName] as Function).bind(depMod), callbackState);
       }
       const req = _getNodeRequire();
       if (req) {
@@ -14056,7 +14069,7 @@ assert._isSameValue = isSameValue;
           const mod = req(moduleName);
           const raw = mod?.[fnName];
           if (typeof raw === "function") {
-            return makeNodeBuiltinFnAdapter(moduleName, fnName, raw.bind(mod));
+            return makeNodeBuiltinFnAdapter(moduleName, fnName, raw.bind(mod), callbackState);
           }
         } catch {
           // fall through to browser / standalone fallback

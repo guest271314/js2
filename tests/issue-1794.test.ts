@@ -77,25 +77,23 @@ export function test(): number {
     ).toBe(7);
   });
 
-  it("addListener alias works; multiple listeners on one event both fire", async () => {
-    // NOTE: each listener captures its OWN local. Two host-callbacks sharing
-    // one mutable captured local diverge (per-closure ref cells — pre-existing
-    // #859/#929 writeback design, also affects DisposableStack; follow-up
-    // filed as the shared-capture cell-unification issue).
+  it("addListener alias works; multiple listeners SHARING one accumulator both land (#3329)", async () => {
+    // Two stored listeners capturing the SAME mutable local alias one ref
+    // cell (the #3329 deferred-callback localMap rebind) — pre-fix each
+    // creation minted its own cell and the last writeback won (returned 30).
     expect(
       await run(`
 import { EventEmitter } from "node:events";
 export function test(): number {
   const e = new EventEmitter();
-  let a = 0;
-  let b = 0;
-  e.addListener("n", (v: number) => { a = v; });
-  e.on("n", (v: number) => { b = v * 10; });
+  let sum = 0;
+  e.addListener("n", (v: number) => { sum = sum + v; });
+  e.on("n", (v: number) => { sum = sum + v * 10; });
   e.emit("n", 3);
-  return a * 100 + b;
+  return sum;
 }
 `),
-    ).toBe(330);
+    ).toBe(33);
   });
 
   it("#1284 guard intact: a REAL user class still shadows extern classes", async () => {
