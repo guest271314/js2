@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 3;
+export const ORACLE_VERSION = 4;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -71,5 +71,22 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "function'. LABEL-ONLY: zero pass/fail flips (net_per_test 0). The " +
       "regression-gate bucket diff is label-noise; landed with ORACLE_REBASE so " +
       "the guards treat the cross-policy relabel as a re-baseline.",
+  },
+  {
+    version: 4,
+    note:
+      "#3227 async post-drain verdict re-read. The JS-host lane schedules " +
+      ".then/await continuations on the HOST microtask queue, which cannot " +
+      "drain while test() is still on the Wasm→JS stack — so async tests' " +
+      "sync return value was read BEFORE the assertion-bearing callbacks ran " +
+      "(they run right after test() returns; #2940 flagged 1,690 of these as " +
+      "vacuous). For async-flagged tests the wrapper now exports __result() " +
+      "(same verdict logic as the test() epilogue) and the runner yields to " +
+      "the event loop after a sync 1/-262, then re-reads the verdict. Flips: " +
+      "vacuous → honest pass where continuations assert correctly, vacuous → " +
+      "honest assert-fail where they expose real bugs (e.g. await <host " +
+      "promise> reads NaN — slice 2), and some sync-pass → assert-fail where " +
+      "a post-drain assertion genuinely fails. Cross-version diff is oracle " +
+      "skew; forward-monotonic bump auto-rebases in diff-test262.ts.",
   },
 ];
