@@ -1,8 +1,9 @@
 ---
 id: 3227
 title: "default (JS-host) lane: async-completion harness callbacks never execute → 1,690 vacuous fails (#2940 detector), dominated by for-await-of / dynamic-import / Promise"
+horizon: xl
 status: ready
-sprint: Backlog
+sprint: current
 priority: high
 feasibility: hard
 reasoning_effort: max
