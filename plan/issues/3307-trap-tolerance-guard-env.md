@@ -51,6 +51,20 @@ No script change; no behaviour change while the var is `0`. The var remains
 the single sanctioned ratchet valve (#3202) and now applies uniformly to
 every diff-test262 invocation in the workflow.
 
+## Validation
+
+- `tests/issue-3303.test.ts` is the permanent pin for these two guard steps:
+  its workflow-agreement harness extracts and EXECUTES the exact `run:` bash
+  of both steps against canned diff outputs, so any edit that changes the
+  guards' decision logic fails the `quality` job. This change adds only
+  step-level `env:` keys (not part of the executed run body), and the harness
+  passes unchanged — verified locally on this branch.
+- Live validation: PR #3104's measurement run showed the exact disagreement
+  this fixes — host-lane diff at guard-tolerance 0 gate-fails on
+  `oob 48→53` while the regression-gate job's tolerance-4 env absorbs the
+  4-test known flap (`test262/test/built-ins/TypedArray/prototype/set/BigInt/`
+  cluster, #3202).
+
 ## Notes
 
 - Found while landing #3104 via the #3303 mechanism (the trap flap would
