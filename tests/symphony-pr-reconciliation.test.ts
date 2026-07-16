@@ -8,6 +8,7 @@ import {
   planPullRequestAction,
   readPullRequest,
   readPullRequestForBranch,
+  scopePullRequestIssues,
 } from "../scripts/symphony-pr-state.mjs";
 
 describe("Symphony pull-request reconciliation", () => {
@@ -59,6 +60,26 @@ describe("Symphony pull-request reconciliation", () => {
         ],
       }).status,
     ).toBe("passed");
+  });
+
+  it("can scope pull-request reconciliation to the selected sprint", () => {
+    const issues = [
+      {
+        id: 1,
+        sprint: "porffor-backend",
+        selected_sprint: "porffor-backend",
+        blocked_by: [{ id: 3 }],
+      },
+      { id: 2, sprint: "current", selected_sprint: "porffor-backend" },
+      { id: 3, sprint: "current", selected_sprint: "porffor-backend", blocked_by: [{ id: 4 }] },
+      { id: 4, sprint: "foundation", selected_sprint: "porffor-backend" },
+    ];
+
+    expect(scopePullRequestIssues(issues, { sprintOnly: true }).map((issue) => issue.id)).toEqual([1]);
+    expect(
+      scopePullRequestIssues(issues, { sprintOnly: true, includeDependencies: true }).map((issue) => issue.id),
+    ).toEqual([1, 3, 4]);
+    expect(scopePullRequestIssues(issues).map((issue) => issue.id)).toEqual([1, 2, 3, 4]);
   });
 
   it("requeues one failed head once and closes merged work", () => {

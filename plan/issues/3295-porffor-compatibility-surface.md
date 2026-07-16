@@ -1,9 +1,11 @@
 ---
 id: 3295
 title: "Porffor backend P0: freeze the optional IR compatibility surface"
-status: in-progress
+status: done
 assignee: ttraenkler/codex-senior-3295
-sprint: current
+sprint: porffor-backend
+pr: 3109
+completed: 2026-07-16
 created: 2026-07-16
 updated: 2026-07-16
 priority: high
@@ -57,8 +59,9 @@ depends on Porffor's experimental internal enums or module-record shape.
 
 ## Implementation record (2026-07-16)
 
-P0 is implemented in ready PR #3107. The issue remains `in-progress` until the
-PR merges; #3288 remains the tracking umbrella.
+P0 landed in PR #3107, with the independently dispatchable issue boundary and
+renamed focused test finalized in PR #3109. Both PRs are merged; #3288 remains
+the tracking umbrella and #3296 owns the next implementation slice.
 
 ### Files
 

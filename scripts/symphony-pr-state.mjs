@@ -64,6 +64,27 @@ export function planPullRequestAction(
   return { action: "requeue", failureKey };
 }
 
+export function scopePullRequestIssues(issues, { sprintOnly = false, includeDependencies = false } = {}) {
+  if (!sprintOnly) return issues;
+  const byId = new Map(issues.map((issue) => [String(issue.id), issue]));
+  const selected = issues.filter((issue) => String(issue.sprint) === String(issue.selected_sprint));
+  if (!includeDependencies) return selected;
+
+  const included = new Set(selected.map((issue) => String(issue.id)));
+  const queue = [...selected];
+  for (let index = 0; index < queue.length; index++) {
+    const issue = queue[index];
+    for (const dependency of issue.blocked_by ?? []) {
+      const dependencyId = String(dependency?.id ?? dependency?.identifier ?? dependency);
+      const dependencyIssue = byId.get(dependencyId);
+      if (!dependencyIssue || included.has(dependencyId)) continue;
+      included.add(dependencyId);
+      queue.push(dependencyIssue);
+    }
+  }
+  return issues.filter((issue) => included.has(String(issue.id)));
+}
+
 export function readPullRequest({ command = "gh", cwd, number, repository = "", timeoutMs = 30_000 }) {
   const args = [
     "pr",
