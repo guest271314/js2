@@ -5314,7 +5314,11 @@ function compileCallExpression(
       // entire test set this targets.
       const rewritten = tryEvalAsRegExpPeephole(ctx, fctx, expr);
       if (rewritten !== undefined) return rewritten;
-      const inlined = tryStaticEvalInline(ctx, fctx, expr);
+      // (#1102) Direct eval may resolve `const` string bindings to widen the
+      // constant frontier (splice = caller scope = §19.2.1.1 direct-eval
+      // semantics). Indirect eval keeps the literal-only constant surface —
+      // its global-scope semantics live on the dynamic path.
+      const inlined = tryStaticEvalInline(ctx, fctx, expr, evalKind === "direct");
       if (inlined !== undefined) return inlined;
       // (#2960) No-JS-host (standalone / wasi): the `__extern_eval` host import
       // is unsatisfiable and previously leaked into the binary, trapping only at
