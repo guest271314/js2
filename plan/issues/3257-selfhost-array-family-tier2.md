@@ -4,6 +4,7 @@ title: "Self-host stdlib: convert array-methods.ts hand-emitted Instr[] to TS (T
 status: done
 assignee: ttraenkler/sendev-3256
 completed: 2026-07-16
+pr: 3122
 sprint: current
 priority: high
 horizon: xl
