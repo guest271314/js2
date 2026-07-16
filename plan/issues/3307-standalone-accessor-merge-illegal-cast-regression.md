@@ -14,6 +14,11 @@ language_feature: object-property-descriptors
 goal: standalone-mode
 created: 2026-07-16
 related: [2992, 3246, 3274]
+# LOC-ratchet allowance (#3102): both arms are regime-gated bug fixes with
+# root-cause commentary in two pre-existing god-files — no new subsystem fits.
+loc-budget-allow:
+  - src/codegen/object-runtime-descriptors.ts
+  - src/codegen/statements/variables.ts
 origin: "flagged by fable-mop during #2992 slice-5 validation — pre-existing on current main, not caught by scoped CI suites"
 ---
 
