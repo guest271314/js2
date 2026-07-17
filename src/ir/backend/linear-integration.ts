@@ -11,12 +11,11 @@
 // → `verifyIrBackendLegality("linear")`) and lowers it through the
 // `LinearEmitter` (#1714/#2954) into a ready-to-insert `WasmFunction`.
 // Everything that does not fit demotes — with a bucketed reason — to the
-// linear DIRECT path, which remains the module driver and default.
+// linear DIRECT path, which remains the module driver and fallback.
 //
-// GATING (slice L1): the overlay only runs when `JS2WASM_LINEAR_IR=1` is set
-// (mirrors the #2980 `JS2WASM_ASYNC_CARRIER_WIDEN` instrument pattern). Flag
-// off ⇒ `generateLinearModule` is byte-identical to before this module
-// existed. The default-ON flip is slice L4 (see the #2956 slice map).
+// GATING: L4 made the proven L1-L3 families default-on. Set
+// `JS2WASM_LINEAR_IR=0` for the byte-identical direct-backend escape hatch;
+// `=1` remains accepted for explicit CI/probe runs.
 //
 // DESIGN NOTE — relation to the ratified L0 (adapter extraction): the #2956
 // spec's L0 splits `src/ir/integration.ts` into a backend-neutral core + an
@@ -67,7 +66,7 @@ import type {
   LinearRefCellLowering,
 } from "./handles.js";
 
-/** One demoted claim: which function, and the bucketed reason. */
+/** One function routed to the direct path, and its stable bucketed reason. */
 export interface LinearIrRejection {
   readonly func: string;
   /** Stable bucket key for the ratchet (scripts/check-linear-ir.mjs). */
@@ -80,6 +79,7 @@ export interface LinearIrResult {
   /** name → IR-lowered function, ready to insert at the pre-assigned slot. */
   readonly funcs: Map<string, WasmFunction>;
   readonly compiled: readonly string[];
+  /** Selector rejections plus post-claim IR demotions, in direct-path order. */
   readonly rejected: readonly LinearIrRejection[];
   /** Deferred helpers appended only after every pre-assigned user slot. */
   readonly helpers: readonly LinearIrHelper[];
@@ -90,9 +90,9 @@ export interface LinearIrHelper {
   readonly func: WasmFunction;
 }
 
-/** Slice-L1 gate: the overlay runs only under `JS2WASM_LINEAR_IR=1`. */
+/** L4 gate: default-on, with an explicit `=0` direct-backend escape hatch. */
 export function linearIrEnabled(): boolean {
-  return typeof process !== "undefined" && process.env?.JS2WASM_LINEAR_IR === "1";
+  return typeof process === "undefined" || process.env?.JS2WASM_LINEAR_IR !== "0";
 }
 
 // Report side-channel for the ratchet harness (scripts/check-linear-ir.mjs):
@@ -120,7 +120,17 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
   const result: LinearIrResult = { funcs, compiled, rejected, helpers };
   lastReport = result;
 
-  const selection = planIrCompilation(sourceFile, { experimentalIR: true });
+  // L4 folds the selector's per-function direct-path list into the same
+  // ratchet as post-claim build/verify/legality demotions. Prefix the stable
+  // selector reason so pre-claim and post-claim buckets cannot collide.
+  const selection = planIrCompilation(sourceFile, { experimentalIR: true, trackFallbacks: true });
+  for (const fallback of selection.fallbacks ?? []) {
+    rejected.push({
+      func: fallback.name,
+      reason: `select:${fallback.reason}`,
+      detail: fallback.detail,
+    });
+  }
   if (selection.funcs.size === 0) return result;
 
   const claimedDecls: { name: string; decl: ts.FunctionDeclaration; exported: boolean }[] = [];

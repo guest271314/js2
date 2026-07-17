@@ -1,6 +1,10 @@
 {
   "compiled": 8,
   "buckets": {
-    "build": 2
+    "build": 2,
+    "select:async-function": 4,
+    "select:body-shape-rejected": 24,
+    "select:call-graph-closure": 12,
+    "select:non-export-modifier": 15
   }
 }
