@@ -435,3 +435,9 @@ started on this branch.
   publication-time catch-up then merged the docs-only `fce847b1ac8` tip; it
   changed no source or test input. No branch-owned repair or P2 work was
   needed; `last_ci_retry_head` remains the recorded failed head.
+- This retry found PR head `401c8eb97a5` fully green and mergeable, with no
+  failing GitHub Actions checks. After merging current `origin/main` at
+  `1db134ff631`, typecheck, the 42 focused tests, the 82-site `pushRaw` ratchet,
+  the change-scoped LOC gate, and all 56 emit-identity records passed again.
+  The prior failures remain classified as transient GitHub HTTP 503s; no P1
+  source repair or later Porffor slice was required.
