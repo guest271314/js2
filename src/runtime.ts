@@ -7761,6 +7761,32 @@ function resolveImport(
           return undefined;
         };
       }
+      // (#1794) node:events EventEmitter listener-registering methods — the
+      // listener argument may be a WasmGC closure struct (no [[Call]]); Node
+      // validates `typeof listener === "function"` and throws
+      // ERR_INVALID_ARG_TYPE on the raw struct. Wrap it as a JS callable via
+      // the identity-CACHED dynamic bridge (`_wasmClosureDynamicWrapperCache`),
+      // so `on(h)` and `off(h)` receive the SAME wrapper and removeListener
+      // identity-matches. Direct arrow args already crossed via
+      // `__make_callback`; this covers variable-held closures.
+      if (
+        intent.className === "EventEmitter" &&
+        (m === "on" ||
+          m === "once" ||
+          m === "off" ||
+          m === "addListener" ||
+          m === "removeListener" ||
+          m === "prependListener" ||
+          m === "prependOnceListener")
+      ) {
+        return (self: any, ...args: any[]) => {
+          if (self == null) return undefined;
+          const wrappedArgs = args.map((a) => _maybeWrapCallableUnknownArity(a, callbackState));
+          const fn = self[m] ?? _sidecarGet(self, m);
+          if (typeof fn === "function") return fn.call(self, ...wrappedArgs);
+          return undefined;
+        };
+      }
       return (self: any, ...args: any[]) => {
         if (self == null) return undefined;
         // Method call — check sidecar if direct method missing
