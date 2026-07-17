@@ -1,8 +1,9 @@
 ---
 id: 3338
 title: "cli: refuse to write invalid Wasm artifacts after optimizer fallback"
-status: in-progress
+status: done
 assignee: dev-refactor
+completed: 2026-07-17
 created: 2026-07-17
 updated: 2026-07-17
 priority: high

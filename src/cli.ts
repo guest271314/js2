@@ -440,12 +440,17 @@ if (suppressedAllowlist > 0) {
 // output file is written — so a malformed artifact never escapes with a
 // success exit code. Optimizer-availability warnings stay nonfatal because the
 // preserved binary they fall back to still reaches this check and validates.
-if (!WebAssembly.validate(result.binary)) {
+// Cast to BufferSource: under TS 5.7+ the typed-array generic types this as
+// `Uint8Array<ArrayBufferLike>`, which the lib `validate`/`Module` overloads
+// (param: BufferSource) don't structurally accept without the widening — the
+// same cast `optimizedBinaryValidates` uses in src/optimize.ts.
+const binaryForValidation = result.binary as unknown as BufferSource;
+if (!WebAssembly.validate(binaryForValidation)) {
   let detail = "";
   try {
     // Constructing a Module surfaces the first engine validation detail that
     // `WebAssembly.validate` (a bare boolean) does not expose.
-    new WebAssembly.Module(result.binary);
+    new WebAssembly.Module(binaryForValidation);
   } catch (err) {
     detail = err instanceof Error ? err.message : String(err);
   }
