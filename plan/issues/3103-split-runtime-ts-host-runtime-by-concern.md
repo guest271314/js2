@@ -208,3 +208,25 @@ green (runtime.ts shrinks; new module ~205 LOC, well under the 1,500 threshold).
 Targeted vitest (`issue-2161-matchall`, `issue-1539-standalone-regex-replace`,
 `issue-3014`): green. runtime.ts is host-side JS, not in the Wasm emit path, so
 the split cannot change an emitted byte by construction.
+
+## Progress — Slice: sparse Array.prototype fast paths (dev-k, 2026-07-17)
+
+**Landed:** another bounded, byte-identical slice — the #1234 sparse-aware
+`Array.prototype.{unshift,reverse,forEach}` fast paths (for non-Array
+receivers) lifted verbatim into a new sibling module
+`src/runtime/array-proto-sparse.ts`. `runtime.ts` shrinks **-187 LOC**.
+
+| New module | Extracted | Wiring |
+| --- | --- | --- |
+| `src/runtime/array-proto-sparse.ts` | `_collectIntegerKeys`, `_arrayProtoUnshiftSparse`, `_arrayProtoReverseSparse`, `_arrayProtoForEachSparse` (all private to the module) + the `_arrayProtoSparseFastPaths` dispatch map | only `_arrayProtoSparseFastPaths` is used by `runtime.ts` (one call site in `__proto_method_call`) — exported and imported back; one-directional, no cycle |
+
+**Root-cause selection:** the whole `#1234` cluster references **nothing**
+outside itself — only JS globals (`Reflect`, `Number`, `Set`, `String`,
+`TypeError`). The 4 functions and their dispatch map move as one unit;
+confirmed **0** stray references to the four privatized symbols remain in
+`runtime.ts`.
+
+**Safety (REFACTOR — zero behavior change):** bodies moved verbatim (only added
+lines: license header, one `export` keyword, one import block). `tsc --noEmit`:
+clean. `check:loc-budget`: green. `runtime.ts` is host-side JS, not in the Wasm
+emit path, so the split cannot change an emitted byte by construction.
