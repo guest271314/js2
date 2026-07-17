@@ -329,6 +329,15 @@ export interface CompileOptions {
    */
   unionAnyRep?: boolean;
   /**
+   * (#684) Usage-based `any`-local type inference. When on (default), a
+   * function-local `any`/`unknown` identifier binding whose every use is
+   * ToNumber-invariant (strictly-numeric operators) is lowered to an unboxed
+   * `f64` slot instead of the boxed carrier, eliminating the per-read
+   * `__box_number`/`__unbox_number` round-trip. Set false to force the legacy
+   * boxed representation. See `src/checker/usage-inference.ts`.
+   */
+  useUsageInfer?: boolean;
+  /**
    * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
    * three-way true-class dispatch inside the both-tags-5 arm of
    * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),

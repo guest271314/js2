@@ -50,7 +50,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
-import { hoistedVarRetypesToConcreteRef } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate
+import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
@@ -6337,12 +6337,25 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
         if (nonSpecificCtx) initForcesExternref = true;
       }
     }
+    // (#684) Usage-narrowed f64 override for a boxed-`any` var — computed
+    // separately so the entry-init below can seed NaN (see next comment).
+    const usageF64 = initForcesExternref ? null : usageInferredLocalType(ctx, decl);
     const wasmType: ValType =
       initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, ctx)
         ? { kind: "externref" as const }
-        : resolveWasmType(ctx, varType);
+        : (usageF64 ?? resolveWasmType(ctx, varType));
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);
     const localIdx = allocLocal(fctx, name, wasmType);
+    // (#684) A hoisted `var` is `undefined` from function entry; when narrowed
+    // to an f64 slot its entry value must be `ToNumber(undefined) === NaN`, NOT
+    // the wasm default 0 — otherwise a read before the `var x = …`/`x = …`
+    // assignment (JS var-hoisting) would observe 0 instead of NaN. Seed NaN at
+    // entry, symmetric with the externref `emitUndefined` below.
+    if (usageF64 && wasmType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: NaN });
+      fctx.body.push({ op: "local.set", index: localIdx });
+      return;
+    }
     // In JS, hoisted `var` variables are `undefined` before their declaration,
     // not `null`. For externref locals, emit __get_undefined() + local.set (#737).
     if (wasmType.kind === "externref") {
@@ -6945,7 +6958,9 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
               ? { kind: "i32" }
               : isNullablePrimitiveType(varType)
                 ? { kind: "externref" }
-                : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ?? resolveWasmType(ctx, varType));
+                : (inferLetConstInitializerWasmType(ctx, fctx, decl.initializer) ??
+                  usageInferredLocalType(ctx, decl) ??
+                  resolveWasmType(ctx, varType));
         // (#3123) A let-binding declared as a FNCTOR-SUBCLASS class instance
         // (`class C extends F`, F a top-level plain function) that is
         // REASSIGNED with another static type can hold a HOST object at

@@ -2,14 +2,24 @@
 id: 684
 title: "Any-typed variable inference from usage patterns"
 horizon: l
-status: ready
+status: done
+completed: 2026-07-17
+assignee: dev-684
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-07-17
 priority: high
 feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
 sprint: current
+# (#684) Intended god-file growth: a new context field + option and the
+# wiring at the three local-slot minting sites. The analysis itself lives in
+# the new module src/checker/usage-inference.ts (not a god file).
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/codegen/statements/variables.ts
+  - src/compiler.ts
 files:
   src/codegen/expressions.ts:
     breaking:
@@ -182,3 +192,64 @@ wasm for the test262 corpus; no regression.
   are consistent; conflict → externref.
 - **Behaviour change on edge JS**: gate behind `ctx.useUsageInfer`
   flag; default on after one week of CI soak.
+
+## Resolution (2026-07-17, dev-684)
+
+Shipped a **sound, conservative** first slice — narrows `any`/`unknown`-typed
+function-**local** identifier bindings to an unboxed `f64` slot when every use is
+*ToNumber-invariant*, eliminating the per-read `__box_number`/`__unbox_number`
+round-trip.
+
+### What landed
+
+- New checker-layer module `src/checker/usage-inference.ts` (`UsageInference`
+  class). Lives above codegen, so it may use the raw `ts.TypeChecker` freely
+  (the oracle-ratchet gate scopes only `src/codegen/**`). Instantiated in
+  `create-context.ts` as `ctx.usageInference`; codegen reads it through the
+  single adapter `usageInferredLocalType(ctx, decl)` in
+  `statements/variables.ts` — **zero** direct-checker growth in the backend
+  (ratchet passes clean).
+- Wired at the three authoritative local-slot minting sites so they agree: the
+  `var` hoister (`hoistVarDecl`), the `let`/`const` pre-hoister, and
+  `localTypeForDeclaration` (main + generator-spill paths).
+- Gated by `useUsageInfer` (default **on**; `JS2WASM_USAGE_INFER=0` or
+  `{ useUsageInfer: false }` restores the legacy boxed carrier).
+
+### Soundness (why f64 is observationally equivalent)
+
+`__unbox_number === Number()` (ToNumber). Storing the local as f64 coerces every
+write via `Number(source)`, which matches the original value **iff every use
+already applies ToNumber**. The classifier only accepts strictly-numeric
+operators (`* / % - ** << >> >>> & | ^`, unary `- + ~`, `++`/`--`, matching
+compound assigns), relationals with a statically-numeric other operand, and the
+assignment target; it **defaults to bail** for everything else. Key exclusions
+found and closed during implementation:
+
+- **`+` / `+=` always bail** — they dispatch on the runtime type, so `x + 3` is
+  string *concatenation* (`"5" + 3 === "53"`) when `x` is a string. A static
+  number-hint on the other operand does not disambiguate `x`.
+- **bigint bails** — a bigint operand/initializer means bigint arithmetic, which
+  an f64 slot cannot represent (and mixing traps).
+- **uninitialized default** — a hoisted `var` is NaN-seeded at entry
+  (`ToNumber(undefined)`), not the wasm default 0; `let`/`const` require an
+  initializer (their slot has no entry-init hook), else bail.
+- **escapes bail** — `return x`, call arguments, `===`/`==`, truthiness,
+  template interpolation, property/index, and **closure capture** all bail.
+
+### Scope / follow-ups
+
+Parameters (ABI-affecting, needs the #743 call graph), destructuring/for-of/in
+bindings, module globals, and the `let x; x = …` (no-initializer) split form are
+deliberately out of this slice.
+
+## Test Results
+
+`tests/issue-684.test.ts` — 36/36 pass. Covers representation (f64 slot, no
+box/unbox, NaN-seeded var, flag-off boxed), narrowed semantics (mul/div/mod/pow/
+bitwise/shift/unary/inc-dec/compound/string-ToNumber/NaN), soundness bails
+(`+` concat, truthiness, escape, closure, bigint, return, relational-only), and
+an on-vs-off differential battery. Regression batches (any-plus-string,
+any-relational, coercion, closures, generators/spill, hoisting, number-arrays)
+show **no new failures** — every failure reproduces identically with
+`JS2WASM_USAGE_INFER=0`, confirming they are pre-existing and independent of this
+change.

@@ -123,6 +123,21 @@ function inferArrayVecType(ctx: CodegenContext, decl: ts.VariableDeclaration): V
  *  that resolveWasmType would produce for the TS return type (e.g. string[]). */
 const HOST_ARRAY_STRING_METHODS = new Set(["split"]);
 
+/**
+ * (#684) Usage-based `any`-local override. Returns an unboxed `f64` ValType when
+ * the (checker-layer) usage-inference pass proved every use of this
+ * `any`/`unknown`-typed local binding is ToNumber-invariant — otherwise `null`,
+ * leaving the caller's boxed-carrier resolution in place. Gated by
+ * `ctx.useUsageInfer`. This is the SINGLE codegen entry point for the inference,
+ * shared by all local-slot minting sites (var hoister, let/const pre-hoister,
+ * `localTypeForDeclaration`) so every site agrees on the slot type.
+ */
+export function usageInferredLocalType(ctx: CodegenContext, decl: ts.VariableDeclaration | undefined): ValType | null {
+  if (!decl || !ctx.useUsageInfer) return null;
+  if (!ts.isIdentifier(decl.name)) return null;
+  return ctx.usageInference.scalarForDecl(decl) === "number" ? { kind: "f64" } : null;
+}
+
 function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.VariableDeclaration): ValType {
   if (isNullablePrimitiveType(type)) return { kind: "externref" };
   // (#2806) A `var x = (void 0)` binding needs an externref slot (the same one
@@ -133,7 +148,7 @@ function localTypeForDeclaration(ctx: CodegenContext, type: ts.Type, decl?: ts.V
   // stay numeric for the delete/undefined f64-sentinel machinery (#1112). See
   // `varBindingNeedsExternrefForUndefined`.
   if (varBindingNeedsExternrefForUndefined(decl, ctx)) return { kind: "externref" };
-  return resolveWasmType(ctx, type);
+  return usageInferredLocalType(ctx, decl) ?? resolveWasmType(ctx, type);
 }
 
 /**
