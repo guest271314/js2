@@ -1,7 +1,8 @@
 ---
 id: 3341
 title: "STRICT_IR_REASONS hardening — per-reason (NOT a corpus-zero flip); doc-correction shipped, real per-reason work remains"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-h
 sprint: current
 created: 2026-07-17
 priority: medium
@@ -123,3 +124,31 @@ category) are NOT in scope here — only the reasons already at zero.
 - `plan/issues/2855-ir-frontend-migration-ratchet-buckets-to-zero.md` updated
   to reflect this slice as done against its own AC (don't close #2855 itself —
   `body-shape-rejected` remains open via #2856).
+
+## Slice B — done (dev-h, 2026-07-17)
+
+Activated the `STRICT_IR_BUILD_ERRORS` promotion vector (the orthogonal,
+lowest-risk slice per the arch plan). Promoted the IR name-repoint **invariant**
+class — the three `ir/integration: unknown {function,global,type} ref` throws
+(`src/ir/integration.ts:1647/1651/1656`) — from a silent legacy demotion
+(`severity:"warning"`) to a hard compile error (`severity:"error"`).
+
+Rationale: when the selector CLAIMS a function, the IR builder emits refs by
+name to entities it created; a resolve miss is a builder↔finalize desync bug
+(late-funcidx name-repoint family), never an unlowerable program. Promotion can
+therefore only fire on a compiler regression — a strict no-op on all valid code
+(the 13-file corpus reports zero of these; `check:ir-fallbacks --verbose`
+confirmed corpus-clean, "Post-claim demotions … (none)").
+
+- `src/codegen/index.ts` — three substrings added to `STRICT_IR_BUILD_ERRORS`
+  (was empty) with rationale comment.
+- `tests/issue-3341-slice-b.test.ts` — asserts `formatIrPathFallbackDiagnostic`
+  promotes each invariant message to `severity:"error"` and still demotes an
+  ordinary non-strict build error to `warning`. Mirrors the
+  `tests/issue-1850.test.ts` seam-level test pattern.
+- The `#1923` injected-build-throw seam is deliberately NOT promoted (it drives
+  the demotion-metering test; promoting it would break that path).
+
+**Remaining:** Slice A (split `param-type-not-resolvable` → promote
+`param-type-internal-desync`) and Slice C (doc/citation reconciliation) — issue
+stays `in-progress` until the headline per-reason promotion (Slice A) lands.
