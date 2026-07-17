@@ -1,19 +1,28 @@
 ---
 id: 3155
 title: "standalone: object spread / Object.assign / Object.keys-values order + object→primitive gaps (unmasked by the #86 vacuous-standalone audit)"
-status: ready
+status: done
+completed: 2026-07-17
 sprint: current
 created: 2026-07-11
-updated: 2026-07-16
+updated: 2026-07-17
 priority: medium
 horizon: m
 feasibility: medium
 area: codegen, runtime
 goal: standalone-mode
-related: [86, 2131, 2746, 2804]
+related: [86, 2131, 2746, 2804, 3342]
 origin: "#86 {standalone:true}-option-ignored audit (fable-wasm, 2026-07-11) — 3 tests were asserting standalone behavior while vacuously running gc-host; the real standalone lane fails."
 loc-budget-allow:
   - src/compiler.ts
+  # (#3155) the native standalone externref-join `compileArrayJoinExternNative`
+  # must live beside `compileArrayJoinExtern` in array-methods.ts (+~100 LOC).
+  - src/codegen/array-methods.ts
+coercion-sites-allow:
+  # (#3155) the native externref-join mirrors compileArrayJoinNative's existing
+  # `__extern_toString` element-ToString (§7.1.17) — same coercion vocabulary,
+  # relocated into the new externref-receiver arm, not novel hand-rolling.
+  - src/codegen/array-methods.ts
 ---
 
 # #3155 — standalone object spread / assign / key-enumeration gaps
@@ -82,3 +91,45 @@ root); listing them here so the acceptance measurement includes them.
   regressions.
 - `built-ins/Object/{keys,values,assign,getOwnPropertyNames}` + object-spread
   standalone test262 improve (measure).
+
+## Resolution (2026-07-17, opus-c)
+
+**Measured first.** Compiling the issue's cases with `target: "standalone"` and a
+`WebAssembly.Module.imports` probe pinned the concrete failure: the
+`Cannot convert object to primitive value` symptom is the **externref-array
+`join`** path. `Object.keys(o).join(sep)` leaked `env::__array_join_any` (an
+unsatisfiable host import → instantiate-against-`{}` fails). The other listed
+sub-parts were already host-free on current main: object **spread** (`{...a,z}`),
+**Object.assign**, **Object.keys(o).length**, and **Object.entries(o).length**
+all compile to zero `env::*` imports and run correctly standalone.
+
+**Fix.** Added `compileArrayJoinExternNative` (`src/codegen/array-methods.ts`):
+under `noJsHost`, `compileArrayJoinExtern` now walks the externref array
+natively — length via `__extern_length`, each element via `__extern_get_idx`
+then §7.1.17 ToString via `__extern_toString` (all native-registered standalone,
+the same helpers the receiver's own `.length` already uses host-free) — and folds
+with the shared `emitStringJoinFold` over the native-string representation,
+mirroring the WasmGC-vec `compileArrayJoinNative`. Host lane is byte-identical
+(guarded on `noJsHost`; the 23 host-lane assertions in issue-2131/2746/2804 stay
+green).
+
+**Verified fixed standalone:** `Object.keys(o).join()` / `.join(",")` /
+multi-char sep / integer-key canonical order (`"1,2,b,a"`) / empty-object (`""`)
+/ single-key — all host-free and correct.
+
+**Delivered:**
+
+- `tests/issue-3155.test.ts` — permanent regression guard (#2093), in-wasm
+  correctness + zero-`env::*`-import assertions.
+- `tests/issue-2131.test.ts` — the vacuous `it.skip("standalone …")` is
+  **un-skipped** and converted to a real in-wasm check (integer-key order), now
+  passing on the true standalone lane.
+
+**Carved out to #3342:** `Object.values(o).join(...)` and
+`Object.getOwnPropertyNames(o).join(...)` take a **different** dispatch arm — the
+join receiver-type probe misclassifies their result as a `Uint8ClampedArray`, so
+they route to the TypedArray-`join` host lowering and leak
+`env::Uint8ClampedArray_join`. Distinct root cause (type inference / probe
+misread), unrelated to the externref-join fix here — tracked in #3342. The
+describe.skip standalone blocks in issue-2746/2804 remain skipped because they
+exercise those still-gapped `Object.values` / `getOwnPropertyNames` paths.
