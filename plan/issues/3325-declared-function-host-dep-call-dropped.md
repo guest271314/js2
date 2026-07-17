@@ -1,8 +1,9 @@
 ---
 id: 3325
 title: "declare function host-dep call is silently dropped (env import bound but never called)"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
+assignee: ttraenkler/opus-b
 goal: npm-library-support
 feasibility: medium
 depends_on: []
@@ -12,7 +13,10 @@ language_feature: host-interop
 task_type: bug
 horizon: s
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-17
+completed: 2026-07-17
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 # #3325 — `declare function` host-dep call silently dropped
@@ -59,3 +63,40 @@ with a `Uint8Array` arg (the #1793 zero-copy probe).
   marshaled arg.
 - A missing dep at instantiation produces a clear link/runtime error, not a
   silent no-op.
+
+## Resolution (opus-b, 2026-07-17)
+
+**Not a codegen drop — a runtime resolution miss.** WAT inspection confirmed
+the call site is emitted correctly: `$test` does `f64.const 7` → `call
+$__box_number` → `call $inspect_import`. The import intent for an ambient
+`declare function f` is `{ type: "builtin", name: "f" }`. In
+`resolveImport` (`src/runtime.ts`, the `case "builtin"` block), every
+recognised builtin — the internal `__*` helpers and the named runtime
+primitives (`parseInt`, `JSON_stringify`, `Promise_*`, …) — returns before the
+terminal fallback `return () => {};`. A user-level ambient name matches nothing,
+hit that fallback, and resolved to a **no-op that ignored `deps`** — so the
+call ran but did nothing.
+
+**Fix** (`src/runtime.ts`, terminal fallback of the `builtin` case):
+
+1. If `deps[name]` is a function → wire the import to it (`(...args) =>
+   userDep(...args)`).
+2. If `deps[name]` is a non-function value → expose it as a zero-arg accessor.
+3. If no dep → keep the historical no-op.
+
+**Scope note — acceptance criterion 2 (missing dep → clear error) is deferred.**
+An earlier revision returned a stub that threw a clear `TypeError` for a
+called-but-undepped user-facing (non-`__`) ambient name. That **regressed the
+merged-state test262 gate** (bot park on PR #3211): the test262 harness
+legitimately declares ambient host functions it does not always supply (print/
+log-style stubs) and relies on the no-op, so throwing flipped passing tests to
+failing. The dep-wiring (1–2) is the real fix for the reported bug; the
+"missing dep" diagnostic would need to be gated to non-harness embedder contexts
+— tracked as a possible follow-up.
+
+**Tests:** `tests/issue-3325.test.ts` (6) — numeric/string arg marshaling,
+per-call-site invocation, missing-dep-is-no-op, unused-import instantiation,
+non-function dep exposure. Adjacent declare-function / host-interop suites
+(issue-1042/1052/1494/1347/2903*/2635/2693*/2752/1636/3125*/3137/1695/
+promise-combinators) show no NEW failures — the pre-existing issue-820m (4) and
+import-resolver (8) failures reproduce identically on clean `main`.

@@ -1,0 +1,120 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// #3101 / E1 — the generic boxed-any runtime operations the dispatch loop
+// delegates to (design constraint 1; doc §13 "helpers, not the loop").
+//
+// ── The free value-representation bridge (the crux, §4.2) ─────────────────────
+// Every op here is written as the plain native TypeScript operation on
+// `any`-typed operands. That single authoring choice makes the value bridge
+// FREE in both directions:
+//   • In Node (E1), `a + b` on two real JS values runs JavaScript's own `+`
+//     (full ToPrimitive/ToString/ToNumber), so the interpreter's arithmetic is
+//     bit-identical to `eval` by construction — the differential harness's whole
+//     premise.
+//   • When js2wasm self-compiles this file (E2), `a + b` on two `any` operands
+//     lowers to the AOT `__any_add` generic runtime op (verified in
+//     `src/codegen/binary-ops.ts` — `compileAnyBinaryDispatch`). Likewise `===`
+//     → the strict-eq helper (preserving `ref.eq` object identity), member
+//     access → `__dyn_member_get`/`__extern_set`, `typeof` → the typeof helper.
+// So ToPrimitive/ToNumber genuinely live in these helpers, never in the loop,
+// and no opcode carries a runtime-type assumption (acceptance #4).
+//
+// These functions are pure and fully inside the js2wasm-compilable subset.
+
+import type { JSValue } from "./types.js";
+
+// ── arithmetic ───────────────────────────────────────────────────────────────
+// NB operand order: the ISA computes `acc = op(regs[r], acc)`, so the caller
+// passes (left = regs[r], right = acc). Order matters for `-`,`/`,`%`,`<`,`<=`
+// and string concatenation — the emitter is responsible for landing the syntactic
+// left operand in the register and the right in the accumulator.
+export function anyAdd(a: JSValue, b: JSValue): JSValue {
+  return a + b;
+}
+export function anySub(a: JSValue, b: JSValue): JSValue {
+  return a - b;
+}
+export function anyMul(a: JSValue, b: JSValue): JSValue {
+  return a * b;
+}
+export function anyDiv(a: JSValue, b: JSValue): JSValue {
+  return a / b;
+}
+export function anyMod(a: JSValue, b: JSValue): JSValue {
+  return a % b;
+}
+export function anyNeg(a: JSValue): JSValue {
+  return -a;
+}
+
+// ── logical / type ───────────────────────────────────────────────────────────
+export function anyLogicalNot(a: JSValue): JSValue {
+  return !a;
+}
+export function anyTypeof(a: JSValue): JSValue {
+  return typeof a;
+}
+/** ToBoolean — the JumpIfTrue / JumpIfFalse / Not truthiness test (doc: "ToBoolean via __is_truthy"). */
+export function isTruthy(a: JSValue): boolean {
+  return !!a;
+}
+
+// ── comparison ───────────────────────────────────────────────────────────────
+export function anyLooseEq(a: JSValue, b: JSValue): JSValue {
+  // Intentional abstract (`==`) equality — the `Eq` opcode's whole purpose.
+  // biome-ignore lint/suspicious/noDoubleEquals: `Eq` implements JS `==`.
+  return a == b;
+}
+export function anyStrictEq(a: JSValue, b: JSValue): JSValue {
+  return a === b;
+}
+export function anyLt(a: JSValue, b: JSValue): JSValue {
+  return a < b;
+}
+export function anyLe(a: JSValue, b: JSValue): JSValue {
+  return a <= b;
+}
+
+// ── dynamic property access (the SAME MOP the AOT path uses — #3053/#3031) ────
+// GetProp (named key from the const pool) and GetElem (dynamic key in a
+// register) are one operation `obj[key]`; the opcodes differ only in where the
+// key comes from. Prototype chain / getters / Proxy semantics come free via JS's
+// own member access in Node, and via `__dyn_member_get` in js2wasm.
+export function anyGet(obj: JSValue, key: JSValue): JSValue {
+  return obj[key];
+}
+/** Assign and return the assigned value (JS assignment-expression semantics). */
+export function anySet(obj: JSValue, key: JSValue, value: JSValue): JSValue {
+  obj[key] = value;
+  return value;
+}
+
+// ── object / array literal builders (%ObjectLiteral% / %ArrayLiteral%) ────────
+// The emitter lowers object/array literals to these builtins rather than
+// dedicated opcodes (doc "Emitter notes" — fewer ops, same cost class).
+
+/** Build `{ k0: v0, k1: v1, … }` from a flat [key, value, key, value, …] window. */
+export function buildObjectLiteral(pairs: JSValue[]): JSValue {
+  const obj: JSValue = {};
+  let i = 0;
+  const n = pairs.length;
+  for (;;) {
+    if (i + 1 >= n) break;
+    obj[pairs[i]] = pairs[i + 1];
+    i += 2;
+  }
+  return obj;
+}
+
+/** Build `[ e0, e1, … ]` from the element window. */
+export function buildArrayLiteral(elems: JSValue[]): JSValue {
+  const arr: JSValue = [];
+  let i = 0;
+  const n = elems.length;
+  for (;;) {
+    if (i >= n) break;
+    arr[i] = elems[i];
+    i += 1;
+  }
+  return arr;
+}
