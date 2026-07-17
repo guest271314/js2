@@ -7,6 +7,9 @@ loc-budget-allow:
   - src/codegen/async-cps.ts
   - src/codegen/expressions.ts
   - src/runtime.ts
+regressions-allow:
+  count: 1100
+  reason: "#3227 S4's own purpose (async post-drain verdict re-read in the CI worker lane, ORACLE_VERSION 6->7) produces exactly this reclassification shape -- the S1-approved honesty regression (lead-approved 2026-07-16, precedent #3086) finally materializing at corpus scale because S1's re-read never reached scripts/test262-worker.mjs. merge_group run 29558462964: 1007 non-excused wasm-change regressions, verified 100% async-flagged tests (0 non-async, checked per-file frontmatter against the merged report), categories assertion_fail 972 / other 15 / runtime_error 15 / type_error 4 / range_error 1 -- premature sync passes correctly becoming honest post-drain fails, clustered on async-gen yield* abrupt-completion shapes (class/elements 200+200, async-gen-method* 56x4, object/method-definition 58). Traps all flat (null_deref 184->184, illegal_cast 87->87, oob 51->51, unreachable 8->8), zero new. Net -659 (33294->32635), 348 improvements (vacuous->honest pass). Ceiling: 1007 + ~93 margin."
 sprint: current
 priority: high
 horizon: xl
