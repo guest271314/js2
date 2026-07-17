@@ -18,6 +18,7 @@ complexity: M
 related: [2143, 2787, 3008, 3337]
 origin: "2026-07-17 stronger-model current-origin/main audit: root baseline records two now-valid malformed-Wasm guards and a WASI it.fails unexpected pass as ordinary failures"
 ---
+
 # #3340 - Keep expected-failure inversions out of the root baseline
 
 ## Problem

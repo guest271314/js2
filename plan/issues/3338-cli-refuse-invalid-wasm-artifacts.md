@@ -18,6 +18,7 @@ complexity: S
 related: [953, 1858, 1927, 1950, 2143, 3024]
 origin: "2026-07-17 stronger-model current-origin/main audit: CLI exits 0 and writes a validator-rejected private-field-in artifact in default and --no-optimize modes"
 ---
+
 # #3338 - CLI must refuse invalid Wasm artifacts
 
 ## Problem

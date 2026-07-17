@@ -18,6 +18,7 @@ complexity: M
 related: [1035, 1482, 1490, 1532, 1801, 3340]
 origin: "2026-07-17 current-origin/main PO audit, corrected by second-pass probe: process.argv validates but returns an empty import-free vector"
 ---
+
 # #3337 - WASI `process.argv` must materialize through `args_get`
 
 ## Problem

@@ -19,6 +19,7 @@ related: [1032, 1571, 1693, 1927]
 needs_architect_spec: true
 origin: "2026-07-17 stronger-model current-origin/main audit: compileProject on axios/lib/core/Axios.js exhausts a 512 MB heap after about 85 seconds"
 ---
+
 # #3339 - Bound `compileProject` expansion on Axios core
 
 ## Problem
