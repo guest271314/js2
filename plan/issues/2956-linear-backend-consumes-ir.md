@@ -6,7 +6,7 @@ sprint: current
 created: 2026-07-02
 updated: 2026-07-17
 assignee: ttraenkler/fable-epsilon
-branch: symphony/porffor/2956-after-pr-3179
+branch: symphony/porffor/2956-after-pr-3200
 priority: medium
 horizon: xl
 feasibility: hard
@@ -24,10 +24,10 @@ loc-budget-allow:
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
 last_ci_retry_head: null
-last_merged_pr: 3179
+last_merged_pr: 3200
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-17T05:03:10.509Z
-pr: 3200
+claimed_at: 2026-07-17T05:46:31.184Z
+pr: 3203
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -360,3 +360,35 @@ playground corpus has no aggregate/refcell row, so
 
 **Remaining after L2:** L3 strings (after #2955) and L4 default-ON + direct
 reject-list folding. The issue remains `in-progress` for those later slices.
+
+## Execution status — L3 strings implemented (2026-07-17, porffor-codex-developer)
+
+Selector-claimed strings now use the direct linear backend's canonical i32
+arena pointer while staying on the shared representation-abstract IR
+front-end. The prerequisite #2955 capstone removed `nativeStrings` from the
+from-ast resolver surface before this slice began.
+
+- `resolveString` and the linear TypeConverter map `IrType.string` to i32;
+  linear legality now admits `string.const/concat/eq/len`, string signatures,
+  and string fields in L2 aggregates.
+- Literal materialization shares the direct backend's UTF-8 data-segment
+  registry and `__str_from_data` path. Concat, equality, UTF-16 `.length`, and
+  relational comparison resolve by name onto the existing linear runtime;
+  fully specified/one-arg `slice` uses the same runtime path as direct codegen.
+- A flag-gated `(string pointer, UTF-16 index) -> f64` helper adds the
+  previously unsupported `charCodeAt` surface. It decodes the linear UTF-8
+  storage, returns BMP code units or the requested half of an astral surrogate
+  pair, and returns NaN out of bounds.
+- String iteration and prototype methods without a representation-complete
+  linear runtime mapping remain explicit build demotions to the direct path.
+  Async, closures/`call_ref`, exceptions, and dynamic/boxed-any remain deferred
+  exactly as specified.
+
+Focused validation: `tests/issue-2956.test.ts` 18/18; linear + legality +
+cross-backend matrix 176/176; typecheck clean. The flag-off string module is
+SHA-256 byte-identical for unset vs `JS2WASM_LINEAR_IR=0`.
+
+The measured linear-IR ratchet improved and was banked:
+`compiled 6 -> 8`, `build 4 -> 2`. L4 (default-ON plus direct reject-list
+folding) is the only issue-defined slice remaining, so status stays
+`in-progress` for the next fresh continuation branch.

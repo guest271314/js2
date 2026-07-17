@@ -83,7 +83,7 @@ function checkInstr(
 // CORE-OP families (const / arithmetic / locals-as-slots / structured control
 // flow / direct call). These lower to core Wasm and `LinearEmitter` emits them
 // byte-identically to `WasmGcEmitter`. The representation-DIVERGENT families
-// (closures, dynamic boxing, strings, exceptions, non-fixed vec
+// (closures, dynamic boxing, exceptions, non-fixed vec
 // iteration, promises) stay rejected here — the linear analogue lands
 // with the production wiring (#2956). This mirrors `bytecodeInstrError`'s
 // allow-list shape; the operand-type gate (`linearValTypeError`) independently
@@ -108,6 +108,12 @@ function linearInstrError(instr: IrInstr): string | null {
     case "select":
     case "if":
     case "call":
+    // #2956 L3: strings use the direct linear backend's canonical i32 arena
+    // pointer and existing UTF-8 runtime helpers.
+    case "string.const":
+    case "string.concat":
+    case "string.eq":
+    case "string.len":
     // #2956 L2: aggregates and primitive ref-cells use i32 arena pointers,
     // with field access emitted as typed linear-memory loads/stores.
     case "object.new":
@@ -267,6 +273,7 @@ function porfforBinopLegal(op: IrBinop): boolean {
 function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
   if (backend === "wasmgc") return null;
   if (backend === "linear") {
+    if (type.kind === "string") return null;
     if (type.kind === "object") return linearAggregateTypeError(type);
     if (type.kind === "boxed") {
       const inner = asVal(type.inner);
@@ -302,6 +309,7 @@ function linearAggregateTypeError(type: Extract<IrType, { kind: "object" }>): st
       if (nested) return nested;
       continue;
     }
+    if (field.type.kind === "string") continue;
     if (field.type.kind === "boxed") {
       const inner = asVal(field.type.inner);
       if (inner && (inner.kind === "i32" || inner.kind === "f64")) continue;
