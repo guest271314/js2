@@ -13,6 +13,7 @@ goal: test262-conformance
 assignee: codex/root
 related: [3362, 3369]
 files:
+  - .github/workflows/ci.yml
   - tests/test262-original-harness.ts
   - tests/test262-runner.ts
   - tests/test262-shared.ts

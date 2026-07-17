@@ -8,12 +8,13 @@
 // sat inside a callback/body that never ran (the dropped-nested-callback class).
 // It must NOT flag a test whose callback genuinely runs (its assert bumps the
 // counter), nor a throw-based test with no assert_* calls.
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { runSyntheticTest262File } from "./test262-runner.ts";
 
-const SCRATCH = "/workspace/test262/test/zz-issue-3086";
-mkdirSync(SCRATCH, { recursive: true });
+const SCRATCH = mkdtempSync(join(tmpdir(), "js2-issue-3086-"));
 afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
 
 const META = `/*---\ndescription: #3086 general vacuity fixture\n---*/\n`;

@@ -2,12 +2,13 @@
 // executes (the dead-callback / dispatch-drop class) is scored `fail` +
 // `vacuous:true`, NOT `pass` — so host_free_pass / the standalone floor
 // structurally exclude it. A genuinely-executing callback stays `pass`.
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { runSyntheticTest262File } from "./test262-runner.ts";
 
-const SCRATCH = "/workspace/test262/test/zz-issue-2940";
-mkdirSync(SCRATCH, { recursive: true });
+const SCRATCH = mkdtempSync(join(tmpdir(), "js2-issue-2940-"));
 afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
 
 const META = `/*---
