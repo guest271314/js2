@@ -27,7 +27,7 @@ import type { IrVecLowering, LinearVecLowering } from "../src/ir/backend/handles
 import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
 import { lowerIrFunctionToWasm } from "../src/ir/lower.js";
 import { emitBinary } from "../src/emit/binary.js";
-import { irVal, type IrLowerResolver } from "../src/ir/index.js";
+import { defaultOperationsForLayout, irVal, planLinearVectorLayout, type IrLowerResolver } from "../src/ir/index.js";
 import type { BlockType, Instr, ValType, WasmFunction, WasmModule } from "../src/ir/types.js";
 
 const wasmgc = new WasmGcEmitter();
@@ -40,7 +40,22 @@ const gcVec: IrVecLowering = {
   arrayTypeIdx: 4,
   elementValType: { kind: "f64" },
 };
-const linVec: LinearVecLowering = { elementValType: { kind: "f64" } };
+function linearVec(elementValType: ValType): LinearVecLowering {
+  const layout = planLinearVectorLayout(irVal(elementValType));
+  const operations = defaultOperationsForLayout(layout);
+  return {
+    elementValType,
+    linearMemory: {
+      layout,
+      allocate: operations.find((operation) => operation.family === "vector" && operation.operation === "allocate")!,
+      initializeElement: operations.find(
+        (operation) => operation.family === "vector" && operation.operation === "initialize-element",
+      )!,
+    },
+  };
+}
+
+const linVec = linearVec({ kind: "f64" });
 
 describe("#1714 vec primitives diverge per backend (same intent, two emitters)", () => {
   it("emitVecLen: WasmGC struct.get vs linear i32.load@8", () => {
@@ -81,7 +96,7 @@ describe("#1714 vec primitives diverge per backend (same intent, two emitters)",
 
   it("emitElemGet stride follows elementValType (i32 → stride 4, i32.load)", () => {
     const lin: Instr[] = [];
-    linear.emitElemGet({ elementValType: { kind: "i32" } }, lin);
+    linear.emitElemGet(linearVec({ kind: "i32" }), lin);
     expect(lin).toEqual([
       { op: "i32.const", value: 4 },
       { op: "i32.mul" },

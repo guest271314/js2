@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import type { IrModule, IrType } from "../../nodes.js";
+import type { LinearMemoryPlan } from "../../analysis/linear-memory-plan.js";
+import { forEachInstrDeep, type IrModule, type IrType } from "../../nodes.js";
 import { lowerIrFunctionBody } from "../../lower.js";
 import { verifyIrBackendLegality } from "../legality.js";
 import type { PorfforRendererInput } from "./compat.js";
@@ -18,6 +19,8 @@ export interface LowerIrModuleToPorfforOptions {
   /** Renderer entry name. Null/omitted emits no C main, useful for embedding/tests. */
   readonly entry?: string | null;
   readonly prefs?: Readonly<Record<string, unknown>>;
+  /** Target-neutral layout/allocation authority required by heap instructions. */
+  readonly memoryPlan?: LinearMemoryPlan;
 }
 
 /**
@@ -33,6 +36,40 @@ export function lowerIrModuleToPorffor(
   const assembler = new PorfforModuleAssembler();
   const types = new PorfforTypeConverter();
   assembler.setPreferences(options.prefs ?? {});
+
+  const hasPlannedHeap = module.functions.some((func) =>
+    func.blocks.some((block) =>
+      block.instrs.some((instr) => {
+        let found = false;
+        forEachInstrDeep(instr, (nested) => {
+          if (
+            nested.kind === "object.new" ||
+            nested.kind === "object.get" ||
+            nested.kind === "object.set" ||
+            nested.kind === "vec.new_fixed" ||
+            nested.kind === "vec.len" ||
+            nested.kind === "vec.get" ||
+            nested.kind === "vec.set"
+          ) {
+            found = true;
+          }
+        });
+        return found;
+      }),
+    ),
+  );
+  if (hasPlannedHeap && !options.memoryPlan) {
+    throw new Error("porffor backend heap lowering requires a shared LinearMemoryPlan");
+  }
+  if (options.memoryPlan) {
+    if (options.memoryPlan.policy !== "arena-v1") {
+      throw new Error(`porffor backend P4 supports the arena-v1 memory policy, got '${options.memoryPlan.policy}'`);
+    }
+    if (options.prefs?.gc !== undefined && options.prefs.gc !== false) {
+      throw new Error("porffor backend arena-v1 requires prefs.gc=false because planned pointers are not GC roots");
+    }
+    assembler.bindMemoryPlan(options.memoryPlan);
+  }
 
   for (const global of options.globals ?? []) {
     const slots = types.convertType(global.type);

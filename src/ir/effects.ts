@@ -149,6 +149,7 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "object.set":
     case "class.set":
     case "refcell.set":
+    case "vec.set":
       fx.writesHeap = true;
       break;
     // Call-like: may read AND write arbitrary heap state. `extern.prop` can

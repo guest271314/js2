@@ -131,6 +131,7 @@ function linearInstrError(instr: IrInstr): string | null {
     case "vec.new_fixed":
     case "vec.len":
     case "vec.get":
+    case "vec.set":
     case "while.loop":
     case "for.loop":
     // #2952 slice 2 — br.label lowers to a core-Wasm `br` (depth derived by
@@ -225,8 +226,15 @@ function porfforInstrError(instr: IrInstr): string | null {
     case "call":
     case "global.get":
     case "global.set":
+    case "object.new":
+    case "object.get":
+    case "object.set":
     case "slot.read":
     case "slot.write":
+    case "vec.new_fixed":
+    case "vec.len":
+    case "vec.get":
+    case "vec.set":
     case "select":
     case "if":
     case "early.return":
@@ -291,9 +299,20 @@ function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
     if (!v) return `bytecode backend does not support IR type '${type.kind}'`;
     return bytecodeValTypeError(v);
   }
+  if (type.kind === "object") return porfforAggregateTypeError(type);
   const v = asVal(type);
   if (!v) return `porffor backend does not support IR type '${type.kind}'`;
   return porfforValTypeError(v);
+}
+
+function porfforAggregateTypeError(type: Extract<IrType, { kind: "object" }>): string | null {
+  for (const field of type.shape.fields) {
+    const value = asVal(field.type);
+    if (!value || (value.kind !== "i32" && value.kind !== "f64")) {
+      return `porffor backend does not support aggregate field IR type '${field.type.kind}'`;
+    }
+  }
+  return null;
 }
 
 function linearAggregateTypeError(type: Extract<IrType, { kind: "object" }>): string | null {
