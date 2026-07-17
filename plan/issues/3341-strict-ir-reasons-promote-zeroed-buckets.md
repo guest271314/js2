@@ -59,6 +59,40 @@ loc-budget-allow:
 > groups) was NOT touched here — it needs a `lower.ts` audit to confirm before
 > editing; folded into the remaining work.
 
+## Slice A — spec correction: DO NOT CLAIM as written (dev-h, 2026-07-17)
+
+**The arch Implementation Plan's Slice A (in #3244) is UNREACHABLE against the
+current code — claiming it would add a dead reason + a vacuous strict entry.**
+
+Slice A proposes peeling a `param-type-internal-desync` reason off
+`param-type-not-resolvable` for the case "the param has an explicit primitive /
+known-class annotation yet `resolveParamType` returned `null`." **That state
+cannot occur.** `resolveParamType` (`src/ir/select.ts:1159–1207`):
+
+- returns a concrete kind for **every** primitive keyword —
+  `number → "f64"` (:1161), `boolean → "bool"` (:1162), `string → "string"`
+  (:1163), `any → "dynamic"` (:1173) — never `null`;
+- returns `"object"` for **every** class/interface `TypeReferenceNode`,
+  `TypeLiteralNode`, and `ArrayTypeNode` (:1192) — never `null`.
+
+The only `null` returns with an annotation present are **legitimate
+rejections**, not desyncs: an inexpressible function-type/closure signature
+(:1178–1179) and genuinely non-lowerable type nodes (unions, tuple, literal,
+conditional, keyof, …, the fall-through :1193). Promoting any of those to a
+hard error would regress real programs. So there is **no safe, non-vacuous
+per-reason peel at these `select.ts` sites** — the reason is entirely
+legitimate here.
+
+**Where a real invariant DOES live (needs re-spec, > M):** the genuine
+"selector-claimed-but-can't-lower" desync is at the **`resolvePositionType`
+layer** (`src/codegen/index.ts`) — `resolveParamType` says `"object"`
+(claimable) but `objectIrTypeFromTsType` / `resolvePositionType` then fails to
+materialize the `IrType`. Peeling _that_ into a strict reason requires tracing
+the select→codegen handoff (the override-map placeholder path), which is a
+larger analysis than the current M sizing. **Slice A needs re-spec before any
+dev claims it.** (Slice B — the `STRICT_IR_BUILD_ERRORS` name-repoint-invariant
+promotion — shipped independently in PR #3249 and is unaffected by this.)
+
 ## Original problem (premise now corrected — see re-scope note above)
 
 ## Problem
@@ -123,3 +157,166 @@ category) are NOT in scope here — only the reasons already at zero.
 - `plan/issues/2855-ir-frontend-migration-ratchet-buckets-to-zero.md` updated
   to reflect this slice as done against its own AC (don't close #2855 itself —
   `body-shape-rejected` remains open via #2856).
+
+## Implementation Plan (arch, 2026-07-17)
+
+### The core problem this plan solves
+
+The re-scope note is correct: a raw `IrFallbackReason` (e.g.
+`param-type-not-resolvable`) fires at **several** sites in `select.ts`, some
+of which are **legitimate IR-non-claimability** (a genuinely unannotated /
+dynamic param the IR cannot yet lower) and some of which are **internal
+invariant violations** (the selector had everything it needed and STILL
+failed to resolve — a bug). Promoting the whole reason to a hard error would
+red the build on the legitimate cases. **The tractable move is therefore a
+REASON SPLIT: peel the "should-never-happen" sub-case off into its OWN reason
+and promote only that.** This gives a real, mergeable, low-blast-radius first
+promotion that satisfies #2855's AC without an open-ended "make every param
+type resolvable" project.
+
+Two independent, separately-claimable promotion vectors exist. Slice A (the
+selector-reason split) is the one the issue text asks for; Slice B (the
+build-error vector) is an orthogonal, even-lower-risk promotion that is
+already wired and unused. Do them as separate PRs.
+
+### Current mechanism (anchors)
+
+- **`STRICT_IR_REASONS`** — `src/codegen/index.ts:1511` (empty set +
+  the #3341 rationale comment at `:1512–1532`).
+- **Promotion loop** — `src/codegen/index.ts:1831–1840`: iterates
+  `selection.fallbacks`, and for any `fb.reason ∈ STRICT_IR_REASONS`
+  calls `reportErrorNoNode(...)` (hard compile error). `trackFallbacks`
+  auto-enables when the set is non-empty (`:1796`).
+- **`STRICT_IR_BUILD_ERRORS`** — `src/codegen/index.ts:1534` (empty array);
+  `isStrictIrBuildError` (`:1542`) substring-matches the per-function
+  `compileIrPathFunctions` build-error message; `formatIrPathFallbackDiagnostic`
+  (`:1562`) promotes a match from `severity:"warning"` to `"error"`.
+- **Reason emission** — `src/ir/select.ts`: the `IrFallbackReason` union at
+  `:70–105`; `param-type-not-resolvable` is returned at `:929`(return),
+  `:961`/`:965`(binding-pattern param), `:979`/`:981`(identifier param),
+  `:1065`/`:1068`(generator). `resolveParamType` / `resolveReturnType` are the
+  resolvers whose `null` return drives these.
+
+### Slice A (M) — split `param-type-not-resolvable`, promote the invariant half
+
+**Root cause of the split.** At `select.ts:979`,
+`if (paramResolved === null) return "param-type-not-resolvable"`.
+`resolveParamType(p, mapped)` returns `null` when NEITHER the AST annotation
+NOR the propagated TypeMap entry yields a concrete primitive. There are two
+disjoint worlds inside that one `null`:
+
+1. **Legitimate** — the param has **no** explicit primitive TS annotation and
+   the TypeMap could not infer one (genuinely dynamic/unknown). The IR cannot
+   yet lower this; the legacy fallback MUST still catch it. → keep reason
+   `param-type-not-resolvable`.
+2. **Invariant violation** — the param **has** an explicit primitive
+   annotation (`n: number` / `s: string` / `b: boolean` / a class type the
+   `classShapes` registry knows) yet `resolveParamType` returned `null`. The
+   resolver should never fail here; a `null` means a resolver bug, not an
+   unlowerable program. → new reason `param-type-internal-desync`, which is
+   **genuinely unreachable on correct code** and therefore safe in
+   `STRICT_IR_REASONS`.
+
+**Changes:**
+
+**File: `src/ir/select.ts`**
+- Add `| "param-type-internal-desync"` to the `IrFallbackReason` union
+  (`:70–105`).
+- At each `param-type-not-resolvable` param site (`:961`, `:965`, `:979`,
+  and the generator sites `:1065/:1068` if they carry an explicit annotation),
+  before returning the legitimate reason, check whether the param carries an
+  explicit primitive/class annotation (`p.type` present AND
+  `resolvePositionType(p.type)` yields a concrete `IrType`). If it does yet
+  `resolveParamType` returned `null`, return `param-type-internal-desync`
+  instead. Factor this into a small helper
+  `paramNullReason(p, mapped): "param-type-not-resolvable" | "param-type-internal-desync"`
+  so the classification lives in one place.
+- Do the analogous split for the return position (`:929`) only if a
+  concrete return annotation is present → a follow-up; keep Slice A to params
+  to bound the blast radius.
+
+**File: `src/codegen/index.ts`**
+- Add `"param-type-internal-desync"` to `STRICT_IR_REASONS` (`:1511`) and
+  document why (annotation-present-but-null-resolve is a resolver bug, not an
+  unlowerable construct — the exact "genuinely unreachable" bar the `:1512`
+  comment sets).
+
+**File: `plan/log/ir-adoption.md`** (regenerate via `pnpm run gen:ir-adoption`
+after editing `scripts/gen-ir-adoption.mjs`) — add the new `BUCKETS` row
+`param-type-internal-desync` (category `unintended`, note "strict — invariant
+violation, must be zero"). The generator cross-checks the union in
+`select.ts`, so this edit is REQUIRED or the `quality` gate fails.
+
+**Guardrails / edge cases:**
+- The new reason must NOT appear in `scripts/ir-fallback-baseline.json` (it is
+  strict, not budgeted). If `check:ir-fallbacks` reports it on the 13-file
+  corpus, that is a REAL resolver bug surfaced by the split — fix the resolver,
+  do not suppress.
+- Because `STRICT_IR_REASONS` becoming non-empty flips `trackFallbacks` on for
+  every compile (`:1796`), Slice A has a global reach — validate on **full CI /
+  merge_group**, not just local (per `project_broad_impact_validate_full_ci`).
+  A `trackFallbacks: true` run collects fallbacks it previously skipped; confirm
+  no other reason's collection path has a side effect (it shouldn't — collection
+  is pure).
+- Do not promote `param-type-not-resolvable` itself, `external-call`,
+  `call-graph-closure`, `class-method`, or the destructuring buckets — all
+  describe legitimate non-claimability (the `:1512–1527` comment enumerates
+  why).
+
+### Slice B (S) — activate the `STRICT_IR_BUILD_ERRORS` vector (orthogonal, lower risk)
+
+This vector promotes a **post-claim IR-BUILD throw** (the selector already
+said "I can lower this," then `compileIrPathFunctions` threw) — which is
+**always a bug** by construction, so it is the safest possible promotion and
+needs no split.
+
+**File: `src/codegen/index.ts`**
+- Pick ONE build-error class that is known-permanently-fixed and add its
+  message substring to `STRICT_IR_BUILD_ERRORS` (`:1534`). Candidate strings
+  are already sketched in the comment (`:1537–1539`), e.g.
+  `"class-method typeIdx parity mismatch"` — but the dev must first grep
+  `compileIrPathFunctions` (and the IR builder in `src/ir/`) for a throw whose
+  message is stable and whose underlying cause is closed, then confirm the
+  corpus never trips it (`JS2WASM_LOG_IR_FALLBACKS=1 pnpm run check:ir-fallbacks
+  -- --verbose` shows the build-error channel).
+- `isStrictIrBuildError` + `formatIrPathFallbackDiagnostic` already do the
+  promotion; no wiring change needed — this slice is purely "add one vetted
+  substring + a test."
+
+**Test:** a fixture that would previously demote-to-warning on that build
+error now hard-errors; assert `compile()` surfaces `severity:"error"`.
+
+### Slice C (S) — doc/citation reconciliation (can fold into A or B)
+
+- The `## Task` item 4 stale-citation fixes were partly shipped by the
+  #3214/#3221 doc-correction PRs; re-verify `plan/log/ir-adoption.md` and
+  `docs/architecture/codegen-axes.md` cite the ACTUAL demote sites
+  (`index.ts:~1889` selector-claimed unresolvable-types fallback and `~2390`
+  IR-build throw — confirm against current HEAD, they drift) and the
+  `lower.ts` "not yet moved" claim reflects #2953's aggregate/closure/
+  ref-coercion move.
+- Update `plan/issues/2855-ir-frontend-migration-ratchet-buckets-to-zero.md`
+  to mark the promoted reason done against its AC (do NOT close #2855 —
+  `body-shape-rejected` stays open via #2856).
+
+### Test strategy
+
+- `pnpm run check:ir-fallbacks -- --verbose` (per-file rejection breakdown) —
+  confirm the newly-strict reason is absent on the corpus.
+- Full equivalence suite (`npm test -- tests/equivalence.test.ts`) — a strict
+  reason that fires on real code fails the build; that is the signal the
+  promotion was premature. Back it out, do not suppress.
+- **Full CI / merge_group** for Slice A (global `trackFallbacks` flip).
+
+### Horizon / slice breakdown
+
+- **Slice A (M)** — split `param-type-not-resolvable` → promote
+  `param-type-internal-desync`. Dev-claimable now; the concrete "first
+  per-reason promotion" the issue asks for.
+- **Slice B (S)** — activate `STRICT_IR_BUILD_ERRORS` with one vetted build-error
+  substring. Independent PR, lower risk. Dev-claimable now.
+- **Slice C (S)** — doc/citation reconciliation + #2855 AC update. Fold into A/B.
+
+All three are ≤M and independently claimable. Recommended order: B (lowest
+risk, proves the promotion lifecycle end-to-end) → A (the headline per-reason
+split) → C alongside.
