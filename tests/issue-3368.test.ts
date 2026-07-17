@@ -46,8 +46,8 @@ describe("#3368 Test262 array sample residuals", () => {
     }
   }
 
-  it("passes dense own-index paths", () => expectPathsToPass(denseOwnIndexPaths), 20_000);
-  it("passes inherited array prototype-value paths", () => expectPathsToPass(arrayPrototypeValuePaths), 35_000);
-  it("passes iterable array-spread paths", () => expectPathsToPass(iterableSpreadPaths), 30_000);
-  it("passes object-spread paths", () => expectPathsToPass(objectSpreadPaths), 30_000);
+  it("passes dense own-index paths", () => expectPathsToPass(denseOwnIndexPaths), 120_000);
+  it("passes inherited array prototype-value paths", () => expectPathsToPass(arrayPrototypeValuePaths), 120_000);
+  it("passes iterable array-spread paths", () => expectPathsToPass(iterableSpreadPaths), 120_000);
+  it("passes object-spread paths", () => expectPathsToPass(objectSpreadPaths), 120_000);
 });

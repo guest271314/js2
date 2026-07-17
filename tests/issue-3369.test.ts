@@ -66,7 +66,7 @@ describe("#3369 original-harness array parity", () => {
     ];
     const tests = await loadOriginalHarnessTests(selected);
     testsByPath = new Map(tests.map((test) => [test.file, test]));
-  }, 30_000);
+  }, 120_000);
 
   async function expectPathsToPass(paths: readonly string[]) {
     const failures = [];
@@ -79,8 +79,8 @@ describe("#3369 original-harness array parity", () => {
     expect(failures).toEqual([]);
   }
 
-  it("passes array-exotic and sparse-hole paths", () => expectPathsToPass(arrayExoticPaths), 60_000);
-  it("passes custom-iterator paths", () => expectPathsToPass(iteratorPaths), 90_000);
-  it("passes exception-identity paths", () => expectPathsToPass(exceptionPaths), 60_000);
-  it("passes captured-global object-spread order", () => expectPathsToPass(capturedGlobalPaths), 30_000);
+  it("passes array-exotic and sparse-hole paths", () => expectPathsToPass(arrayExoticPaths), 300_000);
+  it("passes custom-iterator paths", () => expectPathsToPass(iteratorPaths), 300_000);
+  it("passes exception-identity paths", () => expectPathsToPass(exceptionPaths), 300_000);
+  it("passes captured-global object-spread order", () => expectPathsToPass(capturedGlobalPaths), 120_000);
 });

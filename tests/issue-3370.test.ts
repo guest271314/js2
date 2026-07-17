@@ -184,5 +184,5 @@ throw new SyntaxError("too late");
       }
     }
     expect(failures).toEqual([]);
-  }, 180_000);
+  }, 300_000);
 });

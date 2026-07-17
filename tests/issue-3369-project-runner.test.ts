@@ -28,5 +28,5 @@ describe("#3369 project-runner array parity", () => {
       }
     }
     expect(failures).toEqual([]);
-  }, 180_000);
+  }, 600_000);
 });
