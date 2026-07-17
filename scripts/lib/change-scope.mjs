@@ -18,7 +18,8 @@
 // BASE RESOLUTION (exactness matters — there is no committed ceiling to mask
 // an over-included diff anymore):
 //   1. `LOC_GATE_BASE` env — explicit override (tests, emergencies).
-//   2. CI merge parent: on `pull_request` / `merge_group` / `push` events the
+//   2. CI merge parent: on `pull_request` / `merge_group` / `push` /
+//      `workflow_dispatch` (#3344) events the
 //      checked-out HEAD is a synthetic merge commit created by GitHub
 //      (refs/pull/N/merge, the merge-queue group head, or the landed queue
 //      merge) whose FIRST parent is always the base side. `HEAD^1` is
@@ -65,9 +66,18 @@ export function resolveChangeBase(repoRoot) {
   if (process.env.LOC_GATE_BASE) return { base: process.env.LOC_GATE_BASE, how: "env:LOC_GATE_BASE" };
   if (gitTry(repoRoot, ["rev-parse", "--is-inside-work-tree"]) !== "true") return { base: undefined, how: "no-git" };
   const ev = process.env.GITHUB_EVENT_NAME;
-  if (process.env.GITHUB_ACTIONS === "true" && (ev === "pull_request" || ev === "merge_group" || ev === "push")) {
+  if (
+    process.env.GITHUB_ACTIONS === "true" &&
+    (ev === "pull_request" || ev === "merge_group" || ev === "push" || ev === "workflow_dispatch")
+  ) {
     // Synthetic-merge fast path (see header). Only when HEAD really is a
     // merge commit; a single-commit direct push falls through to merge-base.
+    // `workflow_dispatch` (#3344) is included so an EMERGENCY manual retrigger
+    // against a real merge-commit SHA reproduces the organic push scoping (the
+    // PR's own change-set, incl. its regressions-allow declaration). The
+    // HEAD^2 guard makes this backward-compatible: an ordinary branch-tip
+    // dispatch has a single-parent HEAD, so it no-ops here and falls through
+    // to the merge-base arm exactly as before.
     if (gitTry(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD^2"])) {
       const p1 = gitTry(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD^1"]);
       if (p1) return { base: p1, how: `ci-merge-parent(${ev})` };
