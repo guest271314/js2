@@ -21,6 +21,7 @@ origin: "#3288 P5 split: independently dispatchable allocation-policy comparison
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T17:03:36.037Z
 branch: symphony/porffor/3300
+pr: 3287
 loc-budget-allow:
   - src/codegen-linear/index.ts
   - src/compiler.ts
@@ -59,7 +60,7 @@ count, and runtime for both linear-Wasm and Porffor-C where supported.
       and benchmark commands.
 - [x] Results distinguish planner decisions from backend-specific artifact
       effects and document any unsupported comparison explicitly.
-- [ ] The issue changes are committed, pushed to `origin`, and published as a
+- [x] The issue changes are committed, pushed to `origin`, and published as a
       ready, non-draft PR before completion is reported.
 
 ## Validation
