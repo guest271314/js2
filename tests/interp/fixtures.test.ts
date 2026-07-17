@@ -100,6 +100,25 @@ describe("#3101 comparison desugarings (>, >=, !=, !== via the minimal ISA)", ()
   it("=== is strict", () => expectValue("1 === '1'", false));
   it("> evaluates operands left→right (side-effect order)", () =>
     expectValue("var s=''; var a=function(){s+='a';return 2}; var b=function(){s+='b';return 1}; a()>b(); s", "ab"));
+  // #3356 — COERCION order, one layer below evaluation order: §13.10.1 evaluates
+  // `a > b` as IsLessThan(rval, lval, LeftFirst=false); the false flag exists so
+  // ToPrimitive still runs in SOURCE order (a first, then b). A LeftFirst=true
+  // desugar (native `b < a`) coerces b first — observably wrong ("ba").
+  it("> runs ToPrimitive left-then-right (LeftFirst=false, #3356)", () =>
+    expectValue(
+      "var s=''; var a={valueOf:function(){s+='a';return 1}}; var b={valueOf:function(){s+='b';return 2}}; a>b; s",
+      "ab",
+    ));
+  it(">= runs ToPrimitive left-then-right (LeftFirst=false, #3356)", () =>
+    expectValue(
+      "var s=''; var a={valueOf:function(){s+='a';return 1}}; var b={valueOf:function(){s+='b';return 2}}; a>=b; s",
+      "ab",
+    ));
+  // IsLessThan undefined-result (NaN arm) → false, and the string arms (§7.2.13).
+  it("> with a NaN operand is false", () => expectValue("NaN > 1", false));
+  it(">= with a NaN operand is false", () => expectValue("1 >= NaN", false));
+  it("> compares two strings lexicographically", () => expectValue("'b' > 'a'", true));
+  it(">= coerces a mixed string/number pair numerically", () => expectValue("'10' >= 9", true));
 });
 
 describe("#3101 control flow + completion values", () => {
