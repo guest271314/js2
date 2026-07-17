@@ -41,10 +41,10 @@ import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
 import { LINEAR_IR_VEC_INIT_F64_FN } from "../../codegen-linear/runtime.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
-import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
+import { lowerIrFunctionBody, type IrLowerResolver, wasmValueTypeConverter } from "../lower.js";
 import type { IrFuncRef, IrGlobalRef, IrType, IrTypeRef } from "../nodes.js";
 import { planIrCompilation } from "../select.js";
-import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
+import type { FuncTypeDef, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
 import { verifyIrBackendLegality } from "./legality.js";
 import { LinearEmitter } from "./linear-emitter.js";
@@ -192,9 +192,20 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
           vecNewFuncIdx: ctx.funcMap.get("__arr_new"),
           vecInitF64FuncIdx: ctx.funcMap.get(LINEAR_IR_VEC_INIT_F64_FN),
         });
-        const body = lowerIrFunctionBody<Instr[]>(main, resolver, emitter);
+        const body = lowerIrFunctionBody(
+          main,
+          resolver,
+          emitter,
+          wasmValueTypeConverter("linear", resolver, main.name),
+        );
         const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
-        const locals = body.locals.map((local, index) => {
+        const wasmLocals = body.locals.flatMap((local) =>
+          local.slots.map((type, slot) => ({
+            name: slot === 0 ? local.name : `${local.name}$${slot}`,
+            type,
+          })),
+        );
+        const locals = wasmLocals.map((local, index) => {
           const absoluteIndex = main.params.length + index;
           if (!vecScratchLocals.has(absoluteIndex)) return local;
           // The shared lowerer allocates this scratch as a WasmGC array ref.
@@ -204,7 +215,11 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
         });
         lowered.set(name, {
           name: body.name,
-          typeIdx: body.typeIdx,
+          typeIdx: resolver.internFuncType({
+            kind: "func",
+            params: body.params.flatMap((param) => [...param.slots]),
+            results: body.results.flatMap((result) => [...result]),
+          }),
           locals,
           body: body.body,
           exported: body.exported,
@@ -280,6 +295,22 @@ function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstRe
 
   return {
     resolveFunc(ref: IrFuncRef): number {
+      // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
+      // `__vec_elem_set_<vecStructTypeIdx>` (the C2 path — element store and
+      // `.push` both emit it). On linear the sentinel typeIdx is always 0
+      // (the f64VecLayout below), and the direct runtime's
+      // `__arr_set(ptr:i32, idx:i32, val:f64) -> void` has the SAME
+      // signature and the same grow-on-OOB / zero-fill-gap / len-extension
+      // semantics as the WasmGC `ensureVecElemSet` helper (a negative-index
+      // no-op and #1977 forwarding resolution are safe supersets). Map the
+      // helper name onto it — name-based, funcIdx-shift safe.
+      if (ref.name.startsWith("__vec_elem_set_")) {
+        const arrSet = ctx.funcMap.get("__arr_set");
+        if (arrSet === undefined) {
+          throw new Error(`linear-ir: __arr_set runtime helper missing for '${ref.name}'`);
+        }
+        return arrSet;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx === undefined) {
         throw new Error(`linear-ir: no funcIdx for '${ref.name}' (selector claimed a call outside funcMap)`);
