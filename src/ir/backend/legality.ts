@@ -186,10 +186,10 @@ function bytecodeBinopLegal(op: IrBinop): boolean {
   }
 }
 
-// #3288 P1 — deliberately narrow until the structured Porffor sink lands in
-// P2. Every admitted family reaches a typed BackendEmitter primitive in
-// lower.ts. Families that still touch pushRaw or require an Instr[] sub-buffer
-// are rejected here, before a Porffor emitter can observe them.
+// #3288 P1 / #3297 P2 — scalar/control-flow Porffor profile. Every admitted
+// family reaches a typed BackendEmitter primitive in lower.ts; heap/reference
+// families and composite ops that still need a representation decision remain
+// rejected before a Porffor emitter can observe them.
 function porfforInstrError(instr: IrInstr): string | null {
   switch (instr.kind) {
     case "const":
@@ -203,22 +203,56 @@ function porfforInstrError(instr: IrInstr): string | null {
           return `porffor backend does not support const '${instr.value.kind}'`;
       }
     case "binary":
-      return instr.op.startsWith("js.")
-        ? `porffor backend does not support binary op '${instr.op}' before typed composite-op lowering`
-        : null;
+      return porfforBinopLegal(instr.op)
+        ? null
+        : `porffor backend does not support binary op '${instr.op}' before typed composite-op lowering`;
     case "unary":
       return instr.op === "ref.is_null" ? `porffor backend does not support unary op '${instr.op}'` : null;
     case "call":
     case "global.get":
     case "global.set":
+    case "slot.read":
+    case "slot.write":
     case "select":
     case "if":
     case "early.return":
     case "br.label":
     case "if.stmt":
+    case "while.loop":
+    case "for.loop":
       return null;
     default:
       return `porffor backend does not support IR instruction '${instr.kind}' before typed Porffor lowering`;
+  }
+}
+
+function porfforBinopLegal(op: IrBinop): boolean {
+  switch (op) {
+    case "f64.add":
+    case "f64.sub":
+    case "f64.mul":
+    case "f64.div":
+    case "f64.eq":
+    case "f64.ne":
+    case "f64.lt":
+    case "f64.le":
+    case "f64.gt":
+    case "f64.ge":
+    case "i32.eq":
+    case "i32.ne":
+    case "i32.and":
+    case "i32.or":
+    case "i32.lt_s":
+    case "i32.le_s":
+    case "i32.gt_s":
+    case "i32.ge_s":
+    case "i32.lt_u":
+    case "i32.le_u":
+    case "i32.gt_u":
+    case "i32.ge_u":
+      return true;
+    default:
+      return false;
   }
 }
 
