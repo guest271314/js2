@@ -1,9 +1,10 @@
 ---
 id: 3201
 title: "default lane: Array.prototype search + structural generics (indexOf/lastIndexOf/slice/splice/sort/concat/pop) (~312 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-b
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-17
 priority: high
 feasibility: hard
 task_type: bug
@@ -15,7 +16,15 @@ sprint: current
 horizon: m
 umbrella: 3185
 related: [3185, 3169, 3180, 2036]
-loc-budget-allow: [src/codegen/array-methods.ts, src/runtime.ts]
+# expando-method slice (fable-b): unknown-method host delegation lives in the
+# receiver-method ladder + the shared #3123 emitter; the vec host view's
+# sidecar traps live in runtime.ts. NOTE: keep this a block list — the
+# gate's parseFrontmatterList does not read multi-line flow arrays.
+loc-budget-allow:
+  - src/codegen/array-methods.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/calls.ts
+  - src/runtime.ts
 origin: "2026-07-12 Fable codebase audit §F2; method-family slice of #3185"
 ---
 
@@ -225,6 +234,42 @@ Still open in this family (documented above, left `ready`): huge sparse-index
 WRITES (trap on the densely-growing-backing write path), the harness-entangled
 `Array.prototype`-mutation `illegal cast` cluster, revoked-Proxy casts
 (deferred, #1355/#1472), and `splice`/`pop` sparse reads.
+
+## Progress — expando-method dispatch (Sputnik getClass cluster, ~75 files) landed (fable-b, 2026-07-17)
+
+Root cause of the single largest remaining coherent cluster (65 "result is
+Array object. Actual: null" + 10 getClass-value fails across
+splice/slice/concat `S15.4.4.*`): the Sputnik classifier idiom
+`arr.getClass = Object.prototype.toString; arr.getClass()` silently produced
+`null` — an UNKNOWN method on a statically-typed struct/vec receiver had no
+arm in the receiver-method ladder and fell to the calls.ts graceful
+drop+null fallback. Three coordinated fixes (JS-host lane only; standalone
+untouched per acceptance #5):
+
+1. `call-receiver-method.ts` — end-of-ladder arm delegates unknown methods on
+   ref/ref_null receivers to the generic `__extern_method_call` (#799 WI3 /
+   #3123 machinery).
+2. `calls.ts emitFnctorSubclassDynamicMethodCall` gains `rawStructReceiver`:
+   the receiver marshals as the RAW wasm ref, not coerceType's
+   `__make_iterable` COPY — the `_wasmStructProps` expando sidecar is keyed
+   by raw struct identity, so a copy never finds the stored method.
+3. `runtime.ts _wrapVecForHost` — the vec's array-backed host view surfaces
+   sidecar expandos in get/has (own expando shadows Array.prototype, spec
+   lookup order), callable-wrapping raw closure structs at read time
+   (module-init writes run before setExports, so write-time wrapping can't
+   resolve exports).
+
+Validated: 13/14 sampled cluster files flip fail→pass via runTest262File
+(the 14th is a different mechanism — expando `splice` on array-like, still
+open); tests/issue-3201-expando-method.test.ts 5/5; array-methods /
+object-literals / object-methods / getters-setters / prior #3201 trap-safety
+suites all green (anon-struct's 3 fails pre-exist on clean main).
+
+Still open in this family: coercion/observable semantics (fromIndex
+ToInteger, HasProperty-before-Get, SameValueZero), array-like `.call`
+receivers, sort string-order cluster (14), result species/prototype
+fidelity, huge sparse-index writes, Array.prototype-mutation casts,
+revoked-Proxy casts (deferred).
 
 ## Progress — inherited-length array-like `.call` cluster: `__extern_length` unsound probe (fable-e, 2026-07-17)
 
