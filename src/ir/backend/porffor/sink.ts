@@ -2,6 +2,7 @@
 
 import type { IrBinop, IrInstr, IrType, IrUnop } from "../../nodes.js";
 import { asVal } from "../../nodes.js";
+import type { LinearAllocationSitePlan } from "../../analysis/linear-memory-plan.js";
 import type { BlockType, Instr } from "../../types.js";
 import type { BackendEmitter } from "../emitter.js";
 import type {
@@ -11,6 +12,7 @@ import type {
   IrRefCellLowering,
   IrVecLowering,
   LinearVecLowering,
+  PlannedObjectLowering,
 } from "../handles.js";
 import type { PorfforValueSlot } from "./type-converter.js";
 
@@ -32,6 +34,8 @@ export type PorfforTypeRef =
   | PorfforValueSlot
   | { readonly kind: "local"; readonly local: PorfforLocalRef }
   | { readonly kind: "global"; readonly handle: number };
+
+export type PorfforMemoryCType = "i32" | "u32" | "f64";
 
 interface PorfforExprBase {
   readonly type: PorfforTypeRef;
@@ -61,6 +65,18 @@ export type PorfforExpr =
       readonly value: PorfforExpr;
       readonly flags: number;
     })
+  | (PorfforExprBase & {
+      readonly kind: "alloc";
+      readonly bytes: PorfforExpr;
+      readonly typeId: number;
+      readonly siteId: number;
+    })
+  | (PorfforExprBase & {
+      readonly kind: "load";
+      readonly ctype: PorfforMemoryCType;
+      readonly pointer: PorfforExpr;
+      readonly offset: number;
+    })
   | (PorfforExprBase & { readonly kind: "call"; readonly target: number; readonly args: readonly PorfforExpr[] });
 
 export type PorfforTarget =
@@ -80,6 +96,14 @@ export type PorfforStatement =
   | { readonly kind: "block"; readonly controlId: number; readonly body: readonly PorfforStatement[] }
   | { readonly kind: "loop"; readonly controlId: number; readonly body: readonly PorfforStatement[] }
   | { readonly kind: "branch"; readonly depth: number; readonly condition?: PorfforExpr }
+  | {
+      readonly kind: "store";
+      readonly ctype: PorfforMemoryCType;
+      readonly pointer: PorfforExpr;
+      readonly offset: number;
+      readonly value: PorfforExpr;
+    }
+  | { readonly kind: "gc-barrier"; readonly pointer: PorfforExpr; readonly typeId: PorfforExpr }
   | { readonly kind: "return"; readonly value: PorfforExpr | null }
   | { readonly kind: "unreachable" };
 
@@ -215,6 +239,74 @@ function irTypeSlot(type: IrType): PorfforValueSlot {
 }
 
 type VecLayout = IrVecLowering | LinearVecLowering;
+
+function asPlannedObject(layout: IrObjectStructLowering | IrClassLowering): PlannedObjectLowering {
+  if (!("linearMemory" in layout)) {
+    throw new Error("porffor backend requires a shared linear-memory object handle");
+  }
+  return layout as PlannedObjectLowering;
+}
+
+function asPlannedVec(layout: VecLayout): LinearVecLowering {
+  if (!("linearMemory" in layout)) {
+    throw new Error("porffor backend requires a shared linear-memory vector handle");
+  }
+  return layout;
+}
+
+function memoryCType(type: { readonly kind: string }): PorfforMemoryCType {
+  if (type.kind === "f64") return "f64";
+  if (type.kind === "i32") return "i32";
+  throw new Error(`porffor backend does not support planned memory value type '${type.kind}'`);
+}
+
+function allocateExpr(bytes: number, siteId: number): PorfforExpr {
+  const size: PorfforExpr = { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: bytes };
+  return {
+    kind: "alloc",
+    type: "ptr",
+    effects: PORFFOR_FX.call,
+    bytes: size,
+    // Type id zero is deliberately representation-neutral in the selected
+    // non-collecting arena. No Porffor object/array type is claimed here.
+    typeId: 0,
+    siteId,
+  };
+}
+
+function requireArenaAllocation(
+  allocation: LinearAllocationSitePlan | undefined,
+  family: string,
+): LinearAllocationSitePlan & { readonly size: { readonly kind: "constant"; readonly bytes: number } } {
+  if (!allocation) throw new Error(`porffor backend requires a planned allocation site for ${family}`);
+  if (allocation.allocationClass !== "arena") {
+    throw new Error(`porffor backend P4 supports arena allocation only; site ${allocation.id as number} is managed`);
+  }
+  if (allocation.size.kind !== "constant") {
+    throw new Error(`porffor backend requires a constant planned allocation size for ${family}`);
+  }
+  if (allocation.root.kind !== "none" || allocation.safepoints.kind !== "none" || allocation.barrier.kind !== "none") {
+    throw new Error(
+      `porffor arena allocation site ${allocation.id as number} unexpectedly requires roots, safepoints, or barriers`,
+    );
+  }
+  return allocation as LinearAllocationSitePlan & {
+    readonly size: { readonly kind: "constant"; readonly bytes: number };
+  };
+}
+
+function addPointerOffset(pointer: PorfforExpr, offset: number): PorfforExpr {
+  if (offset === 0) return pointer;
+  return {
+    kind: "binary",
+    type: "ptr",
+    effects: pointer.effects,
+    op: "+",
+    left: pointer,
+    right: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: offset },
+    comparison: false,
+  };
+}
 
 /** Scalar/control-flow BackendEmitter implementation for Porffor's tree IR. */
 export class PorfforEmitter implements BackendEmitter<PorfforSink> {
@@ -428,17 +520,110 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
     else throw new Error(`porffor backend does not support multi-value call '${symbol.name}'`);
   }
 
-  emitVecLen(_layout: VecLayout, _out: PorfforSink): void {
-    this.unsupported("vec.len");
+  emitVecLen(layout: VecLayout, out: PorfforSink): void {
+    const planned = asPlannedVec(layout).linearMemory.layout;
+    const pointer = out.pop("vec.len");
+    out.push({
+      kind: "load",
+      type: "i32",
+      effects: pointer.effects | PORFFOR_FX.readMem,
+      ctype: "u32",
+      pointer,
+      offset: planned.lengthOffset,
+    });
   }
-  emitVecDataPtr(_layout: VecLayout, _out: PorfforSink): void {
-    this.unsupported("vec data pointer");
+  emitVecDataPtr(layout: VecLayout, out: PorfforSink): void {
+    const planned = asPlannedVec(layout).linearMemory.layout;
+    out.push(addPointerOffset(out.pop("vec data pointer"), planned.elementsOffset));
   }
-  emitElemGet(_layout: VecLayout, _out: PorfforSink): void {
-    this.unsupported("element get");
+  emitElemGet(layout: VecLayout, out: PorfforSink): void {
+    const planned = asPlannedVec(layout).linearMemory.layout;
+    const [data, index] = out.popMany(2, "element get");
+    const scaled: PorfforExpr = {
+      kind: "binary",
+      type: "u32",
+      effects: index!.effects,
+      op: "*",
+      left: index!,
+      right: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: planned.elementStride },
+      comparison: false,
+    };
+    const pointer: PorfforExpr = {
+      kind: "binary",
+      type: "ptr",
+      effects: data!.effects | scaled.effects,
+      op: "+",
+      left: data!,
+      right: scaled,
+      comparison: false,
+    };
+    out.push({
+      kind: "load",
+      type: irTypeSlot({ kind: "val", val: layout.elementValType }),
+      effects: pointer.effects | PORFFOR_FX.readMem,
+      ctype: memoryCType(layout.elementValType),
+      pointer,
+      offset: 0,
+    });
   }
-  emitVecNewFixed(_layout: VecLayout, _count: number, _scratch: number, _out: PorfforSink): void {
-    this.unsupported("vec.new_fixed");
+  emitElemSet(layout: VecLayout, _valueScratch: number, out: PorfforSink): void {
+    const planned = asPlannedVec(layout).linearMemory.layout;
+    const [data, index, value] = out.sequence(out.popMany(3, "element set"));
+    const scaled: PorfforExpr = {
+      kind: "binary",
+      type: "u32",
+      effects: index!.effects,
+      op: "*",
+      left: index!,
+      right: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: planned.elementStride },
+      comparison: false,
+    };
+    out.append({
+      kind: "store",
+      ctype: memoryCType(layout.elementValType),
+      pointer: {
+        kind: "binary",
+        type: "ptr",
+        effects: data!.effects | scaled.effects,
+        op: "+",
+        left: data!,
+        right: scaled,
+        comparison: false,
+      },
+      offset: 0,
+      value: value!,
+    });
+  }
+  emitVecNewFixed(layout: VecLayout, count: number, _scratch: number, out: PorfforSink): void {
+    const linear = asPlannedVec(layout).linearMemory;
+    const allocation = requireArenaAllocation(linear.allocation, "vec.new_fixed");
+    const elements = out.sequence(out.popMany(count, "vec.new_fixed elements"));
+    const [pointer] = out.sequence([allocateExpr(allocation.size.bytes, allocation.id as number)]);
+    const capacity = Math.max(count, linear.layout.minimumCapacity);
+    out.append({
+      kind: "store",
+      ctype: "u32",
+      pointer: pointer!,
+      offset: linear.layout.lengthOffset,
+      value: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: count },
+    });
+    out.append({
+      kind: "store",
+      ctype: "u32",
+      pointer: pointer!,
+      offset: linear.layout.capacityOffset,
+      value: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: capacity },
+    });
+    elements.forEach((value, index) => {
+      out.append({
+        kind: "store",
+        ctype: memoryCType(layout.elementValType),
+        pointer: pointer!,
+        offset: linear.layout.elementsOffset + index * linear.layout.elementStride,
+        value,
+      });
+    });
+    out.push(pointer!);
   }
   emitNull(_type: IrType, _out: PorfforSink): void {
     this.unsupported("null/reference values");
@@ -467,14 +652,48 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
   emitCallRef(_typeIdx: number, _out: PorfforSink): void {
     this.unsupported("indirect calls");
   }
-  emitAggregateNew(_layout: IrObjectStructLowering, _fieldCount: number, _out: PorfforSink): void {
-    this.unsupported("heap aggregate allocation");
+  emitAggregateNew(layout: IrObjectStructLowering, fieldCount: number, out: PorfforSink): void {
+    const linear = asPlannedObject(layout).linearMemory;
+    if (fieldCount !== linear.fieldCount) {
+      throw new Error(`porffor backend aggregate arity mismatch (expected ${linear.fieldCount}, got ${fieldCount})`);
+    }
+    const allocation = requireArenaAllocation(linear.allocation, "object.new");
+    const values = out.sequence(out.popMany(fieldCount, "object.new fields"));
+    const [pointer] = out.sequence([allocateExpr(allocation.size.bytes, allocation.id as number)]);
+    linear.layout.fields.forEach((field, index) => {
+      const memory = linear.field(field.name);
+      out.append({
+        kind: "store",
+        ctype: memoryCType(memory.type),
+        pointer: pointer!,
+        offset: field.offset,
+        value: values[index]!,
+      });
+    });
+    out.push(pointer!);
   }
-  emitFieldGet(_layout: IrObjectStructLowering | IrClassLowering, _name: string, _out: PorfforSink): void {
-    this.unsupported("heap field read");
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: PorfforSink): void {
+    const field = asPlannedObject(layout).linearMemory.field(name);
+    const pointer = out.pop(`field read ${name}`);
+    out.push({
+      kind: "load",
+      type: irTypeSlot({ kind: "val", val: field.type }),
+      effects: pointer.effects | PORFFOR_FX.readMem,
+      ctype: memoryCType(field.type),
+      pointer,
+      offset: field.offset,
+    });
   }
-  emitFieldSet(_layout: IrObjectStructLowering | IrClassLowering, _name: string, _out: PorfforSink): void {
-    this.unsupported("heap field write");
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: PorfforSink): void {
+    const field = asPlannedObject(layout).linearMemory.field(name);
+    const [pointer, value] = out.sequence(out.popMany(2, `field write ${name}`));
+    out.append({
+      kind: "store",
+      ctype: memoryCType(field.type),
+      pointer: pointer!,
+      offset: field.offset,
+      value: value!,
+    });
   }
   emitThrow(_tagIdx: number, _out: PorfforSink): void {
     this.unsupported("throw");

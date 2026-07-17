@@ -819,6 +819,8 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.set":
+      return [instr.vec, instr.index, instr.newValue];
     case "vec.new_fixed":
       // #1804 — every element is an SSA use (like object.new's values).
       return instr.elements;
@@ -1275,6 +1277,18 @@ function verifyInstrTypeRules(func: IrFunction, typeOf: ReadonlyMap<IrValueId, I
               block: blockId,
             });
           }
+        }
+        break;
+      }
+      case "vec.get":
+      case "vec.set": {
+        const indexKind = valKindOf(typeOf, instr.index);
+        if (indexKind !== null && indexKind !== "i32") {
+          errors.push({
+            message: `${instr.kind} index must be i32, got ${indexKind}`,
+            func: func.name,
+            block: blockId,
+          });
         }
         break;
       }

@@ -193,6 +193,24 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     } as Instr); // computed-op
   }
 
+  emitElemSet(layout: LinearVecLowering, valueScratchLocal: number, out: Instr[]): void {
+    const linear = asLinearVec(layout);
+    const stride = linear.linearMemory.layout.elementStride;
+    if (layout.elementValType.kind !== "f64" && layout.elementValType.kind !== "i32") {
+      throw new Error(`LinearEmitter: unsupported vec.set element type '${layout.elementValType.kind}'`);
+    }
+    out.push({ op: "local.set", index: valueScratchLocal });
+    out.push({ op: "i32.const", value: stride });
+    out.push({ op: "i32.mul" });
+    out.push({ op: "i32.add" });
+    out.push({ op: "local.get", index: valueScratchLocal });
+    out.push({
+      op: layout.elementValType.kind === "f64" ? "f64.store" : "i32.store",
+      align: stride === 8 ? 3 : 2,
+      offset: 0,
+    });
+  }
+
   // #1804 / #2956 L2 — fixed number-array construction. `lower.ts` has already
   // pushed e0...eN. Allocate the canonical linear array, then consume values
   // from the top of the stack and store each at its original index through the

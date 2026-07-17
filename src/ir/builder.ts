@@ -1295,6 +1295,18 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /** Store one value into a planned dense-vector element. */
+  emitVecSet(vec: IrValueId, indexI32: IrValueId, newValue: IrValueId): void {
+    this.pushInstr({
+      kind: "vec.set",
+      vec,
+      index: indexI32,
+      newValue,
+      result: null,
+      resultType: null,
+    });
+  }
+
   /** Construct a fixed vec whose result uses the resolver's `vecRefType`, so
    * downstream `vec.get`/`.length`/`for-of` reads retain the same identity. */
   emitVecNewFixed(elements: readonly IrValueId[], elementType: IrType, vecRefType: IrType): IrValueId {
