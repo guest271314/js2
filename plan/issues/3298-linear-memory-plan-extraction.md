@@ -1,7 +1,7 @@
 ---
 id: 3298
 title: "Porffor backend P3: extract the shared target-neutral LinearMemoryPlan"
-status: in-progress
+status: in-review
 sprint: porffor-backend
 created: 2026-07-16
 updated: 2026-07-17
@@ -21,6 +21,7 @@ origin: "#3288 P3 split: independently dispatchable shared linear-memory plannin
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T13:18:45.605Z
 branch: symphony/porffor/3298
+pr: 3245
 ---
 
 # #3298 - Porffor backend P3: extract the shared target-neutral LinearMemoryPlan
@@ -54,7 +55,7 @@ consumed by both linear-Wasm and the optional Porffor backend.
 - [x] Function registration order cannot change symbolic allocator/runtime
       references before module assembly.
 - [x] Removing the optional Porffor adapter requires no planner changes.
-- [ ] The issue changes are committed, pushed to `origin`, and published as a
+- [x] The issue changes are committed, pushed to `origin`, and published as a
       ready, non-draft PR before completion is reported.
 
 ## Validation
