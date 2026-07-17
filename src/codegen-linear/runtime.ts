@@ -2324,27 +2324,26 @@ export function addLinearIrStringRuntime(mod: WasmModule): void {
   );
 }
 
-/**
- * Materialize a literal with the direct backend's canonical UTF-8 data
- * segment + `__str_from_data` path. Shared by direct AST codegen and the L3
- * IR resolver so literal layout and deduplication cannot drift.
- */
+/** Materialize a literal through canonical UTF-8 data and `__str_from_data`. */
 export function linearStringLiteralInstrs(
   ctx: LinearContext,
   value: string,
   strFromDataIdx = ctx.funcMap.get("__str_from_data"),
+  plannedBytes?: readonly number[],
 ): readonly Instr[] {
-  const encoded = new TextEncoder().encode(value);
-  let dataOffset = ctx.stringLiterals.get(value);
-  if (dataOffset === undefined) {
-    dataOffset = ctx.dataSegmentOffset;
-    ctx.stringLiterals.set(value, dataOffset);
-    ctx.dataSegmentOffset += encoded.length;
+  const encoded = plannedBytes === undefined ? [...new TextEncoder().encode(value)] : [...plannedBytes];
+  let literal = ctx.stringLiterals.get(value);
+  if (literal === undefined) {
+    literal = { offset: ctx.dataSegmentOffset, bytes: encoded };
+    ctx.stringLiterals.set(value, literal);
+    ctx.dataSegmentOffset += literal.bytes.length;
+  } else if (literal.bytes.length !== encoded.length || literal.bytes.some((byte, index) => byte !== encoded[index])) {
+    throw new Error(`linear string runtime: conflicting data bytes for ${JSON.stringify(value)}`);
   }
   if (strFromDataIdx === undefined) throw new Error("linear string runtime: __str_from_data helper missing");
   return [
-    { op: "i32.const", value: dataOffset },
-    { op: "i32.const", value: encoded.length },
+    { op: "i32.const", value: literal.offset },
+    { op: "i32.const", value: literal.bytes.length },
     { op: "call", funcIdx: strFromDataIdx },
   ];
 }

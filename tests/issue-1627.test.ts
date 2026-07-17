@@ -237,3 +237,41 @@ maybe("#1627 — GetSetRecord validation on object-literal set-like args (host m
     }
   }
 });
+
+// ── #2761 sub-cause B: set-like ARRAY argument ──
+//
+// `const s2 = [5, 6]; s2.size = 3; s2.has = fn; s2.keys = fn;` — an array
+// consumed as a set-like, not as an array. The vec crosses to the host as a
+// materialized plain JS array (`__make_iterable`'s `convertToJS`), which copied
+// only the ELEMENTS and dropped the dynamic `size`/`has`/`keys` sidecar props, so
+// native GetSetRecord read `size = undefined → NaN` and rejected the set-like.
+// `_copyVecSidecarOntoArray` now surfaces those props onto the materialized array.
+maybe("#2761 B — set-like-array argument (host mode)", () => {
+  for (const meth of SET_METHODS) {
+    const file = `${SET_PROTO}/${meth}/set-like-array.js`;
+    if (!existsSync(file)) continue;
+    it(`${meth}/set-like-array`, async () => {
+      const r = await runTest262File(file, "built-ins/Set");
+      expect(r.status, `reason: ${(r as { reason?: string }).reason ?? ""}`).toBe("pass");
+    });
+  }
+});
+
+// ── #2761 sub-cause C: set-like keys() iterator with a `return()` close ──
+//
+// `keys()` returns a `{ next(){…}, return(){…} }` object literal (not a
+// generator); native V8 drives it as a spec iterator record and closes it on
+// early exit (IteratorClose → Get(iter, "return")). The compiled iterator's
+// `next`/`return` are wasm-closure struct fields, opaque to the host ("string
+// 'next' is not a function"). `_setLikeRecordForHost` now routes the keys()
+// result through `_iteratorRecordForHost`, bridging next/return/throw callable.
+maybe("#2761 C — set-like keys() iterator-return (host mode)", () => {
+  for (const meth of ["isSupersetOf", "isDisjointFrom"]) {
+    const file = `${SET_PROTO}/${meth}/set-like-iter-return.js`;
+    if (!existsSync(file)) continue;
+    it(`${meth}/set-like-iter-return`, async () => {
+      const r = await runTest262File(file, "built-ins/Set");
+      expect(r.status, `reason: ${(r as { reason?: string }).reason ?? ""}`).toBe("pass");
+    });
+  }
+});

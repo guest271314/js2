@@ -8,6 +8,7 @@
  */
 import { ts } from "../../ts-api.js";
 import type { TypeOracle } from "../../checker/oracle.js";
+import type { UsageInference } from "../../checker/usage-inference.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
@@ -105,6 +106,17 @@ export interface CodegenOptions {
    * with #2141 (tag-5 ABI untangle).
    */
   unionAnyRep?: boolean;
+  /**
+   * (#684) Usage-based `any`-local type inference. When ON, a function-local
+   * `any`/`unknown` identifier binding whose every use is ToNumber-invariant
+   * (strictly-numeric operators) is lowered to an unboxed `f64` slot instead of
+   * the boxed carrier (`externref` / `$AnyValue`), eliminating the per-read
+   * `__box_number`/`__unbox_number` round-trip. Sound by construction — the
+   * inference (`src/checker/usage-inference.ts`) bails on any use that could
+   * observe the original non-numeric value. Default ON; set false to force the
+   * legacy boxed representation for every `any` local.
+   */
+  useUsageInfer?: boolean;
   /** (#2141 S2/S3, #2626, #2040 A1) Tag-5 boxed-VALUE equality classifier —
    *  see the `CompileOptions.tag5ValueEqClassifier` doc. Default TRUE
    *  (#2040 flip); `JS2WASM_TAG5_CLASSIFIER=0` forces the legacy regime. */
@@ -933,6 +945,16 @@ export interface CodegenContext {
    * codegen-side fact→ValType adapter performs registration separately.
    */
   oracle: TypeOracle;
+  /**
+   * (#684) Usage-based `any`-local inference oracle. Checker-layer pre-pass that
+   * answers "can this boxed-`any` local declaration be lowered to an unboxed
+   * f64?" — see `src/checker/usage-inference.ts`. Consulted at the local-slot
+   * minting sites (var hoister, let/const hoister, `localTypeForDeclaration`).
+   * Gated by `useUsageInfer`.
+   */
+  usageInference: UsageInference;
+  /** (#684) Master switch for `usageInference`. Default true. */
+  useUsageInfer: boolean;
   /** Map from function name to its absolute index (imports + locals) */
   funcMap: Map<string, number>;
   /** Map from struct/interface name to type index */

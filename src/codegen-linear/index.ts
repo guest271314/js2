@@ -251,9 +251,8 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   if (ctx.stringLiterals.size > 0) {
     const totalSize = ctx.dataSegmentOffset - DATA_SEGMENT_BASE;
     const bytes = new Uint8Array(totalSize);
-    for (const [str, offset] of ctx.stringLiterals) {
-      const encoded = new TextEncoder().encode(str);
-      bytes.set(encoded, offset - DATA_SEGMENT_BASE);
+    for (const literal of ctx.stringLiterals.values()) {
+      bytes.set(literal.bytes, literal.offset - DATA_SEGMENT_BASE);
     }
     mod.dataSegments.push({ offset: DATA_SEGMENT_BASE, bytes });
   }
@@ -413,9 +412,8 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearO
   if (ctx.stringLiterals.size > 0) {
     const totalSize = ctx.dataSegmentOffset - DATA_SEGMENT_BASE;
     const bytes = new Uint8Array(totalSize);
-    for (const [str, offset] of ctx.stringLiterals) {
-      const encoded = new TextEncoder().encode(str);
-      bytes.set(encoded, offset - DATA_SEGMENT_BASE);
+    for (const literal of ctx.stringLiterals.values()) {
+      bytes.set(literal.bytes, literal.offset - DATA_SEGMENT_BASE);
     }
     mod.dataSegments.push({ offset: DATA_SEGMENT_BASE, bytes });
   }

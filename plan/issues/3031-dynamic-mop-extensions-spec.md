@@ -9,6 +9,7 @@ assignee: ttraenkler/fable-3031 (apply slice only — released on merge; umbrell
 priority: high
 horizon: xl
 feasibility: hard
+model: fable
 reasoning_effort: max
 task_type: analysis
 area: codegen, runtime
