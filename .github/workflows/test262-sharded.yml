@@ -2086,7 +2086,15 @@ jobs:
             done <<< "$PROMOTE_FILES"
           }
           PUSHED=0
-          for attempt in 1 2 3 4 5; do
+          # #3382 — 14 attempts (was 5) with capped backoff. Under sustained
+          # two-lane merge velocity main advances between fetch and push on every
+          # attempt; a 5-attempt loop lost every retry and marked this promote job
+          # FAILURE, freezing the committed main summary + prose conformance docs.
+          # 14 attempts eventually win the race; the min(attempt*5,30)s cap bounds
+          # total wait to ~6 min. The baselines-repo push (the PUBLIC source of
+          # truth) already landed in the EARLIER step, so this only affects the
+          # committed-main audit trail.
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
             # Fetch the current tip of main and hard-reset our branch to it. -B
             # moves to a clean tip WITHOUT a rebase; --force (-f) on the checkout
             # discards the dirty tracked working-tree state the shard run left
@@ -2095,7 +2103,7 @@ jobs:
             git fetch deploykey main
             git checkout -f -B _promote_tmp deploykey/main || {
               echo "checkout of deploykey/main failed (attempt ${attempt}) — retrying"
-              sleep $((attempt * 5))
+              SLEEP=$((attempt * 5)); [ "$SLEEP" -gt 30 ] && SLEEP=30; sleep "$SLEEP"
               continue
             }
             # Re-apply the freshly-generated baseline files onto the clean tip and
@@ -2141,10 +2149,10 @@ jobs:
               break
             fi
             echo "push race lost (attempt ${attempt}) — re-anchoring on latest main and retrying"
-            sleep $((attempt * 5))
+            SLEEP=$((attempt * 5)); [ "$SLEEP" -gt 30 ] && SLEEP=30; sleep "$SLEEP"
           done
           if [ "$PUSHED" != "1" ]; then
-            echo "::error::Failed to push refreshed baseline to main after 5 attempts (persistent, not a transient race)."
+            echo "::error::Failed to push refreshed baseline to main after 14 attempts (persistent, not a transient race)."
             exit 1
           fi
 
