@@ -16,6 +16,10 @@ goal: spec-completeness
 sprint: Backlog
 related: [1627, 2681, 2686]
 parent: 1627
+# (#3102) runtime.ts is a god-file at ceiling; the B/C fix adds a small
+# vec-sidecar-copy helper + keys() iterator bridge to the host set-algebra path.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 ## Resolution (2026-07-17)

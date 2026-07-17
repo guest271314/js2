@@ -4982,16 +4982,12 @@ function _setLikeRecordForHost(
     keys: fixField("keys"),
   };
   // (#2761 sub-cause C) Bridge the `keys()` iterator. GetSetRecord drives the
-  // keys() RESULT as a spec iterator record (Call(next, iter) + Get done/value,
-  // and IteratorClose's Get(iter, "return") on early exit). When `keys()`
-  // returns a compiled iterator whose `next`/`return` are wasm-closure struct
-  // fields (a `{ next(){…}, return(){…} }` object literal, not a generator),
-  // native V8 reads `iter.next` off the opaque struct as a non-callable ("string
-  // 'next' is not a function" — the `set-like-iter-return.js` pair). Route the
-  // result through the same `_iteratorRecordForHost` shim the ES2025 Iterator
-  // helpers use, which bridges next/return/throw callable and host-mirrors
-  // struct step results. Only wraps the RETURN value, so a `keys` that is
-  // non-callable still fails GetSetRecord's IsCallable check per spec.
+  // keys() RESULT as a spec iterator record (Call(next,iter) + IteratorClose's
+  // Get(iter,"return")). A compiled `{ next(){…}, return(){…} }` iterator's
+  // methods are opaque wasm-closure struct fields ("string 'next' is not a
+  // function" — the `set-like-iter-return.js` pair), so route the result through
+  // the `_iteratorRecordForHost` shim (bridges next/return/throw callable). Only
+  // the RETURN value is wrapped, so a non-callable `keys` still fails IsCallable.
   if (typeof rec.keys === "function") {
     const rawKeys = rec.keys as (this: any, ...a: any[]) => any;
     rec.keys = function keysIterBridge(this: any, ...a: any[]): any {
@@ -5349,21 +5345,14 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
 }
 
 /**
- * (#2761 sub-cause B) Copy a vec's dynamic sidecar (non-index) own properties
- * onto a JS array materialized from it. `__make_iterable`'s `convertToJS`
- * builds a plain `new Array(len)` holding only the vec ELEMENTS; a compiled
- * `arr.size = 3; arr.has = fn; arr.keys = fn` -- an array consumed as a
- * SET-LIKE rather than as an array (the
- * `built-ins/Set/prototype/*x/set-like-array.js` family) -- stores those under
- * `_wasmStructProps`, keyed by the raw vec struct. Without surfacing them on
- * the materialized array, native `GetSetRecord` reads `size` as undefined -> NaN
- * and rejects a valid set-like. Mirrors the `_wrapVecForHost` (#3201) sidecar
- * surfacing, but eagerly onto the real array (this materialization path produces
- * a genuine `[]`, not a proxy). Closure struct values are host-callable-wrapped
- * so `has`/`keys` invoke; index-like and `length`/accessor-helper keys are
- * skipped (`length` and elements are the live array's own; `__get_`/`__set_` are
- * descriptor plumbing). A vec with no sidecar (the common case) early-returns,
- * so this is free for ordinary arrays.
+ * (#2761 sub-cause B) Copy a vec's dynamic non-index own sidecar props onto a JS
+ * array materialized from it. `__make_iterable`'s `convertToJS` builds a plain
+ * `new Array(len)` of ELEMENTS only, so an array consumed as a SET-LIKE
+ * (`arr.size/has/keys`, the `set-like-array.js` family) loses those props →
+ * native `GetSetRecord` reads `size` as NaN. Mirrors `_wrapVecForHost`'s (#3201)
+ * sidecar surfacing, eagerly onto the real array; closure values are
+ * host-callable-wrapped. Skips index/`length`/`__get_`/`__set_` keys; a vec with
+ * no sidecar (the common case) early-returns (free for ordinary arrays).
  */
 function _copyVecSidecarOntoArray(vec: any, arr: any[], exports: Record<string, Function> | undefined): void {
   const sc = _wasmStructProps.get(vec);
@@ -13125,9 +13114,7 @@ assert._isSameValue = isSameValue;
               for (let i = 0; i < len; i++) {
                 arr[i] = convertToJS(vecGet(obj, i));
               }
-              // (#2761 sub-cause B) Surface dynamic non-index own props (an
-              // array consumed as a set-like: `arr.size/has/keys`) so native
-              // GetSetRecord sees them instead of NaN.
+              // (#2761 B) Surface set-like own props (`arr.size/has/keys`).
               _copyVecSidecarOntoArray(obj, arr, exports);
               return arr;
             }
