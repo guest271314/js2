@@ -190,6 +190,10 @@ export function resolveSpillLocalValType(ctx: CodegenContext, decl: ts.VariableD
   const init = decl.initializer;
   if (init) {
     if (ts.isObjectLiteralExpression(init)) {
+      // (#802 Slice A) A proto-receiver literal is promoted to an open `$Object`
+      // (externref, standalone-only) in compileObjectLiteral — the spill slot
+      // must match.
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(init)) return { kind: "externref" };
       const forcesHostObject = init.properties.some(
         (p) =>
           ts.isGetAccessorDeclaration(p) ||
@@ -1053,7 +1057,18 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       ts.isObjectLiteralExpression(decl.initializer) &&
       ts.isIdentifier(decl.name) &&
       ctx.growableObjectLiteralVars.has(decl.name.text);
-    if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral) {
+    // (#802 Slice A) A proto-receiver object literal is built as an open `$Object`
+    // (externref) in compileObjectLiteral so `Object.setPrototypeOf(o, p)` &
+    // inherited reads work; the local must be externref so reads/writes route
+    // through `__extern_get`/`__extern_set` (via the `externrefAccessorVars` hook)
+    // and the store isn't ref.cast to the closed struct TS infers (which would
+    // trap — the value is a `$Object`, not that struct).
+    const initIsProtoReceiverLiteral =
+      ctx.standalone &&
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+    if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral || initIsProtoReceiverLiteral) {
       ctx.externrefAccessorVars.add(name);
     }
 
@@ -1093,6 +1108,10 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       decl.initializer !== undefined &&
       ts.isObjectLiteralExpression(decl.initializer) &&
       !(ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) &&
+      // (#802 Slice A) A proto receiver keeps the externref carrier (below), not
+      // the tag-6 `ref $Object` carrier — its reads/setPrototypeOf go through the
+      // externref `__extern_*` path.
+      !initIsProtoReceiverLiteral &&
       objectLiteralIsStandaloneAnyObjectCarrier(ctx, decl.initializer);
     const anyObjectCarrierTypeIdx = initIsAnyObjectCarrier ? ensureObjectRuntime(ctx).objectTypeIdx : -1;
     const wasmType: ValType =
@@ -1103,7 +1122,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       // plain-fn capture and does not fire for uncaptured bindings).
       fctx.fnctorWidenedLocals?.has(name)
         ? { kind: "externref" as const }
-        : initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
+        : initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral || initIsProtoReceiverLiteral
           ? { kind: "externref" as const }
           : initIsAnyObjectCarrier && anyObjectCarrierTypeIdx >= 0
             ? { kind: "ref_null" as const, typeIdx: anyObjectCarrierTypeIdx }

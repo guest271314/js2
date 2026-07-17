@@ -1318,6 +1318,30 @@ export function compileObjectLiteral(
     return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
 
+  // (#802 Slice A) This literal is the RECEIVER of a proto mutation
+  // (`Object.setPrototypeOf(o, p)` / `Reflect.setPrototypeOf` / `o.__proto__ =`),
+  // as detected by the `scanForDynamicProto` pre-scan. Build it as an open
+  // `$Object` instead of a closed-shape struct: `$Object` carries a mutable
+  // `$proto` (field 0) and the native setPrototypeOf/read/getPrototypeOf helpers
+  // already give it full, correct, standalone dynamic-prototype semantics — so a
+  // closed struct (which has no `$proto`, and fails `__object_setPrototypeOf`'s
+  // `ref.test $Object` in standalone → silently drops the link) is exactly what
+  // must be avoided here. The variable-local typing in statements/variables.ts +
+  // index.ts consults the SAME `ctx.dynamicProtoLiteralNodes` set so the slot is
+  // externref and stays in lockstep with this value representation. Falls through
+  // to the normal path if the `$Object` builder is unavailable (null).
+  //
+  // STANDALONE-ONLY: the dropped-link gap this fixes is standalone-only (spec §0)
+  // — in gc/host a proto receiver is already served by the host runtime's
+  // `_wasmStructProto` sidecar + host setPrototypeOf, and the gc/host inherited
+  // string-key read path (`__extern_get`) is separate host plumbing outside this
+  // slice's scope. Gate promotion to standalone so gc/host stays byte-for-byte
+  // unchanged (zero host-regression surface).
+  if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(expr)) {
+    const promoted = compileObjectLiteralAsExternref(ctx, fctx, expr);
+    if (promoted !== null) return promoted;
+  }
+
   // If this empty object literal is the initializer of a variable with widened
   // properties (from pre-pass), register the struct with those extra fields and
   // compile as a struct.new with default values for the widened fields.

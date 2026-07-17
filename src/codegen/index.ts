@@ -50,6 +50,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
+import { scanForDynamicProto } from "./dynamic-proto.js"; // (#802) object-literal proto-receiver pre-scan (Slice A)
 import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
@@ -2230,6 +2231,12 @@ export function generateModule(
     // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
     // Off by default — programs without holes are byte-identical.
     scanForArrayHoles(ctx, ast.sourceFile);
+
+    // (#802 Slice A) Detect object-literal receivers of proto-mutation ops so
+    // those literals lower to the open `$Object` (which carries a mutable proto
+    // + native setPrototypeOf/read machine). Off by default — programs that
+    // never mutate a prototype are byte-identical.
+    scanForDynamicProto(ctx, ast.sourceFile);
 
     collectDeclarations(ctx, ast.sourceFile);
 
@@ -4418,6 +4425,11 @@ export function generateMultiModule(
       scanForArrayHoles(ctx, sf);
     }
 
+    // (#802 Slice A) Whole-realm dynamic-proto receiver detection.
+    for (const sf of multiAst.sourceFiles) {
+      scanForDynamicProto(ctx, sf);
+    }
+
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);
@@ -6103,6 +6115,13 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     // resolveStructNameForExpr sees the override at every later access.
     let initForcesExternref = false;
     if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      // (#802 Slice A) A proto-receiver object literal is built as an open
+      // `$Object` (externref, standalone-only) in compileObjectLiteral; the
+      // hoisted `var` slot must be externref to match (mirrors the let/const path
+      // in statements/variables.ts via ctx.dynamicProtoLiteralNodes).
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(decl.initializer)) {
+        initForcesExternref = true;
+      }
       for (const p of decl.initializer.properties) {
         if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
           initForcesExternref = true;
@@ -6751,11 +6770,25 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
             (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
             spreadCtxType.getProperties().length === 0;
         }
-        if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
+        // (#802 Slice A) A proto-receiver object literal is promoted to an open
+        // `$Object` (externref) by compileObjectLiteral. This pre-hoist allocator
+        // is the AUTHORITATIVE let/const slot-typer, so the externref override
+        // MUST be applied here too — otherwise the slot is the inferred struct and
+        // the promoted `$Object` externref is ref.cast to it at runtime (cast
+        // fails → the receiver goes null and `o.x`/inherited reads return NaN).
+        // Registers the name in externrefAccessorVars so reads route through the
+        // dynamic `__extern_get` path. Standalone-only (gc/host keeps its existing
+        // closed-struct + host-sidecar path unchanged).
+        const initIsProtoReceiverLiteral =
+          ctx.standalone &&
+          decl.initializer !== undefined &&
+          ts.isObjectLiteralExpression(decl.initializer) &&
+          ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+        if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
         let wasmType: ValType =
-          initIsAccessorLiteral || initIsHostSpreadLiteral
+          initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral
             ? { kind: "externref" }
             : isI32Coerced
               ? { kind: "i32" }

@@ -1127,6 +1127,26 @@ export interface CodegenContext {
   newTargetGlobalIdx: number | undefined;
   classNewTargetIds: Map<string, number>;
   /**
+   * (#802) Dynamic prototype support. Set by the `scanForDynamicProto` pre-scan
+   * when the module contains any `Object.setPrototypeOf` / `Reflect.setPrototypeOf`
+   * / `o.__proto__ =` proto-mutation site. Off by default — a module that never
+   * mutates a prototype is byte-for-byte unchanged.
+   *
+   * `dynamicProtoLiteralNodes` (Slice A) holds the object-literal AST nodes that
+   * are RECEIVERS of such a mutation; `compileObjectLiteral` (and the matching
+   * variable-local typing in statements/variables.ts + index.ts) promote just
+   * those literals to the open `$Object` representation, which already carries a
+   * mutable `$proto` field and the native setPrototypeOf/read/getPrototypeOf
+   * machine — so this needs ZERO struct-layout change.
+   *
+   * `dynamicProtoClasses` (class-instance receiver NAMES) is reserved for Slice B
+   * (a conditional appended `$__proto__` struct field) and is intentionally left
+   * empty by Slice A.
+   */
+  usesDynamicProto: boolean;
+  dynamicProtoClasses: Set<string>;
+  dynamicProtoLiteralNodes: WeakSet<ts.Node>;
+  /**
    * (#2001 S1) Sparse-array hole support. Set by the `scanForArrayHoles`
    * pre-scan when the program contains any array-literal elision
    * (`OmittedExpression`). Gates the `$Hole → undefined` read-boundary guard at
