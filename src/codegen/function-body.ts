@@ -867,7 +867,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
           ? structHintForBindingPattern(ctx, param.name)
           : undefined;
       // (#3333) Host-free lanes, `any`-typed pattern (NO struct hint resolves —
-      // getTypeAtLocation(pattern) is `any`): compiling the default literal
+      // the checker types the pattern as `any`): compiling the default literal
       // against the bare externref hint materializes a typed ANONYMOUS struct
       // (`f64` fields, boxed via extern.convert_any) that the destructure's
       // dynamic `__extern_get` reader cannot reflect — every binding read NaN
