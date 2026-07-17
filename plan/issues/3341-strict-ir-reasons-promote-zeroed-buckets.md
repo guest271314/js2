@@ -59,6 +59,40 @@ loc-budget-allow:
 > groups) was NOT touched here — it needs a `lower.ts` audit to confirm before
 > editing; folded into the remaining work.
 
+## Slice A — spec correction: DO NOT CLAIM as written (dev-h, 2026-07-17)
+
+**The arch Implementation Plan's Slice A (in #3244) is UNREACHABLE against the
+current code — claiming it would add a dead reason + a vacuous strict entry.**
+
+Slice A proposes peeling a `param-type-internal-desync` reason off
+`param-type-not-resolvable` for the case "the param has an explicit primitive /
+known-class annotation yet `resolveParamType` returned `null`." **That state
+cannot occur.** `resolveParamType` (`src/ir/select.ts:1159–1207`):
+
+- returns a concrete kind for **every** primitive keyword —
+  `number → "f64"` (:1161), `boolean → "bool"` (:1162), `string → "string"`
+  (:1163), `any → "dynamic"` (:1173) — never `null`;
+- returns `"object"` for **every** class/interface `TypeReferenceNode`,
+  `TypeLiteralNode`, and `ArrayTypeNode` (:1192) — never `null`.
+
+The only `null` returns with an annotation present are **legitimate
+rejections**, not desyncs: an inexpressible function-type/closure signature
+(:1178–1179) and genuinely non-lowerable type nodes (unions, tuple, literal,
+conditional, keyof, …, the fall-through :1193). Promoting any of those to a
+hard error would regress real programs. So there is **no safe, non-vacuous
+per-reason peel at these `select.ts` sites** — the reason is entirely
+legitimate here.
+
+**Where a real invariant DOES live (needs re-spec, > M):** the genuine
+"selector-claimed-but-can't-lower" desync is at the **`resolvePositionType`
+layer** (`src/codegen/index.ts`) — `resolveParamType` says `"object"`
+(claimable) but `objectIrTypeFromTsType` / `resolvePositionType` then fails to
+materialize the `IrType`. Peeling _that_ into a strict reason requires tracing
+the select→codegen handoff (the override-map placeholder path), which is a
+larger analysis than the current M sizing. **Slice A needs re-spec before any
+dev claims it.** (Slice B — the `STRICT_IR_BUILD_ERRORS` name-repoint-invariant
+promotion — shipped independently in PR #3249 and is unaffected by this.)
+
 ## Original problem (premise now corrected — see re-scope note above)
 
 ## Problem
