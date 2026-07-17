@@ -1,7 +1,8 @@
 ---
 id: 3282
 title: "Decompose the second-level god-functions created by the Wave-B/C extractions (+ ensureAnyHelpers, + deferred object-runtime core)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-1
 sprint: current
 created: 2026-07-14
 priority: high
@@ -82,3 +83,16 @@ pass; keep it a separate slice within this issue (or its own issue) rather than 
 This is *structural* (breaks up functions), setting up the *reductive* follow-ons under #3182:
 the emit-idiom builder library (#3105) and jscpd-quantified dedup (#3259) become far easier
 once these arms are small, named helpers — decompose first, then dedup.
+
+## Slices landed
+
+- **Slice A (opus-1) — `__any_box_*` family out of `ensureAnyHelpers`.**
+  Extracted the seven tag-boxing primitives (`__any_box_null`,
+  `__any_box_undefined`, `__any_box_i32`, `__any_box_f64`, `__any_box_bool`,
+  `__any_box_string`, `__any_box_extern_s1`, `__any_box_ref`) verbatim into a
+  new same-file top-level `registerAnyBoxHelpers(ctx, addHelper, anyRef,
+  anyTypeIdx, eqHeapType)` in `any-helpers.ts`. `addHelper` is threaded in as a
+  callback so the register order + bodies are unchanged → emitted Wasm
+  byte-identical (`prove-emit-identity check`: IDENTICAL 56/56). `ensureAnyHelpers`
+  shrinks by ~205 LOC. tsc 0, biome/prettier clean. Epic remains open for the
+  unbox / eq / add families and the larger call-family functions.
