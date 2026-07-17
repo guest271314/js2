@@ -1648,9 +1648,24 @@ const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReaso
 //   "body-shape-rejected",
 
 const STRICT_IR_BUILD_ERRORS: ReadonlyArray<string> = [
-  // Empty as of #1530 — add substring patterns here when a known build
-  // error class is permanently fixed and a legacy fallback should no
-  // longer mask a real bug. Example for a future PR:
+  // #3341 Slice B — the first activated build-error promotion. These three
+  // `ir/integration: unknown … ref` throws are the IR name-repoint INVARIANT
+  // class: when the selector CLAIMS a function, the IR builder emits refs (by
+  // name) to functions / globals / types that IT created, so `resolveFunction`
+  // / `resolveGlobal` / `resolveType` (src/ir/integration.ts:1647/1651/1656)
+  // MUST resolve them. A miss is a builder↔finalize desync bug (the late-
+  // funcidx name-repoint family — see reference_1461/2191/2193), NOT an
+  // unlowerable program: no valid TS source can legitimately produce an
+  // unresolvable ref on a correctly-claimed function. So promoting these from
+  // a silent legacy demotion to a hard compile error can only fire on a
+  // compiler regression — exactly the loud, filable failure #2855 wants —
+  // while being a strict no-op on all valid code (the 13-file corpus reports
+  // zero of these; verified via `check:ir-fallbacks --verbose`).
+  "ir/integration: unknown function ref",
+  "ir/integration: unknown global ref",
+  "ir/integration: unknown type ref",
+  // Add further substring patterns here when another build-error class is
+  // permanently fixed and a legacy fallback should no longer mask a real bug.
   //   "post-hygiene verify:",
   //   "class-method typeIdx parity mismatch",
 ];
