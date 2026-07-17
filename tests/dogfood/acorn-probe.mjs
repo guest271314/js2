@@ -23,10 +23,15 @@
 //   2. The walker MUST use TYPE-SWITCHED named reads (the emitter's own pattern),
 //      not generic computed access `node[k]` (which does not descend the dynamic
 //      $Object faithfully).
-//   3. A full recursive walk over a LARGE multi-construct parse (~60+ nodes,
-//      e.g. corpus/loops.js) hits a SCALE-DEPENDENT RUNAWAY — a field read
-//      returns a spurious back-edge that only manifests at scale. Single
-//      constructs (up to ~15 nodes) walk with ±0 parity. Every probe here is
+//   3. (#3343, RESOLVED) A full recursive walk over a LARGE multi-construct
+//      parse (~60+ nodes, e.g. corpus/loops.js) USED TO hit a scale-dependent
+//      "runaway". Root cause was NOT a $Object read: reads are faithful. It was
+//      a codegen control-flow bug — a `for (let i)` loop counter was compiled to
+//      a shared module global (`$__mod_i`, because acorn has a top-level `i`)
+//      instead of a per-invocation local, so a recursive walk clobbered the
+//      outer loop's counter. Fixed in src/codegen/statements/loops.ts. This
+//      probe now expects 13/13 `match` and stays as the regression guard (a
+//      re-broken counter would show `runaway` again). Every probe is
 //      budget-guarded so the harness NEVER hangs; a runaway is reported, not hung.
 //
 // Invoke:  npx tsx tests/dogfood/acorn-probe.mjs           (human summary)
@@ -559,7 +564,7 @@ export async function runProbe({ quiet = false } = {}) {
     binaryBytes: r.binary.length,
     note: "in-Wasm AST consumer probe — arbitrates host-boundary gaps #2841/#2851/#2852 via in-Wasm named-field reads (scalar-only measurement).",
     finding:
-      "In-Wasm static named field reads are faithful (element sub-fields intact). A full recursive walk over a LARGE multi-construct parse (~60+ nodes) hits a scale-dependent runaway (spurious back-edge); single constructs (≤ ~15 nodes) walk with ±0 parity. A dynamic-$Object recursive-read fidelity limit at scale — candidate #2937 residual. See plan/issues/3308-*.md.",
+      "In-Wasm static named field reads are faithful (element sub-fields intact). The former scale-dependent recursive-walk 'runaway' (#3343) is RESOLVED — it was NOT a $Object read bug (reads are faithful) but a codegen control-flow bug: a `for (let i)` loop counter was compiled to a shared module global (acorn has a top-level `i`) instead of a per-invocation local, so a recursive walk clobbered the outer counter. Fixed in src/codegen/statements/loops.ts. This probe now expects 13/13 match and guards against regression. See plan/issues/3343-*.md.",
     summary,
     verdicts,
     singleConstructParity: parity,

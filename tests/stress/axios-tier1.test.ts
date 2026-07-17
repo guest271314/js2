@@ -39,6 +39,26 @@
 //     and the React-tier1 `mapIntoArray` finding — strong candidate
 //     for an umbrella issue covering all three libraries.
 //
+// ── Status refresh (2026-07-17, #1032 dev-1044) ────────────────────────
+//   - #TBD-3 RESOLVED: `lib/utils.js` now compiles AND validates on main
+//     (~84 KB module). The i32/f64 `&&`/`fallthru` unification family has
+//     since been fixed. Tier 1g unskipped below as a regression guard.
+//   - #TBD-2 (AxiosHeaders_set extern boxing) is now only observable when a
+//     JS npm file is compiled as the *entry* (Tier 1d/1h) — as a graph
+//     dependency its diagnostics are filtered (compiler.ts `isEntryDiag`).
+//     Compiling `lib/core/AxiosError.js` as an entry now stops EARLIER, at
+//     a TS **entry-diagnostic** wall: TS1093 "Type annotation cannot appear
+//     on a constructor declaration" (the file's JSDoc `@returns {Error}` on
+//     its constructor) + a TS2339/TS2353 cascade. These are `checkJs`-style
+//     diagnostics on untyped JS; they are fatal only for an *entry* JS file,
+//     not for the same file reached as a dependency in the real graph.
+//   - CJS bundle (`dist/node/axios.cjs`) now stops at an unresolved
+//     third-party bare import: `Cannot find module 'form-data'`. Per #1032's
+//     design these third-party deps (`form-data`/`follow-redirects`/
+//     `proxy-from-env`) should route as host imports, not module-not-found.
+//   - #TBD-1 (compileProject hang/OOM on the `lib/core/Axios.js` graph) is
+//     tracked as #3339 and remains the dominant real-graph blocker.
+//
 // Existing related issues:
 //
 //   - #1032 — parent goal (Compile axios to Wasm — Node builtins host imports)
@@ -215,17 +235,18 @@ export async function test(): Promise<number> {
    * the same blockers as 1d/1e but at smaller granularity, useful for
    * bisecting which fix unblocks which slice of the axios graph.
    *
-   * Tier 1g — `lib/utils.js` validates. Currently fails inside
-   * `isBuffer` with
-   *   `fallthru[0] expected i32, got f64`
-   * — the `&&` chain mixes i32 short-circuit branches with an
-   * f64-typed terminal extern call (`val.constructor.isBuffer(val)`).
-   * Same family as ESLint #1558 (`f64.eq[0]`) and the React-tier1
-   * `mapIntoArray` finding. Strong candidate for a shared umbrella fix.
-   *
-   * BLOCKED on #TBD-3.
+   * Tier 1g — `lib/utils.js` compiles AND validates. **UNBLOCKED**
+   * (#1032, 2026-07-17): the historical #TBD-3 `isBuffer` blocker
+   * (`fallthru[0] expected i32, got f64` — an `&&` chain mixing i32
+   * short-circuit branches with an f64-typed terminal extern call,
+   * `val.constructor.isBuffer(val)`) no longer reproduces on current
+   * `main` — the i32/f64 `&&`/`fallthru` unification family (shared with
+   * ESLint #1558 and the React-tier1 `mapIntoArray` finding) has since
+   * been resolved. `lib/utils.js` now compiles to a ~84 KB module that
+   * passes `WebAssembly.validate`. This rung is a permanent regression
+   * guard for that recovery.
    */
-  it.skip("Tier 1g — `lib/utils.js` validates (#TBD-3 isBuffer fallthru i32/f64)", async () => {
+  runIfAxios("Tier 1g — `lib/utils.js` compiles and validates (was #TBD-3 isBuffer fallthru i32/f64)", async () => {
     const r = await compileProject(`${AXIOS_ROOT}/lib/utils.js`, { allowJs: true });
     expect(r.success).toBe(true);
     if (!r.success) return;

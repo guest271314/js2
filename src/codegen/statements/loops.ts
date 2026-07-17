@@ -306,8 +306,17 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
         // a closure whose `i` collides with a differently-typed top-level
         // module global `i` would `global.set` an incompatible value type into
         // the global → invalid Wasm.
+        //
+        // #3343: a `let`/`const` for-head is a FRESH block binding (ECMA-262
+        // §14.7.4) — inside a function it must be a per-invocation local, NEVER a
+        // same-named module global (recursion would clobber the shared counter;
+        // compiled-acorn's top-level `i` → `$__mod_i` runaway). `let`/`const`
+        // aren't hoisted into `localMap`, so `hasLocalShadow` missed them. Only
+        // `__module_init` (module top level) keeps the global. `var` unchanged.
+        // Full write-up in the #3343 issue.
         const hasLocalShadow = fctx.localMap.has(name);
-        const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
+        const blockScopedInsideFunction = !isVar && fctx.name !== "__module_init";
+        const moduleGlobalIdx = hasLocalShadow || blockScopedInsideFunction ? undefined : ctx.moduleGlobals.get(name);
         if (moduleGlobalIdx !== undefined) {
           if (decl.initializer) {
             const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleGlobalIdx)];

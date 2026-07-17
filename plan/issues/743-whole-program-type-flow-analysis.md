@@ -6,6 +6,7 @@ created: 2026-03-22
 updated: 2026-04-28
 priority: critical
 feasibility: hard
+model: fable
 reasoning_effort: max
 goal: performance
 sprint: Backlog
