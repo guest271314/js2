@@ -74,6 +74,17 @@ export function anyLt(a: JSValue, b: JSValue): JSValue {
 export function anyLe(a: JSValue, b: JSValue): JSValue {
   return a <= b;
 }
+// (#3356) `>`/`>=` are their OWN ops, not swapped Lt/Le: §13.10.1 evaluates
+// `a > b` as IsLessThan(b, a, LeftFirst=FALSE) — the false flag makes
+// ToPrimitive run in SOURCE order (a first). Native `b < a` is LeftFirst=true
+// (coerces b first), so the swap desugar observably reversed valueOf/toString
+// side effects. Native `>`/`>=` carry the correct flag by construction.
+export function anyGt(a: JSValue, b: JSValue): JSValue {
+  return a > b;
+}
+export function anyGe(a: JSValue, b: JSValue): JSValue {
+  return a >= b;
+}
 
 // ── dynamic property access (the SAME MOP the AOT path uses — #3053/#3031) ────
 // GetProp (named key from the const pool) and GetElem (dynamic key in a

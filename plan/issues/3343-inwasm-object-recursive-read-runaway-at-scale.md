@@ -2,6 +2,7 @@
 id: 3343
 title: "In-Wasm dynamic-$Object recursive read runs away at scale (spurious back-edge on ~60+-node ASTs)"
 status: ready
+sprint: current
 created: 2026-07-17
 priority: high
 horizon: m

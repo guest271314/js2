@@ -4363,7 +4363,12 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   // (#3310 G2) Match the `__call_fn_method_N` emission cap (index.ts:
   // min(maxClosureArity, 8)); the prior hard cap at 4 dropped 5+-arg dynamic
   // calls to the undefined sentinel. buildArm returns that sentinel for any
-  // unregistered arity, so widening is byte-identical without ≥5-arg closures.
+  // unregistered arity — but the arm's guard scaffold (local.get/i32.const/
+  // i32.eq/if-else) is STILL emitted, ~11 bytes per dead arm (#3356 review:
+  // NOT byte-identical; measured +114 B on a representative standalone module —
+  // one live n=5 arm, the runtime always registers an arity-5 closure, plus 3
+  // dead arms at +33 B). Host/gc modules are unaffected: the bridge is only
+  // ever reserved under standalone/wasi (all reserveApplyClosure call sites).
   const APPLY_CLOSURE_MAX_ARITY = 8;
 
   const buildArm = (n: number): Instr[] => {
