@@ -1,7 +1,7 @@
 ---
 id: 3298
 title: "Porffor backend P3: extract the shared target-neutral LinearMemoryPlan"
-status: in-progress
+status: in-review
 sprint: porffor-backend
 created: 2026-07-16
 updated: 2026-07-17
@@ -21,7 +21,7 @@ origin: "#3288 P3 split: independently dispatchable shared linear-memory plannin
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T14:34:24.198Z
 branch: symphony/porffor/3298-after-pr-3245
-pr: null
+pr: 3257
 last_merged_pr: 3245
 ---
 
