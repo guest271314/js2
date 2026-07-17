@@ -84,6 +84,9 @@ export type {
   IrRefCellLowering,
   IrUnionLowering,
   IrVecLowering,
+  LinearMemoryFieldLowering,
+  LinearObjectLowering,
+  LinearRefCellLowering,
   LinearVecLowering,
 } from "./handles.js";
 

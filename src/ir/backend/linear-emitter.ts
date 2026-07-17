@@ -16,9 +16,6 @@
 //
 // What REMAINS `notImplemented` on LinearEmitter is only the genuinely
 // representation-divergent families, each annotated with the covering issue:
-//   - aggregates (emitAggregateNew/emitFieldGet/emitFieldSet) — WasmGC
-//     `struct.*`; linear lowers objects to a memory layout (#2956)
-//   - ref-cells (emitRefCellNew/Get/Set) — 1-field mutable struct (#2953)
 //   - exceptions (emitThrow/emitRethrow/emitTry) — WasmGC EH; linear has no
 //     exception lowering yet (#2956)
 //   - typed-funcref call (emitCallRef) — `call_ref` over a reference-typed
@@ -54,7 +51,15 @@ import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr, ValType } from "../types.js";
 import type { BackendEmitter } from "./emitter.js";
-import type { LinearVecLowering } from "./handles.js";
+import type {
+  IrClassLowering,
+  IrObjectStructLowering,
+  IrRefCellLowering,
+  LinearMemoryFieldLowering,
+  LinearObjectLowering,
+  LinearRefCellLowering,
+  LinearVecLowering,
+} from "./handles.js";
 
 /** Byte offset of the `len:u32` field in the linear array header. */
 const LINEAR_ARRAY_LEN_OFFSET = 8;
@@ -97,6 +102,45 @@ function linearLoadOp(elem: ValType): Instr["op"] {
       // occur for the #1714 number-array proof; widen here when a backend needs it.)
       return "i32.load";
   }
+}
+
+function linearStoreOp(field: LinearMemoryFieldLowering): "i32.store" | "f64.store" {
+  switch (field.type.kind) {
+    case "i32":
+      return "i32.store";
+    case "f64":
+      return "f64.store";
+    default:
+      throw new Error(`LinearEmitter: unsupported linear-memory field type '${field.type.kind}'`);
+  }
+}
+
+function emitLinearFieldGet(field: LinearMemoryFieldLowering, out: Instr[]): void {
+  const op = field.type.kind === "i32" ? "i32.load" : field.type.kind === "f64" ? "f64.load" : undefined;
+  if (!op) throw new Error(`LinearEmitter: unsupported linear-memory field type '${field.type.kind}'`);
+  out.push({ op, align: field.type.kind === "f64" ? 3 : 2, offset: field.offset });
+}
+
+function emitLinearFieldSet(field: LinearMemoryFieldLowering, out: Instr[]): void {
+  out.push({
+    op: linearStoreOp(field),
+    align: field.type.kind === "f64" ? 3 : 2,
+    offset: field.offset,
+  });
+}
+
+function asLinearObject(layout: IrObjectStructLowering | IrClassLowering): LinearObjectLowering {
+  if (!("linearMemory" in layout)) {
+    throw new Error("LinearEmitter: aggregate layout is not a linear-memory object handle");
+  }
+  return layout as LinearObjectLowering;
+}
+
+function asLinearRefCell(layout: IrRefCellLowering): LinearRefCellLowering {
+  if (!("linearMemory" in layout)) {
+    throw new Error("LinearEmitter: ref-cell layout is not a linear-memory handle");
+  }
+  return layout as LinearRefCellLowering;
 }
 
 function notImplemented(method: string): never {
@@ -354,16 +398,21 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     notImplemented("emitCaptureGet");
   }
 
-  // struct/object family — WasmGC `struct.new`/`struct.get`/`struct.set`; the
-  // linear backend lowers objects to a bump-allocated memory layout (#2956).
-  emitAggregateNew(): void {
-    notImplemented("emitAggregateNew");
+  // struct/object family — the resolver computes offsets through the direct
+  // backend's layout.ts and supplies a deferred allocation helper. The helper
+  // consumes fields in canonical order and leaves the arena pointer (i32).
+  emitAggregateNew(layout: IrObjectStructLowering, fieldCount: number, out: Instr[]): void {
+    const linear = asLinearObject(layout).linearMemory;
+    if (fieldCount !== linear.fieldCount) {
+      throw new Error(`LinearEmitter: aggregate arity mismatch (expected ${linear.fieldCount}, got ${fieldCount})`);
+    }
+    out.push({ op: "call", funcIdx: linear.newFuncIdx });
   }
-  emitFieldGet(): void {
-    notImplemented("emitFieldGet");
+  emitFieldGet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void {
+    emitLinearFieldGet(asLinearObject(layout).linearMemory.field(name), out);
   }
-  emitFieldSet(): void {
-    notImplemented("emitFieldSet");
+  emitFieldSet(layout: IrObjectStructLowering | IrClassLowering, name: string, out: Instr[]): void {
+    emitLinearFieldSet(asLinearObject(layout).linearMemory.field(name), out);
   }
 
   // try-throw family — WasmGC exception handling (`throw`/`try`/`rethrow`); the
@@ -378,15 +427,15 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     notImplemented("emitTry");
   }
 
-  // ref-cell family — a 1-field mutable struct (`struct.new`/`get`/`set`),
-  // structurally the same as the object family; wires with it (#2953/#2956).
-  emitRefCellNew(): void {
-    notImplemented("emitRefCellNew");
+  // ref-cell family — the same header + 8-byte field layout as a one-field
+  // aggregate, with an i32 arena pointer as its value representation.
+  emitRefCellNew(layout: IrRefCellLowering, out: Instr[]): void {
+    out.push({ op: "call", funcIdx: asLinearRefCell(layout).linearMemory.newFuncIdx });
   }
-  emitRefCellGet(): void {
-    notImplemented("emitRefCellGet");
+  emitRefCellGet(layout: IrRefCellLowering, out: Instr[]): void {
+    emitLinearFieldGet(asLinearRefCell(layout).linearMemory.value, out);
   }
-  emitRefCellSet(): void {
-    notImplemented("emitRefCellSet");
+  emitRefCellSet(layout: IrRefCellLowering, out: Instr[]): void {
+    emitLinearFieldSet(asLinearRefCell(layout).linearMemory.value, out);
   }
 }
