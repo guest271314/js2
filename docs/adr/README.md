@@ -28,9 +28,10 @@ The format follows Michael Nygard's 2011 ADR template: **Context**,
 | 013 | Accepted  | [Explicit allocation sites in the IR](./0013-ir-allocation-sites.md)                                                   |
 | 014 | Accepted  | [Ownership and access-semantics analysis on IR values](./0014-ownership-access-analysis.md)                            |
 | 015 | Accepted  | [String encoding tracking](./0015-string-encoding-tracking.md)                                                         |
-| 016 | Accepted  | [Differential codegen performance analysis](./0016-differential-codegen-perf-analysis.md)                             |
+| 016 | Accepted  | [Differential codegen performance analysis](./0016-differential-codegen-perf-analysis.md)                              |
 | 017 | Accepted  | [Linear-backend bump/arena allocator; one fixed GC strategy, not pluggable](./0017-linear-bump-arena-allocator.md)     |
 | 018 | Accepted  | [Structured IR: optimize inside nested control-flow buffers](./0018-structured-ir-nested-buffers.md)                   |
+| 019 | Accepted  | [Bytecode interpreter ISA: register+accumulator, i32-packed encoding, side exception table](./0019-bytecode-isa.md)    |
 
 ¹ ADR-012's high-level-IR / lowered-IR _split_ is superseded in practice by
 ADR-018 (one structured IR, optimized in place); its other content still holds.
