@@ -441,3 +441,10 @@ started on this branch.
   the change-scoped LOC gate, and all 56 emit-identity records passed again.
   The prior failures remain classified as transient GitHub HTTP 503s; no P1
   source repair or later Porffor slice was required.
+- The current retry found head `ad44d816d5d` fully green and already queued,
+  then merged the advanced `origin/main` tip at `6fa60b00cae` as required
+  before republishing. Typecheck, all 42 focused tests, the 82-site `pushRaw`
+  ratchet, the change-scoped LOC gate, and all 56 emit-identity records passed
+  against a clean archive of that exact main commit. No P1 source repair or P2
+  work was needed; `last_ci_retry_head` remains the preserved infrastructure-
+  failure audit head.
