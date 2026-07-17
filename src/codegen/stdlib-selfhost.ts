@@ -156,9 +156,6 @@ const NATIVE_STRING_METHOD_PLANS: ReadonlyMap<
 ]);
 
 const NATIVE_STRINGS_FROMAST_RESOLVER: IrFromAstResolver = {
-  nativeStrings(): boolean {
-    return true;
-  },
   // (#2955 slices 3/4) The de-polymorphed from-ast arms consult these
   // resolver-owned predicates instead of `nativeStrings()`. This build
   // resolver MUST implement them explicitly: the from-ast reads preserve
@@ -178,6 +175,12 @@ const NATIVE_STRINGS_FROMAST_RESOLVER: IrFromAstResolver = {
   },
   hasHostNumberToString(): boolean {
     return false;
+  },
+  // (#2955 slice 5) Native-strings builds iterate strings via the
+  // `__str_charAt` counter loop — the plan-absent default is iter-host
+  // (`__iterator` host import), which a host-free build must never emit.
+  stringForOfPlan(): "char-loop" | "iter-host" {
+    return "char-loop";
   },
   stringMethodPlan(method: string) {
     return NATIVE_STRING_METHOD_PLANS.get(method) ?? null;

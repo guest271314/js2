@@ -328,3 +328,51 @@ iter-host.
 
 **Remaining after slice 4** (from-ast functional `nativeStrings` reads, 1):
 the for-of strategy switch (~4470, slice 5 — last). `status` stays `ready`.
+
+## Slice 5 (2026-07-17, fable-e) — for-of strategy → `stringForOfPlan`; `nativeStrings` OFF the from-ast interface
+
+The LAST functional mode read: `lowerForOfStatement`'s string arm read
+`nativeStrings?.()` to pick the native `__str_charAt` counter loop vs the
+`__iterator` host protocol. Now a resolver-owned strategy query,
+`IrFromAstResolver.stringForOfPlan(): "char-loop" | "iter-host"` (both loop
+builders stay in from-ast; only the SELECTION is resolver-owned — same
+build-time-selection shape as `stringMethodPlan`, since the two strategies
+build structurally different IR). Implementations: integration =
+`ctx.nativeStrings ? "char-loop" : "iter-host"`; the selfhost native-strings
+build resolver pins `"char-loop"` (the plan-absent default is iter-host,
+which a host-free build must never emit); linear omits it (iter-host
+fallthrough, as before). Byte-inert truth table incl. resolver-absent.
+
+**Capstone: `nativeStrings?()` is REMOVED from `IrFromAstResolver`** (and
+from both implementers). With zero functional reads left, keeping the raw
+discriminator on the front-end surface would leave a drift channel open —
+now a new representation-polymorphic IR-build branch is a compile error.
+`IrLowerResolver` (lower.ts) still carries its own `nativeStrings?()` — the
+lower side legitimately owns mode knowledge.
+
+**Verification**: sha256-identical compiled binaries vs the slice-4 parent
+in ALL THREE regimes over the 20-source corpus; mutation check (strategy
+inverted) flips native+standalone `string-forof` hashes — the read is live.
+`tsc --noEmit` clean; prettier clean; `check:ir-fallbacks` unchanged;
+`issue-1183` + `issue-1374-ir-string-iter-inline` +
+`issue-1470-string-iteration-standalone` + `issue-3161` + `issue-3256`
+52/52.
+
+## Acceptance-criteria status after slices 1–5
+
+- **from-ast.ts contains zero `nativeStrings` reads (grep-gated)** — ✅ MET;
+  stronger than the criterion: the discriminator is no longer even on the
+  from-ast resolver interface.
+- **Same source produces identical IR in both modes** — ❌ NOT met, by
+  design of the faithful byte-inert slices: the mode decisions are settled
+  at IR-BUILD time through resolver-owned queries (they must be — demote/
+  claim has no lower-time channel), so the built IR still differs per mode
+  where plans differ (`stringMethodPlan` arg reps, for-of loop shape,
+  capability demotes). Promoting the rep halves into true abstract IR ops
+  lowered per mode (the "identical IR" bar) is the documented follow-up:
+  each promotion is op-union + verifier + lower.ts case + byte proof, and
+  the demote halves stay build-time queries regardless.
+- **Per-mode lowered bytes identical to before** — ✅ every slice
+  sha256-proven over the corpus in host/native/standalone.
+- **Equivalence green both modes / string-heavy net-zero** — per-slice CI
+  (slices 1–3 landed green; 4–5 stacked PRs follow the same gate).

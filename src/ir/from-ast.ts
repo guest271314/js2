@@ -103,9 +103,17 @@ export interface IrExternClassMeta {
  * yet at Phase-1 build time — into the from-ast layer.
  *
  * Phase-1 callable methods only:
- *   - `nativeStrings()` — backend mode discriminator
  *   - `resolveString()` — `IrType.string` ValType (extern vs native struct ref)
  *   - `resolveVec(valType)` — vec struct shape recovery
+ *
+ * (#2955) The raw `nativeStrings()` mode discriminator is deliberately NOT
+ * on this interface anymore: every former from-ast mode read is now a
+ * narrow resolver-owned capability/rep/strategy query (`stringIsExternref`,
+ * `hasHostNumberBox`, `hasHostNumberToString`, `stringMethodPlan`,
+ * `stringForOfPlan`). Keeping the raw discriminator off the front-end
+ * surface makes a new representation-polymorphic IR-build branch a compile
+ * error instead of a drift channel. (`IrLowerResolver` still carries it —
+ * the lower side legitimately owns mode knowledge.)
  *
  * Slice 10 (#1169i) adds:
  *   - `getExternClassInfo(name)` — extern-class metadata for slice-10
@@ -119,7 +127,6 @@ export interface IrExternClassMeta {
  * until Phase 3, so from-ast doesn't see them.
  */
 export interface IrFromAstResolver {
-  nativeStrings?(): boolean;
   resolveString?(): ValType;
   /**
    * (#2955 number-box slice) Capability predicate: does this compile's lane
@@ -174,6 +181,24 @@ export interface IrFromAstResolver {
    * floor.
    */
   hasHostNumberToString?(): boolean;
+  /**
+   * (#2955 slice 5) Strategy query: how does this mode iterate a
+   * `string`-typed for-of iterable? `"char-loop"` = the native fast path
+   * (counter loop over `__str_charAt`, slice 6 part 4 — #1183);
+   * `"iter-host"` = the host-iterator protocol (`__iterator` import; the
+   * host-mode string is already externref-shaped so it feeds the import
+   * unchanged). `lowerForOfStatement` previously read `nativeStrings()`
+   * directly for this — the LAST functional mode read in from-ast; both
+   * loop builders stay here, only the selection is resolver-owned (same
+   * shape as `stringMethodPlan`: the selection must be settled at build
+   * time since the two strategies build structurally different IR).
+   * Resolver-absent default: `iter-host` (preserving the legacy falsy
+   * fallthrough). Implementations: integration =
+   * `nativeStrings ? "char-loop" : "iter-host"`; the selfhost
+   * native-strings build resolver pins `"char-loop"`; linear omits it
+   * (iter-host fallthrough, as before).
+   */
+  stringForOfPlan?(): "char-loop" | "iter-host";
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
    * #1804 — register-or-recover the vec struct for an element ValType so
@@ -4484,12 +4509,15 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
   //                                    shape; if it isn't a vec, lowering
   //                                    throws and the function falls back
   //                                    to legacy.
-  //   - `string` (native mode)      → string fast path (slice 6 part 4 — #1183).
-  //                                    Counter loop with `__str_charAt`.
-  //   - `string` (host mode)         → fall through to iter-host. The
-  //                                    string IR value is already
-  //                                    externref-backed in host mode, so
-  //                                    no coercion is needed.
+  //   - `string`                     → per the resolver's `stringForOfPlan`
+  //                                    (#2955 slice 5): `"char-loop"` =
+  //                                    string fast path (slice 6 part 4 —
+  //                                    #1183), counter loop with
+  //                                    `__str_charAt`; `"iter-host"` (or no
+  //                                    resolver) = fall through to
+  //                                    iter-host — the host-mode string IR
+  //                                    value is already externref-backed,
+  //                                    so no coercion is needed.
   //   - `(val) externref`           → iter-host (slice 6 part 3 — #1182).
   //   - `class` / `object`           → iter-host (with extern.convert_any
   //                                    coercion).
@@ -4500,16 +4528,18 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
     return;
   }
   if (iterableT.kind === "string") {
-    if (cx.resolver?.nativeStrings?.()) {
+    // (#2955 slice 5) The strategy selection is resolver-owned; from-ast
+    // reads no `nativeStrings` here. Resolver-absent → iter-host, preserving
+    // the legacy falsy fallthrough of the old `nativeStrings?.()` read.
+    if (cx.resolver?.stringForOfPlan?.() === "char-loop") {
       lowerForOfString(stmt, cx, iterableV, loopVarName);
       return;
     }
-    // Host-strings mode: fall through to iter-host. The string's
-    // underlying ValType is already externref, so no coercion is
-    // needed — the iter-host arm passes `iterableV` straight to
-    // `__iterator`. We bind the loop variable as externref (host
-    // strings only have host-side string semantics; the iter-host
-    // element is opaque externref by design).
+    // Iter-host strategy: the string's underlying ValType is already
+    // externref, so no coercion is needed — the iter-host arm passes
+    // `iterableV` straight to `__iterator`. We bind the loop variable as
+    // externref (host strings only have host-side string semantics; the
+    // iter-host element is opaque externref by design).
     lowerForOfIterFromExternrefValue(stmt, cx, iterableV, loopVarName, /* alreadyExternref */ true);
     return;
   }
