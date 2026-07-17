@@ -1,5 +1,5 @@
 ---
-id: 3363
+id: 3373
 title: "Annex B: call expressions as assignment/update/for-in targets are rejected at compile time"
 status: done
 created: 2026-07-17
@@ -18,7 +18,7 @@ files:
   - src/compiler.ts
   - src/codegen/expressions/assignment.ts
 ---
-# #3363 — Annex B call-expression assignment targets
+# #3373 — Annex B call-expression assignment targets
 
 ## Problem
 
@@ -55,5 +55,5 @@ This follows [ECMA-262 Annex B.3.9, Runtime Errors for Function Call Assignment 
 
 ### Verification
 
-- `tests/issue-3363.test.ts`: seven focused forms pass.
+- `tests/issue-3373.test.ts`: seven focused forms pass.
 - Original harness: all seven sampled Annex B assignment-target tests pass.

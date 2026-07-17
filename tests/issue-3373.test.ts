@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3363 — Annex B.3.9 Runtime Errors for Function Call Assignment Targets.
+ * #3373 — Annex B.3.9 Runtime Errors for Function Call Assignment Targets.
  *
  * AssignmentTargetType classifies a CallExpression in non-strict code as
  * web-compat. Evaluation must call the target and then throw ReferenceError
@@ -12,7 +12,7 @@ import { compile } from "../src/index.js";
 import { buildImports, instantiateWasm } from "../src/runtime.js";
 
 async function runNumber(source: string): Promise<number> {
-  const result = await compile(source, { fileName: "issue-3363.js", allowJs: true });
+  const result = await compile(source, { fileName: "issue-3373.js", allowJs: true });
   if (!result.success) {
     throw new Error(result.errors.map((error) => error.message).join("\n"));
   }
@@ -41,7 +41,7 @@ function runtimeProbe(expression: string): string {
   `;
 }
 
-describe("#3363 Annex B call-expression assignment targets", () => {
+describe("#3373 Annex B call-expression assignment targets", () => {
   it("simple assignment evaluates only the call target before ReferenceError", async () => {
     expect(await runNumber(runtimeProbe("target() = rhs();"))).toBe(1100);
   });
@@ -87,7 +87,7 @@ describe("#3363 Annex B call-expression assignment targets", () => {
       function strict() { "use strict"; target() = 1; }
       export function test() { return 1; }
     `,
-      { fileName: "issue-3363.js", allowJs: true },
+      { fileName: "issue-3373.js", allowJs: true },
     );
     expect(result.success).toBe(false);
     expect(result.errors.some((error) => error.message.includes("Invalid left-hand side"))).toBe(true);
@@ -99,7 +99,7 @@ describe("#3363 Annex B call-expression assignment targets", () => {
       function target() {}
       export function test() { target() ||= 1; return 1; }
     `,
-      { fileName: "issue-3363.js", allowJs: true },
+      { fileName: "issue-3373.js", allowJs: true },
     );
     expect(result.success).toBe(false);
     expect(result.errors.some((error) => error.message.includes("Invalid left-hand side"))).toBe(true);
