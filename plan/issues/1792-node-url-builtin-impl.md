@@ -1,6 +1,7 @@
 ---
 id: 1792
 title: "node:url — URL / URLSearchParams as host constructors"
+horizon: m
 status: done
 sprint: current
 assignee: ttraenkler/opus-b
