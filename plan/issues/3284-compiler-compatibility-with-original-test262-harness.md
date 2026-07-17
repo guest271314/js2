@@ -6,7 +6,7 @@ sprint: current
 created: 2026-07-15
 priority: high
 feasibility: hard
-model: opus
+model: fable
 horizon: xl
 reasoning_effort: high
 task_type: bugfix

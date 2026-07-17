@@ -8,6 +8,7 @@ updated: 2026-07-12
 priority: high
 horizon: xl
 feasibility: hard
+model: fable
 reasoning_effort: max
 task_type: architecture
 area: codegen, standalone
