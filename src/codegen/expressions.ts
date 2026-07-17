@@ -46,6 +46,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
+import { ensureImportMetaObject } from "./import-meta.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "./type-coercion.js";
 
 // ── Sub-module imports ─────────────────────────────────────────────────
@@ -1521,7 +1522,13 @@ function compileExpressionInner(
   }
 
   if (ts.isMetaProperty(expr) && expr.keywordToken === ts.SyntaxKind.ImportKeyword && expr.name.text === "meta") {
-    return compileStringLiteral(ctx, fctx, "[object Object]");
+    // (#2970) A bare `import.meta` VALUE read yields a distinct per-module
+    // object with stable reference identity — one immutable `$ImportMeta`
+    // global per source file. (`import.meta.<prop>` reads are intercepted
+    // upstream in trySuperAndImportMetaRead, so this object needs no fields.)
+    const globalIdx = ensureImportMetaObject(ctx, expr.getSourceFile().fileName);
+    fctx.body.push({ op: "global.get", index: globalIdx });
+    return { kind: "ref", typeIdx: ctx.importMetaTypeIdx! };
   }
 
   if (ts.isMetaProperty(expr) && expr.keywordToken === ts.SyntaxKind.ImportKeyword) {

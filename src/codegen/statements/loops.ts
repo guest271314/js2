@@ -72,6 +72,7 @@ import {
   compileForOfIteratorAssignDestructuring,
 } from "./for-of-destructuring.js";
 import { collectPatternBindingNames } from "./tdz.js";
+import { tryCompileCountedStringAppend } from "./counted-string-append.js";
 import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
 import { definedFuncAt } from "../func-space.js"; // (#1916 S2) positional-read chokepoint
 
@@ -234,6 +235,9 @@ function detectCanonicalCharReadLoop(
 }
 
 export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForStatement): void {
+  // (#1004) Counted-append string-loop aggregation: `for (let i=A;i<B;i++) s = s + FRAG`
+  // → `s += FRAG.repeat(N)`. Provably-identical fast path; returns true when handled.
+  if (tryCompileCountedStringAppend(ctx, fctx, stmt)) return;
   // Save localMap entries for let/const initializers that shadow outer variables.
   // `for (let x = ...; ...)` creates a block scope that ends after the loop.
   let savedForScope: Map<string, number> | null = null;

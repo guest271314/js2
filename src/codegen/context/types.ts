@@ -1186,6 +1186,16 @@ export interface CodegenContext {
   holeTypeIdx: number;
   holeGlobalIdx: number | undefined;
   /**
+   * (#2970) `import.meta` per-module object identity. One shared zero-field
+   * `$ImportMeta` struct type, plus a DISTINCT immutable global instance per
+   * source file (keyed by `SourceFile.fileName`). Each `import.meta` value read
+   * returns the global of the file it syntactically occurs in, so identity is
+   * stable within a module and distinct across modules (§sec-meta-properties).
+   * Created lazily by `ensureImportMetaObject`.
+   */
+  importMetaTypeIdx: number | undefined;
+  importMetaGlobals: Map<string, number>;
+  /**
    * (#2800) The mutable i32 `__in_module_init` flag — 1 for the duration of
    * `__module_init` (the Wasm `start` section in gc/host mode, which runs INSIDE
    * `WebAssembly.instantiate`, BEFORE the host wires struct getters via

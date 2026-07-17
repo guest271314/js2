@@ -4239,30 +4239,48 @@ export function compileObjectKeysOrValues(
     return true; // no explicit descriptor = enumerable by default
   });
 
+  // (#3229) Resolve the CANONICAL vec type from the call's TS return type so an
+  // INLINE `.length` (which dispatches on `resolveWasmType(returnType)` — the
+  // canonical `string[]`/`T[]` vec) matches. The keys/values fast-paths built a
+  // vec-of-EXTERNREF whose type index the `.length` `ref.test` could not match →
+  // read 0; build with the canonical arr/elem types instead. Shared across all
+  // three arms; falls back to the legacy externref vec when unresolvable.
+  const canonSig = ctx.checker.getResolvedSignature(expr);
+  const canonRetType = canonSig ? ctx.checker.getReturnTypeOfSignature(canonSig) : undefined;
+  const canonResolvedRet = canonRetType ? resolveWasmType(ctx, canonRetType) : undefined;
+  const canonicalVec =
+    canonResolvedRet &&
+    (canonResolvedRet.kind === "ref" || canonResolvedRet.kind === "ref_null") &&
+    "typeIdx" in canonResolvedRet
+      ? (() => {
+          const info = getVecInfo(ctx, (canonResolvedRet as { typeIdx: number }).typeIdx);
+          return info ? { vecTypeIdx: (canonResolvedRet as { typeIdx: number }).typeIdx, ...info } : undefined;
+        })()
+      : undefined;
+
   if (method === "keys") {
-    // Build a string[] array from the field names
-    // Each field name is already registered as a string literal thunk
-    const elemKind = "externref";
-    const vecTypeIdx = getOrRegisterVecType(ctx, elemKind);
-    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    // Build a string[] array from the field names.
+    // (#3229) Use the CANONICAL string[] vec type (so an inline `.length`
+    // matches) and coerce each field-name string to its element type; fall back
+    // to the legacy vec-of-externref when the return type is unresolvable. In
+    // host mode the canonical element IS externref, so this is byte-identical to
+    // the previous behaviour; only standalone (native-string element) changes.
+    const vecTypeIdx = canonicalVec ? canonicalVec.vecTypeIdx : getOrRegisterVecType(ctx, "externref");
+    const arrTypeIdx = canonicalVec ? canonicalVec.arrTypeIdx : getArrTypeIdxFromVec(ctx, vecTypeIdx);
     if (arrTypeIdx < 0) {
       reportError(ctx, expr, `Object.keys(): cannot resolve array type for string[]`);
       return null;
     }
+    const elemTarget: ValType = canonicalVec ? canonicalVec.elemType : { kind: "externref" };
 
-    // Push each enumerable field name string onto the stack
+    // Push each enumerable field name string onto the stack, coerced to the
+    // vec's element type. `compileStringLiteral` materialises a native string in
+    // nativeStrings mode and an externref string constant otherwise, and handles
+    // late registration when the name was not collected in the first pass (an
+    // unregistered name pushed nothing → array.new_fixed underflow, #786).
     for (const entry of enumUserFields) {
-      if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-        compileNativeStringLiteral(ctx, fctx, entry.field.name);
-        // Object.keys returns externref strings, convert from native
-        fctx.body.push({ op: "extern.convert_any" });
-      } else {
-        // compileStringLiteral handles late registration when the field name
-        // was not collected in the first pass (e.g. dynamically-added own
-        // properties). Without it, an unregistered name pushed nothing and
-        // array.new_fixed below underflowed the stack (#786).
-        compileStringLiteral(ctx, fctx, entry.field.name, expr);
-      }
+      const pushed = compileStringLiteral(ctx, fctx, entry.field.name, expr) ?? { kind: "externref" };
+      coerceType(ctx, fctx, pushed, elemTarget);
     }
 
     // Create the backing array with array.new_fixed
@@ -4288,10 +4306,9 @@ export function compileObjectKeysOrValues(
     fctx.body.push({ op: "local.set", index: objLocal });
     emitObjectArgNullGuard(ctx, fctx, objLocal);
 
-    // Resolve the return type from the TS signature to get proper tuple/vec types
-    const sig = ctx.checker.getResolvedSignature(expr);
-    const retType = sig ? ctx.checker.getReturnTypeOfSignature(sig) : undefined;
-    const resolvedRet = retType ? resolveWasmType(ctx, retType) : undefined;
+    // (#3229) Reuse the hoisted return-type resolution (shared with keys/values)
+    // to get the proper tuple/vec types — keeps the checker query count flat.
+    const resolvedRet = canonResolvedRet;
 
     // The return type should be ref_null to a vec struct (Array<[string, T]>)
     // Extract the vec type index and from it the array type index and entry tuple type
@@ -4403,39 +4420,31 @@ export function compileObjectKeysOrValues(
   fctx.body.push({ op: "local.set", index: objLocal });
   emitObjectArgNullGuard(ctx, fctx, objLocal);
 
-  // Always use externref elements for Object.values() since the TS return type is any[]
-  const elemKind = "externref";
-  const vecTypeIdx = getOrRegisterVecType(ctx, elemKind);
-  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  // (#3229) Use the CANONICAL values[] vec type (so an inline `.length` matches)
+  // and coerce each field value to its element type, instead of always boxing to
+  // externref and returning a vec-of-externref that the inline `.length`
+  // `ref.test` could not match (→ 0). For a homogeneous `number[]` the canonical
+  // element is f64 → the field value is stored unboxed; for a heterogeneous
+  // `(string|number)[]` it is externref → `coerceType` boxes exactly as before.
+  // Falls back to the legacy vec-of-externref when the return type is
+  // unresolvable.
+  const vecTypeIdx = canonicalVec ? canonicalVec.vecTypeIdx : getOrRegisterVecType(ctx, "externref");
+  const arrTypeIdx = canonicalVec ? canonicalVec.arrTypeIdx : getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) {
     reportError(ctx, expr, `Object.values(): cannot resolve array type for values[]`);
     return null;
   }
+  const elemTarget: ValType = canonicalVec ? canonicalVec.elemType : { kind: "externref" };
 
-  // Ensure union boxing imports are registered (needed for boxing primitives)
+  // Ensure union boxing imports are registered (needed when the element target
+  // is externref and a primitive field must be boxed by coerceType).
   addUnionImports(ctx);
 
-  // Push each enumerable field value onto the stack, boxing primitives to externref
+  // Push each enumerable field value onto the stack, coerced to the vec element.
   for (const entry of enumUserFields) {
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: entry.fieldIdx });
-    // Box primitive values to externref
-    if (entry.field.type.kind === "f64") {
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-      }
-    } else if (entry.field.type.kind === "i32") {
-      fctx.body.push({ op: "f64.convert_i32_s" });
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-      }
-    } else if (entry.field.type.kind === "ref" || entry.field.type.kind === "ref_null") {
-      // Convert GC ref types (nested structs, etc.) to externref
-      fctx.body.push({ op: "extern.convert_any" });
-    }
-    // externref fields (strings, etc.) don't need boxing
+    coerceType(ctx, fctx, entry.field.type, elemTarget);
   }
 
   // Create the backing array with array.new_fixed

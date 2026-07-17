@@ -23,6 +23,7 @@ import {
 } from "./index.js";
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
+import { emitTypedArraySetBoundsCheck } from "./typed-array-set-bounds.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral, elemGetOp, unpackedElemType, valTypesMatch } from "./shared.js";
 import {
@@ -7320,30 +7321,11 @@ function compileTypedArraySet(
   }
   fctx.body.push({ op: "local.set", index: offsetTmp });
 
-  // Spec §23.2.3.24 (%TypedArray%.prototype.set): the bounds check is an
-  // observable RangeError, NOT an unguarded copy that traps. Throw a *catchable*
-  // RangeError when `offset < 0` or `offset + srcLength > targetLength`; the raw
-  // `array.copy` / element-wise store below would otherwise `oob`-trap (an
-  // uncatchable Wasm abort that escapes try/catch and poisons the whole test
-  // file — #3202 / #3335 Part 1). srcLen+offset is computed in i32; test-realistic
-  // magnitudes never overflow, and a negative offset is caught by the `< 0` arm.
-  fctx.body.push(
-    // predicate: offset < 0  ||  offset + srcLen > dstLen
-    { op: "local.get", index: offsetTmp },
-    { op: "i32.const", value: 0 },
-    { op: "i32.lt_s" },
-    { op: "local.get", index: offsetTmp },
-    { op: "local.get", index: srcLen },
-    { op: "i32.add" },
-    { op: "local.get", index: dstLen },
-    { op: "i32.gt_s" },
-    { op: "i32.or" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: buildThrowJsErrorInstrs(ctx, "RangeError", "offset is out of bounds", { flush: fctx }),
-    },
-  );
+  // Spec §23.2.3.24 (%TypedArray%.prototype.set): OOB throws a catchable
+  // RangeError, not an uncatchable Wasm trap (#3202 / #3335 Part 1). Emitted by
+  // the relocated single-purpose module (#3358) — byte-identical to the former
+  // inline block.
+  emitTypedArraySetBoundsCheck(ctx, fctx, offsetTmp, srcLen, dstLen);
 
   if (srcArrTypeIdx === arrTypeIdx) {
     // Same backing array type — bulk array.copy dstData[offset..] = srcData[0..srcLen].

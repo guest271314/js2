@@ -109,6 +109,8 @@ export function createCodegenContext(
     suppressVecUsageFlag: false, // (#2083) true only during the two prereg calls below
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
     holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
+    importMetaTypeIdx: undefined, // (#2970) shared $ImportMeta struct type
+    importMetaGlobals: new Map(), // (#2970) per-source-file import.meta object globals
     inModuleInitFlagReads: undefined, // (#2800) recorded __in_module_init flag reads
     inModuleInitGlobalIdx: undefined, // (#2800) __in_module_init flag global (set at finalize)
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
