@@ -1,5 +1,5 @@
 ---
-id: 3328
+id: 3334
 title: 'standalone JSON.stringify serialises every object as "null" through any/closure paths — toJSON miss-guard vs $undefined singleton'
 horizon: s
 status: done
@@ -20,7 +20,14 @@ loc-budget-allow:
   - src/codegen/json-codec-native.ts
 ---
 
-# #3328 — standalone JSON.stringify object arg serialises "null" (toJSON miss-guard vs $undefined singleton)
+# #3334 — standalone JSON.stringify object arg serialises "null" (toJSON miss-guard vs $undefined singleton)
+
+> Renumbered from #3328 — that id collided with a different, already-merged
+> issue (`3328-capturing-closure-toprimitive-dispatch.md`, landed via #3178).
+> Both PRs raced `claim-issue.mjs --allocate` concurrently; #3178 merged
+> first and won the id, so this file (opened as PR #3177) is the loser and
+> renumbers per the documented collision-recovery flow
+> (`reference_cross_session_issue_id_collision_renumber_loser`).
 
 ## Problem
 
