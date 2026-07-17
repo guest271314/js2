@@ -2,10 +2,12 @@
 id: 684
 title: "Any-typed variable inference from usage patterns"
 horizon: l
-status: ready
+status: in-progress
+assignee: dev-684
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-07-17
 priority: high
+oracle-ratchet-allow: []
 feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
