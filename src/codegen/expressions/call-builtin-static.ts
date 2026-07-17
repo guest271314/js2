@@ -686,8 +686,11 @@ export function compileBuiltinStaticCall(
     expr.arguments.length === 1 &&
     !ts.isSpreadElement(expr.arguments[0]!)
   ) {
-    const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
-    if (isStringType(argTsType)) {
+    // Route the "is the argument statically a String" question through the
+    // oracle (#1930/#3273 ratchet) rather than the raw TS checker. Per spec
+    // `fromHex` accepts a String only (TypeError, no ToString, otherwise), so a
+    // non-string arg falls through to the existing refusal.
+    if (ctx.oracle.staticJsTypeOf(expr.arguments[0]!) === "string") {
       const strVt = nativeStringType(ctx);
       const at = compileExpression(ctx, fctx, expr.arguments[0]!, strVt);
       if (at) {
