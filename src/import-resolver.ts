@@ -126,6 +126,20 @@ const NODE_BUILTIN_FN_TYPED_STUBS: Record<
   string,
   Record<string, { params: string; returns: string; passthrough: string }>
 > = {
+  // #1795 — node:http/https Tier 0 (client GET round-trip, the axios
+  // unblocker). `get`/`request` take a wasm-closure callback; the
+  // `node_builtin_fn` runtime adapter wraps closure-shaped args as JS
+  // callables (identity-cached), and the response object flows back into the
+  // callback as an externref whose `.on(...)` listeners ride the same
+  // closure-callback contract as #1794 EventEmitter.
+  http: {
+    get: { params: "url: any, cb: any", returns: "any", passthrough: "url, cb" },
+    request: { params: "url: any, cb: any", returns: "any", passthrough: "url, cb" },
+  },
+  https: {
+    get: { params: "url: any, cb: any", returns: "any", passthrough: "url, cb" },
+    request: { params: "url: any, cb: any", returns: "any", passthrough: "url, cb" },
+  },
   crypto: {
     randomBytes: { params: "size: number", returns: "Uint8Array", passthrough: "size" },
     randomUUID: { params: "", returns: "string", passthrough: "" },
