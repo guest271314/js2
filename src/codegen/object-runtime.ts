@@ -4360,16 +4360,10 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   const callMethod = (n: number): number | undefined => ctx.funcMap.get(`__call_fn_method_${n}`);
   const armUnsupported = undefinedSentinel();
 
-  // (#3310 G2) Highest arity the bridge dispatches. The `__call_fn_method_N`
-  // dispatchers are emitted (index.ts, `emitClosureMethodCallExportN`) for every
-  // arity up to `min(maxClosureArity, 8)`, so the bridge must reach the same 8 —
-  // the previous hard cap at 4 silently dropped a 5+-arg dynamic method call
-  // (`o.m(a,b,c,d,e)` through the open-`$Object` lane) to the undefined sentinel.
-  // `buildArm(n)` returns that same sentinel for any arity whose dispatcher was
-  // not registered, so widening the range is byte-identical for modules without
-  // ≥5-arg closures and only adds live dispatch where the matching dispatcher
-  // exists. Arities beyond 8 remain the undefined sentinel (the spill-arm
-  // `__call_fn_method_vec` calling convention is the #2928 CallBuiltin follow-up).
+  // (#3310 G2) Match the `__call_fn_method_N` emission cap (index.ts:
+  // min(maxClosureArity, 8)); the prior hard cap at 4 dropped 5+-arg dynamic
+  // calls to the undefined sentinel. buildArm returns that sentinel for any
+  // unregistered arity, so widening is byte-identical without ≥5-arg closures.
   const APPLY_CLOSURE_MAX_ARITY = 8;
 
   const buildArm = (n: number): Instr[] => {

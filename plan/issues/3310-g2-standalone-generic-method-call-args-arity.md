@@ -16,6 +16,12 @@ goal: runtime-eval
 sprint: current
 parent: 2927
 related: [2928, 1584, 2151, 1888, 3098]
+# (#3102/#3131) The arity lift adds a small named-constant + comment to the
+# fillApplyClosure dispatcher in the god-file object-runtime.ts (the helper
+# already lives there; no clean subsystem module to relocate to). Intended
+# minimal growth for a real standalone correctness fix.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
 ---
 
 # #3310 — G2: pass args on the standalone generic dispatch path; lift the arity-4 ceiling
