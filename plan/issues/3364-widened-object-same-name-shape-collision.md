@@ -24,6 +24,19 @@ depends_on: []
 # `getSymbolAtLocation` sites in codegen. Sanctioned oracle-ratchet allowance.
 oracle-ratchet-allow:
   - src/codegen/widened-var-key.ts
+# (#3364) The per-declaration widening key threads through the existing widened
+# lookup sites in these god-files; the change is a small in-place key swap
+# (bare name → name+declStart), a few lines each — not new subsystem logic that
+# belongs elsewhere. The bulk of the fix lives in the new leaf module
+# src/codegen/widened-var-key.ts.
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/registry/imports.ts
+  - src/codegen/statements/variables.ts
+  - src/codegen/typeof-delete.ts
+  - src/codegen/expressions/unary-updates.ts
+  - src/codegen/property-access.ts
+  - src/codegen/literals.ts
 ---
 
 # #3364 — widened `{}` struct shape clobbered by a same-named variable elsewhere
