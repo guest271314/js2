@@ -15,7 +15,7 @@ sprint: current
 horizon: m
 umbrella: 3185
 related: [3185, 3169, 3180, 2036]
-loc-budget-allow: [src/codegen/array-methods.ts]
+loc-budget-allow: [src/codegen/array-methods.ts, src/runtime.ts]
 origin: "2026-07-12 Fable codebase audit §F2; method-family slice of #3185"
 ---
 
