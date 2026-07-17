@@ -1372,6 +1372,20 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     stringIsExternref(): boolean {
       return !ctx.nativeStrings;
     },
+    // (#2955 slice 4) Capability: this lane owns the `number_toString`
+    // `(f64) -> externref` host import (legacy pre-registers it on any
+    // checker-number `.toString()` in source; its return IS host-mode's
+    // string carrier). The from-ast `<number>.toString()` arm consults THIS
+    // predicate instead of reading `nativeStrings` directly — same
+    // build-time capability shape as `hasHostNumberBox`, deliberately the
+    // exact truth value the old in-place `nativeStrings?.() === false` read
+    // produced (byte-inert relocation). Widening — a native number
+    // formatter returning the `(ref $AnyString)` carrier — is a semantic
+    // follow-up tracked in #2955 and must be validated against the
+    // standalone floor (the demote arm is load-bearing there).
+    hasHostNumberToString(): boolean {
+      return !ctx.nativeStrings;
+    },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
     // (assignment.ts): symbol name of the receiver's TS type against the

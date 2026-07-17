@@ -283,3 +283,48 @@ unrelated).
 **Remaining after slice 3** (from-ast functional `nativeStrings` reads, 2):
 the number-`toString` capability site (~3600, slice 4 next) and the for-of
 strategy switch (~4470, slice 5). `status` stays `ready`.
+
+## Slice 4 (2026-07-17, fable-e) — number-`toString` capability → `hasHostNumberToString`
+
+The `<number>.toString()` arm in `lowerMethodCall` read
+`nativeStrings?.() === false` as a PROXY for "does this lane own the
+`number_toString` `(f64) -> externref` host import?" (host-lane-only, and its
+return IS host-mode's string carrier — the mode read was doing capability
+duty). It now consults `IrFromAstResolver.hasHostNumberToString()`,
+implemented in `integration.ts` as exactly `!ctx.nativeStrings` — the
+boolean-capability shape of `hasHostNumberBox`, byte-inert truth table
+including the resolver-absent case (old `undefined === false` and new
+`undefined === true` are both false → demote).
+
+Same recorded constraints as the number-box slice: the answer stays a
+build-time answer (the native arm is a demote; no lower-time demote channel),
+and widening — a native number formatter returning the `(ref $AnyString)`
+carrier — is a semantic follow-up that must be validated against the
+standalone floor.
+
+**Verification**: sha256-identical compiled binaries vs the slice-3 parent
+commit in ALL THREE regimes (host / native / standalone) over the same
+20-source corpus; mutation check (predicate inverted) changes the
+number-toString snippet + dom/style example hashes in host mode — the site is
+genuinely exercised. `tsc --noEmit` clean; prettier clean;
+`check:ir-fallbacks` unchanged.
+
+**Also in this slice — selfhost build-resolver hardening (latent slice-3
+gap).** `IrFromAstResolver` has three implementers: `makeFromAstResolver`
+(integration, gets every predicate), `makeLinearIrResolver` (linear — omits
+`nativeStrings` entirely, so the per-site preserved resolver-absent defaults
+keep it byte-inert across all slices), and stdlib-selfhost's
+`NATIVE_STRINGS_FROMAST_RESOLVER` (`nativeStrings() → true`). The last one
+diverged after slice 3: site 3366's resolver-absent default is
+**pass-through** (host-shaped), the opposite of the demote-throw a
+native-strings build wants — a latent (corpus-unreachable, byte-diff- and
+CI-verified-inert today) hazard where a `(ref $AnyString)` could flow into an
+externref-expected position without the loud error. Fixed here by
+implementing `stringIsExternref() → false` (plus `hasHostNumberBox`/
+`hasHostNumberToString` → false explicitly — those absent-defaults already
+demoted, made total rather than lucky). Slice 5 must likewise give this
+resolver its for-of answer (`char-loop`), since the plan-absent default is
+iter-host.
+
+**Remaining after slice 4** (from-ast functional `nativeStrings` reads, 1):
+the for-of strategy switch (~4470, slice 5 — last). `status` stays `ready`.
