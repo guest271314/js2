@@ -63,7 +63,9 @@ describe("#2948 — chained any-add in lifted foreign bodies (standalone)", () =
 
   it("control: single any-add (a+b) still === 3", async () => {
     expect(
-      await runStandalone(`export function test(): number { return (new Function("a","b","return a+b") as any)(1,2); }`),
+      await runStandalone(
+        `export function test(): number { return (new Function("a","b","return a+b") as any)(1,2); }`,
+      ),
     ).toBe(3);
   });
 });
