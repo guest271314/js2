@@ -1,11 +1,10 @@
 ---
 id: 3382
 title: "Baseline goes stale under high PR velocity — main-audit push loses all retries; make baselines-repo push resilient"
-status: done
+status: in-progress
 sprint: current
 created: 2026-07-17
 updated: 2026-07-17
-completed: 2026-07-17
 priority: high
 horizon: m
 feasibility: hard
@@ -16,6 +15,13 @@ language_feature: n/a
 goal: correctness
 assignee: "ttraenkler/senior-dev"
 ---
+
+> **Status note:** kept at `in-progress` (not `done`) in this impl PR on
+> purpose. The `quality` gate's #2093 issue→probe-coverage check fails any issue
+> (created ≥ 2026-06-15) that flips to `done` without citing a `tests/…` /
+> `test262/…` probe path — which this CI-infra issue legitimately has none of.
+> It will be reconciled to `done` post-merge (the reconciler / a follow-up doc
+> commit), per the tech-lead-confirmed workaround (cf. #3298→#3375).
 
 ## Problem
 
