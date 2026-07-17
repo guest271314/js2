@@ -13,6 +13,12 @@ area: codegen
 goal: standalone-mode
 created: 2026-07-17
 related: [3189, 3198, 3177, 3087, 1349]
+# (#3335) Intentional growth of two god-files: the latent-bug fixes live in the
+# host-marshalling runtime and the dynamic-call codegen — both pre-existing
+# over-threshold files with no smaller home. Grant this change-set's growth.
+loc-budget-allow:
+  - src/runtime.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3335 — BigInt TA `set` failure-mode regression (catchable → oob trap) + baseline-refresh process gap
