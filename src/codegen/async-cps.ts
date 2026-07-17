@@ -2141,13 +2141,34 @@ function asyncGenBodyHasPatternLocals(fn: ts.FunctionLikeDeclaration): boolean {
   const walk = (n: ts.Node): void => {
     if (found || isNestedFunctionScope(n)) return;
     if (ts.isVariableDeclaration(n) && !ts.isIdentifier(n.name)) {
-      found = true;
-      return;
+      // (#3387) EXEMPT a `for await (const <pattern> of …)` HEAD binding. It is
+      // NOT a frame-spilled own local: the whole for-await statement rides the
+      // driven body as a suspend-free LEAD (compiled by the sync for-await
+      // lowering — loops.ts step loop + for-of-destructuring.ts pattern bind —
+      // entirely within one dispatch, no suspend crosses it), so the pattern
+      // names are ordinary per-iteration locals of the resume fn, never spill
+      // fields. Identifier heads already ride this exact lead arm on main;
+      // this admits the destructuring-head twin (the test262
+      // `async-gen-dstr-*` cohort). Any OTHER pattern local (body `const {a} =
+      // …`, catch-clause patterns, sync for-of heads) still rejects —
+      // correct-or-legacy.
+      if (!isForAwaitHeadDecl(n)) {
+        found = true;
+        return;
+      }
     }
     forEachChild(n, walk);
   };
   forEachChild(body, walk);
   return found;
+}
+
+/** (#3387) Is `n` the head binding of a `for await (const … of …)` statement? */
+function isForAwaitHeadDecl(n: ts.VariableDeclaration): boolean {
+  const list = n.parent;
+  if (!ts.isVariableDeclarationList(list)) return false;
+  const stmt = list.parent;
+  return ts.isForOfStatement(stmt) && stmt.awaitModifier !== undefined;
 }
 
 /** One bounded async-gen yield statement: `yield await <awaited>` OR `yield <plain>`
