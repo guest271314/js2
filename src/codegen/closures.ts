@@ -1415,16 +1415,11 @@ export function closureProvablyAfterLetDecl(
 }
 
 /**
- * (#3359) A TypeScript `this` parameter (`function (this: T, …)`) is a
- * TYPE-LEVEL-only annotation (TS §this-parameters) and must NOT become a
- * runtime Wasm parameter — it is always the FIRST parameter, named `this`.
- * Codegen that iterates `node.parameters` to build the closure's runtime
- * signature / body param-locals must skip it, otherwise a real user param
- * shifts one slot right and the call site (which supplies the spec `thisArg`
- * via the `__current_this` global, not a positional arg) misaligns —
- * `Array.prototype.filter(function (this, x) {…}, thisArg)` read the element
- * into the `this` slot and dropped `thisArg`. A closure WITHOUT a this-param
- * (all JS, incl. every test262 input) returns the original array — byte-identical.
+ * (#3359) Drop a leading TS `this` parameter (`function (this: T, …)`) — a
+ * type-level-only annotation that must NOT become a runtime Wasm param, else a
+ * real user param shifts one slot right and the array-method call site (which
+ * supplies `thisArg` via the `__current_this` global) misaligns. No-this
+ * closures (all JS, incl. every test262 input) return the original — byte-identical.
  */
 export function runtimeParameters(arrow: ts.ArrowFunction | ts.FunctionExpression): readonly ts.ParameterDeclaration[] {
   const ps = arrow.parameters;

@@ -15,6 +15,10 @@ language_feature: array-methods, this-binding
 goal: standalone-parity
 related: [2036, 3326]
 origin: "found while fixing #3326 (stale refuse-loudly expectations in tests/issue-2036.test.ts) — the `filter threads thisArg standalone` case genuinely fails (returns 0, expected 1); confirmed the same bug on a REAL array receiver, so it is a general filter-thisArg threading gap, not an $Object-only issue."
+# (#3102) closures.ts is a god-file (split tracked by #3182); the this-param
+# strip adds a small runtimeParameters() helper + per-site call updates.
+loc-budget-allow:
+  - src/codegen/closures.ts
 ---
 
 ## Partial resolution (2026-07-17) — direct array-receiver form FIXED
