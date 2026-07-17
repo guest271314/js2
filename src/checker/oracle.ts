@@ -101,6 +101,17 @@ export interface TypeOracle {
   typeKeyOf(node: ts.Node): OracleTypeKey;
   /** Declared type NAME when the node's type has a named symbol. */
   declaredNameOf(node: ts.Node): string | undefined;
+  /**
+   * (#869) Immutable-`const` binding resolution for compile-time default-param
+   * folding. If `id` is an identifier that references a `const` variable
+   * declaration with an initializer, returns that initializer expression;
+   * otherwise `undefined`. Deliberately excludes `let`/`var` (reassignable — a
+   * default that reads them must observe the CALL-TIME value, §10.2.11),
+   * ambient/uninitialized consts, destructuring-bound consts, and non-variable
+   * bindings (parameters, enum members, functions). Returns an AST node, not a
+   * `ts.Type`, so it honors the no-checker-object-escapes contract.
+   */
+  constInitializerOf(id: ts.Node): ts.Expression | undefined;
 }
 
 /** Builtins with first-class compiler handling (mirrors type-mapper's set —
@@ -260,6 +271,23 @@ export class TsCheckerOracle implements TypeOracle {
     }
   }
 
+  constInitializerOf(id: ts.Node): ts.Expression | undefined {
+    try {
+      if (!ts.isIdentifier(id)) return undefined;
+      const sym = this.checker.getSymbolAtLocation(id);
+      const decl = sym?.valueDeclaration;
+      // Must be a `const` variable declaration with an initializer, bound to a
+      // plain identifier (not a destructuring pattern).
+      if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
+      if (!ts.isIdentifier(decl.name)) return undefined;
+      const list = decl.parent;
+      if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return undefined;
+      return decl.initializer;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Internal: classify a checker type into a registry-free fact. */
   private factOfType(t: ts.Type, depth: number): TypeFact {
     if (depth > 6) return { kind: "unresolvable" };
@@ -297,15 +325,31 @@ export class TsCheckerOracle implements TypeOracle {
       return { kind: "union", parts, nullable, undefinable };
     }
     if (f & ts.TypeFlags.Object) {
+      const checkerWithCollectionPredicates = this.checker as ts.TypeChecker & {
+        isArrayType?: (type: ts.Type) => boolean;
+        isTupleType?: (type: ts.Type) => boolean;
+        getTypeArguments?: (type: ts.TypeReference) => readonly ts.Type[];
+      };
+      const typeArguments =
+        checkerWithCollectionPredicates.getTypeArguments?.(t as ts.TypeReference) ??
+        (t as ts.TypeReference).typeArguments ??
+        [];
+      if (checkerWithCollectionPredicates.isTupleType?.(t) === true) {
+        return { kind: "tuple", elements: typeArguments.map((element) => this.factOfType(element, depth + 1)) };
+      }
+      if (checkerWithCollectionPredicates.isArrayType?.(t) === true) {
+        const element = typeArguments[0];
+        return { kind: "array", element: element ? this.factOfType(element, depth + 1) : { kind: "any" } };
+      }
       const name = t.symbol?.name;
       if (name && BUILTIN_NAMES.has(name)) {
         if (name === "Array") {
-          const elem = (t as ts.TypeReference).typeArguments?.[0];
+          const elem = typeArguments[0];
           return { kind: "array", element: elem ? this.factOfType(elem, depth + 1) : { kind: "any" } };
         }
         return { kind: "builtin", name };
       }
-      if (t.getCallSignatures?.().length > 0) return { kind: "function" };
+      if (t.getCallSignatures?.().length > 0 || t.getConstructSignatures?.().length > 0) return { kind: "function" };
       if (name && name !== "__type" && name !== "__object") return { kind: "class", name };
       return { kind: "object" };
     }

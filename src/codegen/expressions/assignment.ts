@@ -3515,9 +3515,11 @@ function compilePropertyAssignment(
     if (detachedWrite !== undefined) return detachedWrite;
   }
 
-  // (#3364) A property whose descriptor was changed by Object.defineProperty
-  // must run through the runtime [[Set]] path. A direct struct.set would bypass
-  // [[Writable]], an absent [[Set]], and the receiver's extensibility state.
+  // (#3374) A module-global property whose descriptor was changed by
+  // Object.defineProperty must run through the runtime [[Set]] path. Function-
+  // local class instances use the compiled classAccessorSet path below.
+  // A direct struct.set would bypass [[Writable]], an absent [[Set]], and the
+  // receiver's extensibility state.
   // The strictness bit comes from the actual source context: test262's
   // `noStrict` scripts are compiled through a synthetic module wrapper and must
   // still keep sloppy failed writes as silent no-ops.
@@ -3525,7 +3527,10 @@ function compilePropertyAssignment(
     const receiverName = target.expression.text;
     const propName = target.name.text;
     const propertyKey = `${receiverName}:${propName}`;
-    if (ctx.definePropertyReceiverKeys.has(propertyKey) || sourceDefinesProperty(ctx, target.expression, propName)) {
+    if (
+      ctx.moduleGlobals.has(receiverName) &&
+      (ctx.definePropertyReceiverKeys.has(propertyKey) || sourceDefinesProperty(ctx, target.expression, propName))
+    ) {
       return compilePropertyAssignmentExternSet(ctx, fctx, target, value, propName, true);
     }
 
@@ -3958,7 +3963,7 @@ function compilePropertyAssignmentExternSet(
   const valLocal = allocLocal(fctx, `__paset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
 
-  // (#3364) PutValue throws only when [[Set]] returns false AND the Reference is
+  // (#3374) PutValue throws only when [[Set]] returns false AND the Reference is
   // strict (§6.2.5.6 steps 3.d-e). Preserve that source-level bit instead of
   // treating the compiler's synthetic ESM wrapper as strict JavaScript.
   const strict = isStrictContext(target, ctx.inferModuleStrictArguments);
@@ -3984,7 +3989,7 @@ function compilePropertyAssignmentExternSet(
   // Its terminal else-arm IS the selected runtime setter, so no
   // inline fallback is needed; its struct-candidate arms are enumerated at
   // finalize (the full type table), fixing the compile-order candidate freeze.
-  // (#3364) Object.defineProperty descriptors live in runtime state, not in a
+  // (#3374) Object.defineProperty descriptors live in runtime state, not in a
   // Wasm struct slot. Bypass the struct.set arms for such properties so every
   // write observes [[Writable]] / [[Set]] and returns the correct [[Set]] result.
   const dispatched =
@@ -4840,7 +4845,7 @@ function compileExternSetFallback(
   });
   fctx.body.push({ op: "local.get", index: valLocal });
 
-  // (#3364) Bracket writes carry the same PutValue strictness bit as dot writes.
+  // (#3374) Bracket writes carry the same PutValue strictness bit as dot writes.
   // Keep sloppy failed [[Set]] results silent; strict failures throw TypeError.
   const setName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const funcIdx = ensureLateImport(

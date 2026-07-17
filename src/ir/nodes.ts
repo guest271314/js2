@@ -1467,6 +1467,19 @@ export interface IrInstrVecGet extends IrInstrBase {
 }
 
 /**
+ * Mutate one already-allocated dense-vector element. The index is i32 and the
+ * value must match the vector element type. Bounds/growth policy stays
+ * explicit in surrounding IR; this terminal instruction performs one planned
+ * in-bounds store.
+ */
+export interface IrInstrVecSet extends IrInstrBase {
+  readonly kind: "vec.set";
+  readonly vec: IrValueId;
+  readonly index: IrValueId;
+  readonly newValue: IrValueId;
+}
+
+/**
  * #1804 — Construct a vec from a fixed, statically-known set of element SSA
  * values. All `elements` share the IrType `elementType` (the from-ast lowerer
  * coerces each element to this type before emitting). `resultType` is the vec
@@ -2335,6 +2348,7 @@ export type IrInstr =
   | IrInstrSlotWrite
   | IrInstrVecLen
   | IrInstrVecGet
+  | IrInstrVecSet
   | IrInstrVecNewFixed
   | IrInstrForOfVec
   | IrInstrCoerceToExternref
@@ -2636,6 +2650,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "slot.write":
     case "vec.len":
     case "vec.get":
+    case "vec.set":
     case "vec.new_fixed":
     case "coerce.to_externref":
     case "iter.new":
@@ -2786,6 +2801,7 @@ export function mapNestedBuffers(
     case "slot.write":
     case "vec.len":
     case "vec.get":
+    case "vec.set":
     case "vec.new_fixed":
     case "coerce.to_externref":
     case "iter.new":
@@ -2907,6 +2923,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.set":
+      return [instr.vec, instr.index, instr.newValue];
     case "vec.new_fixed":
       return instr.elements;
     case "forof.vec":

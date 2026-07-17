@@ -21,6 +21,7 @@ import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
 import { popBody, pushBody } from "./context/bodies.js";
+import { resolveWidenedVarKey } from "./widened-var-key.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
@@ -495,7 +496,14 @@ export function runtimeAccessorDescriptorKey(
     return key;
   }
 
-  // (#3364) Function bodies can be emitted before the second module-init pass
+  // The source fallback below exists for module globals whose function bodies
+  // are emitted before the second module-init pass rebuilds descriptor state.
+  // Function-local class instances are compiled in statement order and may use
+  // the native classAccessorSet path; forcing those through __extern_get would
+  // bypass their compiled getter/setter functions.
+  if (!ctx.moduleGlobals.has(receiver.text)) return undefined;
+
+  // (#3374) Function bodies can be emitted before the second module-init pass
   // has rebuilt the descriptor bookkeeping above. Recognize the same static
   // Object.defineProperty accessor shape from the source so a read following a
   // rejected strict write still invokes the installed getter instead of reading
@@ -779,7 +787,9 @@ export function resolveStructNameForExpr(
   const objType = ctx.checker.getTypeAtLocation(expression);
   let typeName = resolveStructName(ctx, objType);
   if (!typeName && ts.isIdentifier(expression)) {
-    typeName = ctx.widenedVarStructMap.get(expression.text);
+    // (#3364) resolve to the receiver's declaration key, not the bare name.
+    const key = resolveWidenedVarKey(ctx, expression);
+    if (key !== undefined) typeName = ctx.widenedVarStructMap.get(key);
   }
   if (!typeName && expression.kind === ts.SyntaxKind.ThisKeyword) {
     typeName = resolveThisStructName(ctx, fctx);

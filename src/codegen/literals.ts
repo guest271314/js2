@@ -43,6 +43,7 @@ import { resolveStructName } from "./expressions/misc.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "./expressions/proto-override.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
+import { widenedVarKeyFromDecl } from "./widened-var-key.js";
 import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
 import { collectInstrs } from "./statements/shared.js";
 import {
@@ -1325,7 +1326,8 @@ export function compileObjectLiteral(
   // properties (from pre-pass), register the struct with those extra fields and
   // compile as a struct.new with default values for the widened fields.
   if (expr.properties.length === 0 && ts.isVariableDeclaration(expr.parent) && ts.isIdentifier(expr.parent.name)) {
-    const widenedProps = ctx.widenedTypeProperties.get(expr.parent.name.text);
+    // (#3364) Look up by the DECLARATION-site key, not the bare name.
+    const widenedProps = ctx.widenedTypeProperties.get(widenedVarKeyFromDecl(expr.parent.name));
     if (widenedProps && widenedProps.length > 0) {
       return compileWidenedEmptyObject(ctx, fctx, expr, widenedProps);
     }
@@ -1908,7 +1910,7 @@ export function compileWidenedEmptyObject(
     typeName = ctx.anonTypeMap.get(varType);
   }
   if (!typeName && ts.isVariableDeclaration(expr.parent) && ts.isIdentifier(expr.parent.name)) {
-    typeName = ctx.widenedVarStructMap.get(expr.parent.name.text);
+    typeName = ctx.widenedVarStructMap.get(widenedVarKeyFromDecl(expr.parent.name));
   }
   if (!typeName) {
     // Fallback: the pre-pass should have registered it but didn't match type identity.
@@ -1944,7 +1946,7 @@ export function compileWidenedEmptyObject(
         ctx.anonTypeMap.set(varType, typeName);
       }
       // Record via widenedVarStructMap so later lookups still find it for any-typed vars.
-      ctx.widenedVarStructMap.set(expr.parent.name.text, typeName);
+      ctx.widenedVarStructMap.set(widenedVarKeyFromDecl(expr.parent.name), typeName);
     }
   }
   if (!typeName) return null;
@@ -3428,12 +3430,8 @@ export function compileArrayLiteral(
   // and preserve their runtime tag/identity.
   const hasDynamicOrCallableElement = expr.elements.some((element) => {
     if (ts.isOmittedExpression(element) || ts.isSpreadElement(element)) return false;
-    const type = ctx.checker.getTypeAtLocation(element);
-    return (
-      (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ||
-      type.getCallSignatures().length > 0 ||
-      type.getConstructSignatures().length > 0
-    );
+    const fact = ctx.oracle.typeFactOf(element);
+    return fact.kind === "any" || fact.kind === "unknown" || fact.kind === "function";
   });
 
   // Check if the target type is a tuple — compile as struct.new instead of array.

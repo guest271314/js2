@@ -1902,15 +1902,13 @@ export function tryPrototypeMethodAndArityReads(
   // receiver is still evaluated for side effects, then discarded; the value is
   // read from the same sandboxed builtin object that an explicit
   // `Array.prototype.toString` expression uses, preserving reference identity.
-  const checkerWithArrayPredicates = ctx.checker as typeof ctx.checker & {
-    isArrayType?: (type: ts.Type) => boolean;
-    isTupleType?: (type: ts.Type) => boolean;
-  };
+  const receiverFact = ctx.oracle.typeFactOf(expr.expression);
+  const receiverName = ctx.oracle.declaredNameOf(expr.expression);
   const receiverIsArray =
-    checkerWithArrayPredicates.isArrayType?.(objType) === true ||
-    checkerWithArrayPredicates.isTupleType?.(objType) === true ||
-    objType.getSymbol()?.name === "Array" ||
-    objType.getSymbol()?.name === "ReadonlyArray";
+    receiverFact.kind === "array" ||
+    receiverFact.kind === "tuple" ||
+    receiverName === "Array" ||
+    receiverName === "ReadonlyArray";
   if (!noJsHost(ctx) && propName === "toString" && receiverIsArray) {
     const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
     const getIdx = ensureLateImport(

@@ -522,7 +522,7 @@ sprint: 0
 | 1668 | 2026-05-25 | Catastrophic test262 regression guard landed in the required merge-report job via PR #619 | Sprint-55 |
 | 3362 | 2026-07-17 | test262.fyi original-harness lane: run top-level harness after host export wiring | Current |
 | 3373 | 2026-07-17 | Annex B call-expression assignment targets now reach their required runtime ReferenceError | Current |
-| 3364 | 2026-07-17 | Strict assignment failures now throw TypeError while sloppy writes remain no-ops | Current |
+| 3374 | 2026-07-17 | Strict assignment failures now throw TypeError while sloppy writes remain no-ops | Current |
 | 3365 | 2026-07-17 | Script top-level this now preserves the global object and branded assignment errors | Current |
 | 3366 | 2026-07-17 | Assignment and destructuring preserve callable, dynamic, and implicit-global values | Current |
 | 3367 | 2026-07-17 | Project and original Test262 harnesses now match at 20/20 on the assignment sample | Current |

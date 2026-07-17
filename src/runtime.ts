@@ -4176,7 +4176,7 @@ function _safeSet(
     // `_isUserProxy(obj)`, so the sloppy-mode struct / frozen-builtin cases
     // below (Math.E=1, Number.NaN=1) are byte-for-byte unchanged (#2017).
     _rethrowIfProxyOrRevoked(e, obj);
-    // (#3364) The runtime module itself executes in strict mode, so the native
+    // (#3374) The runtime module itself executes in strict mode, so the native
     // assignment above throws when [[Set]] returns false. The compiler now
     // selects this helper only for a genuinely strict source Reference; in that
     // case PutValue requires the TypeError to propagate. Sloppy writes keep the

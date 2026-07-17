@@ -1,10 +1,20 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import type { ModuleLayout } from "../../../emit/resolve-layout.js";
-import type { IrFunction, IrFuncRef, IrGlobalRef, IrTypeRef } from "../../nodes.js";
+import type { LinearMemoryPlan, LinearRuntimeOperation, LinearStorageKind } from "../../analysis/linear-memory-plan.js";
+import {
+  irVal,
+  type AllocSiteId,
+  type IrFunction,
+  type IrFuncRef,
+  type IrGlobalRef,
+  type IrObjectShape,
+  type IrTypeRef,
+} from "../../nodes.js";
 import type { IrLoweredBody, IrLowerResolver } from "../../lower.js";
 import type { FuncHandle, FuncTypeDef, GlobalHandle, TypeHandle, ValType } from "../../types.js";
 import type { ModuleAssembler } from "../contract.js";
+import type { IrVecLowering, LinearMemoryFieldLowering, LinearVecLowering, PlannedObjectLowering } from "../handles.js";
 import {
   PORFFOR_EFFECT_ENTRIES,
   PORFFOR_KIND_NAMES,
@@ -98,6 +108,14 @@ export class PorfforModuleAssembler
   private frozen = false;
   private finalInput: PorfforRendererInput | null = null;
   private preferences: Readonly<Record<string, unknown>> = { gc: false };
+  private memoryPlan: LinearMemoryPlan | undefined;
+  private readonly objects = new Map<string, PlannedObjectLowering>();
+
+  bindMemoryPlan(plan: LinearMemoryPlan): void {
+    this.assertMutable("bind memory plan");
+    if (this.memoryPlan) throw new Error("porffor assembler: memory plan already bound");
+    this.memoryPlan = plan;
+  }
 
   setPreferences(preferences: Readonly<Record<string, unknown>>): void {
     this.assertMutable("set preferences");
@@ -286,6 +304,61 @@ export class PorfforModuleAssembler
     throw new Error("porffor backend does not intern Wasm function types");
   }
 
+  resolveObject(shape: IrObjectShape, alloc?: AllocSiteId): PlannedObjectLowering | null {
+    const plan = this.requireMemoryPlan();
+    const layout = plan.layoutForObjectShape(shape);
+    if (!layout) throw new Error("porffor assembler: object layout is absent from the shared memory plan");
+    const allocation = this.allocationFor(layout.id, alloc);
+    const allocate = plannedOperation(
+      allocation.operations,
+      (operation) => operation.family === "memory" && operation.operation === "allocate",
+      `record allocation for '${layout.id}'`,
+    );
+    const cacheKey = `${layout.id}:${allocation.id as number}`;
+    const cached = this.objects.get(cacheKey);
+    if (cached) return cached;
+
+    const fields = shape.fields.map((field, fieldIdx) => {
+      const planned = layout.fields.find((candidate) => candidate.name === field.name);
+      if (!planned) throw new Error(`porffor assembler: object layout has no field '${field.name}'`);
+      const type = memoryValType(planned.storage);
+      if (!type) {
+        throw new Error(`porffor assembler: object field '${field.name}' has unsupported '${planned.storage}' storage`);
+      }
+      return { name: field.name, fieldIdx, offset: planned.offset, type };
+    });
+    const fieldsByName = new Map(fields.map((field) => [field.name, field]));
+    const lowering: PlannedObjectLowering = {
+      typeIdx: 0,
+      fieldIdx(name: string): number {
+        const field = fieldsByName.get(name);
+        if (!field) throw new Error(`porffor assembler: object shape has no field '${name}'`);
+        return field.fieldIdx;
+      },
+      linearMemory: {
+        allocation,
+        layout,
+        allocate,
+        fieldCount: fields.length,
+        field(name: string): LinearMemoryFieldLowering {
+          const field = fieldsByName.get(name);
+          if (!field) throw new Error(`porffor assembler: object shape has no field '${name}'`);
+          return field;
+        },
+      },
+    };
+    this.objects.set(cacheKey, lowering);
+    return lowering;
+  }
+
+  resolveVec(valType: ValType): IrVecLowering | null {
+    return valType.kind === "i32" ? this.f64VecHandle() : null;
+  }
+
+  resolveVecForElement(elementValType: ValType, alloc?: AllocSiteId): IrVecLowering | null {
+    return elementValType.kind === "f64" ? this.f64VecHandle(alloc) : null;
+  }
+
   functionSymbol(handle: number): PorfforFunctionSymbol {
     const entry = this.requireFunc(handle);
     if (!entry.signature) throw new Error(`porffor assembler: function '${entry.name}' has no registered signature`);
@@ -387,6 +460,24 @@ export class PorfforModuleAssembler
           }
           break;
         }
+        case "store": {
+          const pointer = this.assembleExpr(statement.pointer, locals);
+          const value = this.assembleExpr(statement.value, locals);
+          out.push(
+            node("Store", "none", pointer[2] | value[2] | PORFFOR_FX.writeMem, statement.ctype, pointer, [
+              statement.offset,
+              false,
+              value,
+            ]),
+          );
+          break;
+        }
+        case "gc-barrier": {
+          const pointer = this.assembleExpr(statement.pointer, locals);
+          const typeId = this.assembleExpr(statement.typeId, locals);
+          out.push(node("GcBarrier", "none", pointer[2] | typeId[2] | PORFFOR_FX.writeMem, pointer, typeId, 0));
+          break;
+        }
         case "return": {
           const value = statement.value ? this.assembleExpr(statement.value, locals) : null;
           out.push(node("Return", "none", value?.[2] ?? PORFFOR_FX.none, value, 0, 0));
@@ -448,6 +539,17 @@ export class PorfforModuleAssembler
         const value = this.assembleExpr(expression.value, locals);
         return node("Convert", type, value[2], value[1], value, expression.flags);
       }
+      case "alloc": {
+        const bytes = this.assembleExpr(expression.bytes, locals);
+        return node("Alloc", "ptr", bytes[2] | PORFFOR_FX.call, bytes, expression.typeId, [expression.siteId, false]);
+      }
+      case "load": {
+        const pointer = this.assembleExpr(expression.pointer, locals);
+        return node("Load", type, pointer[2] | PORFFOR_FX.readMem, expression.ctype, pointer, [
+          expression.offset,
+          false,
+        ]);
+      }
       case "call": {
         const symbol = this.functionSymbol(expression.target);
         const args = expression.args.map((arg) => this.assembleExpr(arg, locals));
@@ -472,6 +574,53 @@ export class PorfforModuleAssembler
 
   private oneSlot(type: Parameters<PorfforTypeConverter["convertType"]>[0], where: string): PorfforValueSlot {
     return oneLoweredSlot(this.typeConverter.convertType(type), where);
+  }
+
+  private requireMemoryPlan(): LinearMemoryPlan {
+    if (!this.memoryPlan) throw new Error("porffor assembler: heap lowering requires a shared LinearMemoryPlan");
+    return this.memoryPlan;
+  }
+
+  private allocationFor(layoutId: string, alloc?: AllocSiteId) {
+    const plan = this.requireMemoryPlan();
+    if (alloc === undefined) {
+      const allocation = plan.allocationsForLayout(layoutId)[0];
+      if (!allocation) throw new Error(`porffor assembler: plan has no allocation for '${layoutId}'`);
+      return allocation;
+    }
+    const allocation = plan.allocation(alloc);
+    if (!allocation) throw new Error(`porffor assembler: allocation site ${alloc as number} is absent from the plan`);
+    if (allocation.layoutId !== layoutId) {
+      throw new Error(
+        `porffor assembler: allocation site ${alloc as number} planned '${allocation.layoutId}', expected '${layoutId}'`,
+      );
+    }
+    return allocation;
+  }
+
+  private f64VecHandle(alloc?: AllocSiteId): IrVecLowering & LinearVecLowering {
+    const plan = this.requireMemoryPlan();
+    const layout = plan.layoutForVector(irVal({ kind: "f64" }));
+    if (!layout) throw new Error("porffor assembler: f64 vector layout is absent from the shared memory plan");
+    const allocation = this.allocationFor(layout.id, alloc);
+    const allocate = plannedOperation(
+      allocation.operations,
+      (operation) => operation.family === "vector" && operation.operation === "allocate",
+      `vector allocation for '${layout.id}'`,
+    );
+    const initializeElement = plannedOperation(
+      allocation.operations,
+      (operation) => operation.family === "vector" && operation.operation === "initialize-element",
+      `vector element initialization for '${layout.id}'`,
+    );
+    return {
+      vecStructTypeIdx: 0,
+      lengthFieldIdx: 0,
+      dataFieldIdx: 0,
+      arrayTypeIdx: 0,
+      elementValType: { kind: "f64" },
+      linearMemory: { allocation, layout, allocate, initializeElement },
+    };
   }
 
   private bindTypeName(name: string, entry: TypeEntry): void {
@@ -500,6 +649,22 @@ export class PorfforModuleAssembler
 function oneLoweredSlot(slots: readonly PorfforValueSlot[], where: string): PorfforValueSlot {
   if (slots.length !== 1) throw new Error(`porffor backend requires exactly one scalar slot for ${where}`);
   return slots[0]!;
+}
+
+function memoryValType(storage: LinearStorageKind): ValType | null {
+  if (storage === "f64") return { kind: "f64" };
+  if (storage === "i32" || storage === "pointer") return { kind: "i32" };
+  return null;
+}
+
+function plannedOperation(
+  operations: readonly LinearRuntimeOperation[],
+  predicate: (operation: LinearRuntimeOperation) => boolean,
+  label: string,
+): LinearRuntimeOperation {
+  const operation = operations.find(predicate);
+  if (!operation) throw new Error(`porffor assembler: shared plan has no ${label}`);
+  return operation;
 }
 
 function assembleBranch(depth: number, frames: readonly ControlFrame[]): PorfforNode {

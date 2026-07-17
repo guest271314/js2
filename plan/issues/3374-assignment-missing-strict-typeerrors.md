@@ -1,5 +1,5 @@
 ---
-id: 3364
+id: 3374
 title: "Assignment semantics: strict invalid writes fail to throw TypeError"
 status: done
 created: 2026-07-17
@@ -17,8 +17,13 @@ related: [3362, 3365]
 files:
   - src/codegen/expressions/assignment.ts
   - src/runtime.ts
+oracle-ratchet-allow:
+  # Binding-identity scans are outside TypeOracle's type-query boundary.
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/property-access.ts
 ---
-# #3364 — strict assignment writes do not throw
+
+# #3374 — strict assignment writes do not throw
 
 ## Problem
 
@@ -56,6 +61,6 @@ and the receiver/property rules in
 
 ### Verification
 
-- `tests/issue-3364.test.ts`: strict/sloppy coverage for dot, bracket,
+- `tests/issue-3374.test.ts`: strict/sloppy coverage for dot, bracket,
   descriptor, accessor, and non-extensible writes passes.
 - Original harness: all seven sampled missing-throw tests pass.

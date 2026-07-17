@@ -18,6 +18,7 @@ files:
   - src/compiler.ts
   - src/codegen/expressions/assignment.ts
 ---
+
 # #3373 — Annex B call-expression assignment targets
 
 ## Problem

@@ -21,7 +21,12 @@ files:
   - src/codegen/type-coercion.ts
   - src/runtime.ts
   - tests/issue-3368.test.ts
+oracle-ratchet-allow:
+  # This source-order proof resolves one identifier to its declaration; it does
+  # not query or expose a TypeScript type.
+  - src/codegen/object-ops.ts
 ---
+
 # #3368 — close the Test262 array-sample residuals
 
 ## Problem

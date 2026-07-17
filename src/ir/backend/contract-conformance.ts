@@ -98,6 +98,9 @@ export class StubEmitter implements BackendEmitter<StubSink> {
   emitElemGet(_layout: StubVecLayout, out: StubSink): void {
     out.push("elem.get");
   }
+  emitElemSet(_layout: StubVecLayout, _scratch: number, out: StubSink): void {
+    out.push("elem.set");
+  }
   emitVecNewFixed(_layout: StubVecLayout, count: number, _scratch: number, out: StubSink): void {
     out.push(`vec.new_fixed:${count}`);
   }
