@@ -1891,6 +1891,51 @@ export function tryPrototypeMethodAndArityReads(
   propName: string,
   objType: ts.Type,
 ): PADispatchResult {
+  // (#3368) A plain array's inherited method VALUE is the corresponding
+  // `%Array.prototype%` function object. Method calls (`arr.toString()`) already
+  // use the native array-method lowering, but a detached value read
+  // (`arr.toString`) previously fell through to the WasmGC struct-field path
+  // and produced `undefined`. Besides being directly observable, that broke
+  // the required identity `arr.toString === Array.prototype.toString`.
+  //
+  // Keep this host-lane slice deliberately narrow to the sampled member. The
+  // receiver is still evaluated for side effects, then discarded; the value is
+  // read from the same sandboxed builtin object that an explicit
+  // `Array.prototype.toString` expression uses, preserving reference identity.
+  const checkerWithArrayPredicates = ctx.checker as typeof ctx.checker & {
+    isArrayType?: (type: ts.Type) => boolean;
+    isTupleType?: (type: ts.Type) => boolean;
+  };
+  const receiverIsArray =
+    checkerWithArrayPredicates.isArrayType?.(objType) === true ||
+    checkerWithArrayPredicates.isTupleType?.(objType) === true ||
+    objType.getSymbol()?.name === "Array" ||
+    objType.getSymbol()?.name === "ReadonlyArray";
+  if (!noJsHost(ctx) && propName === "toString" && receiverIsArray) {
+    const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (getBuiltinIdx !== undefined && getIdx !== undefined) {
+      const receiverType = compileExpression(ctx, fctx, expr.expression);
+      if (receiverType !== null) fctx.body.push({ op: "drop" });
+
+      addStringConstantGlobal(ctx, "Array");
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, "Array"));
+      fctx.body.push({ op: "call", funcIdx: getBuiltinIdx });
+      for (const member of ["prototype", "toString"] as const) {
+        addStringConstantGlobal(ctx, member);
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, member));
+        fctx.body.push({ op: "call", funcIdx: getIdx });
+      }
+      return { kind: "externref" };
+    }
+  }
+
   // (#1394) `ClassName.prototype.<method>` — emit a cached singleton
   // closure-struct externref. The previous PR #294 emitted a fresh
   // closure on every access, breaking the `c.m === C.prototype.m`

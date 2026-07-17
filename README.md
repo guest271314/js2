@@ -167,6 +167,23 @@ pnpm run test:262
 pnpm dev
 ```
 
+To independently cross-check compiler compatibility with test262.fyi's
+literal, unmodified harness assembler, initialize its optional data submodule
+and run the separate comparison lane:
+
+```bash
+git submodule update --init --checkout test262-fyi/data
+pnpm run test:262:fyi -- --filter built-ins/Array --limit 20
+```
+
+This lane uses `test262-fyi/data/runner/read.js` to concatenate the host shim,
+upstream `assert.js`, `sta.js`, metadata `includes`, and each raw test body. The
+canonical `pnpm run test:262` runner and CI use the same literal-harness
+contract; this optional lane cross-checks their assembly against test262.fyi's
+own reader and reports its score separately. Neither verdict path uses
+`wrapTest()` or a synthetic preamble. Omit the filter and limit for a full run;
+use `--help` for output and target options.
+
 ## Running compiled output
 
 `js2wasm` emits WasmGC modules that use several post-MVP WebAssembly proposals.
