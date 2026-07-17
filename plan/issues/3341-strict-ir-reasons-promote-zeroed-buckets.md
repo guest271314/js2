@@ -6,6 +6,7 @@ sprint: current
 created: 2026-07-17
 priority: medium
 feasibility: hard
+model: fable
 horizon: m
 task_type: feature
 area: codegen
