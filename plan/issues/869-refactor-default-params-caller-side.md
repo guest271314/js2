@@ -11,6 +11,11 @@ reasoning_effort: high
 goal: maintainability
 sprint: current
 related: [3182]
+# The foldConstantNumericDefault helper is a cohesive extension of the
+# existing extractConstantDefault in index.ts (its only caller), so it lives
+# alongside it rather than in a separate module (#3104 split is a later pass).
+loc-budget-allow:
+  - src/codegen/index.ts
 ---
 
 > **2026-07-12 (#3182 groom, elevated to current/high).** Still actionable:
