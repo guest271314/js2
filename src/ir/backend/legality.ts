@@ -12,7 +12,7 @@ import type { IrBinop, IrBlock, IrFunction, IrInstr, IrType } from "../nodes.js"
 import { asVal } from "../nodes.js";
 import type { ValType } from "../types.js";
 
-export type IrBackendKind = "wasmgc" | "linear" | "bytecode";
+export type IrBackendKind = "wasmgc" | "linear" | "bytecode" | "porffor";
 
 export interface IrBackendLegalityError {
   readonly message: string;
@@ -67,6 +67,9 @@ function checkInstr(
     if (reason) reject(reason);
   } else if (backend === "bytecode") {
     const reason = bytecodeInstrError(instr);
+    if (reason) reject(reason);
+  } else if (backend === "porffor") {
+    const reason = porfforInstrError(instr);
     if (reason) reject(reason);
   }
 
@@ -183,6 +186,42 @@ function bytecodeBinopLegal(op: IrBinop): boolean {
   }
 }
 
+// #3288 P1 — deliberately narrow until the structured Porffor sink lands in
+// P2. Every admitted family reaches a typed BackendEmitter primitive in
+// lower.ts. Families that still touch pushRaw or require an Instr[] sub-buffer
+// are rejected here, before a Porffor emitter can observe them.
+function porfforInstrError(instr: IrInstr): string | null {
+  switch (instr.kind) {
+    case "const":
+      switch (instr.value.kind) {
+        case "i32":
+        case "i64":
+        case "f64":
+        case "bool":
+          return null;
+        default:
+          return `porffor backend does not support const '${instr.value.kind}'`;
+      }
+    case "binary":
+      return instr.op.startsWith("js.")
+        ? `porffor backend does not support binary op '${instr.op}' before typed composite-op lowering`
+        : null;
+    case "unary":
+      return instr.op === "ref.is_null" ? `porffor backend does not support unary op '${instr.op}'` : null;
+    case "call":
+    case "global.get":
+    case "global.set":
+    case "select":
+    case "if":
+    case "early.return":
+    case "br.label":
+    case "if.stmt":
+      return null;
+    default:
+      return `porffor backend does not support IR instruction '${instr.kind}' before typed Porffor lowering`;
+  }
+}
+
 function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
   if (backend === "wasmgc") return null;
   if (backend === "linear") {
@@ -196,7 +235,9 @@ function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
     if (!v) return `bytecode backend does not support IR type '${type.kind}'`;
     return bytecodeValTypeError(v);
   }
-  return null;
+  const v = asVal(type);
+  if (!v) return `porffor backend does not support IR type '${type.kind}'`;
+  return porfforValTypeError(v);
 }
 
 function checkValType(
@@ -208,7 +249,13 @@ function checkValType(
   where: string,
 ): void {
   const msg =
-    backend === "bytecode" ? bytecodeValTypeError(type) : backend === "linear" ? linearValTypeError(type) : null;
+    backend === "bytecode"
+      ? bytecodeValTypeError(type)
+      : backend === "linear"
+        ? linearValTypeError(type)
+        : backend === "porffor"
+          ? porfforValTypeError(type)
+          : null;
   if (msg) errors.push({ message: `${where}: ${msg}`, func, block });
 }
 
@@ -232,6 +279,17 @@ function bytecodeValTypeError(v: ValType): string | null {
       return null;
     default:
       return `bytecode backend does not support ValType '${v.kind}'`;
+  }
+}
+
+function porfforValTypeError(v: ValType): string | null {
+  switch (v.kind) {
+    case "i32":
+    case "i64":
+    case "f64":
+      return null;
+    default:
+      return `porffor backend does not support ValType '${v.kind}'`;
   }
 }
 
