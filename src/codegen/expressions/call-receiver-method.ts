@@ -3184,7 +3184,35 @@ export function compileReceiverMethodCall(
   if (!ctx.standalone && !ctx.wasi) {
     // recvWasm hoisted above the any-arm block — one checker resolution
     // serves both fallbacks (oracle ratchet #1930/#3273).
-    if (recvWasm.kind === "ref" || recvWasm.kind === "ref_null") {
+    //
+    // (#3176 merge-queue park) The arm must only claim TRUE expandos —
+    // methods NOT declared on the static receiver type. The original
+    // unconditional delegation hijacked calls the downstream compiled paths
+    // handled correctly (compiled class instance methods like Temporal's
+    // polyfill `since`/`until`, and static class fields like
+    // `class C { static f = () => this }` — C.f is a declared member) into
+    // `__extern_method_call`, whose host mirror does NOT carry compiled
+    // class methods → "since is not a function" / null cascades: 215
+    // merge_group regressions (211 Temporal + class static-field arrows).
+    // `recvTsType.getProperty` / `.isClass` are Type-object reads on the
+    // ALREADY-hoisted resolution — no net-new direct checker usage
+    // (ratchet #1930/#3273). The Sputnik classifier idiom
+    // (`arr.getClass = …` on a vec/struct or object literal) is by
+    // definition undeclared on the receiver's type, so the #3201 wins keep
+    // hitting the arm.
+    //
+    // Class-declared instance types are ALSO declined even when getProperty
+    // misses: a class extending an unresolvable base (e.g.
+    // `class X extends Temporal.PlainYearMonth` — no TS lib typings for the
+    // base) has an incomplete member set, so a getProperty miss is not
+    // evidence of an expando (Temporal/PlainYearMonth/prototype/equals/
+    // use-internal-slots.js regressed exactly this way). Declining restores
+    // the pre-#3201 downstream path, which handled these correctly.
+    if (
+      (recvWasm.kind === "ref" || recvWasm.kind === "ref_null") &&
+      recvTsType.getProperty(propAccess.name.text) === undefined &&
+      !(recvTsType.isClass?.() ?? false)
+    ) {
       // rawStructReceiver: the expando sidecar (`_wasmStructProps`) is keyed
       // by the RAW struct ref — an externref expected-type compile would
       // route a vec receiver through `__make_iterable`'s copy, losing the
