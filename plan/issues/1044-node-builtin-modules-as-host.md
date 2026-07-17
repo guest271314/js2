@@ -2,9 +2,11 @@
 id: 1044
 title: "Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization)"
 horizon: m
-status: ready
+status: done
+completed: 2026-07-17
+assignee: ttraenkler/opus-b
 created: 2026-04-11
-updated: 2026-06-19
+updated: 2026-07-17
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -14,6 +16,7 @@ parent: 1032
 depends_on: [1041]
 required_by: [1032, 1058]
 ---
+
 # #1044 — Node builtin modules as host imports
 
 ## Problem
@@ -28,13 +31,26 @@ For #1032 (axios stress test) to get past Tier 2, the compiler must recognize No
 
    ```ts
    const NODE_BUILTIN_MODULES = new Set([
-     'http', 'https', 'http2', 'url', 'querystring',
-     'stream', 'stream/web', 'events', 'buffer',
-     'zlib', 'util', 'path', 'process',
-     'net', 'tls', 'fs', 'crypto',
+     "http",
+     "https",
+     "http2",
+     "url",
+     "querystring",
+     "stream",
+     "stream/web",
+     "events",
+     "buffer",
+     "zlib",
+     "util",
+     "path",
+     "process",
+     "net",
+     "tls",
+     "fs",
+     "crypto",
    ]);
    function isNodeBuiltin(spec: string): boolean {
-     return NODE_BUILTIN_MODULES.has(spec.replace(/^node:/, ''));
+     return NODE_BUILTIN_MODULES.has(spec.replace(/^node:/, ""));
    }
    ```
 
@@ -78,3 +94,38 @@ For #1032 (axios stress test) to get past Tier 2, the compiler must recognize No
 - Depends on: **#1041** (pre-bundled single-file input — required for any multi-file npm package)
 - Coordinate with: **#1035** (WASI `node:fs` compile-time syscall path — two different mechanisms with overlapping surface; design together)
 - Architecture: `plan/design/architecture/npm-stress-compiler-gaps.md` cross-cutting gap #3
+
+## Resolution (2026-07-17)
+
+The recognition machinery landed **incrementally** across the sprint rather than
+in a single PR, and criterion 5's last gap was closed here:
+
+- **`NODE_BUILTIN_MODULES` set + `isNodeBuiltin` + `normalizeNodeBuiltin`** —
+  `src/import-resolver.ts` (set now spans http/https/url/stream/events/buffer/
+  zlib/util/fs/crypto/os/module/fs-promises/… — well beyond the original spec).
+- **`node:` prefix normalization** — `import http from "node:http"` and
+  `import http from "http"` resolve to the same host import
+  (`normalizeNodeBuiltin` strips the `node:` prefix). ✔ criterion 2.
+- **Host-import routing (no `declare const X: any` erasure)** — node-builtin
+  imports push to `nodeBuiltins` → late externref host import; typed function
+  stubs (`__nodefn__<mod>__<fn>`, #1492/#1795/#2699) and extern-class stubs
+  (#1794) for known members. ✔ criterion 3 (the axios Tier-4 surface —
+  http/https/url/stream/events/zlib/util/buffer — compiles routing through host
+  imports; full `lib/adapters/http.js` also needs async lowering #1042, a
+  declared non-goal here).
+- **WASI capability gate** — a non-`node:fs` builtin under `--target wasi`
+  errors cleanly: _"Node builtin module 'http' is not available in WASI
+  target…"_ rather than crashing. ✔ criterion 4.
+- **Global `Buffer`** — #1793 registered `Buffer` in `BUILTIN_CLASS_NAMES` so
+  `Buffer.from`/`alloc`/`concat` lower syntactically. This PR closed the last
+  gap: `buildNodeEnvDts` (`src/checker/index.ts`) now injects an ambient
+  `declare var Buffer: BufferConstructor` (parallel to the `process` global),
+  so the global form type-checks under `--emulate node` instead of emitting a
+  spurious _"Cannot find name 'Buffer'"_. Gated behind `--emulate node` (like
+  `process`/`Deno`), so the common web/test262 path stays byte-neutral; a local
+  `Buffer` import binding or a user-declared `Buffer` suppresses the inject.
+  ✔ criterion 5.
+
+Verification: `tests/issue-1044.test.ts` (9 tests: global-Buffer ambient typing,
+import-scoped dts, node:-prefix normalization, WASI gate) + the existing
+`tests/issue-1793.test.ts` (7) all green.
