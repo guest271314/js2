@@ -13609,18 +13609,13 @@ assert._isSameValue = isSameValue;
       const userDep = deps?.[name];
       if (typeof userDep === "function") return (...args: any[]) => userDep(...args);
       if (userDep !== undefined) return () => userDep;
-      // No dep. Internal `__`-prefixed helpers keep the historical no-op; a
-      // user-facing name means the embedder declared a host fn but supplied no
-      // dep — throw a clear error WHEN CALLED (lazy, so a declared-but-unused
-      // import never breaks linking) rather than silently dropping the call.
-      if (!name.startsWith("__")) {
-        return () => {
-          throw new TypeError(
-            `Missing host dependency for ambient declaration "${name}": ` +
-              `pass { ${name}: <fn> } via deps to satisfy the import.`,
-          );
-        };
-      }
+      // No matching dep → keep the historical no-op. (An earlier revision threw
+      // a clear error for a called-but-undepped user-facing ambient name, but
+      // the test262 harness legitimately declares ambient functions it does not
+      // always supply — e.g. host print/log stubs — and relies on the no-op, so
+      // throwing regressed the merged-state test262 gate. The dep-wiring above
+      // is the actual #3325 fix; a targeted "missing dep" diagnostic gated to
+      // non-harness contexts is a possible follow-up.)
       return () => {};
     }
     case "callback_maker":

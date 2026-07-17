@@ -82,13 +82,20 @@ call ran but did nothing.
 1. If `deps[name]` is a function → wire the import to it (`(...args) =>
    userDep(...args)`).
 2. If `deps[name]` is a non-function value → expose it as a zero-arg accessor.
-3. If no dep AND the name is user-facing (does not start with `__`) → return a
-   stub that throws a clear `TypeError` **when called** (lazy, so a
-   declared-but-unused import never breaks instantiation/linking).
-4. Internal `__`-prefixed unknown names keep the historical no-op.
+3. If no dep → keep the historical no-op.
+
+**Scope note — acceptance criterion 2 (missing dep → clear error) is deferred.**
+An earlier revision returned a stub that threw a clear `TypeError` for a
+called-but-undepped user-facing (non-`__`) ambient name. That **regressed the
+merged-state test262 gate** (bot park on PR #3211): the test262 harness
+legitimately declares ambient host functions it does not always supply (print/
+log-style stubs) and relies on the no-op, so throwing flipped passing tests to
+failing. The dep-wiring (1–2) is the real fix for the reported bug; the
+"missing dep" diagnostic would need to be gated to non-harness embedder contexts
+— tracked as a possible follow-up.
 
 **Tests:** `tests/issue-3325.test.ts` (6) — numeric/string arg marshaling,
-per-call-site invocation, missing-dep lazy throw, unused-import instantiation,
+per-call-site invocation, missing-dep-is-no-op, unused-import instantiation,
 non-function dep exposure. Adjacent declare-function / host-interop suites
 (issue-1042/1052/1494/1347/2903*/2635/2693*/2752/1636/3125*/3137/1695/
 promise-combinators) show no NEW failures — the pre-existing issue-820m (4) and

@@ -7,9 +7,11 @@
 // no-op — silently ignoring any `deps` the embedder supplied. This is the
 // natural FFI for embedders, so a dropped call is worse than a compile error.
 //
-// The fix wires the fallback to `deps[name]` when present, and turns a missing
-// dep for a user-facing (non-`__`) ambient name into a lazy, clear TypeError
-// (thrown WHEN CALLED, so a declared-but-unused import can't break linking).
+// The fix wires the fallback to `deps[name]` when present (function → forwarded,
+// value → zero-arg accessor). A missing dep stays a no-op — an earlier revision
+// threw for a called-but-undepped user-facing name, but that regressed the
+// test262 harness (which declares ambient host fns it does not always supply),
+// so the historical no-op is preserved.
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
@@ -71,14 +73,16 @@ describe("#3325 — ambient declare function host-dep wiring", () => {
     expect(seen).toEqual([1, 2, 3]);
   });
 
-  it("a missing dep for a called ambient function throws a clear error (not a silent no-op)", async () => {
-    await expect(
-      runWithDeps(
-        `declare function frobnicate(u: any): void;
-         export function test(): number { frobnicate(1); return 9; }`,
-        {},
-      ),
-    ).rejects.toThrow(/Missing host dependency for ambient declaration "frobnicate"/);
+  it("a missing dep for a called ambient function is a no-op (does not break the module)", async () => {
+    // The dep is dropped (historical behavior). A hard error here regressed the
+    // test262 harness, which declares ambient host fns it does not always supply
+    // and relies on the no-op — so a missing dep stays a no-op, not a throw.
+    const ret = await runWithDeps(
+      `declare function frobnicate(u: any): void;
+       export function test(): number { frobnicate(1); return 9; }`,
+      {},
+    );
+    expect(ret).toBe(9);
   });
 
   it("a declared-but-unused ambient function with no dep does NOT break instantiation", async () => {
