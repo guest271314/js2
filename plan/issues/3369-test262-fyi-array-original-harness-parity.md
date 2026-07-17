@@ -22,6 +22,27 @@ files:
   - tests/test262-fyi-runner.test.ts
   - tests/issue-3369.test.ts
   - tests/issue-3369-project-runner.test.ts
+loc-budget-allow:
+  # Closing the literal-harness gaps requires coordinated representation,
+  # dispatch, assignment, iterator, and exception handling in these existing
+  # subsystem modules. This allowance is change-scoped to the Test262 batch.
+  - src/codegen/expressions/assignment.ts
+  - src/runtime.ts
+  - src/codegen/property-access.ts
+  - src/codegen/object-ops.ts
+  - src/codegen/literals.ts
+  - src/codegen/property-access-dispatch.ts
+  - src/codegen/declarations.ts
+  - src/codegen/statements/loops.ts
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/expressions/unary-updates.ts
+  - src/codegen/expressions.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/operator-assignment.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/compiler/early-errors/node-checks.ts
 ---
 # #3369 — close the original-harness array-sample parity gap
 
