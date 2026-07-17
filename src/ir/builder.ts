@@ -357,7 +357,8 @@ export class IrFunctionBuilder {
     }
     const result = this.allocator.fresh();
     this.valueTypes.set(result, toType);
-    this.pushInstr({ kind: "box", value, toType, result, resultType: toType });
+    const alloc = this.allocId("box", toType);
+    this.pushInstr({ kind: "box", value, toType, result, resultType: toType, alloc });
     return result;
   }
 
@@ -1294,16 +1295,14 @@ export class IrFunctionBuilder {
     return result;
   }
 
-  /**
-   * #1804 — construct a fixed-length vec from element SSA values. `elementType`
-   * is the shared element IrType; `vecRefType` is the vec ref IrType the
-   * caller obtained from the resolver (`resolveVecForElement`) and becomes the
-   * result's type so downstream `vec.get`/`.length`/`for-of` reads resolve.
-   */
+  /** Construct a fixed vec whose result uses the resolver's `vecRefType`, so
+   * downstream `vec.get`/`.length`/`for-of` reads retain the same identity. */
   emitVecNewFixed(elements: readonly IrValueId[], elementType: IrType, vecRefType: IrType): IrValueId {
     const result = this.allocator.fresh();
-    this.valueTypes.set(result, vecRefType);
-    this.pushInstr({ kind: "vec.new_fixed", elements: [...elements], elementType, result, resultType: vecRefType });
+    const resultType = vecRefType;
+    this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("array", resultType);
+    this.pushInstr({ kind: "vec.new_fixed", elements: [...elements], elementType, result, resultType, alloc });
     return result;
   }
 

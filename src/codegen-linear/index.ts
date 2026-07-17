@@ -4,6 +4,7 @@ import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import type { FuncTypeDef, Instr, ValType, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileLinearIrFunctions, linearIrEnabled } from "../ir/backend/linear-integration.js";
+import { materializeLinearIrHelper } from "../ir/backend/linear-integration.js";
 import type { CollectionKind, FinallyEntry, LinearContext, LinearFuncContext } from "./context.js";
 import { addLocal } from "./context.js";
 import type { ClassLayout } from "./layout.js";
@@ -234,17 +235,16 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     compileFunction(ctx, decl);
   }
 
-  // Aggregate/ref-cell allocation helpers are deliberately appended after
-  // every pre-assigned user slot. This keeps funcMap indices stable while IR
-  // lowering discovers object shapes lazily.
+  // Aggregate/ref-cell helpers follow every user slot, keeping funcMap stable
+  // while IR lowering discovers object shapes lazily.
   for (const helper of linearIr?.helpers ?? []) {
     const actualFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     if (actualFuncIdx !== helper.funcIdx) {
       throw new Error(
-        `linear-ir: deferred helper slot mismatch for '${helper.func.name}' (expected ${helper.funcIdx}, got ${actualFuncIdx})`,
+        `linear-ir: deferred helper slot mismatch for '${helper.name}' (expected ${helper.funcIdx}, got ${actualFuncIdx})`,
       );
     }
-    ctx.mod.functions.push(helper.func);
+    ctx.mod.functions.push(materializeLinearIrHelper(ctx, helper));
   }
 
   // ── Emit data segments for string literals ──

@@ -39,11 +39,7 @@
 
 import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
-import {
-  computeClassLayout,
-  LINEAR_AGGREGATE_HEADER_SIZE,
-  LINEAR_GENERIC_OBJECT_TAG,
-} from "../../codegen-linear/layout.js";
+import { LINEAR_GENERIC_OBJECT_TAG } from "../../codegen-linear/layout.js";
 import {
   LINEAR_IR_STRING_CHAR_CODE_AT_FN,
   LINEAR_IR_VEC_INIT_F64_FN,
@@ -51,7 +47,30 @@ import {
 } from "../../codegen-linear/runtime.js";
 import { IR_STRING_COMPARE_FN, lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
 import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
-import { asVal, type IrFuncRef, type IrGlobalRef, type IrObjectShape, type IrType, type IrTypeRef } from "../nodes.js";
+import { AllocSiteRegistry } from "../alloc-registry.js";
+import {
+  defaultOperationsForLayout,
+  linearRuntimeOperationKey,
+  planLinearMemory,
+  planLinearStringLayout,
+  planLinearVectorLayout,
+  type LinearAllocationSitePlan,
+  type LinearMemoryPlan,
+  type LinearRecordLayoutPlan,
+  type LinearRuntimeOperation,
+  type LinearStorageKind,
+} from "../analysis/linear-memory-plan.js";
+import {
+  asVal,
+  irVal,
+  type AllocSiteId,
+  type IrFuncRef,
+  type IrFunction,
+  type IrGlobalRef,
+  type IrObjectShape,
+  type IrType,
+  type IrTypeRef,
+} from "../nodes.js";
 import { planIrCompilation } from "../select.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
@@ -64,6 +83,7 @@ import type {
   LinearMemoryFieldLowering,
   LinearObjectLowering,
   LinearRefCellLowering,
+  LinearVecLowering,
 } from "./handles.js";
 
 /** One function routed to the direct path, and its stable bucketed reason. */
@@ -83,11 +103,18 @@ export interface LinearIrResult {
   readonly rejected: readonly LinearIrRejection[];
   /** Deferred helpers appended only after every pre-assigned user slot. */
   readonly helpers: readonly LinearIrHelper[];
+  /** Canonical middle-end allocation/layout decisions for this IR module. */
+  readonly memoryPlan: LinearMemoryPlan;
 }
 
 export interface LinearIrHelper {
   readonly funcIdx: number;
-  readonly func: WasmFunction;
+  readonly name: string;
+  readonly typeIdx: number;
+  readonly fields: readonly { readonly name: string; readonly type: ValType; readonly offset: number }[];
+  readonly layout: LinearRecordLayoutPlan;
+  /** Symbolic until the module adapter assembles the deferred helper. */
+  readonly allocate: LinearRuntimeOperation;
 }
 
 /** L4 gate: default-on, with an explicit `=0` direct-backend escape hatch. */
@@ -114,10 +141,20 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
   const funcs = new Map<string, WasmFunction>();
   const compiled: string[] = [];
   const rejected: LinearIrRejection[] = [];
+  const allocRegistry = new AllocSiteRegistry();
+  let memoryPlan = planLinearMemory({ functions: [] }, allocRegistry);
   let helperStartFuncIdx = 0;
   for (const funcIdx of ctx.funcMap.values()) helperStartFuncIdx = Math.max(helperStartFuncIdx, funcIdx + 1);
-  const { resolver, helpers } = makeLinearIrResolver(ctx, helperStartFuncIdx);
-  const result: LinearIrResult = { funcs, compiled, rejected, helpers };
+  const { resolver, helpers, bindMemoryPlan } = makeLinearIrResolver(ctx, helperStartFuncIdx);
+  const result: LinearIrResult = {
+    funcs,
+    compiled,
+    rejected,
+    helpers,
+    get memoryPlan() {
+      return memoryPlan;
+    },
+  };
   lastReport = result;
 
   // L4 folds the selector's per-function direct-path list into the same
@@ -151,7 +188,7 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
   // the enriched map. Bounded by the claim count (each round must compile
   // at least one new function to continue).
   const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
-  const lowered = new Map<string, WasmFunction>();
+  const built = new Map<string, IrFunction>();
   const lastFailure = new Map<string, LinearIrRejection>();
   let pending = claimedDecls;
 
@@ -191,6 +228,7 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
           funcName: name,
           calleeTypes,
           resolver,
+          allocRegistry,
         });
 
         // Slice 1 lowers into PRE-ASSIGNED slots only; a build that
@@ -224,37 +262,7 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
           continue;
         }
 
-        const emitter = new LinearEmitter({
-          vecNewFuncIdx: ctx.funcMap.get("__arr_new"),
-          vecInitF64FuncIdx: ctx.funcMap.get(LINEAR_IR_VEC_INIT_F64_FN),
-        });
-        const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
-        const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
-        const wasmLocals = body.locals.flatMap((local) =>
-          local.slots.map((type, slot) => ({
-            name: slot === 0 ? local.name : `${local.name}$${slot}`,
-            type,
-          })),
-        );
-        const locals = wasmLocals.map((local, index) => {
-          const absoluteIndex = main.params.length + index;
-          if (!vecScratchLocals.has(absoluteIndex)) return local;
-          // The shared lowerer allocates this scratch as a WasmGC array ref.
-          // LinearEmitter reuses the SAME contract slot for the arena pointer;
-          // normalize only that backend-private local before module insertion.
-          return { name: `$linear_vec_ptr_${index}`, type: { kind: "i32" as const } };
-        });
-        lowered.set(name, {
-          name: body.name,
-          typeIdx: resolver.internFuncType({
-            kind: "func",
-            params: body.params.flatMap((param) => [...param.slots]),
-            results: body.results.flatMap((result) => [...result]),
-          }),
-          locals,
-          body: body.body,
-          exported: body.exported,
-        });
+        built.set(name, main);
         calleeTypes.set(name, {
           params: main.params.map((p) => p.type),
           returnType: main.resultTypes.length > 0 ? main.resultTypes[0]! : null,
@@ -275,14 +283,53 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
     if (!progressed) break; // fixpoint: nothing new compiled or terminally rejected
   }
 
+  const plannedFunctions = claimedDecls.flatMap(({ name }) => {
+    const fn = built.get(name);
+    return fn ? [fn] : [];
+  });
+  memoryPlan = planLinearMemory({ functions: plannedFunctions }, allocRegistry);
+  bindMemoryPlan(memoryPlan);
+
+  // Lower only after the module-wide plan is complete. Every allocation-site
+  // handle below is therefore a view of the same canonical decision.
   for (const { name } of claimedDecls) {
-    const fn = lowered.get(name);
-    if (fn) {
-      funcs.set(name, fn);
-      compiled.push(name);
-    } else {
+    const main = built.get(name);
+    if (!main) {
       const failure = lastFailure.get(name);
       if (failure) rejected.push(failure);
+      continue;
+    }
+    try {
+      const emitter = new LinearEmitter({
+        resolveRuntimeOperation: (operation) => resolveLinearRuntimeOperation(ctx, operation),
+      });
+      const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
+      const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
+      const wasmLocals = body.locals.flatMap((local) =>
+        local.slots.map((type, slot) => ({
+          name: slot === 0 ? local.name : `${local.name}$${slot}`,
+          type,
+        })),
+      );
+      const locals = wasmLocals.map((local, index) => {
+        const absoluteIndex = main.params.length + index;
+        if (!vecScratchLocals.has(absoluteIndex)) return local;
+        return { name: `$linear_vec_ptr_${index}`, type: { kind: "i32" as const } };
+      });
+      funcs.set(name, {
+        name: body.name,
+        typeIdx: resolver.internFuncType({
+          kind: "func",
+          params: body.params.flatMap((param) => [...param.slots]),
+          results: body.results.flatMap((result) => [...result]),
+        }),
+        locals,
+        body: body.body,
+        exported: body.exported,
+      });
+      compiled.push(name);
+    } catch (e) {
+      rejected.push({ func: name, reason: "build", detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -314,24 +361,19 @@ function bucketFromLegalityMessage(message: string): string {
 function makeLinearIrResolver(
   ctx: LinearContext,
   helperStartFuncIdx: number,
-): { resolver: IrLowerResolver & IrFromAstResolver; helpers: LinearIrHelper[] } {
-  // Linear vecs have no module type indices: they are i32 pointers to the
-  // canonical `[header][len][cap][f64 slots...]` runtime layout. The shared
-  // resolver shape still carries the WasmGC index fields for lower.ts's
-  // scratch bookkeeping; LinearEmitter never emits those sentinel indices,
-  // and compileLinearIrFunctions rewrites that one scratch local to i32.
-  const f64VecLayout: IrVecLowering = {
-    vecStructTypeIdx: 0,
-    lengthFieldIdx: 0,
-    dataFieldIdx: 0,
-    arrayTypeIdx: 0,
-    elementValType: { kind: "f64" },
-  };
-
+): {
+  resolver: IrLowerResolver & IrFromAstResolver;
+  helpers: LinearIrHelper[];
+  bindMemoryPlan(plan: LinearMemoryPlan): void;
+} {
   const helpers: LinearIrHelper[] = [];
   const helperByShape = new Map<string, number>();
   const objects = new Map<string, LinearObjectLowering>();
   const refCells = new Map<string, LinearRefCellLowering>();
+  const f64IrType = irVal({ kind: "f64" });
+  const provisionalF64VectorLayout = planLinearVectorLayout(f64IrType);
+  let memoryPlan: LinearMemoryPlan | undefined;
+
   const resolveRuntimeFunc = (name: string): number => {
     // Runtime functions were appended before user-slot pre-assignment. Scan
     // the actual defined-function table so a source function with a reserved
@@ -342,55 +384,83 @@ function makeLinearIrResolver(
   };
 
   const ensureAggregateHelper = (
-    key: string,
-    fields: readonly { name: string; type: ValType; offset: number }[],
-    totalSize: number,
+    layout: LinearRecordLayoutPlan,
+    allocate: LinearRuntimeOperation,
+    fields: readonly { readonly name: string; readonly type: ValType; readonly offset: number }[],
   ): number => {
+    const key = `${layout.id}:${linearRuntimeOperationKey(allocate)}`;
     const cached = helperByShape.get(key);
     if (cached !== undefined) return cached;
 
     const funcIdx = helperStartFuncIdx + helpers.length;
     const name = `__linear_ir_aggregate_new_${helpers.length}`;
-    const mallocIdx = ctx.funcMap.get("__malloc");
-    if (mallocIdx === undefined) throw new Error("linear-ir: __malloc runtime helper missing");
-    const pointerLocal = fields.length;
-    const body: Instr[] = [
-      { op: "i32.const", value: totalSize },
-      { op: "call", funcIdx: mallocIdx },
-      { op: "local.tee", index: pointerLocal },
-      { op: "i32.const", value: LINEAR_GENERIC_OBJECT_TAG },
-      { op: "i32.store8", align: 0, offset: 0 },
-      { op: "local.get", index: pointerLocal },
-      { op: "i32.const", value: totalSize - LINEAR_AGGREGATE_HEADER_SIZE },
-      { op: "i32.store", align: 2, offset: 4 },
-    ];
-    fields.forEach((field, paramIndex) => {
-      body.push({ op: "local.get", index: pointerLocal }, { op: "local.get", index: paramIndex });
-      if (field.type.kind === "i32") {
-        body.push({ op: "i32.store", align: 2, offset: field.offset });
-      } else if (field.type.kind === "f64") {
-        body.push({ op: "f64.store", align: 3, offset: field.offset });
-      } else {
-        throw new Error(`linear-ir: aggregate helper cannot store '${field.type.kind}' field '${field.name}'`);
-      }
+    const typeIdx = internLinearFuncType(ctx, {
+      kind: "func",
+      params: fields.map((field) => field.type),
+      results: [{ kind: "i32" }],
     });
-    body.push({ op: "local.get", index: pointerLocal });
-
-    const func: WasmFunction = {
-      name,
-      typeIdx: internLinearFuncType(ctx, {
-        kind: "func",
-        params: fields.map((field) => field.type),
-        results: [{ kind: "i32" }],
-      }),
-      locals: [{ name: "$aggregate_ptr", type: { kind: "i32" } }],
-      body,
-      exported: false,
-    };
-    helpers.push({ funcIdx, func });
+    helpers.push({ funcIdx, name, typeIdx, fields, layout, allocate });
     helperByShape.set(key, funcIdx);
     ctx.funcMap.set(name, funcIdx);
     return funcIdx;
+  };
+
+  const allocationFor = (layoutId: string, alloc?: AllocSiteId): LinearAllocationSitePlan | undefined => {
+    const plan = memoryPlan;
+    if (!plan) return undefined;
+    if (alloc !== undefined) {
+      const allocation = plan.allocation(alloc);
+      if (!allocation) throw new Error(`linear-ir: allocation site ${alloc as number} is absent from the plan`);
+      if (allocation.layoutId !== layoutId) {
+        throw new Error(
+          `linear-ir: allocation site ${alloc as number} planned '${allocation.layoutId}', expected '${layoutId}'`,
+        );
+      }
+      return allocation;
+    }
+    return plan.allocationsForLayout(layoutId)[0];
+  };
+
+  const plannedOperation = (
+    layout: Parameters<typeof defaultOperationsForLayout>[0],
+    allocation: LinearAllocationSitePlan | undefined,
+    predicate: (operation: LinearRuntimeOperation) => boolean,
+    label: string,
+  ): LinearRuntimeOperation => {
+    const operation = (allocation?.operations ?? defaultOperationsForLayout(layout)).find(predicate);
+    if (!operation) throw new Error(`linear-ir: plan has no ${label} operation for '${layout.id}'`);
+    return operation;
+  };
+
+  const linearFieldType = (storage: LinearStorageKind): ValType | null => {
+    if (storage === "f64") return { kind: "f64" };
+    if (storage === "i32" || storage === "pointer") return { kind: "i32" };
+    return null;
+  };
+
+  const f64VecHandle = (alloc?: AllocSiteId): IrVecLowering & LinearVecLowering => {
+    const layout = memoryPlan?.layoutForVector(f64IrType) ?? provisionalF64VectorLayout;
+    const allocation = allocationFor(layout.id, alloc);
+    const allocate = plannedOperation(
+      layout,
+      allocation,
+      (operation) => operation.family === "vector" && operation.operation === "allocate",
+      "vector allocation",
+    );
+    const initializeElement = plannedOperation(
+      layout,
+      allocation,
+      (operation) => operation.family === "vector" && operation.operation === "initialize-element",
+      "vector element initialization",
+    );
+    return {
+      vecStructTypeIdx: 0,
+      lengthFieldIdx: 0,
+      dataFieldIdx: 0,
+      arrayTypeIdx: 0,
+      elementValType: { kind: "f64" },
+      linearMemory: { layout, allocate, initializeElement },
+    };
   };
 
   const resolver: IrLowerResolver & IrFromAstResolver = {
@@ -470,11 +540,29 @@ function makeLinearIrResolver(
       }
       return null;
     },
-    emitStringConst(value: string): readonly Instr[] {
-      return linearStringLiteralInstrs(ctx, value, resolveRuntimeFunc("__str_from_data"));
+    emitStringConst(value: string, alloc?: AllocSiteId): readonly Instr[] {
+      const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
+      if (layout.kind !== "string") throw new Error("linear-ir: invalid string layout");
+      const allocation = allocationFor(layout.id, alloc);
+      const operation = plannedOperation(
+        layout,
+        allocation,
+        (candidate) => candidate.family === "string" && candidate.operation === "materialize-data",
+        "string materialization",
+      );
+      return linearStringLiteralInstrs(ctx, value, resolveLinearRuntimeOperation(ctx, operation));
     },
-    emitStringConcat(): readonly Instr[] {
-      return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_concat") }];
+    emitStringConcat(alloc?: AllocSiteId): readonly Instr[] {
+      const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
+      if (layout.kind !== "string") throw new Error("linear-ir: invalid string layout");
+      const allocation = allocationFor(layout.id, alloc);
+      const operation = plannedOperation(
+        layout,
+        allocation,
+        (candidate) => candidate.family === "string" && candidate.operation === "concatenate",
+        "string concatenation",
+      );
+      return [{ op: "call", funcIdx: resolveLinearRuntimeOperation(ctx, operation) }];
     },
     emitStringEquals(): readonly Instr[] {
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_eq") }];
@@ -482,29 +570,34 @@ function makeLinearIrResolver(
     emitStringLen(): readonly Instr[] {
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_length_utf16") }];
     },
-    resolveObject(shape: IrObjectShape): LinearObjectLowering | null {
-      const key = linearObjectShapeKey(shape);
+    resolveObject(shape: IrObjectShape, alloc?: AllocSiteId): LinearObjectLowering | null {
+      const layout = memoryPlan?.layoutForObjectShape(shape);
+      if (!layout) throw new Error("linear-ir: object layout is absent from the completed memory plan");
+      const allocation = allocationFor(layout.id, alloc);
+      const allocate = plannedOperation(
+        layout,
+        allocation,
+        (operation) => operation.family === "memory" && operation.operation === "allocate",
+        "record allocation",
+      );
+      const key = `${layout.id}:${linearRuntimeOperationKey(allocate)}`;
       const cached = objects.get(key);
       if (cached) return cached;
 
-      const fieldDefs: { name: string; type: "i32" | "f64" }[] = [];
-      for (const field of shape.fields) {
-        const type = linearAggregateFieldType(field.type);
-        if (!type) return null;
-        fieldDefs.push({ name: field.name, type: type.kind });
-      }
-      const layout = computeClassLayout(`__linear_ir_object_${objects.size}`, fieldDefs);
       const fields = shape.fields.map((field, fieldIdx) => {
-        const memory = layout.fields.get(field.name);
+        const memory = layout.fields.find((candidate) => candidate.name === field.name);
         if (!memory) throw new Error(`linear-ir: object layout has no field '${field.name}'`);
+        const type = linearFieldType(memory.storage);
+        if (!type)
+          throw new Error(`linear-ir: object field '${field.name}' has unsupported '${memory.storage}' storage`);
         return {
           name: field.name,
           fieldIdx,
           offset: memory.offset,
-          type: { kind: memory.type } as ValType,
+          type,
         };
       });
-      const newFuncIdx = ensureAggregateHelper(`object:${key}`, fields, layout.totalSize);
+      const newFuncIdx = ensureAggregateHelper(layout, allocate, fields);
       const byName = new Map(fields.map((field) => [field.name, field]));
       const lowering: LinearObjectLowering = {
         typeIdx: 0,
@@ -514,6 +607,8 @@ function makeLinearIrResolver(
           return field.fieldIdx;
         },
         linearMemory: {
+          layout,
+          allocate,
           newFuncIdx,
           fieldCount: fields.length,
           field(name: string): LinearMemoryFieldLowering {
@@ -526,32 +621,39 @@ function makeLinearIrResolver(
       objects.set(key, lowering);
       return lowering;
     },
-    resolveRefCell(inner: ValType): IrRefCellLowering | null {
+    resolveRefCell(inner: ValType, alloc?: AllocSiteId): IrRefCellLowering | null {
       if (inner.kind !== "i32" && inner.kind !== "f64") return null;
-      const cached = refCells.get(inner.kind);
+      const layout = memoryPlan?.layoutForRefCell(irVal(inner));
+      if (!layout) throw new Error("linear-ir: ref-cell layout is absent from the completed memory plan");
+      const allocation = allocationFor(layout.id, alloc);
+      const allocate = plannedOperation(
+        layout,
+        allocation,
+        (operation) => operation.family === "memory" && operation.operation === "allocate",
+        "ref-cell allocation",
+      );
+      const key = `${layout.id}:${linearRuntimeOperationKey(allocate)}`;
+      const cached = refCells.get(key);
       if (cached) return cached;
-      const layout = computeClassLayout(`__linear_ir_refcell_${inner.kind}`, [{ name: "value", type: inner.kind }]);
-      const value = layout.fields.get("value");
+      const value = layout.fields.find((field) => field.name === "value");
       if (!value) throw new Error("linear-ir: ref-cell layout has no value field");
       const memoryValue: LinearMemoryFieldLowering = { offset: value.offset, type: inner };
-      const newFuncIdx = ensureAggregateHelper(
-        `refcell:${inner.kind}`,
-        [{ name: "value", type: inner, offset: value.offset }],
-        layout.totalSize,
-      );
+      const newFuncIdx = ensureAggregateHelper(layout, allocate, [
+        { name: "value", type: inner, offset: value.offset },
+      ]);
       const lowering: LinearRefCellLowering = {
         typeIdx: 0,
         fieldIdx: 0,
-        linearMemory: { newFuncIdx, value: memoryValue },
+        linearMemory: { layout, allocate, newFuncIdx, value: memoryValue },
       };
-      refCells.set(inner.kind, lowering);
+      refCells.set(key, lowering);
       return lowering;
     },
     resolveVec(valType: ValType): IrVecLowering | null {
-      return valType.kind === "i32" ? f64VecLayout : null;
+      return valType.kind === "i32" ? f64VecHandle() : null;
     },
-    resolveVecForElement(elementValType: ValType): IrVecLowering | null {
-      return elementValType.kind === "f64" ? f64VecLayout : null;
+    resolveVecForElement(elementValType: ValType, alloc?: AllocSiteId): IrVecLowering | null {
+      return elementValType.kind === "f64" ? f64VecHandle(alloc) : null;
     },
     resolveVecValueTypeForElement(elementValType: ValType): ValType | null {
       return elementValType.kind === "f64" ? { kind: "i32" } : null;
@@ -571,7 +673,91 @@ function makeLinearIrResolver(
     },
   };
 
-  return { resolver, helpers };
+  return {
+    resolver,
+    helpers,
+    bindMemoryPlan(plan: LinearMemoryPlan): void {
+      if (memoryPlan) throw new Error("linear-ir: memory plan already bound");
+      memoryPlan = plan;
+    },
+  };
+}
+
+/** Bind a symbolic plan operation to the existing linear runtime adapter. */
+function resolveLinearRuntimeOperation(ctx: LinearContext, operation: LinearRuntimeOperation): number {
+  let name: string | undefined;
+  if (operation.family === "memory" && operation.operation === "allocate" && operation.allocationClass === "arena") {
+    name = "__malloc";
+  } else if (
+    operation.family === "vector" &&
+    operation.operation === "allocate" &&
+    operation.allocationClass === "arena" &&
+    operation.elementStorage === "f64"
+  ) {
+    name = "__arr_new";
+  } else if (
+    operation.family === "vector" &&
+    operation.operation === "initialize-element" &&
+    operation.allocationClass === "arena" &&
+    operation.elementStorage === "f64"
+  ) {
+    name = LINEAR_IR_VEC_INIT_F64_FN;
+  } else if (
+    operation.family === "string" &&
+    operation.operation === "materialize-data" &&
+    operation.allocationClass === "arena" &&
+    operation.elementStorage === "i8"
+  ) {
+    name = "__str_from_data";
+  } else if (
+    operation.family === "string" &&
+    operation.operation === "concatenate" &&
+    operation.allocationClass === "arena" &&
+    operation.elementStorage === "i8"
+  ) {
+    name = "__str_concat";
+  }
+  if (!name) throw new Error(`linear-ir: no runtime binding for '${linearRuntimeOperationKey(operation)}'`);
+  const localIdx = ctx.mod.functions.findIndex((func) => func.name === name);
+  if (localIdx < 0) throw new Error(`linear-ir: runtime helper '${name}' missing`);
+  return ctx.numImportFuncs + localIdx;
+}
+
+/** Materialize a deferred constructor after every user function slot exists. */
+export function materializeLinearIrHelper(ctx: LinearContext, helper: LinearIrHelper): WasmFunction {
+  if (helper.layout.size.kind !== "constant") {
+    throw new Error(`linear-ir: aggregate helper '${helper.name}' requires a constant-size record`);
+  }
+  const totalSize = helper.layout.size.bytes;
+  const pointerLocal = helper.fields.length;
+  const body: Instr[] = [
+    { op: "i32.const", value: totalSize },
+    { op: "call", funcIdx: resolveLinearRuntimeOperation(ctx, helper.allocate) },
+    { op: "local.tee", index: pointerLocal },
+    { op: "i32.const", value: LINEAR_GENERIC_OBJECT_TAG },
+    { op: "i32.store8", align: 0, offset: helper.layout.typeTagOffset },
+    { op: "local.get", index: pointerLocal },
+    { op: "i32.const", value: totalSize - helper.layout.headerBytes },
+    { op: "i32.store", align: 2, offset: helper.layout.payloadSizeOffset },
+  ];
+  helper.fields.forEach((field, paramIndex) => {
+    body.push({ op: "local.get", index: pointerLocal }, { op: "local.get", index: paramIndex });
+    if (field.type.kind === "i32") {
+      body.push({ op: "i32.store", align: 2, offset: field.offset });
+    } else if (field.type.kind === "f64") {
+      body.push({ op: "f64.store", align: 3, offset: field.offset });
+    } else {
+      throw new Error(`linear-ir: aggregate helper cannot store '${field.type.kind}' field '${field.name}'`);
+    }
+  });
+  body.push({ op: "local.get", index: pointerLocal });
+  return {
+    name: helper.name,
+    typeIdx: helper.typeIdx,
+    locals: [{ name: "$aggregate_ptr", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  };
 }
 
 function internLinearFuncType(ctx: LinearContext, def: FuncTypeDef): number {
@@ -607,22 +793,4 @@ function linearValueTypeConverter(resolver: IrLowerResolver, funcName: string): 
       throw new Error(`linear-ir: cannot carry IR type '${type.kind}' in ${funcName}`);
     },
   };
-}
-
-function linearAggregateFieldType(type: IrType): Extract<ValType, { kind: "i32" | "f64" }> | null {
-  if (type.kind === "val" && (type.val.kind === "i32" || type.val.kind === "f64")) return type.val;
-  if (type.kind === "string" || type.kind === "object" || type.kind === "boxed") return { kind: "i32" };
-  return null;
-}
-
-function linearObjectShapeKey(shape: IrObjectShape): string {
-  const typeKey = (type: IrType): unknown => {
-    if (type.kind === "val") return ["val", type.val.kind];
-    if (type.kind === "object") {
-      return ["object", type.shape.fields.map((field) => [field.name, typeKey(field.type)])];
-    }
-    if (type.kind === "boxed") return ["boxed", typeKey(type.inner)];
-    return [type.kind];
-  };
-  return JSON.stringify(shape.fields.map((field) => [field.name, typeKey(field.type)]));
 }

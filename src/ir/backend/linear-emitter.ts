@@ -50,6 +50,7 @@
 import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr, ValType } from "../types.js";
+import type { LinearRuntimeOperation } from "../analysis/linear-memory-plan.js";
 import type { BackendEmitter } from "./emitter.js";
 import type {
   IrClassLowering,
@@ -61,33 +62,9 @@ import type {
   LinearVecLowering,
 } from "./handles.js";
 
-/** Byte offset of the `len:u32` field in the linear array header. */
-const LINEAR_ARRAY_LEN_OFFSET = 8;
-/** Byte offset where the element data region begins (after the 16B header). */
-const LINEAR_ARRAY_DATA_OFFSET = 16;
-/** Direct linear array literals reserve this minimum capacity. */
-const LINEAR_ARRAY_MIN_CAPACITY = 16;
-
 export interface LinearEmitterOptions {
-  /** Existing `__arr_new(cap) -> ptr` runtime function. */
-  readonly vecNewFuncIdx?: number;
-  /** Flag-gated `(value:f64, ptr:i32, index:i32) -> void` initializer. */
-  readonly vecInitF64FuncIdx?: number;
-}
-
-/** Element byte size (stride) for a linear-memory element ValType. */
-function linearStride(elem: ValType): number {
-  switch (elem.kind) {
-    case "i32":
-    case "f32":
-      return 4;
-    case "i64":
-    case "f64":
-      return 8;
-    default:
-      // ref/externref/etc. are stored as i32 handles in the linear backend.
-      return 4;
-  }
+  /** Bind a semantic plan operation only after module functions are registered. */
+  readonly resolveRuntimeOperation?: (operation: LinearRuntimeOperation) => number;
 }
 
 /** The `<t>.load` op matching a linear element ValType. */
@@ -143,6 +120,13 @@ function asLinearRefCell(layout: IrRefCellLowering): LinearRefCellLowering {
   return layout as LinearRefCellLowering;
 }
 
+function asLinearVec(layout: LinearVecLowering): LinearVecLowering {
+  if (!("linearMemory" in layout)) {
+    throw new Error("LinearEmitter: vec layout is not a linear-memory plan handle");
+  }
+  return layout;
+}
+
 function notImplemented(method: string): never {
   throw new Error(
     `LinearEmitter: ${method} not implemented — #1714 scope is the vec ` +
@@ -178,24 +162,27 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   // ---- vec (array) — the #1714 proof surface ------------------------------
 
   emitVecLen(layout: LinearVecLowering, out: Instr[]): void {
+    const linear = asLinearVec(layout);
     // base ptr on stack → load the u32 len field.
     out.push({
       op: "i32.load",
       align: 2,
-      offset: LINEAR_ARRAY_LEN_OFFSET,
+      offset: linear.linearMemory.layout.lengthOffset,
     });
   }
 
   emitVecDataPtr(layout: LinearVecLowering, out: Instr[]): void {
+    const linear = asLinearVec(layout);
     // base ptr on stack → base + 16 = element data-region base (still i32).
-    out.push({ op: "i32.const", value: LINEAR_ARRAY_DATA_OFFSET });
+    out.push({ op: "i32.const", value: linear.linearMemory.layout.elementsOffset });
     out.push({ op: "i32.add" });
   }
 
   emitElemGet(layout: LinearVecLowering, out: Instr[]): void {
     // Stack: [dataBase(i32), index(i32)] → element.
     // addr = dataBase + index * stride
-    const stride = linearStride(layout.elementValType);
+    const linear = asLinearVec(layout);
+    const stride = linear.linearMemory.layout.elementStride;
     out.push({ op: "i32.const", value: stride });
     out.push({ op: "i32.mul" });
     out.push({ op: "i32.add" });
@@ -218,15 +205,18 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     if (layout.elementValType.kind !== "f64") {
       throw new Error(`LinearEmitter: emitVecNewFixed supports f64 elements only; got ${layout.elementValType.kind}`);
     }
-    const { vecNewFuncIdx, vecInitF64FuncIdx } = this.options;
-    if (vecNewFuncIdx === undefined || vecInitF64FuncIdx === undefined) {
+    const linear = asLinearVec(layout);
+    const resolveRuntimeOperation = this.options.resolveRuntimeOperation;
+    if (!resolveRuntimeOperation) {
       throw new Error("LinearEmitter: emitVecNewFixed requires the linear vec runtime");
     }
+    const vecNewFuncIdx = resolveRuntimeOperation(linear.linearMemory.allocate);
+    const vecInitF64FuncIdx = resolveRuntimeOperation(linear.linearMemory.initializeElement);
 
     this.vecScratchLocals.add(dataScratchLocal);
 
     // Stack before: e0 ... eN. Stack after local.set: e0 ... eN, with ptr saved.
-    out.push({ op: "i32.const", value: Math.max(count, LINEAR_ARRAY_MIN_CAPACITY) });
+    out.push({ op: "i32.const", value: Math.max(count, linear.linearMemory.layout.minimumCapacity) });
     out.push({ op: "call", funcIdx: vecNewFuncIdx });
     out.push({ op: "local.set", index: dataScratchLocal });
 
@@ -241,7 +231,7 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     // after all slots are initialized, then leave the base pointer as result.
     out.push({ op: "local.get", index: dataScratchLocal });
     out.push({ op: "i32.const", value: count });
-    out.push({ op: "i32.store", align: 2, offset: LINEAR_ARRAY_LEN_OFFSET });
+    out.push({ op: "i32.store", align: 2, offset: linear.linearMemory.layout.lengthOffset });
     out.push({ op: "local.get", index: dataScratchLocal });
   }
 
