@@ -453,11 +453,45 @@ interface NodeJS_Process {
   readonly stderr: NodeJS_WritableStream;
 }`;
 
+// #1044 / #1793 — the global `Buffer` ambient surface. `Buffer` is a Node
+// GLOBAL (not just an export of `require("buffer")`); #1793 registered it in
+// BUILTIN_CLASS_NAMES so `Buffer.from` / `alloc` / `concat` and the prototype
+// methods lower syntactically in codegen regardless of typing. But WITHOUT an
+// ambient declaration the checker emits a spurious "Cannot find name 'Buffer'"
+// (TS2304/TS2580) for the common global form under `--emulate node`. This
+// injection (gated behind `--emulate node`, like `process`/`Deno` — so the
+// common web/test262 path stays byte-neutral) silences that diagnostic and
+// lets `Buffer.*` type-check as a Uint8Array subtype. Covers the #1793 Tier 0
+// surface (utf-8 + byte-array); the full encoding matrix is a follow-up.
+const BUFFER_INTERFACE_DECLS = `interface Buffer extends Uint8Array {
+  toString(encoding?: string, start?: number, end?: number): string;
+  write(str: string, encoding?: string): number;
+  equals(other: Uint8Array): boolean;
+  readUInt8(offset?: number): number;
+  readUInt16LE(offset?: number): number;
+  readUInt16BE(offset?: number): number;
+  readUInt32LE(offset?: number): number;
+  readUInt32BE(offset?: number): number;
+  writeUInt8(value: number, offset?: number): number;
+}
+interface BufferConstructor {
+  from(str: string, encoding?: string): Buffer;
+  from(data: ArrayLike<number> | ArrayBufferLike): Buffer;
+  from(data: Uint8Array): Buffer;
+  concat(list: readonly Uint8Array[], totalLength?: number): Buffer;
+  alloc(size: number, fill?: string | number, encoding?: string): Buffer;
+  allocUnsafe(size: number): Buffer;
+  isBuffer(obj: unknown): boolean;
+  byteLength(str: string, encoding?: string): number;
+}`;
+
 interface NodeEmuUsage {
   /** node:<mod> -> set of imported member names ("" sentinel = default/namespace import). */
   modules: Map<string, Set<string>>;
   /** A bare global `process` is referenced (NOT via a `node:process` import). */
   bareProcess: boolean;
+  /** A bare global `Buffer` is referenced (NOT bound by an import). */
+  bareBuffer: boolean;
 }
 
 /**
@@ -469,6 +503,10 @@ interface NodeEmuUsage {
 function scanNodeEmuUsage(source: string, scriptKind: ts.ScriptKind): NodeEmuUsage {
   const modules = new Map<string, Set<string>>();
   let importsNodeProcess = false;
+  // #1044 — a local `Buffer` binding from ANY import (`import { Buffer } from
+  // "node:buffer"`, a default/namespace named `Buffer`, etc.) means `Buffer`
+  // is the import symbol, not the ambient global — suppress the global inject.
+  let bindsBufferLocal = false;
 
   const sf = ts.createSourceFile("__scan__.ts", source, ts.ScriptTarget.Latest, /*setParentNodes*/ true, scriptKind);
 
@@ -487,6 +525,20 @@ function scanNodeEmuUsage(source: string, scriptKind: ts.ScriptKind): NodeEmuUsa
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const spec = node.moduleSpecifier.text;
+      // #1044 — record a local `Buffer` binding from ANY module (node: or bare).
+      const importClause = node.importClause;
+      if (importClause) {
+        if (importClause.name?.text === "Buffer") bindsBufferLocal = true;
+        if (importClause.namedBindings) {
+          if (ts.isNamespaceImport(importClause.namedBindings)) {
+            if (importClause.namedBindings.name.text === "Buffer") bindsBufferLocal = true;
+          } else {
+            for (const el of importClause.namedBindings.elements) {
+              if (el.name.text === "Buffer") bindsBufferLocal = true;
+            }
+          }
+        }
+      }
       if (spec.startsWith("node:")) {
         const members: string[] = [];
         const clause = node.importClause;
@@ -529,7 +581,13 @@ function scanNodeEmuUsage(source: string, scriptKind: ts.ScriptKind): NodeEmuUsa
   // covers any user that declares its own `process`.
   const bareProcess = !importsNodeProcess && /\bprocess\b/.test(source);
 
-  return { modules, bareProcess };
+  // #1044 — a bare global `Buffer` reference (NOT bound by an import). `Buffer`
+  // is lowered syntactically in codegen (#1793) regardless of typing; the
+  // ambient declaration only silences the "Cannot find name 'Buffer'"
+  // diagnostic. Same regex-approximation + dup-identifier fallback as `process`.
+  const bareBuffer = !bindsBufferLocal && /\bBuffer\b/.test(source);
+
+  return { modules, bareProcess, bareBuffer };
 }
 
 /**
@@ -559,6 +617,14 @@ function buildNodeEnvDts(usage: NodeEmuUsage): string | undefined {
   if (usage.bareProcess) {
     emitProcessInterfaces();
     parts.push(`declare var process: NodeJS_Process;`);
+  }
+
+  // #1044 — bare ambient global `Buffer` (Node global, lowered syntactically by
+  // #1793). Silences the "Cannot find name 'Buffer'" diagnostic and types
+  // `Buffer.*` as a Uint8Array subtype under `--emulate node`.
+  if (usage.bareBuffer) {
+    parts.push(BUFFER_INTERFACE_DECLS);
+    parts.push(`declare var Buffer: BufferConstructor;`);
   }
 
   // `node:<mod>` modules, each scoped to its imported members.
@@ -650,9 +716,10 @@ const DUP_IDENTIFIER_CODES = new Set([
 
 function diagnosticMentionsInjectedGlobal(d: ts.Diagnostic): boolean {
   const text = typeof d.messageText === "string" ? d.messageText : d.messageText.messageText;
-  // A dup-identifier on EITHER injected ambient global (`process` or `Deno`)
-  // means the user declared it themselves — rebuild without the injection.
-  return text.includes("'process'") || text.includes("'Deno'");
+  // A dup-identifier on any injected ambient global (`process`, `Deno`, or
+  // `Buffer`) means the user declared it themselves — rebuild without the
+  // injection.
+  return text.includes("'process'") || text.includes("'Deno'") || text.includes("'Buffer'");
 }
 
 // #2684 — ambient `Deno` namespace typing, injected import-scoped when the
