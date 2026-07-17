@@ -76,3 +76,84 @@ describe("#3150 — Uint8Array.fromHex (standalone)", () => {
     expect((instance.exports as { test(): number }).test()).toBe(2);
   });
 });
+
+describe("#3150 — Uint8Array.fromBase64 (standalone)", () => {
+  it("decodes length correctly ('aGVsbG8=' → 5)", async () => {
+    expect(
+      await runStandalone(`export function test(): number { return Uint8Array.fromBase64("aGVsbG8=").length; }`),
+    ).toBe(5);
+  });
+
+  it("decodes bytes ('Zm9v' → [102,111,111])", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const a = Uint8Array.fromBase64("Zm9v"); return a[0]*1000000 + a[1]*1000 + a[2]; }`,
+      ),
+    ).toBe(102 * 1000000 + 111 * 1000 + 111);
+  });
+
+  it("empty string → empty array", async () => {
+    expect(await runStandalone(`export function test(): number { return Uint8Array.fromBase64("").length; }`)).toBe(0);
+  });
+
+  it("single '=' padding ('aGVsbG8=' first byte 'h' = 104)", async () => {
+    expect(await runStandalone(`export function test(): number { return Uint8Array.fromBase64("aGVsbG8=")[0]; }`)).toBe(
+      104,
+    );
+  });
+
+  it("'aGk=' decodes to 'hi' (2 bytes, first = 104)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const a = Uint8Array.fromBase64("aGk="); return a.length*1000 + a[0]; }`,
+      ),
+    ).toBe(2 * 1000 + 104);
+  });
+
+  it("loose last-chunk: unpadded 3-char 'aGk' still decodes ('hi')", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const a = Uint8Array.fromBase64("aGk"); return a.length*1000 + a[0]; }`,
+      ),
+    ).toBe(2 * 1000 + 104);
+  });
+
+  it("ASCII whitespace between chars is skipped ('Zm 9v' → 3 bytes)", async () => {
+    expect(
+      await runStandalone(`export function test(): number { return Uint8Array.fromBase64("Zm 9v").length; }`),
+    ).toBe(3);
+  });
+
+  it("illegal character throws SyntaxError", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { try { Uint8Array.fromBase64("Zm@v"); return -1; } catch (e) { return (e instanceof SyntaxError) ? 1 : 2; } }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("single trailing character throws SyntaxError", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { try { Uint8Array.fromBase64("A"); return -1; } catch (e) { return (e instanceof SyntaxError) ? 1 : 2; } }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("base64 character after padding throws SyntaxError", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { try { Uint8Array.fromBase64("aGk=A"); return -1; } catch (e) { return (e instanceof SyntaxError) ? 1 : 2; } }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("does not leak host imports (zero-import instantiation)", async () => {
+    const r = await compile(`export function test(): number { return Uint8Array.fromBase64("aGk=").length; }`, {
+      target: "standalone",
+    });
+    expect(r.success, JSON.stringify(r.errors)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { test(): number }).test()).toBe(2);
+  });
+});

@@ -50,7 +50,7 @@ import {
   typedArrayVecStorage,
 } from "../index.js";
 import { ensureNativeArrayFromMapped, ensureNativeIteratorRuntime } from "../iterator-native.js";
-import { ensureUint8FromHex } from "../uint8-codec.js";
+import { ensureUint8FromBase64, ensureUint8FromHex } from "../uint8-codec.js";
 import { compileArrayConstructorCall, compileObjectLiteralAsExternref } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js";
 import {
@@ -698,6 +698,38 @@ export function compileBuiltinStaticCall(
         const fromHexIdx = ensureUint8FromHex(ctx);
         if (fromHexIdx >= 0) {
           fctx.body.push({ op: "call", funcIdx: fromHexIdx });
+          const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
+      }
+    }
+  }
+
+  // (#3150) Standalone-native `Uint8Array.fromBase64(string)` — decode a
+  // standard-alphabet base64 string (default options: `alphabet: "base64"`,
+  // `lastChunkHandling: "loose"`) to a fresh packed-`i8` Uint8Array vec, the same
+  // backing `new Uint8Array` / `Uint8Array.of` / `fromHex` produce. Only a bare
+  // STRING-typed argument routes here — a call carrying the options object (the
+  // `alphabet` / `lastChunkHandling` variants) has arguments.length > 1 and falls
+  // through to the existing dynamic-shape refusal, so no wrong default is silently
+  // applied. Whitespace is skipped, `=` padding is validated, and malformed input
+  // throws the spec's SyntaxError.
+  if (
+    noJsHost(ctx) &&
+    ts.isIdentifier(propAccess.expression) &&
+    propAccess.expression.text === "Uint8Array" &&
+    propAccess.name.text === "fromBase64" &&
+    expr.arguments.length === 1 &&
+    !ts.isSpreadElement(expr.arguments[0]!)
+  ) {
+    if (ctx.oracle.staticJsTypeOf(expr.arguments[0]!) === "string") {
+      const strVt = nativeStringType(ctx);
+      const at = compileExpression(ctx, fctx, expr.arguments[0]!, strVt);
+      if (at) {
+        if (!valTypesMatch(at, strVt)) coerceType(ctx, fctx, at, strVt);
+        const fromB64Idx = ensureUint8FromBase64(ctx);
+        if (fromB64Idx >= 0) {
+          fctx.body.push({ op: "call", funcIdx: fromB64Idx });
           const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
           return { kind: "ref_null", typeIdx: vecTypeIdx };
         }
