@@ -17,6 +17,12 @@ goal: runtime-eval
 parent: 2927
 related: [2937, 3308, 2928]
 depends_on: []
+# (#3343) The fix is a ~1-line correctness change INSIDE compileForStatement's
+# for-init loop-var binding — it is intrinsic to that function and cannot be
+# relocated to a subsystem module. loops.ts sits at its god-file ceiling, so the
+# fix + its explanatory comment cross it by a few lines. Justified allowance.
+loc-budget-allow:
+  - src/codegen/statements/loops.ts
 ---
 
 # #3343 — In-Wasm dynamic-`$Object` recursive read runs away at scale

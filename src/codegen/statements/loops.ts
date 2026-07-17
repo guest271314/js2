@@ -307,20 +307,13 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
         // module global `i` would `global.set` an incompatible value type into
         // the global → invalid Wasm.
         //
-        // #3343: a block-scoped `let`/`const` for-head binding is ALWAYS a
-        // FRESH lexical binding (ECMA-262 §14.7.4). Inside a function it MUST be
-        // a per-invocation local and must NEVER alias a same-named module-level
-        // global — that global backs the DISTINCT module-top-level binding.
-        // A `let`/`const` is not hoisted into `localMap` (only `var` is), so the
-        // `hasLocalShadow` guard above does not catch it, and the global path
-        // wrongly grabbed the module global. That made a RECURSIVE function's
-        // inner loop clobber the outer loop's counter: compiled-acorn has a
-        // top-level `i` → global `$__mod_i`, so every function's `for (let i)`
-        // shared ONE global; a recursive in-Wasm AST walk (the #2928 emitter
-        // path) re-iterated forever (spurious back-edge → runaway) once the tree
-        // had nested arrays. Only at module top level (`__module_init`) is the
-        // module-level lexical binding actually the global; there `let`/`const`
-        // keeps using it. `var` is unchanged (function-hoist → `hasLocalShadow`).
+        // #3343: a `let`/`const` for-head is a FRESH block binding (ECMA-262
+        // §14.7.4) — inside a function it must be a per-invocation local, NEVER a
+        // same-named module global (recursion would clobber the shared counter;
+        // compiled-acorn's top-level `i` → `$__mod_i` runaway). `let`/`const`
+        // aren't hoisted into `localMap`, so `hasLocalShadow` missed them. Only
+        // `__module_init` (module top level) keeps the global. `var` unchanged.
+        // Full write-up in the #3343 issue.
         const hasLocalShadow = fctx.localMap.has(name);
         const blockScopedInsideFunction = !isVar && fctx.name !== "__module_init";
         const moduleGlobalIdx = hasLocalShadow || blockScopedInsideFunction ? undefined : ctx.moduleGlobals.get(name);
