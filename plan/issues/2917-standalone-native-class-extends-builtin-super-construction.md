@@ -1,8 +1,10 @@
 ---
 id: 2917
 title: "[SUBSTRATE][ARCH] Standalone native `class X extends <Builtin>` super-construction (~10 generic conversions)"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: fable-2917
+sprint: fable-final
+updated: 2026-07-17
 created: 2026-07-01
 priority: medium
 horizon: l
