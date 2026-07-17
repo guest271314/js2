@@ -86,13 +86,18 @@ once these arms are small, named helpers — decompose first, then dedup.
 
 ## Slices landed
 
-- **Slice A (opus-1) — `__any_box_*` family out of `ensureAnyHelpers`.**
-  Extracted the seven tag-boxing primitives (`__any_box_null`,
-  `__any_box_undefined`, `__any_box_i32`, `__any_box_f64`, `__any_box_bool`,
-  `__any_box_string`, `__any_box_extern_s1`, `__any_box_ref`) verbatim into a
-  new same-file top-level `registerAnyBoxHelpers(ctx, addHelper, anyRef,
-  anyTypeIdx, eqHeapType)` in `any-helpers.ts`. `addHelper` is threaded in as a
-  callback so the register order + bodies are unchanged → emitted Wasm
-  byte-identical (`prove-emit-identity check`: IDENTICAL 56/56). `ensureAnyHelpers`
-  shrinks by ~205 LOC. tsc 0, biome/prettier clean. Epic remains open for the
-  unbox / eq / add families and the larger call-family functions.
+- **Slice A (opus-1) — `__any_box_*` + `__any_unbox_*` families out of
+  `ensureAnyHelpers` → new sibling module `any-boxing-helpers.ts`.**
+  Lifted the seven tag-boxing primitives (`__any_box_null`, `…undefined`,
+  `…i32`, `…f64`, `…bool`, `…string`, `…extern_s1`, `…ref`) and the four
+  tag-unboxing primitives (`__any_unbox_i32`, `…f64`, `…bool`, `…extern`)
+  verbatim into `registerAnyBoxHelpers` / `registerAnyUnboxHelpers` in the new
+  `src/codegen/any-boxing-helpers.ts`. `addHelper` is threaded in as a callback
+  so registration order + bodies are unchanged → emitted Wasm byte-identical
+  (`prove-emit-identity check`: IDENTICAL 56/56). Extracting to a **sibling
+  module** (not same-file) shrinks the god-file: `any-helpers.ts` drops
+  2752 → 2425 LOC (−327), keeping the LOC-regrowth ratchet green with no
+  allowance. The `undefinedSingletonActive` import back into `any-helpers.ts`
+  is a runtime-only ESM cycle (both function declarations), safe. tsc 0,
+  biome/prettier/loc-budget clean. Epic remains open for the eq / add families
+  and the larger call-family functions.
