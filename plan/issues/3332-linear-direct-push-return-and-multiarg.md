@@ -17,6 +17,11 @@ horizon: s
 created: 2026-07-17
 updated: 2026-07-17
 related: [2956, 1854]
+loc-budget-allow:
+  # Intended +13 LOC in the direct-path push lowering: evaluate the receiver
+  # once into a local, loop over all arguments, and read __arr_len back for the
+  # expression-position new-length result (fixes the returns-0 / drops-args bug).
+  - src/codegen-linear/index.ts
 ---
 
 ## Resolution (2026-07-17)
