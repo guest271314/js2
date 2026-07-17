@@ -2152,7 +2152,7 @@ function asyncGenBodyHasPatternLocals(fn: ts.FunctionLikeDeclaration): boolean {
       // `async-gen-dstr-*` cohort). Any OTHER pattern local (body `const {a} =
       // …`, catch-clause patterns, sync for-of heads) still rejects —
       // correct-or-legacy.
-      if (!isForAwaitHeadDecl(n)) {
+      if (!isForAwaitHeadDecl(n) || !forAwaitHeadPatternAdmissible(n.name)) {
         found = true;
         return;
       }
@@ -2169,6 +2169,32 @@ function isForAwaitHeadDecl(n: ts.VariableDeclaration): boolean {
   if (!ts.isVariableDeclarationList(list)) return false;
   const stmt = list.parent;
   return ts.isForOfStatement(stmt) && stmt.awaitModifier !== undefined;
+}
+
+/**
+ * (#3387) Admissible for-await HEAD pattern shapes for the driven async-gen
+ * lead arm. Everything is admitted EXCEPT a NESTED sub-pattern binding element
+ * that carries an initializer (`[[x] = [7]]`, `{ w: { x } = {…} }`): the sync
+ * for-await destructure deliberately skips nested defaults under
+ * `awaitModifier` (the #2692 capture-box / #2566 iterator-over-consume guard
+ * in for-of-destructuring.ts), so admitting those shapes would run with the
+ * default NOT applied — a wrong-value run instead of the legacy refusal
+ * (probe-verified: `for await (const [[x,y,z] = [4,5,6]] of [[]])` binds
+ * nothing). Leaf identifier defaults (incl. call defaults), elisions, rest
+ * elements, renamed/string-keyed props, empty patterns, and nested patterns
+ * WITHOUT initializers are probe-verified correct and admitted.
+ */
+function forAwaitHeadPatternAdmissible(name: ts.BindingName): boolean {
+  if (ts.isIdentifier(name)) return true;
+  for (const el of name.elements) {
+    if (!ts.isBindingElement(el)) continue; // OmittedExpression (elision) — fine
+    const isNestedPattern = ts.isObjectBindingPattern(el.name) || ts.isArrayBindingPattern(el.name);
+    if (isNestedPattern) {
+      if (el.initializer !== undefined) return false; // nested default — unsupported under awaitModifier
+      if (!forAwaitHeadPatternAdmissible(el.name)) return false;
+    }
+  }
+  return true;
 }
 
 /** One bounded async-gen yield statement: `yield await <awaited>` OR `yield <plain>`
