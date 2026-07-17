@@ -1234,9 +1234,10 @@ function externResultClassName(
 
 function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): IrFromAstResolver {
   return {
-    nativeStrings(): boolean {
-      return ctx.nativeStrings;
-    },
+    // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
+    // interface no longer carries the mode discriminator; every mode
+    // decision flows through the named capability/rep/strategy queries
+    // below.
     // (#2955 slice 2) The WHOLE string-prototype-method mode decision table,
     // relocated here from from-ast's `lowerStringMethodCall` so the front-end
     // reads no `nativeStrings` at that site. Byte-inert by construction: the
@@ -1385,6 +1386,14 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
     // standalone floor (the demote arm is load-bearing there).
     hasHostNumberToString(): boolean {
       return !ctx.nativeStrings;
+    },
+    // (#2955 slice 5) String for-of strategy — the LAST from-ast mode read,
+    // relocated. Native strings iterate via the `__str_charAt` counter loop;
+    // host strings feed the `__iterator` host protocol (already
+    // externref-shaped). Byte-inert: same truth table as the old in-place
+    // `nativeStrings?.()` read (absent → iter-host).
+    stringForOfPlan(): "char-loop" | "iter-host" {
+      return ctx.nativeStrings ? "char-loop" : "iter-host";
     },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
