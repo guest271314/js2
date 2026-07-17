@@ -49,6 +49,18 @@ destructuring), **#2803** (callsite param-type inference), **#1042** (async
 state-machine epic). In-progress non-standalone work is left at its current
 priority (already claimed — not competing for the next pull).
 
+## Current-origin/main PO audit findings (2026-07-17) - ready, not current-sprint focus
+
+These are verified untracked gaps from the July 17 audit. They do **not**
+displace the #2860 standalone-vs-js-host sprint focus above, but they are high
+leverage backlog candidates because each removes a planning or correctness risk
+that can otherwise misdirect larger implementation work.
+
+| Issue | Area                          | Priority | Horizon | Status | Dependency note                                                                                                                              |
+| ----- | ----------------------------- | -------- | ------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| #3336 | planning / IR / linear memory | high     | s       | ready  | No code deps. Must be done before dispatching target-neutral `LinearMemoryPlan` work as Porffor-only work. Related: #3288/#3298/#3300/#2956. |
+| #3337 | WASI argv correctness         | high     | m       | ready  | No hard deps. #1482 is the env precedent; #1801 explicitly deferred this argv invalid-binary defect; #1532 is tests-only.                    |
+
 ## IR front-end migration — fallback-bucket ratchet (added 2026-06-30, DEMOTED to `priority: low` 2026-06-30)
 
 > **Demoted below the standalone gap (stakeholder directive, 2026-06-30).** All
