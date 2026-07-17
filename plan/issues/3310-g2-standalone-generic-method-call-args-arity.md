@@ -3,7 +3,7 @@ id: 3310
 title: "G2 — args-passing on the standalone generic method-call path + `__apply_closure` arity>4 lift (wantArgs is host-gated)"
 status: ready
 created: 2026-07-16
-priority: medium
+priority: high
 horizon: m
 feasibility: hard
 reasoning_effort: high
