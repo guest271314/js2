@@ -128,8 +128,9 @@ Validation completed:
 - Scoped cross-backend/equivalence run over `tests/cross-backend-diff.test.ts`,
   `tests/ir-ternary-equivalence.test.ts`, object mutability, shape inference,
   and array-bounds elimination (5 files, 55 tests passed).
-- `npx --yes tsx scripts/prove-emit-identity.mjs check --baseline .tmp/emit-identity-3300.json`
-  (all 56 file/target outcomes identical to a clean `origin/main` archive).
+- `npx --yes tsx scripts/prove-emit-identity.mjs check --baseline /private/tmp/emit-identity-origin-main-3300.json`
+  (all 56 file/target outcomes identical to a clean `origin/main` worktree at
+  `49071bce45f`).
 - `npx --yes tsx scripts/benchmark-allocation-policies.mts` (five warmups, 21
   fresh measured rounds, 200,000 kernel invocations per round; exact results
   and methodology are in the checked-in measurement note).
