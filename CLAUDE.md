@@ -379,7 +379,8 @@ GitHub branch protection is the hard block.
    - Planning artifact conflicts (`dashboard/`, `plan/`, `public/`) → `git checkout --theirs` + regen
    - Compiler source conflicts (`src/**/*.ts`) → create a priority `[CONFLICT]` TaskList item; assign to `senior-developer` (Opus); do NOT resolve inline
 2. **Dev runs scoped local checks** — issue-targeted compile/run checks for confidence
-3. **Dev pushes the branch to origin and opens a PR against `main`** — PRs MUST target the **upstream** repo (`loopdive/js2`), never the fork (`ttraenkler/js2`). **Always pass `-R loopdive/js2 --head ttraenkler:<branch>` to `gh pr create`** — the container's gh 2.23 ignores the pinned default (`remote.upstream.gh-resolved=base`) for `pr create` and silently opens the PR on the fork (verified 2026-06-11: fork PRs #6/#7 both had to be closed as misrouted). After creating, verify the PR URL starts with `github.com/loopdive/`. Note the pre-push integrity gate chokes on the fork/upstream divergence — `git push --no-verify` is sanctioned (CI runs the real gate).
+3. **Dev pushes the branch to the `fork` remote and opens a PR against `main`** — PRs MUST target the **upstream** repo (`loopdive/js2`), never the fork (`ttraenkler/js2`). **Push the branch with `git push fork <branch>` FIRST**, then **always pass `-R loopdive/js2 --head ttraenkler:<branch>` to `gh pr create`** — the container's gh 2.23 ignores the pinned default (`remote.upstream.gh-resolved=base`) for `pr create` and silently opens the PR on the fork (verified 2026-06-11: fork PRs #6/#7 both had to be closed as misrouted). After creating, verify the PR URL starts with `github.com/loopdive/`. Note the pre-push integrity gate chokes on the fork/upstream divergence — `git push --no-verify` is sanctioned (CI runs the real gate).
+   - **Push to `fork`, not `origin` — this is load-bearing, not cosmetic (#3343-era, 2026-07-17).** `origin` is **upstream** (`loopdive/js2wasm`) and `push.default=current`, so a plain `git push` puts the branch on **upstream**. `gh pr create --head ttraenkler:<branch>` then fails with "No commits between" (the branch isn't on the fork), and the tempting workaround — dropping the `ttraenkler:` prefix — opens an upstream-head PR. That is how a **duplicate PR** survives: **two lanes run concurrently** (this checkout + a fork-origin lane), and when the same branch NAME exists in two different head repos, GitHub **cannot** apply its normal same-head+base rejection. Both PRs coexist and the work is done twice. Pushing to `fork` restores that free rejection. Do NOT rely on `claim-issue.mjs` to prevent this — it returns **exit 0 to both lanes** (they share the `ttraenkler/senior-dev` slug); the lock is advisory. Before starting an issue, also run `git log origin/main --grep="#<id>"` to check it isn't already merged. A PR that goes **DIRTY on files it itself touched** is a duplicate-merge smell, not an ordinary conflict.
 4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
 5. **On CI completion**:
    - **All required checks green** → run `/dev-self-merge`; if MERGE, mark the task completed and **stand down** (proceed to step 8). The dev does NOT enqueue — the server-side `auto-enqueue.yml` workflow enqueues on CI-completion (grace 0, #2786). NEVER enqueue or re-enqueue from a dev
@@ -408,7 +409,9 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
+
 **test262 conformance**: 32,138 / 43,106 (74.6 %)
+
 <!-- AUTO:conformance-end -->
 
 ### Sprint History
