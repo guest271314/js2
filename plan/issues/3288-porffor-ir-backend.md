@@ -289,14 +289,14 @@ backend's semantic emitter.
 
 All dependency-ordered slices merged before this umbrella was closed:
 
-| Slice | Issue | PR    | Merge commit              |
-| ----- | ----- | ----- | ------------------------- |
-| P0    | #3295 | #3109 | `033ee24f98d7`            |
-| P1    | #3296 | #3166 | `b5a8c98c9bf8`            |
-| P2    | #3297 | #3198 | `792cc36ecf89`            |
-| P3    | #3298 | #3257 | `c81a3e6aa47b`            |
-| P4    | #3299 | #3263 | `d093f05bc1ae`            |
-| P5    | #3300 | #3287 | `PENDING_P5_MERGE_COMMIT` |
+| Slice | Issue | PR    |
+| ----- | ----- | ----- |
+| P0    | #3295 | #3109 |
+| P1    | #3296 | #3166 |
+| P2    | #3297 | #3198 |
+| P3    | #3298 | #3257 |
+| P4    | #3299 | #3263 |
+| P5    | #3300 | #3287 |
 
 The completed optional path is JS2 typed SSA IR through the shared
 `LinearMemoryPlan` into Porffor IR, with Porffor's pinned renderer available as
