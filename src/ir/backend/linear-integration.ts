@@ -32,11 +32,11 @@
 // Recorded in plan/issues/2956 §"Execution status".
 //
 // RESOLVER SCOPE: L1 supplies the four required name/table methods. L2 adds
-// fixed-number vecs plus numeric object/ref-cell layouts: from-ast types each
-// reference-shaped value as the linear backend's i32 arena pointer, while the
-// emitter consumes offsets computed through codegen-linear/layout.ts. Union,
-// dynamic boxing, closure/class/string hooks stay absent and therefore demote
-// through the same legality/build channel.
+// fixed-number vecs plus numeric object/ref-cell layouts; L3 maps strings to
+// the direct backend's i32 arena pointer and UTF-8 runtime. from-ast keeps the
+// representation abstract in each case. Union, dynamic boxing, closure/class,
+// string iteration, and residual prototype methods stay absent and therefore
+// demote through the same legality/build channel.
 
 import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
@@ -45,8 +45,12 @@ import {
   LINEAR_AGGREGATE_HEADER_SIZE,
   LINEAR_GENERIC_OBJECT_TAG,
 } from "../../codegen-linear/layout.js";
-import { LINEAR_IR_VEC_INIT_F64_FN } from "../../codegen-linear/runtime.js";
-import { lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
+import {
+  LINEAR_IR_STRING_CHAR_CODE_AT_FN,
+  LINEAR_IR_VEC_INIT_F64_FN,
+  linearStringLiteralInstrs,
+} from "../../codegen-linear/runtime.js";
+import { IR_STRING_COMPARE_FN, lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
 import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
 import { asVal, type IrFuncRef, type IrGlobalRef, type IrObjectShape, type IrType, type IrTypeRef } from "../nodes.js";
 import { planIrCompilation } from "../select.js";
@@ -102,8 +106,8 @@ export function getLastLinearIrReport(): LinearIrResult | undefined {
 
 /**
  * Build + lower every selector-claimed top-level FunctionDeclaration for the
- * LINEAR backend. Pure precompute: mutates nothing on `ctx.mod` except
- * interning func types (append-only, deduped); the caller inserts the
+ * LINEAR backend. Precompute mutates only append-only/deduped func types and
+ * the direct backend's string-literal data registry; the caller inserts the
  * returned functions at their pre-assigned `ctx.funcMap` slots.
  */
 export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.SourceFile): LinearIrResult {
@@ -168,8 +172,9 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
     for (const { name, decl, exported } of pending) {
       try {
         // Build through the SAME shared from-ast as WasmGC. The narrowed
-        // linear resolver exposes only the L2 fixed-number-vec shape; every
-        // other representation-dependent family still throws and demotes.
+        // linear resolver exposes the landed L2 vec/aggregate and L3 string
+        // shapes; every other representation-dependent family still throws
+        // and demotes.
         const { main, lifted } = lowerFunctionAstToIr(decl, {
           checker: ctx.checker,
           exported,
@@ -293,8 +298,8 @@ function bucketFromLegalityMessage(message: string): string {
 
 /**
  * The linear resolver: required name/table methods plus the L2 fixed-f64-vec,
- * numeric-object, and primitive-refcell subsets. Other optional shape hooks
- * remain absent — see the module header.
+ * aggregate/refcell subsets and the L3 i32-pointer string representation.
+ * Other optional shape hooks remain absent — see the module header.
  */
 function makeLinearIrResolver(
   ctx: LinearContext,
@@ -317,6 +322,14 @@ function makeLinearIrResolver(
   const helperByShape = new Map<string, number>();
   const objects = new Map<string, LinearObjectLowering>();
   const refCells = new Map<string, LinearRefCellLowering>();
+  const resolveRuntimeFunc = (name: string): number => {
+    // Runtime functions were appended before user-slot pre-assignment. Scan
+    // the actual defined-function table so a source function with a reserved
+    // helper-like name cannot shadow the runtime entry in funcMap.
+    const localIdx = ctx.mod.functions.findIndex((func) => func.name === name);
+    if (localIdx < 0) throw new Error(`linear-ir: runtime helper '${name}' missing`);
+    return ctx.numImportFuncs + localIdx;
+  };
 
   const ensureAggregateHelper = (
     key: string,
@@ -372,6 +385,12 @@ function makeLinearIrResolver(
 
   const resolver: IrLowerResolver & IrFromAstResolver = {
     resolveFunc(ref: IrFuncRef): number {
+      // #2956 L3: from-ast keeps string comparison/method choice abstract.
+      // Resolve those names onto the canonical linear UTF-8 runtime here.
+      if (ref.name === IR_STRING_COMPARE_FN) return resolveRuntimeFunc("__str_cmp");
+      if (ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN || ref.name === "__str_slice") {
+        return resolveRuntimeFunc(ref.name);
+      }
       // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
       // `__vec_elem_set_<vecStructTypeIdx>` (the C2 path — element store and
       // `.push` both emit it). On linear the sentinel typeIdx is always 0
@@ -402,12 +421,56 @@ function makeLinearIrResolver(
       return idx;
     },
     resolveType(ref: IrTypeRef): number {
-      // Slice 1 carries no symbolic type refs (numeric/control-flow only) —
-      // the legality gate rejects shape-typed functions before lowering.
-      throw new Error(`linear-ir: symbolic type '${ref.name}' outside slice-1 scope`);
+      // Landed linear shapes resolve through their dedicated handles; symbolic
+      // module type refs remain outside the claimed surface.
+      throw new Error(`linear-ir: symbolic type '${ref.name}' outside the claimed scope`);
     },
     internFuncType(def: FuncTypeDef): number {
       return internLinearFuncType(ctx, def);
+    },
+    // #2956 L3: every linear string is the direct backend's canonical i32
+    // arena pointer. The four string.* ops route through the same runtime
+    // helpers/data-segment registry as direct AST codegen.
+    resolveString(): ValType {
+      return { kind: "i32" };
+    },
+    stringIsExternref(): boolean {
+      return false;
+    },
+    hasHostNumberBox(): boolean {
+      return false;
+    },
+    hasHostNumberToString(): boolean {
+      return false;
+    },
+    stringMethodPlan(method: string) {
+      if (method === "charCodeAt") {
+        return {
+          funcName: LINEAR_IR_STRING_CHAR_CODE_AT_FN,
+          indexArgRep: "i32" as const,
+          padOmitted: "charcode-zero" as const,
+        };
+      }
+      if (method === "slice") {
+        return {
+          funcName: "__str_slice",
+          indexArgRep: "i32" as const,
+          padOmitted: "native-slice-len" as const,
+        };
+      }
+      return null;
+    },
+    emitStringConst(value: string): readonly Instr[] {
+      return linearStringLiteralInstrs(ctx, value, resolveRuntimeFunc("__str_from_data"));
+    },
+    emitStringConcat(): readonly Instr[] {
+      return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_concat") }];
+    },
+    emitStringEquals(): readonly Instr[] {
+      return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_eq") }];
+    },
+    emitStringLen(): readonly Instr[] {
+      return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_length_utf16") }];
     },
     resolveObject(shape: IrObjectShape): LinearObjectLowering | null {
       const key = linearObjectShapeKey(shape);
@@ -525,6 +588,7 @@ function linearValueTypeConverter(resolver: IrLowerResolver, funcName: string): 
     backend: "linear",
     convertType(type: IrType): readonly ValType[] {
       if (type.kind === "val") return [type.val];
+      if (type.kind === "string") return [{ kind: "i32" }];
       if (type.kind === "object" && resolver.resolveObject?.(type.shape)) return [{ kind: "i32" }];
       if (type.kind === "boxed") {
         const inner = asVal(type.inner);
@@ -537,7 +601,7 @@ function linearValueTypeConverter(resolver: IrLowerResolver, funcName: string): 
 
 function linearAggregateFieldType(type: IrType): Extract<ValType, { kind: "i32" | "f64" }> | null {
   if (type.kind === "val" && (type.val.kind === "i32" || type.val.kind === "f64")) return type.val;
-  if (type.kind === "object" || type.kind === "boxed") return { kind: "i32" };
+  if (type.kind === "string" || type.kind === "object" || type.kind === "boxed") return { kind: "i32" };
   return null;
 }
 

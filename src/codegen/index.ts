@@ -1509,11 +1509,27 @@ function irFieldTypeMatchesLegacyValType(
 // dates that drive this list.
 // ---------------------------------------------------------------------------
 const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReason>();
-// Deliberately EMPTY (#3341): promotion is a GLOBAL hard error — the loop below
-// reports EVERY matching `selection.fallbacks` reason via `reportErrorNoNode` on
-// ALL user code, not just the 10-file baseline corpus. Bucket-zero is NECESSARY
-// but NOT SUFFICIENT (safe only at architectural completeness); every current
-// reason still fires on valid code today — see #3341 / plan/log/ir-adoption.md.
+// Empty as of #1530 — and #3341 established that a bucket reaching zero in
+// `scripts/ir-fallback-baseline.json` is NECESSARY but NOT SUFFICIENT to add
+// its reason here. That baseline is measured against the 13-file playground
+// corpus only; corpus-zero does NOT mean the reason is unreachable on real
+// code. Most rejection reasons describe LEGITIMATE IR-non-claimability that the
+// legacy path must still catch — e.g. `external-call` (a call to a
+// non-whitelisted external fn), `call-graph-closure` (an unclaimable callee),
+// `param-type-not-resolvable` / `return-type-not-resolvable` /
+// `type-resolution-failure` (TypeMap can't resolve the type), `class-method`
+// (still covers computed/generator/abstract names, static super,
+// subclass-of-builtin — see plan/log/ir-adoption.md), and the destructuring
+// param buckets. Adding any of these here would promote a legitimate fallback
+// to a HARD COMPILE ERROR and regress real programs. So a reason may be
+// promoted to strict ONLY once it is genuinely UNREACHABLE in the IR (i.e. the
+// IR is now expected to always claim+lower that construct, so a rejection is a
+// bug) — real #2855-family adoption work, reason by reason, not a doc flip.
+// The intended promotion order once each becomes genuinely unreachable
+// (cheapest first, see plan/log/ir-adoption.md):
+//   "param-type-not-resolvable",
+//   "call-graph-closure",
+//   "body-shape-rejected",
 
 const STRICT_IR_BUILD_ERRORS: ReadonlyArray<string> = [
   // Empty as of #1530 — add substring patterns here when a known build

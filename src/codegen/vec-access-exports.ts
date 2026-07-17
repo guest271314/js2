@@ -21,6 +21,28 @@ import { flushLateImportShifts } from "./shared.js";
 import { exportFunc } from "./emit-helpers.js";
 
 /**
+ * (#3311) The native-string vec carrier. `string[]` under nativeStrings /
+ * standalone lowers to a vec whose backing array element is `(ref null
+ * $AnyString)` (keyed `ref_${anyStrTypeIdx}`; `$NativeString <: $AnyString`).
+ * Returns that element ref typeIdx (`anyStrTypeIdx`, or `nativeStrTypeIdx` for a
+ * concretely-native element) so `__vec_push` / `__vec_pop` can admit + cast this
+ * carrier — otherwise they returned the `-1`/`null.extern` unsupported sentinel
+ * and `(a as any).push("x")` on a `string[]` was a silent no-op standalone.
+ * Returns `-1` for a non-string carrier.
+ */
+export function nativeStrVecElemTypeIdx(ctx: CodegenContext, vecTypeIdx: number): number {
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return -1;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") return -1;
+  const el = arrDef.element as ValType;
+  if (el.kind !== "ref" && el.kind !== "ref_null") return -1;
+  if (ctx.anyStrTypeIdx >= 0 && el.typeIdx === ctx.anyStrTypeIdx) return ctx.anyStrTypeIdx;
+  if (ctx.nativeStrTypeIdx >= 0 && el.typeIdx === ctx.nativeStrTypeIdx) return ctx.nativeStrTypeIdx;
+  return -1;
+}
+
+/**
  * Emit __vec_get(externref, i32) -> externref and __vec_len(externref) -> i32
  * exports so the runtime can iterate WasmGC vec structs that were coerced to
  * externref (e.g. arrays stored in `any`-typed variables).
@@ -411,9 +433,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   // through to its fail-loud TypeError instead of silently no-oping.
   const unboxNumIdx = ctx.funcMap.get("__unbox_number");
   const boxNumIdx2 = ctx.funcMap.get("__box_number");
-  const mutEntries = vecEntries.filter(([elemKey]) => {
+  const mutEntries = vecEntries.filter(([elemKey, vecTypeIdx]) => {
     if (elemKey === "externref") return true;
     if (elemKey === "f64" || elemKey === "i32") return unboxNumIdx !== undefined && boxNumIdx2 !== undefined;
+    // (#3311) native-string carrier (`string[]` standalone) — no numeric unbox,
+    // the value round-trips through `any.convert_extern` / `ref.cast $AnyString`.
+    if (nativeStrVecElemTypeIdx(ctx, vecTypeIdx) >= 0) return true;
     return false;
   });
 
@@ -513,6 +538,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { name: `__vp_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
       );
       // value unboxing per element kind (value param is local 1)
+      const strElemIdx = nativeStrVecElemTypeIdx(ctx, vecTypeIdx);
       const valueInstrs: Instr[] =
         elemKey === "externref"
           ? [{ op: "local.get", index: 1 }]
@@ -521,7 +547,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
                 { op: "local.get", index: 1 },
                 { op: "call", funcIdx: unboxNumIdx! },
               ]
-            : [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
+            : elemKey === "i32"
+              ? [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }]
+              : // (#3311) native-string carrier: the boxed externref value is a
+                // `$NativeString` (<: `$AnyString`); recover the ref element for
+                // `array.set` — no numeric unbox.
+                [{ op: "local.get", index: 1 }, { op: "any.convert_extern" }, { op: "ref.cast", typeIdx: strElemIdx }];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 2 },
         { op: "ref.cast", typeIdx: vecTypeIdx },
@@ -655,14 +686,19 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       // — same unsigned read/box. `i32_elem` (Int32/Uint32 element storage) stays
       // full-width signed (plain `array.get`), preserving its pre-split behaviour.
       const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte";
+      const isNativeStr = nativeStrVecElemTypeIdx(ctx, vecTypeIdx) >= 0;
       const boxInstrs: Instr[] =
         elemKey === "externref"
           ? []
-          : elemKey === "f64"
-            ? [{ op: "call", funcIdx: boxNumIdx2! }]
-            : isPackedByte
-              ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
-              : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
+          : // (#3311) native-string element (`ref null $AnyString`) → externref via
+            // the plain anyref→externref box (no `__box_number`).
+            isNativeStr
+            ? [{ op: "extern.convert_any" }]
+            : elemKey === "f64"
+              ? [{ op: "call", funcIdx: boxNumIdx2! }]
+              : isPackedByte
+                ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 1 },
         { op: "ref.cast", typeIdx: vecTypeIdx },

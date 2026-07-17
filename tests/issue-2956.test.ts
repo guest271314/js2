@@ -120,23 +120,6 @@ describe("#2956 L1: linear backend consumes IR for claimed numeric functions", (
     expect(vOn).toBe(111); // collatz(27) takes 111 steps
   });
 
-  it("out-of-scope shapes demote with a bucketed reason and still compile via the direct path", async () => {
-    // String manipulation is outside the slice-1 legal set — the claim must
-    // demote (reason bucket) and the DIRECT path must still produce a
-    // working module (the overlay only ever adds capability).
-    const src = `export function greet(name: string): string { return "hi " + name; }
-    export function test(): number { return greet("x").length; }`;
-    const binary = await compileLinear(src, true);
-    const report = getLastLinearIrReport();
-    expect(report?.compiled ?? []).not.toContain("greet");
-    if (report && report.rejected.length > 0) {
-      for (const rej of report.rejected) {
-        expect(rej.reason).toBeTruthy();
-      }
-    }
-    expect(await run(binary)).toBe(4);
-  });
-
   it("mutual recursion resolves through the annotation pre-seed", async () => {
     const src = `export function even(n: number): boolean { return n === 0 ? true : odd(n - 1); }
     export function odd(n: number): boolean { return n === 0 ? false : even(n - 1); }
@@ -352,5 +335,103 @@ describe("#2956 L2: selector-claimed linear-memory aggregates + ref-cells", () =
       { op: "f64.load", align: 3, offset: 8 },
       { op: "f64.store", align: 3, offset: 8 },
     ]);
+  });
+});
+
+const STRING_CORE_SRC = `export function greet(name: string): string {
+  return "hi " + name;
+}
+export function unicode(): number {
+  const value = "Grüße " + "🌍";
+  return value === "Grüße 🌍" ? value.length : -1;
+}
+export function relation(): number {
+  return "alpha" < "beta" && "same" !== "other" ? 1 : 0;
+}
+export function sliced(): number {
+  return "abcdef".slice(1, 4).length;
+}
+export function objectString(): number {
+  const wrapped = { text: "hi" };
+  return wrapped.text === "hi" ? wrapped.text.length : 0;
+}
+export function test(): number {
+  return greet("x").length + unicode() + relation() + sliced() + objectString();
+}`;
+
+const STRING_CHAR_CODE_SRC = `export function ascii(): number { return "ABC".charCodeAt(1); }
+export function omitted(): number { return "A".charCodeAt(); }
+export function bmp(): number { return "Aé".charCodeAt(1); }
+export function astralHigh(): number { return "😀".charCodeAt(0); }
+export function astralLow(): number { return "😀".charCodeAt(1); }
+export function negative(): number { return "A".charCodeAt(-1); }
+export function missing(): number { return "A".charCodeAt(4); }`;
+
+describe("#2956 L3: selector-claimed linear strings", () => {
+  it("lowers the core i32-pointer string surface with direct-path parity", async () => {
+    const directBinary = await compileLinear(STRING_CORE_SRC, false);
+    const irBinary = await compileLinear(STRING_CORE_SRC, true);
+    const report = getLastLinearIrReport();
+    expect(report?.rejected ?? []).toEqual([]);
+    expect([...(report?.compiled ?? [])].sort()).toEqual([
+      "greet",
+      "objectString",
+      "relation",
+      "sliced",
+      "test",
+      "unicode",
+    ]);
+
+    const direct = await exportedFunctions(directBinary);
+    const ir = await exportedFunctions(irBinary);
+    for (const name of ["unicode", "relation", "sliced", "objectString", "test"]) {
+      expect(callNumber(ir, name), `${name} IR value`).toBe(callNumber(direct, name));
+    }
+    expect(callNumber(ir, "unicode")).toBe(8); // UTF-16 code units: 🌍 counts as two.
+    expect(callNumber(ir, "relation")).toBe(1);
+    expect(callNumber(ir, "sliced")).toBe(3);
+    expect(callNumber(ir, "objectString")).toBe(2);
+    expect(callNumber(ir, "test")).toBe(18);
+  });
+
+  it("adds flag-gated UTF-16 charCodeAt capability, including surrogate halves and NaN bounds", async () => {
+    const binary = await compileLinear(STRING_CHAR_CODE_SRC, true);
+    const report = getLastLinearIrReport();
+    expect(report?.rejected ?? []).toEqual([]);
+    expect([...(report?.compiled ?? [])].sort()).toEqual([
+      "ascii",
+      "astralHigh",
+      "astralLow",
+      "bmp",
+      "missing",
+      "negative",
+      "omitted",
+    ]);
+
+    const exports = await exportedFunctions(binary);
+    expect(callNumber(exports, "ascii")).toBe("B".charCodeAt(0));
+    expect(callNumber(exports, "omitted")).toBe("A".charCodeAt());
+    expect(callNumber(exports, "bmp")).toBe("é".charCodeAt(0));
+    expect(callNumber(exports, "astralHigh")).toBe("😀".charCodeAt(0));
+    expect(callNumber(exports, "astralLow")).toBe("😀".charCodeAt(1));
+    expect(callNumber(exports, "negative")).toBeNaN();
+    expect(callNumber(exports, "missing")).toBeNaN();
+  });
+
+  it("keeps unsupported prototype methods on the direct fallback", async () => {
+    const source = `export function find(value: string): number { return value.indexOf("x"); }
+      export function test(): number { return find("ax"); }`;
+    const binary = await compileLinear(source, true);
+    const report = getLastLinearIrReport();
+    expect(report?.compiled ?? []).not.toContain("find");
+    expect(report?.rejected.some((rejection) => rejection.func === "find" && rejection.reason === "build")).toBe(true);
+    expect(await run(binary)).toBe(1);
+  });
+
+  it("JS2WASM_LINEAR_IR=0 keeps string modules byte-identical to an unset flag", async () => {
+    const unset = await compileLinear(STRING_CORE_SRC, false);
+    const zero = await compileLinear(STRING_CORE_SRC, "0");
+    const sha = (binary: Uint8Array): string => createHash("sha256").update(binary).digest("hex");
+    expect(sha(zero)).toBe(sha(unset));
   });
 });

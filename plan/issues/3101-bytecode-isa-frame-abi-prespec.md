@@ -1,7 +1,9 @@
 ---
 id: 3101
 title: "Bytecode interpreter ISA + `$Frame`/`$EnvRec` ABI pre-spec (E1 executable-cold): opcode set, encoding, exception table, AOT↔interp call protocol"
-status: ready
+status: done
+completed: 2026-07-17
+assignee: ttraenkler/senior-dev
 sprint: current
 priority_note: "promoted 2026-07-17 by the interpreter-backend audit (plan/log/analysis-2026-07/02-interpreter-backend-audit-2026-07-17.md): P1/P2 (#2853) done sprint 71, compiled-acorn corpus 23/23 parity — E1 has zero unmet dependencies and is the start of Tier 2"
 model: fable
@@ -190,3 +192,75 @@ spec cuts it to review + implement); the emitter coverage + fixtures are
 Opus-executable grind. Fully parallel to all substrate work — the ideal
 "budget-window filler" XL-adjacent rock with zero merge-conflict surface
 (new directory).
+
+## Implementation notes (E1 landed — senior-dev, 2026-07-17)
+
+Delivered as `src/interp/` + `docs/adr/0019-bytecode-isa.md` +
+`tests/interp/`. The ADR pins the ISA/ABI exactly as implemented; the notes
+below record the **why** behind the load-bearing decisions and the deltas from
+the #3101 pre-spec.
+
+### Files
+- `src/interp/opcodes.ts` — the 37-op set (see below) + the i32 packed encoding
+  (`op | a<<8 | b<<20`, WIDE bit 7, CallBuiltin trailing-argc, jumps always
+  WIDE) + opcode/builtin metadata for the disassembler.
+- `src/interp/types.ts` — `FuncMeta`/`Frame`/`EnvRec` as TS classes (→ WasmGC
+  structs); `$Frame` field order frozen per #2864.
+- `src/interp/runtime-ops.ts` — the generic boxed-any ops written as **plain
+  native operations on `any`** (`anyAdd(a,b){return a+b}`, …). This is the free
+  value-rep bridge: real-JS semantics in Node (matches `eval`), `__any_*`
+  lowering when js2wasm self-compiles (E2). ToPrimitive/ToNumber live here, not
+  in the loop.
+- `src/interp/encoder.ts` — packing, primitive const-pool interning, forward-jump
+  back-patch, exn-table build.
+- `src/interp/emitter.ts` — ESTree→bytecode, stack-discipline register allocator.
+- `src/interp/loop.ts` — `interpEnter` + the register+accumulator dispatch loop
+  with the explicit frame-stack machine (interp→interp calls push a `$Frame`, no
+  host recursion — mirrors `bytecode-vm.ts::runProgram`) and side-table exception
+  unwinding.
+- `src/interp/disasm.ts` — the disassembler (debugging contract).
+- `src/interp/index.ts` — import-clean public API; the core consumes ESTree, it
+  does NOT parse (acorn stays in the test harness — "two producers, one
+  consumer").
+
+### Decisions / deltas from the pre-spec (documented, not silently improvised)
+1. **37 opcodes, not "34".** #3101's header says 34; its opcode *table*
+   enumerates 37 distinct mnemonics (9+12+4+4+3+4+1). Implemented all 37; the
+   "34" predates 3 table additions. (ADR §4.)
+2. **`this`/receiver → `regs[0]`.** The pre-spec left receiver placement open.
+   Reserving `regs[0]` for `this` (params at `regs[1..]`) keeps the `$Frame`
+   layout unchanged (no extra field to coordinate with #2864).
+3. **Frame-stack built now (not deferred).** The exception unwind-across-a-call
+   needs the caller's exn table scanned at the **call-site PC** — the same frame
+   stack #2929 suspends. Building it now avoids a throwaway recursion-based
+   exception mechanism ripped out at E4.
+4. **Completion-value semantics.** Script/eval bodies return the last
+   value-producing statement's value; control statements (if/for/while/do/try/
+   labeled) reset the running completion to undefined (UpdateEmpty base) so
+   `eval("1; for(;false;){}")` is undefined; blocks/decls propagate empty.
+5. **Global-scope top-level.** Indirect-eval/Function-ctor top-level
+   var/function/let/const create **global** bindings (not registers), so a
+   nested function's free identifier resolves by global lookup — global
+   resolution, NOT the lexical capture Phase 1 excludes.
+
+### Validation
+- 113 Node tests pass (`tests/interp/{fixtures,differential}.test.ts`), zero
+  Wasm.
+- Differential vs `eval` (isolated per-body in `node:vm`): 65-body curated corpus
+  (64 supported, all agree) + **~91% agreement on supported real test262 eval
+  bodies** (103 sampled from `test/language/eval-code` + `built-ins/eval`).
+- `tsc --noEmit` clean over `src/interp/` (the tsc project gate; ready for E2
+  self-compile); biome lint clean; prettier-formatted.
+
+### Follow-ups (out of Phase-1 scope — the emitter throws
+`UnsupportedNodeError`, the differential harness reports them)
+- `switch`, `class`, `for-in`/`for-of`, generators/async (deferred node kinds).
+- Bitwise/shift/`**`, `delete`, `in`, `instanceof` (extend the minimal arith
+  group).
+- Destructuring + spread; regex literals (shared-state, aligns #3301).
+- Lexical closure capture, block scoping, TDZ, strict-mode undeclared-assignment
+  ReferenceError → the declarative-`$EnvRec` work (#2925/#2929).
+- Real global-var hoisting onto the module globalThis + cross-eval visibility →
+  E3 (#2928); invisible to E1's completion-value differential.
+- Wire E2 (#2928): self-compile `src/interp/` via js2wasm and route standalone
+  `new Function(<dynamic>)`/indirect `eval` through `__interp_enter`.

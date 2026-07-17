@@ -197,38 +197,17 @@ const SECTIONS = [
 // IrFallbackReason union in src/ir/select.ts (enforced below).
 const BUCKETS = {
   "body-shape-rejected": ["unintended", "from-ast.ts handles every statement in the body"],
-  "external-call": [
-    "unintended",
-    "Math.\\* / parseInt / Console wired through IR (#1371). Corpus bucket **0** but NOT strict (#3341): whitelist is Math.{abs,sqrt,floor,ceil,trunc}+parseInt by design — any other external (`isNaN`, `Date.now`, …) still legitimately fires it.",
-  ],
-  "call-graph-closure": [
-    "unintended",
-    "Callees of claimed funcs all claimable themselves. Corpus bucket **0** but NOT strict (#3341): fires whenever a claimed fn calls a still-direct-only local (switch / for(;;) / async body).",
-  ],
-  "param-shape-rejected": [
-    "unintended",
-    "Destructuring params supported (#1372). Corpus bucket **0** but NOT strict (#3341): optional `x?` / rest `...args` / default-initializer params still fire it.",
-  ],
-  "param-type-not-resolvable": [
-    "unintended",
-    "TypeMap propagation reaches the param. Corpus bucket **0** but NOT strict (#3341): union-typed / non-move-dynamic params still fire it.",
-  ],
-  "return-type-not-resolvable": [
-    "unintended",
-    "TypeMap propagation reaches the return. Corpus bucket **0** but NOT strict (#3341): union-typed / unresolvable returns still fire it.",
-  ],
-  "type-resolution-failure": [
-    "unintended",
-    'Same. **Dead/unreachable (#3341)**: nothing *produces* this reason (no `.set(…, "type-resolution-failure")`); the only occurrences are the `IrFallbackReason` union decl in select.ts + the `check:ir-fallbacks` category list. Not promoted (vacuous + landmine if re-wired).',
-  ],
+  "external-call": ["unintended", "Math.\\* / parseInt / Console wired through IR (#1371)"],
+  "call-graph-closure": ["unintended", "Callees of claimed funcs all claimable themselves"],
+  "param-shape-rejected": ["unintended", "Destructuring params supported (#1372)"],
+  "param-type-not-resolvable": ["unintended", "TypeMap propagation reaches the param"],
+  "return-type-not-resolvable": ["unintended", "TypeMap propagation reaches the return"],
+  "type-resolution-failure": ["unintended", "Same"],
   "class-method": [
     "unintended",
-    "#1370/#3000 B-C-E — corpus bucket **0** (#3000-E); NOT yet strict (#3341, still covers computed/generator/abstract names, static super, subclass-of-builtin)",
+    "#1370/#3000 B-C-E — corpus bucket **0** (#3000-E); NOT yet strict (still covers computed/generator/abstract names, static super, subclass-of-builtin)",
   ],
-  "destructuring-param-complex": [
-    "unintended",
-    "Complex destructuring params lowered (subset of param-shape). Corpus bucket **0** but NOT strict (#3341): rest/nested destructuring params still fire it.",
-  ],
+  "destructuring-param-complex": ["unintended", "Complex destructuring params lowered (subset of param-shape)"],
   "async-function": ["deferred", "Async bodies — CPS lowering tracked separately (#1373/#1796)"],
   "async-generator": ["deferred", "Out of scope long-term"],
   "deferred-feature": ["deferred", "`eval` / `Proxy` / `with` — wont-fix"],
@@ -270,10 +249,10 @@ bucket work #2856–#2859.
 - **mixed** — \`from-ast.ts\` handles a *subset* of the kind. Whole-function
   rejection by the selector or per-node throws inside \`from-ast.ts\` causes
   the function to fall back to direct codegen via the demote-to-warning
-  path (resolve-time drop \`src/codegen/index.ts:~1891\`; post-claim
-  build/verify/lower demote via \`formatIrPathFallbackDiagnostic\`,
-  \`~2420\`). Ratchet target: drive the rejection bucket to zero, then
-  promote to \`ir-owned\`.
+  path (\`src/codegen/index.ts:~1889\` for a selector-claimed function whose
+  types can't be resolved, and \`~2390\` for an IR-build throw; both emit a
+  severity-\`warning\`). Ratchet target: drive the rejection bucket to zero,
+  then promote to \`ir-owned\`.
 - **direct-only** — IR has no handler; direct codegen is the only path. A
   function touching one of these kinds is rejected by the selector and
   compiles entirely via legacy.

@@ -165,11 +165,9 @@ Stay in `src/codegen/` (direct) until the listed issues land:
 
 `scripts/ir-fallback-baseline.json` is the ratchet. When a kind is
 adopted, its bucket goes to zero and the demote-to-warning escape hatch
-(resolve-time drop `src/codegen/index.ts:~1891`; post-claim
-build/verify/lower demote via `formatIrPathFallbackDiagnostic`, `~2420`)
-is removed for that kind — see #2855. Note: bucket-zero-on-corpus is a
-necessary but **not sufficient** condition for promotion to a hard error
-(`STRICT_IR_REASONS`); see the escape-hatch section below and #3341.
+in `src/codegen/index.ts:~1889/~2390` is removed for that kind — see #2855.
+(Bucket-zero is necessary but **not sufficient** to make a reason a hard
+error via `STRICT_IR_REASONS`; see #3341 and the escape-hatch section below.)
 
 ## Current hidden bias in `src/ir/` (and what to do about it)
 
@@ -179,7 +177,7 @@ deliver on. None of these are bugs — they reflect IR being one backend old.
 
 | File                                  | Bias                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Lift plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/ir/lower.ts`                     | **Partially behind the `BackendEmitter` trait (#1713).** The pass-through group (locals/globals/const/arithmetic/control flow) and the **vec** group (`emitVecLen`/`emitVecDataPtr`/`emitElemGet`, serving `vec.len`/`vec.get`/`forof.vec`) now route through `emitter.*` instead of pushing `struct.get`/`array.get` inline. The aggregate (object/class/union), closure/refcell, and ref-coercion groups **have now been moved** behind typed `BackendEmitter` primitives (#2953, DONE) — they no longer push `struct.new`/`struct.get`/`ref.cast` inline. The residue is small and tracked: **5 GC-op literals** remain in `lower.ts` (`class.get`/`class.set`/union-`instanceof` tag read still emit `struct.get`/`struct.set` via `pushRaw` at ~L1797/1815/1908, and `forof.str` pushes `struct.get` directly onto the raw sink at ~L2614/2674, bypassing the trait) — an internal inconsistency, not whole un-migrated groups. Async/Promise + string ops stay inline by design (string ops are already behind `resolver.emit*`). | `WasmGcEmitter` (`src/ir/backend/wasmgc-emitter.ts`) is the behaviour-identical impl. **#1714 (DONE): the vec group is now the first node kind lowered through the trait to TWO backends** — `LinearEmitter` (`src/ir/backend/linear-emitter.ts`) emits the same `emitVecLen`/`emitVecDataPtr`/`emitElemGet` intents to linear memory (`i32.load`/offset arithmetic) instead of WasmGC struct/array ops, proving the seam abstracts a real second backend (`tests/ir-vec-two-backend.test.ts`). #1715 adds a bytecode emitter. |
+| `src/ir/lower.ts`                     | **Partially behind the `BackendEmitter` trait (#1713).** The pass-through group (locals/globals/const/arithmetic/control flow) and the **vec** group (`emitVecLen`/`emitVecDataPtr`/`emitElemGet`, serving `vec.len`/`vec.get`/`forof.vec`) now route through `emitter.*` instead of pushing `struct.get`/`array.get` inline. The aggregate (object/class/union), closure/refcell, and ref-coercion groups are **not yet moved** and still emit `struct.new`/`struct.get`/`ref.cast` inline (staged for follow-up under #1713; see the spec migration order). Async/Promise + string ops stay inline by design (string ops are already behind `resolver.emit*`). | `WasmGcEmitter` (`src/ir/backend/wasmgc-emitter.ts`) is the behaviour-identical impl. **#1714 (DONE): the vec group is now the first node kind lowered through the trait to TWO backends** — `LinearEmitter` (`src/ir/backend/linear-emitter.ts`) emits the same `emitVecLen`/`emitVecDataPtr`/`emitElemGet` intents to linear memory (`i32.load`/offset arithmetic) instead of WasmGC struct/array ops, proving the seam abstracts a real second backend (`tests/ir-vec-two-backend.test.ts`). #1715 adds a bytecode emitter. |
 | `src/ir/types.ts`                     | `Instr` union includes both GC ops (`struct.*`, `array.*`, `ref.cast`) and linear ops (`memory.size`, `i32.load`, etc.).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | This is shared _Wasm encoding_, not IR. Both backends emit Wasm, both need the union. Stays.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/ir/passes/tagged-union-types.ts` | Names WasmGC struct/array layouts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Move to a backend trait when the linear backend grows IR-driven tagged unions.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `src/ir/nodes.ts` `IrType.boxed`      | Assumes a boxed scalar is a `(struct (field $val))`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Keep abstract at the IR level; let each backend pick its boxing strategy (struct vs heap object vs nan-boxing).                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -193,12 +191,15 @@ the `BackendEmitter` trait becomes linear-capable by implementation
 rather than by a separate front-end. The remaining inline WasmGC emission
 in `lower.ts` is staged under #1713.
 
-## The fallback-to-warning escape hatch (resolve-time `src/codegen/index.ts:~1891`, post-claim `~2420`)
+## The fallback-to-warning escape hatch (`src/codegen/index.ts:~1889/~2390`)
 
 Today, if the IR path throws while compiling a function the selector
 claimed, the failure is logged at severity `"warning"` and the legacy
 direct-codegen body is kept. This makes the IR safe to enable by default
-without breaking test262, but it also masks real IR bugs.
+without breaking test262, but it also masks real IR bugs. (Two sites:
+`~1889` when a selector-claimed function's types can't be resolved, and
+`~2390` for an IR-build throw — both gated by `STRICT_IR_REASONS` /
+`STRICT_IR_BUILD_ERRORS` respectively, which are empty today.)
 
 **This is a transitional safety net, not the final design.** #2855 phases
 the warning channel out. The endgame: when a node kind is IR-owned, the
@@ -206,18 +207,19 @@ selector either claims it (and IR succeeds) or it stays direct (and the
 selector reports a structured "deferred" reason). There is no third
 "IR claimed it and silently fell back" state.
 
-The complementary hardening lever is `STRICT_IR_REASONS`
-(`src/codegen/index.ts`): a selector-rejection reason listed there promotes
-from a silent legacy demote to a hard compile error. **A reason is only
-safe to promote once zero-on-corpus means "architecturally complete for
-this class," not merely "the 10-file corpus doesn't exercise it."** Every
-current selector-rejection reason still legitimately fires on valid user
-code (non-whitelisted externals, calls to still-direct-only locals,
-optional/rest/union-typed params, union returns, computed/generator class
-methods), so promoting any of them would turn a graceful fallback into a
-hard error for real programs. `STRICT_IR_REASONS` therefore remains empty —
-see #3341 for the per-reason analysis (`type-resolution-failure` is
-additionally dead/unreachable).
+**Promoting a reason to strict is per-reason, not a corpus-zero flip
+(#3341).** A reason absent from `scripts/ir-fallback-baseline.json` only
+means the 13-file playground corpus doesn't happen to trigger it — it does
+**not** mean the reason is unreachable on real code. Reasons like
+`external-call`, `call-graph-closure`, `param/return-type-not-resolvable`,
+`type-resolution-failure`, and `class-method` describe **legitimate**
+IR-non-claimability (an external dependency, an unclaimable callee, an
+unresolvable type, a computed/generator/abstract method name) that the
+legacy path must still catch. Adding such a reason to `STRICT_IR_REASONS`
+would turn those legitimate fallbacks into hard compile errors and regress
+real programs. STRICT promotion is therefore gated on first making a
+_specific_ reason genuinely unreachable in the IR (real #2855-family
+adoption work), reason by reason — not a documentation flip.
 
 If you're reading this and the warning channel still exists, treat any
 new warning here as an error — it means a regression slipped past the IR
