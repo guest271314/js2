@@ -3795,12 +3795,113 @@ function compileArrayConcatExtern(
  * cast". Instead, delegate to the host's `Array.prototype.join` via the
  * `__array_join_any` import, which handles JS arrays and WasmGC vecs.
  */
+/**
+ * #3155 — standalone (`noJsHost`) `arr.join(sep?)` for an EXTERNREF receiver
+ * (e.g. `Object.keys(any).join(",")`, whose receiver is a boxed array walked
+ * via the native `__extern_length` / `__extern_get_idx` boundary).
+ *
+ * The host lane's {@link compileArrayJoinExtern} delegates to the JS
+ * `__array_join_any` import, which is an unsatisfiable `env::*` import in
+ * standalone mode (CLAUDE.md "Dual-mode: JS host optional"). This lane instead
+ * walks the externref array natively — length via `__extern_length`, each
+ * element via `__extern_get_idx` then ToString via `__extern_toString` (both
+ * native-registered under standalone, the same helpers the receiver's `.length`
+ * already uses host-free) — and folds with the shared {@link emitStringJoinFold}
+ * over the native-string representation, mirroring {@link compileArrayJoinNative}.
+ *
+ * Returns `null` (⇒ caller falls back to the host import) when the native
+ * string helpers are unavailable.
+ */
+function compileArrayJoinExternNative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+): ValType | null {
+  const repr = nativeStringRepr(ctx);
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  if (repr === undefined || anyStrTypeIdx < 0) return null;
+
+  // Native extern-array boundary helpers. `__extern_length`/`__extern_get_idx`
+  // carry f64 length/index (§ import-manifest); `__extern_toString` is the same
+  // §7.1.17 ToString the boxed-any element path uses. All three have native
+  // arms under standalone (the receiver's own `.length` read proves it), so
+  // these `ensureLateImport`s resolve to the native funcs, not host imports.
+  const externLenIdx = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+  const externGetIdx = ensureLateImport(
+    ctx,
+    "__extern_get_idx",
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  const externToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (externLenIdx === undefined || externGetIdx === undefined || externToStrIdx === undefined) return null;
+
+  const recvTmp = allocLocal(fctx, `__ejoin_recv_${fctx.locals.length}`, { kind: "externref" });
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "ejoin");
+  const { lenTmp, iTmp, resultTmp, sepTmp } = foldLocals;
+
+  // Receiver → externref, retained in recvTmp. len = trunc(__extern_length(recv)).
+  const recvType = compileExpression(ctx, fctx, propAccess.expression);
+  if (recvType && recvType.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
+  fctx.body.push({ op: "local.tee", index: recvTmp });
+  fctx.body.push({ op: "call", funcIdx: externLenIdx });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  fctx.body.push({ op: "local.set", index: lenTmp });
+
+  // Separator: explicit arg (coerced to a native string) or the spec default ",".
+  if (callExpr.arguments.length >= 1) {
+    const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "externref" });
+    if (argType === null) {
+      fctx.body.push(...nativeStringLiteralInstrs(ctx, ","));
+    } else {
+      fctx.body.push({ op: "any.convert_extern" });
+      fctx.body.push({ op: "ref.cast", typeIdx: anyStrTypeIdx });
+    }
+  } else {
+    fctx.body.push(...nativeStringLiteralInstrs(ctx, ","));
+  }
+  fctx.body.push({ op: "local.set", index: sepTmp });
+
+  // result = "" (empty-array join is "", #1968) and i = 0.
+  fctx.body.push(...nativeStringLiteralInstrs(ctx, ""));
+  fctx.body.push({ op: "local.set", index: resultTmp });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iTmp });
+
+  // element → ref $AnyString: __extern_toString(__extern_get_idx(recv, i)).
+  const elemToStr: Instr[] = [
+    { op: "local.get", index: recvTmp },
+    { op: "local.get", index: iTmp },
+    { op: "f64.convert_i32_s" },
+    { op: "call", funcIdx: externGetIdx },
+    { op: "call", funcIdx: externToStrIdx },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: anyStrTypeIdx },
+  ];
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
+
+  // Return the joined native string as externref for the caller.
+  fctx.body.push({ op: "local.get", index: resultTmp });
+  fctx.body.push({ op: "extern.convert_any" });
+  return { kind: "externref" };
+}
+
 function compileArrayJoinExtern(
   ctx: CodegenContext,
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
   callExpr: ts.CallExpression,
 ): ValType | null {
+  // #3155 — standalone/WASI has no JS host, so the `__array_join_any` delegation
+  // below leaks an unsatisfiable `env::__array_join_any` import (the module
+  // fails to instantiate). Walk the externref array natively instead.
+  if (noJsHost(ctx)) {
+    const native = compileArrayJoinExternNative(ctx, fctx, propAccess, callExpr);
+    if (native !== null) return native;
+    // else fall through — native string helpers unavailable, best-effort host.
+  }
   const joinAnyIdx = ensureLateImport(
     ctx,
     "__array_join_any",

@@ -30,8 +30,10 @@ bucket work #2856–#2859.
 - **mixed** — `from-ast.ts` handles a _subset_ of the kind. Whole-function
   rejection by the selector or per-node throws inside `from-ast.ts` causes
   the function to fall back to direct codegen via the demote-to-warning
-  path (`src/codegen/index.ts:889–896`). Ratchet target: drive the
-  rejection bucket to zero, then promote to `ir-owned`.
+  path (`src/codegen/index.ts:~1889` for a selector-claimed function whose
+  types can't be resolved, and `~2390` for an IR-build throw; both emit a
+  severity-`warning`). Ratchet target: drive the rejection bucket to zero,
+  then promote to `ir-owned`.
 - **direct-only** — IR has no handler; direct codegen is the only path. A
   function touching one of these kinds is rejected by the selector and
   compiles entirely via legacy.

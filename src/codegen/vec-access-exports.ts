@@ -16,9 +16,33 @@ import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./regis
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js";
 import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureHoleType } from "./array-holes.js";
+import { undefinedExternInstrs } from "./any-helpers.js"; // (#3315)
+import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
 import { definedFuncAt } from "./func-space.js";
 import { flushLateImportShifts } from "./shared.js";
 import { exportFunc } from "./emit-helpers.js";
+
+/**
+ * (#3311) The native-string vec carrier. `string[]` under nativeStrings /
+ * standalone lowers to a vec whose backing array element is `(ref null
+ * $AnyString)` (keyed `ref_${anyStrTypeIdx}`; `$NativeString <: $AnyString`).
+ * Returns that element ref typeIdx (`anyStrTypeIdx`, or `nativeStrTypeIdx` for a
+ * concretely-native element) so `__vec_push` / `__vec_pop` can admit + cast this
+ * carrier — otherwise they returned the `-1`/`null.extern` unsupported sentinel
+ * and `(a as any).push("x")` on a `string[]` was a silent no-op standalone.
+ * Returns `-1` for a non-string carrier.
+ */
+export function nativeStrVecElemTypeIdx(ctx: CodegenContext, vecTypeIdx: number): number {
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return -1;
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") return -1;
+  const el = arrDef.element as ValType;
+  if (el.kind !== "ref" && el.kind !== "ref_null") return -1;
+  if (ctx.anyStrTypeIdx >= 0 && el.typeIdx === ctx.anyStrTypeIdx) return ctx.anyStrTypeIdx;
+  if (ctx.nativeStrTypeIdx >= 0 && el.typeIdx === ctx.nativeStrTypeIdx) return ctx.nativeStrTypeIdx;
+  return -1;
+}
 
 /**
  * Emit __vec_get(externref, i32) -> externref and __vec_len(externref) -> i32
@@ -243,6 +267,27 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       holeTypeIdxForGet = ctx.holeTypeIdx;
     }
     const getUndefIdxForGet = holeMapInVecGet ? ctx.funcMap.get("__get_undefined") : undefined;
+    // (#3315) UNDEF_F64-sentinel → undefined at the same host read boundary.
+    // An f64 vec can carry the UNDEF_F64_BITS signaling-NaN sentinel for an
+    // `undefined` element (`[7, undefined, ]` lowers to __vec_f64 — see the
+    // #1024 note in literals.ts). `__vec_get` is the chokepoint the HOST reads
+    // vec elements through (`__make_iterable` convertToJS etc.); boxing the
+    // raw bits through `__box_number` degrades that `undefined` to a plain
+    // NaN NUMBER on the JS side, so a destructured sibling binding read back
+    // from the host array compares `=== undefined` false (the #3315
+    // corruption). Map the sentinel to `undefined` before it leaves — same
+    // discipline as the `$Hole` map above. funcMap lookup only (no late
+    // import); when neither the host `__get_undefined` nor the standalone
+    // singleton is available the arm falls back to the plain box (pre-fix
+    // bytes).
+    const f64SentinelUndefInstrs: Instr[] | undefined = (() => {
+      const singleton = undefinedExternInstrs(ctx);
+      if (singleton !== undefined) return singleton;
+      const gu = ctx.funcMap.get("__get_undefined");
+      return gu !== undefined ? [{ op: "call", funcIdx: gu } as Instr] : undefined;
+    })();
+    const f64ScratchIdx = holeMapInVecGet ? 4 : 3;
+    let usedF64Scratch = false;
     for (let i = vecEntries.length - 1; i >= 0; i--) {
       const [elemKey, vecTypeIdx] = vecEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -294,7 +339,27 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
           boxInstrs = [];
         }
       } else if (elemKey === "f64" && boxNumIdx !== undefined) {
-        boxInstrs = [{ op: "call", funcIdx: boxNumIdx }];
+        // (#3315) Sentinel-aware f64 box — see f64SentinelUndefInstrs above.
+        if (f64SentinelUndefInstrs !== undefined) {
+          usedF64Scratch = true;
+          boxInstrs = [
+            { op: "local.tee", index: f64ScratchIdx },
+            { op: "i64.reinterpret_f64" },
+            { op: "i64.const", value: UNDEF_F64_BITS },
+            { op: "i64.eq" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: f64SentinelUndefInstrs.map((instr) => ({ ...instr })),
+              else: [
+                { op: "local.get", index: f64ScratchIdx },
+                { op: "call", funcIdx: boxNumIdx },
+              ],
+            },
+          ];
+        } else {
+          boxInstrs = [{ op: "call", funcIdx: boxNumIdx }];
+        }
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx }];
       } else if (
@@ -374,6 +439,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
           { name: "__hole_scratch", type: { kind: "externref" } as ValType },
         ]
       : [{ name: "__any", type: { kind: "anyref" } as ValType }];
+    // (#3315) f64 scratch backing the UNDEF_F64-sentinel map (`local.tee`
+    // above). Declared ONLY when the f64 arm emitted the check, so modules
+    // without it keep byte-identical `__vec_get` bodies.
+    if (usedF64Scratch) {
+      getLocals.push({ name: "__f64_scratch", type: { kind: "f64" } as ValType });
+    }
     // (#2784 S3) FILL-or-build (see __vec_push). The native-vec element-read guard
     // (property-access.ts) reserves a `__vec_get` placeholder before this finalize
     // pass; fill it in place if reserved.
@@ -411,9 +482,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   // through to its fail-loud TypeError instead of silently no-oping.
   const unboxNumIdx = ctx.funcMap.get("__unbox_number");
   const boxNumIdx2 = ctx.funcMap.get("__box_number");
-  const mutEntries = vecEntries.filter(([elemKey]) => {
+  const mutEntries = vecEntries.filter(([elemKey, vecTypeIdx]) => {
     if (elemKey === "externref") return true;
     if (elemKey === "f64" || elemKey === "i32") return unboxNumIdx !== undefined && boxNumIdx2 !== undefined;
+    // (#3311) native-string carrier (`string[]` standalone) — no numeric unbox,
+    // the value round-trips through `any.convert_extern` / `ref.cast $AnyString`.
+    if (nativeStrVecElemTypeIdx(ctx, vecTypeIdx) >= 0) return true;
     return false;
   });
 
@@ -513,6 +587,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { name: `__vp_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
       );
       // value unboxing per element kind (value param is local 1)
+      const strElemIdx = nativeStrVecElemTypeIdx(ctx, vecTypeIdx);
       const valueInstrs: Instr[] =
         elemKey === "externref"
           ? [{ op: "local.get", index: 1 }]
@@ -521,7 +596,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
                 { op: "local.get", index: 1 },
                 { op: "call", funcIdx: unboxNumIdx! },
               ]
-            : [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
+            : elemKey === "i32"
+              ? [{ op: "local.get", index: 1 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }]
+              : // (#3311) native-string carrier: the boxed externref value is a
+                // `$NativeString` (<: `$AnyString`); recover the ref element for
+                // `array.set` — no numeric unbox.
+                [{ op: "local.get", index: 1 }, { op: "any.convert_extern" }, { op: "ref.cast", typeIdx: strElemIdx }];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 2 },
         { op: "ref.cast", typeIdx: vecTypeIdx },
@@ -655,14 +735,19 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       // — same unsigned read/box. `i32_elem` (Int32/Uint32 element storage) stays
       // full-width signed (plain `array.get`), preserving its pre-split behaviour.
       const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte" || elemKey === "i32_byte";
+      const isNativeStr = nativeStrVecElemTypeIdx(ctx, vecTypeIdx) >= 0;
       const boxInstrs: Instr[] =
         elemKey === "externref"
           ? []
-          : elemKey === "f64"
-            ? [{ op: "call", funcIdx: boxNumIdx2! }]
-            : isPackedByte
-              ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
-              : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
+          : // (#3311) native-string element (`ref null $AnyString`) → externref via
+            // the plain anyref→externref box (no `__box_number`).
+            isNativeStr
+            ? [{ op: "extern.convert_any" }]
+            : elemKey === "f64"
+              ? [{ op: "call", funcIdx: boxNumIdx2! }]
+              : isPackedByte
+                ? [{ op: "f64.convert_i32_u" }, { op: "call", funcIdx: boxNumIdx2! }]
+                : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumIdx2! }];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 1 },
         { op: "ref.cast", typeIdx: vecTypeIdx },

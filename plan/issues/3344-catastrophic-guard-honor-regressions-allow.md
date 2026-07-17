@@ -1,7 +1,8 @@
 ---
 id: 3344
-title: "CI: catastrophic regression guard (#1668) ignores the regressions-allow ceiling → blocks legitimate oracle-bump baseline promotion"
-status: ready
+title: "CI: baseline promote pipeline can hang indefinitely + emergency workflow_dispatch retrigger loses change-set scoping"
+status: done
+completed: 2026-07-17
 sprint: current
 priority: critical
 horizon: m
@@ -10,57 +11,72 @@ task_type: ci-fix
 area: ci
 created: 2026-07-17
 related: [3227, 3303, 3111, 3161, 1668]
-origin: "the #3227/#3201 oracle v6→v7 honest-drop baseline cannot promote — the catastrophic guard step invokes diff-test262.ts BARE with no REGRESSIONS_ALLOW_FILE, so #3227's sanctioned regressions-allow:1100 (actual 1020<1100) is not honored"
+origin: "the #3227/#3201 oracle v6→v7 honest-drop baseline could not publish — the promote job's git-over-SSH push to js2wasm-baselines hung ~2.5h with no timeout, and an emergency workflow_dispatch retrigger could not reproduce the organic change-set scoping"
 ---
 
-# #3344 — Catastrophic regression guard must honor the regressions-allow ceiling
+# #3344 — Harden the baseline promote pipeline (push timeout + workflow_dispatch scoping)
 
 ## Problem
 
-The **"Catastrophic regression guard (#1668)"** step in
-`.github/workflows/test262-sharded.yml` (the push / workflow_dispatch /
-merge_group promote path, ~lines 700–745) invokes `scripts/diff-test262.ts`
-**without** setting `REGRESSIONS_ALLOW_FILE` (and with no repo-variable or
-workflow_dispatch-input path to supply it). So the **#3303 regressions-allow
-mechanism** — a per-issue ceiling in the issue frontmatter that supersedes
-drift-tolerance + bucket checks, verified working locally — is **inert for
-the promote job**.
+**Corrected scope (2026-07-17).** The original framing — "the catastrophic
+regression guard ignores the `regressions-allow` ceiling" — was **wrong**. A
+deeper trace disproved it: `scripts/diff-test262.ts` already calls
+`readRegressionsAllowance()` unconditionally in oracle-rebase mode (arm-1
+auto-discovery from the change-set's own issue files), and the #1668/#1897
+guards already treat the script's exit code as authoritative on PASS (#3303).
+The organic push run on the #3201 merge **passed** the gate. The guard is NOT
+neutered and needs no `REGRESSIONS_ALLOW_FILE` wiring.
 
-Consequence: a legitimate **oracle-version bump** (v6→v7 for #3227/#3201's
-async post-drain honesty correction) produces exactly the sanctioned
-reclassification shape (net −650, 1020 regressions, all the documented
-async-gen `yield*` cluster), which #3227's frontmatter declares
-`regressions-allow: { count: 1100 }` for — but the catastrophic guard can't
-see it, so the baseline **cannot promote**, the public conformance number
-stays stale at the pre-honesty oracle-6 figure, and the merge queue stays
-oracle-skewed. `force_baseline_refresh` only bypasses the *separate*
-fine-grained "check for test262 regressions" job, NOT this coarse guard.
+The REAL reason the honest oracle-v7 baseline could not publish was two
+CI-robustness gaps in the promote pipeline:
 
-Hand-verified data (from run 29567617728 merged-report artifact,
-oracle_version=7): JS-host **32,138 / 43,106** (−650 from 32,788), standalone
-**24,711 / 43,106** — the expected honest drop. So this is purely a CI-wiring
-gap, not a real regression.
+1. **PRIMARY — no timeout on the promote push.** The
+   `promote merged report to main baseline` job (`test262-sharded.yml`) runs a
+   git-over-SSH clone/push to `loopdive/js2wasm-baselines` with **no
+   step-level `timeout-minutes`**. On 2026-07-17 that push hung ~2.5h with no
+   progress, consuming the job budget and stranding the promote — so the fresh
+   v7 baseline (JS-host 32,138/43,106, standalone 24,711/43,106; the expected
+   −650 async-drain correction) never reached the baselines repo, and the
+   merge queue kept diffing the stale oracle-6 floor.
+
+2. **SECONDARY — `workflow_dispatch` lost change-set scoping.**
+   `resolveChangeBase` (`scripts/lib/change-scope.mjs`) whitelisted only
+   `pull_request` / `merge_group` / `push` for the synthetic-merge-parent fast
+   path. An **emergency manual retrigger** (`workflow_dispatch`) against a real
+   merge-commit SHA therefore could NOT reproduce the organic scoping (the
+   PR's own change-set, incl. its `regressions-allow:` declaration) — it fell
+   through to the coarser merge-base arm.
 
 ## Fix
 
-Wire the regressions-allow discovery into the catastrophic-guard step so it
-honors the same sanctioned ceiling the fine-grained gate does. Preferred:
-**auto-discover** the `regressions-allow` declaration from the issue file(s)
-added/changed on the merge commit (so no manual env wiring per-bump is
-needed) — OR, minimally, add a `REGRESSIONS_ALLOW_FILE` workflow input / repo
-variable path for the promote job. Confirm earlier oracle bumps (#3161 v5,
-#3111) either stayed under the guard's catastrophic threshold or promoted via
-a path that needs the same fix.
+1. Add `timeout-minutes: 10` to the baselines-repo push step (and to the
+   sibling main-repo summary push, same hang class), so a hung SSH push fails
+   FAST and is retriable (via a `push`/`workflow_dispatch` re-run) instead of
+   wedging the promote pipeline for the whole job budget. The existing
+   re-anchor loop still handles transient push races within that window.
+
+2. Add `workflow_dispatch` to the `resolveChangeBase` synthetic-merge-parent
+   whitelist, INSIDE the existing `HEAD^2` guard. Backward-compatible: an
+   ordinary branch-tip dispatch has a single-parent HEAD, so the guard no-ops
+   and it falls through to the merge-base arm exactly as before; only a
+   dispatch against a real 2-parent merge commit now reproduces the organic
+   `ci-merge-parent` scoping.
 
 ## Acceptance
 
-- The #3227/#3201 v6→v7 baseline promotes cleanly (oracle_version==7 live on
-  loopdive/js2wasm-baselines, JS-host ~32,138) with the async-cluster
-  regressions excused by the #3227 ceiling — no hand-push, no gate bypass.
-- The catastrophic guard still fails on a genuine regression that lacks a
-  declared ceiling (add a test / dry-run proving it isn't just neutered).
-- Doc the mechanism so the next oracle bump promotes without manual steps.
+- The promote push cannot hang indefinitely — a step timeout bounds it and a
+  re-run publishes the pending baseline. (`tests/issue-3344.test.ts` asserts
+  both push steps carry `timeout-minutes`.)
+- An emergency `workflow_dispatch` retrigger against a real merge-commit SHA
+  resolves the change base to `HEAD^1` (`ci-merge-parent(workflow_dispatch)`),
+  while a single-parent branch-tip dispatch still resolves to the merge-base
+  arm. (`tests/issue-3344.test.ts` pins both.)
+- The catastrophic guard is unchanged and NOT neutered — it still fails on a
+  genuine regression lacking a declared ceiling (the #3303 exit-code contract,
+  already covered by `tests/issue-3303.test.ts`, is untouched).
 
 ## Non-goals
 - Do NOT hand-push a baseline to js2wasm-baselines (bypasses CI validation).
 - Do NOT lower/disable the catastrophic guard globally.
+- Do NOT wire `REGRESSIONS_ALLOW_FILE` into the guard — it is already wired via
+  arm-1 auto-discovery.

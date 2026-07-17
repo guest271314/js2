@@ -7649,6 +7649,13 @@ function resolveImport(
           ...(typeof Intl !== "undefined" && typeof Intl.NumberFormat !== "undefined"
             ? { NumberFormat: Intl.NumberFormat }
             : {}),
+          // (#1792) node:url — WHATWG URL / URLSearchParams globals (Node 18+ /
+          // every browser). Registered as extern-class host constructors so
+          // `new URL(...)` / `new URLSearchParams(...)` bind to the real host
+          // constructor; property/method reads flow through __extern_get /
+          // __extern_method_call.
+          ...(typeof URL !== "undefined" ? { URL } : {}),
+          ...(typeof URLSearchParams !== "undefined" ? { URLSearchParams } : {}),
         };
         let Ctor = deps?.[intent.className] ?? builtinCtors[intent.className];
         // #1044 — Resolve via namespace path (e.g. require('http').Server)
@@ -13671,6 +13678,21 @@ assert._isSameValue = isSameValue;
           }
         };
       }
+      // (#3325) A user-level ambient `declare function f(...)` is a `builtin`
+      // intent but NOT an internal helper special-cased above (every recognised
+      // builtin returns before here). The call site emits `call $f_import`
+      // correctly; the miss was that this fallback no-op'd and ignored `deps`.
+      // Wire it to the supplied dependency — the natural FFI for embedders.
+      const userDep = deps?.[name];
+      if (typeof userDep === "function") return (...args: any[]) => userDep(...args);
+      if (userDep !== undefined) return () => userDep;
+      // No matching dep → keep the historical no-op. (An earlier revision threw
+      // a clear error for a called-but-undepped user-facing ambient name, but
+      // the test262 harness legitimately declares ambient functions it does not
+      // always supply — e.g. host print/log stubs — and relies on the no-op, so
+      // throwing regressed the merged-state test262 gate. The dep-wiring above
+      // is the actual #3325 fix; a targeted "missing dep" diagnostic gated to
+      // non-harness contexts is a possible follow-up.)
       return () => {};
     }
     case "callback_maker":

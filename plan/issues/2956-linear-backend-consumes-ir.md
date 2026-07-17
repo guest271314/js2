@@ -1,12 +1,12 @@
 ---
 id: 2956
 title: "Linear backend consumes the IR front-end: wire the selector + LinearEmitter into generateLinearModule"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-02
 updated: 2026-07-17
 assignee: ttraenkler/fable-epsilon
-branch: symphony/porffor/2956-after-pr-3179
+branch: symphony/porffor/2956-after-pr-3203
 priority: medium
 horizon: xl
 feasibility: hard
@@ -24,10 +24,10 @@ loc-budget-allow:
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
 last_ci_retry_head: null
-last_merged_pr: 3179
+last_merged_pr: 3203
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-17T05:03:10.509Z
-pr: 3200
+claimed_at: 2026-07-17T11:27:47.591Z
+pr: 3232
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -360,3 +360,70 @@ playground corpus has no aggregate/refcell row, so
 
 **Remaining after L2:** L3 strings (after #2955) and L4 default-ON + direct
 reject-list folding. The issue remains `in-progress` for those later slices.
+
+## Execution status — L3 strings implemented (2026-07-17, porffor-codex-developer)
+
+Selector-claimed strings now use the direct linear backend's canonical i32
+arena pointer while staying on the shared representation-abstract IR
+front-end. The prerequisite #2955 capstone removed `nativeStrings` from the
+from-ast resolver surface before this slice began.
+
+- `resolveString` and the linear TypeConverter map `IrType.string` to i32;
+  linear legality now admits `string.const/concat/eq/len`, string signatures,
+  and string fields in L2 aggregates.
+- Literal materialization shares the direct backend's UTF-8 data-segment
+  registry and `__str_from_data` path. Concat, equality, UTF-16 `.length`, and
+  relational comparison resolve by name onto the existing linear runtime;
+  fully specified/one-arg `slice` uses the same runtime path as direct codegen.
+- A flag-gated `(string pointer, UTF-16 index) -> f64` helper adds the
+  previously unsupported `charCodeAt` surface. It decodes the linear UTF-8
+  storage, returns BMP code units or the requested half of an astral surrogate
+  pair, and returns NaN out of bounds.
+- String iteration and prototype methods without a representation-complete
+  linear runtime mapping remain explicit build demotions to the direct path.
+  Async, closures/`call_ref`, exceptions, and dynamic/boxed-any remain deferred
+  exactly as specified.
+
+Focused validation: `tests/issue-2956.test.ts` 18/18; linear + legality +
+cross-backend matrix 176/176; typecheck clean. The flag-off string module is
+SHA-256 byte-identical for unset vs `JS2WASM_LINEAR_IR=0`.
+
+The measured linear-IR ratchet improved and was banked:
+`compiled 6 -> 8`, `build 4 -> 2`. L4 (default-ON plus direct reject-list
+folding) is the only issue-defined slice remaining, so status stays
+`in-progress` for the next fresh continuation branch.
+
+## Execution status — L4 default-on + unified fallback ratchet implemented (2026-07-17, porffor-codex-developer)
+
+The selector/LinearEmitter overlay is now the default single-module
+`--target linear` path for the numeric/control-flow, fixed-number vec,
+aggregate/ref-cell, and string families landed in L1-L3.
+`JS2WASM_LINEAR_IR=0` remains the byte-identical direct-backend rollback switch;
+`=1` remains accepted for explicit CI and probe runs.
+
+- `compileLinearIrFunctions` requests the selector's existing
+  `trackFallbacks` list and folds every pre-claim direct-path decision into
+  `LinearIrResult.rejected` as `select:<IrFallbackReason>`. Post-claim
+  `build`/`verify`/`illegal:*` demotions retain their existing buckets, so one
+  ratchet now measures both sides of the fallback seam without a second
+  predicate family.
+- The baseline now records `compiled=8`, `build=2`, and selector buckets
+  `async-function=4`, `body-shape-rejected=24`,
+  `call-graph-closure=12`, `non-export-modifier=15`. Future growth in any
+  bucket fails `check:linear-ir`.
+- The default-on differential run retired two baselined gaps:
+  `numeric/math-trunc` and `string/charcode` no longer carry
+  `expectLinearUnsupported`, so their values execute and compare on both
+  backends.
+- Fail-loud coverage now distinguishes the still-deferred dynamic/boxed
+  `typeof` surface (`any`) from statically typed `typeof`, which the shared IR
+  can lower safely.
+
+All issue-defined slices and acceptance criteria are implemented; the issue is
+`in-review` for the final PR and merge-queue validation.
+
+Validation: complete linear + cross-backend + IR proof matrix 196/196;
+`tests/issue-2956.test.ts` 20/20; typecheck and production library build clean;
+`check:linear-ir`, `check:ir-fallbacks`, `check:loc-budget`, and
+`check:oracle-ratchet` clean; changed-file Prettier and Biome checks have no
+errors.

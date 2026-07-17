@@ -12,6 +12,7 @@ import {
   addArrayRuntime,
   addFmodRuntime,
   addLinearIrVecRuntime,
+  addLinearIrStringRuntime,
   addMapRuntime,
   addNumericMapRuntime,
   addNumericSetRuntime,
@@ -20,6 +21,7 @@ import {
   addStringRuntime,
   addUint8ArrayRuntime,
   FMOD_FN,
+  linearStringLiteralInstrs,
 } from "./runtime.js";
 
 /** Type tag for class instances in linear memory */
@@ -35,6 +37,20 @@ function isUint8ArrayTypeText(text: string): boolean {
 function isNumberArrayOrUint8ArrayUnionText(text: string): boolean {
   const parts = text.split("|").map((part) => part.trim());
   return parts.length === 2 && parts.includes("number[]") && parts.some(isUint8ArrayTypeText);
+}
+
+function sourceUsesStringCharCodeAt(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isPropertyAccessExpression(node) && node.name.text === "charCodeAt") {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
 }
 
 /**
@@ -87,8 +103,14 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   addNumericSetRuntime(mod);
   addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
   // #2956 L2: construction needs one value-first indexed store helper.
-  // Register it only for the opt-in overlay so flag-off output stays byte-identical.
-  if (linearIrEnabled()) addLinearIrVecRuntime(mod);
+  // Register it only for the overlay so the explicit `=0` escape hatch stays
+  // byte-identical to the pre-IR direct backend.
+  if (linearIrEnabled()) {
+    addLinearIrVecRuntime(mod);
+    // The UTF-16 decoder is sizeable and only the charCodeAt plan needs it.
+    // Register before user-slot assignment when the source can request it.
+    if (sourceUsesStringCharCodeAt(ast.sourceFile)) addLinearIrStringRuntime(mod);
+  }
 
   // Add __closure_env global (mutable i32, init 0) for closure support
   const closureEnvGlobalIdx = mod.globals.length;
@@ -183,8 +205,9 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     compileClassDeclaration(ctx, classDecl);
   }
 
-  // ── #2956 L1: IR overlay for selector-claimed top-level functions ──
-  // Gated on JS2WASM_LINEAR_IR=1 (flag off ⇒ byte-identical module). Runs
+  // ── #2956: IR overlay for selector-claimed top-level functions ──
+  // Default-on since L4; JS2WASM_LINEAR_IR=0 restores the byte-identical
+  // direct path. Runs
   // AFTER slot pre-assignment + module-global collection so the linear IR
   // resolver's name-based lookups (funcMap / moduleGlobals) are complete,
   // and BEFORE the funcDecls loop so an IR-lowered body lands at exactly
@@ -4932,22 +4955,7 @@ function inferClassName(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Ex
 
 /** Compile a string literal into a __str_from_data call */
 function compileStringLiteral(ctx: LinearContext, fctx: LinearFuncContext, value: string): void {
-  const encoded = new TextEncoder().encode(value);
-
-  // Check if we already have this string in the data segment
-  let dataOffset = ctx.stringLiterals.get(value);
-  if (dataOffset === undefined) {
-    dataOffset = ctx.dataSegmentOffset;
-    ctx.stringLiterals.set(value, dataOffset);
-    ctx.dataSegmentOffset += encoded.length;
-  }
-
-  const strFromDataIdx = ctx.funcMap.get("__str_from_data")!;
-
-  // Call __str_from_data(dataOffset, len) -> i32 pointer
-  fctx.body.push({ op: "i32.const", value: dataOffset });
-  fctx.body.push({ op: "i32.const", value: encoded.length });
-  fctx.body.push({ op: "call", funcIdx: strFromDataIdx });
+  fctx.body.push(...linearStringLiteralInstrs(ctx, value));
 }
 
 /** Look up a function's result types by its wasm function name */

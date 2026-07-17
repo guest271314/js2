@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/types.js";
+import type { LinearContext } from "./context.js";
 import { hashProbeAdvanceInstrs } from "./emit-idioms.js";
 
 /** Heap starts at byte offset 1024 (leave low addresses for null/sentinel) */
@@ -2109,6 +2110,243 @@ export function addStringRuntime(mod: WasmModule): void {
     },
     5,
   );
+}
+
+/** Reserved `(string pointer, UTF-16 index) -> code unit` helper for #2956 L3. */
+export const LINEAR_IR_STRING_CHAR_CODE_AT_FN = "__linear_ir_str_char_code_at";
+
+/**
+ * Add the string helper needed only by the opt-in linear-IR overlay.
+ *
+ * Linear strings store UTF-8 bytes, while JavaScript `charCodeAt` indexes
+ * UTF-16 code units. The direct backend has no `charCodeAt` arm, so L3 adds a
+ * flag-gated helper that decodes one UTF-8 sequence at a time and returns the
+ * requested BMP code unit or half of an astral surrogate pair. Out-of-range
+ * indices return NaN as required by ECMA-262 §22.1.3.3.
+ */
+export function addLinearIrStringRuntime(mod: WasmModule): void {
+  if (mod.functions.some((func) => func.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN)) return;
+
+  addRuntimeFunc(
+    mod,
+    LINEAR_IR_STRING_CHAR_CODE_AT_FN,
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "f64" }],
+    [],
+    (firstLocalIdx) => {
+      const byteLen = firstLocalIdx;
+      const bytePos = firstLocalIdx + 1;
+      const unitPos = firstLocalIdx + 2;
+      const lead = firstLocalIdx + 3;
+      const codePoint = firstLocalIdx + 4;
+
+      const loadByte = (delta: number): Instr[] => [
+        { op: "local.get", index: 0 },
+        { op: "local.get", index: bytePos },
+        { op: "i32.add" },
+        { op: "i32.load8_u", align: 0, offset: 12 + delta },
+      ];
+      const returnIfRequested = (value: readonly Instr[], unitDelta = 0): Instr[] => {
+        const unitDeltaOps: Instr[] = unitDelta === 0 ? [] : [{ op: "i32.const", value: unitDelta }, { op: "i32.add" }];
+        return [
+          { op: "local.get", index: unitPos },
+          ...unitDeltaOps,
+          { op: "local.get", index: 1 },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...value, { op: "f64.convert_i32_u" }, { op: "return" }],
+          },
+        ];
+      };
+      const advance = (bytes: number, units: number): Instr[] => [
+        { op: "local.get", index: bytePos },
+        { op: "i32.const", value: bytes },
+        { op: "i32.add" },
+        { op: "local.set", index: bytePos },
+        { op: "local.get", index: unitPos },
+        { op: "i32.const", value: units },
+        { op: "i32.add" },
+        { op: "local.set", index: unitPos },
+      ];
+
+      const decodeTwo: Instr[] = [
+        { op: "local.get", index: lead },
+        { op: "i32.const", value: 0x1f },
+        { op: "i32.and" },
+        { op: "i32.const", value: 6 },
+        { op: "i32.shl" },
+        ...loadByte(1),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.or" },
+        { op: "local.set", index: codePoint },
+        ...returnIfRequested([{ op: "local.get", index: codePoint }]),
+        ...advance(2, 1),
+      ];
+      const decodeThree: Instr[] = [
+        { op: "local.get", index: lead },
+        { op: "i32.const", value: 0x0f },
+        { op: "i32.and" },
+        { op: "i32.const", value: 12 },
+        { op: "i32.shl" },
+        ...loadByte(1),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.const", value: 6 },
+        { op: "i32.shl" },
+        { op: "i32.or" },
+        ...loadByte(2),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.or" },
+        { op: "local.set", index: codePoint },
+        ...returnIfRequested([{ op: "local.get", index: codePoint }]),
+        ...advance(3, 1),
+      ];
+      const decodeFour: Instr[] = [
+        { op: "local.get", index: lead },
+        { op: "i32.const", value: 0x07 },
+        { op: "i32.and" },
+        { op: "i32.const", value: 18 },
+        { op: "i32.shl" },
+        ...loadByte(1),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.const", value: 12 },
+        { op: "i32.shl" },
+        { op: "i32.or" },
+        ...loadByte(2),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.const", value: 6 },
+        { op: "i32.shl" },
+        { op: "i32.or" },
+        ...loadByte(3),
+        { op: "i32.const", value: 0x3f },
+        { op: "i32.and" },
+        { op: "i32.or" },
+        { op: "local.set", index: codePoint },
+        ...returnIfRequested([
+          { op: "local.get", index: codePoint },
+          { op: "i32.const", value: 0x10000 },
+          { op: "i32.sub" },
+          { op: "i32.const", value: 10 },
+          { op: "i32.shr_u" },
+          { op: "i32.const", value: 0xd800 },
+          { op: "i32.add" },
+        ]),
+        ...returnIfRequested(
+          [
+            { op: "local.get", index: codePoint },
+            { op: "i32.const", value: 0x10000 },
+            { op: "i32.sub" },
+            { op: "i32.const", value: 0x03ff },
+            { op: "i32.and" },
+            { op: "i32.const", value: 0xdc00 },
+            { op: "i32.add" },
+          ],
+          1,
+        ),
+        ...advance(4, 2),
+      ];
+
+      return [
+        // Negative indices are immediately out of range.
+        { op: "local.get", index: 1 },
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "f64.const", value: Number.NaN }, { op: "return" }],
+        },
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: byteLen },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: bytePos },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: unitPos },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: bytePos },
+                { op: "local.get", index: byteLen },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                ...loadByte(0),
+                { op: "local.set", index: lead },
+                { op: "local.get", index: lead },
+                { op: "i32.const", value: 0x80 },
+                { op: "i32.lt_u" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [...returnIfRequested([{ op: "local.get", index: lead }]), ...advance(1, 1)],
+                  else: [
+                    { op: "local.get", index: lead },
+                    { op: "i32.const", value: 0xe0 },
+                    { op: "i32.lt_u" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: decodeTwo,
+                      else: [
+                        { op: "local.get", index: lead },
+                        { op: "i32.const", value: 0xf0 },
+                        { op: "i32.lt_u" },
+                        {
+                          op: "if",
+                          blockType: { kind: "empty" },
+                          then: decodeThree,
+                          else: decodeFour,
+                        },
+                      ],
+                    },
+                  ],
+                },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        { op: "f64.const", value: Number.NaN },
+      ];
+    },
+    5,
+  );
+}
+
+/**
+ * Materialize a literal with the direct backend's canonical UTF-8 data
+ * segment + `__str_from_data` path. Shared by direct AST codegen and the L3
+ * IR resolver so literal layout and deduplication cannot drift.
+ */
+export function linearStringLiteralInstrs(
+  ctx: LinearContext,
+  value: string,
+  strFromDataIdx = ctx.funcMap.get("__str_from_data"),
+): readonly Instr[] {
+  const encoded = new TextEncoder().encode(value);
+  let dataOffset = ctx.stringLiterals.get(value);
+  if (dataOffset === undefined) {
+    dataOffset = ctx.dataSegmentOffset;
+    ctx.stringLiterals.set(value, dataOffset);
+    ctx.dataSegmentOffset += encoded.length;
+  }
+  if (strFromDataIdx === undefined) throw new Error("linear string runtime: __str_from_data helper missing");
+  return [
+    { op: "i32.const", value: dataOffset },
+    { op: "i32.const", value: encoded.length },
+    { op: "call", funcIdx: strFromDataIdx },
+  ];
 }
 
 /**
