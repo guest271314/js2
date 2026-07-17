@@ -13,6 +13,12 @@ area: codegen
 goal: test262-conformance
 sprint: current
 depends_on: []
+# (#2728) The new `__new_Symbol` host handler belongs in runtime.ts alongside
+# every other `__new_*`/`__box_*` host import; the growth is net-minimised by
+# factoring the shared symbol-id→Symbol resolution (`_resolveSymbolFromId`) out
+# of `__box_symbol` so both handlers reuse it.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 # #2728 — `Object(Symbol())` → Symbol-wrapper object
 
