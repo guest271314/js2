@@ -1,11 +1,11 @@
 ---
 id: 3103
 title: "Split src/runtime.ts (15,032 LOC) host runtime by concern; decompose resolveImport (6,517-line function)"
-status: ready
+status: in-progress
 assignee: ttraenkler/opus-splitrt
 sprint: current
 created: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-17
 priority: high
 horizon: l
 feasibility: medium
@@ -178,3 +178,25 @@ decomposition (the 6.5k-line function), `sidecar.ts`, `to-primitive.ts`,
 `wrap-host.ts`, `instantiate.ts`, and the `imports/*` handler groups per the
 Target-structure table above. `runtime.ts` is still 14,618 LOC; acceptance
 criterion #2 (<600 LOC barrel) is a multi-PR target.
+
+## Progress — Slice: sparse Array.prototype fast paths (dev-k, 2026-07-17)
+
+**Landed:** another bounded, byte-identical slice — the #1234 sparse-aware
+`Array.prototype.{unshift,reverse,forEach}` fast paths (for non-Array
+receivers) lifted verbatim into a new sibling module
+`src/runtime/array-proto-sparse.ts`. `runtime.ts` shrinks **-187 LOC**.
+
+| New module | Extracted | Wiring |
+| --- | --- | --- |
+| `src/runtime/array-proto-sparse.ts` | `_collectIntegerKeys`, `_arrayProtoUnshiftSparse`, `_arrayProtoReverseSparse`, `_arrayProtoForEachSparse` (all private to the module) + the `_arrayProtoSparseFastPaths` dispatch map | only `_arrayProtoSparseFastPaths` is used by `runtime.ts` (one call site in `__proto_method_call`) — exported and imported back; one-directional, no cycle |
+
+**Root-cause selection:** the whole `#1234` cluster references **nothing**
+outside itself — only JS globals (`Reflect`, `Number`, `Set`, `String`,
+`TypeError`). The 4 functions and their dispatch map move as one unit;
+confirmed **0** stray references to the four privatized symbols remain in
+`runtime.ts`.
+
+**Safety (REFACTOR — zero behavior change):** bodies moved verbatim (only added
+lines: license header, one `export` keyword, one import block). `tsc --noEmit`:
+clean. `check:loc-budget`: green. `runtime.ts` is host-side JS, not in the Wasm
+emit path, so the split cannot change an emitted byte by construction.
