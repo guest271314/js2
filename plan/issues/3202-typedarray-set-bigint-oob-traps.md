@@ -1,7 +1,8 @@
 ---
 id: 3202
 title: "CI-sharded-only +4 oob on 4 unsupported-BigInt TypedArray.set tests — nondeterministic ratchet classification (main is 58, NOT 62)"
-status: ready
+status: done
+completed: 2026-07-17
 created: 2026-07-12
 priority: medium
 feasibility: medium
@@ -12,6 +13,8 @@ goal: crash-free
 sprint: current
 horizon: m
 related: [3189, 3173]
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 origin: "The #3189 uncatchable-trap ratchet fired oob 58->62 (+4) on EVERY merge_group, wedging the queue. Re-diagnosed 2026-07-12 (dev-find-wasm): main HEAD is verifiably 58 (baseline promoted from main commit c660e830; `git log c660e830..origin/main` = ONLY doc commits; freshly-fetched promoted baseline reads 58; the 4 named tests are `fail`/'undefined is not a constructor' on both baseline and main HEAD, not oob). So the +4 is SPECULATIVE-MERGE / CI-sharded-only, NOT a main regression — a promote-baseline 'refresh to 62' is impossible (it reflects main = 58; the attempted refresh left it at 58). Unwedged via the ratchet's own designed valve TRAP_RATCHET_TOLERANCE=4 (repo var, PR #2963)."
 ---
 
@@ -103,3 +106,39 @@ guarded-bounds pattern used elsewhere in the standalone array path.
   main HEAD, which is 58 (freshly-fetched baseline still reads 58).
 - Gate/ratchet: `scripts/diff-test262.ts` `evaluateTrapCategoryGrowth`
   (`TRAP_ERROR_CATEGORIES`), #3189.
+
+## Resolution — 2026-07-17 (opus-d)
+
+**Root cause confirmed (codegen, not CI-nondeterminism):** `compileTypedArraySet`
+(`src/codegen/array-methods.ts`) had **no offset bounds check** — it extracted the
+receiver's `data` array (vec field 1) but not its `length`, then fell straight
+into `emitArrayCopy` / an element-wise store. An out-of-range `offset` (or a
+source longer than the remaining space) therefore ran the raw `array.copy` /
+`array.set` past the end and emitted an **uncatchable Wasm `oob` trap** instead
+of the spec-mandated **catchable RangeError** (§23.2.3.24). That is the trap the
+#3189 ratchet caught in the speculative `merge_group` merged-state run.
+
+**Fix:** extract the receiver length (vec field 0 → `dstLen`) alongside the data
+array, then gate the copy on `offset < 0 || offset + srcLen > dstLen`, emitting a
+real `RangeError` instance via `buildThrowJsErrorInstrs(ctx, "RangeError", …)` in
+a structured `if` before the copy. Dual-mode: standalone uses the in-module
+`__new_RangeError` constructor, so **no `env::*` host import is requested**
+(verified by instantiating the standalone module against `{}`).
+
+**Verified** (`tests/issue-3202.test.ts`, 8 cases): valid/exact-fit sets still
+copy correctly; `offset+srcLength > targetLength`, an off-by-one overrun, a
+negative offset, and a cross-type (Float64Array) overrun all throw a **catchable**
+`RangeError`; standalone OOB set throws catchably with **zero** env leak. All 25
+existing `#1664` / `#2593` TypedArray tests still pass (no regression).
+
+This is **#3335 Part 1** (turn the six `TypedArray/prototype/set/BigInt/*` oob
+regressions back into catchable JS errors → the #3189 oob-ratchet should drop
+back toward its ≤45 floor). **Out of scope / follow-ups (left for #3335 Part 2 +
+this issue's criterion 4):**
+- #3335 Part 2 — make the baseline-refresh **refuse/flag an oob-trap-count
+  INCREASE** so a main-side trap regression cannot self-legalize (a CI-guard
+  task, separate from this codegen fix).
+- Criterion 4 — once CI confirms the ratchet has dropped, tighten the valve back
+  with `gh variable set TRAP_RATCHET_TOLERANCE --body 0 -R loopdive/js2wasm`.
+  Deferred to the lead/shepherd post-merge (a repo-variable change, not a code
+  change; premature tightening risks re-wedging on any residual flaky delta).

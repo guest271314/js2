@@ -90,6 +90,9 @@ const CURATED: string[] = [
   // operand evaluation order (side effects must match JS left→right)
   "var s=''; var a=function(){s+='a';return 2}; var b=function(){s+='b';return 1}; a()>b(); s",
   "var s=''; var a=function(){s+='a';return 1}; var b=function(){s+='b';return 2}; a()>=b(); s",
+  // #3356 — ToPrimitive COERCION order for > / >= (§13.10.1 LeftFirst=false)
+  "var s=''; var a={valueOf:function(){s+='a';return 1}}; var b={valueOf:function(){s+='b';return 2}}; a>b; s",
+  "var s=''; var a={valueOf:function(){s+='a';return 1}}; var b={valueOf:function(){s+='b';return 2}}; a>=b; s",
   // exceptions
   "var r; try { throw 7; } catch (e) { r = e * 2; } r",
   "var o = 0; try { o = 1; } finally { o += 10; } o",
