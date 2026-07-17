@@ -48,7 +48,7 @@ describe("#3344 — resolveChangeBase honors workflow_dispatch on a real merge c
   beforeEach(() => {
     for (const k of ["GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "LOC_GATE_BASE"]) saved[k] = process.env[k];
     // A stale LOC_GATE_BASE would short-circuit arm 1 — clear it for these tests.
-    delete process.env.LOC_GATE_BASE;
+    Reflect.deleteProperty(process.env, "LOC_GATE_BASE");
     repo = mkdtempSync(join(tmpdir(), "issue-3344-repo-"));
     // Base commit on `base` branch; `origin/main` ref points at it so the
     // merge-base fallback arm is reachable in the single-parent case.
@@ -63,7 +63,7 @@ describe("#3344 — resolveChangeBase honors workflow_dispatch on a real merge c
 
   afterEach(() => {
     for (const k of ["GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "LOC_GATE_BASE"]) {
-      if (saved[k] === undefined) delete process.env[k];
+      if (saved[k] === undefined) Reflect.deleteProperty(process.env, k);
       else process.env[k] = saved[k];
     }
     rmSync(repo, { recursive: true, force: true });
