@@ -1,7 +1,8 @@
 ---
 id: 3311
 title: "G4 — `string[]` push/pop under standalone is a no-op: native-string vec carrier missing from `__vec_push`/`__vec_pop` mutEntries"
-status: ready
+status: done
+completed: 2026-07-17
 created: 2026-07-16
 priority: high
 horizon: s
@@ -72,3 +73,36 @@ fall-through also returned `undefined`); this issue is the actual fix.
 Filed under #2784 lineage per the #2927 audit ("fix belongs in the
 `__vec_push`/`__vec_pop` carrier set, not the brand arm"). Umbrella:
 #2927 → #1584.
+
+## Resolution (2026-07-17, opus-c)
+
+Confirmed the repro standalone: `const a: any = ["a","b"]; a.push("c")` left
+`a.length === 2` (push a no-op), `a[2]` absent, `a.pop()` → `undefined`; the f64
+carrier worked (control).
+
+Fix (as planned): added `nativeStrVecElemTypeIdx` (vec-access-exports.ts) — the
+`string[]` vec is keyed `ref_${anyStrTypeIdx}` with backing element
+`(ref null $AnyString)` (`$NativeString <: $AnyString`). Admitted that carrier to
+the `mutEntries` filter, and gave three helpers its arm:
+
+- **`__vec_push`** value-unbox: the boxed externref value is a `$NativeString`;
+  recover the ref element via `any.convert_extern` + `ref.cast $AnyString` (no
+  numeric unbox) before `array.set`.
+- **`__vec_pop`** element-box: the popped `ref null $AnyString` boxes back to
+  externref via `extern.convert_any` (plain anyref box, no `__box_number`).
+- **`__vec_set_elem`** (vec-define-writeback.ts, the array-exotic
+  `Object.defineProperty` write-back) took the SAME missing arm — without it the
+  string carrier now in `mutEntries` fell through to the i32 conversion and
+  emitted invalid Wasm (`array.set expected (ref null …), found i32`). Fixed
+  identically.
+
+`__vec_get` / `__vec_len` already covered the carrier (get boxes a non-externref
+ref element via `extern.convert_any`; len is element-kind-agnostic).
+
+Verified standalone (host-free, `{}`-instantiable): push→length 3, push return 3,
+`a[2]==="c"`, multi-push order, grow-from-empty, pop→"c", pop→length 2, push/pop
+round-trip. gc-host `string[]` push/pop unaffected (uses the `wasm:js-string`
+path, not this vec carrier). No regression in vec-push / defineProperty-writeback
+/ wasi-defineProperty suites.
+
+Delivered: `tests/issue-3311.test.ts` (10 tests, the #2093 probe-coverage guard).
