@@ -446,8 +446,14 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Clone baselines repo (shallow — only need latest state)
-          git clone --depth=1 git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+          # (#3392) Metadata-only clone + sparse materialization of just the
+          # files this step reads/rewrites — the runs/ per-SHA cache history
+          # pushed a full-blob clone past the step timeout (see the identical
+          # fix in test262-sharded.yml promote-baseline). New runs/<sha> files
+          # are staged via `git add -A --sparse`.
+          git clone --depth=1 --filter=blob:none --no-checkout git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+          git -C /tmp/js2wasm-baselines sparse-checkout set --no-cone '/*' '!/runs/*' '/runs/index.json'
+          git -C /tmp/js2wasm-baselines checkout main
 
           # (#3335) Trap-growth gate: refuse to bake a main-side increase of any
           # uncatchable-trap category into the baseline (it silently raises the
@@ -507,7 +513,7 @@ jobs:
           cd /tmp/js2wasm-baselines
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A --sparse
           if git diff --cached --quiet; then
             echo "No baseline changes to push."
           else
@@ -573,7 +579,7 @@ jobs:
                 mkdir -p "$(dirname "$f")"
                 cp "$SNAP/$f" "$f"
               done
-              git add -A
+              git add -A --sparse
               if git diff --cached --quiet; then
                 echo "Re-anchored tree identical to remote tip — nothing left to promote."
                 BASELINE_PUSHED=1

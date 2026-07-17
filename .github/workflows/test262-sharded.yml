@@ -1615,8 +1615,18 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Clone baselines repo (shallow — only need latest state)
-          git clone --depth=1 git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+          # (#3392) Clone metadata-only and materialize ONLY the files this
+          # step reads/rewrites. The runs/ per-SHA result cache (~1000 entries,
+          # tens of MB each) grew a full-blob --depth=1 clone past the 10-min
+          # step timeout, killing EVERY promote on 2026-07-17 and stranding the
+          # standalone baseline stale from 11:33Z. '!/runs/*' excludes only the
+          # directory CONTENTS (not the dir), so re-including runs/index.json is
+          # legal gitignore semantics; unmaterialized entries are skip-worktree,
+          # so `git add -A` cannot stage them as deletions, and NEW runs/<sha>
+          # cache files are staged explicitly via `git add -A --sparse`.
+          git clone --depth=1 --filter=blob:none --no-checkout git@github.com:loopdive/js2wasm-baselines.git /tmp/js2wasm-baselines
+          git -C /tmp/js2wasm-baselines sparse-checkout set --no-cone '/*' '!/runs/*' '/runs/index.json'
+          git -C /tmp/js2wasm-baselines checkout main
           cp /tmp/js2wasm-baselines/test262-current.jsonl /tmp/js2wasm-baselines/test262-current.before.jsonl 2>/dev/null || true
           cp /tmp/js2wasm-baselines/test262-standalone-current.jsonl /tmp/js2wasm-baselines/test262-standalone-current.before.jsonl 2>/dev/null || true
 
@@ -1718,7 +1728,7 @@ jobs:
           cd /tmp/js2wasm-baselines
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A --sparse
           if git diff --cached --quiet; then
             echo "No baseline changes to push."
           else
@@ -1780,7 +1790,7 @@ jobs:
                 mkdir -p "$(dirname "$f")"
                 cp "$SNAP/$f" "$f"
               done
-              git add -A
+              git add -A --sparse
               if git diff --cached --quiet; then
                 echo "Re-anchored tree is identical to the remote tip — nothing left to promote."
                 BASELINE_PUSHED=1
