@@ -7,7 +7,6 @@ created: 2026-07-02
 updated: 2026-07-17
 assignee: ttraenkler/fable-epsilon
 branch: symphony/porffor/2956-after-pr-3179
-pr: null
 priority: medium
 horizon: xl
 feasibility: hard
@@ -27,7 +26,8 @@ loc-budget-allow:
 last_ci_retry_head: null
 last_merged_pr: 3179
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-17T05:02:57.114Z
+claimed_at: 2026-07-17T05:03:10.509Z
+pr: 3200
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -320,3 +320,43 @@ the divergence with #3332-referencing assertions instead of masking it.
 
 **Remaining after this sub-slice**: refcells + aggregates via `layout.ts`
 (the L2 remainder), L3 strings (after #2955), L4 default-ON flip.
+
+## Execution status — L2 aggregate/ref-cell sub-slice implemented (2026-07-17, porffor-codex-developer)
+
+Selector-claimed numeric objects now lower through the flag-gated linear-IR
+overlay as i32 arena pointers. The resolver computes field offsets with the
+direct backend's `computeClassLayout`, and `LinearEmitter` realizes
+`object.new/get/set` plus primitive `refcell.new/get/set` as allocation calls
+and typed linear-memory loads/stores.
+
+- Aggregate constructors are deferred defined functions with signatures
+  `(field0, ...fieldN) -> i32`. They are discovered lazily but appended only
+  after every pre-assigned class/top-level function slot; the assembler checks
+  the predicted absolute index before insertion. This preserves the #2710
+  name/slot discipline and avoids a scratch-local change to the frozen emitter
+  contract.
+- Layout handles carry only target-neutral memory facts (field offset + Wasm
+  scalar type). Numeric (`f64`), boolean/pointer (`i32`), and nested-object
+  fields are admitted; other field carriers fail the linear legality gate and
+  demote before lowering.
+- The linear TypeConverter now maps object and primitive boxed/refcell IR types
+  to their i32 pointer carrier. WasmGC and bytecode conversion paths are
+  unchanged.
+- Primitive refcell allocation/get/set is wired and emitter-tested. No closure
+  promise is added: the selector does not claim closure/nested-function shapes
+  on linear today, and lifted closure slots/`call_ref` remain explicitly
+  deferred as the architect spec requires.
+- Focused coverage proves direct-path parity for numeric/boolean/nested reads,
+  mutation + strict aliasing, deferred helper index stability, and flag-off
+  SHA-256 byte identity. The overlay additionally compiles anonymous-object
+  mutation that the direct linear path currently rejects.
+
+Validation: `tests/issue-2956.test.ts` 15/15; `tests/issue-1850.test.ts`
+11/11; complete linear + cross-backend + IR proof matrix 184/184; typecheck
+clean; `check:ir-fallbacks`, `check:loc-budget`, and `check:oracle-ratchet`
+clean. Linear-IR ratchet remains `compiled=6`, `build=4` because the fixed
+playground corpus has no aggregate/refcell row, so
+`scripts/linear-ir-baseline.json` is intentionally unchanged.
+
+**Remaining after L2:** L3 strings (after #2955) and L4 default-ON + direct
+reject-list folding. The issue remains `in-progress` for those later slices.

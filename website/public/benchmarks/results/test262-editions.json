@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 10284,
-    "fail": 2699,
+    "pass": 10317,
+    "fail": 2666,
     "ce": 92,
     "skip": 0,
     "total": 13075,
@@ -57,8 +57,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11676,
-    "fail": 3575,
+    "pass": 11754,
+    "fail": 3497,
     "ce": 134,
     "skip": 1,
     "total": 15386,
@@ -66,8 +66,8 @@
     "features": [
       {
         "name": "destructuring-binding",
-        "pass": 2154,
-        "fail": 352,
+        "pass": 2158,
+        "fail": 348,
         "ce": 27,
         "skip": 0,
         "total": 2533,
@@ -75,8 +75,8 @@
       },
       {
         "name": "generators",
-        "pass": 1026,
-        "fail": 353,
+        "pass": 1028,
+        "fail": 351,
         "ce": 12,
         "skip": 0,
         "total": 1391,
@@ -84,8 +84,8 @@
       },
       {
         "name": "TypedArray",
-        "pass": 806,
-        "fail": 296,
+        "pass": 810,
+        "fail": 292,
         "ce": 1,
         "skip": 0,
         "total": 1103,
@@ -93,12 +93,12 @@
       },
       {
         "name": "default-parameters",
-        "pass": 560,
-        "fail": 95,
+        "pass": 562,
+        "fail": 93,
         "ce": 9,
         "skip": 0,
         "total": 664,
-        "pct": 84
+        "pct": 85
       },
       {
         "name": "Symbol.iterator",
@@ -246,12 +246,12 @@
       },
       {
         "name": "uint8array-base64",
-        "pass": 26,
-        "fail": 42,
+        "pass": 30,
+        "fail": 38,
         "ce": 0,
         "skip": 0,
         "total": 68,
-        "pct": 38
+        "pct": 44
       },
       {
         "name": "Symbol.split",
@@ -1026,8 +1026,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3390,
-    "fail": 838,
+    "pass": 3392,
+    "fail": 836,
     "ce": 23,
     "skip": 0,
     "total": 4251,
@@ -1035,12 +1035,12 @@
     "features": [
       {
         "name": "async-iteration",
-        "pass": 2511,
-        "fail": 751,
+        "pass": 2513,
+        "fail": 749,
         "ce": 22,
         "skip": 0,
         "total": 3284,
-        "pct": 76
+        "pct": 77
       },
       {
         "name": "destructuring-binding",
@@ -2141,8 +2141,8 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3376,
-    "fail": 828,
+    "pass": 3377,
+    "fail": 827,
     "ce": 30,
     "skip": 0,
     "total": 4234,
@@ -2150,8 +2150,8 @@
     "features": [
       {
         "name": "class",
-        "pass": 2302,
-        "fail": 473,
+        "pass": 2303,
+        "fail": 472,
         "ce": 15,
         "skip": 0,
         "total": 2790,
@@ -2186,12 +2186,12 @@
       },
       {
         "name": "class-static-methods-private",
-        "pass": 675,
-        "fail": 95,
+        "pass": 676,
+        "fail": 94,
         "ce": 2,
         "skip": 0,
         "total": 772,
-        "pct": 87
+        "pct": 88
       },
       {
         "name": "async-iteration",
@@ -3508,12 +3508,12 @@
   },
   {
     "edition": "ES2026",
-    "pass": 169,
-    "fail": 173,
+    "pass": 173,
+    "fail": 169,
     "ce": 7,
     "skip": 0,
     "total": 349,
-    "pct": 48,
+    "pct": 50,
     "features": [
       {
         "name": "joint-iteration",
@@ -3544,21 +3544,21 @@
       },
       {
         "name": "__getter__",
-        "pass": 18,
-        "fail": 9,
+        "pass": 20,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 27,
-        "pct": 67
+        "pct": 74
       },
       {
         "name": "__setter__",
-        "pass": 18,
-        "fail": 9,
+        "pass": 20,
+        "fail": 7,
         "ce": 0,
         "skip": 0,
         "total": 27,
-        "pct": 67
+        "pct": 74
       },
       {
         "name": "legacy-regexp",
@@ -3670,12 +3670,12 @@
       },
       {
         "name": "Proxy",
-        "pass": 0,
-        "fail": 10,
+        "pass": 2,
+        "fail": 8,
         "ce": 0,
         "skip": 0,
         "total": 10,
-        "pct": 0
+        "pct": 20
       },
       {
         "name": "Reflect.construct",
@@ -3925,9 +3925,9 @@
   {
     "edition": "Proposals",
     "pass": 620,
-    "fail": 4050,
+    "fail": 4041,
     "ce": 216,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 12
   }

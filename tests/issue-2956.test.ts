@@ -10,6 +10,9 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { getLastLinearIrReport } from "../src/ir/backend/linear-integration.js";
+import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
+import type { LinearRefCellLowering } from "../src/ir/backend/handles.js";
+import type { Instr } from "../src/ir/types.js";
 
 const FLAG = "JS2WASM_LINEAR_IR";
 const savedFlag = process.env[FLAG];
@@ -264,5 +267,90 @@ describe("#2956 L2: selector-claimed vec MUTATION (element store + push)", () =>
     // push arg (pre-existing defect, #3332): length is 2, not the
     // spec-correct 3. Update to 3 when #3332 lands.
     expect(await run(binary)).toBe(2);
+  });
+});
+
+const AGGREGATE_READ_SRC = `export function readPoint(): number {
+  const point = { x: 2, y: 3 };
+  return point.x + point.y;
+}
+export function nested(): number {
+  const inner = { value: 3 };
+  const outer = { bonus: 4, inner };
+  return outer.inner.value + outer.bonus;
+}
+export function boolField(): number {
+  const value = { ok: true, n: 4 };
+  return value.ok ? value.n : 0;
+}
+export function test(): number { return readPoint() + nested() + boolField(); }`;
+
+const AGGREGATE_MUTATION_SRC = `export function mutate(): number {
+  const point = { x: 2, y: 3 };
+  point.x = 4;
+  return point.x + point.y;
+}
+export function alias(): number {
+  const point = { x: 2 };
+  const same = point;
+  same.x = 8;
+  return point.x + same.x;
+}
+export function test(): number { return mutate() + alias(); }`;
+
+describe("#2956 L2: selector-claimed linear-memory aggregates + ref-cells", () => {
+  it("lowers object allocation and nested reads with direct-path value parity", async () => {
+    const directBinary = await compileLinear(AGGREGATE_READ_SRC, false);
+    const irBinary = await compileLinear(AGGREGATE_READ_SRC, true);
+    const report = getLastLinearIrReport();
+    expect(report?.rejected ?? []).toEqual([]);
+    expect([...(report?.compiled ?? [])].sort()).toEqual(["boolField", "nested", "readPoint", "test"]);
+    expect(report?.helpers.length).toBe(4);
+
+    const direct = await exportedFunctions(directBinary);
+    const ir = await exportedFunctions(irBinary);
+    for (const name of ["readPoint", "nested", "boolField", "test"]) {
+      expect(callNumber(ir, name), `${name} IR value`).toBe(callNumber(direct, name));
+    }
+    expect(callNumber(ir, "test")).toBe(16);
+  });
+
+  it("preserves mutation and strict aliasing through i32 arena pointers", async () => {
+    const binary = await compileLinear(AGGREGATE_MUTATION_SRC, true);
+    const report = getLastLinearIrReport();
+    expect(report?.rejected ?? []).toEqual([]);
+    expect([...(report?.compiled ?? [])].sort()).toEqual(["alias", "mutate", "test"]);
+    const exports = await exportedFunctions(binary);
+    expect(callNumber(exports, "mutate")).toBe(7);
+    expect(callNumber(exports, "alias")).toBe(16);
+    expect(callNumber(exports, "test")).toBe(23);
+  });
+
+  it("JS2WASM_LINEAR_IR=0 keeps aggregate modules byte-identical to an unset flag", async () => {
+    const unset = await compileLinear(AGGREGATE_READ_SRC, false);
+    const zero = await compileLinear(AGGREGATE_READ_SRC, "0");
+    const sha = (binary: Uint8Array): string => createHash("sha256").update(binary).digest("hex");
+    expect(sha(zero)).toBe(sha(unset));
+  });
+
+  it("emits primitive ref-cell allocation and field access through linear-memory handles", () => {
+    const layout: LinearRefCellLowering = {
+      typeIdx: 0,
+      fieldIdx: 0,
+      linearMemory: {
+        newFuncIdx: 77,
+        value: { offset: 8, type: { kind: "f64" } },
+      },
+    };
+    const emitter = new LinearEmitter();
+    const out: Instr[] = [];
+    emitter.emitRefCellNew(layout, out);
+    emitter.emitRefCellGet(layout, out);
+    emitter.emitRefCellSet(layout, out);
+    expect(out).toEqual([
+      { op: "call", funcIdx: 77 },
+      { op: "f64.load", align: 3, offset: 8 },
+      { op: "f64.store", align: 3, offset: 8 },
+    ]);
   });
 });
