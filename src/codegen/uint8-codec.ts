@@ -747,3 +747,484 @@ export function ensureUint8FromBase64(ctx: CodegenContext): number {
 
   return funcIdx;
 }
+
+/**
+ * Register (idempotently) `__hex_char(i32) -> i32`: maps a nibble value 0-15 to
+ * its LOWERCASE ASCII hex code unit (`0-9` → 48-57, `10-15` → `a-f` = 97-102).
+ * Uint8Array.prototype.toHex always emits lowercase.
+ */
+function ensureHexCharHelper(ctx: CodegenContext): number {
+  const cached = ctx.funcMap.get("__hex_char");
+  if (cached !== undefined) return cached;
+
+  const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__hex_char", funcIdx);
+
+  const N = 0; // param: nibble 0-15
+  const R = 1; // local: result code unit
+
+  const body: Instr[] = [
+    // R = n + 48  ('0'..'9')
+    { op: "local.get", index: N },
+    { op: "i32.const", value: 48 },
+    { op: "i32.add" },
+    { op: "local.set", index: R },
+    // if n >= 10: R = n + 87  ('a'..'f')
+    { op: "local.get", index: N },
+    { op: "i32.const", value: 10 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: N },
+        { op: "i32.const", value: 87 },
+        { op: "i32.add" },
+        { op: "local.set", index: R },
+      ],
+      else: [],
+    },
+    { op: "local.get", index: R },
+  ];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__hex_char",
+    typeIdx,
+    locals: [{ name: "r", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  } as WasmFunction);
+
+  return funcIdx;
+}
+
+/**
+ * Register (idempotently) `__base64_char(i32) -> i32`: maps a 6-bit sextet value
+ * 0-63 to its ASCII code unit in the standard `base64` alphabet — the inverse of
+ * `__base64_digit`. `0-25`→`A-Z` (65-90), `26-51`→`a-z` (97-122), `52-61`→`0-9`
+ * (48-57), `62`→`+` (43), `63`→`/` (47). Input is always in-range (masked to 6
+ * bits by the caller), so the default arm is unreachable defensive `0`.
+ */
+function ensureBase64CharHelper(ctx: CodegenContext): number {
+  const cached = ctx.funcMap.get("__base64_char");
+  if (cached !== undefined) return cached;
+
+  const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__base64_char", funcIdx);
+
+  const X = 0; // param: sextet 0-63
+  const R = 1; // local: result code unit
+
+  const inRange = (lo: number, hi: number): Instr[] => [
+    { op: "local.get", index: X },
+    { op: "i32.const", value: lo },
+    { op: "i32.ge_s" },
+    { op: "local.get", index: X },
+    { op: "i32.const", value: hi },
+    { op: "i32.le_s" },
+    { op: "i32.and" },
+  ];
+  const rangeArm = (lo: number, hi: number, bias: number): Instr[] => [
+    ...inRange(lo, hi),
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: X },
+        { op: "i32.const", value: bias },
+        { op: "i32.add" },
+        { op: "local.set", index: R },
+      ],
+      else: [],
+    },
+  ];
+  const eqArm = (val: number, code: number): Instr[] => [
+    { op: "local.get", index: X },
+    { op: "i32.const", value: val },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: code },
+        { op: "local.set", index: R },
+      ],
+      else: [],
+    },
+  ];
+
+  const body: Instr[] = [
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: R },
+    ...rangeArm(0, 25, 65), // 'A'..'Z'
+    ...rangeArm(26, 51, 71), // 'a'..'z' (26+71 = 97)
+    ...rangeArm(52, 61, -4), // '0'..'9' (52-4 = 48)
+    ...eqArm(62, 43), // '+'
+    ...eqArm(63, 47), // '/'
+    { op: "local.get", index: R },
+  ];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__base64_char",
+    typeIdx,
+    locals: [{ name: "r", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  } as WasmFunction);
+
+  return funcIdx;
+}
+
+/**
+ * Register (idempotently) `__uint8_to_hex((ref null $vec_i8_byte)) -> (ref
+ * $NativeString)` and return its stable func handle. Encodes each packed byte as
+ * two LOWERCASE hex code units into a fresh i16-backed native string (all output
+ * chars are ASCII). `Uint8Array.prototype.toHex()` takes no options. Returns -1
+ * if the native-string runtime is unavailable (caller falls through).
+ */
+export function ensureUint8ToHex(ctx: CodegenContext): number {
+  const cached = ctx.funcMap.get("__uint8_to_hex");
+  if (cached !== undefined) return cached;
+
+  ensureNativeStringHelpers(ctx);
+  const hexCharIdx = ensureHexCharHelper(ctx);
+
+  const strTypeIdx = ctx.nativeStrTypeIdx; // flat $NativeString: {len, off, data}
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx; // i16 code-unit array
+  if (strTypeIdx < 0 || strDataTypeIdx < 0) return -1;
+
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+
+  const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: vecTypeIdx }], [{ kind: "ref", typeIdx: strTypeIdx }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__uint8_to_hex", funcIdx);
+
+  const V = 0; // param: vec (ref null)
+  const VEC = 1; // local: non-null vec
+  const LEN = 2;
+  const DATA = 3;
+  const OUTLEN = 4;
+  const OUT = 5; // i16 output data array
+  const I = 6;
+  const B = 7;
+
+  const body: Instr[] = [
+    // vec = ref.as_non_null(v)
+    { op: "local.get", index: V },
+    { op: "ref.as_non_null" },
+    { op: "local.set", index: VEC },
+    // len = vec.field0 ; data = vec.field1
+    { op: "local.get", index: VEC },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: LEN },
+    { op: "local.get", index: VEC },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: DATA },
+    // outLen = len << 1 ; out = new i16[outLen]
+    { op: "local.get", index: LEN },
+    { op: "i32.const", value: 1 },
+    { op: "i32.shl" },
+    { op: "local.set", index: OUTLEN },
+    { op: "local.get", index: OUTLEN },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: OUT },
+    // i = 0
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            // b = data[i] (unsigned 0-255)
+            { op: "local.get", index: DATA },
+            { op: "local.get", index: I },
+            { op: "array.get_u", typeIdx: arrTypeIdx },
+            { op: "local.set", index: B },
+            // out[2i] = __hex_char(b >> 4)
+            { op: "local.get", index: OUT },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "local.get", index: B },
+            { op: "i32.const", value: 4 },
+            { op: "i32.shr_u" },
+            { op: "call", funcIdx: hexCharIdx },
+            { op: "array.set", typeIdx: strDataTypeIdx },
+            // out[2i+1] = __hex_char(b & 15)
+            { op: "local.get", index: OUT },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.shl" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.get", index: B },
+            { op: "i32.const", value: 15 },
+            { op: "i32.and" },
+            { op: "call", funcIdx: hexCharIdx },
+            { op: "array.set", typeIdx: strDataTypeIdx },
+            // i++
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // return struct.new $NativeString(outLen, 0, out)
+    { op: "local.get", index: OUTLEN },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: OUT },
+    { op: "struct.new", typeIdx: strTypeIdx },
+  ];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__uint8_to_hex",
+    typeIdx,
+    locals: [
+      { name: "vec", type: { kind: "ref", typeIdx: vecTypeIdx } },
+      { name: "len", type: { kind: "i32" } },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
+      { name: "outLen", type: { kind: "i32" } },
+      { name: "out", type: { kind: "ref", typeIdx: strDataTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "b", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  } as WasmFunction);
+
+  return funcIdx;
+}
+
+/**
+ * Register (idempotently) `__uint8_to_base64((ref null $vec_i8_byte)) -> (ref
+ * $NativeString)` and return its stable func handle. Encodes the packed bytes as
+ * standard-alphabet base64 under the DEFAULT options (`alphabet: "base64"`,
+ * `omitPadding: false`): 3-byte groups → 4 chars, a trailing 1- or 2-byte chunk
+ * emits the partial sextets followed by `=` padding to a 4-char group. All output
+ * is ASCII, written into a fresh i16-backed native string.
+ * `Uint8Array.prototype.toBase64()` with an options object is a follow-up — only
+ * the no-argument default-options call routes here. Returns -1 if the
+ * native-string runtime is unavailable (caller falls through).
+ */
+export function ensureUint8ToBase64(ctx: CodegenContext): number {
+  const cached = ctx.funcMap.get("__uint8_to_base64");
+  if (cached !== undefined) return cached;
+
+  ensureNativeStringHelpers(ctx);
+  const b64CharIdx = ensureBase64CharHelper(ctx);
+
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (strTypeIdx < 0 || strDataTypeIdx < 0) return -1;
+
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+
+  const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: vecTypeIdx }], [{ kind: "ref", typeIdx: strTypeIdx }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__uint8_to_base64", funcIdx);
+
+  const V = 0; // param: vec (ref null)
+  const VEC = 1;
+  const LEN = 2;
+  const DATA = 3;
+  const OUTLEN = 4;
+  const OUT = 5; // i16 output data array
+  const I = 6; // input byte index
+  const O = 7; // output char index
+  const N = 8; // packed 24-bit accumulator
+  const REM = 9; // remaining bytes (len - i)
+
+  // out[O] = __base64_char((N >> shift) & 63); O++
+  const emitChar = (shift: number): Instr[] => [
+    { op: "local.get", index: OUT },
+    { op: "local.get", index: O },
+    { op: "local.get", index: N },
+    { op: "i32.const", value: shift },
+    { op: "i32.shr_u" },
+    { op: "i32.const", value: 63 },
+    { op: "i32.and" },
+    { op: "call", funcIdx: b64CharIdx },
+    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "local.get", index: O },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: O },
+  ];
+  // out[O] = '=' (61); O++
+  const emitPad: Instr[] = [
+    { op: "local.get", index: OUT },
+    { op: "local.get", index: O },
+    { op: "i32.const", value: 61 },
+    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "local.get", index: O },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: O },
+  ];
+  // read byte data[i + delta] (unsigned) onto the stack
+  const readByte = (delta: number): Instr[] => [
+    { op: "local.get", index: DATA },
+    { op: "local.get", index: I },
+    ...(delta === 0 ? [] : [{ op: "i32.const", value: delta } as Instr, { op: "i32.add" } as Instr]),
+    { op: "array.get_u", typeIdx: arrTypeIdx },
+  ];
+
+  const body: Instr[] = [
+    { op: "local.get", index: V },
+    { op: "ref.as_non_null" },
+    { op: "local.set", index: VEC },
+    { op: "local.get", index: VEC },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: LEN },
+    { op: "local.get", index: VEC },
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: DATA },
+    // outLen = ((len + 2) / 3) * 4
+    { op: "local.get", index: LEN },
+    { op: "i32.const", value: 2 },
+    { op: "i32.add" },
+    { op: "i32.const", value: 3 },
+    { op: "i32.div_s" },
+    { op: "i32.const", value: 4 },
+    { op: "i32.mul" },
+    { op: "local.set", index: OUTLEN },
+    { op: "local.get", index: OUTLEN },
+    { op: "array.new_default", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: OUT },
+    // i = 0 ; o = 0
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: O },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I },
+            { op: "local.get", index: LEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            // rem = len - i
+            { op: "local.get", index: LEN },
+            { op: "local.get", index: I },
+            { op: "i32.sub" },
+            { op: "local.set", index: REM },
+            // rem >= 3: full group
+            { op: "local.get", index: REM },
+            { op: "i32.const", value: 3 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // n = (b0<<16)|(b1<<8)|b2
+                ...readByte(0),
+                { op: "i32.const", value: 16 },
+                { op: "i32.shl" },
+                ...readByte(1),
+                { op: "i32.const", value: 8 },
+                { op: "i32.shl" },
+                { op: "i32.or" },
+                ...readByte(2),
+                { op: "i32.or" },
+                { op: "local.set", index: N },
+                ...emitChar(18),
+                ...emitChar(12),
+                ...emitChar(6),
+                ...emitChar(0),
+                { op: "local.get", index: I },
+                { op: "i32.const", value: 3 },
+                { op: "i32.add" },
+                { op: "local.set", index: I },
+              ],
+              else: [
+                // rem == 2: two data chars + one pad
+                { op: "local.get", index: REM },
+                { op: "i32.const", value: 2 },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // n = (b0<<16)|(b1<<8)
+                    ...readByte(0),
+                    { op: "i32.const", value: 16 },
+                    { op: "i32.shl" },
+                    ...readByte(1),
+                    { op: "i32.const", value: 8 },
+                    { op: "i32.shl" },
+                    { op: "i32.or" },
+                    { op: "local.set", index: N },
+                    ...emitChar(18),
+                    ...emitChar(12),
+                    ...emitChar(6),
+                    ...emitPad,
+                  ],
+                  else: [
+                    // rem == 1: two sextets + two pads
+                    // n = b0<<16
+                    ...readByte(0),
+                    { op: "i32.const", value: 16 },
+                    { op: "i32.shl" },
+                    { op: "local.set", index: N },
+                    ...emitChar(18),
+                    ...emitChar(12),
+                    ...emitPad,
+                    ...emitPad,
+                  ],
+                },
+                // consumed all remaining bytes → i = len (end loop next check)
+                { op: "local.get", index: LEN },
+                { op: "local.set", index: I },
+              ],
+            },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: OUTLEN },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: OUT },
+    { op: "struct.new", typeIdx: strTypeIdx },
+  ];
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__uint8_to_base64",
+    typeIdx,
+    locals: [
+      { name: "vec", type: { kind: "ref", typeIdx: vecTypeIdx } },
+      { name: "len", type: { kind: "i32" } },
+      { name: "data", type: { kind: "ref", typeIdx: arrTypeIdx } },
+      { name: "outLen", type: { kind: "i32" } },
+      { name: "out", type: { kind: "ref", typeIdx: strDataTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "o", type: { kind: "i32" } },
+      { name: "n", type: { kind: "i32" } },
+      { name: "rem", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  } as WasmFunction);
+
+  return funcIdx;
+}
