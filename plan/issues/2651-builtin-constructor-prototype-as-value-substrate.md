@@ -2,11 +2,14 @@
 id: 2651
 title: "standalone: builtin constructor + prototype as a first-class VALUE (TypedArray ctor-iteration substrate)"
 status: blocked
+updated: 2026-07-17
+model: fable
+fable_role: spec
 blocked_on: 2580
 assignee: ttraenkler/sd-2651
 slices_done: "D2/M1 (PR #2043, commit 7374c34c6)"
 slices_remaining: "M3 (%TypedArray% intrinsic value-dispatch) — predecessor-stack on #2580 M3"
-sprint: current
+sprint: fable-final
 created: 2026-06-24
 priority: high
 feasibility: hard

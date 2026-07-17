@@ -2,8 +2,10 @@
 id: 1378
 title: "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)"
 status: ready
+model: fable
+fable_role: spec
 created: 2026-05-08
-updated: 2026-06-19
+updated: 2026-07-17
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -11,7 +13,7 @@ task_type: bugfix
 area: codegen
 language_feature: control-flow
 goal: spec-completeness
-sprint: Backlog
+sprint: fable-final
 ---
 # #1378 — try/catch/finally: completion values + error type fidelity
 

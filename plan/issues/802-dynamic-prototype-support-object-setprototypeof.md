@@ -2,13 +2,15 @@
 id: 802
 title: "- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)"
 status: ready
+model: fable
+fable_role: spec
 created: 2026-03-26
-updated: 2026-04-28
+updated: 2026-07-17
 priority: low
 feasibility: medium
 reasoning_effort: high
 goal: property-model
-sprint: Backlog
+sprint: fable-final
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
 

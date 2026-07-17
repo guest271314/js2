@@ -2,13 +2,14 @@
 id: 3108
 title: "Decompose giant runtime-helper emitter functions (ensureObjectRuntime 6,960; ensureNativeStringHelpers 4,851; ensureAnyHelpers 1,815; ensureProxyRuntime 1,273)"
 status: ready
-sprint: Backlog
+sprint: fable-final
 created: 2026-07-09
-updated: 2026-07-09
+updated: 2026-07-17
 priority: medium
 horizon: l
 feasibility: medium
-model: opus
+model: fable
+fable_role: spec
 reasoning_effort: high
 task_type: refactor
 area: codegen

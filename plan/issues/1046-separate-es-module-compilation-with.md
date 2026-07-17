@@ -3,12 +3,14 @@ id: 1046
 title: "Separate ES-module compilation with consumer-driven import/export type specialization"
 status: ready
 created: 2026-04-11
-updated: 2026-04-28
+updated: 2026-07-17
 priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: compiler-architecture
-sprint: Backlog
+sprint: fable-final
+model: fable
+fable_role: spec
 parent: null
 required_by: [1058]
 note: "Verified 2026-05-21: preprocessImports 23→89, compileProject 216→248, resolveAllImports 204→360, compileMultiSource 406→534"

@@ -2,8 +2,10 @@
 id: 3196
 title: "bloat S6: de-inline the standalone dynamic-HOF lane in compileArrayLikePrototypeCall onto the #3098 __hof_* steppers"
 status: ready
+model: fable
+fable_role: spec
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-17
 priority: medium
 feasibility: hard
 task_type: refactor
@@ -11,7 +13,7 @@ area: codegen
 es_edition: n/a
 language_feature: array-methods
 goal: maintainability
-sprint: current
+sprint: fable-final
 horizon: l
 umbrella: 3182
 related: [3098, 3029, 3102, 3185]

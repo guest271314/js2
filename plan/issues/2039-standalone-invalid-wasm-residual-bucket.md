@@ -3,13 +3,14 @@ id: 2039
 title: "standalone invalid-Wasm residual bucket after #1623/#1666/#1677: async-gen i64 ABI, __obj_find externref key, __str_flatten, arguments arity (~1,135 tests)"
 status: blocked
 blocked_by: [2167]
-sprint: Backlog
+sprint: fable-final
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-07-17
 priority: critical
 feasibility: hard
 reasoning_effort: max
 model: fable
+fable_role: implement
 task_type: bugfix
 area: codegen, emit
 language_feature: async-generators, classes, private-names, strings

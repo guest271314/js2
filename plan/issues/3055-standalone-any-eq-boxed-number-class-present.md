@@ -2,6 +2,10 @@
 id: 3055
 title: "Standalone `any === any` on boxed numbers returns equal-for-unequal when an object-runtime/class is present"
 status: in-progress
+updated: 2026-07-17
+model: fable
+fable_role: spec
+sprint: fable-final
 assignee: opus-3055
 created: 2026-07-05
 priority: high

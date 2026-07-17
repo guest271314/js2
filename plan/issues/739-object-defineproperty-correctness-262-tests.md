@@ -3,12 +3,14 @@ id: 739
 title: "- Object.defineProperty correctness (262 tests)"
 status: ready
 created: 2026-03-22
-updated: 2026-04-28
+updated: 2026-07-17
 priority: medium
 feasibility: hard
 reasoning_effort: max
 goal: property-model
-sprint: Backlog
+sprint: fable-final
+model: fable
+fable_role: spec
 test262_fail: 262
 files:
   src/codegen/expressions.ts:

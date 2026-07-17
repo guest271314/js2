@@ -2,7 +2,10 @@
 id: 2570
 title: "lazy/suspending async-generator runtime — yield* execution order (eager-buffer drains before first .next())"
 status: ready
-sprint: Backlog
+updated: 2026-07-17
+model: fable
+fable_role: implement
+sprint: fable-final
 created: 2026-06-21
 priority: medium
 feasibility: hard

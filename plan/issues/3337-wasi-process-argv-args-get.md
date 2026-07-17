@@ -2,6 +2,8 @@
 id: 3337
 title: "wasi: materialize process.argv through args_get instead of a silent empty vector"
 status: ready
+model: fable
+fable_role: spec
 created: 2026-07-17
 updated: 2026-07-17
 priority: high
@@ -11,7 +13,7 @@ task_type: bugfix
 area: codegen, runtime, wasi
 language_feature: process-argv
 goal: standalone-mode
-sprint: Backlog
+sprint: fable-final
 horizon: m
 es_edition: n/a
 complexity: M

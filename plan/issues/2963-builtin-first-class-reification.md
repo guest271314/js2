@@ -3,10 +3,11 @@ id: 2963
 title: "Reify builtins as first-class values: retire the `__get_builtin` dynamic-shape CE cluster (~400 compile errors)"
 status: in-progress
 assignee: ttraenkler/fable-identity
-sprint: current
+sprint: fable-final
 model: fable
+fable_role: spec
 created: 2026-07-02
-updated: 2026-07-09
+updated: 2026-07-17
 priority: high
 horizon: l
 feasibility: hard

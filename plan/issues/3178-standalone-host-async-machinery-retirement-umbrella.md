@@ -2,13 +2,14 @@
 id: 3178
 title: "UMBRELLA: retire the generator/async/Promise HOST machinery in standalone — the 4,467-leaky-pass (10.3 pt) family, measured slice map + shared-substrate design"
 status: ready
-sprint: current
+sprint: fable-final
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-17
 priority: high
 horizon: xl
 feasibility: hard
 model: fable
+fable_role: spec
 reasoning_effort: max
 task_type: architecture
 area: codegen, standalone

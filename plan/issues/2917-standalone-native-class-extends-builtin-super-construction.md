@@ -2,12 +2,14 @@
 id: 2917
 title: "[SUBSTRATE][ARCH] Standalone native `class X extends <Builtin>` super-construction (~10 generic conversions)"
 status: ready
-sprint: Backlog
+updated: 2026-07-17
+sprint: fable-final
 created: 2026-07-01
 priority: medium
 horizon: l
 feasibility: hard
 model: fable
+fable_role: spec
 reasoning_effort: high
 task_type: feature
 area: codegen
