@@ -23,10 +23,11 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
+last_ci_retry_head: null
+last_merged_pr: 3179
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T05:03:10.509Z
 pr: 3200
-last_merged_pr: 3179
 ---
 
 # #2956 — the backend fork sits ABOVE the IR

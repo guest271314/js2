@@ -1,7 +1,7 @@
 ---
 id: 3297
 title: "Porffor backend P2: scalar and control-flow differential proof"
-status: in-review
+status: done
 sprint: porffor-backend
 created: 2026-07-16
 updated: 2026-07-17
@@ -21,6 +21,8 @@ origin: "#3288 P2 split: independently dispatchable scalar Porffor backend proof
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T02:12:12.870Z
 branch: symphony/porffor/3297
+pr: 3198
+completed: 2026-07-17
 ---
 
 # #3297 - Porffor backend P2: scalar and control-flow differential proof
