@@ -13,6 +13,13 @@ area: codegen
 goal: test262-conformance
 sprint: current
 depends_on: []
+related: [1568, 3280, 3383]
+# (#2728) The new `__new_Symbol` host handler belongs in runtime.ts alongside
+# every other `__new_*`/`__box_*` host import. Kept self-contained (its own
+# id→Symbol resolution) rather than reusing #3280's extern_class `__new_Symbol`
+# arm, which boxes the raw i32 id as a Number — see #3383 for that cleanup.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 # #2728 — `Object(Symbol())` → Symbol-wrapper object
 
