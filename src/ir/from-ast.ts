@@ -459,6 +459,46 @@ export interface AstToIrOptions {
    * unset, which is inert at lowering (byte-identical output).
    */
   readonly allocRegistry?: AllocSiteRegistry;
+  /**
+   * (#3142 Slice 2) The function being lowered is the synthetic
+   * `<module-init>` claim unit (the top-level statement population wrapped
+   * by `makeModuleInitSynthetic`). Mirrors the constructor-body precedent:
+   * every statement lowers as a plain body statement via `lowerStmt` (no
+   * tail requirement) and the builder terminates with an empty `return`.
+   * Requires `returnTypeOverride: null` (the unit is void) and a
+   * `moduleBindings` map for the top-level declared names.
+   */
+  readonly moduleInitUnit?: boolean;
+  /**
+   * (#3142 Slice 2) Module-scope bindings → the Wasm global the legacy
+   * backend allocated for each (`__mod_<name>`, plus the `__tdz_<name>`
+   * flag when legacy tracks one). A top-level `let`/`const` declaration
+   * for a name in this map lowers as a symbolic `global.set` against that
+   * SAME storage slot (and binds in scope as a `moduleGlobal`
+   * ScopeBinding), so every other function — legacy or IR — observes the
+   * initialized value exactly as it does with the legacy `__module_init`
+   * body. Slice 2 restricts entries to f64/i32-backed globals (the
+   * integration layer builds the map and throws → demotes for anything
+   * else).
+   */
+  readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
+}
+
+/**
+ * (#3142 Slice 2) One module-scope binding's legacy storage description.
+ * Built by the integration layer from `ctx.moduleGlobals` / `ctx.mod.globals`.
+ */
+export interface ModuleBindingGlobal {
+  /** The Wasm global's symbolic name (`__mod_<name>`), resolvable by the
+   *  lowerer's `resolveGlobal`. */
+  readonly globalName: string;
+  /** The `__tdz_<name>` flag global when legacy tracks a TDZ flag for this
+   *  binding, else null. The declaration lowering mirrors legacy
+   *  `emitTdzInit`: after the value write, set the flag to 1. */
+  readonly tdzGlobalName: string | null;
+  /** The binding's IrType — derived from (and Wasm-identical to) the
+   *  global's ValType. Slice 2: f64 or i32 only. */
+  readonly type: IrType;
 }
 
 /**
@@ -660,6 +700,7 @@ export function lowerFunctionAstToIr(
     generatorBufferSlot,
     checker: options.checker,
     allocRegistry: options.allocRegistry,
+    moduleBindings: options.moduleInitUnit ? options.moduleBindings : undefined,
   };
   // #1372 — emit destructuring preamble for binding-pattern params. Each
   // leaf becomes a `local` ScopeBinding via `lowerBindingPattern`; the
@@ -669,6 +710,50 @@ export function lowerFunctionAstToIr(
   // so the body sees the leaves in scope from statement #0.
   for (const { pattern, value } of pendingDestructures) {
     lowerBindingPattern(pattern, value, cx);
+  }
+
+  // (#3142 Slice 2) `<module-init>` unit — constructor-body precedent: every
+  // population statement is a plain body statement (`lowerStmt`, the same
+  // dispatcher the selector's `isPhase1BodyStatement` mirrors), no tail
+  // requirement, implicit empty return. Top-level declarations bind through
+  // `cx.moduleBindings` (see `lowerVarDecl`) so the legacy `__mod_<name>`
+  // globals receive the initialized values.
+  if (options.moduleInitUnit) {
+    if (returnType !== null) {
+      throw new Error(`ir/from-ast: module-init unit must be void (${name})`);
+    }
+    // `var` gate: a `var` anywhere in the unit (including for-init /
+    // nested blocks, where the lowering below would bind it as a
+    // loop-local slot) is FUNCTION-scoped on the legacy path — it hoists
+    // to a module global other functions can observe. Slice 2 does not
+    // model that; demote the whole unit. `var`s inside nested
+    // function-likes are local to those functions and stay fine.
+    const findVarDecl = (node: ts.Node): boolean => {
+      if (
+        ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node)
+      ) {
+        return false;
+      }
+      if (ts.isVariableDeclarationList(node) && (node.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) {
+        return true;
+      }
+      return ts.forEachChild(node, findVarDecl) === true;
+    };
+    for (const s of stmts) {
+      if (findVarDecl(s)) {
+        throw new Error(`ir/from-ast: module-init unit contains a var declaration — not in Slice 2 scope (${name})`);
+      }
+    }
+    for (const s of stmts) {
+      lowerStmt(s, cx);
+      // A top-level break/continue can't appear (no enclosing loop — the
+      // selector rejects it), so no dead-code guard is needed.
+    }
+    builder.terminate({ kind: "return", values: [] });
+    return { main: builder.finish(), lifted };
   }
 
   if (isCtor) {
@@ -1121,6 +1206,18 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
 type ScopeBinding =
   | { kind: "local"; value: IrValueId; type: IrType }
   | {
+      /**
+       * (#3142 Slice 2) A module-scope binding inside the `<module-init>`
+       * unit. Reads emit a symbolic `global.get` and writes a symbolic
+       * `global.set` against the legacy-allocated `__mod_<name>` global, so
+       * the IR-lowered init body and every other function (legacy or IR)
+       * share the exact same storage. Slice 2 restricts `type` to f64/i32.
+       */
+      kind: "moduleGlobal";
+      globalName: string;
+      type: IrType;
+    }
+  | {
       kind: "nestedFunc";
       liftedName: string;
       signature: IrClosureSignature;
@@ -1265,6 +1362,15 @@ interface LowerCtx {
    * `earlyReturnBarrierDepth` so accepted shapes always lower.
    */
   readonly noEarlyReturn?: boolean;
+  /**
+   * (#3142 Slice 2) Module-scope binding storage map — present only when
+   * lowering the `<module-init>` unit. `lowerVarDecl` consults it: a
+   * declared name with an entry binds as a `moduleGlobal` ScopeBinding
+   * (symbolic global.set) instead of a local/slot. Names WITHOUT an entry
+   * (loop-scoped `let i` in a for-init, block-scoped inner lets) keep the
+   * ordinary local/slot lowering.
+   */
+  readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
 }
 
 /**
@@ -1339,6 +1445,28 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       if (!d.initializer) {
         throw new Error(`ir/from-ast: binding pattern requires an initializer (${cx.funcName})`);
       }
+      // (#3142 Slice 2) Top-level destructuring in the module-init unit:
+      // the leaves are module globals on the legacy path, but the pattern
+      // lowerer binds them as plain locals — demote instead of splitting
+      // the storage.
+      if (cx.moduleBindings) {
+        const leafIsModuleBinding = (pattern: ts.BindingPattern): boolean => {
+          for (const element of pattern.elements) {
+            if (ts.isOmittedExpression(element)) continue;
+            if (ts.isIdentifier(element.name)) {
+              if (cx.moduleBindings!.has(element.name.text)) return true;
+            } else if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
+              if (leafIsModuleBinding(element.name)) return true;
+            }
+          }
+          return false;
+        };
+        if (leafIsModuleBinding(d.name)) {
+          throw new Error(
+            `ir/from-ast: module-level destructuring declaration not in module-init Slice 2 scope (${cx.funcName})`,
+          );
+        }
+      }
       // Hint: pass an externref so the initializer's actual IrType (object,
       // class, vec ref, etc.) flows through unchanged. The pattern lowerer
       // dispatches on the inferred IrType.
@@ -1355,6 +1483,17 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     }
     if (!d.initializer) {
       throw new Error(`ir/from-ast: Phase 1 requires an initializer for '${name}' in ${cx.funcName}`);
+    }
+    // (#3142 Slice 2) A module-scope binding initialized with a
+    // function-like value: the legacy path stores its closure where other
+    // functions can reach it (closureMap / the `__mod_<name>` global), and
+    // the IR closure binding below would keep it purely local to the init
+    // body — the observable storage would never be written. Demote.
+    const moduleBinding = cx.moduleBindings?.get(name);
+    if (moduleBinding && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) {
+      throw new Error(
+        `ir/from-ast: module-level closure binding '${name}' not in module-init Slice 2 scope (${cx.funcName})`,
+      );
     }
     // Slice 3 (#1169c): closure-literal initializer. Lifted to a
     // top-level IR function and bound in scope as an IrType.closure
@@ -1396,7 +1535,10 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         },
       );
     }
-    const hint: IrType = annotated ?? irVal({ kind: "f64" });
+    // (#3142 Slice 2) A module binding's hint is its GLOBAL's type — the
+    // storage slot is fixed by the legacy allocation, so the initializer
+    // must land on exactly that representation (checked below).
+    const hint: IrType = annotated ?? moduleBinding?.type ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
     if (annotated) {
@@ -1434,6 +1576,28 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
           `number representation is unsound (the ${boundKind} Wasm kind conflates number / boolean / ` +
           `any); demote to the SAFE boxed legacy lowering in ${cx.funcName} (#2782/#2790)`,
       );
+    }
+    // (#3142 Slice 2) Module-scope binding: write the legacy-allocated
+    // `__mod_<name>` global (symbolic ref — the lowerer's `resolveGlobal`
+    // maps it to the concrete index) and bind as `moduleGlobal` so body
+    // reads/writes route through global.get/set. Mutation needs no slot —
+    // the global IS the mutable storage. Mirrors legacy `emitTdzInit`: when
+    // a TDZ flag global exists for the name, set it to 1 AFTER the value
+    // write so cross-function TDZ checks observe initialization.
+    if (moduleBinding) {
+      if (!irTypeEquals(inferred, moduleBinding.type)) {
+        throw new Error(
+          `ir/from-ast: module binding '${name}' initializer is ${describeIrType(inferred)} but its global is ` +
+            `${describeIrType(moduleBinding.type)} in ${cx.funcName}`,
+        );
+      }
+      cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.globalName }, value);
+      if (moduleBinding.tdzGlobalName) {
+        const one = cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
+        cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.tdzGlobalName }, one);
+      }
+      cx.scope.set(name, { kind: "moduleGlobal", globalName: moduleBinding.globalName, type: moduleBinding.type });
+      continue;
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
     // reassigned anywhere in the function body bind as a `slot`
@@ -1877,6 +2041,11 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
         return cx.builder.emitSlotReadAs(p.slotIndex, p.asType);
       }
       return cx.builder.emitSlotRead(p.slotIndex);
+    }
+    // (#3142 Slice 2) Module-scope binding inside the `<module-init>` unit:
+    // reads come from the legacy-allocated global (symbolic ref).
+    if (p.kind === "moduleGlobal") {
+      return cx.builder.emitGlobalGet({ kind: "global", name: p.globalName }, p.type);
     }
     if (p.kind !== "local") {
       // Slice 3 (#1169c): nestedFunc bindings are name-only — they have
@@ -2737,7 +2906,13 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
   const recvVal = asVal(recvType);
-  if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null")) {
+  // (#2956 L2) Linear vec receivers are scalar i32 arena pointers, not GC
+  // refs — admit them via the same resolver probe the read paths use
+  // (`scalarVecReceiver` at the `.length` / element-access arms). The
+  // WasmGC lane is unaffected: its vec receivers always lower as refs.
+  const scalarVecStoreReceiver =
+    recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(lhs.expression) === true;
+  if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null" && !scalarVecStoreReceiver)) {
     throw new Error(`ir/from-ast: element store on ${describeIrType(recvType)} not in IR scope (${cx.funcName})`);
   }
   const vec = cx.resolver?.resolveVec?.(recvVal);
@@ -3755,7 +3930,14 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // externref element vecs only (mirrors `lowerElementStore`).
   {
     const vecRecvVal = asVal(recvType);
-    if (methodName === "push" && vecRecvVal && vecRecvVal.kind === "ref") {
+    // (#2956 L2) Linear vec receivers are scalar i32 arena pointers — admit
+    // them alongside the non-null GC ref (same probe as the read arms; the
+    // linear runtime's __arr_set target resolves #1977 forwarding itself).
+    const scalarVecPushReceiver =
+      vecRecvVal?.kind === "i32" &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true;
+    if (methodName === "push" && vecRecvVal && (vecRecvVal.kind === "ref" || scalarVecPushReceiver)) {
       const vec = cx.resolver?.resolveVec?.(vecRecvVal);
       if (vec) {
         if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
@@ -5353,6 +5535,18 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
   if (!binding) {
     throw new Error(`ir/from-ast: assignment to undeclared identifier "${id.text}" in ${cx.funcName}`);
   }
+  // (#3142 Slice 2) Module-scope binding — write the legacy global.
+  if (binding.kind === "moduleGlobal") {
+    const newValue = lowerExpr(rhs, cx, binding.type);
+    const newType = cx.builder.typeOf(newValue);
+    if (!irTypeEquals(newType, binding.type)) {
+      throw new Error(
+        `ir/from-ast: assignment to module binding "${id.text}" (${describeIrType(binding.type)}) got ${describeIrType(newType)} in ${cx.funcName}`,
+      );
+    }
+    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, newValue);
+    return;
+  }
   if (binding.kind !== "slot") {
     throw new Error(
       `ir/from-ast: assignment to non-slot binding "${id.text}" — mutation pre-pass should have detected it (${cx.funcName})`,
@@ -5387,7 +5581,7 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   if (!binding) {
     throw new Error(`ir/from-ast: compound assign to undeclared identifier "${id.text}" in ${cx.funcName}`);
   }
-  if (binding.kind !== "slot") {
+  if (binding.kind !== "slot" && binding.kind !== "moduleGlobal") {
     throw new Error(
       `ir/from-ast: compound assign to non-slot binding "${id.text}" — mutation pre-pass should have detected it (${cx.funcName})`,
     );
@@ -5399,8 +5593,12 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
     );
   }
 
-  // Desugar: read the slot, lower the RHS, apply the binop, write back.
-  const lhs = cx.builder.emitSlotRead(binding.slotIndex);
+  // Desugar: read the slot (or, #3142, the module-binding global), lower the
+  // RHS, apply the binop, write back.
+  const lhs =
+    binding.kind === "moduleGlobal"
+      ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type)
+      : cx.builder.emitSlotRead(binding.slotIndex);
   const rhsValue = lowerExpr(rhs, cx, binding.type);
   const rhsType = cx.builder.typeOf(rhsValue);
   if (asVal(rhsType)?.kind !== "f64") {
@@ -5425,6 +5623,10 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
       throw new Error(`ir/from-ast: unsupported compound assign op ${ts.SyntaxKind[compoundOp]} in ${cx.funcName}`);
   }
   const result = cx.builder.emitBinary(binop, lhs, rhsValue, irVal({ kind: "f64" }));
+  if (binding.kind === "moduleGlobal") {
+    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    return;
+  }
   cx.builder.emitSlotWrite(binding.slotIndex, result);
 }
 
@@ -5442,7 +5644,7 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
   if (!binding) {
     throw new Error(`ir/from-ast: increment/decrement of undeclared "${id.text}" in ${cx.funcName}`);
   }
-  if (binding.kind !== "slot") {
+  if (binding.kind !== "slot" && binding.kind !== "moduleGlobal") {
     throw new Error(
       `ir/from-ast: increment/decrement of non-slot "${id.text}" — mutation pre-pass should have detected it (${cx.funcName})`,
     );
@@ -5457,12 +5659,19 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
       `ir/from-ast: increment/decrement of non-f64 slot "${id.text}" (${describeIrType(binding.type)}) not in slice 12 (${cx.funcName})`,
     );
   }
-  const lhs = cx.builder.emitSlotRead(binding.slotIndex);
+  const lhs =
+    binding.kind === "moduleGlobal"
+      ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type)
+      : cx.builder.emitSlotRead(binding.slotIndex);
   const isAdd = op === ts.SyntaxKind.PlusPlusToken;
   const oneIr: IrType = irVal({ kind: "f64" });
   const one = cx.builder.emitConst({ kind: "f64", value: 1 }, oneIr);
   const binop: IrBinop = isAdd ? "f64.add" : "f64.sub";
   const result = cx.builder.emitBinary(binop, lhs, one, oneIr);
+  if (binding.kind === "moduleGlobal") {
+    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    return;
+  }
   cx.builder.emitSlotWrite(binding.slotIndex, result);
 }
 
