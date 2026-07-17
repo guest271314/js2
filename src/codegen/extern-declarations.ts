@@ -291,6 +291,72 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
+  // (#1792) node:url — `URL` / `URLSearchParams` as host constructors. Both are
+  // WHATWG globals present in Node 18+ and every browser, so the JS-host path
+  // binds them via `builtinCtors` (runtime.ts) exactly like Set/Map. `new
+  // URL(...)` / `new URLSearchParams(...)` lower to `URL_new` /
+  // `URLSearchParams_new`; instance property reads (`.pathname`,
+  // `.searchParams`, …) flow through the generic `__extern_get` host import and
+  // method calls (`.get`, `.getAll`, …) through `__extern_method_call`. The
+  // method tables below give the typed-dispatch path exact arities. Standalone
+  // (WASI) needs a pure-Wasm URL parser — deferred (#1792 approach step 4), so
+  // skip registration under nativeStrings to avoid leaking an unsatisfiable
+  // `URL_new` host import into the standalone module.
+  if (!ctx.externClasses.has("URL") && !ctx.nativeStrings) {
+    const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
+    methods.set("toString", externMethod(0)); // toString() → string
+    methods.set("toJSON", externMethod(0)); // toJSON() → string
+    ctx.externClasses.set("URL", {
+      importPrefix: "URL",
+      namespacePath: [],
+      className: "URL",
+      constructorParams: [{ kind: "externref" }, { kind: "externref" }], // new URL(url, base?)
+      methods,
+      // All URL instance properties are host getters read via __extern_get;
+      // listing the common ones as readonly gives the typed path their shape.
+      properties: new Map(
+        [
+          "href",
+          "origin",
+          "protocol",
+          "username",
+          "password",
+          "host",
+          "hostname",
+          "port",
+          "pathname",
+          "search",
+          "searchParams",
+          "hash",
+        ].map((p) => [p, { type: { kind: "externref" } as ValType, readonly: p === "origin" }]),
+      ),
+    });
+  }
+
+  if (!ctx.externClasses.has("URLSearchParams") && !ctx.nativeStrings) {
+    const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
+    methods.set("append", externMethod(2)); // append(name, value) → void
+    methods.set("delete", externMethod(2, false)); // delete(name, value?) → void
+    methods.set("get", externMethod(1)); // get(name) → string | null
+    methods.set("getAll", externMethod(1)); // getAll(name) → string[]
+    methods.set("has", externMethod(2)); // has(name, value?) → boolean
+    methods.set("set", externMethod(2, false)); // set(name, value) → void
+    methods.set("sort", externMethod(0, false)); // sort() → void
+    methods.set("toString", externMethod(0)); // toString() → string
+    methods.set("forEach", externMethod(1, false)); // forEach(cb) → void
+    methods.set("entries", externMethod(0)); // entries() → Iterator
+    methods.set("keys", externMethod(0)); // keys() → Iterator
+    methods.set("values", externMethod(0)); // values() → Iterator
+    ctx.externClasses.set("URLSearchParams", {
+      importPrefix: "URLSearchParams",
+      namespacePath: [],
+      className: "URLSearchParams",
+      constructorParams: [{ kind: "externref" }], // new URLSearchParams(init?)
+      methods,
+      properties: new Map([["size", { type: { kind: "externref" }, readonly: true }]]),
+    });
+  }
+
   // #1238 — synthetic ExternClassInfo for String and Array.
   //
   // String and Array are JS built-ins, not declared classes (`declare class
