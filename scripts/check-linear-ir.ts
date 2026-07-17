@@ -4,7 +4,7 @@
  * #1376 `check:ir-fallbacks` shape for the LINEAR overlay).
  *
  * Compiles the fixed corpus (`website/playground/examples/*.ts`) with
- * `--target linear` and the L1 overlay ON (`JS2WASM_LINEAR_IR=1`), reads each
+ * `--target linear` with the overlay explicitly ON (`JS2WASM_LINEAR_IR=1`), reads each
  * module's `LinearIrResult` report, and aggregates:
  *
  *   - `compiled`  — functions the overlay lowered via IR + LinearEmitter
@@ -18,10 +18,9 @@
  *   Decreasing buckets / increasing compiled succeed; run with `--update`
  *   to refresh the committed baseline in the same PR (visible in review).
  *
- * The overlay is env-gated (off in production compiles until slice L4), so
- * this script is the ONLY CI consumer that turns it on — a regression inside
- * the overlay can never affect flag-off users, but the ratchet still catches
- * it here.
+ * The overlay is default-on since L4. This script still pins `=1` so a caller's
+ * ambient rollback setting cannot silently turn the ratchet into a direct-path
+ * compile.
  *
  * Usage:
  *   pnpm run check:linear-ir              # gate against baseline
