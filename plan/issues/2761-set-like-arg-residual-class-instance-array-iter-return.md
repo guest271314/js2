@@ -1,9 +1,11 @@
 ---
 id: 2761
 title: "Set set-algebra set-like-arg residual: class-instance set-likes (substrate-gated), set-like-array, iterator-return (27 test262 fails)"
-status: ready
+status: done
+assignee: ttraenkler/dev-f
+completed: 2026-07-17
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-17
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -15,6 +17,30 @@ sprint: Backlog
 related: [1627, 2681, 2686]
 parent: 1627
 ---
+
+## Resolution (2026-07-17)
+
+Sub-causes **B (set-like-array, 7)** and **C (set-like-iter-return, 2)** — the
+independently-tractable residual — are fixed (9 test262 fail→pass), verified on
+the host/JS-host gc lane. Sub-cause **A (class-instance set-likes, 18)** stays
+**folded into the value-rep / proto-read substrate roadmap** (`related: 2681,
+2686`) per the acceptance criteria — it is architect-scoped and NOT point-fixed
+here; it flips once that substrate lands.
+
+- **B fix** (`src/runtime.ts`): `__make_iterable`'s `convertToJS` materialized a
+  vec into a plain `new Array(len)` holding only the ELEMENTS, dropping the
+  dynamic `size`/`has`/`keys` sidecar props, so native `GetSetRecord` read
+  `size = undefined → NaN`. New `_copyVecSidecarOntoArray` surfaces the vec's
+  non-index own sidecar props onto the materialized array (closure values
+  host-callable-wrapped). Free for ordinary arrays (no sidecar → early return).
+- **C fix** (`src/runtime.ts`): the object set-like's `keys()` returned a
+  compiled `{ next(){…}, return(){…} }` iterator whose methods are opaque
+  wasm-closure struct fields ("string 'next' is not a function"). Routed the
+  keys() RESULT through the existing `_iteratorRecordForHost` shim (bridges
+  next/return/throw callable, host-mirrors struct step results) in
+  `_setLikeRecordForHost`.
+
+Guard: `tests/issue-1627.test.ts` extended with the B and C case batteries.
 
 # #2761 — Set set-algebra set-like-arg residual (carried over from #1627)
 

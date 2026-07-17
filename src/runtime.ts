@@ -4976,7 +4976,29 @@ function _setLikeRecordForHost(
     // handles these correctly (callable closureBridge / raw value).
     return proxy[key];
   };
-  return { size: fixField("size"), has: fixField("has"), keys: fixField("keys") };
+  const rec: { size: any; has: any; keys: any } = {
+    size: fixField("size"),
+    has: fixField("has"),
+    keys: fixField("keys"),
+  };
+  // (#2761 sub-cause C) Bridge the `keys()` iterator. GetSetRecord drives the
+  // keys() RESULT as a spec iterator record (Call(next, iter) + Get done/value,
+  // and IteratorClose's Get(iter, "return") on early exit). When `keys()`
+  // returns a compiled iterator whose `next`/`return` are wasm-closure struct
+  // fields (a `{ next(){…}, return(){…} }` object literal, not a generator),
+  // native V8 reads `iter.next` off the opaque struct as a non-callable ("string
+  // 'next' is not a function" — the `set-like-iter-return.js` pair). Route the
+  // result through the same `_iteratorRecordForHost` shim the ES2025 Iterator
+  // helpers use, which bridges next/return/throw callable and host-mirrors
+  // struct step results. Only wraps the RETURN value, so a `keys` that is
+  // non-callable still fails GetSetRecord's IsCallable check per spec.
+  if (typeof rec.keys === "function") {
+    const rawKeys = rec.keys as (this: any, ...a: any[]) => any;
+    rec.keys = function keysIterBridge(this: any, ...a: any[]): any {
+      return _iteratorRecordForHost(rawKeys.apply(this, a), state);
+    };
+  }
+  return rec;
 }
 
 // (#2801) Parse a property key into a canonical array index (uint32), or
@@ -5324,6 +5346,45 @@ function _wrapVecForHost(vec: any, exports: Record<string, Function>): any {
   _hostProxyCache.set(vec, proxy);
   _hostProxyReverse.set(proxy, vec);
   return proxy;
+}
+
+/**
+ * (#2761 sub-cause B) Copy a vec's dynamic sidecar (non-index) own properties
+ * onto a JS array materialized from it. `__make_iterable`'s `convertToJS`
+ * builds a plain `new Array(len)` holding only the vec ELEMENTS; a compiled
+ * `arr.size = 3; arr.has = fn; arr.keys = fn` -- an array consumed as a
+ * SET-LIKE rather than as an array (the
+ * `built-ins/Set/prototype/*x/set-like-array.js` family) -- stores those under
+ * `_wasmStructProps`, keyed by the raw vec struct. Without surfacing them on
+ * the materialized array, native `GetSetRecord` reads `size` as undefined -> NaN
+ * and rejects a valid set-like. Mirrors the `_wrapVecForHost` (#3201) sidecar
+ * surfacing, but eagerly onto the real array (this materialization path produces
+ * a genuine `[]`, not a proxy). Closure struct values are host-callable-wrapped
+ * so `has`/`keys` invoke; index-like and `length`/accessor-helper keys are
+ * skipped (`length` and elements are the live array's own; `__get_`/`__set_` are
+ * descriptor plumbing). A vec with no sidecar (the common case) early-returns,
+ * so this is free for ordinary arrays.
+ */
+function _copyVecSidecarOntoArray(vec: any, arr: any[], exports: Record<string, Function> | undefined): void {
+  const sc = _wasmStructProps.get(vec);
+  if (!sc) return;
+  const wrapVal = (val: any): any => {
+    if (val != null && typeof val === "object" && _isWasmStruct(val)) {
+      const callable = _maybeWrapCallableUnknownArity(val, { getExports: () => exports });
+      if (callable !== val) return callable;
+      return _wrapForHost(val, exports);
+    }
+    return val;
+  };
+  for (const key of Object.getOwnPropertyNames(sc)) {
+    if (key === "length") continue;
+    if (key.startsWith("__get_") || key.startsWith("__set_")) continue;
+    if (_asArrayIndex(key) !== undefined) continue;
+    (arr as Record<string, any>)[key] = wrapVal((sc as Record<string, any>)[key]);
+  }
+  for (const key of Object.getOwnPropertySymbols(sc)) {
+    (arr as Record<symbol, any>)[key] = wrapVal((sc as Record<symbol, any>)[key]);
+  }
 }
 
 // (#2841) Present a REAL host JS array (not a wasm vec) that may hold RAW
@@ -13062,6 +13123,10 @@ assert._isSameValue = isSameValue;
               for (let i = 0; i < len; i++) {
                 arr[i] = convertToJS(vecGet(obj, i));
               }
+              // (#2761 sub-cause B) Surface dynamic non-index own props (an
+              // array consumed as a set-like: `arr.size/has/keys`) so native
+              // GetSetRecord sees them instead of NaN.
+              _copyVecSidecarOntoArray(obj, arr, exports);
               return arr;
             }
           }
