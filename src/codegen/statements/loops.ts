@@ -306,8 +306,24 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
         // a closure whose `i` collides with a differently-typed top-level
         // module global `i` would `global.set` an incompatible value type into
         // the global → invalid Wasm.
+        //
+        // #3343: a block-scoped `let`/`const` for-head binding is ALWAYS a
+        // FRESH lexical binding (ECMA-262 §14.7.4). Inside a function it MUST be
+        // a per-invocation local and must NEVER alias a same-named module-level
+        // global — that global backs the DISTINCT module-top-level binding.
+        // A `let`/`const` is not hoisted into `localMap` (only `var` is), so the
+        // `hasLocalShadow` guard above does not catch it, and the global path
+        // wrongly grabbed the module global. That made a RECURSIVE function's
+        // inner loop clobber the outer loop's counter: compiled-acorn has a
+        // top-level `i` → global `$__mod_i`, so every function's `for (let i)`
+        // shared ONE global; a recursive in-Wasm AST walk (the #2928 emitter
+        // path) re-iterated forever (spurious back-edge → runaway) once the tree
+        // had nested arrays. Only at module top level (`__module_init`) is the
+        // module-level lexical binding actually the global; there `let`/`const`
+        // keeps using it. `var` is unchanged (function-hoist → `hasLocalShadow`).
         const hasLocalShadow = fctx.localMap.has(name);
-        const moduleGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
+        const blockScopedInsideFunction = !isVar && fctx.name !== "__module_init";
+        const moduleGlobalIdx = hasLocalShadow || blockScopedInsideFunction ? undefined : ctx.moduleGlobals.get(name);
         if (moduleGlobalIdx !== undefined) {
           if (decl.initializer) {
             const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleGlobalIdx)];
