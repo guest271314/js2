@@ -2,7 +2,12 @@
 id: 3333
 title: "standalone: whole-pattern param default OBJECT LITERAL never binds — `function f({a,b}: any = {a:5,b:3}); f()` reads garbage/NaN"
 horizon: s
-status: ready
+status: done
+completed: 2026-07-17
+assignee: ttraenkler/fable-s2
+loc-budget-allow:
+  - src/codegen/closures.ts
+  - src/codegen/function-body.ts
 sprint: current
 priority: high
 feasibility: medium
@@ -67,3 +72,34 @@ The non-dflt twin (`obj-ptrn-rest-val-obj.js`) passes.
   declaration forms, with and without `...rest`).
 - `dflt-obj-ptrn-rest-val-obj.js` passes cold standalone.
 - Host lane byte-neutral or verified no-regression on the dstr family.
+
+## Fix (2026-07-17, fable-s2, same-day)
+
+Root confirmed via WAT: the default literal materialized as a typed ANONYMOUS
+struct (`f64.const 5; f64.const 3; struct.new <anon>; extern.convert_any`)
+because the `any`-typed pattern yields NO struct hint
+(`structHintForBindingPattern` → undefined ⇒ bare externref hint), while the
+destructure — also hint-less — takes the dynamic `__extern_get` path, which
+cannot reflect anonymous typed structs on the host-free lanes (host lane
+reflects wasm structs through the host wrapper, hence never broken).
+
+Fix at BOTH whole-param default sites: when `(standalone || wasi)` ∧ object
+binding pattern ∧ externref param ∧ object-literal initializer ∧ no struct
+hint, materialize the default via `compileObjectLiteralAsExternref` (the
+`__new_plain_object` dynamic carrier — the exact shape the dynamic reader
+consumes, and why the module-var default control always worked):
+
+- `src/codegen/function-body.ts` (declarations)
+- `src/codegen/closures.ts` (function expressions / arrows; this site never
+  had the #2568 struct hint either — typed-pattern closure defaults on
+  standalone may deserve the #2568 mirror as a follow-up, not folded in)
+
+## Test Results
+
+- `tests/issue-3333.test.ts` (4): expression form, declaration + rest,
+  explicit-undefined, and the three controls (passed-arg / module-var /
+  ident-param) — all pass host-free.
+- test262 anchors cold standalone: `dflt-obj-ptrn-rest-val-obj.js` PASS (was
+  fail), `obj-ptrn-rest-val-obj.js` still PASS.
+- Sweep: issue-2568, issue-2158, issue-2512, fn-param-dstr-rest-in-rest,
+  issue-1372 — 33/33.
