@@ -8,7 +8,7 @@
 
 import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir/types.js";
 import { coercionPlan } from "./coercion-plan.js";
-import { boxToAny, UNDEF_F64_BITS } from "./value-tags.js";
+import { boxToAny } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
@@ -1922,47 +1922,23 @@ export function coerceType(
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__box_number");
     if (funcIdx !== undefined) {
-      // (#3315) Undefined-sentinel-aware boxing. An f64 carrier can hold the
-      // UNDEF_F64_BITS signaling-NaN sentinel (value-tags.ts) — e.g. an
-      // `undefined` element inside an f64-lowered array literal
-      // (`[7, undefined, ]`), an OOB destructure read, or a missing optional
-      // arg. Boxing the raw bits through `__box_number` degrades that
-      // `undefined` to a plain NaN NUMBER — undefined identity is lost and
-      // `y === undefined` / `assert_sameValue(y, undefined)` read false (the
-      // #3315 corruption). The standalone any-box already recovers exactly
-      // this sentinel to the tag-1 undefined singleton (any-helpers.ts
-      // "$BoxedNumber carrying the UNDEF_F64 sentinel" arm); this wires the
-      // SAME observer into the generic box so both lanes agree. JS arithmetic
-      // only produces the quiet NaN 0x7FF8…, never this signaling pattern, so
-      // genuine computed NaNs still box as numbers.
-      const singletonUndef = undefinedExternInstrs(ctx);
-      const getUndefIdx =
-        singletonUndef !== undefined
-          ? undefined
-          : ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
-      const undefInstrs: Instr[] | undefined =
-        singletonUndef ?? (getUndefIdx !== undefined ? [{ op: "call", funcIdx: getUndefIdx }] : undefined);
-      if (undefInstrs !== undefined) {
-        flushLateImportShifts(ctx, fctx);
-        // Re-resolve the box target AFTER the potential late-import shift.
-        const boxIdx = ctx.funcMap.get("__box_number") ?? funcIdx;
-        const tmp = allocTempLocal(fctx, { kind: "f64" });
-        fctx.body.push({ op: "local.tee", index: tmp });
-        fctx.body.push({ op: "i64.reinterpret_f64" });
-        fctx.body.push({ op: "i64.const", value: UNDEF_F64_BITS });
-        fctx.body.push({ op: "i64.eq" });
-        fctx.body.push({
-          op: "if",
-          blockType: { kind: "val", type: { kind: "externref" } },
-          then: undefInstrs,
-          else: [
-            { op: "local.get", index: tmp },
-            { op: "call", funcIdx: boxIdx },
-          ],
-        });
-        releaseTempLocal(fctx, tmp);
-        return;
-      }
+      // (#3315) The generic f64→externref box does NOT resurrect the
+      // UNDEF_F64_BITS sentinel to `undefined`. An arbitrary f64 reaching this
+      // arm is a COMPUTED NUMBER — ToNumber(undefined) = NaN-the-number, and
+      // `Math.log2(undefined)` / `Math.abs(undefined)` etc. must box as a NaN
+      // number, not `undefined`. The original #3315 fix intercepted here on
+      // the premise "JS arithmetic only produces the quiet NaN 0x7FF8…, never
+      // this signaling pattern", but that premise fails for the self-hosted
+      // Math family: its `if (x !== x) return x` NaN fast-path (and the
+      // payload-preserving `f64.abs` bit-op) return the INPUT sentinel bits
+      // unchanged, so a genuine numeric NaN reached this arm carrying the
+      // sentinel and was wrongly boxed to `undefined` (the log2-basicTests
+      // assert #8 merge_group regression on the JS-host lane). Undefined
+      // IDENTITY is preserved at the dedicated identity-carrying-slot boxing
+      // sites instead — the destructure vec read-back (vec-access-exports.ts)
+      // and the standalone any-box tag-1 recovery (any-helpers.ts) — which box
+      // a value read from a slot that genuinely holds `undefined`, never a
+      // fresh arithmetic result.
       fctx.body.push({ op: "call", funcIdx });
       return;
     }

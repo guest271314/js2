@@ -208,3 +208,32 @@ family; needs its own slice through the typed-vec OOB read.
   flips re-measured after the fix — they should disappear from the flip set
   once the shim rework (#3104) and this fix are both in.
 - Scan for latent corpus instances per scope-guidance (2) — report count.
+
+## Regression fix — merge_group park on PR #3182 (2026-07-17)
+
+The first cut of this PR auto-parked on the `check for test262 regressions`
+gate (JS-host lane, merge_group): `Math/log2/log2-basicTests.js` assert #8
+(`Math.log2(undefined)` must be NaN) flipped `pass → fail`, boxing to
+`undefined` instead of a NaN number.
+
+Root cause: the fix's sentinel-aware boxing was added to the **generic**
+`f64 → externref` arm in `type-coercion.ts` on the premise "JS arithmetic
+only produces the quiet NaN `0x7FF8…`, never the signaling sentinel." That
+premise fails for the self-hosted Math family — its NaN fast-path
+(`if (x !== x) return x;` in `src/stdlib/math.ts`) and the payload-preserving
+`f64.abs` bit-op return the input `UNDEF_F64_BITS` bits unchanged. So a genuine
+numeric NaN (`ToNumber(undefined) = NaN`) reached the generic box carrying the
+sentinel and was wrongly resurrected to `undefined`. Confirmed scope: log2,
+abs, sin, cos, exp, log, log10, tanh, cbrt (self-hosted family); `Math.sqrt`,
+`Math.floor`, `Number(undefined)`, `+undefined`, `parseFloat` were already
+correct (canonicalizing ops / host). Not broader than the Math family.
+
+Fix: the generic `f64 → externref` arm no longer intercepts the sentinel — an
+arbitrary computed f64 is a NUMBER and boxes as one. Undefined **identity** is
+still preserved at the dedicated identity-carrying-slot boxing sites (the
+destructure vec read-back in `vec-access-exports.ts`, the `undefWidenedLocals`
+externref path, and the standalone any-box tag-1 recovery in
+`any-helpers.ts`). Verified: log2-basicTests passes, all 10 of
+`tests/issue-3315.test.ts` pass, `[7, undefined]` array-element identity
+preserved, whole Math family boxes to NaN-number, genuine computed NaNs stay
+numbers.
