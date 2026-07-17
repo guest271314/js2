@@ -2,22 +2,47 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-07-17 - Current `origin/main` PO audit (verified high-leverage gaps)
+
+Audit scope: current `origin/main` after fetch, existing `plan/issues`, sprint
+files, open PRs, TODO/FIXME markers, tests, CI scripts, backend contracts, and
+recent backend-architecture areas. Filed only non-duplicate, independently
+dispatchable gaps:
+
+- [#3336](../3336-linear-memory-plan-target-neutral-ownership.md) - planning:
+  make `LinearMemoryPlan` ownership target-neutral before dispatch. Highest
+  architecture value because the prose invariant already exists, but canonical
+  issue titles/sprints still route target-neutral planner work through the
+  Porffor backend wave.
+- [#3337](../3337-wasi-process-argv-args-get.md) - WASI `process.argv` must
+  lower through `args_get` instead of the invalid native-string path. Highest
+  correctness value because the real-world WASI suite currently carries an
+  `it.fails` invalid-binary sentinel and the previous owner explicitly deferred
+  this as a separate issue; #1532 is tests-only and cannot fix the runtime path.
+
+Investigated, no new issue filed: cross-backend parity as a required advisory
+gate is already owned by #2711; the linear-IR overlay ratchet and flag-on
+coverage are active in #2956 (PR #3200 has landed for the L2 aggregate/ref-cell
+slice, with later slices still tracked there), so a separate gate-hardening
+issue would duplicate current work.
+
 ## 2026-07-03 — `/harvest-errors` sweep (both lanes, fresh baselines)
 
 Default lane (`test262-current.jsonl`, run `20260703-092808`, gitHash
 `51622ba2`): 31,878/43,106 official pass (73.9%). Standalone lane
 (`test262-standalone-current.jsonl`, same-day run): 24,915/43,136 official
 pass (57.8%). Full harvest cross-referenced embedded `#NNNN` error citations
-+ sub-bucketed uncited "other" failures against `plan/issues/`. Filed
-`sprint: current`, `status: ready`:
 
-- [#3021](../3021-class-elements-static-private-field-placement-residual.md) — class elements: static/private field & method placement residual (~1,522 default-lane fails) — high, horizon L. Residual after #1047/#1144/#1226/#1348/#1364/#1365/#1591/#1643 each closed a narrower slice.
-- [#3022](../3022-defineproperty-descriptor-fidelity-tail-residual.md) — Object.defineProperty(ies) descriptor fidelity tail + non-object receiver arm (~728 default-lane fails) — high, horizon M. Tail after #1334/#1629 ("biggest single bucket" at the time).
-- [#3023](../3023-iterator-protocol-forof-abrupt-completion-residual.md) — iterator protocol: `.next` callability + for-of/for-await abrupt-completion residual (~508 default-lane fails) — high, horizon M. Coordinate with #2669 (shared `for-of/dstr` surface).
-- [#3024](../3024-invalid-wasm-default-lane-emitter-residual.md) — invalid Wasm binary emission residual, **default `gc` target** (~131 fails) — high, horizon M. Distinct from the several standalone-target invalid-Wasm issues (#2039/#2878/#2934).
-- [#3025](../3025-with-statement-closed-shape-residual.md) — `with` statement closed-object-literal-shape residual (~167 default-lane fails) — medium, horizon S. Tail after #1387.
-- [#3026](../3026-negative-test-fail-early-error-gaps-jul03.md) — residual `negative_test_fail` early-error/static-semantics gaps (~79 default-lane, 64 unenforced SyntaxErrors) — medium, horizon S. Same whack-a-mole pattern as #927/#1091/#1435/#1805/#1931/#2912/#2920.
-- [#3027](../3027-standalone-dynamic-object-property-reader-residual.md) — standalone: `$Object` dynamic-object-property reader residual — null/undefined reads on unmodeled shapes (~1,552 host-free fails) — high, horizon L, umbrella #2860. This is the umbrella's own promised "not-yet-issued follow-on" (`$Object` dynamic-object-property reader, previously estimated ~669), re-measured larger now that #2861/#2863 have landed.
+- sub-bucketed uncited "other" failures against `plan/issues/`. Filed
+  `sprint: current`, `status: ready`:
+
+* [#3021](../3021-class-elements-static-private-field-placement-residual.md) — class elements: static/private field & method placement residual (~1,522 default-lane fails) — high, horizon L. Residual after #1047/#1144/#1226/#1348/#1364/#1365/#1591/#1643 each closed a narrower slice.
+* [#3022](../3022-defineproperty-descriptor-fidelity-tail-residual.md) — Object.defineProperty(ies) descriptor fidelity tail + non-object receiver arm (~728 default-lane fails) — high, horizon M. Tail after #1334/#1629 ("biggest single bucket" at the time).
+* [#3023](../3023-iterator-protocol-forof-abrupt-completion-residual.md) — iterator protocol: `.next` callability + for-of/for-await abrupt-completion residual (~508 default-lane fails) — high, horizon M. Coordinate with #2669 (shared `for-of/dstr` surface).
+* [#3024](../3024-invalid-wasm-default-lane-emitter-residual.md) — invalid Wasm binary emission residual, **default `gc` target** (~131 fails) — high, horizon M. Distinct from the several standalone-target invalid-Wasm issues (#2039/#2878/#2934).
+* [#3025](../3025-with-statement-closed-shape-residual.md) — `with` statement closed-object-literal-shape residual (~167 default-lane fails) — medium, horizon S. Tail after #1387.
+* [#3026](../3026-negative-test-fail-early-error-gaps-jul03.md) — residual `negative_test_fail` early-error/static-semantics gaps (~79 default-lane, 64 unenforced SyntaxErrors) — medium, horizon S. Same whack-a-mole pattern as #927/#1091/#1435/#1805/#1931/#2912/#2920.
+* [#3027](../3027-standalone-dynamic-object-property-reader-residual.md) — standalone: `$Object` dynamic-object-property reader residual — null/undefined reads on unmodeled shapes (~1,552 host-free fails) — high, horizon L, umbrella #2860. This is the umbrella's own promised "not-yet-issued follow-on" (`$Object` dynamic-object-property reader, previously estimated ~669), re-measured larger now that #2861/#2863 have landed.
 
 Updated (not new): [#1524](../1524-test262-harness-resizable-buffer-ctors-fixture.md) — `ctors is not defined` harness-fixture scoping bug, confirmed firing in **both** lanes (259 default + 175 standalone = 434 combined); still `feasibility: easy`, still `backlog` — flagged as a strong promotion candidate (cheap, well-scoped, cross-lane win).
 
@@ -529,7 +554,7 @@ Object.defineProperty) under existing goals — no new crash cluster. Actions:
   the JS-host lane; residual after #2939/#2940 closed.
 - **#1906 residual note** (issue is `done`) — 79 standalone records still emit
   `Object.defineProperties unsupported descriptor shape in standalone mode
-  (#1906)` + ~180 `Property description must be an object`. Accessor/mixed
+(#1906)` + ~180 `Property description must be an object`. Accessor/mixed
   descriptor shapes still refused; incomplete-fix flag, follow-up optional.
 - **negative_test_fail** (55/lane, 40 = "early SyntaxError not detected"):
   covered by existing spec-gap early-error issues (#1315/#1435); no new issue.
