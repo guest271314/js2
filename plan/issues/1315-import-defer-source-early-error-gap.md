@@ -2,9 +2,10 @@
 id: 1315
 title: "import.defer / import.source missing early error detection — 157 negative tests false-pass"
 horizon: m
-status: ready
+status: done
+completed: 2026-07-17
 created: 2026-05-07
-updated: 2026-06-19
+updated: 2026-07-17
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -68,3 +69,39 @@ codegen or runtime behavior.
 ## Frontmatter reconcile (2026-06-12)
 
 Was `in-progress` with no open PR, no active agent, and no Suspended Work section (session died sprints 42-52). Reset to `ready` during the sprint-62 issue review; re-validate against current main before claiming (#2148).
+
+## Resolution — verified already implemented (2026-07-17)
+
+Re-validated against current `main` before implementing (per the #2148 note
+above). **Both acceptance criteria are already met** — the fix landed in prior
+work that referenced this issue, but the frontmatter was never flipped from
+`ready`. Evidence:
+
+- **Early-error / SyntaxError detection** lives in
+  `src/compiler/early-errors/node-checks.ts` — the `ts.isMetaProperty` check
+  (`import.defer` / `import.source` → `SyntaxError`) at ~L1285-1295 plus the
+  arg-count checks at ~L1613/1641. It walks the whole AST including unreferenced
+  bodies, so it fires on the dead-code negative-test shapes. The in-code comment
+  notes "The earlier call-only check (#1315) is subsumed by this."
+- **Debug-Failure crash guard**: `src/codegen/expressions/calls.ts:5494-5509`
+  emits a clean unsupported-feature `SyntaxError` for the meta-property callee,
+  and `src/codegen/expressions.ts:1275` skips the async-call
+  `getResolvedSignature` query that used to re-trigger the TS
+  `Debug Failure: Trying to get the type of import.defer` assertion.
+- **Regression test present and green**: `tests/issue-1315.test.ts` — 9 tests,
+  all passing (verified 2026-07-17), covering the no-crash path, dead-code
+  early-error detection, and non-regression of `import()` / `import.meta`.
+- **test262 negative corpus**: all **168** `invalid/` `import-defer` /
+  `import-source` syntax tests under
+  `language/expressions/dynamic-import/syntax/invalid/` are now correctly
+  rejected at compile time (0 false-passes, 0 `Debug Failure` crashes),
+  measured directly against current `main`. Acceptance criterion 1 (27 crashes
+  gone) and criterion 2 (157 negative false-passes flip) are satisfied.
+- The `valid/` proposal tests remain **skipped** by the runner —
+  `import-defer` and `source-phase-imports` are in the SKIP feature list
+  (`tests/test262-runner.ts:171-172`), because implementing the Stage 3
+  proposals themselves is explicitly out of scope here (tracked separately by
+  #1615 "source-phase-imports / import-defer proposal deferred").
+
+No code change required. This PR only flips `status: ready → done` and records
+the verification. Closing as **done**.
