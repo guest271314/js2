@@ -17,6 +17,22 @@ language_feature: promises
 goal: standalone-mode
 related: [2867, 2632, 1326]
 origin: "2026-07-02 July Fable audit §2 (no unhandled-rejection story on the native carrier)"
+# (#3102 LOC budget) The unhandled-rejection SUBSTRATE was extracted into its own
+# module `src/codegen/unhandled-rejection.ts` (the ensureUnhandledRejectionTracking
+# / buildNoteUnhandledRejection / ensureUnhandledRejectionReporter family, ~286
+# lines). That shrank async-scheduler.ts's growth from +359 to a residual ~+89 of
+# IRREDUCIBLE inline integration that must sit beside the machinery it patches:
+# the AsyncSchedulerState + AsyncDriveRuntime field additions, the
+# ensurePromiseSettleFunctions registration call, and the settle-body note +
+# Promise.reject-mint hooks. The other three overages are just the wiring calls
+# (wasi.ts top-level Promise/await import scan; index.ts _start reporter call;
+# async-frame.ts await mark-handled). A deeper reduction of the residual belongs
+# with the concurrent god-file bloat-reduction epic (#3182).
+loc-budget-allow:
+  - src/codegen/async-scheduler.ts
+  - src/codegen/wasi.ts
+  - src/codegen/index.ts
+  - src/codegen/async-frame.ts
 ---
 
 # #2958 — a rejected $Promise with no reactions vanishes silently

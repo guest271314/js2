@@ -115,12 +115,12 @@ import {
 import {
   enableStdinReactor,
   ensureTimerHeap,
-  ensureUnhandledRejectionReporter,
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { ensureUnhandledRejectionReporter } from "./unhandled-rejection.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
