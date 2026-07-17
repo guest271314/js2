@@ -16,6 +16,14 @@ goal: correctness
 parent: 2927
 related: [3343, 3308, 2937, 3024]
 depends_on: []
+# (#3364) `resolveWidenedVarKey` resolves a USE-site receiver identifier to its
+# variable DECLARATION (for the per-declaration widening key) via
+# `checker.getSymbolAtLocation` → `symbol.valueDeclaration`. This is raw
+# symbol/declaration IDENTITY, not a type query — `ctx.oracle` (which answers
+# type questions) cannot express it, and it mirrors the 296 existing
+# `getSymbolAtLocation` sites in codegen. Sanctioned oracle-ratchet allowance.
+oracle-ratchet-allow:
+  - src/codegen/widened-var-key.ts
 ---
 
 # #3364 — widened `{}` struct shape clobbered by a same-named variable elsewhere
