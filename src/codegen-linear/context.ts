@@ -3,6 +3,11 @@ import { ts } from "../ts-api.js";
 import type { Instr, LocalDef, ValType, WasmModule } from "../ir/types.js";
 import type { ClassLayout } from "./layout.js";
 
+export interface LinearStringLiteralData {
+  readonly offset: number;
+  readonly bytes: readonly number[];
+}
+
 /** Module-level context for linear-memory codegen */
 export interface LinearContext {
   mod: WasmModule;
@@ -17,8 +22,8 @@ export interface LinearContext {
   errors: { message: string; line: number; column: number }[];
   /** Class layouts for class declarations */
   classLayouts: Map<string, ClassLayout>;
-  /** String literal data segment: string value → data segment offset */
-  stringLiterals: Map<string, number>;
+  /** String literal data segment: string value → relocatable bytes + assigned artifact offset. */
+  stringLiterals: Map<string, LinearStringLiteralData>;
   /** Current data segment write offset */
   dataSegmentOffset: number;
   /** Counter for generating unique lambda function names */

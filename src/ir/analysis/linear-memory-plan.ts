@@ -241,16 +241,33 @@ export class LinearMemoryPlan {
   private readonly layoutsById: ReadonlyMap<string, LinearLayoutPlan>;
   private readonly allocationsById: ReadonlyMap<number, LinearAllocationSitePlan>;
   private readonly dataSegmentsById: ReadonlyMap<string, LinearDataSegmentPlan>;
+  private readonly globalsById: ReadonlyMap<string, LinearGlobalStoragePlan>;
 
   constructor(snapshot: LinearMemoryPlanSnapshot) {
-    this.policy = snapshot.policy;
-    this.layouts = Object.freeze([...snapshot.layouts]);
-    this.allocations = Object.freeze([...snapshot.allocations]);
-    this.dataSegments = Object.freeze([...snapshot.dataSegments]);
-    this.globals = Object.freeze([...snapshot.globals]);
-    this.layoutsById = new Map(this.layouts.map((layout) => [layout.id, layout]));
-    this.allocationsById = new Map(this.allocations.map((allocation) => [allocation.id as number, allocation]));
-    this.dataSegmentsById = new Map(this.dataSegments.map((segment) => [segment.id, segment]));
+    const frozen = freezePlanValue(snapshot);
+    this.policy = frozen.policy;
+    this.layouts = frozen.layouts;
+    this.allocations = frozen.allocations;
+    this.dataSegments = frozen.dataSegments;
+    this.globals = frozen.globals;
+    this.layoutsById = indexUnique(this.layouts, (layout) => layout.id, "layout");
+    this.allocationsById = indexUnique(this.allocations, (allocation) => allocation.id as number, "allocation site");
+    this.dataSegmentsById = indexUnique(this.dataSegments, (segment) => segment.id, "data segment");
+    this.globalsById = indexUnique(this.globals, (global) => global.id, "global storage");
+
+    for (const allocation of this.allocations) {
+      if (!this.layoutsById.has(allocation.layoutId)) {
+        throw new Error(
+          `linear-memory allocation site ${allocation.id as number} references missing layout '${allocation.layoutId}'`,
+        );
+      }
+      if (allocation.dataSegmentId !== undefined && !this.dataSegmentsById.has(allocation.dataSegmentId)) {
+        throw new Error(
+          `linear-memory allocation site ${allocation.id as number} references missing data segment '${allocation.dataSegmentId}'`,
+        );
+      }
+    }
+    Object.freeze(this);
   }
 
   layout(id: string): LinearLayoutPlan | undefined {
@@ -269,6 +286,16 @@ export class LinearMemoryPlan {
 
   dataSegment(id: string): LinearDataSegmentPlan | undefined {
     return this.dataSegmentsById.get(id);
+  }
+
+  requireDataSegment(id: string): LinearDataSegmentPlan {
+    const segment = this.dataSegment(id);
+    if (!segment) throw new Error(`linear-memory plan has no data segment '${id}'`);
+    return segment;
+  }
+
+  global(id: string): LinearGlobalStoragePlan | undefined {
+    return this.globalsById.get(id);
   }
 
   layoutForObjectShape(shape: IrObjectShape): LinearRecordLayoutPlan | undefined {
@@ -291,14 +318,35 @@ export class LinearMemoryPlan {
   }
 
   toJSON(): LinearMemoryPlanSnapshot {
-    return {
+    return Object.freeze({
       policy: this.policy,
       layouts: this.layouts,
       allocations: this.allocations,
       dataSegments: this.dataSegments,
       globals: this.globals,
-    };
+    });
   }
+}
+
+/** Clone + freeze the plan's deliberately plain, serializable value graph. */
+function freezePlanValue<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => freezePlanValue(item))) as T;
+  }
+  const clone: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) clone[key] = freezePlanValue(item);
+  return Object.freeze(clone) as T;
+}
+
+function indexUnique<T, K>(values: readonly T[], keyOf: (value: T) => K, label: string): ReadonlyMap<K, T> {
+  const indexed = new Map<K, T>();
+  for (const value of values) {
+    const key = keyOf(value);
+    if (indexed.has(key)) throw new Error(`linear-memory plan has duplicate ${label} '${String(key)}'`);
+    indexed.set(key, value);
+  }
+  return indexed;
 }
 
 interface OwnershipMetadata {

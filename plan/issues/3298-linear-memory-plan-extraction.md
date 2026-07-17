@@ -19,9 +19,10 @@ depends_on: [3297, 2956]
 related: [3288, 2953, 2956, 3029, 747]
 origin: "#3288 P3 split: independently dispatchable shared linear-memory planning layer"
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-17T13:18:45.605Z
-branch: symphony/porffor/3298
-pr: 3245
+claimed_at: 2026-07-17T14:34:24.198Z
+branch: symphony/porffor/3298-after-pr-3245
+pr: 3257
+last_merged_pr: 3245
 ---
 
 # #3298 - Porffor backend P3: extract the shared target-neutral LinearMemoryPlan
@@ -116,3 +117,41 @@ Validation completed:
 - `npm run check:loc-budget`
 - `npm run check:ir-fallbacks`
 - `npm run check:linear-ir`
+
+## Continuation hardening (2026-07-17)
+
+The post-#3245 audit found that string data-segment requirements were present
+in `LinearMemoryPlan`, but the linear-Wasm adapter independently re-encoded the
+source string when assembling its data segment. This follow-up makes the plan
+authoritative for those bytes while retaining adapter-owned placement/order:
+
+- `LinearMemoryPlan` now clones and deeply freezes its serializable value graph,
+  rejects duplicate layout/allocation/data/global identities, and validates
+  allocation references to canonical layouts and data segments. Optional
+  consumers therefore cannot mutate or silently shadow middle-end decisions.
+- Linear-Wasm stores the planned relocatable bytes beside each assigned literal
+  offset and emits those stored bytes during final module assembly. Direct-AST
+  literals use the same registry, including conflict detection when both paths
+  encounter the same value.
+- The focused suite now covers immutable/canonical snapshots, invalid
+  cross-references, exact UTF-8 plan bytes, and execution of the resulting
+  Unicode literal through linear-Wasm.
+
+Continuation validation completed:
+
+- `npx vitest run tests/issue-3298.test.ts` (5 tests passed)
+- focused planner/provenance/backend regression set (9 files, 75 tests passed)
+- full linear CI slice (20 files, 204 tests passed)
+- cross-backend differential (29 tests passed)
+- `npx tsx scripts/prove-emit-identity.mjs check --baseline .tmp/emit-identity-3298.json`
+  (all 56 file/target outcomes identical to the pre-change baseline)
+- `npm run build`
+- `npm run typecheck -- --pretty false`
+- `npm run lint`
+- `npm run format:check`
+- `npm run check:pushraw`
+- `npm run check:loc-budget`
+- `npm run check:ir-fallbacks`
+- `npm run check:linear-ir`
+- `npm run check:dead-exports`
+- `npm run check:issues`
