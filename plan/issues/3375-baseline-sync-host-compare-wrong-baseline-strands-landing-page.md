@@ -1,7 +1,7 @@
 ---
 id: 3375
 title: "baseline-summary-sync host drift-check compares the wrong baseline → landing page silently strands stale/inflated test262 number"
-status: in-progress
+status: done
 sprint: current
 created: 2026-07-17
 priority: high
