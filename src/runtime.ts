@@ -3400,49 +3400,6 @@ let _symbolCache: Map<number, symbol> | undefined;
 const _symbolDescRegistry: Map<number, string | null> = new Map();
 const _asyncDisposeSym: symbol = (Symbol as any).asyncDispose ?? Symbol.for("Symbol.asyncDispose");
 
-// (#2728) Resolve an i32 symbol id to its identity-stable JS Symbol, reusing the
-// per-instance id→Symbol cache + description registry (#1933: was a module-level
-// map that clobbered concurrent instances; falls back to a fresh local map when
-// no instanceState is threaded). Seeds the well-known symbols (ids 1–14) on
-// first use. Shared by the `__box_symbol` host import and the `__new_Symbol`
-// Symbol-wrapper factory so both preserve the SAME symbol identity/description.
-function _resolveSymbolFromId(id: number, instanceState?: InstanceState): symbol {
-  const symbolCache =
-    instanceState?.symbolCache ??
-    (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
-  if (symbolCache.size === 0) {
-    symbolCache.set(1, Symbol.iterator);
-    symbolCache.set(2, Symbol.hasInstance);
-    symbolCache.set(3, Symbol.toPrimitive);
-    symbolCache.set(4, Symbol.toStringTag);
-    symbolCache.set(5, Symbol.species);
-    symbolCache.set(6, Symbol.isConcatSpreadable);
-    symbolCache.set(7, Symbol.match);
-    symbolCache.set(8, Symbol.replace);
-    symbolCache.set(9, Symbol.search);
-    symbolCache.set(10, Symbol.split);
-    symbolCache.set(11, Symbol.unscopables);
-    symbolCache.set(12, Symbol.asyncIterator);
-    symbolCache.set(13, _disposeSym);
-    symbolCache.set(14, _asyncDisposeSym);
-  }
-  const symbolDescRegistry =
-    instanceState?.symbolDescRegistry ??
-    (instanceState
-      ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
-      : new Map<number, string | null>());
-  let sym = symbolCache.get(id);
-  if (sym === undefined) {
-    const reg = symbolDescRegistry.get(id);
-    // reg === undefined → caller never registered (use legacy wasm_<id>)
-    // reg === null     → Symbol() with no description → undefined
-    // reg is a string  → user-supplied description
-    sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
-    symbolCache.set(id, sym);
-  }
-  return sym;
-}
-
 /** Escape a literal string so it matches itself when used as a RegExp source. */
 function _escapeRegExpLiteral(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -9162,9 +9119,45 @@ assert._isSameValue = isSameValue;
       // `''` (empty string) marks "Symbol() called with no arg" so
       // `.description === undefined` works distinctly from "uninitialized".
       if (name === "__box_symbol") {
-        // #1933 — per-instance symbol cache via `_resolveSymbolFromId` (was a
-        // module-level `_symbolCache` that clobbered concurrent instances).
-        return (id: number) => _resolveSymbolFromId(id, instanceState);
+        // #1933 — per-instance symbol cache (was module-level `_symbolCache`,
+        // reset per buildImports → clobbered concurrent instances). Falls back
+        // to a local map when no instanceState is threaded (legacy callers).
+        const symbolCache =
+          instanceState?.symbolCache ??
+          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
+        if (symbolCache.size === 0) {
+          symbolCache.set(1, Symbol.iterator);
+          symbolCache.set(2, Symbol.hasInstance);
+          symbolCache.set(3, Symbol.toPrimitive);
+          symbolCache.set(4, Symbol.toStringTag);
+          symbolCache.set(5, Symbol.species);
+          symbolCache.set(6, Symbol.isConcatSpreadable);
+          symbolCache.set(7, Symbol.match);
+          symbolCache.set(8, Symbol.replace);
+          symbolCache.set(9, Symbol.search);
+          symbolCache.set(10, Symbol.split);
+          symbolCache.set(11, Symbol.unscopables);
+          symbolCache.set(12, Symbol.asyncIterator);
+          symbolCache.set(13, _disposeSym);
+          symbolCache.set(14, _asyncDisposeSym);
+        }
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
+        return (id: number) => {
+          let sym = symbolCache.get(id);
+          if (sym === undefined) {
+            const reg = symbolDescRegistry.get(id);
+            // reg === undefined → caller never registered (use legacy wasm_<id>)
+            // reg === null     → Symbol() with no description → undefined
+            // reg is a string  → user-supplied description
+            sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
+            symbolCache.set(id, sym);
+          }
+          return sym;
+        };
       }
       // (#1467) Register a description for the symbol at `id` so subsequent
       // `__box_symbol(id)` calls produce Symbol(desc) preserving Description.
@@ -11548,7 +11541,39 @@ assert._isSameValue = isSameValue;
       // symbol preserves identity/description) then `Object()` it into a wrapper
       // object. `Symbol.prototype.description` already unwraps such wrappers.
       if (name === "__new_Symbol") {
-        return (id: number): any => Object(_resolveSymbolFromId(id, instanceState));
+        const symbolCache =
+          instanceState?.symbolCache ??
+          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
+        if (symbolCache.size === 0) {
+          symbolCache.set(1, Symbol.iterator);
+          symbolCache.set(2, Symbol.hasInstance);
+          symbolCache.set(3, Symbol.toPrimitive);
+          symbolCache.set(4, Symbol.toStringTag);
+          symbolCache.set(5, Symbol.species);
+          symbolCache.set(6, Symbol.isConcatSpreadable);
+          symbolCache.set(7, Symbol.match);
+          symbolCache.set(8, Symbol.replace);
+          symbolCache.set(9, Symbol.search);
+          symbolCache.set(10, Symbol.split);
+          symbolCache.set(11, Symbol.unscopables);
+          symbolCache.set(12, Symbol.asyncIterator);
+          symbolCache.set(13, _disposeSym);
+          symbolCache.set(14, _asyncDisposeSym);
+        }
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
+        return (id: number): any => {
+          let sym = symbolCache.get(id);
+          if (sym === undefined) {
+            const reg = symbolDescRegistry.get(id);
+            sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
+            symbolCache.set(id, sym);
+          }
+          return Object(sym);
+        };
       }
       if (name === "__new_AggregateError")
         return (errors: any, message: any, options: any): any => {
