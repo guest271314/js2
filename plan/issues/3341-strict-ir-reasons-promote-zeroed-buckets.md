@@ -1,12 +1,12 @@
 ---
 id: 3341
-title: "Promote zeroed IR fallback reasons into STRICT_IR_REASONS (#2855's own AC — cheapest unstarted hardening step)"
+title: "STRICT_IR_REASONS hardening — per-reason (NOT a corpus-zero flip); doc-correction shipped, real per-reason work remains"
 status: ready
 sprint: current
 created: 2026-07-17
-priority: high
-feasibility: medium
-horizon: s
+priority: medium
+feasibility: hard
+horizon: m
 task_type: feature
 area: codegen
 language_feature: compiler-internals
@@ -15,7 +15,47 @@ related: [2855, 2856, 2857, 2858, 2859, 2950]
 origin: "carved out of #2855's umbrella scope per the 2026-07-17 IR audit (plan/log/analysis-2026-07/01-ir-audit-2026-07-17.md §2) — the promotion half of #2855's AC has not started even though the underlying buckets are already zero"
 ---
 
-# #3341 — promote zeroed IR fallback reasons into `STRICT_IR_REASONS`
+# #3341 — STRICT_IR_REASONS hardening (per-reason)
+
+> **RE-SCOPED 2026-07-17 (opus-c, confirmed by tech lead).** The original
+> premise — "the buckets are already zero, so promoting the reasons into
+> `STRICT_IR_REASONS` is the cheapest unstarted hardening step" — is **UNSAFE**
+> and has been corrected. Bucket-zero in `scripts/ir-fallback-baseline.json` is
+> measured against the **13-file playground corpus only**; corpus-zero does
+> **not** mean the reason is unreachable on real code. `external-call`,
+> `call-graph-closure`, `param/return-type-not-resolvable`,
+> `type-resolution-failure`, `class-method`, and the destructuring-param buckets
+> all describe **legitimate IR-non-claimability** (an external dependency, an
+> unclaimable callee, an unresolvable type, a computed/generator/abstract method
+> name) that the legacy path must still catch. Adding any of them to
+> `STRICT_IR_REASONS` would turn those legitimate fallbacks into **hard compile
+> errors** and regress real programs — an unvalidatable-locally, broad-blast
+> change. `ir-adoption.md`'s `class-method` row already documented exactly this
+> ("corpus bucket 0 … NOT yet strict"); the same logic applies to every other
+> corpus-zero reason.
+>
+> **What shipped (the doc-correction portion, DONE):**
+>
+> - Fixed the stale `src/codegen/index.ts:889–896` citations (actual demote
+>   sites are `~1889` for a selector-claimed unresolvable-types fallback and
+>   `~2390` for an IR-build throw) in `scripts/gen-ir-adoption.mjs` (→ regenerated
+>   `plan/log/ir-adoption.md`) and `docs/architecture/codegen-axes.md`.
+> - Added a code-comment at `STRICT_IR_REASONS` (`src/codegen/index.ts`)
+>   explaining the necessary-but-not-sufficient condition, so no future dev
+>   naively flips a corpus-zero reason and reddens the build.
+> - Documented the per-reason (not corpus-flip) promotion rule in
+>   `codegen-axes.md`'s escape-hatch section.
+>
+> **What remains OPEN (this issue stays `ready`):** the _actual_ per-reason
+> hardening — pick ONE reason, do the real #2855-family IR-adoption work to make
+> that construct genuinely unreachable in the IR (IR always claims+lowers it, so
+> a rejection IS a bug), THEN add it to `STRICT_IR_REASONS` and validate on full
+> CI. That is `feasibility: hard`, not a doc flip. The stale `lower.ts`
+> "not yet moved" claim in `codegen-axes.md` (aggregate/closure/ref-coercion
+> groups) was NOT touched here — it needs a `lower.ts` audit to confirm before
+> editing; folded into the remaining work.
+
+## Original problem (premise now corrected — see re-scope note above)
 
 ## Problem
 
