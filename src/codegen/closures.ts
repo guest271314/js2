@@ -1102,14 +1102,17 @@ export function emitArrowParamDefaults(
   arrow: ts.ArrowFunction | ts.FunctionExpression,
   paramOffset: number, // offset in liftedFctx.params (usually 1 for __self)
 ): void {
+  // (#3359) Iterate the this-param-stripped list so index `i` stays aligned with
+  // `fctx.params[paramOffset + i]` (which was built without the TS `this` param).
+  const params = runtimeParameters(arrow);
   // TDZ enforcement (#413): set up TDZ flags for parameters with defaults
-  const hasDefaults = arrow.parameters.some((p) => !!p.initializer);
+  const hasDefaults = params.some((p) => !!p.initializer);
   let tdzFlags: number[] | undefined;
   if (hasDefaults) {
     if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
     tdzFlags = [];
-    for (let i = 0; i < arrow.parameters.length; i++) {
-      const param = arrow.parameters[i]!;
+    for (let i = 0; i < params.length; i++) {
+      const param = params[i]!;
       const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${i}`;
       const flagIdx = allocLocal(fctx, `__tdz_param_${paramName}`, { kind: "i32" });
       tdzFlags.push(flagIdx);
@@ -1118,15 +1121,15 @@ export function emitArrowParamDefaults(
   }
   const defaultArgcLocal =
     hasDefaults &&
-    arrow.parameters.some((param, i) => {
+    params.some((param, i) => {
       if (!param.initializer) return false;
       return paramDefaultNeedsArgc(fctx.params[paramOffset + i]?.type);
     })
       ? cacheParamDefaultArgc(ctx, fctx)
       : undefined;
 
-  for (let i = 0; i < arrow.parameters.length; i++) {
-    const param = arrow.parameters[i]!;
+  for (let i = 0; i < params.length; i++) {
+    const param = params[i]!;
     if (!param.initializer) {
       if (tdzFlags) {
         fctx.body.push({ op: "i32.const", value: 1 });
@@ -1207,8 +1210,8 @@ export function emitArrowParamDefaults(
 
   // Clean up param TDZ flags
   if (tdzFlags) {
-    for (let i = 0; i < arrow.parameters.length; i++) {
-      const param = arrow.parameters[i]!;
+    for (let i = 0; i < params.length; i++) {
+      const param = params[i]!;
       const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${i}`;
       fctx.tdzFlagLocals?.delete(paramName);
     }
@@ -1412,6 +1415,27 @@ export function closureProvablyAfterLetDecl(
 }
 
 /**
+ * (#3359) A TypeScript `this` parameter (`function (this: T, …)`) is a
+ * TYPE-LEVEL-only annotation (TS §this-parameters) and must NOT become a
+ * runtime Wasm parameter — it is always the FIRST parameter, named `this`.
+ * Codegen that iterates `node.parameters` to build the closure's runtime
+ * signature / body param-locals must skip it, otherwise a real user param
+ * shifts one slot right and the call site (which supplies the spec `thisArg`
+ * via the `__current_this` global, not a positional arg) misaligns —
+ * `Array.prototype.filter(function (this, x) {…}, thisArg)` read the element
+ * into the `this` slot and dropped `thisArg`. A closure WITHOUT a this-param
+ * (all JS, incl. every test262 input) returns the original array — byte-identical.
+ */
+export function runtimeParameters(arrow: ts.ArrowFunction | ts.FunctionExpression): readonly ts.ParameterDeclaration[] {
+  const ps = arrow.parameters;
+  const first = ps.length > 0 ? ps[0]! : undefined;
+  if (first && ts.isIdentifier(first.name) && first.name.escapedText === "this") {
+    return ps.slice(1);
+  }
+  return ps;
+}
+
+/**
  * (#2939) Compute the funcref-wrapper signature (user param ValTypes + return
  * ValType) of an arrow / function-expression closure, WITHOUT emitting anything.
  *
@@ -1436,9 +1460,9 @@ export function computeClosureWrapperSig(
 ): { params: ValType[]; returnType: ValType | null } {
   const isGenerator = ts.isFunctionExpression(arrow) && arrow.asteriskToken !== undefined;
 
-  // 1. Parameter types.
+  // 1. Parameter types. (#3359) A TS `this` param is type-level only — exclude it.
   const arrowParams: ValType[] = [];
-  for (const p of arrow.parameters) {
+  for (const p of runtimeParameters(arrow)) {
     const paramType = ctx.checker.getTypeAtLocation(p);
     let wasmType = resolveWasmType(ctx, paramType);
     if (p.initializer && wasmType.kind === "ref") {
@@ -1910,7 +1934,8 @@ export function compileArrowAsClosure(
     name: closureName,
     params: [
       { name: "__self", type: { kind: selfParamKind, typeIdx: selfTypeIdx } },
-      ...arrow.parameters.map((p, i) => ({
+      // (#3359) Skip a TS `this` param — type-level only, never a runtime arg.
+      ...runtimeParameters(arrow).map((p, i) => ({
         name: ts.isIdentifier(p.name) ? p.name.text : `__param${i}`,
         type: arrowParams[i] ?? { kind: "f64" as const },
       })),
@@ -2316,7 +2341,7 @@ export function compileArrowAsClosure(
     // Receiver/args spilling is #3032 W2.
     const genLazyEligible =
       !isAsync &&
-      arrow.parameters.length === 0 &&
+      runtimeParameters(arrow).length === 0 && // (#3359) a TS `this` param is not a runtime arg
       !(ts.isBlock(body) && closureBodyUsesArguments(body)) &&
       !genBodyReferencesThis(body);
     // (#3164) Defensive: in a no-JS-host target the eager-buffer path needs the
@@ -2615,7 +2640,9 @@ export function compileArrowAsCallback(
   const cbParams: ValType[] = [{ kind: "externref" }]; // captures param [0]
   // When needsThis=true, inject 'this' as param [1] (externref receiver)
   if (needsThis) cbParams.push({ kind: "externref" });
-  for (const p of arrow.parameters) {
+  // (#3359) A TS `this` param is type-level only — never a runtime callback arg.
+  const cbArrowParams = runtimeParameters(arrow);
+  for (const p of cbArrowParams) {
     const paramType = ctx.checker.getTypeAtLocation(p);
     const resolved = resolveWasmType(ctx, paramType);
     cbResolvedParams.push(resolved);
@@ -2662,8 +2689,8 @@ export function compileArrowAsCallback(
   if (needsThis) {
     cbFctxParams.push({ name: "__this", type: { kind: "externref" } });
   }
-  for (let i = 0; i < arrow.parameters.length; i++) {
-    const p = arrow.parameters[i]!;
+  for (let i = 0; i < cbArrowParams.length; i++) {
+    const p = cbArrowParams[i]!;
     cbFctxParams.push({
       name: ts.isIdentifier(p.name) ? p.name.text : `__param${i}`,
       type: cbParams[arrowParamOffset + i] ?? { kind: "f64" as const },
@@ -2789,9 +2816,10 @@ export function compileArrowAsCallback(
   // Emit default-value initialization for simple params with defaults
   emitArrowParamDefaults(ctx, cbFctx, arrow, arrowParamOffset /* skip __captures [and __this] */);
 
-  // Emit destructuring code for binding pattern parameters
-  for (let i = 0; i < arrow.parameters.length; i++) {
-    const param = arrow.parameters[i]!;
+  // Emit destructuring code for binding pattern parameters (#3359: over the
+  // this-param-stripped list, aligned with cbResolvedParams / cbFctxParams).
+  for (let i = 0; i < cbArrowParams.length; i++) {
+    const param = cbArrowParams[i]!;
     if (ts.isObjectBindingPattern(param.name) || ts.isArrayBindingPattern(param.name)) {
       const resolved = cbResolvedParams[i] ?? { kind: "f64" as const };
       const paramName = cbFctx.params[arrowParamOffset + i]?.name ?? `__param${i}`;
