@@ -1,9 +1,11 @@
 ---
 id: 2935
 title: "Standalone: __str_flatten null-deref on new String(...).split/replace(RegExp) — String-wrapper receiver not unwrapped before flatten"
-status: ready
+status: done
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-17
+completed: 2026-07-17
+assignee: ttraenkler/opus-3
 priority: medium
 horizon: m
 feasibility: medium
@@ -15,6 +17,30 @@ related: [2878, 2860]
 umbrella: 2860
 origin: "2026-07-02 spun out of #2878 Class B triage (dev-callback). origin/main current."
 ---
+
+## Verification — already fixed on main (2026-07-17, opus-3)
+
+Re-verified against current `origin/main` (079c585fa6): the `__str_flatten`
+null-deref on a String-**wrapper** receiver (`new String(...)` or a var typed
+`String`) calling `.split(RegExp)` / `.replace(RegExp, …)` under
+`--target standalone` **no longer reproduces** — the wrapper receiver runs
+host-free and its results match the primitive receiver. The intervening
+borrowed-receiver `RequireObjectCoercible` + `ToString` unwrap work
+(**PR #3254**, `d44d0d6c34`; cf. the #2934 receiver-ToString normalise) now
+recovers the primitive `$AnyString` from the wrapper's `[[StringData]]` before
+the native flatten helper, so the receiver-shape-specific null-deref is gone.
+
+Probed on main (all correct, no trap):
+- `new String("abc").split(/[a-z]/).length` → **4** (matches `"abc".split(...)`)
+- `new String("aXbXc").split(/X/).length` → **3**
+- `new String("abc").replace(/[a-z]/, "X")` → `"Xbc"` (`.length` 3, `charCodeAt(0)` 88)
+- `new String("abcabc").replace(/b/g, "X").length` → **6** (global flag honored)
+- `const s: String = new String("a1b2c3"); s.split(/[0-9]/).length` → **4**
+
+Locked with a regression test (`tests/issue-2935.test.ts`, 5 cases,
+standalone host-free). This PR is test + doc only — **byte-inert** to the
+compiler (no `src/` change).
+
 
 # #2935 — `__str_flatten` null-deref on String-wrapper `.split`/`.replace(RegExp)`
 
