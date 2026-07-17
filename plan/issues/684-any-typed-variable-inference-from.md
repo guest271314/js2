@@ -12,6 +12,14 @@ feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
 sprint: current
+# (#684) Intended god-file growth: a new context field + option and the
+# wiring at the three local-slot minting sites. The analysis itself lives in
+# the new module src/checker/usage-inference.ts (not a god file).
+loc-budget-allow:
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/codegen/statements/variables.ts
+  - src/compiler.ts
 files:
   src/codegen/expressions.ts:
     breaking:
