@@ -1,5 +1,5 @@
 ---
-id: 3378
+id: 3384
 title: "standalone/wasi: member access on a wrapped JSON.parse() call crashes codegen"
 status: done
 completed: 2026-07-17
@@ -18,7 +18,7 @@ related: [2961]
 origin: "2026-07-17 found while sweeping #2961 enumeration: JSON.parse('{...}') member-access under --target standalone hard-crashes codegen."
 ---
 
-# #3378 — member access on a wrapped `JSON.parse()` call crashes codegen (standalone/wasi)
+# #3384 — member access on a wrapped `JSON.parse()` call crashes codegen (standalone/wasi)
 
 ## Problem
 
