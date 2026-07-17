@@ -10,6 +10,8 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2984]
 origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
+loc-budget-allow:
+  - src/codegen/expressions/call-builtin-static.ts
 ---
 
 # #3150 — standalone Uint8Array base64/hex codec statics
