@@ -4,8 +4,8 @@ title: "E0 — in-Wasm AST consumer probe: walk compiled-acorn's AST inside Wasm
 status: ready
 created: 2026-07-16
 priority: high
-horizon: s
-feasibility: medium
+horizon: m
+feasibility: hard
 reasoning_effort: high
 task_type: test
 area: runtime, dogfood
@@ -13,8 +13,18 @@ language_feature: eval
 goal: runtime-eval
 sprint: current
 parent: 2927
-related: [2928, 1584, 1710, 1712, 2841, 2851, 2852, 2847]
+depends_on: [3348]
+related: [2928, 1584, 1710, 1712, 2841, 2851, 2852, 2847, 3348]
 ---
+
+> **BLOCKED / re-scoped 2026-07-17 (opus-4).** Attempted E0. The in-Wasm
+> AST-consumer measurement cannot proceed because **compiled-acorn's own
+> `parse()` currently throws in-Wasm** ("parse is not a function" dynamic
+> method-dispatch failure) on current main — even the acorn-alone control via
+> `wrapExports` fails, a regression since the 2026-06-30 corpus baseline. Filed
+> as **#3348** (feasibility:hard, priority:high). This issue was mis-sized `S`;
+> re-tagged `feasibility:hard`, `horizon:m`, and `depends_on: [3348]` — it needs
+> a walkable compiled-acorn AST first. See #3348 for the full repro.
 
 # #3308 — E0: in-Wasm AST consumer probe
 
