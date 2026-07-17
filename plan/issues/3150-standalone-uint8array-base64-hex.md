@@ -14,6 +14,7 @@ origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
 loc-budget-allow:
   - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/uint8-codec.ts
+  - src/codegen/expressions/call-receiver-method.ts
 ---
 
 # #3150 — standalone Uint8Array base64/hex codec statics
