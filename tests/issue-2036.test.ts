@@ -273,13 +273,14 @@ describe("#2036 S6 — borrowed search/result-building methods run natively in s
     ).toBe(2);
   });
 
-  // (#3326/#3359) `filter`'s `thisArg` is NOT threaded into the callback's `this`
-  // under standalone — the predicate reads `this.t` as undefined and the result
-  // is empty (returns 0, not 1). Confirmed on a real array receiver too, so it is
-  // a general native filter-thisArg threading gap, not an $Object-only issue.
-  // Tracked in #3359; skipped here until that lands (leaving a genuinely-broken
-  // case as-is per the #3326 scope, rather than asserting the wrong behavior).
-  it.skip("filter threads thisArg standalone (#3359 — thisArg not threaded)", async () => {
+  // (#3326/#3359) The DIRECT array-receiver form (`a.filter(cb, thisArg)`) is
+  // FIXED for all callback methods on both lanes (root cause: a TS `this` param
+  // was emitted as a real runtime param, shifting user params — see
+  // `runtimeParameters` in closures.ts and tests/issue-3359.test.ts). The
+  // BORROWED array-like form below (`Array.prototype.filter.call(o, cb, thisArg)`)
+  // still binds `this` to the receiver instead of `thisArg` — a SEPARATE residual
+  // in the array-like borrow dispatch, kept skipped and tracked in #3359.
+  it.skip("filter threads thisArg standalone — array-like .call form (#3359 residual)", async () => {
     expect(
       await runStandalone(
         `export function test(): number {
