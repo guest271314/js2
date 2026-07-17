@@ -22,6 +22,11 @@ claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T16:08:01.435Z
 branch: symphony/porffor/3299
 pr: 3263
+loc-budget-allow:
+  - src/ir/builder.ts
+  - src/ir/lower.ts
+  - src/ir/nodes.ts
+last_ci_retry_head: bf951fe7ddbd208830096214c84584130ae8acce
 ---
 
 # #3299 - Porffor backend P4: heap and layout proof through shared planning
