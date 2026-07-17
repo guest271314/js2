@@ -2695,7 +2695,13 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
   const recvVal = asVal(recvType);
-  if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null")) {
+  // (#2956 L2) Linear vec receivers are scalar i32 arena pointers, not GC
+  // refs — admit them via the same resolver probe the read paths use
+  // (`scalarVecReceiver` at the `.length` / element-access arms). The
+  // WasmGC lane is unaffected: its vec receivers always lower as refs.
+  const scalarVecStoreReceiver =
+    recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(lhs.expression) === true;
+  if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null" && !scalarVecStoreReceiver)) {
     throw new Error(`ir/from-ast: element store on ${describeIrType(recvType)} not in IR scope (${cx.funcName})`);
   }
   const vec = cx.resolver?.resolveVec?.(recvVal);
@@ -3709,7 +3715,14 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // externref element vecs only (mirrors `lowerElementStore`).
   {
     const vecRecvVal = asVal(recvType);
-    if (methodName === "push" && vecRecvVal && vecRecvVal.kind === "ref") {
+    // (#2956 L2) Linear vec receivers are scalar i32 arena pointers — admit
+    // them alongside the non-null GC ref (same probe as the read arms; the
+    // linear runtime's __arr_set target resolves #1977 forwarding itself).
+    const scalarVecPushReceiver =
+      vecRecvVal?.kind === "i32" &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true;
+    if (methodName === "push" && vecRecvVal && (vecRecvVal.kind === "ref" || scalarVecPushReceiver)) {
       const vec = cx.resolver?.resolveVec?.(vecRecvVal);
       if (vec) {
         if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
