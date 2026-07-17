@@ -36,7 +36,11 @@ import { emitSymbolDescLoad } from "./symbol-native.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { rollbackSpeculative, snapshotSpeculative } from "./context/speculative.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
-import { classMethodCandidatesForProp, reserveMemberGetDispatch } from "./member-get-dispatch.js";
+import {
+  classAccessorCandidatesForProp,
+  classMethodCandidatesForProp,
+  reserveMemberGetDispatch,
+} from "./member-get-dispatch.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
@@ -3569,12 +3573,16 @@ export function finalizeStructAndDynamicMemberGet(
         // `propName` exists, route through the `__get_member_<name>` dispatcher:
         // its terminal is the same `__extern_get` (own/sidecar props keep
         // shadowing) plus miss-gated method arms answering the canonical
-        // method-value singleton — the SAME cache global the typed
-        // `C.prototype.m` read uses — so a dynamic `any`-receiver method read
-        // resolves to an identical, `===`-stable value instead of `undefined`
-        // (the ~87-file `assert.sameValue(c.m, C.prototype.m)` class-elements
-        // cluster). Modules with no class-method of this name are byte-identical.
-        if (classMethodCandidatesForProp(ctx, propName).length > 0) {
+        // method-value singleton, so a dynamic `any`-receiver method read
+        // resolves to a `===`-stable value instead of `undefined`.
+        // (#3041) Also route when a class GET-ACCESSOR of this name exists —
+        // else a getter via an `any` receiver fell to `__extern_get` → NaN; the
+        // dispatcher's #3041 accessor arms `ref.cast`+`call` it. No such
+        // method/getter of this name → byte-identical.
+        if (
+          classMethodCandidatesForProp(ctx, propName).length > 0 ||
+          classAccessorCandidatesForProp(ctx, propName).length > 0
+        ) {
           const getMemberIdx = reserveMemberGetDispatch(ctx, propName, fctx);
           if (getMemberIdx !== undefined) {
             fctx.body.push({ op: "local.get", index: objTmp });
