@@ -3,6 +3,8 @@
 import type { ModuleLayout } from "../../../emit/resolve-layout.js";
 import {
   LINEAR_STACK_ARENA_BYTES,
+  type LinearAllocationClass,
+  type LinearAllocationSitePlan,
   type LinearMemoryPlan,
   type LinearRuntimeOperation,
   type LinearStorageKind,
@@ -122,9 +124,44 @@ export class PorfforModuleAssembler
     this.assertMutable("bind memory plan");
     if (this.memoryPlan) throw new Error("porffor assembler: memory plan already bound");
     this.memoryPlan = plan;
-    if (plan.allocations.some((allocation) => allocation.allocationClass === "stack")) {
+    for (const allocation of plan.allocations) this.plannedAllocationClass(allocation);
+    if (plan.allocations.some((allocation) => this.hasStackFrameOperations(allocation))) {
       this.ensureStackRuntime();
     }
+  }
+
+  private plannedAllocationClass(allocation: LinearAllocationSitePlan): LinearAllocationClass {
+    const allocationOperations = allocation.operations.filter(isAllocationBindingOperation);
+    const encodedClasses = allocationOperations.flatMap((operation) =>
+      "allocationClass" in operation ? [operation.allocationClass] : [],
+    );
+    if (allocation.allocationClass !== "managed" && encodedClasses.length === 0) {
+      throw new Error(
+        `porffor assembler: allocation site ${allocation.id as number} has no symbolic allocation operation`,
+      );
+    }
+    if (encodedClasses.some((allocationClass) => allocationClass !== allocation.allocationClass)) {
+      throw new Error(
+        `porffor assembler: allocation site ${allocation.id as number} disagrees with its symbolic allocation operation`,
+      );
+    }
+
+    const marks = allocation.operations.filter(
+      (operation) => operation.family === "stack" && operation.operation === "mark",
+    ).length;
+    const restores = allocation.operations.filter(
+      (operation) => operation.family === "stack" && operation.operation === "restore",
+    ).length;
+    if (allocation.allocationClass === "stack" ? marks !== 1 || restores !== 1 : marks !== 0 || restores !== 0) {
+      throw new Error(
+        `porffor assembler: allocation site ${allocation.id as number} has inconsistent symbolic stack operations`,
+      );
+    }
+    return encodedClasses[0] ?? allocation.allocationClass;
+  }
+
+  private hasStackFrameOperations(allocation: LinearAllocationSitePlan): boolean {
+    return allocation.operations.some((operation) => operation.family === "stack" && operation.operation === "mark");
   }
 
   setPreferences(preferences: Readonly<Record<string, unknown>>): void {
@@ -426,7 +463,7 @@ export class PorfforModuleAssembler
     }
 
     const usesStack = this.memoryPlan?.allocations.some(
-      (allocation) => allocation.ownerFunction === entry.name && allocation.allocationClass === "stack",
+      (allocation) => allocation.ownerFunction === entry.name && this.hasStackFrameOperations(allocation),
     );
     const stackMarkName = "#js2_stack_frame_mark";
     const stackResultName = "#js2_stack_frame_result";
@@ -736,7 +773,7 @@ export class PorfforModuleAssembler
           (candidate) => (candidate.id as number) === expression.siteId,
         );
         if (!allocation) throw new Error(`porffor assembler: allocation site ${expression.siteId} is not planned`);
-        if (allocation.allocationClass === "stack") {
+        if (this.plannedAllocationClass(allocation) === "stack") {
           if (!this.stackGlobals) throw new Error("porffor assembler: stack allocation has no runtime");
           return node("Call", "ptr", bytes[2] | PORFFOR_FX.call, "#js2_stack_allocate", [bytes], 0);
         }
@@ -843,6 +880,15 @@ export class PorfforModuleAssembler
   private assertMutable(action: string): void {
     if (this.frozen) throw new Error(`porffor assembler: cannot ${action} after finalize`);
   }
+}
+
+function isAllocationBindingOperation(operation: LinearRuntimeOperation): boolean {
+  return (
+    (operation.family === "memory" && operation.operation === "allocate") ||
+    (operation.family === "vector" && operation.operation === "allocate") ||
+    (operation.family === "string" && operation.operation === "materialize-data") ||
+    (operation.family === "managed" && operation.operation === "allocate")
+  );
 }
 
 function oneLoweredSlot(slots: readonly PorfforValueSlot[], where: string): PorfforValueSlot {

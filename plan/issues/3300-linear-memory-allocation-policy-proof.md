@@ -88,7 +88,8 @@ final completion status.
 - Added `analysis-stack-arena-v1` beside the byte-preserving `arena-v1`
   baseline. Both decisions are made from the same module `LinearMemoryPlan`;
   fixed-size sites proven owned, local, and stack-safe are promoted, while
-  escaping, variable, and unsupported sites retain the non-moving arena.
+  every non-promoted site retains the complete baseline decision, including
+  managed roots, safepoints, and barriers where applicable.
 - Added target-neutral symbolic stack mark/restore operations and stable
   allocation-owner identities. Linear-Wasm and Porffor bind those operations
   in their adapter/assembly layers; `LinearEmitter` was untouched and
@@ -104,17 +105,26 @@ final completion status.
   21-sample medians reduced per-round backing allocations from 400,000 to one
   and peak memory from 9,633,792 to 131,072 bytes in linear-Wasm and from
   10,911,744 to 1,310,720 RSS bytes in Porffor-C. The generated artifacts grew
-  by 177 Wasm bytes and 1,173 C-source / 296 native bytes, respectively.
+  by 177 Wasm bytes and 1,173 C-source / 296 native bytes, respectively. Median
+  kernel CPU time decreased from 10.856 to 6.382 ms for linear-Wasm and from
+  1.858 to 1.075 ms for Porffor-C in the recorded run.
 - A mixed managed-heap comparison is explicitly unsupported. ADR-0017 requires
   non-moving raw pointers, Porffor selects GC globally, and JS2 has no managed
   root-slot/type-id contract for these layouts. Managed collection stress is
   therefore inapplicable; the fixtures instead cover repeated frame reuse and
   overflow into the existing non-moving arena.
+- The pre-merge safety review closed four gaps: ownership/escape now propagates
+  through select, value-producing if, block arguments, slots, and global
+  stores; fallback preserves the baseline managed decision; Porffor validates
+  and consumes the plan's symbolic allocation and stack operations; and the
+  optional Porffor-C test skips cleanly when the submodule is absent. The
+  benchmark reads and cross-checks the emitted checksum instead of assuming a
+  fixed value.
 
 Validation completed:
 
-- `IR_VERIFY_ALLOC=1 pnpm exec vitest run tests/issue-3300.test.ts tests/issue-3299.test.ts tests/issue-3298.test.ts tests/issue-3297.test.ts tests/issue-3288.test.ts tests/backend-contract.test.ts tests/ir-vec-two-backend.test.ts tests/ir/alloc-registry.test.ts tests/ir/alloc-provenance.test.ts --reporter=dot`
-  (9 files, 59 tests passed).
+- `IR_VERIFY_ALLOC=1 pnpm exec vitest run tests/issue-3300.test.ts tests/issue-3299.test.ts tests/issue-3298.test.ts tests/issue-3297.test.ts tests/issue-3288.test.ts tests/backend-contract.test.ts tests/ir-vec-two-backend.test.ts tests/ir/alloc-registry.test.ts tests/ir/alloc-provenance.test.ts tests/ir/ownership.test.ts tests/ir/escape.test.ts --reporter=dot`
+  (9 discovered files, 62 tests passed).
 - Scoped cross-backend/equivalence run over `tests/cross-backend-diff.test.ts`,
   `tests/ir-ternary-equivalence.test.ts`, object mutability, shape inference,
   and array-bounds elimination (5 files, 55 tests passed).

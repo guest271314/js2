@@ -81,6 +81,6 @@ export function objectPolicyProof(seed: number): number {
   const second = { x: seed, y: 5 };
   const alias = first;
   alias.x = alias.x + 2;
-  return first.x + second.y;
+  return (first.x - seed) * 450 + second.y + 6;
 }
 `;

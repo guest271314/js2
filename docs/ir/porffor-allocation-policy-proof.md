@@ -12,18 +12,22 @@ IDs and owners, layouts and sizes, pointer maps, ownership/access facts, escape
 classes, stack-candidate facts, roots, barriers, data segments, globals, and
 symbolic runtime operations. Only `LinearAllocatorPolicy.decide` changes.
 
-| Policy                    | Fixed numeric objects                 | Dense f64 vector | Roots / barriers |
-| ------------------------- | ------------------------------------- | ---------------- | ---------------- |
-| `arena-v1`                | arena                                 | arena            | none / none      |
-| `analysis-stack-arena-v1` | stack when owned + local + fixed-size | arena fallback   | none / none      |
+| Policy                    | Fixed numeric objects                 | Dense f64 vector | Benchmark roots / barriers |
+| ------------------------- | ------------------------------------- | ---------------- | -------------------------- |
+| `arena-v1`                | arena                                 | arena            | none / none                |
+| `analysis-stack-arena-v1` | stack when owned + local + fixed-size | arena fallback   | none / none                |
 
-The alternative is deliberately stack-plus-arena, not stack-plus-managed-heap.
-ADR-0017 keeps JS2's raw linear pointers non-moving, and this proof does not
-silently adopt Porffor's GC object kinds or root discovery. A mixed managed
-comparison is therefore unsupported: the current Porffor renderer selects GC
-globally, while JS2 has not yet defined managed root slots/type IDs for these
-raw layouts. Managed-collection stress is inapplicable and was not claimed.
-The checked fixtures instead stress function-frame reclamation and the existing
+For the supported record/vector sites, the alternative is deliberately
+stack-plus-arena; it does not introduce a new managed heap. ADR-0017 keeps
+JS2's raw linear pointers non-moving, and this proof does not silently adopt
+Porffor's GC object kinds or root discovery. A mixed managed comparison is
+therefore unsupported: the current Porffor renderer selects GC globally, while
+JS2 has not yet defined managed root slots/type IDs for these raw layouts.
+Non-promoted opaque sites retain the baseline managed allocation, root,
+safepoint, and barrier decision; the alternative policy does not rewrite them
+as arena allocations. Managed-collection stress is unsupported because neither
+backend can execute that mixed contract yet. The checked fixtures instead
+stress function-frame reclamation, repeated overflow, and the existing
 non-moving arena fallback.
 
 ## Fixed benchmark
@@ -41,27 +45,29 @@ timed round. Runtime and size comparisons are only within one backend.
 
 | Backend / policy        |                      Output size | Median runtime |      Peak memory | Logical allocations | Backing-arena allocations |
 | ----------------------- | -------------------------------: | -------------: | ---------------: | ------------------: | ------------------------: |
-| linear-Wasm `arena-v1`  |                     4,866 B Wasm |      11.198 ms |      9,633,792 B |             400,000 |                   400,000 |
-| linear-Wasm stack/arena |                     5,043 B Wasm |       5.313 ms |        131,072 B |             400,000 |                         1 |
-| Porffor-C `arena-v1`    | 30,087 B C / 34,048 B executable |       1.928 ms | 10,911,744 B RSS |             400,000 |                   400,000 |
-| Porffor-C stack/arena   | 31,260 B C / 34,344 B executable |       0.974 ms |  1,310,720 B RSS |             400,000 |                         1 |
+| linear-Wasm `arena-v1`  |                     4,889 B Wasm |      10.856 ms |      9,633,792 B |             400,000 |                   400,000 |
+| linear-Wasm stack/arena |                     5,066 B Wasm |       6.382 ms |        131,072 B |             400,000 |                         1 |
+| Porffor-C `arena-v1`    | 30,087 B C / 34,048 B executable |       1.858 ms | 10,911,744 B RSS |             400,000 |                   400,000 |
+| Porffor-C stack/arena   | 31,260 B C / 34,344 B executable |       1.075 ms |  1,310,720 B RSS |             400,000 |                         1 |
 
 The planner result explains the allocation-count and peak-memory change: two
 logical object allocations per call become offsets in one reusable 64 KiB
 function-stack backing region. If one invocation exceeds that region, both
 adapters preserve behavior by falling back to the ordinary arena for the
 overflowing allocations. Backend artifacts explain the remaining deltas.
-Linear-Wasm pays 177 bytes plus mark/restore calls and was about 53% faster in
-this run; Porffor-C pays 1,173 C-source bytes / 296 native bytes and was about
-49% faster because it avoids 400,000 calls to the C arena allocator. A repeated
-independent run preserved both directions; this pilot does not establish a
-universally better policy.
+Linear-Wasm pays 177 bytes plus mark/restore calls; Porffor-C pays 1,173
+C-source bytes / 296 native bytes. The measured median runtime decreased by
+about 41% for linear-Wasm and 42% for Porffor-C because both avoid 400,000
+calls to their arena allocator. A repeated independent run preserved both
+directions; this pilot does not establish a universally better policy.
 
 The supported comparison families are fixed numeric records (promotion) and
-dense f64 vectors (arena fallback). Strings, closures, variable-size objects,
-managed collection, and Porffor-native object/array operations are outside the
-proof. The alias/identity/mutation fixture returns `911`; vector indices 1, -1,
-and 8 return `309`, `300`, and `300` through both policies/backends.
+dense f64 vectors (arena fallback). Both benchmark kernels perform the same two
+fixed-record allocations and alias mutation and return `911`; the typed IR
+fixture additionally asserts reference identity through Porffor. Strings,
+closures, variable-size objects, managed collection, and Porffor-native
+object/array operations are outside the proof. Vector indices 1, -1, and 8
+return `309`, `300`, and `300` through both policies/backends.
 
 ## Reproduction
 

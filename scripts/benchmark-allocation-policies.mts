@@ -74,7 +74,7 @@ function compilerVersion(compiler: string): string {
   return (spawnSync(compiler, ["--version"], { encoding: "utf8" }).stdout || "").split("\n")[0]!.trim();
 }
 
-function peakRss(binaryPath: string): { stdout: string; peakRssBytes: number | null } {
+function peakRss(binaryPath: string): { stdout: string; stderr: string; peakRssBytes: number | null } {
   const darwin = process.platform === "darwin";
   const result = spawnSync("/usr/bin/time", darwin ? ["-l", binaryPath] : ["-v", binaryPath], {
     encoding: "utf8",
@@ -85,6 +85,7 @@ function peakRss(binaryPath: string): { stdout: string; peakRssBytes: number | n
     : /Maximum resident set size \(kbytes\):\s*(\d+)/.exec(result.stderr);
   return {
     stdout: result.stdout,
+    stderr: result.stderr,
     peakRssBytes: match ? Number(match[1]) * (darwin ? 1 : 1024) : null,
   };
 }
@@ -129,6 +130,7 @@ int main(int argc, char** argv) {
     if (build.status !== 0) throw new Error(`C compile failed:\n${build.stdout}\n${build.stderr}`);
     const samplesNs: number[] = [];
     let peakRssBytes: number | null = null;
+    let checksum: string | null = null;
     for (let round = 0; round < WARMUP_ROUNDS + MEASURED_ROUNDS; round++) {
       const run = peakRss(binaryPath);
       const sample = run.stdout
@@ -136,6 +138,12 @@ int main(int argc, char** argv) {
         .split("\n")
         .find((line) => line.startsWith("sample:"));
       if (!sample) throw new Error(`Porffor benchmark did not print a runtime sample: ${run.stdout}`);
+      const checksumMatch = /(?:^|\n)checksum:([^\n]+)/.exec(run.stderr);
+      if (!checksumMatch) throw new Error(`Porffor benchmark did not print a checksum: ${run.stderr}`);
+      if (checksum !== null && checksum !== checksumMatch[1]) {
+        throw new Error(`Porffor benchmark checksum changed from ${checksum} to ${checksumMatch[1]}`);
+      }
+      checksum = checksumMatch[1]!;
       if (round >= WARMUP_ROUNDS) samplesNs.push(Number(sample.slice("sample:".length)));
       if (run.peakRssBytes !== null) peakRssBytes = Math.max(peakRssBytes ?? 0, run.peakRssBytes);
     }
@@ -147,7 +155,7 @@ int main(int argc, char** argv) {
       peakRssBytes,
       logicalAllocations: ITERATIONS * 2,
       backingArenaAllocations: policy === DEFAULT_ARENA_POLICY ? ITERATIONS * 2 : 1,
-      checksum: (ITERATIONS * 911).toString(),
+      checksum,
     };
   } finally {
     rmSync(directory, { recursive: true, force: true });

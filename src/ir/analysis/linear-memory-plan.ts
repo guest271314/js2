@@ -414,17 +414,15 @@ export const ANALYSIS_STACK_ARENA_POLICY: LinearAllocatorPolicy = {
       facts.site.kind !== "extern" &&
       facts.site.kind !== "iterator" &&
       facts.site.kind !== "generator";
-    const allocationClass: LinearAllocationClass = stack ? "stack" : "arena";
-    const operations = operationsForLayout(facts.layout, allocationClass);
+    if (!stack) return DEFAULT_ARENA_POLICY.decide(facts);
+    const operations = operationsForLayout(facts.layout, "stack");
     return {
-      allocationClass,
-      lifetime: stack ? "function" : lifetimeFromEscape(facts.escape),
+      allocationClass: "stack",
+      lifetime: "function",
       root: { kind: "none" },
       safepoints: { kind: "none" },
       barrier: { kind: "none" },
-      operations: stack
-        ? [...operations, { family: "stack", operation: "mark" }, { family: "stack", operation: "restore" }]
-        : operations,
+      operations: [...operations, { family: "stack", operation: "mark" }, { family: "stack", operation: "restore" }],
     };
   },
 };
