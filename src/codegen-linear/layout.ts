@@ -1,4 +1,10 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import {
+  LINEAR_RECORD_FIELD_SLOT_BYTES,
+  LINEAR_RECORD_HEADER_BYTES,
+  planLinearRecordLayout,
+} from "../ir/analysis/linear-memory-plan.js";
+
 /**
  * Class layout computation for the linear-memory backend.
  *
@@ -27,8 +33,8 @@ export interface ClassLayout {
 }
 
 /** Canonical header/slot constants shared by classes, object literals, and IR aggregates. */
-export const LINEAR_AGGREGATE_HEADER_SIZE = 8;
-export const LINEAR_AGGREGATE_FIELD_SIZE = 8;
+export const LINEAR_AGGREGATE_HEADER_SIZE = LINEAR_RECORD_HEADER_BYTES;
+export const LINEAR_AGGREGATE_FIELD_SIZE = LINEAR_RECORD_FIELD_SLOT_BYTES;
 export const LINEAR_GENERIC_OBJECT_TAG = 0x10;
 
 /**
@@ -39,16 +45,23 @@ export const LINEAR_GENERIC_OBJECT_TAG = 0x10;
  * @returns The computed ClassLayout
  */
 export function computeClassLayout(name: string, fieldDefs: { name: string; type: "i32" | "f64" }[]): ClassLayout {
+  const plan = planLinearRecordLayout(
+    `record:legacy:${JSON.stringify(name)}`,
+    fieldDefs.map((field) => ({ name: field.name, storage: field.type })),
+  );
   const fields = new Map<string, { offset: number; type: "i32" | "f64" }>();
-  let offset = LINEAR_AGGREGATE_HEADER_SIZE;
-  for (const f of fieldDefs) {
-    fields.set(f.name, { offset, type: f.type });
-    offset += LINEAR_AGGREGATE_FIELD_SIZE;
+  for (const field of plan.fields) {
+    const type = field.storage;
+    if (type !== "i32" && type !== "f64") {
+      throw new Error(`linear class layout cannot store '${type}' field '${field.name}'`);
+    }
+    fields.set(field.name, { offset: field.offset, type });
   }
+  if (plan.size.kind !== "constant") throw new Error("linear class layout must have a constant size");
 
   return {
     name,
-    totalSize: offset,
+    totalSize: plan.size.bytes,
     fields,
     fieldCollectionKinds: new Map(),
     methods: new Map(),

@@ -7284,13 +7284,17 @@ function compileTypedArraySet(
     typeIdx: srcArrTypeIdx,
   });
   const srcLen = allocLocal(fctx, `__ta_set_slen_${fctx.locals.length}`, { kind: "i32" });
+  const dstLen = allocLocal(fctx, `__ta_set_dlen_${fctx.locals.length}`, { kind: "i32" });
   const offsetTmp = allocLocal(fctx, `__ta_set_off_${fctx.locals.length}`, { kind: "i32" });
   const iTmp = allocLocal(fctx, `__ta_set_i_${fctx.locals.length}`, { kind: "i32" });
 
-  // Receiver -> vec ref, extract data array.
+  // Receiver -> vec ref, extract length (field 0) + data array (field 1).
   compileExpression(ctx, fctx, propAccess.expression);
   fctx.body.push({ op: "local.tee", index: dstVec });
   emitReceiverNullGuard(ctx, fctx, dstVec);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: dstLen });
+  fctx.body.push({ op: "local.get", index: dstVec });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dstData });
 
@@ -7315,6 +7319,31 @@ function compileTypedArraySet(
     fctx.body.push({ op: "i32.const", value: 0 });
   }
   fctx.body.push({ op: "local.set", index: offsetTmp });
+
+  // Spec §23.2.3.24 (%TypedArray%.prototype.set): the bounds check is an
+  // observable RangeError, NOT an unguarded copy that traps. Throw a *catchable*
+  // RangeError when `offset < 0` or `offset + srcLength > targetLength`; the raw
+  // `array.copy` / element-wise store below would otherwise `oob`-trap (an
+  // uncatchable Wasm abort that escapes try/catch and poisons the whole test
+  // file — #3202 / #3335 Part 1). srcLen+offset is computed in i32; test-realistic
+  // magnitudes never overflow, and a negative offset is caught by the `< 0` arm.
+  fctx.body.push(
+    // predicate: offset < 0  ||  offset + srcLen > dstLen
+    { op: "local.get", index: offsetTmp },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    { op: "local.get", index: offsetTmp },
+    { op: "local.get", index: srcLen },
+    { op: "i32.add" },
+    { op: "local.get", index: dstLen },
+    { op: "i32.gt_s" },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: buildThrowJsErrorInstrs(ctx, "RangeError", "offset is out of bounds", { flush: fctx }),
+    },
+  );
 
   if (srcArrTypeIdx === arrTypeIdx) {
     // Same backing array type — bulk array.copy dstData[offset..] = srcData[0..srcLen].

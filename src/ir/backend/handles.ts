@@ -22,6 +22,11 @@
 
 import type { Instr, ValType } from "../types.js";
 import type { JsTag } from "../../codegen/js-tag.js";
+import type {
+  LinearRecordLayoutPlan,
+  LinearRuntimeOperation,
+  LinearVectorLayoutPlan,
+} from "../analysis/linear-memory-plan.js";
 
 /**
  * Information about a tagged-union struct type emitted into the WasmGC module.
@@ -83,6 +88,10 @@ export interface LinearMemoryFieldLowering {
  */
 export interface LinearObjectLowering extends IrObjectStructLowering {
   readonly linearMemory: {
+    /** Canonical target-neutral layout consumed by this backend handle. */
+    readonly layout: LinearRecordLayoutPlan;
+    /** Still symbolic until the linear module adapter assembles the helper. */
+    readonly allocate: LinearRuntimeOperation;
     /** Deferred helper `(field0, ...fieldN) -> i32` appended after user slots. */
     readonly newFuncIdx: number;
     readonly fieldCount: number;
@@ -125,6 +134,8 @@ export interface IrRefCellLowering {
 /** Linear-memory analogue of the one-field mutable ref-cell struct. */
 export interface LinearRefCellLowering extends IrRefCellLowering {
   readonly linearMemory: {
+    readonly layout: LinearRecordLayoutPlan;
+    readonly allocate: LinearRuntimeOperation;
     /** Deferred helper `(value) -> i32` appended after user slots. */
     readonly newFuncIdx: number;
     readonly value: LinearMemoryFieldLowering;
@@ -417,4 +428,9 @@ export interface IrDynamicLowering {
 export interface LinearVecLowering {
   /** Element ValType — drives stride (4 vs 8) and the load op. */
   readonly elementValType: ValType;
+  readonly linearMemory: {
+    readonly layout: LinearVectorLayoutPlan;
+    readonly allocate: LinearRuntimeOperation;
+    readonly initializeElement: LinearRuntimeOperation;
+  };
 }
