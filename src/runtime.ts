@@ -8409,19 +8409,26 @@ assert._isSameValue = isSameValue;
             }
             return Number(v);
           };
-          // Reading .length on an opaque wasmGC struct throws — check sidecar first (#983)
+          // Reading .length on an opaque wasmGC struct throws — resolve through
+          // the #1629-safe own-descriptor reader (#983 sidecar + vec live length
+          // + shape-gated struct field), then the inherited chain.
           if (_isWasmStruct(obj)) {
-            const sc = _sidecarGet(obj, "length");
-            if (sc !== undefined) return toLength(coerceLen(sc));
             const exports = callbackState?.getExports();
-            const getter = exports?.[`__sget_length`];
-            if (typeof getter === "function") {
-              try {
-                return toLength(coerceLen(getter(obj)));
-              } catch {
-                /* not a field */
-              }
-            }
+            // (#3201) Own `length` via _readOwnDescriptor — NOT a raw
+            // `__sget_length` try/catch probe. The raw probe was the #1629
+            // anti-pattern and produced a REAL miss here: on a fnctor instance
+            // struct whose shape happens to cast-succeed for some registered
+            // `__sget_length` getter, the probe "succeeds" reading a
+            // zero-initialized unrelated slot and returns own length 0, which
+            // SHADOWS the inherited `length` on the ctor prototype
+            // (`Con.prototype = { length: 2 }; new Con()` — the
+            // indexOf/15.4.4.14-2-* array-like `.call` cluster). The
+            // descriptor reader serves the vec live length (step 0), sidecar
+            // values (step 1), and genuine struct `length` fields shape-gated
+            // via _getStructFieldNames (step 3), so every previously-correct
+            // own read stays served.
+            const own = _readOwnDescriptor(obj, "length", exports);
+            if (own) return toLength(coerceLen(own.get ? own.get.call(obj) : own.value));
             // (#3139) Inherited `length` through the fnctor instance→ctor
             // prototype chain (§7.3.2 Get is prototype-inclusive). The classic
             // shape: `foo.prototype = new Array(1,2,3); var f = new foo();

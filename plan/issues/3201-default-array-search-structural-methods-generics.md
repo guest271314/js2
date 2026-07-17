@@ -225,3 +225,36 @@ Still open in this family (documented above, left `ready`): huge sparse-index
 WRITES (trap on the densely-growing-backing write path), the harness-entangled
 `Array.prototype`-mutation `illegal cast` cluster, revoked-Proxy casts
 (deferred, #1355/#1472), and `splice`/`pop` sparse reads.
+
+## Progress — inherited-length array-like `.call` cluster: `__extern_length` unsound probe (fable-e, 2026-07-17)
+
+Mechanism-1 slice (array-like receivers via `.call(obj, …)`). Root cause found
+by live instrumentation: `__extern_length`'s struct arm resolved own `length`
+with a raw `__sget_length` try/catch probe. On a fnctor instance struct
+(`var Con = function(){}; Con.prototype = {length: 2}; new Con()`) the probe
+CAST-SUCCEEDS via structural canonicalization on some registered
+`__sget_length` getter and reads a **zero-initialized unrelated slot** —
+returning own length 0 (a non-null, non-throwing wrong answer, so no
+null-check gate can catch it) and SHADOWING the inherited `length` that
+`_fnctorProtoLookup` (#3139) resolves correctly one line below. This is the
+`#1629` unsound-`__sget_*`-probe anti-pattern.
+
+Fix: resolve own `length` through the #1629-safe `_readOwnDescriptor` (vec
+live length via `__vec_len`, sidecar, shape-gated struct field via
+`_getStructFieldNames`), then the fnctor prototype chain. Flips the
+`15.4.4.14-2-{6,8,9}` + `15.4.4.15-2-{6,8,9}` inherited-length clusters
+(6 verified per-process flips on the 97-test indexOf/lastIndexOf
+baseline-fail sample); also feeds every array-like borrow loop (forEach/map/
+filter etc. — #3200's families).
+
+**Coordination (agreed with fable-2, 2026-07-17):** the SAME unsound-probe
+class exists in `__extern_get_idx` (wrong-shape null served as a real
+element, masking inherited indices) and `__extern_has_idx` (`return 1` on
+any non-throwing probe visits holes as own) — those two arms are **fable-2's**
+(branch issue-3200-array-iteration-generics); `__extern_length` is this
+branch. The remaining ~19 `.call`-cluster fails in this family hinge on
+those two arms plus the element-kind mechanisms.
+
+Suites: `issue-3201-inherited-length` 5/5 (new), `issue-1360` +
+`issue-3138` + `issue-3116` + `issue-1629-S1` + `issue-3139` + `issue-1629`
++ `issue-1629a` 76/76, tsc clean.
