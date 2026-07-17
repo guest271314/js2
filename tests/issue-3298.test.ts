@@ -11,6 +11,7 @@ import { compile } from "../src/index.js";
 import {
   AllocSiteRegistry,
   IrFunctionBuilder,
+  LinearMemoryPlan,
   irVal,
   planLinearMemory,
   planLinearRecordLayout,
@@ -141,6 +142,32 @@ describe("#3298 — target-neutral LinearMemoryPlan", () => {
       allocationClass: "arena",
       elementStorage: "f64",
     });
+
+    const objectLayout = plan.layouts.find((layout) => layout.kind === "record");
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.allocations)).toBe(true);
+    expect(Object.isFrozen(plan.allocations[0])).toBe(true);
+    expect(Object.isFrozen(objectLayout)).toBe(true);
+    expect(objectLayout?.kind === "record" && Object.isFrozen(objectLayout.fields)).toBe(true);
+    expect(() => {
+      (plan.allocations[0] as { layoutId: string }).layoutId = "mutated";
+    }).toThrow(TypeError);
+
+    const snapshot = plan.toJSON();
+    expect(
+      () =>
+        new LinearMemoryPlan({
+          ...snapshot,
+          layouts: [...snapshot.layouts, snapshot.layouts[0]!],
+        }),
+    ).toThrow(/duplicate layout/);
+    expect(
+      () =>
+        new LinearMemoryPlan({
+          ...snapshot,
+          allocations: [{ ...snapshot.allocations[0]!, layoutId: "missing" }, ...snapshot.allocations.slice(1)],
+        }),
+    ).toThrow(/references missing layout/);
   });
 
   it("keeps the direct linear class layout on the shared record-layout primitive", () => {
@@ -185,5 +212,19 @@ describe("#3298 — target-neutral LinearMemoryPlan", () => {
       allocationClass: "arena",
       zeroed: false,
     });
+  });
+
+  it("materializes linear-Wasm string data from the canonical plan bytes", async () => {
+    const result = await compile(`export function unicode(): number { return "hé".length; }`, { target: "linear" });
+    expect(result.success, result.success ? "" : result.errors.map((error) => error.message).join("; ")).toBe(true);
+
+    const report = getLastLinearIrReport();
+    expect(report?.compiled).toContain("unicode");
+    const allocation = report?.memoryPlan.allocations.find((candidate) => candidate.dataSegmentId !== undefined);
+    expect(allocation?.dataSegmentId).toBeDefined();
+    expect(report?.memoryPlan.requireDataSegment(allocation!.dataSegmentId!).bytes).toEqual([104, 195, 169]);
+
+    const instance = await WebAssembly.instantiate(result.binary!);
+    expect((instance.instance.exports.unicode as () => number)()).toBe(2);
   });
 });
