@@ -188,39 +188,19 @@ describe("#3288 P1 Porffor legality", () => {
     expect(verifyIrBackendLegality(scalar, "porffor")).toEqual([]);
   });
 
-  it.each([
-    [
-      "raw.wasm",
-      {
-        kind: "raw.wasm",
-        ops: [{ op: "i32.const", value: 1 }],
-        stackDelta: 1,
-        result: asValueId(1),
-        resultType: I32,
-      } as IrInstr,
-      /porffor backend does not support IR instruction 'raw\.wasm'/,
-    ],
-    [
-      "slot.read",
-      { kind: "slot.read", slotIndex: 0, result: asValueId(1), resultType: I32 } as IrInstr,
-      /porffor backend does not support IR instruction 'slot\.read'/,
-    ],
-    [
-      "Instr-array loop",
-      {
-        kind: "while.loop",
-        cond: [],
-        condValue: asValueId(0),
-        body: [],
-        result: null,
-        resultType: null,
-      } as IrInstr,
-      /porffor backend does not support IR instruction 'while\.loop'/,
-    ],
-  ])("rejects the %s escape family before emission", (_label, instr, expected) => {
+  it("keeps rejecting the raw Wasm escape family before emission", () => {
+    const instr: IrInstr = {
+      kind: "raw.wasm",
+      ops: [{ op: "i32.const", value: 1 }],
+      stackDelta: 1,
+      result: asValueId(1),
+      resultType: I32,
+    };
     const fn = oneBlock("unsupported", [instr], []);
     const errors = verifyIrBackendLegality(fn, "porffor");
-    expect(errors.some((error) => expected.test(error.message))).toBe(true);
+    expect(
+      errors.some((error) => /porffor backend does not support IR instruction 'raw\.wasm'/.test(error.message)),
+    ).toBe(true);
     expect(() => lowerIrFunctionBody(fn, resolver(), new StubEmitter("porffor"), new PorfforTypeConverter())).toThrow(
       /porffor backend legality failed/,
     );

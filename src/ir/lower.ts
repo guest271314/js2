@@ -1949,18 +1949,12 @@ export function lowerIrFunctionBody<S, Slot>(
       }
       // Slice 6 (#1169e): slot / vec / for-of ops.
       case "slot.read": {
-        emitter.pushRaw(out, {
-          op: "local.get",
-          index: slotWasmIdx(instr.slotIndex),
-        });
+        emitter.emitLocalGet(slotWasmIdx(instr.slotIndex), out);
         return;
       }
       case "slot.write": {
         emitValue(instr.value, out);
-        emitter.pushRaw(out, {
-          op: "local.set",
-          index: slotWasmIdx(instr.slotIndex),
-        });
+        emitter.emitLocalSet(slotWasmIdx(instr.slotIndex), out);
         return;
       }
       case "vec.len": {
@@ -2767,31 +2761,27 @@ export function lowerIrFunctionBody<S, Slot>(
       // are emitted in place).
       case "while.loop":
       case "for.loop": {
-        // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
-        const wasmOut = requireInstrSink(out);
-        const loopBody: Instr[] = [];
+        // #3297: generic structured-control-flow path. Nested buffers stay in
+        // the backend's own sink type; no raw Instr[] or Wasm-only eqz push is
+        // required for scalar loops.
+        const loopBody: S = emitter.newSink();
 
         // Helper: emit a body buffer (cond / body / update) into a
-        // target ops array using the standard SSA materialisation
-        // rules (mirrors the `forof.*` body emission). `target` is a local
-        // Instr[] sub-buffer; the arm asserted S = Instr[] so the cast to S
-        // on the recursive emit is sound (#1584 §2a).
-        const emitBodyBuffer = (bodyInstrs: readonly IrInstr[], target: Instr[]): void => {
+        // backend sink using the standard SSA materialisation rules (mirrors
+        // the `forof.*` body emission).
+        const emitBodyBuffer = (bodyInstrs: readonly IrInstr[], target: S): void => {
           for (const bodyInstr of bodyInstrs) {
             if (bodyInstr.result === null) {
-              emitInstrTree(bodyInstr, target as unknown as S);
+              emitInstrTree(bodyInstr, target);
             } else if (crossBlock.has(bodyInstr.result)) {
-              emitInstrTree(bodyInstr, target as unknown as S);
-              target.push({
-                op: "local.set",
-                index: localIdx.get(bodyInstr.result)!,
-              });
+              emitInstrTree(bodyInstr, target);
+              emitter.emitLocalSet(localIdx.get(bodyInstr.result)!, target);
               materialized.add(bodyInstr.result);
             } else if ((totalUses.get(bodyInstr.result) ?? 0) === 0 && isSideEffecting(bodyInstr)) {
               // (#2856) Zero-use side-effecting instr — eager emit + drop,
               // same contract as `emitBlockBody` (see the if-arm variant).
-              emitInstrTree(bodyInstr, target as unknown as S);
-              emitter.emitDrop(target as unknown as S);
+              emitInstrTree(bodyInstr, target);
+              emitter.emitDrop(target);
             }
             // Intra-block multi-use: handled at use site via tee pattern.
           }
@@ -2821,11 +2811,11 @@ export function lowerIrFunctionBody<S, Slot>(
         ctrlStack.push(preTestWhile && label !== undefined ? { kind: "continue", label } : { kind: "plain" });
         const emitLoopBodyStatements = (): void => {
           if (needsContinueBlock) {
-            const bodyOps: Instr[] = [];
+            const bodyOps: S = emitter.newSink();
             ctrlStack.push({ kind: "continue", label: label! });
             emitBodyBuffer(instr.body, bodyOps);
             ctrlStack.pop();
-            emitter.emitBlock({ kind: "empty" }, bodyOps as unknown as S, loopBody as unknown as S);
+            emitter.emitBlock({ kind: "empty" }, bodyOps, loopBody);
           } else {
             emitBodyBuffer(instr.body, loopBody);
           }
@@ -2838,9 +2828,9 @@ export function lowerIrFunctionBody<S, Slot>(
           // 2. Cond instructions (re-evaluated each iteration, after body).
           emitBodyBuffer(instr.cond, loopBody);
           // 3. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
-          emitValue(instr.condValue, loopBody as unknown as S);
-          loopBody.push({ op: "i32.eqz" });
-          emitter.emitBrIf(1, loopBody as unknown as S);
+          emitValue(instr.condValue, loopBody);
+          emitter.emitUnary("i32.eqz", loopBody);
+          emitter.emitBrIf(1, loopBody);
         } else {
           // Pre-test (`while` / `for`): cond first, exit before running body.
           // 1. Cond instructions (re-evaluated each iteration).
@@ -2848,9 +2838,9 @@ export function lowerIrFunctionBody<S, Slot>(
 
           // 2. Push the cond value, invert (i32.eqz), then br_if 1 to exit.
           //    #1584 (a3): the control-flow ops route through the trait.
-          emitValue(instr.condValue, loopBody as unknown as S);
-          loopBody.push({ op: "i32.eqz" });
-          emitter.emitBrIf(1, loopBody as unknown as S);
+          emitValue(instr.condValue, loopBody);
+          emitter.emitUnary("i32.eqz", loopBody);
+          emitter.emitBrIf(1, loopBody);
 
           // 3. Body instructions (for `for`, continue falls to the update).
           emitLoopBodyStatements();
@@ -2862,14 +2852,14 @@ export function lowerIrFunctionBody<S, Slot>(
         }
 
         // 5. Continue back to the loop header.
-        emitter.emitBr(0, loopBody as unknown as S);
+        emitter.emitBr(0, loopBody);
         ctrlStack.pop(); // loop frame
         ctrlStack.pop(); // break frame
 
         // 6. Wrap in `block { loop { ... } }` via the trait (#1584 a3).
-        const loopWrap: Instr[] = [];
-        emitter.emitLoop({ kind: "empty" }, loopBody as unknown as S, loopWrap as unknown as S);
-        emitter.emitBlock({ kind: "empty" }, loopWrap as unknown as S, wasmOut as unknown as S);
+        const loopWrap: S = emitter.newSink();
+        emitter.emitLoop({ kind: "empty" }, loopBody, loopWrap);
+        emitter.emitBlock({ kind: "empty" }, loopWrap, out);
         return;
       }
       // (#1373b Phase C Slice 1) Async / await IR node lowering.

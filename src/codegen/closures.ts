@@ -66,7 +66,12 @@ import {
   compileStatement,
 } from "./statements.js";
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
-import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
+import {
+  buildDestructureNullThrow,
+  isNullOrUndefinedLiteral,
+  structHintForBindingPattern,
+} from "./destructuring-params.js";
+import { compileObjectLiteralAsExternref } from "./literals.js";
 import {
   cacheParamDefaultArgc,
   emitF64ParamSentinelCheck,
@@ -1161,8 +1166,26 @@ export function emitArrowParamDefaults(
       if (isArrayPatternExternref) {
         (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = true;
       }
+      // (#3333) Host-free lanes, `any`-typed OBJECT pattern (no struct type
+      // resolves from the pattern): a default object LITERAL compiled against
+      // the bare externref hint materializes a typed anonymous struct the
+      // destructure's dynamic `__extern_get` reader cannot reflect — every
+      // binding read NaN. Build it through `compileObjectLiteralAsExternref`
+      // (the `__new_plain_object` dynamic carrier) instead. Mirrors the
+      // function-declaration site in function-body.ts.
+      const dynObjCarrier =
+        (ctx.standalone || ctx.wasi) &&
+        ts.isObjectBindingPattern(param.name) &&
+        paramType.kind === "externref" &&
+        ts.isObjectLiteralExpression(param.initializer) &&
+        structHintForBindingPattern(ctx, param.name) === undefined;
       try {
-        compileExpression(ctx, fctx, param.initializer, paramType);
+        if (dynObjCarrier) {
+          const t = compileObjectLiteralAsExternref(ctx, fctx, param.initializer as ts.ObjectLiteralExpression);
+          if (t === null) compileExpression(ctx, fctx, param.initializer, paramType);
+        } else {
+          compileExpression(ctx, fctx, param.initializer, paramType);
+        }
       } finally {
         if (isArrayPatternExternref) {
           (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = prevForceVec;
