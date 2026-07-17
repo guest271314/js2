@@ -1,7 +1,8 @@
 ---
 id: 3341
 title: "Promote zeroed IR fallback reasons into STRICT_IR_REASONS (#2855's own AC — cheapest unstarted hardening step)"
-status: ready
+status: in-progress
+assignee: senior-dev
 sprint: current
 created: 2026-07-17
 priority: high
