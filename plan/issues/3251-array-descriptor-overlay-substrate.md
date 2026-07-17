@@ -1,8 +1,9 @@
 ---
 id: 3251
 title: "standalone: array-descriptor OVERLAY substrate — $Vec receivers have no per-index/expando property-descriptor storage (blocks array-exotic defineProperty + Array generic-method-over-accessor-index)"
-status: needs_architect_spec
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/fable-1
+sprint: current
 created: 2026-07-13
 priority: high
 feasibility: hard
@@ -131,6 +132,126 @@ Key design questions for the spec:
   getter (the ~204 `testResult`/`accessed` cluster).
 - Dense-array fast path unchanged (no perf/behaviour regression); host/gc
   output byte-identical; standalone floor NET ≥ 0.
+
+## Implementation Plan (fable-1, 2026-07-17 — replaces the needs_architect_spec gate)
+
+### Verified routing (WAT-probed on 0f7ac132a0, all 7 repro probes fail as filed)
+
+Both the dynamic (`any`) lane AND the typed local lane funnel through the SAME
+runtime natives — the substrate has exactly four chokepoints:
+
+- **Define**: `Object.defineProperty(arr, k, d)` → `__defineProperty_value` /
+  `__defineProperty_accessor` (object-runtime-descriptors.ts) with the vec
+  boxed to externref. Both open with `ref.test $Object`-else-return-obj — the
+  lenient no-op. `__defineProperty_desc` + the plural loops dispatch INTO these
+  two, so a vec arm here covers every define entry point.
+- **Dynamic element read**: `arr[i]` (any lane) AND every `__hof_*` loop
+  (map/filter/every/… — the ~204-test cluster iterates through `__hof_every`
+  etc., confirmed by WAT) read through **`__extern_get_idx`** — one chokepoint.
+- **Typed element read**: raw `array.get` inline — NOT hookable cheaply; kept
+  fast by writing data-define VALUES INTO the vec (the #3116 host-mode trick).
+- **gOPD**: `__getOwnPropertyDescriptor` — same `$Object`-gate miss.
+
+Typed-lane call sites also PRE-GROW the vec (`maybeEmitVecLengthGrowth`,
+object-ops.ts:468) before calling the native — which destroys the real-element
+vs fresh-hole distinction (#3116 regression class 1). Standalone-gate it off so
+the native sees the true length.
+
+### Storage decision: side table of companions, NOT a hidden `$Vec` field
+
+A hidden field is rejected: `$Vec` layout ({length, data} subtyping
+`$__vec_base`) is load-bearing across every struct.new site, the `$__subview`
+prefix, and the per-carrier dispatch arms — unbounded blast radius. Instead:
+
+- New module `src/codegen/vec-overlay.ts`:
+  - `$__overlay_pair` struct `{ vec: anyref, companion: (ref null $Object) }`,
+    growable `$__overlay_tab` array + `$__vec_overlay_tab` /
+    `$__vec_overlay_count(i32)` globals.
+  - `__vec_overlay_lookup(anyref) -> (ref null $Object)` — count==0 fast path,
+    then linear `ref.eq` scan (defineProperty-on-array is rare; table is ~0/1).
+  - `__vec_overlay_ensure(anyref) -> (ref $Object)` — lookup-or-append (companion
+    minted via `__new_plain_object`).
+- **The companion is a plain `$Object`** — so the vec arms DELEGATE to the
+  existing, already-correct `$Object` machinery (`__defineProperty_value` S4
+  ValidateAndApply preflight, §10.1.6.3 merge, CompletePropertyDescriptor
+  defaults, `__obj_find`, gOPD builder) instead of duplicating any of it.
+
+### Coherence rules
+
+- **Data defines**: full delegate to `__defineProperty_value(companionExt, key,
+  value, flags)` (validation + attribute storage), THEN write the value back
+  into the vec element per-carrier (`ensureVecElemSet` handles in-bounds +
+  grow + length update). Kind-incompatible values (string value into `__vec_f64`)
+  skip write-back and set a new `$PropEntry` flag bit `FLAG_COMPANION_VALUE
+  (16)` so dynamic readers prefer the companion value.
+- **Seeding**: an in-bounds index with NO companion entry is a REAL element →
+  seed `{value: vec[i], w/e/c: true}` into the companion BEFORE delegating, so
+  redefine-legality validates against the spec's implicit element descriptor
+  (fresh OOB indices stay first-definitions → defaults false — correct, and
+  the reason the call-site pre-growth must go).
+- **Accessor defines**: delegate to `__defineProperty_accessor` on the
+  companion (after the same seeding); NO vec length extension for OOB accessor
+  defines (#3116 15.2.3.6-4-312 lesson — deferred with ArraySetLength).
+- **Reads**: `__extern_get_idx` gets a finalize-spliced prologue (gated on
+  `$__vec_overlay_count != 0` → zero cost for overlay-free modules): companion
+  entry with FLAG_ACCESSOR → `__call_accessor_get(origReceiver, getter)`
+  (correct `this`); FLAG_COMPANION_VALUE → companion value; else fall through
+  to the existing per-carrier vec arms (vec value is authoritative — it was
+  written back at define time and later plain writes keep it fresh).
+- **gOPD**: vec arm — companion entry present → delegate to the `$Object`
+  gOPD on the companion; no entry + in-bounds index → synthesize
+  `{value: vec[i], writable/enumerable/configurable: true}` fresh (do NOT seed
+  on reads); else undefined.
+- **`length` key**: explicitly excluded (legacy no-op) — ArraySetLength with
+  non-configurable shrink-blocking is slice 3.
+
+### Emission-order discipline (the hazard part)
+
+The define/gOPD natives are built EARLY (ensureObjectRuntime) but the
+per-carrier vec types + `__str_to_number`/`number_toString` are only complete
+at FINALIZE. Use the two proven patterns, nothing new:
+
+- The vec arms baked early are a single `ref.test $__vec_base` → `call
+  <reserved __vec_dp_value / __vec_dp_accessor / __vec_gopd>` → return.
+  Reserved via the `reserveAccessorSetDriver` pattern (mintDefinedFunc +
+  placeholder body + funcMap; `ctx.vecOverlayReserved` flag). Placeholders are
+  SAFE NO-OPS (`return obj` / `return null-extern`), not `unreachable`, so a
+  skipped fill degrades to today's behavior instead of trapping.
+- `fillVecOverlayHelpers(ctx)` runs in index.ts finalize right after
+  `fillExternSetVecArms` (#3190): fills the three bodies (carrier whitelist:
+  elemKind f64 / externref / `$AnyString`-ref only — TypedArray carriers +
+  subviews keep the legacy no-op), and splices the overlay prologue into
+  `__extern_get_idx` (append-locals, splice-front, fresh Instr factories per
+  the shared-instr double-remap hazard).
+- Key→index: `__str_to_number` + NaN check + canonical round-trip
+  (`number_toString(n)` `__str_equals` key) — the CanonicalNumericIndexString
+  discipline; `"length"` via the `__str_flatten`+`__str_equals` pattern from
+  `fillDynamicForinVecArms` (#3183).
+- Strict number test for f64 write-back: `ref.test ctx.nativeBoxNumberTypeIdx`
+  (+ `$AnyValue` tag 2/3 arm when `ctx.anyValueTypeIdx >= 0`) — NEVER the
+  coercing `__unbox_number` alone (defineProperty must not ToNumber the value).
+
+### Host-lane byte identity
+
+Every emission is inside standalone-only builders (`ensureObjectRuntime`
+natives) or `ctx.standalone`-gated (pre-growth removal, finalize fills). Host
+mode routes defineProperty through the JS-import sidecar (#3116) untouched.
+Verify: compile a defineProperty-using module in host mode on main vs branch —
+byte-identical (the #1917 discipline).
+
+### Slices
+
+- **S1 (this PR)**: overlay core + define arms (value/accessor) + seeding +
+  vec write-back + `__extern_get_idx` overlay prologue + gOPD vec arm +
+  pre-growth standalone-gate. Covers probes A–F (define/readback coherence,
+  redefine-throws, accessor+HOF ~204 cluster, gOPD).
+- **S2**: write-side enforcement — `writable:false` drop + setter invoke in
+  `fillExternSetVecArms`' arm and the typed/inline assignment lanes;
+  `__extern_get`/`__extern_has` named-expando companion consult; for-in merge
+  (enumerable:false filtering).
+- **S3**: ArraySetLength (§10.4.2.1) — length define validation, RangeError,
+  shrink stopping at non-configurable elements (the 28 throw-only tests),
+  gOPD("length").
 
 ## Provenance
 
