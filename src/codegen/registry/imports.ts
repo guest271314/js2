@@ -2043,6 +2043,16 @@ export function addForInImports(ctx: CodegenContext): void {
   // __for_in_has: (externref obj, externref key) -> i32 — per-visit liveness
   // check so a property deleted mid-enumeration is skipped (#2066).
   ensureLateImport(ctx, "__for_in_has", [ER, ER], [{ kind: "i32" }]);
+  // (#3323) __array_forin_keys: (externref vec, i32 len) -> externref — for an
+  // ARRAY receiver, returns the full OrdinaryOwnPropertyKeys string list: integer
+  // indices "0".."len-1" ascending (len is the vec length, read in Wasm via the
+  // `$__vec_base` length field and passed in — the host has no reliable opaque-vec
+  // length otherwise), THEN the own enumerable non-index string keys added via
+  // `arr.k = v` / `Object.defineProperty` (sidecar), in insertion order with
+  // `__get_`/`__set_` accessor keys normalized to their user key and deduped. The
+  // native emitArrayForIn index loop only covered the indices and dropped the
+  // string keys entirely.
+  ensureLateImport(ctx, "__array_forin_keys", [ER, { kind: "i32" }], [ER]);
   flushLateImportShifts(ctx, ctx.currentFunc);
 }
 

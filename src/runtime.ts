@@ -12061,6 +12061,51 @@ assert._isSameValue = isSameValue;
           if (keys == null || !Array.isArray(keys)) return undefined;
           return keys[i];
         };
+      // (#3323) for-in over an ARRAY receiver: return the full
+      // OrdinaryOwnPropertyKeys string list — integer indices "0".."length-1"
+      // ascending, THEN the own enumerable non-index string keys added via
+      // `arr.k = v` / `Object.defineProperty(arr, "k", …)` (the accessor case),
+      // in insertion order. The native `emitArrayForIn` index loop only emitted
+      // the indices and dropped every string key, so `for (k in arr)` after a
+      // `defineProperty(arr,"a",{get,enumerable})` yielded `[]` instead of
+      // `["a"]` (test262 for-in/order-after-define-property.js assert #2).
+      //
+      // Accessor properties are stored in the sidecar as `__get_<k>`/`__set_<k>`
+      // (the bound getter/setter) — normalize those to the user key `<k>` at that
+      // insertion position and dedupe, so a redefine (which also leaves a bare
+      // `<k>` marker) does not enumerate the key twice or reorder it.
+      if (name === "__array_forin_keys")
+        return (vec: any, len: number): string[] => {
+          const keys: string[] = [];
+          if (vec == null) return keys;
+          // Integer index keys "0".."len-1" — `len` is the vec length, read in
+          // Wasm and passed in (the opaque vec has no host-reachable length).
+          const n = typeof len === "number" && len > 0 ? len | 0 : 0;
+          for (let i = 0; i < n; i++) keys.push("" + i);
+          // Own enumerable non-index string keys from the sidecar, insertion order.
+          const sc = _wasmStructProps.get(vec);
+          if (!sc) return keys;
+          const descs = _wasmPropDescs.get(vec);
+          const tomb = _wasmStructDeletedKeys.get(vec);
+          const seen = new Set<string>();
+          for (const raw of Object.getOwnPropertyNames(sc)) {
+            let k = raw;
+            if (raw.startsWith("__get_") || raw.startsWith("__set_")) k = raw.slice(6);
+            // Integer-index keys are already emitted by the index loop above.
+            if (_isCanonicalArrayIndexKey(k)) continue;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            if (tomb && tomb.has(k)) continue; // deleted → not an own property
+            // Enumerability: a sidecar key WITHOUT an explicit descriptor is
+            // enumerable; a defined descriptor must have the enumerable bit set.
+            if (descs) {
+              const flags = descs.get(k);
+              if (flags !== undefined && flags & _SC_DEFINED && !(flags & _SC_ENUMERABLE)) continue;
+            }
+            keys.push(k);
+          }
+          return keys;
+        };
       // Per-visit liveness check for for-in (#2066). The key set is snapshotted
       // up front (spec-permitted), but §14.7.5.10 requires that a property
       // deleted before it is visited is skipped. This re-tests, at visit time,

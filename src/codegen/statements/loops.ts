@@ -29,7 +29,13 @@ import { flatStringType, stringConstantExternrefInstrs } from "../native-strings
 import { emitNativeNumberFormat } from "../number-format-native.js";
 import { ensureObjectRuntime } from "../object-runtime.js";
 import { coercionInstrs, defaultValueInstrs } from "../type-coercion.js";
-import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
+import {
+  addForInImports,
+  addImport,
+  addStringConstantGlobal,
+  ensureExnTag,
+  localGlobalIdx,
+} from "../registry/imports.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -2986,14 +2992,28 @@ function emitArrayForIn(
   // types host mode doesn't register — registering them there bakes a `-1`
   // heap-type ref, the #2043 class). Register before the funcIdx capture so the
   // late-import index shift settles first.
+  // (#3323) In JS-host mode, enumerate the FULL OrdinaryOwnPropertyKeys list —
+  // integer indices PLUS the own enumerable non-index string keys added via
+  // `arr.k = v` / `Object.defineProperty` — through the `__array_forin_keys`
+  // host helper, driven by the shared `__for_in_len`/`__for_in_get` loop. The
+  // pure-native index loop below (kept for standalone / wasi, where the sidecar
+  // is unavailable) only emits the integer indices and drops the string keys.
+  const useHostKeys = !ctx.standalone && !ctx.wasi;
   const NUM_FMT = "number_toString";
+  if (useHostKeys) {
+    addForInImports(ctx);
+  }
   if (ctx.standalone || ctx.wasi || ctx.nativeStrings) {
     emitNativeNumberFormat(ctx, new Set([NUM_FMT]));
-  } else if (ctx.funcMap.get(NUM_FMT) === undefined) {
+  } else if (!useHostKeys && ctx.funcMap.get(NUM_FMT) === undefined) {
     ensureLateImport(ctx, NUM_FMT, [{ kind: "f64" }], [{ kind: "externref" }]);
   }
   flushLateImportShifts(ctx, fctx);
   const numToStrIdx = ctx.funcMap.get(NUM_FMT);
+  const arrayKeysIdx = useHostKeys ? ctx.funcMap.get("__array_forin_keys") : undefined;
+  const forInLenIdx = useHostKeys ? ctx.funcMap.get("__for_in_len") : undefined;
+  const forInGetIdx = useHostKeys ? ctx.funcMap.get("__for_in_get") : undefined;
+  const hostKeys = useHostKeys && arrayKeysIdx !== undefined && forInLenIdx !== undefined && forInGetIdx !== undefined;
 
   // Compile the array expression into a vec ref local. A null/undefined receiver
   // would throw in JS; for-in over null/undefined is spec'd as a no-op (§13.7.5.1
@@ -3041,8 +3061,8 @@ function emitArrayForIn(
     fctx.body.push({ op: "local.set", index: vecLocal });
   }
 
-  // length = vec.field0  (0 when the ref is null → loop body never runs)
-  const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, { kind: "i32" });
+  // vec length = vec.field0 (0 when the ref is null → no integer indices).
+  const vecLenLocal = allocLocal(fctx, `__forin_veclen_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: vecLocal });
   fctx.body.push({ op: "ref.is_null" });
   fctx.body.push({
@@ -3055,6 +3075,30 @@ function emitArrayForIn(
       { op: "struct.get", typeIdx: vecBaseTypeIdx, fieldIdx: 0 },
     ],
   });
+  fctx.body.push({ op: "local.set", index: vecLenLocal });
+
+  // (#3323) Host mode: materialize the full key list (integer indices + own
+  // enumerable string keys) into an externref local via
+  // `__array_forin_keys(vec, vecLen)`. The vec length is read above and passed in
+  // (the opaque vec has no host-reachable length). A null vec → null externref +
+  // len 0 → the helper returns `[]` → 0 iterations.
+  const keysLocal = hostKeys ? allocLocal(fctx, `__forin_keys_${fctx.locals.length}`, { kind: "externref" }) : -1;
+  if (hostKeys) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "extern.convert_any" });
+    fctx.body.push({ op: "local.get", index: vecLenLocal });
+    fctx.body.push({ op: "call", funcIdx: arrayKeysIdx! });
+    fctx.body.push({ op: "local.set", index: keysLocal });
+  }
+
+  // Iteration count = keys.length (host, indices + string keys) | vecLen (native).
+  const lenLocal = allocLocal(fctx, `__forin_len_${fctx.locals.length}`, { kind: "i32" });
+  if (hostKeys) {
+    fctx.body.push({ op: "local.get", index: keysLocal });
+    fctx.body.push({ op: "call", funcIdx: forInLenIdx! });
+  } else {
+    fctx.body.push({ op: "local.get", index: vecLenLocal });
+  }
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   // Counter i = 0
@@ -3097,11 +3141,17 @@ function emitArrayForIn(
   loopBody.push({ op: "i32.ge_s" });
   loopBody.push({ op: "br_if", depth: 1 });
 
-  // key = <decimal formatter>(f64(i))  → keyLocal (externref string)
-  loopBody.push({ op: "local.get", index: iLocal });
-  loopBody.push({ op: "f64.convert_i32_s" });
-  if (numToStrIdx !== undefined) {
-    loopBody.push({ op: "call", funcIdx: numToStrIdx });
+  // key = keys[i] (host) | <decimal formatter>(f64(i)) (native) → keyLocal
+  if (hostKeys) {
+    loopBody.push({ op: "local.get", index: keysLocal });
+    loopBody.push({ op: "local.get", index: iLocal });
+    loopBody.push({ op: "call", funcIdx: forInGetIdx! });
+  } else {
+    loopBody.push({ op: "local.get", index: iLocal });
+    loopBody.push({ op: "f64.convert_i32_s" });
+    if (numToStrIdx !== undefined) {
+      loopBody.push({ op: "call", funcIdx: numToStrIdx });
+    }
   }
   loopBody.push({ op: "local.set", index: keyLocal });
 
