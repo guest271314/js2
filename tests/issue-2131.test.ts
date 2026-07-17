@@ -90,19 +90,20 @@ describe("#2131 — JS-host integer-key enumeration order", () => {
 
   // (#86/#3155) This "standalone" test ran gc-host vacuously (the `{ standalone:
   // true }` option was silently ignored) — the #1837 "fix" was never exercised
-  // on the real lane. On the true `target: "standalone"` lane the
-  // `Object.keys(o).join(",")` path fails. Skipped-pending-#3155 (HONEST — was
-  // vacuously "passing"). The host-mode order test above keeps real coverage.
-  it.skip("standalone mode (already fixed by #1837) keeps the same order", async () => {
+  // on the real lane. #3155 wired the native externref-`join` path so
+  // `Object.keys(o).join(",")` is host-free on the real `target: "standalone"`
+  // lane. A standalone string export is an opaque `ref $AnyString` from JS, so
+  // the order is verified in-wasm via a native `===` compare returning a boolean.
+  it("standalone mode keeps the same integer-key-first order (#3155)", async () => {
     const out = await run(
       `
-      export function test(): string {
+      export function test(): boolean {
         const o: any = { b: 1, "2": 2, a: 3, "1": 4 };
-        return Object.keys(o).join(",");
+        return Object.keys(o).join(",") === "1,2,b,a";
       }
     `,
       { target: "standalone" },
     );
-    expect(out).toBe("1,2,b,a");
+    expect(out).toBe(1);
   });
 });
