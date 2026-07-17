@@ -21,6 +21,7 @@ origin: "#3288 P4 split: independently dispatchable Porffor heap/layout proof"
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T16:08:01.435Z
 branch: symphony/porffor/3299
+pr: 3263
 ---
 
 # #3299 - Porffor backend P4: heap and layout proof through shared planning
@@ -52,7 +53,7 @@ silently depending on Porffor's own object representation.
       covered by stress validation where collection is possible.
 - [x] The Porffor adapter does not reinterpret values as Porffor-native objects
       or call builtins that assume Porffor layouts.
-- [ ] The issue changes are committed, pushed to `origin`, and published as a
+- [x] The issue changes are committed, pushed to `origin`, and published as a
       ready, non-draft PR before completion is reported.
 
 ## Validation
