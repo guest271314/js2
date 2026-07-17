@@ -5,6 +5,8 @@ status: in-progress
 created: 2026-07-12
 updated: 2026-07-17
 assignee: ttraenkler/fable-2
+loc-budget-allow:
+  - src/runtime.ts
 priority: high
 feasibility: hard
 task_type: bug
