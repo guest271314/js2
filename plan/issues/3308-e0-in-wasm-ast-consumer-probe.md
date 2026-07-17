@@ -3,7 +3,7 @@ id: 3308
 title: "E0 — in-Wasm AST consumer probe: walk compiled-acorn's AST inside Wasm to arbitrate parser bugs vs host-marshalling losses"
 status: ready
 created: 2026-07-16
-priority: medium
+priority: high
 horizon: s
 feasibility: medium
 reasoning_effort: high
