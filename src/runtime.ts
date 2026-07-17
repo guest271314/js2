@@ -4314,6 +4314,18 @@ function _readOwnDescriptor(
   prop: string | symbol,
   exports: Record<string, Function> | undefined,
 ): PropertyDescriptor | undefined {
+  // (#3200 slice 2) Delete tombstone FIRST: `delete obj[k]` on a struct
+  // receiver records the key in `_wasmStructDeletedKeys` (#1334) but the
+  // struct FIELD still exists, so the field-name-registry step below would
+  // resurrect the deleted property as an own data descriptor. A deleted key
+  // is not an own property for gOPD, HasProperty, or the array-like index
+  // MOP (the test262 forEach `-7-b-*` "deleted properties are visible"
+  // family deletes mid-iteration through a `length` accessor). Mirrors the
+  // `_wasmStructHasOwn` ordering.
+  {
+    const tomb = _wasmStructDeletedKeys.get(obj);
+    if (tomb && tomb.has(typeof prop === "symbol" ? prop : String(prop))) return undefined;
+  }
   // 0. (#3116) Vec (compiled array) receiver: element and `length` descriptors
   // read LIVE from the vec (values live in the vec, attributes in the sidecar
   // table — see _vecDefineOwnProperty). Previously an in-bounds element with no
