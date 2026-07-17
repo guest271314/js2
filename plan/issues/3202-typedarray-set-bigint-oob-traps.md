@@ -13,6 +13,8 @@ goal: crash-free
 sprint: current
 horizon: m
 related: [3189, 3173]
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 origin: "The #3189 uncatchable-trap ratchet fired oob 58->62 (+4) on EVERY merge_group, wedging the queue. Re-diagnosed 2026-07-12 (dev-find-wasm): main HEAD is verifiably 58 (baseline promoted from main commit c660e830; `git log c660e830..origin/main` = ONLY doc commits; freshly-fetched promoted baseline reads 58; the 4 named tests are `fail`/'undefined is not a constructor' on both baseline and main HEAD, not oob). So the +4 is SPECULATIVE-MERGE / CI-sharded-only, NOT a main regression — a promote-baseline 'refresh to 62' is impossible (it reflects main = 58; the attempted refresh left it at 58). Unwedged via the ratchet's own designed valve TRAP_RATCHET_TOLERANCE=4 (repo var, PR #2963)."
 ---
 
