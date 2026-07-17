@@ -258,3 +258,22 @@ those two arms plus the element-kind mechanisms.
 Suites: `issue-3201-inherited-length` 5/5 (new), `issue-1360` +
 `issue-3138` + `issue-3116` + `issue-1629-S1` + `issue-3139` + `issue-1629`
 + `issue-1629a` 76/76, tsc clean.
+
+## Progress — len==0 before ToInteger(fromIndex) (fable-e, 2026-07-17, same PR)
+
+Mechanism-2 slice, same PR (#3194). §23.1.3.14/.20 step 3: on an empty array,
+`return -1` precedes step 4's `ToIntegerOrInfinity(fromIndex)`, so a throwing
+`valueOf` on the fromIndex object must not be observed
+(`{indexOf,lastIndexOf}/length-zero-returns-minus-one.js` — both flip to
+pass). `compileArrayIndexOf`/`compileArrayLastIndexOf` compiled the fromIndex
+coercion (whose f64 path embeds ToPrimitive → `valueOf`) unconditionally;
+now the coercion+clamp instrs are compiled into the main body then spliced
+into a `len != 0` guard arm (safe: nested `then`/`else` arms ARE walked by
+`flushLateImportShifts`' recursive `shiftBody`, so no detached-array funcIdx
+staleness — only never-embedded arrays are hazardous, per the #2001
+pre-ensure note). len==0 arms: indexOf iTmp=0 (loop bound 0 → -1);
+lastIndexOf iTmp=-1 (same as the empty default `len-1`).
+
+Suites: `issue-3201-inherited-length` 8/8 (3 new ordering tests incl. the
+positive valueOf-IS-observed control), the five issue-3201* suites +
+`issue-1360` + `array-prototype-methods` 91/91, tsc clean.

@@ -96,3 +96,58 @@ describe("#3201 array-like .call with inherited length", () => {
     expect((exports.test as () => number)()).toBe(1);
   });
 });
+
+describe("#3201 len==0 checked before ToInteger(fromIndex) (§23.1.3.14/.20 step 3)", () => {
+  it("indexOf on an empty array does not observe fromIndex.valueOf", async () => {
+    const exports = await compileAndInstantiate(`
+      var observed = false;
+      var fromIndex: any = {
+        valueOf: function(): number { observed = true; return 0; }
+      };
+      export function test(): number {
+        var e: number[] = [];
+        var r = e.indexOf(2, fromIndex);
+        if (r !== -1) return 100;
+        if (observed) return 200;
+        return 0;
+      }
+    `);
+    expect((exports.test as () => number)()).toBe(0);
+  });
+
+  it("lastIndexOf on an empty array does not observe fromIndex.valueOf", async () => {
+    const exports = await compileAndInstantiate(`
+      var observed = false;
+      var fromIndex: any = {
+        valueOf: function(): number { observed = true; return 0; }
+      };
+      export function test(): number {
+        var e: number[] = [];
+        var r = e.lastIndexOf(2, fromIndex);
+        if (r !== -1) return 100;
+        if (observed) return 200;
+        return 0;
+      }
+    `);
+    expect((exports.test as () => number)()).toBe(0);
+  });
+
+  it("fromIndex.valueOf IS observed on a non-empty array", async () => {
+    const exports = await compileAndInstantiate(`
+      var observed = false;
+      var fromIndex: any = {
+        valueOf: function(): number { observed = true; return 1; }
+      };
+      export function test(): number {
+        var a = [7, 8, 8];
+        var r = a.indexOf(8, fromIndex);
+        if (r !== 1) return 100 + r;
+        if (!observed) return 200;
+        var r2 = a.lastIndexOf(8, fromIndex);
+        if (r2 !== 1) return 300 + r2;
+        return 0;
+      }
+    `);
+    expect((exports.test as () => number)()).toBe(0);
+  });
+});
