@@ -1,7 +1,8 @@
 ---
 id: 3150
 title: "standalone: Uint8Array.fromBase64 / fromHex (+ toBase64/toHex/setFrom*) (12 __get_builtin CEs)"
-status: ready
+status: done
+completed: 2026-07-17
 sprint: current
 priority: medium
 horizon: m
@@ -16,6 +17,38 @@ loc-budget-allow:
 ---
 
 # #3150 — standalone Uint8Array base64/hex codec statics
+
+## Progress (2026-07-17, dev-j) — `toHex` / `toBase64` instance methods landed
+
+The **`Uint8Array.prototype.toHex()`** and **`Uint8Array.prototype.toBase64()`**
+instance methods are now implemented standalone-native (`__uint8_to_hex` /
+`__uint8_to_base64` + the `__hex_char` / `__base64_char` alphabet-encode helpers
+in `src/codegen/uint8-codec.ts`, plus a dispatch arm in the standalone
+native-string block of `src/codegen/expressions/call-receiver-method.ts`
+alongside the TextEncoder/TextDecoder lowering). They read the packed-`i8`
+Uint8Array vec (the same backing `new Uint8Array` / `Uint8Array.of` / `fromHex`
+produce) and build a fresh i16-backed native string:
+- `toHex` emits two LOWERCASE hex code units per byte.
+- `toBase64` emits standard-alphabet base64 under the DEFAULT options
+  (`alphabet: "base64"`, `omitPadding: false`): 3-byte groups → 4 chars, a
+  trailing 1-/2-byte chunk emits partial sextets + `=` padding to a full group,
+  and the `+` / `/` sextets (62/63) are covered.
+
+Only the **no-argument** form routes here — a `.toBase64({...})` call carrying an
+options object has `arguments.length > 0` and falls through to the existing
+dynamic-shape refusal, so no wrong default (base64url / omitPadding) is silently
+applied. Gated on the standalone native-string path (host lane unaffected). 0
+host imports. Covered by `tests/issue-3150.test.ts` (byte-exact via `.length` +
+`.charCodeAt`).
+
+**Known limitation carried forward** (same static return-type branding gap as
+the statics): `toHex`/`toBase64` are not in the bundled TS lib, so the checker
+types the result `any`; a direct `arr.toHex() === "literal"` uses the
+`any === <literal>` reference-eq fast-path and mis-compares even though the
+runtime string is byte-correct. test262's `assert.sameValue(actual, expected)`
+(untyped params → content comparison) passes. The branding fix (teach the
+checker/type-mapper these return `string`) is the same remaining item already
+tracked below and applies to the statics too.
 
 ## Progress (2026-07-17, opus-a) — `fromHex` slice landed
 
@@ -53,8 +86,9 @@ imports). Covered by `tests/issue-3150.test.ts`.
   `lastChunkHandling: "strict" | "stop-before-partial"` variants (a call with a
   second argument still refuses; only the default-options string form is
   handled).
-- Instance methods `toHex` / `toBase64` / `setFromHex` / `setFromBase64`
-  (currently silently return `null`).
+- Instance methods `toHex` / `toBase64` **landed** (dev-j, 2026-07-17, see
+  progress note above). `setFromHex` / `setFromBase64` (in-place decode into an
+  existing array) still silently return `null` — follow-up.
 - **Static return-type branding** so `results.js`'s
   `Object.getPrototypeOf(arr) === Uint8Array.prototype` / `arr.buffer` assertions
   pass — the checker doesn't know `fromHex` returns `Uint8Array` (not in the TS
