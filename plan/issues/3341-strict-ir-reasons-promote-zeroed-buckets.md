@@ -261,8 +261,9 @@ error now hard-errors; assert `compile()` surfaces `severity:"error"`.
   IR-build throw — confirm against current HEAD, they drift) and the
   `lower.ts` "not yet moved" claim reflects #2953's aggregate/closure/
   ref-coercion move.
-- Update `plan/issues/2855-...md` to mark the promoted reason done against its
-  AC (do NOT close #2855 — `body-shape-rejected` stays open via #2856).
+- Update `plan/issues/2855-ir-frontend-migration-ratchet-buckets-to-zero.md`
+  to mark the promoted reason done against its AC (do NOT close #2855 —
+  `body-shape-rejected` stays open via #2856).
 
 ### Test strategy
 
