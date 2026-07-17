@@ -1,8 +1,9 @@
 ---
 id: 2958
 title: "Standalone: unhandled-rejection tracking — report rejected promises with no handler at drain/event-loop exit"
-status: in-progress
+status: done
 assignee: dev-2958
+completed: 2026-07-17
 sprint: current
 created: 2026-07-02
 updated: 2026-07-17
@@ -165,3 +166,76 @@ slice queue). Two additions from the spec, both cheap:
 remaining gaps (#2906 slices 3d + widen) live in async-cps/async-frame, not
 the scheduler — the `async-scheduler.ts` churn this was deferred on has
 settled. Claimable (Opus, `horizon: m`).
+
+## Implementation (2026-07-17, dev-2958)
+
+Landed as a self-contained substrate in `src/codegen/async-scheduler.ts`, wired
+into `_start` in `src/codegen/index.ts`, with consumer-side "mark handled" hooks
+in `async-frame.ts` (await) and `promise-combinators.ts` (combinator inputs), and
+import registration in `src/codegen/wasi.ts`.
+
+### Deviation from the banked plan — no `$Promise` struct-layout change
+The banked plan appended two fields (`handled`, `unhandledNext`) to the `$Promise`
+struct. That is **not viable as written**: `struct.new $Promise` requires ALL
+fields on the stack, so appending two fields forces edits to **17** `struct.new`
+sites across 6 files (`async-scheduler`, `promise-executor`, `async-frame`,
+`promise-combinators`, `expressions`, `ir/backend/wasmgc-emitter`) — high
+merge-conflict risk in contended files, and the plan's "every current
+struct.get/set stays valid" note overlooked the `struct.new` arity requirement.
+
+Instead the tracking uses a **separate intrusive list of a NEW node struct**
+`$__unhandled_node { promise (ref null eq), next externref, handled i32 (mut) }`,
+whose only construction site is our own code — zero changes to any `$Promise`
+`struct.new`. A global `__unhandled_head` (externref) is the list head.
+
+- **Note (O(1) prepend)**: on a handler-less rejection — both the direct
+  `Promise.reject(x)` mint (`emitStandalonePromiseReject`) and the
+  `__promise_reject` settle of a previously-pending promise with a null callback
+  list (`buildPromiseSettleBody`, REJECTED arm). The settle funnel covers
+  executor `reject`, `.then`-chain rejection propagation (derived promise),
+  combinator result rejection, and async-fn result rejection.
+- **Mark handled**: a later `.then/.catch/.finally` on an already-rejected
+  receiver, an `await` that consumes the rejection, or a combinator subscription
+  clears the matching node's `handled` flag via `__mark_rejection_handled`.
+- **Report**: `__report_unhandled_rejections()` runs at the `_start` tail (after
+  the microtask/event-loop drain); it writes `Unhandled promise rejection\n` to
+  stderr per still-unhandled node and `proc_exit(1)`s if any. Per-reason
+  stringification remains deferred to #2962.
+
+Everything is `ctx.wasi`-gated; host and non-wasi-standalone builds are byte-inert
+(`markRejectionHandledFuncIdx`/`unhandledHeadGlobalIdx` stay -1, so every emit
+hook degrades to a no-op). Import registration is scoped to **top-level**
+`Promise`/`await` usage so host-free carrier modules that only use promises inside
+exported functions (instantiated with `{}`, driven directly — e.g. the #2867/#2865
+tests) keep their exact prior import set.
+
+### Acceptance criteria — all met (`tests/issue-2958.test.ts`, 13 cases, green)
+- AC1 `Promise.reject(new Error("x"))` no handler → stderr line + exit 1. ✓
+- AC2 `.catch(() => {})` (and 2-arg `.then` onRejected) → exit 0, no line. ✓
+- AC3 reject inside a microtask + same-turn late `.catch` → no report. ✓
+- Architect note 1 (derived promise via `.then` reject adoption reports on the
+  derived promise). ✓ Plus: executor reject, `Promise.all` result caught (no false
+  positive), multiple independent rejections (one line each), non-Error reasons,
+  resolved chains never report, promise-free module byte-inert. ✓
+
+Validated by compiling under `--target wasi` and running `_start` under V8 (this
+Node) with a minimal `wasi_snapshot_preview1` shim (independent of the host
+wasmtime version — wasmtime ≥ 41 dropped the legacy EH encoding the promise
+runtime emits). No new regressions across the promise/async/combinator suites
+(2865 NaN, 2867-gap2 imports, 1326 host, 2903-r4 typedarray failures are all
+pre-existing on the clean tree).
+
+### Known limitations (follow-ups, out of AC scope)
+1. **Async-function-body-throw** with **no `await`** is not tracked: that shape
+   bypasses the settle funnel entirely (no `ensurePromiseSettleFunctions` call),
+   so its result-promise rejection is not noted. An **awaited** async body throw
+   IS routed through `__promise_reject`, but the result promise carries a driving
+   callback at reject time, so it is not currently classified as handler-less.
+   Both live in the async-frame result-promise wiring the issue already scopes to
+   the #2867 / async-cps follow-ups.
+2. A literal `await Promise.reject(x)` / combinator over a literal `Promise.reject`
+   is marked handled at the consume site, but async **reject propagation to a
+   `catch`** is itself incomplete today (#2867 territory) — where the catch does
+   not yet run, the rejection is genuinely unhandled at runtime and is (correctly)
+   reported; this self-corrects once #2867 lands the propagation and the
+   `await`/combinator mark-handled hooks fire.

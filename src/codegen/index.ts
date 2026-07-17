@@ -115,6 +115,7 @@ import {
 import {
   enableStdinReactor,
   ensureTimerHeap,
+  ensureUnhandledRejectionReporter,
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
@@ -3218,6 +3219,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
     ensureWasiStartExnPrinter(ctx);
   }
 
+  // (#2958) Pre-emit the unhandled-rejection reporter (a no-op unless the native
+  // $Promise carrier registered its tracking substrate AND fd_write/proc_exit
+  // exist). Emitting it here — before any funcidx below is computed — keeps the
+  // index space stable, mirroring the exn-printer discipline above. `_start`
+  // calls it at the tail (after the drain/run-loop), so a still-unhandled
+  // rejection is reported to stderr and the program exits nonzero.
+  const unhandledReporterIdx = ctx.wasi ? ensureUnhandledRejectionReporter(ctx) : -1;
+
   // Choose the WASI program entry that `_start` wraps.
   //
   // #1411 regression: #1978 correctly stopped splicing the module-init body
@@ -3294,6 +3303,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
       if (drainFuncIdx !== null) {
         body.push({ op: "call", funcIdx: drainFuncIdx });
       }
+    }
+
+    // (#2958) After the microtask/event-loop drain has fully quiesced, surface
+    // any promise that rejected without ever getting a handler (Node parity:
+    // report to stderr + exit nonzero). No-op function body when nothing was
+    // tracked; only emitted at all when the reporter exists.
+    if (unhandledReporterIdx >= 0) {
+      body.push({ op: "call", funcIdx: unhandledReporterIdx });
     }
 
     // (#2968) If the uncaught-exception printer was emitted (throwing WASI
