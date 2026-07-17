@@ -14,6 +14,8 @@ language_feature: strings-concat
 goal: generator-model
 sprint: current
 es_edition: multi
+loc-budget-allow:
+  - src/codegen/statements/loops.ts
 ---
 # #1004 -- Optimize repeated string concatenation via compile-time folding and counted-loop aggregation
 
