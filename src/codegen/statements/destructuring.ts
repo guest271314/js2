@@ -18,7 +18,7 @@ import {
   nativeStringType,
   resolveWasmType,
 } from "../index.js";
-import { resolveBindingElementType } from "../../checker/type-mapper.js";
+import { isUndefWidenedBindingElement, resolveBindingElementType } from "../../checker/type-mapper.js";
 // (#3100 S4) The string-rest lowering builds the rest `string[]` natively from
 // the #1470 per-code-point char vec instead of the host `__extern_slice`.
 import { ensureStrToCharVecHelper } from "../native-strings.js";
@@ -239,6 +239,12 @@ export function ensureBindingLocals(ctx: CodegenContext, fctx: FunctionContext, 
       const elemType = ctx.checker.getTypeAtLocation(element);
       const wasmType = resolveBindingElementType(element, elemType, (t) => resolveWasmType(ctx, t));
       allocLocal(fctx, name, wasmType);
+      // (#3315) Widened parameter array-pattern binding — mark it so
+      // identifier reads skip the checker-type unbox narrowing (which would
+      // degrade a runtime `undefined` to NaN before it can be observed).
+      if (isUndefWidenedBindingElement(element, resolveWasmType(ctx, elemType))) {
+        (fctx.undefWidenedLocals ??= new Set()).add(name);
+      }
     } else if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
       ensureBindingLocals(ctx, fctx, element.name);
     }
