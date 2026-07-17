@@ -112,7 +112,9 @@ describe("#2961 — standalone host-import leak scan (phase 1, warning-first)", 
         // The binary is byte-for-byte the same either way — imports still emitted.
         expect(envImportNames(result.wat)).toContain("__str_from_mem");
       } finally {
-        if (prev === undefined) delete process.env.JS2WASM_STANDALONE_LEAK_SCAN;
+        // Reflect.deleteProperty (not `delete`, which trips biome noDelete; not
+        // `= undefined`, which would set the literal string "undefined").
+        if (prev === undefined) Reflect.deleteProperty(process.env, "JS2WASM_STANDALONE_LEAK_SCAN");
         else process.env.JS2WASM_STANDALONE_LEAK_SCAN = prev;
       }
     });
