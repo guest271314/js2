@@ -40,7 +40,9 @@ import {
   buildObjectLiteral,
   anyAdd,
   anyDiv,
+  anyGe,
   anyGet,
+  anyGt,
   anyLe,
   anyLogicalNot,
   anyLooseEq,
@@ -288,6 +290,12 @@ function run(bottom: Frame): JSValue {
             break;
           case Op.Le:
             acc = anyLe(regs[a], acc);
+            break;
+          case Op.Gt:
+            acc = anyGt(regs[a], acc);
+            break;
+          case Op.Ge:
+            acc = anyGe(regs[a], acc);
             break;
 
           // ── property (the shared dynamic MOP) ──
