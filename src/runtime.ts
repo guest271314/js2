@@ -5376,14 +5376,16 @@ function _copyVecSidecarOntoArray(vec: any, arr: any[], exports: Record<string, 
     }
     return val;
   };
+  const arrProps = arr as unknown as Record<PropertyKey, any>;
+  const scProps = sc as unknown as Record<PropertyKey, any>;
   for (const key of Object.getOwnPropertyNames(sc)) {
     if (key === "length") continue;
     if (key.startsWith("__get_") || key.startsWith("__set_")) continue;
     if (_asArrayIndex(key) !== undefined) continue;
-    (arr as Record<string, any>)[key] = wrapVal((sc as Record<string, any>)[key]);
+    arrProps[key] = wrapVal(scProps[key]);
   }
   for (const key of Object.getOwnPropertySymbols(sc)) {
-    (arr as Record<symbol, any>)[key] = wrapVal((sc as Record<symbol, any>)[key]);
+    arrProps[key] = wrapVal(scProps[key]);
   }
 }
 
