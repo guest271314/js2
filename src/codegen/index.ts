@@ -3159,21 +3159,34 @@ export function generateModule(
  * and would fail instantiation in a hostless runtime (#2073/#2075). This scan
  * turns that into a clean `success: false` CE instead.
  *
- * It does NOT fire on plain `--target standalone` (which is NOT strict by
- * default): standalone builds today still tolerate a set of `env` imports that
- * the test harness satisfies, and rejecting them here would regress thousands
- * of currently-passing standalone tests. The scan is a backstop for the strict
- * contract, not a new policy — when standalone is run strictly
- * (`strictNoHostImports`) it is covered. No-op for host/WasmGC builds.
+ * (#2961 phase 1) Plain `--target standalone` (NOT strict by default) now ALSO
+ * runs this scan, but at **warning** severity: every leaked host import gets a
+ * source-located advisory diagnostic while the binary is emitted UNCHANGED (the
+ * per-call `addImport` gate stays strict-only, so nothing is dropped and the
+ * emitted module is byte-identical to today's). This is the warning-first step
+ * of extending wasi's structural no-leak guarantee to standalone: it surfaces
+ * the exact standalone leak set without moving the `host_free_pass` floor
+ * (which keys on emitted `env::` imports, unchanged here) or failing any
+ * currently-passing standalone test. #2961 ratchets this to a hard error
+ * (mirroring wasi's `strictNoHostImports`) once the allowlist stabilizes. Set
+ * `JS2WASM_STANDALONE_LEAK_SCAN=0` to force the scan off for A/B control.
+ * No-op for host/WasmGC builds.
  */
 function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
-  if (!ctx.strictNoHostImports) return;
+  // wasi / explicit `--no-host-imports` → hard error (the #2094 backstop).
+  // plain `--target standalone` → warning-first advisory (#2961 phase 1).
+  const severity: "error" | "warning" | null = ctx.strictNoHostImports
+    ? "error"
+    : ctx.standalone && process.env.JS2WASM_STANDALONE_LEAK_SCAN !== "0"
+      ? "warning"
+      : null;
+  if (severity === null) return;
   // #2783 — pass `ctx.linkedNamespaces` so an arbitrary `--link`'d namespace's
   // imports survive the strict gate (left as link-time imports for a preloaded
   // provider) instead of being rejected as leaked host imports.
   const leaks = scanForLeakedHostImports(mod.imports, ctx.linkedNamespaces);
   for (const leak of leaks) {
-    reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+    reportErrorNoNode(ctx, buildLeakedHostImportError(leak, severity), severity);
   }
 }
 
