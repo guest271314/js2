@@ -13601,37 +13601,23 @@ assert._isSameValue = isSameValue;
           }
         };
       }
-      // (#3325) A user-level ambient `declare function f(...)` is classified as
-      // a `builtin` intent but is NOT one of the internal runtime helpers
-      // special-cased above (every recognised builtin — internal `__*` helpers
-      // and the named runtime primitives like `parseInt`/`JSON_stringify` —
-      // returns before reaching here). The call site DOES emit `call
-      // $f_import` (codegen never dropped the call); the miss was purely that
-      // the runtime resolved the import to a no-op and ignored `deps`. Wire it
-      // to the supplied dependency — the natural FFI for embedders declaring an
-      // ambient host function.
+      // (#3325) A user-level ambient `declare function f(...)` is a `builtin`
+      // intent but NOT an internal helper special-cased above (every recognised
+      // builtin returns before here). The call site emits `call $f_import`
+      // correctly; the miss was that this fallback no-op'd and ignored `deps`.
+      // Wire it to the supplied dependency — the natural FFI for embedders.
       const userDep = deps?.[name];
-      if (typeof userDep === "function") {
-        return (...args: any[]) => userDep(...args);
-      }
-      if (userDep !== undefined) {
-        // A non-function dep (e.g. a value) was supplied under this name;
-        // expose it as a zero-arg accessor rather than silently dropping it.
-        return () => userDep;
-      }
-      // No matching dep. Internal helpers are all `__`-prefixed and either
-      // handled above or legitimately absent, so keep the historical no-op for
-      // them. A user-facing (non-`__`) ambient name reaching here means the
-      // embedder declared a host function but supplied no `deps` entry — a
-      // SILENTLY dropped call is worse than an error, so return a stub that
-      // throws a clear message WHEN CALLED. Throwing lazily (not at
-      // instantiation) keeps a declared-but-unused import from breaking linking.
+      if (typeof userDep === "function") return (...args: any[]) => userDep(...args);
+      if (userDep !== undefined) return () => userDep;
+      // No dep. Internal `__`-prefixed helpers keep the historical no-op; a
+      // user-facing name means the embedder declared a host fn but supplied no
+      // dep — throw a clear error WHEN CALLED (lazy, so a declared-but-unused
+      // import never breaks linking) rather than silently dropping the call.
       if (!name.startsWith("__")) {
         return () => {
           throw new TypeError(
-            `Missing host dependency for ambient declaration "${name}": no ` +
-              `matching function was provided via deps. Pass { ${name}: <fn> } ` +
-              `to buildImports/compileAndInstantiate to satisfy the import.`,
+            `Missing host dependency for ambient declaration "${name}": ` +
+              `pass { ${name}: <fn> } via deps to satisfy the import.`,
           );
         };
       }

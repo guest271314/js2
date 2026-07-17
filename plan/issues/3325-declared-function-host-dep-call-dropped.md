@@ -15,6 +15,8 @@ horizon: s
 created: 2026-07-16
 updated: 2026-07-17
 completed: 2026-07-17
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 # #3325 — `declare function` host-dep call silently dropped
