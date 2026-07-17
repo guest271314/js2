@@ -428,3 +428,8 @@ started on this branch.
   including CLA, quality, linear, equivalence, cross-backend parity, and
   test262 relevance. The branch still contains only P1, and the umbrella stays
   `in-progress` for dependency-ordered P2-P5 follow-up branches.
+- Final same-PR catch-up merged `origin/main` at `048f715edb0`, then passed
+  typecheck, the 42 focused tests, the 82-site `pushRaw` ratchet, the
+  change-scoped LOC gate, and a fresh 56-record emit-identity comparison
+  against a clean archive of that exact main commit. No branch-owned repair
+  or P2 work was needed; `last_ci_retry_head` remains the recorded failed head.
