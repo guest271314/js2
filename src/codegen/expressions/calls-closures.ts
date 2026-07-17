@@ -11,7 +11,9 @@ import { ts } from "../../ts-api.js";
 import { isVoidType, isPromiseType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { getFuncRefWrapperRootTypeIdx, getOrCreateFuncRefWrapperTypes } from "../closures.js";
+import { compileArrayJoinExtern } from "../array-methods.js";
 import { tryCompileNativeDisposableStackAnyMethodCall } from "../disposable-runtime.js";
+import { noJsHost } from "../js-errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
@@ -1502,6 +1504,21 @@ export function tryExternClassMethodOnAny(
   if (ctx.nativeStrings && ctx.externClasses.get("DisposableStack")?.methods.has(methodName)) {
     const dsAny = tryCompileNativeDisposableStackAnyMethodCall(ctx, fctx, propAccess, expr, methodName);
     if (dsAny !== undefined) return dsAny;
+  }
+
+  // (#3342) `join` on an `any`-typed receiver is ambiguous across `Array` and
+  // every `TypedArray` view — all declare a `join` extern with all-externref
+  // params. The first-match loop below binds whichever registered first, which
+  // is a TypedArray (`env::Uint8ClampedArray_join`). That host import is
+  // unsatisfiable under standalone/wasi, so the module fails to instantiate —
+  // e.g. `(Object.values(o) as any).join(",")` /
+  // `(Object.getOwnPropertyNames(o) as any).join(",")`, whose results are boxed
+  // externref arrays. Route to the native externref `join`
+  // (`compileArrayJoinExtern`, host-free under noJsHost since #3155) instead;
+  // the JS-host lane keeps the existing import binding (byte-identical).
+  if (noJsHost(ctx) && methodName === "join") {
+    const nativeJoin = compileArrayJoinExtern(ctx, fctx, propAccess, expr);
+    if (nativeJoin !== null) return nativeJoin;
   }
 
   for (const [key, info] of ctx.externClasses) {
