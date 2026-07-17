@@ -58,6 +58,7 @@ import type {
 } from "./backend/handles.js";
 import { WasmGcEmitter } from "./backend/wasmgc-emitter.js";
 import {
+  type AllocSiteId,
   type IrBlock,
   type IrClassShape,
   type IrClosureSignature,
@@ -131,7 +132,7 @@ export interface IrLowerResolver {
    * `ctx.anonStructHash`, so legacy `ensureStructForType` and the IR path
    * converge on a single WasmGC struct for any given shape.
    */
-  resolveObject?(shape: IrObjectShape): IrObjectStructLowering | null;
+  resolveObject?(shape: IrObjectShape, alloc?: AllocSiteId): IrObjectStructLowering | null;
   /**
    * Slice 3 (#1169c): resolve the SUPERTYPE WasmGC struct for a closure
    * signature. Carried by the IrType.closure ValType so all
@@ -153,7 +154,7 @@ export interface IrLowerResolver {
    * `getOrRegisterRefCellType` so legacy and IR ref cells share one
    * type per inner ValType.
    */
-  resolveRefCell?(inner: ValType): IrRefCellLowering | null;
+  resolveRefCell?(inner: ValType, alloc?: AllocSiteId): IrRefCellLowering | null;
   /**
    * Slice 4 (#1169d): resolve the WasmGC struct + constructor + method
    * funcs for a class declared in the compilation unit. Returns `null`
@@ -180,7 +181,7 @@ export interface IrLowerResolver {
    * legacy `compileArrayLiteral` output (===, instanceof Array, the for-of fast
    * path). Returns the same `IrVecLowering` shape as `resolveVec`.
    */
-  resolveVecForElement?(elementValType: ValType): IrVecLowering | null;
+  resolveVecForElement?(elementValType: ValType, alloc?: AllocSiteId): IrVecLowering | null;
   /**
    * Resolve the Wasm value type used for `IrType.string` in the active
    * backend.
@@ -238,12 +239,11 @@ export interface IrLowerResolver {
    *   - native       → inline `i32.const len`, `i32.const 0`, code-unit
    *                    `i32.const`s, `array.new_fixed`, `struct.new`.
    */
-  // #1588 PR-B part 2: `alloc` carries the string.const's allocation-site id
-  // so the resolver can read the encoding annotation (utf8-storage decision).
+  // #1588: `alloc` lets the resolver read the string.const encoding decision.
   // Optional — resolvers/callers that omit it get the i16 path (byte-identical).
-  emitStringConst?(value: string, alloc?: import("./nodes.js").AllocSiteId): readonly Instr[];
+  emitStringConst?(value: string, alloc?: AllocSiteId): readonly Instr[];
   /** `[call concat]` (host) or `[call __str_concat]` (native). */
-  emitStringConcat?(): readonly Instr[];
+  emitStringConcat?(alloc?: AllocSiteId): readonly Instr[];
   /** `[call equals]` (host) or `[call __str_equals]` (native). */
   emitStringEquals?(): readonly Instr[];
   /**
@@ -1570,7 +1570,7 @@ export function lowerIrFunctionBody<S, Slot>(
       case "string.concat": {
         emitValue(instr.lhs, out);
         emitValue(instr.rhs, out);
-        const ops = resolver.emitStringConcat?.();
+        const ops = resolver.emitStringConcat?.(instr.alloc);
         if (!ops) throw new Error(`ir/lower: resolver cannot emit string.concat (${func.name})`);
         for (const o of ops) emitter.pushRaw(out, o);
         return;
@@ -1594,7 +1594,7 @@ export function lowerIrFunctionBody<S, Slot>(
         return;
       }
       case "object.new": {
-        const obj = resolver.resolveObject?.(instr.shape);
+        const obj = resolver.resolveObject?.(instr.shape, instr.alloc);
         if (!obj) {
           throw new Error(`ir/lower: resolver cannot lower object<${describeShape(instr.shape)}> (${func.name})`);
         }
@@ -1710,7 +1710,7 @@ export function lowerIrFunctionBody<S, Slot>(
         if (!inner) {
           throw new Error(`ir/lower: refcell.new value must be a val-kind IrType (${func.name})`);
         }
-        const cell = resolver.resolveRefCell?.(inner);
+        const cell = resolver.resolveRefCell?.(inner, instr.alloc);
         if (!cell) {
           throw new Error(`ir/lower: resolver cannot lower refcell<${inner.kind}> (${func.name})`);
         }
@@ -1988,7 +1988,7 @@ export function lowerIrFunctionBody<S, Slot>(
         if (!elemVT) {
           throw new Error(`ir/lower: vec.new_fixed elementType must be a val IrType (${func.name})`);
         }
-        const vec = resolver.resolveVecForElement?.(elemVT);
+        const vec = resolver.resolveVecForElement?.(elemVT, instr.alloc);
         if (!vec) {
           throw new Error(`ir/lower: resolver cannot lower vec for vec.new_fixed (${func.name})`);
         }

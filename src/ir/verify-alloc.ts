@@ -45,6 +45,7 @@ const ALLOC_INSTR_KIND: Readonly<Record<string, AllocKind>> = {
   "extern.regex": "extern",
   "string.const": "string",
   "string.concat": "string",
+  "vec.new_fixed": "array",
   box: "box",
   "iter.new": "iterator",
   "gen.epilogue": "generator",
