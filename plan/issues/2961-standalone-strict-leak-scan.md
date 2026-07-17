@@ -1,7 +1,8 @@
 ---
 id: 2961
 title: "Extend the strictNoHostImports leak guarantee to `--target standalone` (today wasi-only)"
-status: in-progress
+status: done
+completed: 2026-07-17
 assignee: dev-2961
 depends_on: [3009]
 sprint: current
@@ -159,12 +160,15 @@ Unrelated pre-existing bug found while sweeping (NOT #2961, out of scope):
   severity wording.
 - NO allowlist growth (phase 1 needs none — everything just warns).
 
-## Phase 2 (follow-up, gated) — ratchet to hard error
+## Phase 2 (follow-up, gated) — tracked in #3376
 
-Flip `ctx.standalone` to `"error"` severity (change the one ternary in
-`assertNoLeakedHostImports`) once the host-free floor is confirmed
-net-neutral-or-up on a real merged-report/test262 run. This produces the
-pre-approved `host_import_leak` reclassification (leaky standalone passes →
-honest fails; see the `regressions-allow` block). Decide per-bucket
-tolerate-vs-refuse for the console/timer/DOM leaks at that point. This issue
-stays `in-progress` until phase 2 lands.
+This issue closes `done` with phase 1: its acceptance explicitly allows the
+warning form ("fails loudly ... (or warns, phase 1)"), which PR #3288 delivers.
+
+The ratchet WARNING→ERROR is tracked as a separate small issue **#3376**: after
+#3288 merges, on a real merged-report/test262 run showing the host-free floor
+net-neutral-or-up, flip the severity ternary in `assertNoLeakedHostImports` to
+ERROR (one-liner) and decide per-bucket tolerate-vs-refuse for the
+console/timer/DOM leaks. This produces the pre-approved `host_import_leak`
+reclassification (leaky standalone passes → honest fails; see the
+`regressions-allow` block).
