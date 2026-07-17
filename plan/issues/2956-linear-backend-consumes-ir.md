@@ -25,7 +25,7 @@ loc-budget-allow:
   - src/codegen-linear/index.ts
 claimed_by: porffor-codex-developer
 claimed_at: 2026-07-17T05:03:10.509Z
-pr: null
+pr: 3200
 last_merged_pr: 3179
 ---
 
