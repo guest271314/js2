@@ -219,7 +219,7 @@ const BUCKETS = {
   ],
   "type-resolution-failure": [
     "unintended",
-    "Same. **Dead/unreachable (#3341)**: nothing produces this reason — only the `IrFallbackReason` union decl in select.ts mentions it. Not promoted (vacuous + landmine if re-wired).",
+    'Same. **Dead/unreachable (#3341)**: nothing *produces* this reason (no `.set(…, "type-resolution-failure")`); the only occurrences are the `IrFallbackReason` union decl in select.ts + the `check:ir-fallbacks` category list. Not promoted (vacuous + landmine if re-wired).',
   ],
   "class-method": [
     "unintended",

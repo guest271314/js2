@@ -116,7 +116,7 @@ promoting the reason would flip a working compile into a hard compile error:
 | `param-shape-rejected` | `export function f(x?: number): number { return 1; }` (optional/rest/default params) |
 | `destructuring-param-complex` | `export function f({ a, ...rest }: { a: number; b: number }): number { return a; }` |
 | `class-method` | computed method name `class C { [k](): number {…} }` (also generator/abstract/static-super/subclass-of-builtin) |
-| `type-resolution-failure` | **dead/unreachable** — nothing in the repo produces it (only the union decl in `select.ts` mentions it). Promotion would be vacuous + a landmine if a future PR re-wires it. |
+| `type-resolution-failure` | **dead/unreachable** — nothing *produces* it (`git grep` finds no `.set(…, "type-resolution-failure")`); the only occurrences are the `IrFallbackReason` union decl in `select.ts` + the `check:ir-fallbacks` category list. Promotion would be vacuous + a landmine if a future PR re-wires it. |
 
 ### What landed
 

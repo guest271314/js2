@@ -152,7 +152,7 @@ that compiles today via graceful fallback but would hard-error if promoted
 - `param-shape-rejected` — optional `x?` / rest / default-initializer param
 - `destructuring-param-complex` — rest/nested destructuring param
 - `class-method` — computed/generator/abstract name, static super, subclass-of-builtin
-- `type-resolution-failure` — **dead/unreachable** (nothing produces it; only the union decl mentions it) → promotion vacuous + a landmine if re-wired
+- `type-resolution-failure` — **dead/unreachable** (nothing *produces* it; only the union decl + the `check:ir-fallbacks` category list mention it) → promotion vacuous + a landmine if re-wired
 
 Consequence for this epic: AC-2 cannot be satisfied by driving buckets to zero
 alone. For a reason to become strict, the underlying IR path must reach
