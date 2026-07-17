@@ -1,9 +1,11 @@
 ---
 id: 3193
 title: "bloat S3: delete the 5 shape-path Array.prototype.*.call clones, route through the synthetic-call rewrite"
-status: ready
+status: done
+assignee: dev-3193
+completed: 2026-07-17
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-17
 priority: medium
 feasibility: medium
 task_type: refactor
@@ -65,3 +67,39 @@ The clones exist only because `compileArrayMethodCall`'s receiver resolution
 **serially** with #3196 (disjoint ranges: S3 is `:2378-3075`, S6 is
 `:763-1887`, but both shift line numbers — re-anchor by symbol). Re-merge
 `origin/main` immediately before enqueue.
+
+## Resolution (2026-07-17)
+
+The code had moved from `array-methods.ts` to `src/codegen/array-prototype-borrow.ts`
+(#3264 extraction); re-anchored by symbol. Root cause confirmed: shape-inferred
+receivers are **module globals** whose wasm type `object-shape-widening.ts`
+already overrides to `ref_null <vecTypeIdx>`. So `compileArrayMethodCall`'s
+existing receiver resolution (`resolveArrayInfoFromWasmType` over
+`inferExpressionWasmType`) *already* recovers the exact vec arrInfo from the
+global — no `ctx.shapeMap` plumbing into the resolver was needed.
+
+Change (`compileArrayPrototypeCall`): the five methods that had clones
+(`indexOf/includes/every/some/forEach`) now take the SAME synthetic-call rewrite
+as the TS-type lane when the receiver is a shape-inferred global (gated by the
+new `SHAPE_NATIVE_BORROW_METHODS` set). All other methods on a shape global
+(`filter/map/reduce/reduceRight/find/findIndex` — no shape fast path) keep
+falling through to the generic array-like loop, unchanged. The five
+`compileArrayPrototype{IndexOf,Includes,Every,Some,ForEach}` clones plus their
+now-unused imports (`emitReceiverNullGuard`, `nativeStringElementEqInstrs`,
+`addStringImports`) were deleted.
+
+- **-582 net LOC** in `array-prototype-borrow.ts` (2422 → 1840); 32 ins / 614 del.
+- `npx tsc --noEmit` clean; `biome lint` + `prettier --check` clean.
+- `scripts/prove-emit-identity.mjs check`: **IDENTICAL** across all 56
+  (file,target) corpus emits — the deletion is surgical, no unrelated drift.
+
+## Test Results
+
+New `tests/issue-3193.test.ts` — 5 `assertEquivalent` cases exercising the
+shape-inferred `Array.prototype.{indexOf,includes,every,some,forEach}.call(obj,…)`
+lane (module-global widened receiver; found/missing/first-element, callback
+with/without index, forEach accumulation). All 5 pass on the new routing.
+Regression sweep over 10 related test files (issue-1022/1358/1360/1472/3049/
+3139/3200/1234, check-regressions, shape-inference): the 10 pre-existing
+failures on this local checkout are **identical with and without the change**
+(verified by stashing the src edit) — zero new failures introduced.
