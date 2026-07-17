@@ -20,6 +20,7 @@
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
+import { nativeStrVecElemTypeIdx } from "./vec-access-exports.js";
 
 /**
  * Emit the two write-back exports. `mutEntries` is the caller's filtered
@@ -64,6 +65,7 @@ export function emitVecDefineWritebackExports(
         { name: `__vse_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
       );
       // value unboxing per element kind (value param is local 2)
+      const strElemIdx = nativeStrVecElemTypeIdx(ctx, vecTypeIdx);
       const valueInstrs: Instr[] =
         elemKey === "externref"
           ? [{ op: "local.get", index: 2 }]
@@ -72,7 +74,10 @@ export function emitVecDefineWritebackExports(
                 { op: "local.get", index: 2 },
                 { op: "call", funcIdx: unboxNumIdx! },
               ]
-            : [{ op: "local.get", index: 2 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }];
+            : elemKey === "i32"
+              ? [{ op: "local.get", index: 2 }, { op: "call", funcIdx: unboxNumIdx! }, { op: "i32.trunc_sat_f64_s" }]
+              : // (#3311) native-string carrier: recover the `$AnyString` ref element.
+                [{ op: "local.get", index: 2 }, { op: "any.convert_extern" }, { op: "ref.cast", typeIdx: strElemIdx }];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 3 },
         { op: "ref.cast", typeIdx: vecTypeIdx },

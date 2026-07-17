@@ -1580,6 +1580,14 @@ jobs:
         run: node --experimental-strip-types scripts/generate-editions.ts --results benchmarks/results/test262-current.jsonl
 
       - name: Push baseline artifacts to js2wasm-baselines repo
+        # (#3344) Bound the git-over-SSH clone/push to the baselines repo. Without
+        # a step timeout a hung SSH push (no progress) can run for the whole
+        # job budget — the 2026-07-17 promote stranded for ~2.5h this way,
+        # blocking the honest oracle-v7 baseline from publishing. The re-anchor
+        # loop below already retries transient races; this cap makes a genuine
+        # hang fail FAST and retriable (via a `push`/workflow_dispatch re-run)
+        # instead of wedging the promote pipeline indefinitely.
+        timeout-minutes: 10
         env:
           BASELINE_DEPLOY_KEY: ${{ secrets.BASELINE_DEPLOY_KEY }}
           # (#3335) Per-category tolerance for the trap-growth gate below —
@@ -1836,6 +1844,10 @@ jobs:
       # bypass relies on — do NOT swap this back to GITHUB_TOKEN/HTTPS or GH013
       # returns (#1861).
       - name: Commit refreshed summary JSON to main repo
+        # (#3344) Same hang-class bound as the baselines push above: cap the
+        # git-over-SSH deploy-key push to main so a stalled push fails fast and
+        # retriable instead of consuming the whole job budget.
+        timeout-minutes: 10
         env:
           MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

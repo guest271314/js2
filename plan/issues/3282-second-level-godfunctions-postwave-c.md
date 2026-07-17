@@ -1,7 +1,8 @@
 ---
 id: 3282
 title: "Decompose the second-level god-functions created by the Wave-B/C extractions (+ ensureAnyHelpers, + deferred object-runtime core)"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-1
 sprint: current
 created: 2026-07-14
 priority: high
@@ -82,3 +83,21 @@ pass; keep it a separate slice within this issue (or its own issue) rather than 
 This is *structural* (breaks up functions), setting up the *reductive* follow-ons under #3182:
 the emit-idiom builder library (#3105) and jscpd-quantified dedup (#3259) become far easier
 once these arms are small, named helpers — decompose first, then dedup.
+
+## Slices landed
+
+- **Slice A (opus-1) — `__any_box_*` + `__any_unbox_*` families out of
+  `ensureAnyHelpers` → new sibling module `any-boxing-helpers.ts`.**
+  Lifted the seven tag-boxing primitives (`__any_box_null`, `…undefined`,
+  `…i32`, `…f64`, `…bool`, `…string`, `…extern_s1`, `…ref`) and the four
+  tag-unboxing primitives (`__any_unbox_i32`, `…f64`, `…bool`, `…extern`)
+  verbatim into `registerAnyBoxHelpers` / `registerAnyUnboxHelpers` in the new
+  `src/codegen/any-boxing-helpers.ts`. `addHelper` is threaded in as a callback
+  so registration order + bodies are unchanged → emitted Wasm byte-identical
+  (`prove-emit-identity check`: IDENTICAL 56/56). Extracting to a **sibling
+  module** (not same-file) shrinks the god-file: `any-helpers.ts` drops
+  2752 → 2425 LOC (−327), keeping the LOC-regrowth ratchet green with no
+  allowance. The `undefinedSingletonActive` import back into `any-helpers.ts`
+  is a runtime-only ESM cycle (both function declarations), safe. tsc 0,
+  biome/prettier/loc-budget clean. Epic remains open for the eq / add families
+  and the larger call-family functions.
