@@ -6,7 +6,8 @@ sprint: current
 created: 2026-07-02
 updated: 2026-07-17
 assignee: ttraenkler/fable-epsilon
-branch: issue-2956-linear-ir-consume
+branch: symphony/porffor/2956-after-pr-3179
+pr: null
 priority: medium
 horizon: xl
 feasibility: hard
@@ -23,6 +24,10 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
+last_ci_retry_head: null
+last_merged_pr: 3179
+claimed_by: porffor-codex-developer
+claimed_at: 2026-07-17T05:02:57.114Z
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
