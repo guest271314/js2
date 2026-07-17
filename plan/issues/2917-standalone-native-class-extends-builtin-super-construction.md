@@ -1,7 +1,8 @@
 ---
 id: 2917
 title: "[SUBSTRATE][ARCH] Standalone native `class X extends <Builtin>` super-construction (~10 generic conversions)"
-status: ready
+status: in-progress
+assignee: fable-2917
 sprint: Backlog
 created: 2026-07-01
 priority: medium
@@ -18,6 +19,76 @@ origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, per-
 ---
 
 # #2917 — Standalone native `class X extends <Builtin>` super-construction
+
+## Progress (2026-07-18, PR: issue-2917-extends-builtin-native)
+
+State on main had moved since this plan was written: #3238 landed a native
+`extends Object` ctor and #3239 identity-only vec ctors for the TypedArray
+family — both only for the two class-bodies construction sites, and both with
+latent gaps this PR root-caused and fixed:
+
+**Landed in this PR (slices 1+2 of the split recommendation):**
+
+1. **`extends Object` own fields (slice 1)** — the #2101a own-field
+   read/write path unconditionally cast the instance to `$Error_struct`
+   (the Error-family backing) and stored fields in its `$props` side-slot.
+   #3238's `$Object` backing made that an **illegal-cast trap** on any ctor
+   own-field write. Fix: `externrefBackedOwnFieldBacking()`
+   (registry/error-types.ts) classifies by the transitive builtin ancestor —
+   Error family (+`SuppressedError`) keeps the `$props` path; `Object`
+   ancestry stores fields DIRECTLY on the instance via
+   `__extern_set`/`__extern_get` (the `$Object` instance IS the open property
+   store, which is also why no `$Subclass_struct` wrapper is needed for
+   Object); anything else returns `undefined` → callers fall through to the
+   legacy multi-dispatch instead of baking a cast that can only trap.
+2. **`extends Array` native backing (slice 2)** —
+   `emitStandaloneArrayConstructor` (object-runtime.ts): a defined native
+   `__new_Array` building a REAL `$__vec_externref` per §23.1.1.1 (trailing
+   forwarder undefined-padding stripped; single boxed-number arg → length;
+   otherwise args become elements; deliberately NOT ToNumber-coercing so
+   `new Sub("3")` stays `["3"]`). No wrapper struct: element ops, `.length`,
+   `push`, `Array.isArray` all work through the existing `$__vec_base`
+   dynamic-accessor arms; `instanceof` (both) resolves statically. The
+   plan's `$Subclass_struct` wrapper is NOT needed for element/length
+   behavior — only for own fields on Array subclasses (still open, below).
+3. **Per-arity `__new_<Builtin>` registration (root-cause fix, all three
+   helpers)** — #3238/#3239 registered ONE plain funcMap name keyed off the
+   FIRST call site's arity. Implicit-forwarder arity varies per class
+   (`max(builtin arity, observed new-arity)`), so a multi-level chain
+   (`class B extends A`, `A extends Array`) called the arity-1 registration
+   with 2 args; the extra arg stayed on the operand stack and **validly
+   became the forwarder's return value** — `new B(4,5)` returned the boxed
+   `4` instead of the new instance (no validation error!). Helpers now
+   register per-arity (`__new_X@N`) and return the funcIdx; call sites use
+   the return value. Safe because standalone never registers `env::__new_*`
+   host imports elsewhere (import-collector skips them) and the host lane
+   never calls these helpers.
+
+Tests: `tests/issue-2917-standalone-extends-builtin.test.ts` (14 cases incl.
+Error-family + gc-lane byte-inertness controls).
+
+**Still open (follow-up slices, re-claimable):**
+
+- `extends Function` (closure backing + call-forward), `extends Date` /
+  `extends RegExp` (#2395-stacked) — per the original plan.
+- **Own fields on Array/vec-backed subclasses**: `$Vec` has no props slot;
+  needs the `$Error_struct.$props`-style side-slot (widen `$__vec_base`?) or
+  the plan's `$Subclass_struct` wrapper. Currently falls through to the
+  legacy path (graceful failure, no more unconditional trap).
+- **Field initializers on externref-backed subclasses are not emitted at
+  all** (pre-existing, family-wide — `class X extends Error { code = 5 }`
+  yields 0 on main too). Separate issue-worthy.
+- **Intermediate user ctor bodies in a builtin-ancestor chain are skipped**:
+  `B extends A extends Object` with `A`'s ctor writing `this.x` — `B`'s
+  `super()` constructs the builtin directly and never runs `A`'s body
+  (pre-existing, family-wide incl. Error).
+- **Error-family `emitWasiErrorConstructor` still registers plain-name with
+  first-seen arity** — same latent mis-call hazard as (3) for multi-arity
+  Error-subclass chains; not touched here because many sites look up the
+  plain `__new_Error` name (js-errors.ts, throwNativeError, …).
+- `emitSetSubclassProto` still no-ops standalone (dynamic proto-chain reads
+  like `Object.getPrototypeOf(x)` don't see `Sub.prototype`); static
+  instanceof makes this invisible to the current corpus.
 
 ## Problem (verified on `main` `f350ba855`, 2026-07-01)
 
