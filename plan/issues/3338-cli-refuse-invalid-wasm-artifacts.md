@@ -1,7 +1,8 @@
 ---
 id: 3338
 title: "cli: refuse to write invalid Wasm artifacts after optimizer fallback"
-status: ready
+status: in-progress
+assignee: dev-refactor
 created: 2026-07-17
 updated: 2026-07-17
 priority: high
@@ -11,7 +12,7 @@ task_type: bugfix
 area: cli, compiler, optimizer
 language_feature: compiler-output-validation
 goal: trustworthiness
-sprint: Backlog
+sprint: current
 horizon: s
 es_edition: n/a
 complexity: S
