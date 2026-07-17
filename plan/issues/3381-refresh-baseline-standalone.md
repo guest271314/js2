@@ -1,10 +1,11 @@
 ---
 id: 3381
 title: "refresh-baseline.yml refreshes HOST only, never standalone — public standalone number strands stale"
-status: in-progress
+status: done
 sprint: current
 created: 2026-07-17
 updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 horizon: m
 feasibility: hard

@@ -1,10 +1,11 @@
 ---
 id: 3382
 title: "Baseline goes stale under high PR velocity — main-audit push loses all retries; make baselines-repo push resilient"
-status: in-progress
+status: done
 sprint: current
 created: 2026-07-17
 updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 horizon: m
 feasibility: hard
@@ -55,7 +56,7 @@ emergency refresh is most needed.
   exponential-ish backoff (`min(attempt*5, 30)s`), in BOTH `test262-sharded.yml`
   promote-baseline and `refresh-baseline.yml`. Under continuous main-advance a
   larger loop eventually wins; the capped backoff keeps total wait bounded
-  (~5+10+15+20+25+30*9 ≈ 5 min worst case).
+  (~5+10+15+20+25+30\*9 ≈ 5 min worst case).
 - **(a) Make `refresh-baseline.yml`'s baselines-repo push resilient** by wrapping
   it in the SAME proven Option-A re-anchor loop `test262-sharded.yml`'s
   promote-baseline uses for its baselines push (snapshot the promoted files,
@@ -93,8 +94,9 @@ stops recurring. The added debounce (this issue) prevents overlapping dispatches
 on 2026-07-17 (`gh workflow disable baseline-floor-staleness-alert.yml`) to stop
 the storm. A manually-disabled workflow's state is stored in GitHub, NOT in the
 file, so merging this PR does NOT re-enable it. Once this PR lands, run
-`gh workflow enable baseline-floor-staleness-alert.yml -R loopdive/js2wasm` to
-restore the floor-staleness safety net — it is now safe because standalone heals
+`gh workflow enable baseline-floor-staleness-alert.yml -R loopdive/js2` (the gh
+slug that resolves in this container) to restore the floor-staleness safety net —
+it is now safe because standalone heals
 (#3381) and the auto-heal is debounced.
 
 ## Acceptance criteria
