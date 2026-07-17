@@ -1,8 +1,9 @@
 ---
 id: 3341
 title: "Promote zeroed IR fallback reasons into STRICT_IR_REASONS (#2855's own AC — cheapest unstarted hardening step)"
-status: in-progress
+status: done
 assignee: senior-dev
+completed: 2026-07-17
 sprint: current
 created: 2026-07-17
 priority: high
@@ -77,6 +78,56 @@ category) are NOT in scope here — only the reasons already at zero.
 - Full test suite green; `check:ir-fallbacks` gate green.
 - Stale line-number citations in `ir-adoption.md` and `codegen-axes.md`
   corrected.
-- `plan/issues/2855-*.md` updated to reflect this slice as done against its
-  own AC (don't close #2855 itself — `body-shape-rejected` remains open via
-  #2856).
+- `plan/issues/2855-ir-frontend-migration-ratchet-buckets-to-zero.md` updated
+  to reflect this slice as done against its own AC (don't close #2855 itself —
+  `body-shape-rejected` remains open via #2856).
+
+## Outcome (2026-07-17, senior-dev)
+
+**Result: promote NONE.** Every currently-zeroed reason was evaluated and none
+is safe to promote to `STRICT_IR_REASONS`. This is the correct, issue-sanctioned
+"leave the rest demoted with a note explaining why" outcome (step 2), not a skip.
+
+### Why — the mechanism makes STRICT a GLOBAL hard error
+
+`selection.fallbacks` (`src/ir/select.ts`) records **every** non-claimed
+function/member with its reason (top-level fn loop ~L407-424; the
+`external-call` / `call-graph-closure` drops at ~L668/L700; class members at
+~L497-570). The promotion loop in `src/codegen/index.ts` (~L1816) iterates all
+of them with **no allowlist filter** and calls `reportErrorNoNode` (severity
+`error`) for each reason in the set. So a promoted reason hard-errors on **all
+user code**, not just the 10-file `website/playground/examples/` corpus the
+`check:ir-fallbacks` gate measures. Corpus-zero is therefore NECESSARY but NOT
+SUFFICIENT — a reason is only safe when zero means the IR is **architecturally
+complete** for that class (any occurrence ⇒ genuine regression).
+
+### Per-reason verdict (each proven with a minimal valid repro)
+
+Each program below compiles successfully **today** (graceful legacy fallback)
+AND trips the named reason via `planIrCompilation(trackFallbacks)` — so
+promoting the reason would flip a working compile into a hard compile error:
+
+| Reason | Minimal valid program that would hard-error if promoted |
+| --- | --- |
+| `external-call` | `export function f(x: number): boolean { return isNaN(x); }` (whitelist = Math.{abs,sqrt,floor,ceil,trunc}+parseInt only) |
+| `call-graph-closure` | claimed fn calling a `for(;;)`-bodied local (any still-direct-only callee: switch/async/for-in) |
+| `param-type-not-resolvable` | `export function f(x: number \| string): number { return 1; }` |
+| `return-type-not-resolvable` | `export function f(): number \| string { return 1; }` |
+| `param-shape-rejected` | `export function f(x?: number): number { return 1; }` (optional/rest/default params) |
+| `destructuring-param-complex` | `export function f({ a, ...rest }: { a: number; b: number }): number { return a; }` |
+| `class-method` | computed method name `class C { [k](): number {…} }` (also generator/abstract/static-super/subclass-of-builtin) |
+| `type-resolution-failure` | **dead/unreachable** — nothing in the repo produces it (only the union decl in `select.ts` mentions it). Promotion would be vacuous + a landmine if a future PR re-wires it. |
+
+### What landed
+
+- `STRICT_IR_REASONS` stays `new Set()` (no functional change) — the misleading
+  "intended order (cheapest first)" comment is replaced with the analysis + the
+  completeness-not-corpus rule so the next agent doesn't naively promote.
+- Stale demote-channel citations fixed: `index.ts:889-896` → resolve-time
+  `~1891` / post-claim `~2420` in `scripts/gen-ir-adoption.mjs` (regenerated
+  `plan/log/ir-adoption.md`) and `docs/architecture/codegen-axes.md`.
+- `codegen-axes.md` "not yet moved" claim for the aggregate/closure/ref-coercion
+  groups corrected — they moved (#2953); residue is 5 GC-op literals in
+  `lower.ts`.
+- `ir-adoption.md` bucket rows annotated "corpus-0 but NOT strict (#3341)".
+- `#2855` AC-2 refined: bucket-zero alone does not satisfy it; completeness does.

@@ -1509,12 +1509,38 @@ function irFieldTypeMatchesLegacyValType(
 // dates that drive this list.
 // ---------------------------------------------------------------------------
 const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReason>();
-// Empty as of #1530 — flip entries to "strict" in follow-up PRs once
-// their `scripts/ir-fallback-baseline.json` bucket reaches zero. The
-// intended order (cheapest first, see plan/log/ir-adoption.md):
-//   "param-type-not-resolvable",
-//   "call-graph-closure",
-//   "body-shape-rejected",
+// Deliberately EMPTY (re-evaluated #3341, 2026-07-17). Bucket-zero in
+// `scripts/ir-fallback-baseline.json` is measured against the 10-file
+// `website/playground/examples/` corpus only — it is a NECESSARY but NOT
+// SUFFICIENT condition for promotion. A reason is safe here ONLY when
+// zero-on-corpus means "the IR is architecturally complete for this
+// class," so any occurrence is a genuine regression. Promotion is a
+// GLOBAL hard error: `selection.fallbacks` records EVERY non-claimed
+// unit with its reason (see select.ts), and the loop below reports each
+// matching one via `reportErrorNoNode` — i.e. it fires on ALL user code,
+// not just the corpus.
+//
+// Every current selector-rejection reason FAILS the sufficiency test —
+// each still legitimately fires on valid TS that compiles today via the
+// graceful legacy fallback (minimal repro verified per reason in #3341):
+//   - external-call            → any non-whitelisted external, e.g. `isNaN(x)`
+//     (whitelist is Math.{abs,sqrt,floor,ceil,trunc} + parseInt by design)
+//   - call-graph-closure       → claimed fn calling a still-direct-only local
+//     (switch / for(;;) / async body, etc.)
+//   - param-type-not-resolvable→ union / non-move-dynamic param
+//   - return-type-not-resolvable→ union-typed / unresolvable return
+//   - param-shape-rejected     → optional `x?` / rest `...args` / default param
+//   - destructuring-param-complex → rest/nested destructuring param
+//   - class-method             → computed/generator/abstract name, static super,
+//     subclass-of-builtin (ir-adoption.md flags this row: bucket-0, NOT strict)
+//   - type-resolution-failure  → DEAD: nothing produces it (only the union
+//     decl in select.ts mentions it). Promotion would be vacuous, but also a
+//     misleading landmine if a future PR re-wires it — left out on purpose.
+//
+// Promoting any of these turns a working compile into a hard error for real
+// programs — a strict regression the corpus gate cannot catch. Do NOT add a
+// reason here on "its bucket is zero" alone; first prove no valid program
+// trips it (a completeness argument, not a passing corpus/test run).
 
 const STRICT_IR_BUILD_ERRORS: ReadonlyArray<string> = [
   // Empty as of #1530 — add substring patterns here when a known build

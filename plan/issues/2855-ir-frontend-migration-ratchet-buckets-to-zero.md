@@ -38,9 +38,10 @@ The retirement is governed by the **IR fallback budget gate** (`pnpm run
 check:ir-fallbacks`, built in **#1376**, the ratchet mechanism) which counts
 each rejection reason against `scripts/ir-fallback-baseline.json`. The direction
 is to drive every **unintended** bucket to zero, then add the retired reason to
-`STRICT_IR_REASONS` (`src/codegen/index.ts:1013`, currently the **empty set** —
-no reason promoted yet) so any future regression becomes a hard compile error
-instead of a silent legacy fallback.
+`STRICT_IR_REASONS` (`src/codegen/index.ts:1511`, currently the **empty set** —
+no reason promoted yet; see the #3341 outcome note for why it stays empty) so
+any future regression becomes a hard compile error instead of a silent legacy
+fallback.
 
 **Stale-reference note (#1530):** `CLAUDE.md`, `docs/architecture/codegen-axes.md`,
 and `plan/log/ir-adoption.md` all cite **#1530** as "the issue that phases out
@@ -81,12 +82,16 @@ This epic is `done` when, for every unintended bucket:
 
 1. The bucket count in `scripts/ir-fallback-baseline.json` is `0`.
 2. The corresponding `IrFallbackReason` is added to `STRICT_IR_REASONS`
-   (`src/codegen/index.ts:1013`), so a regression hard-errors.
+   (`src/codegen/index.ts:1511`), so a regression hard-errors — **but only
+   when zero-on-corpus genuinely means architectural completeness for that
+   class** (see the #3341 outcome note below; AC-2 is NOT satisfied by
+   corpus-zero alone).
 3. The matching row in `plan/log/ir-adoption.md` is promoted `mixed → ir-owned`
    (regenerate via `pnpm run gen:ir-adoption`).
 4. Once all unintended buckets are zero + strict, the demote-to-warning channel
-   (`src/codegen/index.ts:889–896`) can be removed for the affected kinds — the
-   final goal the stale #1530 citation referred to.
+   (resolve-time `src/codegen/index.ts:~1891`, post-claim `~2420`) can be
+   removed for the affected kinds — the final goal the stale #1530 citation
+   referred to.
 
 ## Children
 
@@ -123,3 +128,37 @@ pushRaw at ~1797/1815/1908 — should use the existing
 `emitFieldGet`/`emitFieldSet` primitives like `obj.get` does) plus
 `forof.str` pushing `struct.get` on the RAW sink (`lower.ts:2614/2674`),
 invisible to the `check:pushraw` ratchet (§3).
+
+## #3341 outcome 2026-07-17 — promotion slice done: **promote NONE** (AC-2 refined)
+
+The promotion slice (#3341) is **done against its own AC**: every currently
+zeroed unintended reason was evaluated for STRICT promotion and **none was
+promoted**, which is the correct, issue-sanctioned result — not a skip.
+Root cause: `STRICT_IR_REASONS` promotion is a **global** hard error
+(`selection.fallbacks` in `select.ts` records EVERY non-claimed unit with its
+reason; the index.ts loop reports each matching one on ALL user code, not just
+the corpus). So corpus-zero (10-file `website/playground/examples/`) is
+NECESSARY but NOT SUFFICIENT. A reason is only safe when zero means
+"architecturally complete," so any occurrence is a genuine regression.
+
+Every candidate FAILS that test — each was given a minimal valid TS program
+that compiles today via graceful fallback but would hard-error if promoted
+(repros in the #3341 PR body):
+
+- `external-call` — `isNaN(x)` (whitelist is Math.{abs,sqrt,floor,ceil,trunc}+parseInt by design)
+- `call-graph-closure` — claimed fn calling a still-direct-only local (`for(;;)`/switch/async)
+- `param-type-not-resolvable` — union / non-move-dynamic param
+- `return-type-not-resolvable` — union-typed / unresolvable return
+- `param-shape-rejected` — optional `x?` / rest / default-initializer param
+- `destructuring-param-complex` — rest/nested destructuring param
+- `class-method` — computed/generator/abstract name, static super, subclass-of-builtin
+- `type-resolution-failure` — **dead/unreachable** (nothing produces it; only the union decl mentions it) → promotion vacuous + a landmine if re-wired
+
+Consequence for this epic: AC-2 cannot be satisfied by driving buckets to zero
+alone. For a reason to become strict, the underlying IR path must reach
+**completeness** for its whole class (e.g. the whitelist must expand to cover
+all externals, or all param shapes must lower). Until then the demote-to-warning
+channel is load-bearing and stays. `STRICT_IR_REASONS` remains `new Set()` with
+an in-code explanation; `ir-adoption.md` bucket rows and `codegen-axes.md` now
+carry the "corpus-0 but NOT strict" note. `body-shape-rejected` (14) stays open
+via **#2856**; #2855 remains open (not closed by #3341).
