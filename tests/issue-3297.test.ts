@@ -240,7 +240,7 @@ describe("#3297 Porffor scalar/control-flow sink", () => {
     expect(lowerProof().globals.map((global) => global.name)).toEqual(["spare", "trace"]);
   });
 
-  it("rejects heap/reference IR through legality before sink emission", () => {
+  it("requires the shared memory plan before heap emission", () => {
     const shape: IrObjectShape = { fields: [{ name: "value", type: F64 }] };
     const builder = new IrFunctionBuilder("heapRejected", [{ kind: "object", shape }]);
     builder.openBlock();
@@ -249,12 +249,8 @@ describe("#3297 Porffor scalar/control-flow sink", () => {
     builder.terminate({ kind: "return", values: [object] });
     const func = builder.finish();
 
-    expect(
-      verifyIrBackendLegality(func, "porffor")
-        .map((error) => error.message)
-        .join("\n"),
-    ).toMatch(/porffor backend does not support (?:IR type 'object'|IR instruction 'object\.new')/);
-    expect(() => lowerIrModuleToPorffor({ functions: [func] })).toThrow(/porffor backend legality failed/);
+    expect(verifyIrBackendLegality(func, "porffor")).toEqual([]);
+    expect(() => lowerIrModuleToPorffor({ functions: [func] })).toThrow(/shared LinearMemoryPlan/);
   });
 });
 

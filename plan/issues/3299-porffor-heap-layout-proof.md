@@ -1,10 +1,10 @@
 ---
 id: 3299
 title: "Porffor backend P4: heap and layout proof through shared planning"
-status: ready
+status: in-review
 sprint: porffor-backend
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-17
 priority: high
 horizon: l
 feasibility: hard
@@ -18,6 +18,9 @@ parent: 3288
 depends_on: [3298]
 related: [3288, 3297, 3298]
 origin: "#3288 P4 split: independently dispatchable Porffor heap/layout proof"
+claimed_by: porffor-codex-developer
+claimed_at: 2026-07-17T16:08:01.435Z
+branch: symphony/porffor/3299
 ---
 
 # #3299 - Porffor backend P4: heap and layout proof through shared planning
@@ -40,14 +43,14 @@ silently depending on Porffor's own object representation.
 
 ## Acceptance criteria
 
-- [ ] Two aliases observe the same mutation while two equal-looking allocated
+- [x] Two aliases observe the same mutation while two equal-looking allocated
       objects remain non-identical.
-- [ ] Fixed-shape field offsets and vector strides come exclusively from the
+- [x] Fixed-shape field offsets and vector strides come exclusively from the
       shared plan.
-- [ ] Vector bounds and mutation behavior match JavaScript and linear-Wasm.
-- [ ] Root/barrier behavior follows the selected planned runtime policy and is
+- [x] Vector bounds and mutation behavior match JavaScript and linear-Wasm.
+- [x] Root/barrier behavior follows the selected planned runtime policy and is
       covered by stress validation where collection is possible.
-- [ ] The Porffor adapter does not reinterpret values as Porffor-native objects
+- [x] The Porffor adapter does not reinterpret values as Porffor-native objects
       or call builtins that assume Porffor layouts.
 - [ ] The issue changes are committed, pushed to `origin`, and published as a
       ready, non-draft PR before completion is reported.
@@ -69,3 +72,46 @@ silently depending on Porffor's own object representation.
 
 After this PR merges, #3300 must demonstrate that allocation policy can change
 without changing either backend's semantic emitter.
+
+## Implementation record (2026-07-17)
+
+- Extended shared backend handles with each allocation site's canonical
+  `LinearAllocationSitePlan`. The Porffor resolver now requires a completed
+  `LinearMemoryPlan`, verifies each site/layout pairing, and exposes record
+  fields and vector layout operations without re-planning them.
+- Added symbolic Porffor heap expressions/statements and final assembly for the
+  pinned `Alloc`, `Load`, and `Store` nodes. Fixed-shape fields use only planned
+  field offsets; vectors use only planned length/capacity/elements offsets,
+  minimum capacity, allocation size, and element stride. Allocations use type
+  id zero and never invoke Porffor object/array builtins, `jsval`, NaN boxing,
+  native layouts, or parser/codegen paths.
+- Added the typed `vec.set` terminal operation across the backend contract,
+  verifier/effects/ownership passes, WasmGC emitter, linear emitter, and
+  Porffor emitter. Bounds remain explicit in surrounding typed SSA; the
+  terminal performs one planned in-bounds store.
+- Selected the existing `arena-v1` plan policy. Every supported site is
+  non-moving arena allocation with `root:none`, `safepoints:none`, and
+  `barrier:none`; the adapter rejects managed sites, non-arena policies, or a
+  renderer with `prefs.gc` enabled. Therefore no `GcBarrier` is emitted and a
+  managed-collection stress run is inapplicable for this slice.
+- The focused fixture executes one identical typed SSA module through
+  linear-Wasm and rendered Porffor-C, with a JavaScript oracle. Results
+  `[911, 309, 300, 300]` prove alias-visible mutation, identity/non-identity,
+  vector mutation, and negative/high out-of-bounds reads.
+
+Validation completed:
+
+- `IR_VERIFY_ALLOC=1 pnpm exec vitest run tests/issue-3299.test.ts tests/issue-3298.test.ts tests/issue-3297.test.ts tests/issue-3288.test.ts tests/backend-contract.test.ts tests/ir-vec-two-backend.test.ts tests/ir/alloc-registry.test.ts tests/ir/alloc-provenance.test.ts --reporter=dot`
+  (8 files, 56 tests passed)
+- `pnpm exec vitest run tests/issue-3297.test.ts tests/issue-3298.test.ts tests/issue-3299.test.ts`
+  (3 files, 11 tests passed, including Porffor-C rendering compiled with
+  warnings as errors)
+- `npx --yes tsx scripts/prove-emit-identity.mjs check --baseline .tmp/emit-identity-3299.json`
+  (all 56 file/target outcomes identical to the clean pre-change
+  `origin/main` baseline)
+- `pnpm run build`
+- `pnpm run typecheck`
+- focused `biome lint` over changed IR/backend/tests
+- `pnpm run check:pushraw` (79 call sites, one fewer than merge-base)
+- `pnpm run check:linear-ir`
+- `pnpm run check:ir-fallbacks`

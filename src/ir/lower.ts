@@ -855,6 +855,16 @@ export function lowerIrFunctionBody<S, Slot>(
     vecNewFixedDataScratch.set(arrayTypeIdx, idx);
     return idx;
   };
+  const vecElementScratch = new Map<string, number>();
+  const ensureVecElementScratch = (type: ValType): number => {
+    const key = `${type.kind}:${"typeIdx" in type ? type.typeIdx : ""}`;
+    const existing = vecElementScratch.get(key);
+    if (existing !== undefined) return existing;
+    const idx = func.params.length + locals.length;
+    locals.push({ name: `$vec_element_${key}`, type, logicalType: { kind: "val", val: type } });
+    vecElementScratch.set(key, idx);
+    return idx;
+  };
   const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
     if (jsBitwiseTmpIdx === null) {
       jsBitwiseTmpIdx = func.params.length + locals.length;
@@ -1965,9 +1975,9 @@ export function lowerIrFunctionBody<S, Slot>(
         emitValue(instr.vec, out);
         emitter.emitVecLen(vec, out);
         // IR-level result is f64 (matches JS Number semantics) — promote.
-        // The f64.convert is an IR-result-type coercion, not a backend op,
-        // so it stays in the caller (#1713 spec section 3).
-        emitter.pushRaw(out, { op: "f64.convert_i32_s" });
+        // Route the coercion through the emitter so non-Wasm sinks do not
+        // need to accept a raw Wasm escape hatch.
+        emitter.emitUnary("f64.convert_i32_s", out);
         return;
       }
       case "vec.get": {
@@ -1980,6 +1990,18 @@ export function lowerIrFunctionBody<S, Slot>(
         emitter.emitVecDataPtr(vec, out);
         emitValue(instr.index, out);
         emitter.emitElemGet(vec, out);
+        return;
+      }
+      case "vec.set": {
+        const vecT = asVal(typeOf(instr.vec));
+        if (!vecT) throw new Error(`ir/lower: vec.set vec must be a val IrType (${func.name})`);
+        const vec = resolver.resolveVec?.(vecT);
+        if (!vec) throw new Error(`ir/lower: resolver cannot lower vec for vec.set (${func.name})`);
+        emitValue(instr.vec, out);
+        emitter.emitVecDataPtr(vec, out);
+        emitValue(instr.index, out);
+        emitValue(instr.newValue, out);
+        emitter.emitElemSet(vec, ensureVecElementScratch(vec.elementValType), out);
         return;
       }
       case "vec.new_fixed": {
@@ -3273,6 +3295,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.set":
+      return [instr.vec, instr.index, instr.newValue];
     case "vec.new_fixed":
       return instr.elements; // #1804
     case "forof.vec":

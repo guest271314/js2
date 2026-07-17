@@ -102,6 +102,12 @@ export interface BackendEmitter<S = Instr[]> {
   /** data-region handle + i32 index on stack -> element value. */
   emitElemGet(layout: VecLayout, out: S): void;
   /**
+   * data-region handle + i32 index + element value on stack -> in-place store.
+   * `valueScratchLocal` is an element-typed local available to backends whose
+   * address calculation must temporarily move the topmost value.
+   */
+  emitElemSet(layout: VecLayout, valueScratchLocal: number, out: S): void;
+  /**
    * #1804 — N element values on the stack (e0 deepest … eN top) -> a fully
    * built vec ref. WasmGC: `array.new_fixed $arr N`, stash the data ref in
    * `dataScratchLocal`, push `i32.const N` (length, field 0), re-load the data
