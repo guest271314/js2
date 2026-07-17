@@ -256,7 +256,7 @@ export function tryEmitJsonParsePropertyAccess(
   fctx: FunctionContext,
   expr: ts.PropertyAccessExpression,
 ): ValType | null | undefined {
-  // #3378 — unwrap transparent wrappers (`as`, parens, `!`) BEFORE reading
+  // #3384 — unwrap transparent wrappers (`as`, parens, `!`) BEFORE reading
   // `.arguments`. `isJsonParseCall` unwraps internally, so `(JSON.parse(s) as
   // any).a` passes the guard while `expr.expression` is still the AsExpression
   // (no `.arguments` field) — reading `expr.expression.arguments[0]` then threw
@@ -278,7 +278,7 @@ export function tryEmitJsonParseElementAccess(
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null | undefined {
-  // #3378 — unwrap before reading `.arguments` (see tryEmitJsonParsePropertyAccess).
+  // #3384 — unwrap before reading `.arguments` (see tryEmitJsonParsePropertyAccess).
   const call = unwrapTransparentExpression(expr.expression);
   if (!(ctx.standalone || ctx.wasi) || !isJsonParseCall(call)) return undefined;
   const value = parsedJsonLiteral(ctx, call.arguments[0]!);

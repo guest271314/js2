@@ -78,6 +78,6 @@ predicate is sound in practice.
 
 ## Test Results
 
-`tests/issue-3378.test.ts` — property/element access on wrapped `JSON.parse`
+`tests/issue-3384.test.ts` — property/element access on wrapped `JSON.parse`
 (as/parens/`!`), object and array, standalone + wasi, each instantiates with an
 empty import object and returns the statically-folded value. All pass.

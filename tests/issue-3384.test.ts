@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3378 — member access on a wrapped `JSON.parse()` call crashed codegen under
+ * #3384 — member access on a wrapped `JSON.parse()` call crashed codegen under
  * `--target standalone` / `--target wasi`.
  *
  * `tryEmitJsonParse{Property,Element}Access` guarded with
@@ -30,7 +30,7 @@ async function runStandaloneWasi(src: string): Promise<{ standalone: number; was
   return { standalone: out.standalone!, wasi: out.wasi! };
 }
 
-describe("#3378 — wrapped JSON.parse member access no longer crashes codegen", () => {
+describe("#3384 — wrapped JSON.parse member access no longer crashes codegen", () => {
   it("property access on `JSON.parse(...) as any`", async () => {
     const r = await runStandaloneWasi(`export function test(): number { return (JSON.parse('{"a":5}') as any).a; }`);
     expect(r).toEqual({ standalone: 5, wasi: 5 });
