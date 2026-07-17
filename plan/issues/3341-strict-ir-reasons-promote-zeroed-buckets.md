@@ -1,7 +1,8 @@
 ---
 id: 3341
 title: "STRICT_IR_REASONS hardening — per-reason (NOT a corpus-zero flip); doc-correction shipped, real per-reason work remains"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-h
 sprint: current
 created: 2026-07-17
 priority: medium
@@ -287,6 +288,28 @@ needs no split.
 **Test:** a fixture that would previously demote-to-warning on that build
 error now hard-errors; assert `compile()` surfaces `severity:"error"`.
 
+**Slice B — done (dev-h, 2026-07-17).** Activated the
+`STRICT_IR_BUILD_ERRORS` promotion vector. Promoted the IR name-repoint
+**invariant** class — the three `ir/integration: unknown {function,global,type}
+ref` throws (`src/ir/integration.ts:1647/1651/1656`) — from a silent legacy
+demotion (`severity:"warning"`) to a hard compile error (`severity:"error"`).
+Rationale: when the selector CLAIMS a function, the IR builder emits refs by
+name to entities it created; a resolve miss is a builder↔finalize desync bug
+(late-funcidx name-repoint family), never an unlowerable program. Promotion
+can therefore only fire on a compiler regression — a strict no-op on all
+valid code (the 13-file corpus reports zero of these; `check:ir-fallbacks
+--verbose` confirmed corpus-clean, "Post-claim demotions … (none)").
+Changes: `src/codegen/index.ts` (three substrings added to
+`STRICT_IR_BUILD_ERRORS`, was empty, with rationale comment);
+`tests/issue-3341-slice-b.test.ts` (asserts `formatIrPathFallbackDiagnostic`
+promotes each invariant message to `severity:"error"` and still demotes an
+ordinary non-strict build error to `warning`, mirroring the
+`tests/issue-1850.test.ts` seam-level test pattern). The `#1923`
+injected-build-throw seam is deliberately NOT promoted (it drives the
+demotion-metering test; promoting it would break that path). **Remaining:**
+Slice A and Slice C — issue stays `in-progress` until the headline
+per-reason promotion (Slice A) lands.
+
 ### Slice C (S) — doc/citation reconciliation (can fold into A or B)
 
 - The `## Task` item 4 stale-citation fixes were partly shipped by the
@@ -315,7 +338,7 @@ error now hard-errors; assert `compile()` surfaces `severity:"error"`.
   `param-type-internal-desync`. Dev-claimable now; the concrete "first
   per-reason promotion" the issue asks for.
 - **Slice B (S)** — activate `STRICT_IR_BUILD_ERRORS` with one vetted build-error
-  substring. Independent PR, lower risk. Dev-claimable now.
+  substring. **Done (dev-h, 2026-07-17)** — see completion note above.
 - **Slice C (S)** — doc/citation reconciliation + #2855 AC update. Fold into A/B.
 
 All three are ≤M and independently claimable. Recommended order: B (lowest
