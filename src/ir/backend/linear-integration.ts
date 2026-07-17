@@ -541,7 +541,8 @@ function makeLinearIrResolver(
       return null;
     },
     emitStringConst(value: string, alloc?: AllocSiteId): readonly Instr[] {
-      const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
+      const plan = memoryPlan;
+      const layout = plan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
       if (layout.kind !== "string") throw new Error("linear-ir: invalid string layout");
       const allocation = allocationFor(layout.id, alloc);
       const operation = plannedOperation(
@@ -550,7 +551,11 @@ function makeLinearIrResolver(
         (candidate) => candidate.family === "string" && candidate.operation === "materialize-data",
         "string materialization",
       );
-      return linearStringLiteralInstrs(ctx, value, resolveLinearRuntimeOperation(ctx, operation));
+      if (!plan || !allocation?.dataSegmentId) {
+        throw new Error("linear-ir: string literal is absent from the completed memory plan");
+      }
+      const segment = plan.requireDataSegment(allocation.dataSegmentId);
+      return linearStringLiteralInstrs(ctx, value, resolveLinearRuntimeOperation(ctx, operation), segment.bytes);
     },
     emitStringConcat(alloc?: AllocSiteId): readonly Instr[] {
       const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
