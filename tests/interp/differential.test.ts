@@ -87,10 +87,15 @@ const CURATED: string[] = [
   "((a, b) => a - b)(10, 3)",
   "function twice(f, x){ return f(f(x)); } twice(function(n){ return n + 1; }, 5)",
   "var o = { n: 5 }; function g(){ return this.n; } g.call(o)",
+  // operand evaluation order (side effects must match JS left→right)
+  "var s=''; var a=function(){s+='a';return 2}; var b=function(){s+='b';return 1}; a()>b(); s",
+  "var s=''; var a=function(){s+='a';return 1}; var b=function(){s+='b';return 2}; a()>=b(); s",
   // exceptions
   "var r; try { throw 7; } catch (e) { r = e * 2; } r",
   "var o = 0; try { o = 1; } finally { o += 10; } o",
   "function boom(){ throw 'e'; } var r; try { boom(); } catch(e){ r = e; } r",
+  "var log=''; try { log+='t'; throw 1; } catch(e){ log+='c'; } finally { log+='f'; } log",
+  "var caught='no'; try { try { throw 'x'; } finally {} } catch(e){ caught=e; } caught",
   // strings / templates / builtins
   "'hello'.length",
   "'hello'.toUpperCase()",

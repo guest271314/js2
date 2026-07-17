@@ -409,11 +409,15 @@ class FunctionEmitter {
       }
       this.enc.addExnRow(start, end, handlerPc, handlerReg);
       this.emitStatement(s.handler.body);
-    } else {
-      // try/finally with no catch: route the throw to the finalizer.
-      // (finally handling below re-runs on both paths.)
-      this.enc.addExnRow(start, end, this.enc.here(), this.allocReg());
+      // A throw inside the try with a catch lands here, then falls through to the
+      // finalizer below (catch → finally ordering).
     }
+    // NOTE (Phase-1 finally): for try/finally with NO catch we deliberately add
+    // NO exn row — a throw in the try PROPAGATES (unwinds to an outer handler or
+    // escapes), it is never swallowed. The finalizer therefore runs only on the
+    // NORMAL completion path (below). Full finally-on-exceptional-path (run the
+    // finalizer, then re-raise) is the documented cut-point / follow-up; the
+    // exception is preserved either way (loud, never silent-wrong — invariant L1).
     this.enc.patch(overCatch);
 
     if (s.finalizer) {
@@ -899,14 +903,19 @@ class FunctionEmitter {
   }
 
   private emitSwapped(rt: number, left: Node, right: Node): void {
-    // Compute `right < left` / `right <= left`: eval RIGHT into the register,
-    // LEFT into acc, so `acc = regs[right] op acc` == right op left.
+    // `a > b` ≡ `b < a`, `a >= b` ≡ `b <= a`. Evaluate operands in SOURCE order
+    // (left then right — side effects must match JS) into two registers, then
+    // compute `acc = regs[rRight] op regs[rLeft]` via `Ldar rLeft; op rRight`
+    // (`op` = Lt/Le → `regs[rRight] op acc` = b op a = a >/>= b).
     const m = this.mark();
-    this.emitExpr(right);
-    const rReg = this.allocReg();
-    this.enc.emitReg(Op.Star, rReg);
-    this.emitExpr(left);
-    this.enc.emitReg(rt, rReg);
+    this.emitExpr(left); // acc = a (evaluated first)
+    const rLeft = this.allocReg();
+    this.enc.emitReg(Op.Star, rLeft);
+    this.emitExpr(right); // acc = b (evaluated second)
+    const rRight = this.allocReg();
+    this.enc.emitReg(Op.Star, rRight);
+    this.enc.emitReg(Op.Ldar, rLeft); // acc = a
+    this.enc.emitReg(rt, rRight); // acc = regs[rRight] op acc = b op a
     this.release(m);
   }
 

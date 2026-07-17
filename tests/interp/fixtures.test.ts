@@ -98,6 +98,8 @@ describe("#3101 comparison desugarings (>, >=, !=, !== via the minimal ISA)", ()
   it("a != b desugars to !(a == b)", () => expectValue("1 != 2", true));
   it("a !== b desugars to !(a === b)", () => expectValue("1 !== '1'", true));
   it("=== is strict", () => expectValue("1 === '1'", false));
+  it("> evaluates operands left→right (side-effect order)", () =>
+    expectValue("var s=''; var a=function(){s+='a';return 2}; var b=function(){s+='b';return 1}; a()>b(); s", "ab"));
 });
 
 describe("#3101 control flow + completion values", () => {
@@ -140,6 +142,10 @@ describe("#3101 exceptions (side-table, cross-call unwind)", () => {
   it("catches a thrown value", () => expectValue("var r; try { throw 42; } catch(e) { r = e + 1; } r", 43));
   it("runs finally after normal completion", () =>
     expectValue("var o=0; try { o=1; } catch(e) { o=2; } finally { o+=10; } o", 11));
+  it("orders throw → catch → finally", () =>
+    expectValue("var log=''; try { log+='t'; throw 1; } catch(e){ log+='c'; } finally { log+='f'; } log", "tcf"));
+  it("does NOT swallow a throw in try/finally with no catch (propagates)", () =>
+    expectValue("var caught='no'; try { try { throw 'x'; } finally {} } catch(e){ caught=e; } caught", "x"));
   it("unwinds a throw across a call boundary into a caller's catch", () =>
     expectValue("function boom(){ throw 'x'; } var r='no'; try { boom(); } catch(e){ r=e; } r", "x"));
   it("host TypeError on a non-callable is catchable", () =>
