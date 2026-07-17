@@ -7633,6 +7633,19 @@ function resolveImport(
           options == null ? self.addEventListener(type, listener) : self.addEventListener(type, listener, options);
       }
       if (intent.action === "new") {
+        // (#1568) `__new_BigInt(v)` / `__new_Symbol(v)` — Object(bigint) /
+        // Object(symbol) auto-boxing (§7.1.18 ToObject, Table 13). BigInt and
+        // Symbol are NOT constructors, so `new BigInt(v)` throws; box via the
+        // spec's literal `Object(v)`, yielding an object (typeof "object") whose
+        // valueOf() returns the underlying primitive. This handler must precede
+        // the generic `builtinCtors` lookup below — neither name is a member of
+        // that map (they aren't constructors), so without this early return the
+        // resolver throws "No dependency provided for extern class BigInt".
+        // (Regressed when the extern_class block moved during a runtime refactor;
+        // restored here — see tests/issue-1568.test.ts.)
+        if (intent.className === "BigInt" || intent.className === "Symbol") {
+          return (v: any): any => Object(v);
+        }
         // Test262Error is a simple Error subclass used by the test262 harness
         class Test262Error extends Error {
           constructor(msg?: string) {
