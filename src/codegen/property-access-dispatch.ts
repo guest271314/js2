@@ -36,7 +36,11 @@ import { emitSymbolDescLoad } from "./symbol-native.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { rollbackSpeculative, snapshotSpeculative } from "./context/speculative.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
-import { classMethodCandidatesForProp, reserveMemberGetDispatch } from "./member-get-dispatch.js";
+import {
+  classAccessorCandidatesForProp,
+  classMethodCandidatesForProp,
+  reserveMemberGetDispatch,
+} from "./member-get-dispatch.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
@@ -3531,7 +3535,18 @@ export function finalizeStructAndDynamicMemberGet(
         // resolves to an identical, `===`-stable value instead of `undefined`
         // (the ~87-file `assert.sameValue(c.m, C.prototype.m)` class-elements
         // cluster). Modules with no class-method of this name are byte-identical.
-        if (classMethodCandidatesForProp(ctx, propName).length > 0) {
+        //
+        // (#3041) Also route when a class GET-ACCESSOR named `propName` exists:
+        // a getter reached via an `any` receiver (class declared inside a
+        // function, no struct field for `propName`) previously fell straight to
+        // `__extern_get` → `undefined`/NaN — the getter body never ran. The
+        // dispatcher's #3041 accessor arms `ref.cast`+`call` the getter and box
+        // its result, exactly as the static `compilePropertyAccess` accessor
+        // branch does. Modules with no getter of this name stay byte-identical.
+        if (
+          classMethodCandidatesForProp(ctx, propName).length > 0 ||
+          classAccessorCandidatesForProp(ctx, propName).length > 0
+        ) {
           const getMemberIdx = reserveMemberGetDispatch(ctx, propName, fctx);
           if (getMemberIdx !== undefined) {
             fctx.body.push({ op: "local.get", index: objTmp });
