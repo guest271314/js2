@@ -1,15 +1,17 @@
 ---
 id: 2728
 title: "Object(Symbol()) should box to a Symbol-wrapper object (typeof → 'object')"
-status: ready
+status: done
+assignee: dev-builtins
+completed: 2026-07-17
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-07-17
 priority: low
 feasibility: medium
 task_type: bugfix
 area: codegen
 goal: test262-conformance
-sprint: Backlog
+sprint: current
 depends_on: []
 ---
 # #2728 — `Object(Symbol())` → Symbol-wrapper object
