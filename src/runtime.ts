@@ -8437,9 +8437,22 @@ assert._isSameValue = isSameValue;
             }
           }
           // Try struct getter export __sget_N (for WasmGC struct fields like "0", "1", etc.)
+          // (#3200) Shape-gated via _readOwnDescriptor: `__sget_<k>` is a
+          // ref.test dispatch chain that answers null — or a zero-initialized
+          // slot on a structurally-colliding shape — WITHOUT trapping when the
+          // receiver's own shape lacks the field. Returning that raw probe
+          // result here masked INHERITED indices served by the fnctor /
+          // Object.prototype walks below (the map/filter/forEach `-c-i-*`
+          // array-like families). `_readOwnDescriptor` consults the field-name
+          // registry (#1589A discipline) so only a genuinely-own field answers.
           const exports = callbackState?.getExports();
-          const getter = exports?.[`__sget_${strKey}`];
-          if (typeof getter === "function") return getter(obj);
+          if (_isWasmStruct(obj)) {
+            const od = _readOwnDescriptor(obj, strKey, exports);
+            if (od) return od.get ? od.get.call(obj) : od.value;
+          } else {
+            const getter = exports?.[`__sget_${strKey}`];
+            if (typeof getter === "function") return getter(obj);
+          }
           // (#3139) Inherited index through the fnctor instance→ctor prototype
           // chain (`foo.prototype = new Array(11,22,33); new foo()[1]` → 22).
           // Sits BEFORE the Object.prototype extended-index table below because
@@ -8508,13 +8521,22 @@ assert._isSameValue = isSameValue;
           if (typeof exports?.[`__sget_${strKey}`] === "function") {
             try {
               // (#1589A) HasProperty (spec §7.3.12) is true for any own
-              // property regardless of value — including null/undefined. A
-              // struct getter that returns *at all* (even null) proves the
-              // field exists on this struct shape. Only a throw means "this
-              // field is not defined on this struct variant" (opaque-struct
-              // access error), so we fall through to `return 0` in that case.
-              exports[`__sget_${strKey}`](obj);
-              return 1;
+              // property regardless of value — including null/undefined.
+              // (#3200) BUT "the getter returned at all" is NOT proof of
+              // ownness: `__sget_<k>` is a ref.test dispatch chain that
+              // NEVER traps — it answers null (or a zero-initialized slot on
+              // a structurally-colliding shape) for a receiver whose own
+              // shape lacks the field. The old unconditional `return 1` made
+              // HasProperty answer true for EVERY struct whenever any shape
+              // in the module had the field — visiting holes/inherited-only
+              // indices as own. Gate on _readOwnDescriptor (field-name
+              // registry, #1589A discipline); a miss falls through to the
+              // prototype-chain arms below.
+              if (_isWasmStruct(obj)) {
+                if (_readOwnDescriptor(obj, strKey, exports) !== undefined) return 1;
+              } else if (exports[`__sget_${strKey}`](obj) !== undefined) {
+                return 1;
+              }
             } catch {
               /* getter not defined for this struct variant — fall through */
             }
