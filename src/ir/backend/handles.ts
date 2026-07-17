@@ -23,6 +23,7 @@
 import type { Instr, ValType } from "../types.js";
 import type { JsTag } from "../../codegen/js-tag.js";
 import type {
+  LinearAllocationSitePlan,
   LinearRecordLayoutPlan,
   LinearRuntimeOperation,
   LinearVectorLayoutPlan,
@@ -86,16 +87,26 @@ export interface LinearMemoryFieldLowering {
  * the linear emitter consumes this additive metadata and never interprets
  * the sentinel type index as a WasmGC type.
  */
-export interface LinearObjectLowering extends IrObjectStructLowering {
-  readonly linearMemory: {
-    /** Canonical target-neutral layout consumed by this backend handle. */
-    readonly layout: LinearRecordLayoutPlan;
-    /** Still symbolic until the linear module adapter assembles the helper. */
-    readonly allocate: LinearRuntimeOperation;
+export interface PlannedObjectMemoryLowering {
+  /** Canonical per-site allocation decision; absent on read/write-only handles. */
+  readonly allocation?: LinearAllocationSitePlan;
+  /** Canonical target-neutral layout consumed by every linear-memory backend. */
+  readonly layout: LinearRecordLayoutPlan;
+  /** Still symbolic until the selected backend binds its allocator. */
+  readonly allocate: LinearRuntimeOperation;
+  readonly fieldCount: number;
+  field(name: string): LinearMemoryFieldLowering;
+}
+
+/** Shared-plan record handle consumed by linear-Wasm and Porffor IR. */
+export interface PlannedObjectLowering extends IrObjectStructLowering {
+  readonly linearMemory: PlannedObjectMemoryLowering;
+}
+
+export interface LinearObjectLowering extends PlannedObjectLowering {
+  readonly linearMemory: PlannedObjectMemoryLowering & {
     /** Deferred helper `(field0, ...fieldN) -> i32` appended after user slots. */
     readonly newFuncIdx: number;
-    readonly fieldCount: number;
-    field(name: string): LinearMemoryFieldLowering;
   };
 }
 
@@ -429,6 +440,8 @@ export interface LinearVecLowering {
   /** Element ValType — drives stride (4 vs 8) and the load op. */
   readonly elementValType: ValType;
   readonly linearMemory: {
+    /** Canonical per-site decision; absent on read/write-only handles. */
+    readonly allocation?: LinearAllocationSitePlan;
     readonly layout: LinearVectorLayoutPlan;
     readonly allocate: LinearRuntimeOperation;
     readonly initializeElement: LinearRuntimeOperation;

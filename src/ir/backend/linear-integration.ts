@@ -459,7 +459,7 @@ function makeLinearIrResolver(
       dataFieldIdx: 0,
       arrayTypeIdx: 0,
       elementValType: { kind: "f64" },
-      linearMemory: { layout, allocate, initializeElement },
+      linearMemory: { allocation, layout, allocate, initializeElement },
     };
   };
 
@@ -612,6 +612,7 @@ function makeLinearIrResolver(
           return field.fieldIdx;
         },
         linearMemory: {
+          allocation,
           layout,
           allocate,
           newFuncIdx,

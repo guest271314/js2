@@ -61,6 +61,10 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
     out.push({ op: "array.get", typeIdx: layout.arrayTypeIdx });
   }
 
+  emitElemSet(layout: IrVecLowering, _valueScratchLocal: number, out: Instr[]): void {
+    out.push({ op: "array.set", typeIdx: layout.arrayTypeIdx });
+  }
+
   // #1804 — build a fixed-length vec from N element values already on the
   // stack (e0 deepest … eN top). Mirrors the legacy `compileArrayLiteral` fast
   // path (src/codegen/literals.ts): the vec struct is { length:i32,

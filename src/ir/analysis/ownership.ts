@@ -260,6 +260,10 @@ function applyInstrEffect(instr: IrInstr, state: State, allocOf: Map<IrValueId, 
       touch(state, instr.cell, allocOf, null, "write");
       markEscaped(state, instr.value, allocOf);
       break;
+    case "vec.set":
+      touch(state, instr.vec, allocOf, null, "write");
+      markEscaped(state, instr.newValue, allocOf);
+      break;
 
     // --- read-modify-write -> `mutate` ---------------------------------------
     // (no dedicated RMW instr in Phase-1 IR; reserved for when one lands.)
