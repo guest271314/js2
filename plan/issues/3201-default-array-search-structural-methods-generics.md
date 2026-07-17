@@ -270,3 +270,56 @@ ToInteger, HasProperty-before-Get, SameValueZero), array-like `.call`
 receivers, sort string-order cluster (14), result species/prototype
 fidelity, huge sparse-index writes, Array.prototype-mutation casts,
 revoked-Proxy casts (deferred).
+
+## Progress — inherited-length array-like `.call` cluster: `__extern_length` unsound probe (fable-e, 2026-07-17)
+
+Mechanism-1 slice (array-like receivers via `.call(obj, …)`). Root cause found
+by live instrumentation: `__extern_length`'s struct arm resolved own `length`
+with a raw `__sget_length` try/catch probe. On a fnctor instance struct
+(`var Con = function(){}; Con.prototype = {length: 2}; new Con()`) the probe
+CAST-SUCCEEDS via structural canonicalization on some registered
+`__sget_length` getter and reads a **zero-initialized unrelated slot** —
+returning own length 0 (a non-null, non-throwing wrong answer, so no
+null-check gate can catch it) and SHADOWING the inherited `length` that
+`_fnctorProtoLookup` (#3139) resolves correctly one line below. This is the
+`#1629` unsound-`__sget_*`-probe anti-pattern.
+
+Fix: resolve own `length` through the #1629-safe `_readOwnDescriptor` (vec
+live length via `__vec_len`, sidecar, shape-gated struct field via
+`_getStructFieldNames`), then the fnctor prototype chain. Flips the
+`15.4.4.14-2-{6,8,9}` + `15.4.4.15-2-{6,8,9}` inherited-length clusters
+(6 verified per-process flips on the 97-test indexOf/lastIndexOf
+baseline-fail sample); also feeds every array-like borrow loop (forEach/map/
+filter etc. — #3200's families).
+
+**Coordination (agreed with fable-2, 2026-07-17):** the SAME unsound-probe
+class exists in `__extern_get_idx` (wrong-shape null served as a real
+element, masking inherited indices) and `__extern_has_idx` (`return 1` on
+any non-throwing probe visits holes as own) — those two arms are **fable-2's**
+(branch issue-3200-array-iteration-generics); `__extern_length` is this
+branch. The remaining ~19 `.call`-cluster fails in this family hinge on
+those two arms plus the element-kind mechanisms.
+
+Suites: `issue-3201-inherited-length` 5/5 (new), `issue-1360` +
+`issue-3138` + `issue-3116` + `issue-1629-S1` + `issue-3139` + `issue-1629`
++ `issue-1629a` 76/76, tsc clean.
+
+## Progress — len==0 before ToInteger(fromIndex) (fable-e, 2026-07-17, same PR)
+
+Mechanism-2 slice, same PR (#3194). §23.1.3.14/.20 step 3: on an empty array,
+`return -1` precedes step 4's `ToIntegerOrInfinity(fromIndex)`, so a throwing
+`valueOf` on the fromIndex object must not be observed
+(`{indexOf,lastIndexOf}/length-zero-returns-minus-one.js` — both flip to
+pass). `compileArrayIndexOf`/`compileArrayLastIndexOf` compiled the fromIndex
+coercion (whose f64 path embeds ToPrimitive → `valueOf`) unconditionally;
+now the coercion+clamp instrs are compiled into the main body then spliced
+into a `len != 0` guard arm (safe: nested `then`/`else` arms ARE walked by
+`flushLateImportShifts`' recursive `shiftBody`, so no detached-array funcIdx
+staleness — only never-embedded arrays are hazardous, per the #2001
+pre-ensure note). len==0 arms: indexOf iTmp=0 (loop bound 0 → -1);
+lastIndexOf iTmp=-1 (same as the empty default `len-1`).
+
+Suites: `issue-3201-inherited-length` 8/8 (3 new ordering tests incl. the
+positive valueOf-IS-observed control), the five issue-3201* suites +
+`issue-1360` + `array-prototype-methods` 91/91, tsc clean.
+>>>>>>> upstream/main
