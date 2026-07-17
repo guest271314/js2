@@ -38,9 +38,11 @@ The retirement is governed by the **IR fallback budget gate** (`pnpm run
 check:ir-fallbacks`, built in **#1376**, the ratchet mechanism) which counts
 each rejection reason against `scripts/ir-fallback-baseline.json`. The direction
 is to drive every **unintended** bucket to zero, then add the retired reason to
-`STRICT_IR_REASONS` (`src/codegen/index.ts:1013`, currently the **empty set** —
+`STRICT_IR_REASONS` (`src/codegen/index.ts:1511`, currently the **empty set** —
 no reason promoted yet) so any future regression becomes a hard compile error
-instead of a silent legacy fallback.
+instead of a silent legacy fallback. **Corpus-zero is NOT the promotion
+trigger** — see the re-scoped #3341 for why a reason may only be promoted once
+it is genuinely *unreachable* in the IR.
 
 **Stale-reference note (#1530):** `CLAUDE.md`, `docs/architecture/codegen-axes.md`,
 and `plan/log/ir-adoption.md` all cite **#1530** as "the issue that phases out
@@ -81,11 +83,18 @@ This epic is `done` when, for every unintended bucket:
 
 1. The bucket count in `scripts/ir-fallback-baseline.json` is `0`.
 2. The corresponding `IrFallbackReason` is added to `STRICT_IR_REASONS`
-   (`src/codegen/index.ts:1013`), so a regression hard-errors.
+   (`src/codegen/index.ts:1511`), so a regression hard-errors. **Bucket-zero
+   alone does NOT satisfy this** (re-scoped #3341): corpus-zero is measured on
+   the playground corpus only, so a reason may be promoted only once it is
+   genuinely *unreachable* in the IR — i.e. the IR is expected to always
+   claim+lower the construct, making a rejection a bug rather than a legitimate
+   fallback. `tests/issue-3341.test.ts` locks this: it keeps a valid program
+   per reason compiling, so a premature promotion fails loudly.
 3. The matching row in `plan/log/ir-adoption.md` is promoted `mixed → ir-owned`
    (regenerate via `pnpm run gen:ir-adoption`).
 4. Once all unintended buckets are zero + strict, the demote-to-warning channel
-   (`src/codegen/index.ts:889–896`) can be removed for the affected kinds — the
+   (`~1889` selector-claimed unresolvable-types fallback / `~2390` IR-build
+   throw in `src/codegen/index.ts`) can be removed for the affected kinds — the
    final goal the stale #1530 citation referred to.
 
 ## Children
