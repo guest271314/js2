@@ -38,6 +38,7 @@ import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
   isOwnParamName,
+  runtimeParameters,
 } from "../closures.js";
 
 export type ArrowClosureCapture = {
@@ -490,8 +491,10 @@ export function emitClosureParamDestructuring(
   // nested patterns, rest elements, and ReferenceError-on-unresolvable defaults
   // all work uniformly across function declarations, function expressions, and
   // arrow functions (#ref-error-A).
-  for (let pi = 0; pi < arrow.parameters.length; pi++) {
-    const param = arrow.parameters[pi]!;
+  // (#3359) Over the this-param-stripped list so `pi` aligns with `arrowParams`.
+  const destructureParams = runtimeParameters(arrow);
+  for (let pi = 0; pi < destructureParams.length; pi++) {
+    const param = destructureParams[pi]!;
     if (ts.isIdentifier(param.name)) continue; // simple param, already handled
 
     const paramIdx = pi + 1; // +1 for __self

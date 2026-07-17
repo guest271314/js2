@@ -576,3 +576,30 @@ Object.defineProperty) under existing goals — no new crash cluster. Actions:
   descriptor shapes still refused; incomplete-fix flag, follow-up optional.
 - **negative_test_fail** (55/lane, 40 = "early SyntaxError not detected"):
   covered by existing spec-gap early-error issues (#1315/#1435); no new issue.
+
+## 2026-07-17 /harvest-errors run (oracle-7 fresh baseline, both lanes)
+
+Baselines run `20260717-111717` (host 32,138 / standalone 24,711 of 43,106),
+oracle_version 7 — the honest async-scoring drop. Cross-referenced both lanes;
+**nearly every >50 cluster maps to an existing tracked issue**. The single
+genuinely-new, >50, untracked, high-value pattern:
+
+- [#3360](../3360-async-gen-yield-star-abrupt-completion-protocol.md) — **NEW.**
+  Async-generator `yield*` delegation drops iterator-protocol **abrupt
+  completions** — **690 honest `yield-star-*` fails** in the default lane (0
+  vacuous), the largest coherent honest-fail family oracle-7's #3227 S1/S4
+  re-scoring exposed. Sub-families: getiter-async (182) + getiter-sync (144) =
+  GetIterator-return-validation; next-then (108) + next-not (84) + next-call
+  (36) + … = IteratorNext/step-protocol. Root: `__gen_yield_star`
+  (`src/runtime.ts` ~L12510) — #3227 S3 fixed only the happy path. This is the
+  S5 feature-fix carve-out of #3227 (`depends_on: [3227]`). `horizon: l`.
+
+Verified-tracked (no new issue; safe-refill pointers for the lead):
+Set-like method residuals → #2761 (ready) / #1674 (blocked); resizable
+ArrayBuffer + `.transfer` → #1645 (ready) / #1595 (blocked); Reflect receiver
+→ #2046 (in-progress); standalone host-import leaks (iterator_protocol 4,021 /
+generic 1,720) → #2961 (in-progress) umbrella; new-Function/indirect-eval →
+#2928 (backlog); with-statement PutValue-through-object-env residual
+(30, `compound-assignment/S11.13.2_A5.*`) → #1387 (done) niche; import-attributes
+early-SyntaxError (35, sub-50) → #1805 (done) residual. Temporal / ShadowRealm /
+import.defer|source / Atomics.waitAsync = non-official proposals, excluded.

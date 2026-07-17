@@ -86,10 +86,18 @@ export const Op = {
 
   // ── exceptions (Throw raises; regions are a SIDE TABLE, not opcodes) ──
   Throw: 36, //    Throw           ; throw acc
+
+  // ── comparison, part 2 (#3356 — appended to keep opcode ids stable) ──
+  // `>`/`>=` are NOT desugared to swapped Lt/Le: native `<` is IsLessThan with
+  // LeftFirst=true, but §13.10.1 evaluates `a > b` as IsLessThan(b, a,
+  // LeftFirst=FALSE) so ToPrimitive still runs in source order (a then b).
+  // Native `>`/`>=` carry that flag correctly, so they get their own opcodes.
+  Gt: 37, //       Gt r            ; acc = regs[r] >  acc
+  Ge: 38, //       Ge r            ; acc = regs[r] >= acc
 } as const;
 
 /** The number of distinct opcodes (0..OP_COUNT-1). */
-export const OP_COUNT = 37;
+export const OP_COUNT = 39;
 
 // ── Encoding (doc §"Encoding" / ADR-0019) ────────────────────────────────────
 //
@@ -189,6 +197,8 @@ export const OP_INFO: OpInfo[] = [
   { name: "JumpIfFalse", form: OperandForm.Target }, // 34
   { name: "Return", form: OperandForm.None }, // 35
   { name: "Throw", form: OperandForm.None }, // 36
+  { name: "Gt", form: OperandForm.RegA }, // 37 (#3356)
+  { name: "Ge", form: OperandForm.RegA }, // 38 (#3356)
 ];
 
 // ── Builtin ids (CallBuiltin operand `a`) ────────────────────────────────────

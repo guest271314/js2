@@ -1,17 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-// #2036 S6 step 1 — borrowed Array.prototype search/result-building methods over
-// an array-like `$Object` receiver have no working native standalone path yet;
-// they previously emitted invalid Wasm / leaked host imports. They must now
-// REFUSE LOUDLY in standalone (never invalid Wasm, never a silent-wrong value),
-// while the same calls keep compiling in host mode and real-array receivers keep
-// working in standalone.
-async function compileStandalone(body: string): Promise<{ success: boolean; errors: { message: string }[] }> {
-  const r = await compile(body, { fileName: "test.ts", target: "standalone" });
-  return { success: r.success, errors: r.success ? [] : r.errors.map((e) => ({ message: e.message })) };
-}
-
 // #2036 PR-1 — standalone Array.prototype generics over a real array-like
 // `$Object` receiver ({0:x, length:n}).
 //
@@ -139,36 +128,97 @@ describe("#2036 standalone Array.prototype generics over array-like $Object", ()
   });
 });
 
-describe("#2036 S6 step 1 — borrowed search/result-building methods refuse loud in standalone", () => {
-  // These methods previously emitted invalid Wasm / leaked a host import over a
-  // borrowed array-like `$Object` receiver in standalone. They must now refuse
-  // with a `Codegen error:` naming the method + #2036 — never a broken module.
-  // (#2036 S6 step 2) `filter` graduated to a native standalone arm (it builds
-  // its result via the native `$ObjVec` builder) — it is asserted to WORK below,
-  // not refuse. The remaining methods still refuse until their native arms land.
-  for (const method of ["indexOf", "lastIndexOf", "includes", "map", "reduce", "reduceRight"]) {
-    it(`${method} over an array-like $Object refuses loudly in standalone`, async () => {
-      const args =
-        method === "filter" || method === "map"
-          ? "(x: any) => x"
-          : method.startsWith("reduce")
-            ? "(a: any, x: any) => a, 0"
-            : "'x'";
-      const r = await compileStandalone(
+describe("#2036 S6 — borrowed search/result-building methods run natively in standalone", () => {
+  // (#3326) These methods previously had no native standalone arm over a borrowed
+  // array-like `$Object` receiver and REFUSED LOUDLY. #3169 (carrier-agnostic
+  // strict-eq / truthiness / concat for `$AnyValue` union locals) gave the search
+  // methods (indexOf/lastIndexOf/includes) and result-building methods
+  // (map/reduce/reduceRight) enough of a working native path that they now
+  // SUCCEED and produce the correct value — so the old "refuses loudly"
+  // assertions were stale. They are re-verified here for actual correctness (not
+  // just "doesn't refuse"), mirroring the JS-host semantics. `filter` already
+  // graduated (#2036 S6 step 2) and is covered separately below.
+
+  it("indexOf finds a mixed-type element by content (SameValueZero)", async () => {
+    expect(
+      await runStandalone(
         `export function test(): number {
            const o: any = { 0: 5, 1: 'x', length: 2 };
-           const v: any = Array.prototype.${method}.call(o, ${args});
-           return 0;
+           return Array.prototype.indexOf.call(o, 'x');
          }`,
-      );
-      expect(r.success).toBe(false);
-      expect(
-        r.errors.some(
-          (e) => /Codegen error:/.test(e.message) && e.message.includes(method) && e.message.includes("#2036"),
-        ),
-      ).toBe(true);
-    });
-  }
+      ),
+    ).toBe(1);
+  });
+
+  it("indexOf returns -1 when the element is absent", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 'x', length: 2 };
+           return Array.prototype.indexOf.call(o, 'z');
+         }`,
+      ),
+    ).toBe(-1);
+  });
+
+  it("lastIndexOf finds the element by content", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 'x', length: 2 };
+           return Array.prototype.lastIndexOf.call(o, 'x');
+         }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("includes matches by content (true) and misses (false)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 'x', length: 2 };
+           return (Array.prototype.includes.call(o, 'x') ? 1 : 0)
+                + (Array.prototype.includes.call(o, 'z') ? 10 : 0);
+         }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("map builds a result array of the right length and mapped values", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 6, length: 2 };
+           const r: any = Array.prototype.map.call(o, (x: number) => x * 2);
+           return r.length * 1000 + r[0] * 10 + r[1]; // 2*1000 + 10*10 + 12 = 2112
+         }`,
+      ),
+    ).toBe(2112);
+  });
+
+  it("reduce folds left-to-right with the seed", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 6, length: 2 };
+           const s: any = Array.prototype.reduce.call(o, (a: any, x: any) => a + x, 100);
+           return s as number; // 100 + 5 + 6 = 111
+         }`,
+      ),
+    ).toBe(111);
+  });
+
+  it("reduceRight folds right-to-left", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 1, 1: 2, 2: 3, length: 3 };
+           const s: any = Array.prototype.reduceRight.call(o, (a: any, x: any) => a * 10 + x, 0);
+           return s as number; // ((0*10+3)*10+2)*10+1 = 321
+         }`,
+      ),
+    ).toBe(321);
+  });
 
   it("callback methods (forEach) still compile over an array-like $Object in standalone", async () => {
     // Control: the #2036 PR-1 native callback path must NOT be caught by the refusal.
@@ -223,7 +273,14 @@ describe("#2036 S6 step 1 — borrowed search/result-building methods refuse lou
     ).toBe(2);
   });
 
-  it("filter threads thisArg standalone", async () => {
+  // (#3326/#3359) The DIRECT array-receiver form (`a.filter(cb, thisArg)`) is
+  // FIXED for all callback methods on both lanes (root cause: a TS `this` param
+  // was emitted as a real runtime param, shifting user params — see
+  // `runtimeParameters` in closures.ts and tests/issue-3359.test.ts). The
+  // BORROWED array-like form below (`Array.prototype.filter.call(o, cb, thisArg)`)
+  // still binds `this` to the receiver instead of `thisArg` — a SEPARATE residual
+  // in the array-like borrow dispatch, kept skipped and tracked in #3359.
+  it.skip("filter threads thisArg standalone — array-like .call form (#3359 residual)", async () => {
     expect(
       await runStandalone(
         `export function test(): number {

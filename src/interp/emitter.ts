@@ -867,15 +867,10 @@ class FunctionEmitter {
 
   private emitBinary(node: Node): void {
     const op: string = node.operator;
-    // Comparison desugarings the ISA lacks.
-    if (op === ">") {
-      this.emitSwapped(Op.Lt, node.left, node.right); // a > b → b < a
-      return;
-    }
-    if (op === ">=") {
-      this.emitSwapped(Op.Le, node.left, node.right); // a >= b → b <= a
-      return;
-    }
+    // Comparison desugarings the ISA lacks. NOTE `>`/`>=` are NOT desugared to
+    // swapped Lt/Le (#3356): §13.10.1 is IsLessThan(b, a, LeftFirst=FALSE), so
+    // ToPrimitive must run in source order — the dedicated Gt/Ge ops (native
+    // `>`/`>=`) carry that flag correctly; a `Lt(b, a)` swap coerced b first.
     if (op === "!=") {
       this.emitNegated(Op.Eq, node.left, node.right); // !(a == b)
       return;
@@ -900,23 +895,6 @@ class FunctionEmitter {
     const rt = this.binaryOpcode(op);
     if (rt === -1) throw new UnsupportedNodeError(`binary operator '${op}'`, "BinaryExpression");
     this.enc.emitReg(rt, rLeft);
-  }
-
-  private emitSwapped(rt: number, left: Node, right: Node): void {
-    // `a > b` ≡ `b < a`, `a >= b` ≡ `b <= a`. Evaluate operands in SOURCE order
-    // (left then right — side effects must match JS) into two registers, then
-    // compute `acc = regs[rRight] op regs[rLeft]` via `Ldar rLeft; op rRight`
-    // (`op` = Lt/Le → `regs[rRight] op acc` = b op a = a >/>= b).
-    const m = this.mark();
-    this.emitExpr(left); // acc = a (evaluated first)
-    const rLeft = this.allocReg();
-    this.enc.emitReg(Op.Star, rLeft);
-    this.emitExpr(right); // acc = b (evaluated second)
-    const rRight = this.allocReg();
-    this.enc.emitReg(Op.Star, rRight);
-    this.enc.emitReg(Op.Ldar, rLeft); // acc = a
-    this.enc.emitReg(rt, rRight); // acc = regs[rRight] op acc = b op a
-    this.release(m);
   }
 
   private emitNegated(eqOp: number, left: Node, right: Node): void {
@@ -950,6 +928,10 @@ class FunctionEmitter {
         return Op.Lt;
       case "<=":
         return Op.Le;
+      case ">":
+        return Op.Gt; // (#3356) own op — LeftFirst=false, see emitBinary note
+      case ">=":
+        return Op.Ge; // (#3356)
       default:
         return -1; // bitwise / shift / ** / in / instanceof — Phase-1 out of scope
     }
