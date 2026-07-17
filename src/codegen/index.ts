@@ -49,6 +49,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
+import { scanForDynamicProto, fillDynamicProtoHelpers } from "./dynamic-proto.js"; // (#802)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
@@ -2226,6 +2227,12 @@ export function generateModule(
     // default — programs without `new.target` are byte-identical.
     scanForNewTarget(ctx, ast.sourceFile);
 
+    // (#802) Detect proto-mutation receivers up front so class collection can
+    // append the conditional standalone-only `$__proto__` field to marked
+    // hierarchy roots. Off by default — programs without proto mutation are
+    // byte-identical.
+    scanForDynamicProto(ctx, ast.sourceFile);
+
     // (#2001 S1) Detect any array-literal elision up front so externref-element
     // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
     // Off by default — programs without holes are byte-identical.
@@ -2780,6 +2787,16 @@ export function generateModule(
     // doc in registry/error-types.ts). No-op unless the module constructs
     // native errors (standalone/wasi only) — byte-identical otherwise.
     fillExternGetErrorProps(ctx);
+
+    // (#802 Slices B+C) Mint the struct-proto natives and prepend the
+    // marked-root dispatch arms into `__object_setPrototypeOf` /
+    // `__getPrototypeOf` / `__extern_get`, so `Object.setPrototypeOf(
+    // classInstance, proto)` records the link in the conditional appended
+    // `$__proto__` field and inherited dynamic reads walk it. Mints DEFINED
+    // funcs only (no import shifts). No-op unless standalone AND the
+    // scanForDynamicProto prescan marked a class hierarchy — byte-identical
+    // otherwise.
+    fillDynamicProtoHelpers(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
@@ -4411,6 +4428,12 @@ export function generateMultiModule(
     // (#2023) Whole-realm new.target detection — OR across all source files.
     for (const sf of multiAst.sourceFiles) {
       scanForNewTarget(ctx, sf);
+    }
+
+    // (#802) Whole-realm proto-mutation receiver detection — OR across all
+    // source files (marked roots must be known before class collection).
+    for (const sf of multiAst.sourceFiles) {
+      scanForDynamicProto(ctx, sf);
     }
 
     // (#2001 S1) Whole-realm array-hole detection — OR across all source files.
