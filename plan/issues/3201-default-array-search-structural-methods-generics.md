@@ -322,4 +322,3 @@ lastIndexOf iTmp=-1 (same as the empty default `len-1`).
 Suites: `issue-3201-inherited-length` 8/8 (3 new ordering tests incl. the
 positive valueOf-IS-observed control), the five issue-3201* suites +
 `issue-1360` + `array-prototype-methods` 91/91, tsc clean.
->>>>>>> upstream/main
