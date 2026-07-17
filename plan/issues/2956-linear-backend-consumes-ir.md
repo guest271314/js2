@@ -1,12 +1,12 @@
 ---
 id: 2956
 title: "Linear backend consumes the IR front-end: wire the selector + LinearEmitter into generateLinearModule"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-02
 updated: 2026-07-17
 assignee: ttraenkler/fable-epsilon
-branch: symphony/porffor/2956-after-pr-3200
+branch: symphony/porffor/2956-after-pr-3203
 priority: medium
 horizon: xl
 feasibility: hard
@@ -24,10 +24,10 @@ loc-budget-allow:
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
 last_ci_retry_head: null
-last_merged_pr: 3200
+last_merged_pr: 3203
 claimed_by: porffor-codex-developer
-claimed_at: 2026-07-17T05:46:31.184Z
-pr: 3203
+claimed_at: 2026-07-17T11:27:47.591Z
+pr: null
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -392,3 +392,38 @@ The measured linear-IR ratchet improved and was banked:
 `compiled 6 -> 8`, `build 4 -> 2`. L4 (default-ON plus direct reject-list
 folding) is the only issue-defined slice remaining, so status stays
 `in-progress` for the next fresh continuation branch.
+
+## Execution status — L4 default-on + unified fallback ratchet implemented (2026-07-17, porffor-codex-developer)
+
+The selector/LinearEmitter overlay is now the default single-module
+`--target linear` path for the numeric/control-flow, fixed-number vec,
+aggregate/ref-cell, and string families landed in L1-L3.
+`JS2WASM_LINEAR_IR=0` remains the byte-identical direct-backend rollback switch;
+`=1` remains accepted for explicit CI and probe runs.
+
+- `compileLinearIrFunctions` requests the selector's existing
+  `trackFallbacks` list and folds every pre-claim direct-path decision into
+  `LinearIrResult.rejected` as `select:<IrFallbackReason>`. Post-claim
+  `build`/`verify`/`illegal:*` demotions retain their existing buckets, so one
+  ratchet now measures both sides of the fallback seam without a second
+  predicate family.
+- The baseline now records `compiled=8`, `build=2`, and selector buckets
+  `async-function=4`, `body-shape-rejected=24`,
+  `call-graph-closure=12`, `non-export-modifier=15`. Future growth in any
+  bucket fails `check:linear-ir`.
+- The default-on differential run retired two baselined gaps:
+  `numeric/math-trunc` and `string/charcode` no longer carry
+  `expectLinearUnsupported`, so their values execute and compare on both
+  backends.
+- Fail-loud coverage now distinguishes the still-deferred dynamic/boxed
+  `typeof` surface (`any`) from statically typed `typeof`, which the shared IR
+  can lower safely.
+
+All issue-defined slices and acceptance criteria are implemented; the issue is
+`in-review` for the final PR and merge-queue validation.
+
+Validation: complete linear + cross-backend + IR proof matrix 196/196;
+`tests/issue-2956.test.ts` 20/20; typecheck and production library build clean;
+`check:linear-ir`, `check:ir-fallbacks`, `check:loc-budget`, and
+`check:oracle-ratchet` clean; changed-file Prettier and Biome checks have no
+errors.

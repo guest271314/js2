@@ -103,7 +103,8 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   addNumericSetRuntime(mod);
   addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
   // #2956 L2: construction needs one value-first indexed store helper.
-  // Register it only for the opt-in overlay so flag-off output stays byte-identical.
+  // Register it only for the overlay so the explicit `=0` escape hatch stays
+  // byte-identical to the pre-IR direct backend.
   if (linearIrEnabled()) {
     addLinearIrVecRuntime(mod);
     // The UTF-16 decoder is sizeable and only the charCodeAt plan needs it.
@@ -204,8 +205,9 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     compileClassDeclaration(ctx, classDecl);
   }
 
-  // ── #2956 L1: IR overlay for selector-claimed top-level functions ──
-  // Gated on JS2WASM_LINEAR_IR=1 (flag off ⇒ byte-identical module). Runs
+  // ── #2956: IR overlay for selector-claimed top-level functions ──
+  // Default-on since L4; JS2WASM_LINEAR_IR=0 restores the byte-identical
+  // direct path. Runs
   // AFTER slot pre-assignment + module-global collection so the linear IR
   // resolver's name-based lookups (funcMap / moduleGlobals) are complete,
   // and BEFORE the funcDecls loop so an IR-lowered body lands at exactly

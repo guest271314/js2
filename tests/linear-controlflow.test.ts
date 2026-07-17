@@ -529,9 +529,9 @@ describe("linear-controlflow: unsupported constructs fail loud (#1937)", () => {
     expect(errors.some((e) => e.line > 0)).toBe(true);
   });
 
-  it("typeof (unsupported expression) fails loud with a located message", async () => {
+  it("dynamic typeof (unsupported expression) fails loud with a located message", async () => {
     const errors = await compileLinearExpectError(`
-      export function test(x: number): number {
+      export function test(x: any): number {
         if (typeof x === "number") return 1;
         return 0;
       }
