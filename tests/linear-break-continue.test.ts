@@ -331,7 +331,7 @@ describe("linear fail-loud on unsupported constructs (#1937)", () => {
   // NOT a silently-invalid binary.
   const unsupported: ReadonlyArray<readonly [string, string]> = [
     ["throw", `export function f(): number { throw 1; }`],
-    ["typeof", `export function f(x: number): number { const t = typeof x; return 0; }`],
+    ["dynamic typeof", `export function f(x: any): number { const t = typeof x; return 0; }`],
     [
       "await",
       `export async function f(): Promise<number> { return await g(); }
