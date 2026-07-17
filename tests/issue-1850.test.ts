@@ -249,9 +249,9 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
     ).not.toThrow();
   });
 
-  it("#2954: still rejects a representation-divergent (object.new) instr on the linear boundary", () => {
-    // The core-op opening (#2954) did NOT open the divergent families — objects
-    // lower to WasmGC `struct.*`; the linear analogue lands with #2956.
+  it("#2956 L2: accepts object.new after the linear-memory aggregate lowering lands", () => {
+    // The linear resolver/emitter now carries object values as i32 arena
+    // pointers and lowers fields through layout.ts offsets.
     const objInstr: IrInstr = {
       kind: "object.new",
       shape: { fields: [] },
@@ -269,10 +269,7 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
       valueCount: 3,
     };
 
-    const errors = verifyIrBackendLegality(fn, "linear");
-    expect(errors.some((e) => /linear backend does not support IR instruction 'object.new'/.test(e.message))).toBe(
-      true,
-    );
+    expect(verifyIrBackendLegality(fn, "linear")).toEqual([]);
   });
 
   it("promotes verifier fallback diagnostics to hard Codegen errors in test builds only", () => {

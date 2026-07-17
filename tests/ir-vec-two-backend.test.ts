@@ -222,17 +222,12 @@ describe("#2954 LinearEmitter core-op families are byte-identical to WasmGc", ()
   });
 
   it("representation-divergent families still fail loudly on LinearEmitter", () => {
-    // Aggregates, boxing-adjacent funcref call, exceptions, ref-cells lower to
-    // WasmGC-specific ops; the linear analogue lands with #2956/#2953. Each stays
-    // a loud stub (WasmGc implements them; Linear throws).
+    // Boxing-adjacent funcref calls and exceptions still need distinct linear
+    // designs. Aggregates/ref-cells are covered by #2956's linear-memory tests.
     for (const call of [
       () => linear.emitCallRef(),
-      () => linear.emitAggregateNew(),
-      () => linear.emitFieldGet(),
-      () => linear.emitFieldSet(),
       () => linear.emitThrow(),
       () => linear.emitTry(),
-      () => linear.emitRefCellNew(),
       () => linear.emitVecNewFixed(),
     ]) {
       expect(call).toThrow(/LinearEmitter:/);

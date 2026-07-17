@@ -13,9 +13,9 @@
 // for backwards compatibility, so existing `import { IrVecLowering } from
 // "./lower.js"` sites keep working.
 //
-// Phase 1 (#1713) keeps every handle WasmGC-typed (they expose `typeIdx` /
-// `fieldIdx`). A second backend (#1714 linear, #1715 bytecode) introduces
-// parallel handle shapes and parameterises the emitter over them -- see the
+// Phase 1 (#1713) began with WasmGC-typed handles (`typeIdx` / `fieldIdx`).
+// Second backends (#1714 linear, #1715 bytecode) add parallel handle metadata
+// and parameterise the emitter over it -- see the
 // `## Implementation Plan` section 7 in
 // `plan/issues/1713-ir-backend-emitter-trait-seam.md` for that design step.
 // Nothing here changes for Phase 1.
@@ -66,6 +66,31 @@ export interface IrObjectStructLowering {
 }
 
 /**
+ * Linear-memory field metadata carried by the aggregate/ref-cell handles.
+ * Offsets follow `src/codegen-linear/layout.ts`; the IR layer deliberately
+ * sees only the backend-neutral memory facts needed by `LinearEmitter`.
+ */
+export interface LinearMemoryFieldLowering {
+  readonly offset: number;
+  readonly type: ValType;
+}
+
+/**
+ * Linear-memory analogue of an object struct handle. `typeIdx`/`fieldIdx`
+ * remain present because `IrLowerResolver` predates parallel layout handles;
+ * the linear emitter consumes this additive metadata and never interprets
+ * the sentinel type index as a WasmGC type.
+ */
+export interface LinearObjectLowering extends IrObjectStructLowering {
+  readonly linearMemory: {
+    /** Deferred helper `(field0, ...fieldN) -> i32` appended after user slots. */
+    readonly newFuncIdx: number;
+    readonly fieldCount: number;
+    field(name: string): LinearMemoryFieldLowering;
+  };
+}
+
+/**
  * Slice 3 (#1169c): WasmGC type info for a closure value. Two structs
  * are involved per closure construction site:
  *   - The SUPERTYPE struct (`structTypeIdx`): contains only the funcref
@@ -95,6 +120,15 @@ export interface IrClosureLowering {
 export interface IrRefCellLowering {
   readonly typeIdx: number;
   readonly fieldIdx: number;
+}
+
+/** Linear-memory analogue of the one-field mutable ref-cell struct. */
+export interface LinearRefCellLowering extends IrRefCellLowering {
+  readonly linearMemory: {
+    /** Deferred helper `(value) -> i32` appended after user slots. */
+    readonly newFuncIdx: number;
+    readonly value: LinearMemoryFieldLowering;
+  };
 }
 
 /**

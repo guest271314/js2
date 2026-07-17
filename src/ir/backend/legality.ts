@@ -83,8 +83,8 @@ function checkInstr(
 // CORE-OP families (const / arithmetic / locals-as-slots / structured control
 // flow / direct call). These lower to core Wasm and `LinearEmitter` emits them
 // byte-identically to `WasmGcEmitter`. The representation-DIVERGENT families
-// (objects, closures, boxing, strings, ref-cells, exceptions, non-fixed vec
-// mutation/iteration, promises) stay rejected here — the linear analogue lands
+// (closures, dynamic boxing, strings, exceptions, non-fixed vec
+// iteration, promises) stay rejected here — the linear analogue lands
 // with the production wiring (#2956). This mirrors `bytecodeInstrError`'s
 // allow-list shape; the operand-type gate (`linearValTypeError`) independently
 // rejects any non-{i32,i64,f32,f64} value, so allowing an op kind here never
@@ -108,6 +108,14 @@ function linearInstrError(instr: IrInstr): string | null {
     case "select":
     case "if":
     case "call":
+    // #2956 L2: aggregates and primitive ref-cells use i32 arena pointers,
+    // with field access emitted as typed linear-memory loads/stores.
+    case "object.new":
+    case "object.get":
+    case "object.set":
+    case "refcell.new":
+    case "refcell.get":
+    case "refcell.set":
     case "global.get":
     case "global.set":
     case "slot.read":
@@ -225,6 +233,13 @@ function porfforInstrError(instr: IrInstr): string | null {
 function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
   if (backend === "wasmgc") return null;
   if (backend === "linear") {
+    if (type.kind === "object") return linearAggregateTypeError(type);
+    if (type.kind === "boxed") {
+      const inner = asVal(type.inner);
+      return inner && (inner.kind === "i32" || inner.kind === "f64")
+        ? null
+        : `${backend} backend does not support boxed IR type '${type.inner.kind}'`;
+    }
     const v = asVal(type);
     if (!v) return `${backend} backend does not support IR type '${type.kind}'`;
     return linearValTypeError(v);
@@ -238,6 +253,28 @@ function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
   const v = asVal(type);
   if (!v) return `porffor backend does not support IR type '${type.kind}'`;
   return porfforValTypeError(v);
+}
+
+function linearAggregateTypeError(type: Extract<IrType, { kind: "object" }>): string | null {
+  for (const field of type.shape.fields) {
+    if (field.type.kind === "val") {
+      if (field.type.val.kind !== "i32" && field.type.val.kind !== "f64") {
+        return `linear backend does not support aggregate field ValType '${field.type.val.kind}'`;
+      }
+      continue;
+    }
+    if (field.type.kind === "object") {
+      const nested = linearAggregateTypeError(field.type);
+      if (nested) return nested;
+      continue;
+    }
+    if (field.type.kind === "boxed") {
+      const inner = asVal(field.type.inner);
+      if (inner && (inner.kind === "i32" || inner.kind === "f64")) continue;
+    }
+    return `linear backend does not support aggregate field IR type '${field.type.kind}'`;
+  }
+  return null;
 }
 
 function checkValType(
