@@ -1,12 +1,13 @@
 ---
 id: 2958
 title: "Standalone: unhandled-rejection tracking — report rejected promises with no handler at drain/event-loop exit"
-status: ready
+status: in-progress
+assignee: dev-2958
 sprint: current
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-17
 priority: low
-horizon: s
+horizon: m
 feasibility: medium
 reasoning_effort: medium
 task_type: feature
