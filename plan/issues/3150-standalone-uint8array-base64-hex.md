@@ -12,6 +12,7 @@ related: [2984]
 origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
 loc-budget-allow:
   - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/uint8-codec.ts
 ---
 
 # #3150 — standalone Uint8Array base64/hex codec statics
@@ -31,9 +32,27 @@ the existing refusal (no silent wrong coercion, no regression). Gated on
 This clears the `fromHex/{illegal-characters,odd-length-input}` + core-decode
 `__get_builtin` CEs.
 
+## Progress (2026-07-17, opus-a) — `fromBase64` slice landed
+
+The **`Uint8Array.fromBase64(string)`** static factory is now also implemented
+standalone-native (`__uint8_from_base64` + `__base64_digit` in
+`src/codegen/uint8-codec.ts`, plus a dispatch arm in
+`src/codegen/expressions/call-builtin-static.ts`). It decodes a
+standard-alphabet base64 string under the **default options** (`alphabet:
+"base64"`, `lastChunkHandling: "loose"`): 4-char groups → 3 bytes, ASCII
+whitespace skipped, `=` padding validated, loose trailing 2-/3-char chunks
+accepted (1/2 bytes), and the spec's `SyntaxError` on an illegal character, a
+single trailing character, unexpected padding, or any character after padding.
+Only a **bare string** argument routes here — a call carrying the options object
+has `arguments.length > 1` and falls through to the existing dynamic-shape
+refusal, so no wrong default is silently applied. Standalone-pure (0 host
+imports). Covered by `tests/issue-3150.test.ts`.
+
 **Remaining (this issue stays open):**
-- `Uint8Array.fromBase64` (default alphabet + padding; then the `alphabet` /
-  `lastChunkHandling` options, whitespace, `last-chunk-*` fidelity).
+- `Uint8Array.fromBase64` **options object** — the `alphabet: "base64url"` and
+  `lastChunkHandling: "strict" | "stop-before-partial"` variants (a call with a
+  second argument still refuses; only the default-options string form is
+  handled).
 - Instance methods `toHex` / `toBase64` / `setFromHex` / `setFromBase64`
   (currently silently return `null`).
 - **Static return-type branding** so `results.js`'s
