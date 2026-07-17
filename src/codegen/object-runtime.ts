@@ -4306,8 +4306,8 @@ export function reserveApplyClosure(ctx: CodegenContext): number {
  *   n = i32(__extern_length(args))
  *   if n==0: __call_fn_method_0(recv, fn)
  *   if n==1: __call_fn_method_1(recv, fn, idx0)
- *   ... up to 4 ...
- *   else (n>4): return undefined (sentinel)
+ *   ... up to 8 (#3310 G2 — matches the `emitClosureMethodCallExportN` cap) ...
+ *   else (n>8): return undefined (sentinel)
  *
  * S1 SCOPE — NO THROWS. This bridge returns the undefined sentinel
  * (`ref.null.extern`) for the not-a-function and arity-overflow cases rather
@@ -4355,10 +4355,22 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     { op: "call", funcIdx: externGetIdxArr },
   ];
 
-  // Build the arity dispatch from the bottom up (n>4 → undefined), each arm
+  // Build the arity dispatch from the bottom up (n>MAX → undefined), each arm
   // guarded on the matching __call_fn_method_N being registered.
   const callMethod = (n: number): number | undefined => ctx.funcMap.get(`__call_fn_method_${n}`);
   const armUnsupported = undefinedSentinel();
+
+  // (#3310 G2) Highest arity the bridge dispatches. The `__call_fn_method_N`
+  // dispatchers are emitted (index.ts, `emitClosureMethodCallExportN`) for every
+  // arity up to `min(maxClosureArity, 8)`, so the bridge must reach the same 8 —
+  // the previous hard cap at 4 silently dropped a 5+-arg dynamic method call
+  // (`o.m(a,b,c,d,e)` through the open-`$Object` lane) to the undefined sentinel.
+  // `buildArm(n)` returns that same sentinel for any arity whose dispatcher was
+  // not registered, so widening the range is byte-identical for modules without
+  // ≥5-arg closures and only adds live dispatch where the matching dispatcher
+  // exists. Arities beyond 8 remain the undefined sentinel (the spill-arm
+  // `__call_fn_method_vec` calling convention is the #2928 CallBuiltin follow-up).
+  const APPLY_CLOSURE_MAX_ARITY = 8;
 
   const buildArm = (n: number): Instr[] => {
     const idx = callMethod(n);
@@ -4378,9 +4390,9 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     return ops;
   };
 
-  // if n==0 .. n==4 else undefined. Nest as if/else chain.
+  // if n==0 .. n==APPLY_CLOSURE_MAX_ARITY else undefined. Nest as if/else chain.
   let dispatch: Instr[] = armUnsupported;
-  for (let n = 4; n >= 0; n--) {
+  for (let n = APPLY_CLOSURE_MAX_ARITY; n >= 0; n--) {
     dispatch = [
       { op: "local.get", index: 3 },
       { op: "i32.const", value: n },
