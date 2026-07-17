@@ -319,17 +319,28 @@ export interface CompileOptions {
    */
   honestAnyBoxing?: boolean;
   /**
+   * (#745 S2) Known-union `$AnyValue` representation — heterogeneous primitive
+   * unions (`number | string`, …) resolve to the universal `$AnyValue` tagged
+   * carrier instead of externref, so narrowed reads become tag-checked
+   * `struct.get`s with no box/unbox helper round-trip. Default false (legacy,
+   * byte-identical — the mapping only fires on such union types). EXPERIMENTAL
+   * opt-in until the consumer migration (#745 S3: strict-eq / truthiness /
+   * string-concat / call boundaries; coordinate #2141) makes it lane-default.
+   */
+  unionAnyRep?: boolean;
+  /**
    * (#2141 S2/S3, #2626) Tag-5 boxed-VALUE equality classifier — the
    * three-way true-class dispatch inside the both-tags-5 arm of
    * `__any_eq`/`__any_strict_eq`: Number×Number → `f64.eq` (#2040),
    * String×String → content eq (landed #1888), Object×Object → `ref.eq`
-   * identity (#2585), else legacy `0`. Default false (legacy: only the
-   * guarded string arm; non-string tag-5 pairs answer `0`, which also makes
-   * them fake-NaN self-unequal — the vacuity the test262 comparator
-   * accidentally relies on, see #2141 S2). The env var
-   * `JS2WASM_TAG5_CLASSIFIER=1` defaults this on for whole-runner A/B
-   * measurements. Do not enable by default until the #3032 lazy-generator
-   * waves land (the −162 dstr cluster unmasking).
+   * identity (#2585), else legacy `0`. Default TRUE since the #2040 A1 flip
+   * (2026-07-16): the #3032 lazy-generator waves (W3/#3302/W4) removed the
+   * eager-buffer vacuity that previously made the classifier's honest
+   * answers unmask latent dstr failures (the −162 merge_group eject). The
+   * emit site remains standalone/wasi-gated — host mode is unaffected. Set
+   * `JS2WASM_TAG5_CLASSIFIER=0` (or pass `false` here) to force the legacy
+   * always-`0` non-string tag-5 arm, which is also fake-NaN self-unequal —
+   * the comparator vacuity described in #2141 S2.
    */
   tag5ValueEqClassifier?: boolean;
   /**

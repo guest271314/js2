@@ -18,6 +18,7 @@
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
+import { undefinedExternInstrs } from "./any-helpers.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -2566,7 +2567,11 @@ function emitRegExpProtoMemberBody(
         addStringConstantGlobal(ctx, "");
         protoResult = stringConstantExternrefInstrs(ctx, "");
       } else {
-        protoResult = [{ op: "ref.null.extern" }];
+        // (#3319) The proto-identity `undefined` result must be the
+        // `$undefined` singleton under the #2106 regime (null ≠ undefined
+        // there — `get.call(RegExp.prototype) === undefined` answered false);
+        // legacy lanes keep the byte-identical `ref.null.extern`.
+        protoResult = undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" }];
       }
       emitNativeProtoIdentityReturnUndefined(ctx, fctx, brand, 1, protoResult);
     }

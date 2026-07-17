@@ -133,12 +133,14 @@ function _argumentsHasOwn(_obj: any, key: any): boolean {
   return key === "length" || key === "callee";
 }
 
-/** (#1712) Resolve a property through the instance's fnctor prototype chain. */
-function _fnctorProtoLookup(
-  obj: any,
-  key: any,
-  exports?: Record<string, Function> | undefined,
-): PropertyDescriptor | undefined {
+/**
+ * (#2739 b) Resolve a registered fnctor instance's user prototype object — the
+ * ctor's vivified/assigned `.prototype` — or undefined when the instance is not
+ * a registered fnctor instance or no prototype object was ever materialized.
+ * Shared by `_fnctorProtoLookup` (property reads) and `_structUserProto` (the
+ * for-in walk) so enumeration and [[Get]] resolve through ONE prototype source.
+ */
+function _fnctorCtorProto(obj: any, exports?: Record<string, Function> | undefined): any {
   if (!_canBeWeakKey(obj)) return undefined;
   const ctor = _fnctorInstanceCtor.get(obj);
   if (ctor == null) return undefined;
@@ -160,6 +162,17 @@ function _fnctorProtoLookup(
     }
   }
   if (proto == null || typeof proto !== "object") return undefined;
+  return proto;
+}
+
+/** (#1712) Resolve a property through the instance's fnctor prototype chain. */
+function _fnctorProtoLookup(
+  obj: any,
+  key: any,
+  exports?: Record<string, Function> | undefined,
+): PropertyDescriptor | undefined {
+  const proto = _fnctorCtorProto(obj, exports);
+  if (proto === undefined) return undefined;
   let cur: any = proto;
   let guard = 0;
   while (cur != null && typeof cur === "object" && guard++ < 16) {
@@ -191,15 +204,22 @@ function _fnctorProtoLookup(
  * `null`, meaning "own keys only", which must stop the walk). Otherwise fall
  * back to the native `[[Prototype]]`.
  *
- * NOTE: the fnctor instance→ctor prototype link (`function F(){}; F.prototype =
- * {…}; new F()`) is intentionally NOT consulted here — that path (the
- * `S12.6.4_A6*` for-in tests) is carved to a follow-up because routing existing
- * #1712 fnctor instances through the prototype walk changes their for-in output
- * and must be validated against the acorn/#1712 prototype-method surface.
+ * (#2739 b) The fnctor instance→ctor prototype link (`function F(){};
+ * F.prototype = {…}; new F()`) IS consulted (after the explicit
+ * `_wasmStructProto` record, which an explicit setPrototypeOf overrides) via
+ * the SAME `_fnctorCtorProto` resolution `_fnctorProtoLookup` uses for reads —
+ * so `for (k in new F())` enumerates inherited enumerable keys (`S12.6.4_A6*`)
+ * exactly where `inst.k` resolves them. Note this also means #1712 acorn-style
+ * `F.prototype.m = fn` methods enumerate on instances — which is spec-correct:
+ * a plain prototype-method assignment creates an ENUMERABLE property.
  */
-function _structUserProto(current: any): any {
-  if (_isWasmStruct(current) && _canBeWeakKey(current) && _wasmStructProto.has(current)) {
-    return _wasmStructProto.get(current);
+function _structUserProto(current: any, exports?: Record<string, Function> | undefined): any {
+  if (_isWasmStruct(current) && _canBeWeakKey(current)) {
+    if (_wasmStructProto.has(current)) {
+      return _wasmStructProto.get(current);
+    }
+    const fnctorProto = _fnctorCtorProto(current, exports);
+    if (fnctorProto !== undefined) return fnctorProto;
   }
   try {
     return Object.getPrototypeOf(current);
@@ -3689,6 +3709,28 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     // exports existed for the write-side wrap) are wrapped at read time.
     const protoDesc = _fnctorProtoLookup(obj, key, callbackState?.getExports());
     if (protoDesc) {
+      // (#2739 b) §7.3.2 [[Get]]: an OWN typed struct FIELD shadows the
+      // inherited prototype property. The own-field fast path lives in
+      // __extern_get's fallback (AFTER _safeGet returns), so without this
+      // check a proto hit here wrongly shadows the own field (e.g.
+      // `function F(){this.hint="hinted"}; F.prototype={hint:"protohint"}` —
+      // `new F().hint` must read "hinted"). Shape-gated via
+      // _getStructFieldNames (never a blind __sget_ try/catch probe),
+      // honoring the delete tombstone.
+      if (typeof key === "string") {
+        const tomb = _wasmStructDeletedKeys.get(obj);
+        if (!(tomb && tomb.has(key))) {
+          const exports = callbackState?.getExports();
+          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
+          if (fieldNames.includes(key)) {
+            const getter = exports?.[`__sget_${key}`];
+            if (typeof getter === "function") {
+              const own = getter(obj);
+              if (own !== undefined) return own;
+            }
+          }
+        }
+      }
       if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
       return _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
     }
@@ -7716,6 +7758,32 @@ function resolveImport(
           const thisArg = args.length > 1 ? args[1] : undefined;
           const fn = self[m] ?? _sidecarGet(self, m);
           if (typeof fn === "function") return fn.call(self, cb, thisArg);
+          return undefined;
+        };
+      }
+      // (#1794) node:events EventEmitter listener-registering methods — the
+      // listener argument may be a WasmGC closure struct (no [[Call]]); Node
+      // validates `typeof listener === "function"` and throws
+      // ERR_INVALID_ARG_TYPE on the raw struct. Wrap it as a JS callable via
+      // the identity-CACHED dynamic bridge (`_wasmClosureDynamicWrapperCache`),
+      // so `on(h)` and `off(h)` receive the SAME wrapper and removeListener
+      // identity-matches. Direct arrow args already crossed via
+      // `__make_callback`; this covers variable-held closures.
+      if (
+        intent.className === "EventEmitter" &&
+        (m === "on" ||
+          m === "once" ||
+          m === "off" ||
+          m === "addListener" ||
+          m === "removeListener" ||
+          m === "prependListener" ||
+          m === "prependOnceListener")
+      ) {
+        return (self: any, ...args: any[]) => {
+          if (self == null) return undefined;
+          const wrappedArgs = args.map((a) => _maybeWrapCallableUnknownArity(a, callbackState));
+          const fn = self[m] ?? _sidecarGet(self, m);
+          if (typeof fn === "function") return fn.call(self, ...wrappedArgs);
           return undefined;
         };
       }
@@ -11801,6 +11869,29 @@ assert._isSameValue = isSameValue;
                 keys.push(k);
                 seen.add(k);
               }
+              // (#2739 b) §13.7.5.15: a NON-enumerable own property still
+              // shadows a same-named prototype property (it enters `visited`
+              // without being yielded — 12.6.4-2.js). Mark every own key —
+              // struct fields and ALL sidecar/descriptor-table keys, whether
+              // enumerable or not — as seen before descending. A deleted
+              // (tombstoned) key is NOT an own property and must not shadow.
+              const tomb = _wasmStructDeletedKeys.get(current);
+              for (const k of fieldNames) {
+                if (!(tomb && tomb.has(k))) seen.add(k);
+              }
+              if (sc) {
+                for (const k of Object.keys(sc)) {
+                  if (k.startsWith("__get_") || k.startsWith("__set_")) continue;
+                  if (!(tomb && tomb.has(k))) seen.add(k);
+                }
+              }
+              const descTable = _wasmPropDescs.get(current);
+              if (descTable) {
+                for (const k of descTable.keys()) {
+                  if (typeof k !== "string") continue;
+                  if (!(tomb && tomb.has(k))) seen.add(k);
+                }
+              }
             } else {
               // Plain JS object — use Object.keys for own enumerable, respecting shadowing
               try {
@@ -11821,7 +11912,7 @@ assert._isSameValue = isSameValue;
             // (#2739) Advance through the user-intended prototype (consults the
             // recorded setPrototypeOf link + the #1712 fnctor proto), not the
             // native [[Prototype]] which is null for an opaque WasmGC struct.
-            current = _structUserProto(current);
+            current = _structUserProto(current, exports);
           }
           return keys;
         };
@@ -12296,6 +12387,31 @@ assert._isSameValue = isSameValue;
           // half of the for-await dstr cluster). Materialize it into a real JS
           // array through the module's `__vec_len`/`__vec_get` exports first;
           // non-vec / host iterables pass through unchanged.
+          // (#3227 S3) `yield* <async generator>` inside an `async function*`:
+          // the inner object carries only `Symbol.asyncIterator`, so the sync
+          // for-of below drained ZERO values — the outer async generator then
+          // reported `{value: undefined, done: true}` on the first `.next()`
+          // (the yield-star half of the S3 flip cluster). Our async generators
+          // are EAGERLY buffered (`_AsyncGeneratorState` → `{buf, index}`), so
+          // the settled values are synchronously available: drain the
+          // remaining buffer directly, then propagate a pendingThrow exactly
+          // like the eager body would (§27.6.3.8 — an inner abrupt completion
+          // propagates out of the `yield*`).
+          const asyncState = rawIterable != null ? _AsyncGeneratorState.get(rawIterable) : undefined;
+          if (asyncState !== undefined) {
+            while (asyncState.index < asyncState.buf.length) {
+              if (buf.length >= __EAGER_GEN_LIMIT) {
+                throw new RangeError("Eager generator buffer exceeded " + __EAGER_GEN_LIMIT + " yields");
+              }
+              buf.push(asyncState.buf[asyncState.index++]);
+            }
+            if (asyncState.pendingThrow !== null && asyncState.pendingThrow !== undefined) {
+              const e = asyncState.pendingThrow;
+              asyncState.pendingThrow = null;
+              throw e;
+            }
+            return;
+          }
           const iterable = _materializeIterable(rawIterable, callbackState);
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {

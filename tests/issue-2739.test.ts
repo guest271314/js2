@@ -71,3 +71,68 @@ describe("#2739 (a) — for-in walks a setPrototypeOf prototype chain", () => {
     ).toBe("p1,p2,");
   });
 });
+
+// (#2739 b) — constructor-function prototype chain. `new F()` instances must
+// enumerate the ctor's `.prototype` object's enumerable keys after their own
+// keys, with own keys (including the typed struct FIELDS) shadowing.
+import { buildImports } from "../src/runtime.js";
+
+async function runHost(src: string): Promise<unknown> {
+  const r = (await compile(src, { fileName: "test.ts", skipSemanticDiagnostics: true } as never)) as any;
+  if (!r.success) throw new Error("compile error: " + (r.errors?.[0]?.message ?? "unknown"));
+  const imp = buildImports(r.imports, undefined, r.stringPool) as Record<string, unknown> & {
+    setExports?: (e: unknown) => void;
+  };
+  const { instance } = await WebAssembly.instantiate(r.binary, imp);
+  if (typeof imp.setExports === "function") imp.setExports(instance.exports);
+  return (instance.exports as { test(): unknown }).test();
+}
+
+describe("#2739 (b) — for-in walks the fnctor constructor-prototype chain", () => {
+  // NOTE: these mirror the test262 top-level shape (S12.6.4_A6 / 12.6.4-2).
+  // Keep the constructor + `.prototype =` write + `new` at MODULE top level
+  // with no `as any` casts — a cast parenthesizes the callee, which routes
+  // `new` away from the fnctor path (no __register_fnctor_instance) and the
+  // scenario silently stops testing the prototype link.
+  it("own keys first, inherited key visits, own field shadows proto value (S12.6.4_A6)", async () => {
+    expect(
+      await runHost(`function FACTORY() { this.prop = 1; this.hint = "hinted"; }
+FACTORY.prototype = { feat: 2, hint: "protohint" };
+var inst = new FACTORY();
+export function test(): string {
+  var accum = "";
+  for (var key in inst) accum += key + inst[key];
+  return accum;
+}`),
+    ).toBe("prop1hinthintedfeat2");
+  });
+
+  it("inherited reads resolve and own dynamic-key reads shadow the proto", async () => {
+    expect(
+      await runHost(`function FACTORY() { this.hint = "hinted"; }
+FACTORY.prototype = { feat: 2, hint: "protohint" };
+var inst = new FACTORY();
+export function test(): string {
+  var k = "hint";
+  return inst.feat + "|" + inst[k] + "|" + inst.hint;
+}`),
+    ).toBe("2|hinted|hinted");
+  });
+
+  it("a non-enumerable OWN property still shadows the proto's enumerable one (12.6.4-2)", async () => {
+    expect(
+      await runHost(`var proto = { prop: "enumerableValue" };
+var ConstructFun = function () {};
+ConstructFun.prototype = proto;
+var child = new ConstructFun();
+Object.defineProperty(child, "prop", { value: "nonEnumerableValue", enumerable: false });
+export function test(): string {
+  var accessedProp = false;
+  for (var p in child) {
+    if (p === "prop") accessedProp = true;
+  }
+  return accessedProp ? "visited" : "skipped";
+}`),
+    ).toBe("skipped");
+  });
+});

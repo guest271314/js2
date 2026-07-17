@@ -87,18 +87,28 @@ describe("#1888 S6 — standalone built-in static globals", () => {
     expect(value).toBe(1);
   });
 
-  it("unsupported built-in static value reads refuse loud with a #1888 cite", async () => {
+  // (#3320) The compile-refusal contract for un-wired built-in static
+  // value-reads was deliberately retired by #2984 (PR #2851, 2026-07-06):
+  // un-wired members reify as IDENTITY-STABLE closures that throw a catchable
+  // error at CALL time (spec-shaped gOPD descriptors, `desc.value === m`
+  // identity). The guardrail now asserts the CURRENT contract: the module
+  // compiles to VALID host-free Wasm (the original #1888 S6 hazard —
+  // `__get_builtin` leakage / invalid Wasm — must still never happen) and the
+  // call throws catchably instead of computing a wrong result silently.
+  it("un-wired built-in static value read compiles host-free and throws catchably at call time (#2984 contract)", async () => {
     const r = await compile(
       `
         export function run(): number {
           const f: any = Array.from;
-          return f([1]).length;
+          try { f([1]); return 0; } catch (e) { return 1; }
         }
       `,
       { target: "standalone" },
     );
-    expect(r.success).toBe(false);
-    expect(r.errors.map((e) => e.message).join("\n")).toMatch(/#1888 S6/);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     assertNoStandaloneObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as Record<string, () => number>).run()).toBe(1);
   });
 });

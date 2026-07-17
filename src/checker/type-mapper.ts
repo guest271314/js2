@@ -415,3 +415,64 @@ export function isHeterogeneousUnion(type: ts.Type, checker: ts.TypeChecker, fas
   const mapped = nonNullish.map((t) => mapTsTypeToWasm(t, checker, fast));
   return !mapped.every((m) => m.kind === mapped[0]!.kind);
 }
+
+/**
+ * (#745 S2) True for a *statically-known heterogeneous primitive* union —
+ * ≥2 distinct primitive kinds among {number, string, boolean} after
+ * filtering null/undefined/void. These are the unions that adopt the
+ * universal `$AnyValue` tagged carrier (see #745 `## Design Decision`)
+ * instead of externref boxing, in the lanes where `ctx.unionAnyRep` is on.
+ *
+ * Deliberately NARROW — returns false (preserving existing externref
+ * behaviour) for:
+ * - homogeneous unions (`"a" | "b"`, `0 | 2`, `true | false`) — these
+ *   already collapse to a single Wasm kind in `mapTsTypeToWasm`;
+ * - unions containing bigint (i64-branded; `$AnyValue` has no i64 payload),
+ *   symbol, enum members, object/class/array/function members, or
+ *   any/unknown — representation for those stays as-is until later slices;
+ * - `T | null/undefined` single-kind nullables (the existing unwrap path).
+ */
+/**
+ * (#745 S3) True when `node` (after unwrapping parens / `as` / `!`) is an
+ * identifier whose DECLARED symbol type is a heterogeneous primitive union
+ * (see {@link isHeterogeneousPrimitiveUnion}). Needed because assignment /
+ * literal narrowing re-types the USE SITE (`x = "done"; x === "done"` reports
+ * `"done"`) while the value stays in the `$AnyValue` carrier the S2 mapping
+ * chose from the declaration type. Takes the checker as a local param —
+ * symbol/binding resolution is explicitly outside the oracle's v1 scope
+ * (#1930 D3), mirroring `isHeterogeneousUnion`'s signature.
+ */
+export function isDeclaredHeterogeneousPrimitiveUnion(checker: ts.TypeChecker, node: ts.Expression): boolean {
+  let cur: ts.Expression = node;
+  while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+    cur = cur.expression;
+  }
+  if (!ts.isIdentifier(cur)) return false;
+  const sym = checker.getSymbolAtLocation(cur);
+  const decl = sym?.valueDeclaration;
+  if (!decl) return false;
+  try {
+    return isHeterogeneousPrimitiveUnion(checker.getTypeOfSymbolAtLocation(sym, decl));
+  } catch {
+    return false;
+  }
+}
+
+export function isHeterogeneousPrimitiveUnion(type: ts.Type): boolean {
+  if (!type.isUnion()) return false;
+  const nonNullish = type.types.filter(
+    (t) => !(t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)),
+  );
+  if (nonNullish.length < 2) return false;
+  const kinds = new Set<string>();
+  for (const t of nonNullish) {
+    // Enum members carry NumberLiteral/StringLiteral flags too — exclude
+    // explicitly so enum-typed unions keep their existing representation.
+    if (t.flags & ts.TypeFlags.EnumLike) return false;
+    if (t.flags & (ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral)) kinds.add("number");
+    else if (t.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) kinds.add("string");
+    else if (t.flags & (ts.TypeFlags.Boolean | ts.TypeFlags.BooleanLiteral)) kinds.add("boolean");
+    else return false; // non-primitive member → not this slice's shape
+  }
+  return kinds.size >= 2;
+}

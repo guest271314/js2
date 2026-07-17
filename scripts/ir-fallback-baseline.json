@@ -1,5 +1,5 @@
 {
-  "generated": "2026-07-11",
+  "generated": "2026-07-16",
   "unintended": {
     "body-shape-rejected": 14
   },
@@ -11,5 +11,8 @@
     "verify": {},
     "lower": {},
     "backend-legality": {}
+  },
+  "moduleLevel": {
+    "body-shape-rejected": 2
   }
 }

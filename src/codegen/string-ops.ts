@@ -7,10 +7,11 @@ import type { Instr, ValType } from "../ir/types.js";
  * and native string method calls.
  */
 import { ts } from "../ts-api.js";
-import { emitIsUndefinedSingletonExternAt, undefinedSingletonActive } from "./any-helpers.js";
+import { emitIsUndefinedSingletonExternAt, isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
 import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
-import { compileAndEmitToString, emitToString, registerStringHelperEmitters } from "./coercion-engine.js";
+import { compileAndEmitToString, emitToString } from "./coercion-engine.js";
+import { registerStringHelperEmitters } from "./string-emitter-registry.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -183,7 +184,13 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
   // ARE migrated (js-host-only, standalone-gate-proven safe).
 
   // Already a native string operand (string-typed ref) — pass straight through.
-  if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType)) {
+  // (#745 S3) EXCEPT an `$AnyValue` carrier: a `number|string` union local
+  // narrowed to `string` still compiles to `ref_null $AnyValue` under
+  // `unionAnyRep`; passing it through made the caller `ref.cast $AnyString`
+  // an incompatible struct (an always-trapping nullref cast). Fall to the
+  // dynamic-ref arm below, whose `$__any_to_string` extracts the tag-5
+  // payload (and stringifies any other tag).
+  if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType) && !isAnyValue(opType, ctx)) {
     return true;
   }
 
@@ -3581,9 +3588,8 @@ export function compileGuardedNativeStringMethodCall(
 // string constants without importing string-ops.ts directly (cycle prevention).
 registerCompileStringLiteral(compileStringLiteral);
 
-// #1917 Step 1 — register the two leaf string emitters the coercion engine
-// needs (both defined here and not exported; string-ops.ts imports the engine,
-// so the engine binds them lazily to avoid a module cycle).
+// #1917 Step 1 / #3324 — bind the leaf string emitters (defined here, not
+// exported) into the import-free registry: safe while the engine is mid-init.
 registerStringHelperEmitters({
   boolToString: emitBoolToString,
   nativeStringRefFromExternref: emitNativeStringRefFromExternref,

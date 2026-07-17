@@ -1,6 +1,7 @@
 ---
 id: 684
 title: "Any-typed variable inference from usage patterns"
+horizon: l
 status: ready
 created: 2026-03-20
 updated: 2026-04-28
@@ -8,7 +9,7 @@ priority: high
 feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
-sprint: Backlog
+sprint: current
 files:
   src/codegen/expressions.ts:
     breaking:

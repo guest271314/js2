@@ -500,6 +500,7 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
     const aLen = base + 4;
     const aKey = base + 5; // normalized key externref
     const aN = base + 6; // parsed numeric key f64
+    const aExp = base + 7; // (#3177 slice 4) expando $Object externref
     fn.locals.push(
       { name: "__tam_any", type: { kind: "anyref" } },
       { name: "__tam_dv", type: { kind: "ref_null", typeIdx: dynIdx } },
@@ -508,6 +509,7 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
       { name: "__tam_len", type: { kind: "i32" } },
       { name: "__tam_key", type: { kind: "externref" } },
       { name: "__tam_n", type: { kind: "f64" } },
+      { name: "__tam_exp", type: { kind: "externref" } },
     );
 
     // Build the inner (receiver IS dyn-view) body with a mini fctx so the
@@ -538,20 +540,82 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
     inner.push({ op: "local.get", index: 1 });
     inner.push({ op: "call", funcIdx: tpkIdx });
     inner.push({ op: "local.set", index: aKey });
-    // Non-string key (Symbol / opaque) → ordinary miss for this arm.
+    // (#3177 slice 4) Ordinary (non-index, non-intrinsic) keys — including
+    // Symbol keys — delegate to the EXPANDO side-table (`$__ta_dyn_view`
+    // field 4, a lazily-created `$Object` boxed as externref): the §10.4.5
+    // "Otherwise, return Ordinary*" steps. Reads (get/has/delete) on a view
+    // with no expando keep the pre-slice-4 miss results; writes
+    // (set/reflect_set) lazily CREATE the expando. The delegate is a
+    // recursive self-call on the SAME native — the expando is a `$Object`,
+    // so the dyn-view arm's `ref.test` declines and the ordinary body runs.
+    const selfIdx = ctx.funcMap.get(
+      mode === "get"
+        ? "__extern_get"
+        : mode === "has"
+          ? "__extern_has"
+          : mode === "set"
+            ? "__extern_set"
+            : mode === "reflect_set"
+              ? "__reflect_set"
+              : "__delete_property",
+    );
+    const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+    const loadExpando = (): Instr[] => [
+      { op: "local.get", index: aDv },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: dynIdx, fieldIdx: 4 },
+      { op: "local.set", index: aExp },
+    ];
     const missInstrs = (): Instr[] => {
-      switch (mode) {
-        case "get":
-          return [...undef(), { op: "return" }];
-        case "has":
-          return [{ op: "i32.const", value: 0 }, { op: "return" }];
-        case "set":
-          return [{ op: "return" }]; // void — expando writes are a follow-on
-        case "reflect_set":
-          return [{ op: "i32.const", value: 1 }, { op: "return" }]; // OrdinarySet on extensible → true
-        case "delete":
-          return [{ op: "i32.const", value: 1 }, { op: "return" }]; // no own prop → true
+      const legacyMiss: Instr[] = (() => {
+        switch (mode) {
+          case "get":
+            return [...undef(), { op: "return" }];
+          case "has":
+            return [{ op: "i32.const", value: 0 }, { op: "return" }];
+          case "set":
+            return [{ op: "return" }]; // void
+          case "reflect_set":
+            return [{ op: "i32.const", value: 1 }, { op: "return" }]; // OrdinarySet on extensible → true
+          case "delete":
+            return [{ op: "i32.const", value: 1 }, { op: "return" }]; // no own prop → true
+        }
+      })();
+      if (selfIdx === undefined) return legacyMiss;
+      const out: Instr[] = [...loadExpando()];
+      if (mode === "set" || mode === "reflect_set") {
+        if (newPlainObjIdx === undefined) return legacyMiss;
+        // Lazily create the expando on first ordinary write.
+        out.push({ op: "local.get", index: aExp });
+        out.push({ op: "ref.is_null" });
+        out.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "call", funcIdx: newPlainObjIdx },
+            { op: "local.set", index: aExp },
+            { op: "local.get", index: aDv },
+            { op: "ref.as_non_null" },
+            { op: "local.get", index: aExp },
+            { op: "struct.set", typeIdx: dynIdx, fieldIdx: 4 },
+          ],
+        });
+        out.push({ op: "local.get", index: aExp });
+        out.push({ op: "local.get", index: aKey });
+        out.push({ op: "local.get", index: 2 });
+        out.push({ op: "call", funcIdx: selfIdx });
+        out.push({ op: "return" });
+        return out;
       }
+      // get / has / delete: no expando → legacy miss; else delegate.
+      out.push({ op: "local.get", index: aExp });
+      out.push({ op: "ref.is_null" });
+      out.push({ op: "if", blockType: { kind: "empty" }, then: legacyMiss });
+      out.push({ op: "local.get", index: aExp });
+      out.push({ op: "local.get", index: aKey });
+      out.push({ op: "call", funcIdx: selfIdx });
+      out.push({ op: "return" });
+      return out;
     };
     inner.push({ op: "local.get", index: aKey });
     inner.push({ op: "any.convert_extern" });
@@ -796,11 +860,16 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
     );
   }
 
-  // __object_isExtensible(externref) -> i32: a live view IS extensible
-  // (§10.4.5 views are ordinary wrt [[IsExtensible]]; no preventExtensions
-  // state exists on `$__ta_dyn_view` yet — the expando slice owns that).
+  // __object_isExtensible(externref) -> i32: a live view IS extensible unless
+  // preventExtensions was applied — that state lives on the EXPANDO $Object
+  // (#3177 slice 4): no expando → true; else recurse on the expando (whose
+  // ordinary flags arm reads OBJ_FLAG_NONEXTENSIBLE).
   const isExtFn = findFn("__object_isExtensible");
-  if (isExtFn) {
+  const isExtIdx = ctx.funcMap.get("__object_isExtensible");
+  if (isExtFn && isExtIdx !== undefined) {
+    const base = 1 + isExtFn.locals.length;
+    const xExp = base;
+    isExtFn.locals.push({ name: "__tax_exp", type: { kind: "externref" } });
     isExtFn.body.unshift(
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -808,7 +877,22 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: dynIdx },
+          { op: "struct.get", typeIdx: dynIdx, fieldIdx: 4 },
+          { op: "local.tee", index: xExp },
+          { op: "ref.is_null" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+          },
+          { op: "local.get", index: xExp },
+          { op: "call", funcIdx: isExtIdx },
+          { op: "return" },
+        ],
       },
     );
   }
@@ -884,5 +968,324 @@ export function fillTaDynViewMopArms(ctx: CodegenContext): void {
       { op: "ref.test", typeIdx: ctorIdx },
       { op: "if", blockType: { kind: "empty" }, then: inner },
     );
+  }
+
+  // ── (#3177 slice 4) Descriptor MOP arms — §10.4.5.3 [[DefineOwnProperty]] /
+  // §10.4.5.1 [[GetOwnProperty]] over dyn-view receivers, composing the
+  // #2984/#2965 builtin-descriptor natives (arms extension, NOT a parallel
+  // descriptor path). REJECTION CHANNEL: `__defineProperty_value`/`_accessor`
+  // return the input obj on every existing path and never null, so the arms
+  // signal a §10.4.5.3 false with a `ref.null.extern` SENTINEL: the
+  // `__obj_define_from_desc` applier threads it out (Reflect.defineProperty's
+  // `__is_truthy` then yields the spec `false`), and the compile-time
+  // Object.defineProperty call sites convert it to the §20.1.2.4 TypeError.
+  // Ordinary (non-index) keys delegate to the lazily-created EXPANDO (whose
+  // ordinary define enforces its own attribute semantics); a NEW key on a
+  // non-extensible expando pre-checks via __hasOwnProperty +
+  // __object_isExtensible and rejects with the sentinel (Reflect → false).
+  {
+    const newPlainObjIdx = ctx.funcMap.get("__new_plain_object");
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+    const externSetIdx = ctx.funcMap.get("__extern_set");
+    const gopdIdx = ctx.funcMap.get("__getOwnPropertyDescriptor");
+    const dpvIdx = ctx.funcMap.get("__defineProperty_value");
+    const dpaIdx = ctx.funcMap.get("__defineProperty_accessor");
+    const preventExtIdx = ctx.funcMap.get("__object_preventExtensions");
+    const hasOwnIdx = ctx.funcMap.get("__hasOwnProperty");
+
+    const keyExtern = (lit: string): Instr[] => [...nativeStringLiteralInstrs(ctx, lit), { op: "extern.convert_any" }];
+    const nullRet: Instr[] = [{ op: "ref.null.extern" }, { op: "return" }];
+
+    // Shared arm-builder pieces: derive dv/key locals on a native with params
+    // 0=obj 1=key …; returns the locals base. Appends 4 locals.
+    type FilledFn = { locals: { name: string; type: ValType }[]; body: Instr[] };
+    const pushDvKeyPreamble = (
+      fn: FilledFn,
+      numParams: number,
+      inner: Instr[],
+    ): { dDv: number; dKey: number; dN: number; dExp: number } => {
+      const base = numParams + fn.locals.length;
+      const dDv = base;
+      const dKey = base + 1;
+      const dN = base + 2;
+      const dExp = base + 3;
+      fn.locals.push(
+        { name: "__tad_dv", type: { kind: "ref_null", typeIdx: dynIdx } },
+        { name: "__tad_key", type: { kind: "externref" } },
+        { name: "__tad_n", type: { kind: "f64" } },
+        { name: "__tad_exp", type: { kind: "externref" } },
+      );
+      inner.push({ op: "local.get", index: 0 });
+      inner.push({ op: "any.convert_extern" });
+      inner.push({ op: "ref.cast", typeIdx: dynIdx });
+      inner.push({ op: "local.set", index: dDv });
+      inner.push({ op: "local.get", index: 1 });
+      inner.push({ op: "call", funcIdx: tpkIdx });
+      inner.push({ op: "local.set", index: dKey });
+      return { dDv, dKey, dN, dExp };
+    };
+    // `key is $AnyString && CanonicalNumericIndexString(key)` → i32 (writes dN).
+    const keyIsStringCanonical = (dKey: number, dN: number): Instr[] => [
+      { op: "local.get", index: dKey },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: anyStrTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: keyIsCanonical(dKey, dN),
+        else: [{ op: "i32.const", value: 0 }],
+      },
+    ];
+    // Load expando into dExp; lazily create when `create` (define semantics).
+    const loadOrCreateExpando = (dDv: number, dExp: number, create: boolean): Instr[] => {
+      const out: Instr[] = [
+        { op: "local.get", index: dDv },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: dynIdx, fieldIdx: 4 },
+        { op: "local.set", index: dExp },
+      ];
+      if (create && newPlainObjIdx !== undefined) {
+        out.push({ op: "local.get", index: dExp });
+        out.push({ op: "ref.is_null" });
+        out.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "call", funcIdx: newPlainObjIdx },
+            { op: "local.set", index: dExp },
+            { op: "local.get", index: dDv },
+            { op: "ref.as_non_null" },
+            { op: "local.get", index: dExp },
+            { op: "struct.set", typeIdx: dynIdx, fieldIdx: 4 },
+          ],
+        });
+      }
+      return out;
+    };
+    // §10.1.6.3 pre-check for the expando delegate: a NEW key on a
+    // NON-extensible expando → reject (sentinel). Emits `if (…) nullRet`.
+    const expandoExtensibilityCheck = (dExp: number, dKey: number): Instr[] => {
+      if (hasOwnIdx === undefined || isExtIdx === undefined) return [];
+      return [
+        { op: "local.get", index: dExp },
+        { op: "local.get", index: dKey },
+        { op: "call", funcIdx: hasOwnIdx },
+        { op: "i32.eqz" },
+        { op: "local.get", index: dExp },
+        { op: "call", funcIdx: isExtIdx },
+        { op: "i32.eqz" },
+        { op: "i32.and" },
+        { op: "if", blockType: { kind: "empty" }, then: [...nullRet] },
+      ];
+    };
+
+    // __getOwnPropertyDescriptor(obj, key) -> externref (§10.4.5.1):
+    // canonical index → valid: fresh data descriptor {value, w:T, e:T, c:T};
+    // invalid: undefined. Ordinary key → expando read-back (or undefined).
+    const gopdFn = findFn("__getOwnPropertyDescriptor");
+    if (
+      gopdFn &&
+      gopdIdx !== undefined &&
+      newPlainObjIdx !== undefined &&
+      boxBoolIdx !== undefined &&
+      externSetIdx !== undefined
+    ) {
+      const inner: Instr[] = [];
+      const { dDv, dKey, dN, dExp } = pushDvKeyPreamble(gopdFn, 2, inner);
+      const gDesc = 2 + gopdFn.locals.length;
+      gopdFn.locals.push({ name: "__tad_desc", type: { kind: "externref" } });
+      const boolProp = (name: string): Instr[] => [
+        { op: "local.get", index: gDesc },
+        ...keyExtern(name),
+        { op: "i32.const", value: 1 },
+        { op: "call", funcIdx: boxBoolIdx },
+        { op: "call", funcIdx: externSetIdx },
+      ];
+      inner.push(...keyIsStringCanonical(dKey, dN));
+      inner.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: dN },
+          { op: "call", funcIdx: helpers.hasIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "call", funcIdx: newPlainObjIdx },
+              { op: "local.set", index: gDesc },
+              { op: "local.get", index: gDesc },
+              ...keyExtern("value"),
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: dN },
+              { op: "call", funcIdx: helpers.getElem },
+              { op: "call", funcIdx: externSetIdx },
+              ...boolProp("writable"),
+              ...boolProp("enumerable"),
+              ...boolProp("configurable"),
+              { op: "local.get", index: gDesc },
+              { op: "return" },
+            ],
+          },
+          ...undef(),
+          { op: "return" },
+        ],
+      });
+      inner.push(...loadOrCreateExpando(dDv, dExp, false));
+      inner.push({ op: "local.get", index: dExp });
+      inner.push({ op: "ref.is_null" });
+      inner.push({ op: "if", blockType: { kind: "empty" }, then: [...undef(), { op: "return" }] });
+      inner.push({ op: "local.get", index: dExp });
+      inner.push({ op: "local.get", index: dKey });
+      inner.push({ op: "call", funcIdx: gopdIdx });
+      inner.push({ op: "return" });
+      gopdFn.body.unshift(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: dynIdx },
+        { op: "if", blockType: { kind: "empty" }, then: inner },
+      );
+    }
+
+    // __defineProperty_value(obj, key, value, flagsF64) -> externref
+    // (§10.4.5.3, data descriptor): canonical index → validate (invalid index /
+    // accessor bit / any attribute EXPLICITLY false → sentinel-reject), then
+    // write the element when [[Value]] is present. Ordinary key → expando.
+    // Host flag bits (computeRuntimeFlags): 0=w 1=e 2=c 3=wSpec 4=eSpec
+    // 5=cSpec 6=accessor 7=hasValue.
+    const dpvFn = findFn("__defineProperty_value");
+    if (dpvFn && dpvIdx !== undefined && newPlainObjIdx !== undefined) {
+      const inner: Instr[] = [];
+      const { dDv, dKey, dN, dExp } = pushDvKeyPreamble(dpvFn, 4, inner);
+      const dFlags = 4 + dpvFn.locals.length;
+      dpvFn.locals.push({ name: "__tad_flags", type: { kind: "i32" } });
+      const flagBit = (bit: number): Instr[] => [
+        { op: "local.get", index: dFlags },
+        { op: "i32.const", value: bit },
+        { op: "i32.and" },
+        { op: "i32.const", value: 0 },
+        { op: "i32.ne" },
+      ];
+      const rejectIfSpecifiedFalse = (specBit: number, valueBit: number): Instr[] => [
+        ...flagBit(specBit),
+        ...flagBit(valueBit),
+        { op: "i32.eqz" },
+        { op: "i32.and" },
+        { op: "if", blockType: { kind: "empty" }, then: [...nullRet] },
+      ];
+      inner.push(...keyIsStringCanonical(dKey, dN));
+      inner.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 3 },
+          { op: "i32.trunc_sat_f64_s" },
+          { op: "local.set", index: dFlags },
+          // i. IsValidIntegerIndex (detach/OOB/-0/non-integral) → reject.
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: dN },
+          { op: "call", funcIdx: helpers.hasIdx },
+          { op: "i32.eqz" },
+          { op: "if", blockType: { kind: "empty" }, then: [...nullRet] },
+          // ii. accessor descriptor → reject.
+          ...flagBit(1 << 6),
+          { op: "if", blockType: { kind: "empty" }, then: [...nullRet] },
+          // iii–v. configurable/enumerable/writable specified-and-false → reject.
+          ...rejectIfSpecifiedFalse(1 << 5, 1 << 2),
+          ...rejectIfSpecifiedFalse(1 << 4, 1 << 1),
+          ...rejectIfSpecifiedFalse(1 << 3, 1 << 0),
+          // vi. [[Value]] present → IntegerIndexedElementSet.
+          ...flagBit(1 << 7),
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: dN },
+              { op: "local.get", index: 2 },
+              { op: "call", funcIdx: helpers.setElem },
+              { op: "drop" },
+            ],
+          },
+          { op: "local.get", index: 0 },
+          { op: "return" },
+        ],
+      });
+      inner.push(...loadOrCreateExpando(dDv, dExp, true));
+      inner.push(...expandoExtensibilityCheck(dExp, dKey));
+      inner.push({ op: "local.get", index: dExp });
+      inner.push({ op: "local.get", index: dKey });
+      inner.push({ op: "local.get", index: 2 });
+      inner.push({ op: "local.get", index: 3 });
+      inner.push({ op: "call", funcIdx: dpvIdx });
+      inner.push({ op: "drop" });
+      inner.push({ op: "local.get", index: 0 });
+      inner.push({ op: "return" });
+      dpvFn.body.unshift(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: dynIdx },
+        { op: "if", blockType: { kind: "empty" }, then: inner },
+      );
+    }
+
+    // __defineProperty_accessor(obj, key, get, set, flagsF64) -> externref:
+    // an accessor descriptor on a canonical index is ALWAYS rejected
+    // (§10.4.5.3 step ii); ordinary keys delegate to the expando.
+    const dpaFn = findFn("__defineProperty_accessor");
+    if (dpaFn && dpaIdx !== undefined && newPlainObjIdx !== undefined) {
+      const inner: Instr[] = [];
+      const { dDv, dKey, dN, dExp } = pushDvKeyPreamble(dpaFn, 5, inner);
+      inner.push(...keyIsStringCanonical(dKey, dN));
+      inner.push({ op: "if", blockType: { kind: "empty" }, then: [...nullRet] });
+      inner.push(...loadOrCreateExpando(dDv, dExp, true));
+      inner.push(...expandoExtensibilityCheck(dExp, dKey));
+      inner.push({ op: "local.get", index: dExp });
+      inner.push({ op: "local.get", index: dKey });
+      inner.push({ op: "local.get", index: 2 });
+      inner.push({ op: "local.get", index: 3 });
+      inner.push({ op: "local.get", index: 4 });
+      inner.push({ op: "call", funcIdx: dpaIdx });
+      inner.push({ op: "drop" });
+      inner.push({ op: "local.get", index: 0 });
+      inner.push({ op: "return" });
+      dpaFn.body.unshift(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: dynIdx },
+        { op: "if", blockType: { kind: "empty" }, then: inner },
+      );
+    }
+
+    // __object_preventExtensions(obj) -> externref: the state lives on the
+    // (lazily-created) expando; identity-preserving return of the view.
+    const pxFn = findFn("__object_preventExtensions");
+    if (pxFn && preventExtIdx !== undefined && newPlainObjIdx !== undefined) {
+      const inner: Instr[] = [];
+      const base = 1 + pxFn.locals.length;
+      const pDv = base;
+      const pExp = base + 1;
+      pxFn.locals.push(
+        { name: "__tad_dv", type: { kind: "ref_null", typeIdx: dynIdx } },
+        { name: "__tad_exp", type: { kind: "externref" } },
+      );
+      inner.push({ op: "local.get", index: 0 });
+      inner.push({ op: "any.convert_extern" });
+      inner.push({ op: "ref.cast", typeIdx: dynIdx });
+      inner.push({ op: "local.set", index: pDv });
+      inner.push(...loadOrCreateExpando(pDv, pExp, true));
+      inner.push({ op: "local.get", index: pExp });
+      inner.push({ op: "call", funcIdx: preventExtIdx });
+      inner.push({ op: "drop" });
+      inner.push({ op: "local.get", index: 0 });
+      inner.push({ op: "return" });
+      pxFn.body.unshift(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: dynIdx },
+        { op: "if", blockType: { kind: "empty" }, then: inner },
+      );
+    }
   }
 }

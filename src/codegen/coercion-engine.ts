@@ -36,10 +36,12 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
 import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
+import { boxToAny } from "./value-tags.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
+import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
 import {
   compileExpression,
   compileStringLiteral,
@@ -470,20 +472,30 @@ function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
   // freshly-compiled-operand path consistent. Only reachable in standalone/wasi
   // (the helper is undefined otherwise → host lane keeps `coerceType`).
   const fromExternIdx = ensureAnyFromExternHelper(ctx);
-  const marshal = (t: ValType): void => {
+  const marshal = (t: ValType, node?: ts.Expression): void => {
     if (isAnyValue(t, ctx)) return;
     if (fromExternIdx !== undefined && t.kind === "externref") {
       fctx.body.push({ op: "call", funcIdx: fromExternIdx });
       return;
     }
+    // (#745 S3, flag-gated) A statically-BOOLEAN i32 operand must box tag-4
+    // (`__any_box_bool`), not the kind-keyed tag-2 number the generic
+    // `coerceType` arm produces — `__any_strict_eq` classifies tag-2 vs
+    // tag-4 as different JS types, so `unionLocal === true` compared a
+    // tag-4 carrier against a tag-2 box and answered false. `boxToAny`
+    // already owns the type-aware hint; thread it only under `unionAnyRep`
+    // so flag-off (and the whole any-lane today) stays byte-identical.
+    if (ctx.unionAnyRep && node !== undefined && t.kind === "i32" && ctx.oracle.isBooleanProducing(node)) {
+      if (boxToAny(ctx, fctx, t, "boolean")) return;
+    }
     coerceType(ctx, fctx, t, anyValueTarget);
   };
   const leftType = compileExpression(ctx, fctx, expr.left);
   if (!leftType) return false;
-  marshal(leftType);
+  marshal(leftType, expr.left);
   const rightType = compileExpression(ctx, fctx, expr.right);
   if (!rightType) return false;
-  marshal(rightType);
+  marshal(rightType, expr.right);
   return true;
 }
 
@@ -664,26 +676,25 @@ function pushStringLiteral(ctx: CodegenContext, fctx: FunctionContext, value: st
 
 // emitBoolToString and emitNativeStringRefFromExternref live in string-ops.ts
 // and are not exported (string-ops.ts imports this module, so a direct import
-// here would be a cycle). They are bound lazily by string-ops.ts at module load.
-let boolToStringEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
-let nativeStringRefFromExternrefEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
-
-export function registerStringHelperEmitters(emitters: {
-  boolToString: (ctx: CodegenContext, fctx: FunctionContext) => void;
-  nativeStringRefFromExternref: (ctx: CodegenContext, fctx: FunctionContext) => void;
-}): void {
-  boolToStringEmitter = emitters.boolToString;
-  nativeStringRefFromExternrefEmitter = emitters.nativeStringRefFromExternref;
-}
+// here would be a cycle). They are bound by string-ops.ts at module load into
+// the runtime-import-free string-emitter-registry leaf (#3324) — NOT into
+// module-level `let` slots here: string-ops.ts's top-level register call can
+// run while THIS module is still mid-initialization (entry paths that reach
+// coercion-engine before string-ops, e.g. via any-helpers), and assigning a
+// TDZ'd `let` crashed with "Cannot access 'boolToStringEmitter' before
+// initialization". The leaf registry has no imports, so it is always fully
+// initialized whenever either side touches it.
 
 function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): void {
-  if (!boolToStringEmitter) throw new Error("coercion-engine: bool-to-string emitter not registered");
-  boolToStringEmitter(ctx, fctx);
+  const emitter = getBoolToStringEmitter();
+  if (!emitter) throw new Error("coercion-engine: bool-to-string emitter not registered");
+  emitter(ctx, fctx);
 }
 
 function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionContext): void {
-  if (!nativeStringRefFromExternrefEmitter) {
+  const emitter = getNativeStringRefFromExternrefEmitter();
+  if (!emitter) {
     throw new Error("coercion-engine: native-string-ref emitter not registered");
   }
-  nativeStringRefFromExternrefEmitter(ctx, fctx);
+  emitter(ctx, fctx);
 }

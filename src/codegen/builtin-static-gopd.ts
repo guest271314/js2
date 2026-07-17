@@ -58,6 +58,7 @@
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
+import { emitUndefinedExtern, undefinedExternInstrs } from "./any-helpers.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import {
   BUILTIN_STATIC_METHOD_ARITY,
@@ -260,15 +261,19 @@ export function tryEmitStandaloneBuiltinStaticGopd(
       if (createIdx === undefined) return false;
       if (brand === undefined || !emitLazyNativeProtoGet(ctx, fctx, brand)) {
         // No reified proto object for this builtin yet — the attribute
-        // assertions (the only shape in the corpus) still pass.
-        fctx.body.push({ op: "ref.null.extern" });
+        // assertions (the only shape in the corpus) still pass. (#3319: the
+        // absent value surfaces as `undefined` — the singleton under the
+        // #2106 regime; legacy null.extern.)
+        if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
       }
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "call", funcIdx: createIdx });
       return true;
     }
     // Namespaces (Math/JSON/Reflect/Atomics) and Proxy own no "prototype".
-    fctx.body.push({ op: "ref.null.extern" });
+    // (#3319) A gOPD miss answers `undefined` — the singleton under the #2106
+    // regime (null ≠ undefined there); legacy lanes keep null.extern.
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
 
@@ -320,7 +325,9 @@ export function tryEmitStandaloneBuiltinStaticGopd(
   // phantom `undefined`. Every other receiver's standard own STRING-keyed
   // surface is fully covered above, so the member is genuinely absent.
   if (builtinName === "Symbol" || builtinName === "RegExp") return false;
-  fctx.body.push({ op: "ref.null.extern" });
+  // (#3319) Genuinely-absent member → `undefined` (singleton under the #2106
+  // regime; legacy null.extern).
+  if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
   return true;
 }
 
@@ -545,7 +552,8 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   });
   const objType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
   if (!objType || typeof objType !== "object") {
-    fctx.body.push({ op: "ref.null.extern" });
+    // (#3319) degenerate answer is `undefined` — singleton under the regime.
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
   if (objType.kind === "externref") {
@@ -559,7 +567,9 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   fctx.body.push({ op: "local.set", index: objAny });
   const keyType = compileExpression(ctx, fctx, arg1, { kind: "externref" });
   if (!keyType || typeof keyType !== "object") {
-    fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+    // (#3319) degenerate answer is `undefined` — singleton under the regime.
+    fctx.body.push({ op: "drop" });
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
   if (keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
@@ -582,7 +592,8 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
   ) {
     // Natives unavailable — answer `undefined` (operands are already parked
     // in locals, so the stack is clean; same answer as the dynamic native).
-    fctx.body.push({ op: "ref.null.extern" });
+    // (#3319: the singleton under the #2106 regime; legacy null.extern.)
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" });
     return true;
   }
   // Strictly-additive fall-through: anything this arm does not positively
@@ -613,7 +624,10 @@ export function tryEmitStandaloneStructGopdKeyDispatch(
 
   // Innermost→outermost: fold the field chain from the last field backwards.
   const externrefBlock = { kind: "val" as const, type: { kind: "externref" } as ValType };
-  let chain: Instr[] = [{ op: "ref.null.extern" }]; // no field matched → undefined
+  // (#3319) no field matched → `undefined` — the $undefined singleton under
+  // the #2106 regime (a fresh clone; index-bearing instrs are never shared),
+  // legacy `ref.null.extern` otherwise.
+  let chain: Instr[] = undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" }];
   for (let i = userFields.length - 1; i >= 0; i--) {
     const { field, fieldIdx } = userFields[i]!;
     const value: Instr[] = [

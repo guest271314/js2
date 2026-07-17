@@ -1032,7 +1032,10 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // lie-boxed operands — the vacuous-pass mask that made #1888's classifier
   // eject at −162: the arms don't break dstr, they UNMASK latent failures of
   // the eager-buffer generator fixture (see #2141 S2 root cause + #3032).
-  // Enable by default only after the #3032 waves land.
+  // DEFAULT-ON since the #2040 A1 flip (2026-07-16): the #3032 waves
+  // (W3 TDZ threading / #3302 capturing expressions / W4 method generators)
+  // landed, removing the eager-buffer vacuity. `JS2WASM_TAG5_CLASSIFIER=0`
+  // forces the legacy arm.
   // GATE (pitfall from sd-3's attempt, memory
   // reference_2040_tag5_field4_three_way_classifier: never gate the numeric
   // arm on string availability): the classifier builds whenever the flag is
@@ -1411,7 +1414,61 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
 
   // __any_unbox_bool(val: ref $AnyValue) -> i32
   // Truthiness check: tag 4 → i32val, tag 2 → i32val!=0, tag 3 → f64val!=0,
-  // tag 0/1 → 0 (null/undefined), tag >= 5 → 1 (truthy object)
+  // tag 0/1 → 0 (null/undefined), tag >= 5 → 1 (truthy object).
+  //
+  // (#745 S3, flag-gated) Under `unionAnyRep` in the native-string lane the
+  // legacy "tag >= 5 → 1" arm is WRONG for tag-5 strings: ToBoolean("") is
+  // false (§7.1.2), but a `number|string` $AnyValue local holding "" answered
+  // truthy. The corrected arm recovers the tag-5 externval ($AnyString via
+  // extern.convert_any), and answers flatten(str).length > 0; a non-string
+  // tag-5 carrier (the overloaded field-4 case, see tag5StringEqThen's guard)
+  // keeps the legacy truthy answer. Tags 6/7 stay truthy, 0/1 falsy. The
+  // corrected body (and its scratch local) is emitted ONLY when the flag is
+  // on — flag-off modules stay byte-identical.
+  const unionTag5Truthy = ctx.unionAnyRep === true && canNativeStrEq && ctx.nativeStrTypeIdx >= 0;
+  const tag5TruthyElse: Instr[] = unionTag5Truthy
+    ? [
+        { op: "local.get", index: 0 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: 5 },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "call", funcIdx: nativeStrFlattenIdx },
+                { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 0 },
+                { op: "i32.gt_s" },
+              ],
+              else: [{ op: "i32.const", value: 1 }],
+            },
+          ],
+          else: [
+            { op: "local.get", index: 0 },
+            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+            { op: "i32.const", value: 5 },
+            { op: "i32.ge_s" },
+          ],
+        },
+      ]
+    : [
+        { op: "local.get", index: 0 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+        { op: "i32.const", value: 5 },
+        { op: "i32.ge_s" },
+      ];
   addHelper(
     "__any_unbox_bool",
     [anyRefNull],
@@ -1456,18 +1513,14 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                   { op: "f64.const", value: 0 },
                   { op: "f64.ne" },
                 ],
-                else: [
-                  { op: "local.get", index: 0 },
-                  { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
-                  { op: "i32.const", value: 5 },
-                  { op: "i32.ge_s" },
-                ],
+                else: tag5TruthyElse,
               },
             ],
           },
         ],
       },
     ],
+    unionTag5Truthy ? [{ name: "t5str", type: { kind: "anyref" } as ValType }] : undefined,
   );
 
   // __any_unbox_extern(val: ref $AnyValue) -> externref

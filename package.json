@@ -92,6 +92,7 @@
     "check:ir-fallbacks": "npx tsx scripts/check-ir-fallbacks.ts",
     "check:linear-ir": "npx tsx scripts/check-linear-ir.ts",
     "check:oracle-ratchet": "node scripts/check-oracle-ratchet.mjs",
+    "check:pushraw": "node scripts/check-pushraw.mjs",
     "check:loc-budget": "node scripts/check-loc-budget.mjs",
     "check:dead-exports": "node scripts/audit-legacy-reachability.mjs --check",
     "check:godfiles": "node scripts/profile-godfiles.mjs --check",

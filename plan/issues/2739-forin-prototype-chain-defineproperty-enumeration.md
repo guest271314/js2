@@ -1,8 +1,9 @@
 ---
 id: 2739
 title: "for-in does not enumerate setPrototypeOf / constructor-prototype-chain properties; Object.defineProperty ordering"
-status: ready
-sprint: Backlog
+horizon: l
+status: done
+sprint: current
 goal: test262-conformance
 feasibility: hard
 depends_on: []
@@ -11,8 +12,13 @@ es_edition: ES5
 language_feature: for-in
 task_type: bug
 created: 2026-06-27
-updated: 2026-06-27
+updated: 2026-07-16
+completed: 2026-07-16
+assignee: ttraenkler/fable-delta
+loc-budget-allow:
+  - src/runtime.ts
 ---
+
 # #2739 — for-in prototype-chain + defineProperty enumeration
 
 ## Problem
@@ -69,12 +75,13 @@ test/language/statements/for-in/order-after-define-property.js   (c)
 
 `__for_in_keys` (`src/runtime.ts`) already has a manual prototype-chain walk
 (`Object.getPrototypeOf(current)`), but for a shape-inferred WasmGC struct:
+
 - `Object.setPrototypeOf(struct, proto)` likely sets a host-side proto link that
   `Object.getPrototypeOf(struct)` in the walk does NOT observe (the struct's
   native `[[Prototype]]` is not the user `proto`), so the proto level is never
   visited.
 - A constructor-function (`function FACTORY(){…}; FACTORY.prototype = {…};
-  new FACTORY`) builds an instance whose prototype is the function's `.prototype`
+new FACTORY`) builds an instance whose prototype is the function's `.prototype`
   object — the runtime must link the instance to that prototype object so the
   for-in walk reaches `feat`, with `hint` shadowing.
 - `defineProperty` ordering: `__object_keys`/`__for_in_keys` must treat a
@@ -111,7 +118,7 @@ link that `__for_in_keys`' manual walk can follow.** The walk in `__for_in_keys`
 (`src/runtime.ts:10844-10906`) advances with `current = Object.getPrototypeOf(current)`
 (`:10902`). For an opaque WasmGC struct exported to JS, host `Object.getPrototypeOf`
 returns null/the engine default — **never** the user-intended prototype. The link
-is also never *recorded* at the two mutation sites:
+is also never _recorded_ at the two mutation sites:
 
 - **(a) `Object.setPrototypeOf(o, proto)` is a COMPLETE NO-OP in gc/host mode.**
   `src/codegen/expressions/calls.ts:5943-5949` compiles both args, `drop`s `proto`,
@@ -124,7 +131,7 @@ is also never *recorded* at the two mutation sites:
   `compileNewFunctionDeclaration` (`new-super.ts:1004`) builds a `$__fnctor_FACTORY`
   struct with fields `prop`,`hint`. Its `__register_fnctor_instance` registration
   (`new-super.ts:1267-1287`) fires **only when `ctorGlobalIdx` is defined** — i.e.
-  the fnctor has a closure global. A fnctor that is *only* `new`'d (never used as a
+  the fnctor has a closure global. A fnctor that is _only_ `new`'d (never used as a
   value) has **no** closure global, so registration never fires (WAT-verified:
   `__fn_closure_FACTORY` absent, `__register_fnctor_instance` absent). Separately,
   `FACTORY.prototype = {feat,hint}` routes through `tryCompileFnctorPrototypeAssign`
@@ -142,6 +149,7 @@ sites, both surfacing in the SAME `__for_in_keys` walk.
 ### Changes
 
 **Part 1a — record the setPrototypeOf link (host mode).**
+
 - `src/runtime.ts`: add `const _wasmStructProto = new WeakMap<object, any>();`
   (sibling of `_wasmStructProps`/`_wasmStructDeletedKeys`/`_wasmStructShadowedFields`).
 - `src/runtime.ts`: add a host import `__host_set_struct_proto(obj, proto)` that, when
@@ -152,12 +160,13 @@ sites, both surfacing in the SAME `__for_in_keys` walk.
   `buildImports` wires it.
 - `src/codegen/expressions/calls.ts:5943-5949` (the gc/host arm): instead of
   `drop`+return, emit `call __host_set_struct_proto(obj, proto)` (ensureLateImport
-  + flushLateImportShifts, same discipline as the standalone arm at :5927-5935).
-  Mirror at **`Reflect.setPrototypeOf`** (calls.ts:7593) and the `o.__proto__ = v`
-  write path (grep `__proto__` in assignment.ts) so all three record the link.
+  - flushLateImportShifts, same discipline as the standalone arm at :5927-5935).
+    Mirror at **`Reflect.setPrototypeOf`** (calls.ts:7593) and the `o.__proto__ = v`
+    write path (grep `__proto__` in assignment.ts) so all three record the link.
 
 **Part 1b — record the fnctor instance→prototype link (host mode).** Pick ONE:
-- *Preferred (reuse #1712 machinery):* ensure `__register_fnctor_instance` fires for
+
+- _Preferred (reuse #1712 machinery):_ ensure `__register_fnctor_instance` fires for
   EVERY `new`'d fnctor. At `new-super.ts:1267`, when `ctorGlobalIdx` is undefined,
   allocate the closure global for `funcName` (the same lazy global `closures.ts:4300`
   mints) so the registration emits, AND make `F.prototype = {...}` vivify the SAME
@@ -166,12 +175,13 @@ sites, both surfacing in the SAME `__for_in_keys` walk.
   `_getOrVivifyFnPrototype`). Then `_fnctorInstanceCtor`→`_sidecarGet(ctor,"prototype")`
   is the link, and the existing read path (`_fnctorProtoLookup`, runtime.ts:74) already
   resolves inherited reads — closing the `__instance.feat`→undefined half of (b).
-- *Alternative (name-keyed rendezvous):* a host `Map<string,object> _fnctorPrototypeByName`;
+- _Alternative (name-keyed rendezvous):_ a host `Map<string,object> _fnctorPrototypeByName`;
   `F.prototype = {...}` (host) writes it; construction does
   `_wasmStructProto.set(instance, _fnctorPrototypeByName.get(F))`. Simpler but a second
   proto-link channel; prefer reusing `_fnctorInstanceCtor` to avoid divergence.
 
 **Part 2 — consult the link in the for-in walk (fixes a + b enumeration).**
+
 - `src/runtime.ts`: add `_structUserProto(current, exports)` returning, for a wasm
   struct: (1) `_wasmStructProto.get(current)` if set; else (2) the fnctor prototype
   via `_fnctorInstanceCtor.get(current)` → `_sidecarGet(ctor,"prototype")`; else (3)
@@ -184,6 +194,7 @@ sites, both surfacing in the SAME `__for_in_keys` walk.
   struct branch (`:10850`) already handles that recursively.
 
 **Part 3 — read-path consistency (already mostly covered).**
+
 - For (b) the test reads `__instance[key]`; once Part 1b registers the link,
   `_fnctorProtoLookup` (consulted by `__extern_get` at runtime.ts:4170/4977) resolves
   inherited reads. ALSO have `_fnctorProtoLookup` (or a shared resolver) consult
@@ -197,6 +208,7 @@ Guard against regressing existing proto-walk tests (run the `Object/getPrototype
 and `setPrototypeOf` test262 dirs).
 
 ### Edge cases
+
 - `Object.setPrototypeOf(o, null)` → store null; for-in then enumerates own keys only.
 - Cycle: OrdinarySetPrototypeOf must refuse a cycle (no-op); ALSO add a visited-object
   guard in the `__for_in_keys` walk (the `_fnctorProtoLookup` uses `guard++ < 16`) so a
@@ -210,6 +222,7 @@ and `setPrototypeOf` test262 dirs).
   verify before shipping).
 
 ### (c) `order-after-define-property` — SEPARATE, lower-confidence sub-task
+
 Verified split: assert #1 (plain object: `obj.a=1;obj.b=2;defineProperty(obj,"a",{value})`
 → `["a","b"]`) **already PASSES** on current main. Only assert #2 (the **array +
 accessor-descriptor** case: `defineProperty(arr,"a",{get,enumerable,configurable})`;
@@ -223,6 +236,7 @@ prototype-link defect. **Treat as its own follow-up**; the dev MUST reproduce vi
 issue if (a)+(b) ship first.
 
 ### Test files to verify
+
 - `statements/for-in/order-property-on-prototype.js` — Part 1a + Part 2 (a)
 - `statements/for-in/S12.6.4_A6.js`, `S12.6.4_A6.1.js` — Part 1b + Part 2 + Part 3 (b)
 - `statements/for-in/order-after-define-property.js` — (c), separate sub-task
@@ -232,3 +246,51 @@ issue if (a)+(b) ship first.
 ## Residual (as of #2199, PO reconcile 2026-06-28)
 
 NOT done — sliced. Part (a) (for-in walks a setPrototypeOf prototype chain) landed. The remaining parts — full setPrototypeOf-chain enumeration + defineProperty-driven enumeration ordering on the prototype chain — remain. Stays in-progress.
+
+## Resolution (fable-delta, 2026-07-16)
+
+Part (b) — the fnctor constructor-prototype chain — landed in this PR. Two
+distinct defects on then-current main (78a091c574), both fixed in
+`src/runtime.ts`:
+
+1. **for-in never walked the fnctor instance→ctor→prototype link.**
+   `_structUserProto` deliberately skipped it (carved out when (a) landed).
+   Fixed by extracting the ctor→prototype resolution out of
+   `_fnctorProtoLookup` into `_fnctorCtorProto(obj, exports)` (sidecar
+   `prototype` + `__sget_prototype` struct-slot fallback, per #3123) and
+   consulting it from `_structUserProto` after the explicit `_wasmStructProto`
+   record. Reads and enumeration now share ONE prototype source (spec Part 3).
+
+2. **Own typed struct FIELD was shadowed by the prototype on dynamic reads**
+   (`inst["hint"]` returned proto `"protohint"` instead of own `"hinted"`).
+   In `_safeGet`, `_fnctorProtoLookup` ran BEFORE the own-field fast path
+   (which lives in `__extern_get`'s post-`_safeGet` fallback). Fixed by
+   consulting the own field (shape-gated via `_getStructFieldNames`, tombstone-
+   aware) before serving a proto hit — §7.3.2 [[Get]] own-shadows-proto.
+
+3. **Follow-on:** once the walk reached proto levels, a NON-enumerable own
+   sidecar/descriptor property no longer shadowed a same-named enumerable proto
+   property (12.6.4-2.js). Fixed by marking ALL own keys (fields + sidecar +
+   descriptor-table, enumerable or not, minus delete-tombstoned) as `seen`
+   at each struct level of the `__for_in_keys` walk (§13.7.5.15 `visited`).
+
+Sub-case (c) (`order-after-define-property.js` — array + accessor-descriptor
+redefine, full-harness-only repro) is a separate defect → split to **#3323**
+per the architect's recommendation.
+
+## Test Results (2026-07-16, branch issue-2739-forin-proto-chain)
+
+- `statements/for-in/S12.6.4_A6.js` fail→pass; `S12.6.4_A6.1.js` fail→pass
+- `statements/for-in/order-property-on-prototype.js` stays pass (part a)
+- `statements/for-in/` full-dir sweep vs baseline: 0 regressions
+  (12.6.4-2.js initially regressed — non-enumerable-own-shadow — fixed by
+  item 3 above; final sweep clean)
+- 19/19 baseline-passing tests importing `__register_fnctor_instance` +
+  `__for_in_keys` (the at-risk fnctor set): 0 regressions
+- 43-file sample of baseline-passing `__for_in_keys` tests: clean (one
+  load flake, `acquire-properties-from-array.js`, passes 3/3 re-run and on
+  isolated probe)
+- vitest: `issue-2739` (6/6, incl. 3 new (b) tests), `issue-2731`,
+  `issue-3123`, `issue-3138`, `issue-3139`, `issue-2680`, `issue-1712` all
+  green on the branch
+- `order-after-define-property.js` still fails (assert #2) → #3323

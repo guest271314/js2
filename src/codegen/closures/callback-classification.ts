@@ -318,6 +318,15 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
 const DEFERRED_CALLBACK_METHODS_BY_CLASS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["DisposableStack", new Set(["defer", "use", "adopt"])],
   ["AsyncDisposableStack", new Set(["defer", "use", "adopt"])],
+  // (#1794) node:events EventEmitter — every listener-registering method stores
+  // the callback; it fires later from `.emit(...)` (a DIFFERENT host call), so a
+  // one-shot pending writeback would resync the outer local before the listener
+  // ever ran (captured-mutable writes were lost: `got` stayed 0 in the Tier 0
+  // acceptance shape).
+  [
+    "EventEmitter",
+    new Set(["on", "once", "off", "addListener", "removeListener", "prependListener", "prependOnceListener"]),
+  ],
 ]);
 
 /**

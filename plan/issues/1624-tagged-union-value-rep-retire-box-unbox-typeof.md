@@ -15,14 +15,17 @@ sprint: Backlog
 renumbered_from: 1552
 related: [1535, 1471]
 ---
+
 # #1552 — Uniform tagged-union value representation
 
 ## Problem
+
 ~12 host imports — `__box_number`, `__box_boolean`, `__box_symbol`, `__unbox_number`, `__unbox_boolean`, `__unbox_string`, `__is_truthy`, `__to_boolean`, `__to_primitive`, `__get_undefined`, `__extern_is_undefined`, `__typeof` (with `__typeof_*` setup imports) — exist because js2wasm currently boxes primitives into JS externref to participate in union types. Every `let x: number | string` round-trips through a JS object on assignment, and `typeof x` is a JS call.
 
 This is the single biggest source of host calls for ordinary, non-error JS programs.
 
 ## Proposed solution
+
 Introduce a uniform WasmGC tagged-union value type:
 
 ```wat
@@ -36,17 +39,21 @@ Introduce a uniform WasmGC tagged-union value type:
 All polymorphic locals/params use `(ref $Value)`. Codegen emits inline construction and inspection — no host call required.
 
 ## Library/approach
+
 None — internal IR change.
 
 ## Binary size impact
+
 Codegen-level — likely a small reduction once `__box_*` import shims are removed. Per-value cost is a small constant (one struct allocation per box site), comparable to the externref allocation today.
 
 ## Test262 impact (estimated)
+
 - Indirect: enables Recommendation #1 (errors), #2 (numbers), #3 (JSON) to operate without bouncing through externref.
 - Direct: a handful of `typeof` tests currently fall back to host.
-- Most importantly: this is a *prerequisite* for true standalone mode. Without it, every union-typed variable touches JS.
+- Most importantly: this is a _prerequisite_ for true standalone mode. Without it, every union-typed variable touches JS.
 
 ## Implementation steps
+
 1. Define `$Value` struct in `src/codegen/registry/types.ts`.
 2. New helpers in `src/codegen/value-helpers.ts`:
    - `$value.from_number(f64) -> ref $Value`
@@ -61,11 +68,13 @@ Codegen-level — likely a small reduction once `__box_*` import shims are remov
 6. Keep host imports as opt-out for compatibility with externref-flavoured embedders.
 
 ## Risk
+
 - Large blast radius — touches every union-typed code path.
 - Object/symbol/bigint cases must still hold a reference; the discriminator + `(ref null any)` design accommodates this.
 - Likely best done after #1536/#1537 land so the rest of the runtime is also externref-free.
 
 ## Builds on
+
 #1471 (already in flight for some box/unbox retirement).
 
 ## Implementation Plan
@@ -105,6 +114,7 @@ Tag enum (mirror in `src/codegen/registry/value-type.ts` as
 ```
 
 Rationale for the unboxed-payload split (vs. one any-ref):
+
 - `f64` field avoids per-number allocation; matches existing fast
   path for `let x: number` locals.
 - `ref null any` carries strings/objects/symbols/bigints without
@@ -271,10 +281,10 @@ regression on test262 pass count after Phase D.
   uses and emits unboxed f64 directly; tagged form only when
   cross-type union flow is observed.
 - **Performance**: tag dispatch on `typeof`/truthiness is an i32 load
-  + branch, faster than the current host call but slower than the
-  monomorphic unboxed path. Mitigation — same monomorphism check as
-  above.
+  - branch, faster than the current host call but slower than the
+    monomorphic unboxed path. Mitigation — same monomorphism check as
+    above.
 
 ## Superseded (2026-06-12)
 
-The tagged-union `$Value` this issue proposes ≈ the existing `$AnyValue` struct; the migration it wants is re-specced with sharper phasing by the 2026-06 value-representation program: #2104 (P1 JsTag module), #2105 (P2 boolean brand), #2106 (P3 undefined observability), #2107 (P4 standalone helper conformance), plus #2140 (tag-5 ABI untangle — the blocker this issue's Phase D would have hit; see the #1888 −794-test incident). Host-import retirement remains the endgame after P1–P4 + #2140.
+The tagged-union `$Value` this issue proposes ≈ the existing `$AnyValue` struct; the migration it wants is re-specced with sharper phasing by the 2026-06 value-representation program: #2104 (P1 JsTag module), #2105 (P2 boolean brand), #2106 (P3 undefined observability), #2107 (P4 standalone helper conformance), plus #2141 (tag-5 ABI untangle — the blocker this issue's Phase D would have hit; see the #1888 −794-test incident). Host-import retirement remains the endgame after P1–P4 + #2141. _(Cross-ref fixed 2026-07-16: this note originally cited "#2140", an id since reused by an unrelated stack-balance issue — the tag-5 ABI untangle is #2141. The known-union adoption remainder is tracked in #745.)_

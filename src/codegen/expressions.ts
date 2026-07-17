@@ -13,7 +13,12 @@
  */
 import { ts } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
-import { classifyAsyncConsumer, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
+import {
+  classifyAsyncConsumer,
+  analyzeAsyncBody,
+  asyncFnNeedsCps,
+  staticPromiseResolveSettledExpr,
+} from "./async-cps.js";
 import { asyncGenConsumerNeedsDrive } from "./async-frame.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
@@ -1443,8 +1448,23 @@ function compileExpressionInner(
     // (`Promise_resolve` → `Promise_then2` → continuation), so it never reaches
     // this legacy passthrough. Keep the identity passthrough for the await
     // shapes CPS does not claim (statically-resolved operands, bodies
-    // `splitBodyAtAwait` rejects); these are already the resolved value on the
-    // stack.
+    // `splitBodyAtAwait` rejects).
+    // (#3227 S2) BUT "already the resolved value on the stack" was false for
+    // `await Promise.resolve(x)`: the operand compiles to a HOST call returning
+    // the Promise OBJECT (externref), not x — a numeric consumer's
+    // externref→f64 coercion then read NaN, synchronously (the await-NaN
+    // cluster: ~875 honest fails in the S1 census). Substitute the settled
+    // value: the resolve argument (or undefined for the zero-arg form).
+    {
+      const settled = staticPromiseResolveSettledExpr(expr.expression);
+      if (settled === "undefined") {
+        emitUndefined(ctx, fctx);
+        return { kind: "externref" };
+      }
+      if (settled !== null) {
+        return compileExpressionInner(ctx, fctx, settled, expectedType);
+      }
+    }
     return compileExpressionInner(ctx, fctx, expr.expression, expectedType);
   }
 

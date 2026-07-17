@@ -136,6 +136,12 @@ interface Baseline {
   // Optional for backward compatibility with pre-#1923 baselines (treated as
   // all-empty, which is the desired target).
   readonly postClaim?: PostClaimBuckets;
+  // #3142 Slice 1 — module-level (top-level statement) claim rejections,
+  // keyed by rejection reason: one count per corpus MODULE whose module-init
+  // unit is not IR-claimable (`selection.moduleInit.reason != null`).
+  // Optional for backward compatibility: when absent from the committed
+  // baseline the section is reported informationally but not gated.
+  readonly moduleLevel?: Partial<Record<IrFallbackReason, number>>;
 }
 
 function listTsFiles(root: string): string[] {
@@ -161,6 +167,11 @@ async function aggregate(): Promise<{
   unintended: Partial<Record<IrFallbackReason, number>>;
   deferred: Partial<Record<IrFallbackReason, number>>;
   postClaim: PostClaimBuckets;
+  // #3142 Slice 1 — module-level rejection histogram + informational
+  // claimable/empty module counts (not baselined; printed for context).
+  moduleLevel: Partial<Record<IrFallbackReason, number>>;
+  moduleLevelInfo: { claimable: number; empty: number };
+  modulePerFile: Array<{ file: string; status: string }>;
   perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }>;
   // (#2856 Step-1) Per-rejection reject-arm detail for `body-shape-rejected`,
   // populated only when JS2WASM_IR_SHAPE_DIAG=1 (select.ts records it).
@@ -176,6 +187,9 @@ async function aggregate(): Promise<{
   // corpus file (the selector-level `planIrCompilation` below cannot see them
   // — they happen during build/verify/lower AFTER the selector claims).
   const postClaim = emptyPostClaim();
+  const moduleLevel: Partial<Record<IrFallbackReason, number>> = {};
+  const moduleLevelInfo = { claimable: 0, empty: 0 };
+  const modulePerFile: Array<{ file: string; status: string }> = [];
   const perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }> = [];
   const shapeDetails: Array<{ file: string; name: string; detail: string }> = [];
 
@@ -254,6 +268,21 @@ async function aggregate(): Promise<{
     }
     perFile.push({ file: relative(REPO_ROOT, filePath), reasons: fileReasons });
 
+    // #3142 Slice 1 — module-level claim assessment (one verdict per module).
+    if (selection.moduleInit) {
+      const mi = selection.moduleInit;
+      if (mi.reason !== null) {
+        moduleLevel[mi.reason] = (moduleLevel[mi.reason] ?? 0) + 1;
+        modulePerFile.push({ file: relative(REPO_ROOT, filePath), status: `${mi.reason} (${mi.stmtCount} stmts)` });
+      } else if (mi.stmtCount === 0) {
+        moduleLevelInfo.empty += 1;
+        modulePerFile.push({ file: relative(REPO_ROOT, filePath), status: "empty (no module-init statements)" });
+      } else {
+        moduleLevelInfo.claimable += 1;
+        modulePerFile.push({ file: relative(REPO_ROOT, filePath), status: `claimable (${mi.stmtCount} stmts)` });
+      }
+    }
+
     // #1923 — post-claim demotions: compile the file for real and aggregate
     // `irPostClaimErrors` by kind + normalized message class. A compile that
     // throws contributes nothing (same tolerance as the selector pass above).
@@ -268,7 +297,7 @@ async function aggregate(): Promise<{
       // ignore — example-file compile failures are not the gate's concern
     }
   }
-  return { unintended, deferred, postClaim, perFile, shapeDetails };
+  return { unintended, deferred, postClaim, moduleLevel, moduleLevelInfo, modulePerFile, perFile, shapeDetails };
 }
 
 function loadBaseline(): Baseline | undefined {
@@ -361,7 +390,8 @@ async function main(): Promise<void> {
   const verbose = args.has("--verbose");
   const shapeDiag = args.has("--shape-diag");
 
-  const { unintended, deferred, postClaim, perFile, shapeDetails } = await aggregate();
+  const { unintended, deferred, postClaim, moduleLevel, moduleLevelInfo, modulePerFile, perFile, shapeDetails } =
+    await aggregate();
 
   // (#2856 Step-1) `--shape-diag`: print the `body-shape-rejected` reject-arm
   // histogram. Requires `JS2WASM_IR_SHAPE_DIAG=1` in the env (select.ts reads it
@@ -393,18 +423,25 @@ async function main(): Promise<void> {
   }
 
   if (mode === "json") {
-    process.stdout.write(JSON.stringify({ unintended, deferred, postClaim, perFile }, null, 2) + "\n");
+    process.stdout.write(
+      JSON.stringify({ unintended, deferred, postClaim, moduleLevel, moduleLevelInfo, perFile }, null, 2) + "\n",
+    );
     return;
   }
 
   const generated = new Date().toISOString().slice(0, 10);
-  const next: Baseline = { generated, unintended, deferred, postClaim };
+  const next: Baseline = { generated, unintended, deferred, postClaim, moduleLevel };
+
+  // #3142 — one-line context for the module-level section (informational).
+  const moduleLevelSummary = `\nModule-level units: ${moduleLevelInfo.claimable} claimable, ${moduleLevelInfo.empty} empty (declarations-only)\n`;
 
   if (mode === "update") {
     writeFileSync(BASELINE_PATH, JSON.stringify(next, null, 2) + "\n", "utf-8");
     process.stdout.write(`Updated ${relative(REPO_ROOT, BASELINE_PATH)}\n`);
     process.stdout.write(formatTable("Unintended (target = 0)", diffTable({}, unintended).rows));
     process.stdout.write(formatTable("Deferred (informational)", diffTable({}, deferred).rows));
+    process.stdout.write(formatTable("Module-level rejections (#3142; target = 0)", diffTable({}, moduleLevel).rows));
+    process.stdout.write(moduleLevelSummary);
     process.stdout.write(
       formatTable("Post-claim demotions (target = 0)", diffPostClaim(undefined, postClaim).rows) + "\n",
     );
@@ -421,8 +458,21 @@ async function main(): Promise<void> {
   const unDiff = diffTable(baseline.unintended, unintended);
   const defDiff = diffTable(baseline.deferred, deferred);
   const pcDiff = diffPostClaim(baseline.postClaim, postClaim);
+  // #3142 — module-level bucket: gated only once the committed baseline
+  // carries the section (back-compat: older baselines report info-only).
+  const mlGated = baseline.moduleLevel !== undefined;
+  const mlDiff = diffTable(baseline.moduleLevel ?? {}, moduleLevel);
   process.stdout.write(formatTable("Unintended (gated; must not increase)", unDiff.rows));
   process.stdout.write(formatTable("Deferred (informational)", defDiff.rows));
+  process.stdout.write(
+    formatTable(
+      mlGated
+        ? "Module-level rejections (#3142; gated; must not increase)"
+        : "Module-level rejections (#3142; informational — baseline has no section yet)",
+      mlDiff.rows,
+    ),
+  );
+  process.stdout.write(moduleLevelSummary);
   process.stdout.write(formatTable("Post-claim demotions (gated; must not increase)", pcDiff.rows) + "\n");
 
   if (unDiff.anyIncrease) {
@@ -454,6 +504,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // #3142 — module-level bucket growth fails once the baseline carries it.
+  if (mlGated && mlDiff.anyIncrease) {
+    process.stderr.write(
+      `\nIR fallback gate: the module-level rejection bucket grew vs. baseline (#3142).\n` +
+        `A corpus module whose top-level statement list was IR-claimable no longer is.\n` +
+        `If the change was intentional, run \`pnpm run check:ir-fallbacks -- --update\` and\n` +
+        `commit the refreshed baseline.\n`,
+    );
+    for (const row of modulePerFile) process.stderr.write(`  ${row.file}: ${row.status}\n`);
+    process.exit(1);
+  }
+
   // #1530 — ratchet policy. When a PR decreases an unintended bucket, the
   // gate writes the lower number back to the committed baseline so the next
   // PR can't silently regress the gain. Decreases are STAGED on disk only;
@@ -471,7 +533,14 @@ async function main(): Promise<void> {
   const totalCur = Object.values(unintended).reduce((a: number, b) => a + (b ?? 0), 0);
   // #1923 — bank post-claim decreases too, so a PR that fixes an IR-path
   // demotion ratchets the bucket down and the next PR can't reintroduce it.
-  const anyDecrease = unDiff.rows.some((r) => r.delta < 0) || pcDiff.rows.some((r) => r.delta < 0);
+  // #3142 — likewise for the module-level bucket (and a baseline that lacks
+  // the section counts as a bankable change so the first ratchet run after
+  // this gate lands writes it).
+  const anyDecrease =
+    unDiff.rows.some((r) => r.delta < 0) ||
+    pcDiff.rows.some((r) => r.delta < 0) ||
+    (mlGated && mlDiff.rows.some((r) => r.delta < 0)) ||
+    !mlGated;
 
   if (mode === "update-on-decrease" && anyDecrease) {
     writeFileSync(BASELINE_PATH, JSON.stringify(next, null, 2) + "\n", "utf-8");
@@ -485,8 +554,12 @@ async function main(): Promise<void> {
 
   // All decreases or equal — silently refresh on local runs is unsafe (would
   // cause main to drift). Just succeed; CI doesn't auto-update either.
-  process.stdout.write("\nIR fallback gate: OK (no unintended/post-claim increases vs. baseline).\n");
-  if (verbose) process.stdout.write(formatPerFile(perFile));
+  process.stdout.write("\nIR fallback gate: OK (no unintended/post-claim/module-level increases vs. baseline).\n");
+  if (verbose) {
+    process.stdout.write(formatPerFile(perFile));
+    process.stdout.write("\nModule-level per-file (#3142):\n");
+    for (const row of modulePerFile) process.stdout.write(`  ${row.file}: ${row.status}\n`);
+  }
 }
 
 main().catch((err) => {

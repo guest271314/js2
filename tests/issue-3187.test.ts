@@ -59,3 +59,39 @@ describe("#3187 error_category classifier split", () => {
     expect(ORACLE_VERSION).toBeGreaterThanOrEqual(3);
   });
 });
+
+// #3285 — wrapper return-code protocol beats the trap regexes. The tightened
+// assert_throws shim embeds the ORIGINAL test source line in "returned N"
+// failure messages; quoted text like "out of bounds" / "unreachable" was
+// hitting the trap patterns and mis-binning honest assertion fails as
+// uncatchable traps — false-positive-tripping the allowance-immune #3189
+// trap-growth ratchet (live instance: Temporal/Duration/subtract/
+// result-out-of-range-1 counted as a NEW oob on the #3104 measurement run).
+// A genuine trap aborts the module and can never produce a "returned N"
+// message, so the protocol prefix is authoritative.
+describe("#3285 — 'returned N' protocol classified before trap patterns", () => {
+  it("bins a returned-N message quoting 'out of bounds' as assertion_fail, not oob", () => {
+    expect(
+      classifyError(
+        "returned 2 — assert #1 at L28: assert.throws(RangeError, () => { d.subtract(d.negated()); }, `…is out of bounds: ${d}`);",
+      ),
+    ).toBe("assertion_fail");
+  });
+
+  it("bins a returned-N message quoting 'unreachable' as assertion_fail, not unreachable", () => {
+    expect(classifyError("returned 3 — assert #2 at L10: assert(x !== 'unreachable code path');")).toBe(
+      "assertion_fail",
+    );
+  });
+
+  it("bins returned -1 (exception caught by wrapper) as exception_in_test even with trap words", () => {
+    expect(classifyError("returned -1 — assert #1 at L5: assert.throws(TypeError, () => oob.access());")).toBe(
+      "exception_in_test",
+    );
+  });
+
+  it("still bins a GENUINE trap message as a trap (no returned-N prefix)", () => {
+    expect(classifyError("RuntimeError: memory access out of bounds")).toBe("oob");
+    expect(classifyError("RuntimeError: unreachable")).toBe("unreachable");
+  });
+});

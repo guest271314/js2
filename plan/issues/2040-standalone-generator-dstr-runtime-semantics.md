@@ -1,10 +1,15 @@
 ---
 id: 2040
 title: "standalone: generator/destructuring runtime-semantics residual — rest-pattern iterator consumption, lazy defaults, private elements (~1,750 tests)"
-status: ready
+status: done
+completed: 2026-07-16
+assignee: ttraenkler/fable-beta
 sprint: current
+loc-budget-allow:
+  - src/codegen/any-helpers.ts
+  - src/codegen/context/types.ts
 created: 2026-06-10
-updated: 2026-07-12
+updated: 2026-07-16
 priority: critical
 horizon: l
 feasibility: hard
@@ -745,3 +750,62 @@ generator-laziness work (specifically the TDZ-flag-capture native-threading
 extension), NOT on #2580 M2 or #3053. Keep the tag-5 3-way classifier flag
 gated OFF until #3032's standalone generator-laziness clears the merge_group
 floor under `JS2WASM_TAG5_CLASSIFIER=1`.
+
+## A1 DEFAULT-FLIP LANDED — issue CLOSED (fable-beta, 2026-07-16)
+
+**PR:** `issue-2040-a1-tag5-classifier-flip`. The #3032 waves the A1-unblock
+map named are all on main as of 2026-07-16: W3 TDZ-native-threading
+(PR #3115), #3302 capturing generator fn-expressions (PR #3126), W4 method
+generators (PR #3136). This PR flips `tag5ValueEqClassifier` to **default ON**
+(`create-context.ts`; `JS2WASM_TAG5_CLASSIFIER=0` or
+`tag5ValueEqClassifier: false` forces legacy). The emit site stays
+standalone/wasi-gated (`any-helpers.ts` `tag5ValueEqThen`) — the JS-host lane
+is byte-identical by construction.
+
+### Re-ground: the A1 fail cluster had already dissolved (measured, not narrative)
+
+Paired A/B (same-process env toggle, faithful runner
+`runTest262File(..., "standalone")`, branch base = main @ 3186699e68):
+
+- **Eject canaries** (68: the −162 `*ary-ptrn-empty*` dstr family across all
+  producers + W3 canary buckets): **0 flips** — 62 pass→pass, 6 fail→fail
+  (async-gen rides #3132; `dflt-ary-ptrn-empty` fn/gen pre-existing both-arms).
+- **A1 family** (251 sampled sync dstr `notSameValue` files): **0 flips** —
+  235 already PASS with the flag OFF on current main. The "382 A1 fails"
+  from the 2026-07-12 baseline had already collapsed to ~71 rows by the
+  2026-07-14 standalone baseline (mostly `fn-name`/obj-rest buckets — census
+  buckets of #3283, not rest-identity vacuity), i.e. the #3032 laziness work
+  itself de-vacuized the comparator paths. The flip's value is therefore the
+  **honest tag-5 equality substrate** (boxed-number `===`/self-eq, object
+  `ref.eq` identity — the previously flag-gated #2040/#2585 semantic cases)
+  plus the S11.9.x equality / indexOf-lastIndexOf rows measured +10/0 in the
+  2026-06-22 cascade A/B, with the merge_group standalone floor as the final
+  decider.
+- Remaining A/B sweeps (51 baseline-fail rows, 224-file equality cluster,
+  485-file every-97th cross-tree control) recorded in the PR body.
+
+### Residual redirect (why this closes #2040)
+
+Every remaining dstr/generator bucket is owned elsewhere (verified by #3283's
+2026-07-14 census): slices A2/A3/A5/B3 → resolved or substrate-blocked per
+#3283 (wont-fix, superseded); A4 vacuous-wrapper → #3086; B1 eager-gen
+consumption → #3164/#3032 residuals; B2 async-gen dstr → #3132/#3178 S4;
+fn-name/PropertyDescriptor rows → unowned track flagged to PO in #3283.
+A1 (this flip) was the last bucket owned HERE.
+
+### Salvage re-validation (fable-epsilon, 2026-07-16)
+
+fable-beta died at the session limit after committing the flip; salvaged via
+cherry-pick onto a fresh branch off origin/main @ ea91a1b0f4
+(`issue-2040-tag5-classifier-flip`). Independent re-validation:
+
+- `tests/issue-2040-tag5-field4-eq.test.ts`: **16/16 pass** (incl. the
+  OPT-OUT legacy-arm test and the HOST-LANE byte-inert test).
+- Fresh paired A/B (faithful `runTest262File(..., "standalone")`,
+  `JS2WASM_TAG5_CLASSIFIER=1` vs `=0`) over the 116-file eject-canary +
+  rest-id set (`*ary-ptrn-empty*` + `*ary-ptrn-rest-id` across
+  class/function stmt+expr and object dstr): **0 flips** — 115 pass/pass,
+  1 fail/fail (`function/dstr/dflt-ary-ptrn-empty.js`, pre-existing both
+  arms, matches fable-beta's note).
+
+Authoritative gate remains the merge_group standalone floor.

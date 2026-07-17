@@ -3696,11 +3696,12 @@ export function emitDynamicTaViewConstruct(
       lenOutLocal,
       lenGiven ? { kind: "static-yes", lenLocal: lenElemsLocal, lenF64Local } : { kind: "static-no" },
     );
-    // view = {length (elements | -1 tracking), buf, byteOffset, kind}.
+    // view = {length (elements | -1 tracking), buf, byteOffset, kind, expando}.
     fctx.body.push({ op: "local.get", index: lenOutLocal });
     fctx.body.push({ op: "local.get", index: bufLocal });
     fctx.body.push({ op: "local.get", index: offsetLocal });
     fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
     fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
     fctx.body.push({ op: "extern.convert_any" });
     fctx.body.push({ op: "local.set", index: resultLocal });
@@ -3873,7 +3874,7 @@ export function emitTaDynCtorConstructFromLocals(
     fctx.body.push({ op: "local.get", index: dstBlLocal });
     fctx.body.push({ op: "array.new_default", typeIdx: byteArrIdx });
     fctx.body.push({ op: "local.set", index: dstArrLocal });
-    // view = {length: n, buf: {bl, arr}, byteOffset: 0, kind}
+    // view = {length: n, buf: {bl, arr}, byteOffset: 0, kind, expando}
     fctx.body.push({ op: "local.get", index: dstNLocal });
     fctx.body.push({ op: "local.get", index: dstBlLocal });
     fctx.body.push({ op: "local.get", index: dstArrLocal });
@@ -3881,6 +3882,7 @@ export function emitTaDynCtorConstructFromLocals(
     fctx.body.push({ op: "struct.new", typeIdx: byteVecIdx });
     fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.get", index: kindLocal });
+    fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
     fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
     fctx.body.push({ op: "extern.convert_any" });
     fctx.body.push({ op: "local.set", index: resultLocal });
@@ -4168,11 +4170,12 @@ export function emitTaDynCtorConstructFromLocals(
             /* skipAutoModulo — bare-byte-vec pun, see helper doc */ true,
           );
         }
-        // view = {n, sharedBuf, off, kind}
+        // view = {n, sharedBuf, off, kind, expando}
         fctx.body.push({ op: "local.get", index: dstNLocal });
         fctx.body.push({ op: "local.get", index: bufLocal });
         fctx.body.push({ op: "local.get", index: offLocal });
         fctx.body.push({ op: "local.get", index: kindLocal });
+        fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
         fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
         fctx.body.push({ op: "extern.convert_any" });
         fctx.body.push({ op: "local.set", index: resultLocal });

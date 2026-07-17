@@ -1367,6 +1367,39 @@ export function coerceType(
       // Unboxing: any ref → non-any ref (extract refval and cast)
       if (isAnyValue(from, ctx) && !isAnyValue(to, ctx)) {
         ensureAnyHelpers(ctx);
+        // (#1988 / #745 S3) A native string is boxed into $AnyValue tag 5 with
+        // its payload in `externval` (field 4, externref-wrapped $AnyString) —
+        // NOT `refval` (field 3, eqref). The `ref_null → ref` arm below got the
+        // externval handling in #1988, but this same-kind (`ref_null → ref_null`)
+        // arm kept reading field 3 only, so unboxing a tag-5 string box to a
+        // nullable native-string target always produced null (a `number|string`
+        // $AnyValue local compared `=== "lit"` answered false — #745 S3).
+        // Mirror the #1988 native-string-target path here.
+        const toIdxStr = (to as { typeIdx: number }).typeIdx;
+        const isNativeStrTarget =
+          ctx.nativeStrings &&
+          (toIdxStr === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdxStr === ctx.nativeStrTypeIdx));
+        if (isNativeStrTarget) {
+          const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+          fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "local.tee", index: tmpStr });
+          fctx.body.push({ op: "ref.test", typeIdx: toIdxStr });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdxStr } as ValType },
+            then: [
+              { op: "local.get", index: tmpStr },
+              { op: "ref.cast_null", typeIdx: toIdxStr },
+            ],
+            else: [{ op: "ref.null", typeIdx: toIdxStr }],
+          });
+          if (to.kind === "ref") {
+            fctx.body.push({ op: "ref.as_non_null" });
+          }
+          releaseTempLocal(fctx, tmpStr);
+          return;
+        }
         // Get the refval field (eqref), then guarded ref.cast to target type
         fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
         // Guard: ref.test before ref.cast to avoid illegal cast traps
@@ -2838,6 +2871,25 @@ function tryToStringFallback(
                       instrs.push({ op: "drop" });
                       instrs.push({ op: "f64.const", value: NaN });
                     }
+                  } else if (
+                    info.returnType &&
+                    (info.returnType.kind === "ref" ||
+                      info.returnType.kind === "ref_null" ||
+                      info.returnType.kind === "anyref" ||
+                      info.returnType.kind === "eqref")
+                  ) {
+                    // (#3306) ref-kind result — under nativeStrings this is the
+                    // native string `toString` returned; StringToNumber it
+                    // (§7.1.4.1). This is the arm object-literal `{toString}`
+                    // shapes actually hit (eqref-typed field): the old
+                    // drop+NaN ran the method and threw away "7".
+                    const strInstrs = refResultStringToF64Instrs(ctx, fctx);
+                    if (strInstrs !== null) {
+                      instrs.push(...strInstrs);
+                    } else {
+                      instrs.push({ op: "drop" });
+                      instrs.push({ op: "f64.const", value: NaN });
+                    }
                   } else if (!info.returnType || info.returnType.kind !== "f64") {
                     if (info.returnType) instrs.push({ op: "drop" });
                     instrs.push({ op: "f64.const", value: NaN });
@@ -3173,10 +3225,63 @@ function emitToStringResultToF64(
       fctx.body.push({ op: "f64.const", value: NaN });
     }
   } else {
-    // ref or other — drop and push NaN
-    fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "f64.const", value: NaN });
+    // (#3306) ref-kind result: under nativeStrings a `toString(){return "7"}`
+    // closure returns the NATIVE string struct — StringToNumber it. Genuine
+    // object returns keep the legacy NaN.
+    const strInstrs = refResultStringToF64Instrs(ctx, fctx);
+    if (strInstrs !== null) {
+      fctx.body.push(...strInstrs);
+    } else {
+      // ref or other — drop and push NaN
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+    }
   }
+}
+
+/**
+ * (#3306 — the #3174 "toString-only object → NaN" residual) Instruction
+ * sequence converting a REF-kind ToPrimitive-method result that may be a
+ * native string into f64 per §7.1.4 ToNumber step "If argument is a String,
+ * return StringToNumber(argument)".
+ *
+ * Every `tryToStringFallback` result-converter treated a `ref`/`ref_null`
+ * return as "object → drop + NaN" — but under nativeStrings that is exactly
+ * what `toString(){ return "…" }` returns (a `ref $NativeString`/`$AnyString`
+ * subtype), so `+{toString(){return "7"}}` executed toString and then dropped
+ * the "7" (NaN). The test is a RUNTIME `ref.test $AnyString` (not a static
+ * typeIdx match) so loosely-typed closure returns (eqref/anyref carriers)
+ * convert too; a genuine object return misses the test and keeps the legacy
+ * NaN (the spec's both-non-primitive TypeError remains a follow-up, unchanged
+ * by this fix).
+ *
+ * Expects the ref-kind result on the stack; the sequence leaves an f64.
+ * Returns `null` when native strings / `__str_to_number` are unavailable
+ * (host lane — externref strings never reach the ref arm) so callers keep
+ * their legacy drop+NaN byte-identically.
+ */
+function refResultStringToF64Instrs(ctx: CodegenContext, fctx: FunctionContext): Instr[] | null {
+  if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return null;
+  let strToNumberIdx = ctx.funcMap.get("__str_to_number");
+  if (strToNumberIdx === undefined) {
+    addUnionImports(ctx);
+    strToNumberIdx = ctx.funcMap.get("__str_to_number");
+  }
+  if (strToNumberIdx === undefined) return null;
+  const tmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+  const instrs: Instr[] = [
+    { op: "local.set", index: tmp },
+    { op: "local.get", index: tmp },
+    { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "local.get", index: tmp }, { op: "extern.convert_any" }, { op: "call", funcIdx: strToNumberIdx }],
+      else: [{ op: "f64.const", value: NaN }],
+    },
+  ];
+  releaseTempLocal(fctx, tmp);
+  return instrs;
 }
 
 /**
@@ -3192,6 +3297,15 @@ function emitToStringResultToF64ByKind(ctx: CodegenContext, fctx: FunctionContex
     const unboxIdx = ctx.funcMap.get("__unbox_number");
     if (unboxIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: unboxIdx });
+    } else {
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+    }
+  } else if (retKind === "ref" || retKind === "ref_null" || retKind === "anyref" || retKind === "eqref") {
+    // (#3306) ref-kind result — may be a native string; StringToNumber it.
+    const strInstrs = refResultStringToF64Instrs(ctx, fctx);
+    if (strInstrs !== null) {
+      fctx.body.push(...strInstrs);
     } else {
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "f64.const", value: NaN });

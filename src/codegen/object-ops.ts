@@ -8,6 +8,7 @@
 import { ts } from "../ts-api.js";
 import { isVoidType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
+import { emitUndefinedExtern } from "./any-helpers.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
@@ -19,6 +20,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowRangeError, emitThrowTypeError } from "./expressions/helpers.js";
+import { buildThrowJsErrorInstrs } from "./js-errors.js"; // (#3177 slice 4) defineProperty rejection sentinel → TypeError
 import { emitMappedArgReverseSync } from "./expressions/logical-ops.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
@@ -1264,7 +1266,7 @@ export function compileObjectDefineProperty(
       const init = !ts.isObjectLiteralExpression(descArg)
         ? descriptorInitializerForIdentifier(ctx, descArg)
         : undefined;
-      return emitDefinePropertyDescRuntime(
+      const r = emitDefinePropertyDescRuntime(
         ctx,
         fctx,
         objArg,
@@ -1272,6 +1274,10 @@ export function compileObjectDefineProperty(
         descArg,
         init ? descriptorUndefinedFields(init) : [],
       );
+      // (#3177 slice 4) Object.defineProperty converts a null (rejection
+      // sentinel / falsy-undefined trap result) into the §20.1.2.4 TypeError.
+      if (r !== null) emitDefinePropertyRejectionThrow(ctx, fctx);
+      return r;
     }
   }
 
@@ -1572,7 +1578,7 @@ export function compileObjectDefineProperty(
   // sibling Object.create path at calls.ts:3996+ (#1631).
   if (!ts.isObjectLiteralExpression(descArg)) {
     const init = descriptorInitializerForIdentifier(ctx, descArg);
-    return emitDefinePropertyDescRuntime(
+    const r = emitDefinePropertyDescRuntime(
       ctx,
       fctx,
       objArg,
@@ -1580,6 +1586,12 @@ export function compileObjectDefineProperty(
       descArg,
       init ? descriptorUndefinedFields(init) : [],
     );
+    // (#3177 slice 4) §20.1.2.4 step 3: the applier threads the dyn-view
+    // [[DefineOwnProperty]]-false sentinel (null) out — Object.defineProperty
+    // converts it to TypeError. (Reflect.defineProperty consumes the same
+    // applier via `__is_truthy` → `false` instead; see call-namespace-static.)
+    if (r !== null) emitDefinePropertyRejectionThrow(ctx, fctx);
+    return r;
   }
 
   // (#1629) Explicit-`undefined` descriptor fields (e.g. `{ value: undefined }`,
@@ -2726,10 +2738,41 @@ function emitExternDefinePropertyValue(
   flushLateImportShifts(ctx, fctx);
   if (funcIdx !== undefined) {
     fctx.body.push({ op: "call", funcIdx });
+    emitDefinePropertyRejectionThrow(ctx, fctx);
   }
 
   // __defineProperty_value returns obj, so we're done
   return { kind: "externref" };
+}
+
+/**
+ * (#3177 slice 4) §20.1.2.4 step 3: `Object.defineProperty` throws TypeError
+ * when [[DefineOwnProperty]] returns false. The standalone dyn-view arms in
+ * `__defineProperty_value`/`_accessor` signal that false with a
+ * `ref.null.extern` SENTINEL (every ordinary path returns the input obj, and
+ * a null/undefined obj already threw in `emitObjectArgNullGuard` — so a null
+ * result can ONLY be the rejection sentinel). Reflect.defineProperty keeps
+ * its own consumption (`__is_truthy` → spec `false`) and is NOT routed here.
+ * Standalone-only: the host-lane import returns the JS object, never null.
+ * Leaves the (non-null) result on the stack.
+ */
+function emitDefinePropertyRejectionThrow(ctx: CodegenContext, fctx: FunctionContext): void {
+  if (!(ctx.standalone || ctx.wasi)) return;
+  const resLocal = allocLocal(fctx, `__defprop_res_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.tee", index: resLocal });
+  fctx.body.push({ op: "ref.is_null" });
+  const throwInstrs = buildThrowJsErrorInstrs(
+    ctx,
+    "TypeError",
+    "Cannot define property, object is not extensible or index is invalid",
+    {
+      flush: fctx,
+    },
+  );
+  // Stack: `local.tee` kept the copy in the local, `ref.is_null` consumed the
+  // stack copy — re-read the local for the caller.
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwInstrs, else: [] });
+  fctx.body.push({ op: "local.get", index: resLocal });
 }
 
 /**
@@ -3087,6 +3130,7 @@ function emitExternDefinePropertyNoValue(
       flushLateImportShifts(ctx, fctx);
       if (accFuncIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: accFuncIdx });
+        emitDefinePropertyRejectionThrow(ctx, fctx);
       }
 
       // (#3125) STANDALONE closed-struct receiver: the runtime
@@ -3139,7 +3183,12 @@ function emitExternDefinePropertyNoValue(
       coerceType(ctx, fctx, objType, { kind: "externref" });
     }
     fctx.body.push({ op: "local.get", index: propLocal });
-    fctx.body.push({ op: "ref.null.extern" }); // null value
+    // (#3319) no-value define: [[Value]] defaults to `undefined` on a FRESH
+    // define (§10.1.6.3) — the $undefined singleton under the #2106 regime
+    // (null read back as `typeof 'object'` / `!== undefined`); legacy lanes
+    // keep the byte-identical null value. Redefines ignore this param (the
+    // #2992 S3 merge preserves the live value when hasValue is unset).
+    if (!emitUndefinedExtern(ctx, fctx)) fctx.body.push({ op: "ref.null.extern" }); // null value
     emitRuntimeFlagsF64(
       ctx,
       fctx,
@@ -3161,6 +3210,7 @@ function emitExternDefinePropertyNoValue(
     flushLateImportShifts(ctx, fctx);
     if (funcIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx });
+      emitDefinePropertyRejectionThrow(ctx, fctx);
     }
     return { kind: "externref" };
   }
@@ -3866,7 +3916,11 @@ export function compileObjectDefineProperties(
           fctx.body.push({ op: "local.get", index: objExtLocal });
           compileExpression(ctx, fctx, ts.factory.createStringLiteral(propName), { kind: "externref" });
 
-          // Compile value or push null
+          // Compile value or push the no-value default. (#3319) A missing
+          // `value` defaults [[Value]] to `undefined` on a fresh define
+          // (§10.1.6.3) — the $undefined singleton under the #2106 regime
+          // (null read back `!== undefined` / typeof "object"); legacy lanes
+          // keep the byte-identical null push.
           if (valueExpr) {
             const vt = compileExpression(ctx, fctx, valueExpr, { kind: "externref" });
             if (vt && vt.kind !== "externref") {
@@ -3874,7 +3928,7 @@ export function compileObjectDefineProperties(
             } else if (!vt) {
               fctx.body.push({ op: "ref.null.extern" });
             }
-          } else {
+          } else if (!emitUndefinedExtern(ctx, fctx)) {
             fctx.body.push({ op: "ref.null.extern" });
           }
 
