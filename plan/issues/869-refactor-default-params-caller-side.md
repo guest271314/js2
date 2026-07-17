@@ -1,9 +1,10 @@
 ---
 id: 869
 title: "Refactor default params: caller-side insertion instead of sNaN sentinel"
-status: ready
+status: in-progress
+assignee: dev-869
 created: 2026-03-29
-updated: 2026-07-12
+updated: 2026-07-17
 priority: high
 feasibility: medium
 reasoning_effort: high
