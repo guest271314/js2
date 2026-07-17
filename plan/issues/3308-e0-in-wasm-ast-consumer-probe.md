@@ -15,18 +15,23 @@ language_feature: eval
 goal: runtime-eval
 sprint: current
 parent: 2927
-depends_on: [3348]
-related: [2928, 1584, 1710, 1712, 2841, 2851, 2852, 2847, 3348]
+depends_on: []
+related: [2928, 1584, 1710, 1712, 2841, 2851, 2852, 2847, 3343, 3348]
 ---
 
-> **BLOCKED / re-scoped 2026-07-17 (opus-4).** Attempted E0. The in-Wasm
-> AST-consumer measurement cannot proceed because **compiled-acorn's own
-> `parse()` currently throws in-Wasm** ("parse is not a function" dynamic
-> method-dispatch failure) on current main — even the acorn-alone control via
-> `wrapExports` fails, a regression since the 2026-06-30 corpus baseline. Filed
-> as **#3348** (feasibility:hard, priority:high). This issue was mis-sized `S`;
-> re-tagged `feasibility:hard`, `horizon:m`, and `depends_on: [3348]` — it needs
-> a walkable compiled-acorn AST first. See #3348 for the full repro.
+> **NOT BLOCKED — E0 is COMPLETE (2026-07-17, senior-dev).** A prior
+> `BLOCKED / depends_on: [3348]` re-scope (PR #3230) was based on **#3348's
+> claim that compiled-acorn's `parse()` throws in-Wasm**. That claim was
+> **arbitrated empirically and refuted**: it was a _harness artifact_ — the repro
+> omitted `io.__setExports(instance.exports)` after `WebAssembly.instantiate`,
+> which makes host dispatch mis-resolve and raises the runtime's
+> `method is not a function` guard. With that one line, acorn-alone
+> `wrapExports(...).parse("const a=1; let b=2; function f(){}", …)` returns a
+> correct `Program` (`body.length === 3`), and the committed corpus harness
+> reports **`compiled-threw=0`** across all 23 inputs on current main (_better_
+> than the 2026-06-30 baseline's 1 — nothing regressed). **#3348 is
+> `wont-fix`; no bisect is warranted.** `depends_on` cleared and the E0
+> measurement below stands. Full evidence in #3348's resolution banner.
 
 # #3308 — E0: in-Wasm AST consumer probe
 
