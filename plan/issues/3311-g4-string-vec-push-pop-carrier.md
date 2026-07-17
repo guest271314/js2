@@ -3,7 +3,7 @@ id: 3311
 title: "G4 — `string[]` push/pop under standalone is a no-op: native-string vec carrier missing from `__vec_push`/`__vec_pop` mutEntries"
 status: ready
 created: 2026-07-16
-priority: medium
+priority: high
 horizon: s
 feasibility: medium
 reasoning_effort: medium
