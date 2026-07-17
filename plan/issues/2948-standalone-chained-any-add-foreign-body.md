@@ -1,9 +1,11 @@
 ---
 id: 2948
 title: "standalone: chained dynamic add in lifted foreign bodies yields NaN (any-add result cannot feed another any-add)"
-status: ready
+status: done
 created: 2026-07-02
-updated: 2026-07-02
+updated: 2026-07-17
+completed: 2026-07-17
+assignee: ttraenkler/opus-3
 priority: medium
 horizon: m
 feasibility: medium
@@ -15,6 +17,31 @@ goal: runtime-eval
 parent: 2860
 related: [2923, 2924, 1629]
 ---
+
+## Verification — chained any-add fixed on main; typeof layer split to #3346 (2026-07-17, opus-3)
+
+Re-verified against current `origin/main`: the chained-any-add NaN in lifted
+foreign bodies (criteria 1 & 2) **no longer reproduces** — the #745 tagged-union
+value-rep substrate work (carrier-agnostic strict-eq / truthiness / concat /
+arithmetic for the `$AnyValue` union) closed the gap. All standalone, host-free,
+return **6**:
+- `eval("function q(a,b,c){return a+b+c} q(1,2,3)")` → **6**
+- `new Function("a","b","c","return a+b+c")(1,2,3)` → **6**
+- `new Function("a","b","c","var t=a+b; return t+c")(1,2,3)` → **6**
+- `new Function("a","b","c","return a+(b+c)")(1,2,3)` → **6**
+
+Locked with `tests/issue-2948.test.ts` (5 standalone host-free cases). This PR is
+test + doc only — **byte-inert** to the compiler (no `src/` change).
+
+**Criterion 3 (typeof-boxed-param) is independent and still broken** — split to
+**#3346**. `new Function("a","return typeof a")(5)` returns `"undefined"` not
+`"number"` on main; the arithmetic controls prove the boxed value is usable, so
+the defect is in the standalone `typeof` rep classifier, not the lift. The
+#2924 acceptance-3 `return a+b+c` re-enable was validated-working but deferred
+here to avoid entangling with two **pre-existing, unrelated** failures in
+`tests/issue-2924.test.ts` (`acceptance 5: new Function("return")()` and the
+no-arg `new Function()` case, both red on pristine main — flagged separately).
+
 
 # #2948 — standalone: chained any-add in lifted foreign bodies yields NaN
 
