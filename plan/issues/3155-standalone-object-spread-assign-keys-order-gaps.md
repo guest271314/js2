@@ -15,6 +15,9 @@ related: [86, 2131, 2746, 2804, 3342]
 origin: "#86 {standalone:true}-option-ignored audit (fable-wasm, 2026-07-11) — 3 tests were asserting standalone behavior while vacuously running gc-host; the real standalone lane fails."
 loc-budget-allow:
   - src/compiler.ts
+  # (#3155) the native standalone externref-join `compileArrayJoinExternNative`
+  # must live beside `compileArrayJoinExtern` in array-methods.ts (+~100 LOC).
+  - src/codegen/array-methods.ts
 ---
 
 # #3155 — standalone object spread / assign / key-enumeration gaps
