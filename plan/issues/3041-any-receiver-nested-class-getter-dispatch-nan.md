@@ -15,6 +15,10 @@ area: codegen
 language_feature: classes, accessors, dynamic-dispatch
 goal: spec-completeness
 related: [3039, 634, 1395]
+# (#3102) The dynamic-read accessor routing lives in the any-receiver terminal
+# of this god-file; the condition + minimal comment grow it a few LOC.
+loc-budget-allow:
+  - src/codegen/property-access-dispatch.ts
 ---
 
 # #3041 — get-accessor via `any` receiver on a nested class returns NaN (dynamic accessor dispatch gap)

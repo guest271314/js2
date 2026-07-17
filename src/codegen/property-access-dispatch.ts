@@ -3530,19 +3530,12 @@ export function finalizeStructAndDynamicMemberGet(
         // `propName` exists, route through the `__get_member_<name>` dispatcher:
         // its terminal is the same `__extern_get` (own/sidecar props keep
         // shadowing) plus miss-gated method arms answering the canonical
-        // method-value singleton — the SAME cache global the typed
-        // `C.prototype.m` read uses — so a dynamic `any`-receiver method read
-        // resolves to an identical, `===`-stable value instead of `undefined`
-        // (the ~87-file `assert.sameValue(c.m, C.prototype.m)` class-elements
-        // cluster). Modules with no class-method of this name are byte-identical.
-        //
-        // (#3041) Also route when a class GET-ACCESSOR named `propName` exists:
-        // a getter reached via an `any` receiver (class declared inside a
-        // function, no struct field for `propName`) previously fell straight to
-        // `__extern_get` → `undefined`/NaN — the getter body never ran. The
-        // dispatcher's #3041 accessor arms `ref.cast`+`call` the getter and box
-        // its result, exactly as the static `compilePropertyAccess` accessor
-        // branch does. Modules with no getter of this name stay byte-identical.
+        // method-value singleton, so a dynamic `any`-receiver method read
+        // resolves to a `===`-stable value instead of `undefined`.
+        // (#3041) Also route when a class GET-ACCESSOR of this name exists —
+        // else a getter via an `any` receiver fell to `__extern_get` → NaN; the
+        // dispatcher's #3041 accessor arms `ref.cast`+`call` it. No such
+        // method/getter of this name → byte-identical.
         if (
           classMethodCandidatesForProp(ctx, propName).length > 0 ||
           classAccessorCandidatesForProp(ctx, propName).length > 0
