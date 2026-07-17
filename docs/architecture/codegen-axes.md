@@ -165,7 +165,9 @@ Stay in `src/codegen/` (direct) until the listed issues land:
 
 `scripts/ir-fallback-baseline.json` is the ratchet. When a kind is
 adopted, its bucket goes to zero and the demote-to-warning escape hatch
-in `src/codegen/index.ts:889–896` is removed for that kind — see #2855.
+in `src/codegen/index.ts:~1889/~2390` is removed for that kind — see #2855.
+(Bucket-zero is necessary but **not sufficient** to make a reason a hard
+error via `STRICT_IR_REASONS`; see #3341 and the escape-hatch section below.)
 
 ## Current hidden bias in `src/ir/` (and what to do about it)
 
@@ -189,18 +191,35 @@ the `BackendEmitter` trait becomes linear-capable by implementation
 rather than by a separate front-end. The remaining inline WasmGC emission
 in `lower.ts` is staged under #1713.
 
-## The fallback-to-warning escape hatch (`src/codegen/index.ts:889–896`)
+## The fallback-to-warning escape hatch (`src/codegen/index.ts:~1889/~2390`)
 
 Today, if the IR path throws while compiling a function the selector
 claimed, the failure is logged at severity `"warning"` and the legacy
 direct-codegen body is kept. This makes the IR safe to enable by default
-without breaking test262, but it also masks real IR bugs.
+without breaking test262, but it also masks real IR bugs. (Two sites:
+`~1889` when a selector-claimed function's types can't be resolved, and
+`~2390` for an IR-build throw — both gated by `STRICT_IR_REASONS` /
+`STRICT_IR_BUILD_ERRORS` respectively, which are empty today.)
 
 **This is a transitional safety net, not the final design.** #2855 phases
 the warning channel out. The endgame: when a node kind is IR-owned, the
 selector either claims it (and IR succeeds) or it stays direct (and the
 selector reports a structured "deferred" reason). There is no third
 "IR claimed it and silently fell back" state.
+
+**Promoting a reason to strict is per-reason, not a corpus-zero flip
+(#3341).** A reason absent from `scripts/ir-fallback-baseline.json` only
+means the 13-file playground corpus doesn't happen to trigger it — it does
+**not** mean the reason is unreachable on real code. Reasons like
+`external-call`, `call-graph-closure`, `param/return-type-not-resolvable`,
+`type-resolution-failure`, and `class-method` describe **legitimate**
+IR-non-claimability (an external dependency, an unclaimable callee, an
+unresolvable type, a computed/generator/abstract method name) that the
+legacy path must still catch. Adding such a reason to `STRICT_IR_REASONS`
+would turn those legitimate fallbacks into hard compile errors and regress
+real programs. STRICT promotion is therefore gated on first making a
+_specific_ reason genuinely unreachable in the IR (real #2855-family
+adoption work), reason by reason — not a documentation flip.
 
 If you're reading this and the warning channel still exists, treat any
 new warning here as an error — it means a regression slipped past the IR

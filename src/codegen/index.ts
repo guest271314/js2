@@ -1509,9 +1509,24 @@ function irFieldTypeMatchesLegacyValType(
 // dates that drive this list.
 // ---------------------------------------------------------------------------
 const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReason>();
-// Empty as of #1530 — flip entries to "strict" in follow-up PRs once
-// their `scripts/ir-fallback-baseline.json` bucket reaches zero. The
-// intended order (cheapest first, see plan/log/ir-adoption.md):
+// Empty as of #1530 — and #3341 established that a bucket reaching zero in
+// `scripts/ir-fallback-baseline.json` is NECESSARY but NOT SUFFICIENT to add
+// its reason here. That baseline is measured against the 13-file playground
+// corpus only; corpus-zero does NOT mean the reason is unreachable on real
+// code. Most rejection reasons describe LEGITIMATE IR-non-claimability that the
+// legacy path must still catch — e.g. `external-call` (a call to a
+// non-whitelisted external fn), `call-graph-closure` (an unclaimable callee),
+// `param-type-not-resolvable` / `return-type-not-resolvable` /
+// `type-resolution-failure` (TypeMap can't resolve the type), `class-method`
+// (still covers computed/generator/abstract names, static super,
+// subclass-of-builtin — see plan/log/ir-adoption.md), and the destructuring
+// param buckets. Adding any of these here would promote a legitimate fallback
+// to a HARD COMPILE ERROR and regress real programs. So a reason may be
+// promoted to strict ONLY once it is genuinely UNREACHABLE in the IR (i.e. the
+// IR is now expected to always claim+lower that construct, so a rejection is a
+// bug) — real #2855-family adoption work, reason by reason, not a doc flip.
+// The intended promotion order once each becomes genuinely unreachable
+// (cheapest first, see plan/log/ir-adoption.md):
 //   "param-type-not-resolvable",
 //   "call-graph-closure",
 //   "body-shape-rejected",
