@@ -15,6 +15,13 @@ task_type: bug
 horizon: s
 created: 2026-07-16
 updated: 2026-07-17
+# (#3323) genuine growth: new __array_forin_keys host helper (runtime.ts), its
+# late-import registration (imports.ts), and the host-keys array for-in path
+# (loops.ts). Cohesive with each file's existing for-in / sidecar logic.
+loc-budget-allow:
+  - src/codegen/statements/loops.ts
+  - src/runtime.ts
+  - src/codegen/registry/imports.ts
 ---
 
 # #3323 — for-in order after defineProperty on an ARRAY with an accessor descriptor
