@@ -32,23 +32,36 @@
 // Recorded in plan/issues/2956 §"Execution status".
 //
 // RESOLVER SCOPE: L1 supplies the four required name/table methods. L2 adds
-// only the fixed-number-vec hooks: from-ast types the value as the linear
-// backend's i32 arena pointer, while lower/emitter consume the existing vec
-// layout contract. Union/boxed/object/closure/refcell/class/string hooks stay
-// absent and therefore demote through the same legality/build channel.
+// fixed-number vecs plus numeric object/ref-cell layouts: from-ast types each
+// reference-shaped value as the linear backend's i32 arena pointer, while the
+// emitter consumes offsets computed through codegen-linear/layout.ts. Union,
+// dynamic boxing, closure/class/string hooks stay absent and therefore demote
+// through the same legality/build channel.
 
 import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
+import {
+  computeClassLayout,
+  LINEAR_AGGREGATE_HEADER_SIZE,
+  LINEAR_GENERIC_OBJECT_TAG,
+} from "../../codegen-linear/layout.js";
 import { LINEAR_IR_VEC_INIT_F64_FN } from "../../codegen-linear/runtime.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
 import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
-import type { IrFuncRef, IrGlobalRef, IrType, IrTypeRef } from "../nodes.js";
+import { asVal, type IrFuncRef, type IrGlobalRef, type IrObjectShape, type IrType, type IrTypeRef } from "../nodes.js";
 import { planIrCompilation } from "../select.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
+import type { TypeConverter } from "./contract.js";
 import { verifyIrBackendLegality } from "./legality.js";
 import { LinearEmitter } from "./linear-emitter.js";
-import type { IrVecLowering } from "./handles.js";
+import type {
+  IrRefCellLowering,
+  IrVecLowering,
+  LinearMemoryFieldLowering,
+  LinearObjectLowering,
+  LinearRefCellLowering,
+} from "./handles.js";
 
 /** One demoted claim: which function, and the bucketed reason. */
 export interface LinearIrRejection {
@@ -64,6 +77,13 @@ export interface LinearIrResult {
   readonly funcs: Map<string, WasmFunction>;
   readonly compiled: readonly string[];
   readonly rejected: readonly LinearIrRejection[];
+  /** Deferred helpers appended only after every pre-assigned user slot. */
+  readonly helpers: readonly LinearIrHelper[];
+}
+
+export interface LinearIrHelper {
+  readonly funcIdx: number;
+  readonly func: WasmFunction;
 }
 
 /** Slice-L1 gate: the overlay runs only under `JS2WASM_LINEAR_IR=1`. */
@@ -90,13 +110,14 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
   const funcs = new Map<string, WasmFunction>();
   const compiled: string[] = [];
   const rejected: LinearIrRejection[] = [];
-  const result: LinearIrResult = { funcs, compiled, rejected };
+  let helperStartFuncIdx = 0;
+  for (const funcIdx of ctx.funcMap.values()) helperStartFuncIdx = Math.max(helperStartFuncIdx, funcIdx + 1);
+  const { resolver, helpers } = makeLinearIrResolver(ctx, helperStartFuncIdx);
+  const result: LinearIrResult = { funcs, compiled, rejected, helpers };
   lastReport = result;
 
   const selection = planIrCompilation(sourceFile, { experimentalIR: true });
   if (selection.funcs.size === 0) return result;
-
-  const resolver = makeLinearIrResolver(ctx);
 
   const claimedDecls: { name: string; decl: ts.FunctionDeclaration; exported: boolean }[] = [];
   for (const stmt of sourceFile.statements) {
@@ -192,9 +213,15 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
           vecNewFuncIdx: ctx.funcMap.get("__arr_new"),
           vecInitF64FuncIdx: ctx.funcMap.get(LINEAR_IR_VEC_INIT_F64_FN),
         });
-        const body = lowerIrFunctionBody<Instr[]>(main, resolver, emitter);
+        const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
         const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
-        const locals = body.locals.map((local, index) => {
+        const wasmLocals = body.locals.flatMap((local) =>
+          local.slots.map((type, slot) => ({
+            name: slot === 0 ? local.name : `${local.name}$${slot}`,
+            type,
+          })),
+        );
+        const locals = wasmLocals.map((local, index) => {
           const absoluteIndex = main.params.length + index;
           if (!vecScratchLocals.has(absoluteIndex)) return local;
           // The shared lowerer allocates this scratch as a WasmGC array ref.
@@ -204,7 +231,11 @@ export function compileLinearIrFunctions(ctx: LinearContext, sourceFile: ts.Sour
         });
         lowered.set(name, {
           name: body.name,
-          typeIdx: body.typeIdx,
+          typeIdx: resolver.internFuncType({
+            kind: "func",
+            params: body.params.flatMap((param) => [...param.slots]),
+            results: body.results.flatMap((result) => [...result]),
+          }),
           locals,
           body: body.body,
           exported: body.exported,
@@ -261,10 +292,14 @@ function bucketFromLegalityMessage(message: string): string {
 }
 
 /**
- * The linear resolver: required name/table methods plus the L2 fixed-f64-vec
- * subset. Other optional shape hooks remain absent — see the module header.
+ * The linear resolver: required name/table methods plus the L2 fixed-f64-vec,
+ * numeric-object, and primitive-refcell subsets. Other optional shape hooks
+ * remain absent — see the module header.
  */
-function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstResolver {
+function makeLinearIrResolver(
+  ctx: LinearContext,
+  helperStartFuncIdx: number,
+): { resolver: IrLowerResolver & IrFromAstResolver; helpers: LinearIrHelper[] } {
   // Linear vecs have no module type indices: they are i32 pointers to the
   // canonical `[header][len][cap][f64 slots...]` runtime layout. The shared
   // resolver shape still carries the WasmGC index fields for lower.ts's
@@ -278,8 +313,81 @@ function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstRe
     elementValType: { kind: "f64" },
   };
 
-  return {
+  const helpers: LinearIrHelper[] = [];
+  const helperByShape = new Map<string, number>();
+  const objects = new Map<string, LinearObjectLowering>();
+  const refCells = new Map<string, LinearRefCellLowering>();
+
+  const ensureAggregateHelper = (
+    key: string,
+    fields: readonly { name: string; type: ValType; offset: number }[],
+    totalSize: number,
+  ): number => {
+    const cached = helperByShape.get(key);
+    if (cached !== undefined) return cached;
+
+    const funcIdx = helperStartFuncIdx + helpers.length;
+    const name = `__linear_ir_aggregate_new_${helpers.length}`;
+    const mallocIdx = ctx.funcMap.get("__malloc");
+    if (mallocIdx === undefined) throw new Error("linear-ir: __malloc runtime helper missing");
+    const pointerLocal = fields.length;
+    const body: Instr[] = [
+      { op: "i32.const", value: totalSize },
+      { op: "call", funcIdx: mallocIdx },
+      { op: "local.tee", index: pointerLocal },
+      { op: "i32.const", value: LINEAR_GENERIC_OBJECT_TAG },
+      { op: "i32.store8", align: 0, offset: 0 },
+      { op: "local.get", index: pointerLocal },
+      { op: "i32.const", value: totalSize - LINEAR_AGGREGATE_HEADER_SIZE },
+      { op: "i32.store", align: 2, offset: 4 },
+    ];
+    fields.forEach((field, paramIndex) => {
+      body.push({ op: "local.get", index: pointerLocal }, { op: "local.get", index: paramIndex });
+      if (field.type.kind === "i32") {
+        body.push({ op: "i32.store", align: 2, offset: field.offset });
+      } else if (field.type.kind === "f64") {
+        body.push({ op: "f64.store", align: 3, offset: field.offset });
+      } else {
+        throw new Error(`linear-ir: aggregate helper cannot store '${field.type.kind}' field '${field.name}'`);
+      }
+    });
+    body.push({ op: "local.get", index: pointerLocal });
+
+    const func: WasmFunction = {
+      name,
+      typeIdx: internLinearFuncType(ctx, {
+        kind: "func",
+        params: fields.map((field) => field.type),
+        results: [{ kind: "i32" }],
+      }),
+      locals: [{ name: "$aggregate_ptr", type: { kind: "i32" } }],
+      body,
+      exported: false,
+    };
+    helpers.push({ funcIdx, func });
+    helperByShape.set(key, funcIdx);
+    ctx.funcMap.set(name, funcIdx);
+    return funcIdx;
+  };
+
+  const resolver: IrLowerResolver & IrFromAstResolver = {
     resolveFunc(ref: IrFuncRef): number {
+      // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
+      // `__vec_elem_set_<vecStructTypeIdx>` (the C2 path — element store and
+      // `.push` both emit it). On linear the sentinel typeIdx is always 0
+      // (the f64VecLayout below), and the direct runtime's
+      // `__arr_set(ptr:i32, idx:i32, val:f64) -> void` has the SAME
+      // signature and the same grow-on-OOB / zero-fill-gap / len-extension
+      // semantics as the WasmGC `ensureVecElemSet` helper (a negative-index
+      // no-op and #1977 forwarding resolution are safe supersets). Map the
+      // helper name onto it — name-based, funcIdx-shift safe.
+      if (ref.name.startsWith("__vec_elem_set_")) {
+        const arrSet = ctx.funcMap.get("__arr_set");
+        if (arrSet === undefined) {
+          throw new Error(`linear-ir: __arr_set runtime helper missing for '${ref.name}'`);
+        }
+        return arrSet;
+      }
       const idx = ctx.funcMap.get(ref.name);
       if (idx === undefined) {
         throw new Error(`linear-ir: no funcIdx for '${ref.name}' (selector claimed a call outside funcMap)`);
@@ -299,24 +407,72 @@ function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstRe
       throw new Error(`linear-ir: symbolic type '${ref.name}' outside slice-1 scope`);
     },
     internFuncType(def: FuncTypeDef): number {
-      // Dedupe against the linear module's type section (append-only, no
-      // hoist pass on linear — the spec's "must not grow it per call").
-      const sameValType = (a: ValType, b: ValType): boolean =>
-        a.kind === b.kind && (a as { typeIdx?: number }).typeIdx === (b as { typeIdx?: number }).typeIdx;
-      for (let i = 0; i < ctx.mod.types.length; i++) {
-        const t = ctx.mod.types[i]!;
-        if (t.kind !== "func") continue;
-        if (t.params.length !== def.params.length || t.results.length !== def.results.length) continue;
-        if (
-          t.params.every((p, j) => sameValType(p, def.params[j]!)) &&
-          t.results.every((r, j) => sameValType(r, def.results[j]!))
-        ) {
-          return i;
-        }
+      return internLinearFuncType(ctx, def);
+    },
+    resolveObject(shape: IrObjectShape): LinearObjectLowering | null {
+      const key = linearObjectShapeKey(shape);
+      const cached = objects.get(key);
+      if (cached) return cached;
+
+      const fieldDefs: { name: string; type: "i32" | "f64" }[] = [];
+      for (const field of shape.fields) {
+        const type = linearAggregateFieldType(field.type);
+        if (!type) return null;
+        fieldDefs.push({ name: field.name, type: type.kind });
       }
-      const idx = ctx.mod.types.length;
-      ctx.mod.types.push(def);
-      return idx;
+      const layout = computeClassLayout(`__linear_ir_object_${objects.size}`, fieldDefs);
+      const fields = shape.fields.map((field, fieldIdx) => {
+        const memory = layout.fields.get(field.name);
+        if (!memory) throw new Error(`linear-ir: object layout has no field '${field.name}'`);
+        return {
+          name: field.name,
+          fieldIdx,
+          offset: memory.offset,
+          type: { kind: memory.type } as ValType,
+        };
+      });
+      const newFuncIdx = ensureAggregateHelper(`object:${key}`, fields, layout.totalSize);
+      const byName = new Map(fields.map((field) => [field.name, field]));
+      const lowering: LinearObjectLowering = {
+        typeIdx: 0,
+        fieldIdx(name: string): number {
+          const field = byName.get(name);
+          if (!field) throw new Error(`linear-ir: object shape has no field '${name}'`);
+          return field.fieldIdx;
+        },
+        linearMemory: {
+          newFuncIdx,
+          fieldCount: fields.length,
+          field(name: string): LinearMemoryFieldLowering {
+            const field = byName.get(name);
+            if (!field) throw new Error(`linear-ir: object shape has no field '${name}'`);
+            return field;
+          },
+        },
+      };
+      objects.set(key, lowering);
+      return lowering;
+    },
+    resolveRefCell(inner: ValType): IrRefCellLowering | null {
+      if (inner.kind !== "i32" && inner.kind !== "f64") return null;
+      const cached = refCells.get(inner.kind);
+      if (cached) return cached;
+      const layout = computeClassLayout(`__linear_ir_refcell_${inner.kind}`, [{ name: "value", type: inner.kind }]);
+      const value = layout.fields.get("value");
+      if (!value) throw new Error("linear-ir: ref-cell layout has no value field");
+      const memoryValue: LinearMemoryFieldLowering = { offset: value.offset, type: inner };
+      const newFuncIdx = ensureAggregateHelper(
+        `refcell:${inner.kind}`,
+        [{ name: "value", type: inner, offset: value.offset }],
+        layout.totalSize,
+      );
+      const lowering: LinearRefCellLowering = {
+        typeIdx: 0,
+        fieldIdx: 0,
+        linearMemory: { newFuncIdx, value: memoryValue },
+      };
+      refCells.set(inner.kind, lowering);
+      return lowering;
     },
     resolveVec(valType: ValType): IrVecLowering | null {
       return valType.kind === "i32" ? f64VecLayout : null;
@@ -341,4 +497,58 @@ function makeLinearIrResolver(ctx: LinearContext): IrLowerResolver & IrFromAstRe
       }
     },
   };
+
+  return { resolver, helpers };
+}
+
+function internLinearFuncType(ctx: LinearContext, def: FuncTypeDef): number {
+  const sameValType = (a: ValType, b: ValType): boolean =>
+    a.kind === b.kind && (a as { typeIdx?: number }).typeIdx === (b as { typeIdx?: number }).typeIdx;
+  for (let i = 0; i < ctx.mod.types.length; i++) {
+    const type = ctx.mod.types[i]!;
+    if (type.kind !== "func") continue;
+    if (type.params.length !== def.params.length || type.results.length !== def.results.length) continue;
+    if (
+      type.params.every((param, index) => sameValType(param, def.params[index]!)) &&
+      type.results.every((result, index) => sameValType(result, def.results[index]!))
+    ) {
+      return i;
+    }
+  }
+  const typeIdx = ctx.mod.types.length;
+  ctx.mod.types.push(def);
+  return typeIdx;
+}
+
+function linearValueTypeConverter(resolver: IrLowerResolver, funcName: string): TypeConverter<ValType> {
+  return {
+    backend: "linear",
+    convertType(type: IrType): readonly ValType[] {
+      if (type.kind === "val") return [type.val];
+      if (type.kind === "object" && resolver.resolveObject?.(type.shape)) return [{ kind: "i32" }];
+      if (type.kind === "boxed") {
+        const inner = asVal(type.inner);
+        if (inner && resolver.resolveRefCell?.(inner)) return [{ kind: "i32" }];
+      }
+      throw new Error(`linear-ir: cannot carry IR type '${type.kind}' in ${funcName}`);
+    },
+  };
+}
+
+function linearAggregateFieldType(type: IrType): Extract<ValType, { kind: "i32" | "f64" }> | null {
+  if (type.kind === "val" && (type.val.kind === "i32" || type.val.kind === "f64")) return type.val;
+  if (type.kind === "object" || type.kind === "boxed") return { kind: "i32" };
+  return null;
+}
+
+function linearObjectShapeKey(shape: IrObjectShape): string {
+  const typeKey = (type: IrType): unknown => {
+    if (type.kind === "val") return ["val", type.val.kind];
+    if (type.kind === "object") {
+      return ["object", type.shape.fields.map((field) => [field.name, typeKey(field.type)])];
+    }
+    if (type.kind === "boxed") return ["boxed", typeKey(type.inner)];
+    return [type.kind];
+  };
+  return JSON.stringify(shape.fields.map((field) => [field.name, typeKey(field.type)]));
 }

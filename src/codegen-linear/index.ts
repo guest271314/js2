@@ -211,6 +211,19 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     compileFunction(ctx, decl);
   }
 
+  // Aggregate/ref-cell allocation helpers are deliberately appended after
+  // every pre-assigned user slot. This keeps funcMap indices stable while IR
+  // lowering discovers object shapes lazily.
+  for (const helper of linearIr?.helpers ?? []) {
+    const actualFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    if (actualFuncIdx !== helper.funcIdx) {
+      throw new Error(
+        `linear-ir: deferred helper slot mismatch for '${helper.func.name}' (expected ${helper.funcIdx}, got ${actualFuncIdx})`,
+      );
+    }
+    ctx.mod.functions.push(helper.func);
+  }
+
   // ── Emit data segments for string literals ──
   if (ctx.stringLiterals.size > 0) {
     const totalSize = ctx.dataSegmentOffset - DATA_SEGMENT_BASE;

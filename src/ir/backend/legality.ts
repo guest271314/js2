@@ -12,7 +12,7 @@ import type { IrBinop, IrBlock, IrFunction, IrInstr, IrType } from "../nodes.js"
 import { asVal } from "../nodes.js";
 import type { ValType } from "../types.js";
 
-export type IrBackendKind = "wasmgc" | "linear" | "bytecode";
+export type IrBackendKind = "wasmgc" | "linear" | "bytecode" | "porffor";
 
 export interface IrBackendLegalityError {
   readonly message: string;
@@ -68,6 +68,9 @@ function checkInstr(
   } else if (backend === "bytecode") {
     const reason = bytecodeInstrError(instr);
     if (reason) reject(reason);
+  } else if (backend === "porffor") {
+    const reason = porfforInstrError(instr);
+    if (reason) reject(reason);
   }
 
   checkInstrEmbeddedTypes(instr, blockId, checkType);
@@ -80,8 +83,8 @@ function checkInstr(
 // CORE-OP families (const / arithmetic / locals-as-slots / structured control
 // flow / direct call). These lower to core Wasm and `LinearEmitter` emits them
 // byte-identically to `WasmGcEmitter`. The representation-DIVERGENT families
-// (objects, closures, boxing, strings, ref-cells, exceptions, non-fixed vec
-// mutation/iteration, promises) stay rejected here — the linear analogue lands
+// (closures, dynamic boxing, strings, exceptions, non-fixed vec
+// iteration, promises) stay rejected here — the linear analogue lands
 // with the production wiring (#2956). This mirrors `bytecodeInstrError`'s
 // allow-list shape; the operand-type gate (`linearValTypeError`) independently
 // rejects any non-{i32,i64,f32,f64} value, so allowing an op kind here never
@@ -105,6 +108,14 @@ function linearInstrError(instr: IrInstr): string | null {
     case "select":
     case "if":
     case "call":
+    // #2956 L2: aggregates and primitive ref-cells use i32 arena pointers,
+    // with field access emitted as typed linear-memory loads/stores.
+    case "object.new":
+    case "object.get":
+    case "object.set":
+    case "refcell.new":
+    case "refcell.get":
+    case "refcell.set":
     case "global.get":
     case "global.set":
     case "slot.read":
@@ -183,9 +194,86 @@ function bytecodeBinopLegal(op: IrBinop): boolean {
   }
 }
 
+// #3288 P1 / #3297 P2 — scalar/control-flow Porffor profile. Every admitted
+// family reaches a typed BackendEmitter primitive in lower.ts; heap/reference
+// families and composite ops that still need a representation decision remain
+// rejected before a Porffor emitter can observe them.
+function porfforInstrError(instr: IrInstr): string | null {
+  switch (instr.kind) {
+    case "const":
+      switch (instr.value.kind) {
+        case "i32":
+        case "i64":
+        case "f64":
+        case "bool":
+          return null;
+        default:
+          return `porffor backend does not support const '${instr.value.kind}'`;
+      }
+    case "binary":
+      return porfforBinopLegal(instr.op)
+        ? null
+        : `porffor backend does not support binary op '${instr.op}' before typed composite-op lowering`;
+    case "unary":
+      return instr.op === "ref.is_null" ? `porffor backend does not support unary op '${instr.op}'` : null;
+    case "call":
+    case "global.get":
+    case "global.set":
+    case "slot.read":
+    case "slot.write":
+    case "select":
+    case "if":
+    case "early.return":
+    case "br.label":
+    case "if.stmt":
+    case "while.loop":
+    case "for.loop":
+      return null;
+    default:
+      return `porffor backend does not support IR instruction '${instr.kind}' before typed Porffor lowering`;
+  }
+}
+
+function porfforBinopLegal(op: IrBinop): boolean {
+  switch (op) {
+    case "f64.add":
+    case "f64.sub":
+    case "f64.mul":
+    case "f64.div":
+    case "f64.eq":
+    case "f64.ne":
+    case "f64.lt":
+    case "f64.le":
+    case "f64.gt":
+    case "f64.ge":
+    case "i32.eq":
+    case "i32.ne":
+    case "i32.and":
+    case "i32.or":
+    case "i32.lt_s":
+    case "i32.le_s":
+    case "i32.gt_s":
+    case "i32.ge_s":
+    case "i32.lt_u":
+    case "i32.le_u":
+    case "i32.gt_u":
+    case "i32.ge_u":
+      return true;
+    default:
+      return false;
+  }
+}
+
 function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
   if (backend === "wasmgc") return null;
   if (backend === "linear") {
+    if (type.kind === "object") return linearAggregateTypeError(type);
+    if (type.kind === "boxed") {
+      const inner = asVal(type.inner);
+      return inner && (inner.kind === "i32" || inner.kind === "f64")
+        ? null
+        : `${backend} backend does not support boxed IR type '${type.inner.kind}'`;
+    }
     const v = asVal(type);
     if (!v) return `${backend} backend does not support IR type '${type.kind}'`;
     return linearValTypeError(v);
@@ -195,6 +283,30 @@ function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
     const v = asVal(type);
     if (!v) return `bytecode backend does not support IR type '${type.kind}'`;
     return bytecodeValTypeError(v);
+  }
+  const v = asVal(type);
+  if (!v) return `porffor backend does not support IR type '${type.kind}'`;
+  return porfforValTypeError(v);
+}
+
+function linearAggregateTypeError(type: Extract<IrType, { kind: "object" }>): string | null {
+  for (const field of type.shape.fields) {
+    if (field.type.kind === "val") {
+      if (field.type.val.kind !== "i32" && field.type.val.kind !== "f64") {
+        return `linear backend does not support aggregate field ValType '${field.type.val.kind}'`;
+      }
+      continue;
+    }
+    if (field.type.kind === "object") {
+      const nested = linearAggregateTypeError(field.type);
+      if (nested) return nested;
+      continue;
+    }
+    if (field.type.kind === "boxed") {
+      const inner = asVal(field.type.inner);
+      if (inner && (inner.kind === "i32" || inner.kind === "f64")) continue;
+    }
+    return `linear backend does not support aggregate field IR type '${field.type.kind}'`;
   }
   return null;
 }
@@ -208,7 +320,13 @@ function checkValType(
   where: string,
 ): void {
   const msg =
-    backend === "bytecode" ? bytecodeValTypeError(type) : backend === "linear" ? linearValTypeError(type) : null;
+    backend === "bytecode"
+      ? bytecodeValTypeError(type)
+      : backend === "linear"
+        ? linearValTypeError(type)
+        : backend === "porffor"
+          ? porfforValTypeError(type)
+          : null;
   if (msg) errors.push({ message: `${where}: ${msg}`, func, block });
 }
 
@@ -232,6 +350,17 @@ function bytecodeValTypeError(v: ValType): string | null {
       return null;
     default:
       return `bytecode backend does not support ValType '${v.kind}'`;
+  }
+}
+
+function porfforValTypeError(v: ValType): string | null {
+  switch (v.kind) {
+    case "i32":
+    case "i64":
+    case "f64":
+      return null;
+    default:
+      return `porffor backend does not support ValType '${v.kind}'`;
   }
 }
 

@@ -46,6 +46,7 @@ import {
   resolveWasmType,
   resolveWasmTypeForClosureReturn,
 } from "./index.js";
+import { refCellValueType } from "./registry/types.js"; // (#3328) boxed-capture valType fallback
 import {
   coerceType,
   compileExpression,
@@ -65,7 +66,12 @@ import {
   compileStatement,
 } from "./statements.js";
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
-import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
+import {
+  buildDestructureNullThrow,
+  isNullOrUndefinedLiteral,
+  structHintForBindingPattern,
+} from "./destructuring-params.js";
+import { compileObjectLiteralAsExternref } from "./literals.js";
 import {
   cacheParamDefaultArgc,
   emitF64ParamSentinelCheck,
@@ -1160,8 +1166,26 @@ export function emitArrowParamDefaults(
       if (isArrayPatternExternref) {
         (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = true;
       }
+      // (#3333) Host-free lanes, `any`-typed OBJECT pattern (no struct type
+      // resolves from the pattern): a default object LITERAL compiled against
+      // the bare externref hint materializes a typed anonymous struct the
+      // destructure's dynamic `__extern_get` reader cannot reflect — every
+      // binding read NaN. Build it through `compileObjectLiteralAsExternref`
+      // (the `__new_plain_object` dynamic carrier) instead. Mirrors the
+      // function-declaration site in function-body.ts.
+      const dynObjCarrier =
+        (ctx.standalone || ctx.wasi) &&
+        ts.isObjectBindingPattern(param.name) &&
+        paramType.kind === "externref" &&
+        ts.isObjectLiteralExpression(param.initializer) &&
+        structHintForBindingPattern(ctx, param.name) === undefined;
       try {
-        compileExpression(ctx, fctx, param.initializer, paramType);
+        if (dynObjCarrier) {
+          const t = compileObjectLiteralAsExternref(ctx, fctx, param.initializer as ts.ObjectLiteralExpression);
+          if (t === null) compileExpression(ctx, fctx, param.initializer, paramType);
+        } else {
+          compileExpression(ctx, fctx, param.initializer, paramType);
+        }
       } finally {
         if (isArrayPatternExternref) {
           (ctx as unknown as { _arrayLiteralForceVec?: boolean })._arrayLiteralForceVec = prevForceVec;
@@ -1969,9 +1993,15 @@ export function compileArrowAsClosure(
       if (cap.alreadyBoxed && (cap.type.kind === "ref" || cap.type.kind === "ref_null")) {
         // Already boxed: the field stores the ref cell directly
         refCellTypeIdx = (cap.type as { typeIdx: number }).typeIdx;
-        // Look up the original value type from the outer scope's boxed capture info
+        // Look up the original value type from the outer scope's boxed capture
+        // info; when absent (#3328 — the lifted body compiles BEFORE the
+        // construct site populates fctx.boxedCaptures), fall back to the ref
+        // cell's own field-0 type, which IS the value type. The old blind f64
+        // default retyped captured strings as numbers, so `log += 'y'` inside
+        // a capturing toString/valueOf compiled to f64.add + a null-ref
+        // placeholder that trapped on first call.
         const outerBoxed = fctx.boxedCaptures?.get(cap.name);
-        valType = outerBoxed?.valType ?? { kind: "f64" };
+        valType = outerBoxed?.valType ?? refCellValueType(ctx, refCellTypeIdx) ?? { kind: "f64" };
       } else {
         refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
         valType = cap.type;
@@ -1991,7 +2021,8 @@ export function compileArrowAsClosure(
       // through struct.get on the ref cell instead of using the raw ref value.
       const refCellTypeIdx = (cap.type as { typeIdx: number }).typeIdx;
       const outerBoxed = fctx.boxedCaptures?.get(cap.name);
-      const valType = outerBoxed?.valType ?? { kind: "f64" as const };
+      // (#3328) Cell field-0 type as the fallback — see the mutable arm above.
+      const valType = outerBoxed?.valType ?? refCellValueType(ctx, refCellTypeIdx) ?? { kind: "f64" as const };
       const refCellType: ValType = { kind: "ref_null", typeIdx: refCellTypeIdx };
       const localIdx = allocLocal(liftedFctx, cap.name, refCellType);
       selfCaptureLayoutEntries.push({ name: cap.name, fieldIdx: i + 1, localType: refCellType });
@@ -2699,7 +2730,8 @@ export function compileArrowAsCallback(
         if (cap.alreadyBoxed && (cap.type.kind === "ref" || cap.type.kind === "ref_null")) {
           refCellTypeIdx = (cap.type as { typeIdx: number }).typeIdx;
           const outerInfo = fctx.boxedCaptures?.get(cap.name);
-          valType = outerInfo?.valType ?? { kind: "f64" };
+          // (#3328) Cell field-0 type as the fallback — see the arrow-lift arm.
+          valType = outerInfo?.valType ?? refCellValueType(ctx, refCellTypeIdx) ?? { kind: "f64" };
         } else {
           refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
           valType = cap.type;
@@ -2886,7 +2918,15 @@ export function compileArrowAsCallback(
         // getter, which kept reading the creation-time snapshot. The orphaned
         // original local slot keeps receiving writebacks — harmless (no reads
         // resolve to it once localMap points at the box).
-        if (needsThis) {
+        // (#3329) DEFERRED (stored) callbacks get the same rebind: the callback
+        // fires from a LATER host call, and a SIBLING stored callback capturing
+        // the same local must alias ONE cell — without the rebind each creation
+        // minted its own cell and the last writeback won (`body += chunk` in a
+        // "data" listener was invisible to the "end" listener: the #1795 http
+        // Tier 0 shape, and the #1794 multi-listener shape). After the rebind
+        // the sibling's capture analysis sees the local as already-boxed and
+        // pushes the SAME cell.
+        if (needsThis || options?.deferredInvocation === true) {
           fctx.localMap.set(cap.name, refCellLocal);
           (fctx.boxedCaptures ??= new Map()).set(cap.name, { refCellTypeIdx, valType: cap.type });
         }

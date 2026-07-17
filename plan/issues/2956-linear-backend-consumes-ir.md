@@ -2,13 +2,11 @@
 id: 2956
 title: "Linear backend consumes the IR front-end: wire the selector + LinearEmitter into generateLinearModule"
 status: in-progress
-branch: codex/2956-l2-vec
-pr: 3110
 sprint: current
 created: 2026-07-02
-updated: 2026-07-16
-assignee: ttraenkler/codex-l2-vec
-branch: codex/2956-l2-vec
+updated: 2026-07-17
+assignee: ttraenkler/fable-epsilon
+branch: symphony/porffor/2956-after-pr-3179
 priority: medium
 horizon: xl
 feasibility: hard
@@ -25,6 +23,11 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/codegen-linear/runtime.ts
   - src/codegen-linear/index.ts
+last_ci_retry_head: null
+last_merged_pr: 3179
+claimed_by: porffor-codex-developer
+claimed_at: 2026-07-17T05:03:10.509Z
+pr: 3200
 ---
 
 # #2956 — the backend fork sits ABOVE the IR
@@ -285,3 +288,75 @@ playground corpus. There is no measured corpus improvement, so
 `scripts/linear-ir-baseline.json` is intentionally unchanged. The next L2
 work is the separately owned refcell/aggregate surface; this sub-slice does
 not claim it.
+
+## Execution status — L2 vec-MUTATION sub-slice (2026-07-17, fable-epsilon)
+
+Element store (`a[i] = v`) and single-arg `a.push(v)` on selector-claimed
+`number[]` receivers now lower through the linear-IR overlay under
+`JS2WASM_LINEAR_IR=1`. No new IR instr kinds and no emitter changes — the
+sub-slice rides the existing C2 element-store helper call:
+
+- `src/ir/from-ast.ts`: the element-store and push receiver gates admit the
+  linear scalar-i32 vec receiver via the same `isVecValueExpression` probe
+  the read arms (`.length`, element access) already use. WasmGC lane
+  unaffected (its vec receivers are always refs; `check:ir-fallbacks` OK).
+- `src/ir/backend/linear-integration.ts` `resolveFunc`: intercepts the
+  `__vec_elem_set_<typeIdx>` helper name (sentinel 0 on linear) and maps it
+  to the direct runtime's `__arr_set(ptr:i32, idx:i32, val:f64)` — same
+  signature, same grow-on-OOB / zero-fill-gap / len-extension semantics as
+  the WasmGC `ensureVecElemSet` helper (negative-idx no-op + #1977
+  forwarding resolution are safe supersets). Name-based, funcIdx-shift safe.
+
+Validated: `tests/issue-2956.test.ts` 11/11 (parity vs direct for
+setInBounds/setGrow/pushStmt; OOB-growth len-extension 507; flag-off SHA
+byte-identity; multi-arg push demotes to direct); linear-array/basic +
+cross-backend-diff 43/43; tsc clean; ratchet 6→6 / build 4→4 (corpus has
+no mutation-gated rows — baseline intentionally unchanged).
+
+**Found + filed #3332**: the DIRECT linear path returns 0 from
+expression-position push (spec: new length) and drops multi-arg push
+extras — the overlay is spec-correct where claimed, so the tests document
+the divergence with #3332-referencing assertions instead of masking it.
+
+**Remaining after this sub-slice**: refcells + aggregates via `layout.ts`
+(the L2 remainder), L3 strings (after #2955), L4 default-ON flip.
+
+## Execution status — L2 aggregate/ref-cell sub-slice implemented (2026-07-17, porffor-codex-developer)
+
+Selector-claimed numeric objects now lower through the flag-gated linear-IR
+overlay as i32 arena pointers. The resolver computes field offsets with the
+direct backend's `computeClassLayout`, and `LinearEmitter` realizes
+`object.new/get/set` plus primitive `refcell.new/get/set` as allocation calls
+and typed linear-memory loads/stores.
+
+- Aggregate constructors are deferred defined functions with signatures
+  `(field0, ...fieldN) -> i32`. They are discovered lazily but appended only
+  after every pre-assigned class/top-level function slot; the assembler checks
+  the predicted absolute index before insertion. This preserves the #2710
+  name/slot discipline and avoids a scratch-local change to the frozen emitter
+  contract.
+- Layout handles carry only target-neutral memory facts (field offset + Wasm
+  scalar type). Numeric (`f64`), boolean/pointer (`i32`), and nested-object
+  fields are admitted; other field carriers fail the linear legality gate and
+  demote before lowering.
+- The linear TypeConverter now maps object and primitive boxed/refcell IR types
+  to their i32 pointer carrier. WasmGC and bytecode conversion paths are
+  unchanged.
+- Primitive refcell allocation/get/set is wired and emitter-tested. No closure
+  promise is added: the selector does not claim closure/nested-function shapes
+  on linear today, and lifted closure slots/`call_ref` remain explicitly
+  deferred as the architect spec requires.
+- Focused coverage proves direct-path parity for numeric/boolean/nested reads,
+  mutation + strict aliasing, deferred helper index stability, and flag-off
+  SHA-256 byte identity. The overlay additionally compiles anonymous-object
+  mutation that the direct linear path currently rejects.
+
+Validation: `tests/issue-2956.test.ts` 15/15; `tests/issue-1850.test.ts`
+11/11; complete linear + cross-backend + IR proof matrix 184/184; typecheck
+clean; `check:ir-fallbacks`, `check:loc-budget`, and `check:oracle-ratchet`
+clean. Linear-IR ratchet remains `compiled=6`, `build=4` because the fixed
+playground corpus has no aggregate/refcell row, so
+`scripts/linear-ir-baseline.json` is intentionally unchanged.
+
+**Remaining after L2:** L3 strings (after #2955) and L4 default-ON + direct
+reject-list folding. The issue remains `in-progress` for those later slices.

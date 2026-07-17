@@ -26,6 +26,11 @@ export interface ClassLayout {
   ctorFuncName: string;
 }
 
+/** Canonical header/slot constants shared by classes, object literals, and IR aggregates. */
+export const LINEAR_AGGREGATE_HEADER_SIZE = 8;
+export const LINEAR_AGGREGATE_FIELD_SIZE = 8;
+export const LINEAR_GENERIC_OBJECT_TAG = 0x10;
+
 /**
  * Compute the memory layout for a class with the given fields.
  *
@@ -34,14 +39,11 @@ export interface ClassLayout {
  * @returns The computed ClassLayout
  */
 export function computeClassLayout(name: string, fieldDefs: { name: string; type: "i32" | "f64" }[]): ClassLayout {
-  const HEADER_SIZE = 8; // tag (1) + padding (3) + payload_size (4)
-  const FIELD_SIZE = 8; // each field gets 8 bytes for uniform access
-
   const fields = new Map<string, { offset: number; type: "i32" | "f64" }>();
-  let offset = HEADER_SIZE;
+  let offset = LINEAR_AGGREGATE_HEADER_SIZE;
   for (const f of fieldDefs) {
     fields.set(f.name, { offset, type: f.type });
-    offset += FIELD_SIZE;
+    offset += LINEAR_AGGREGATE_FIELD_SIZE;
   }
 
   return {
