@@ -16,6 +16,8 @@ language_feature: node-builtins
 goal: npm-library-support
 parent: 1575
 related: [1044, 1494, 1400, 1032]
+loc-budget-allow:
+  - src/codegen/extern-declarations.ts
 ---
 # node:url — URL / URLSearchParams as host constructors
 
