@@ -13,6 +13,10 @@ language_feature: compiler-internals
 goal: compiler-architecture
 related: [2855, 2856, 2857, 2858, 2859, 2950]
 origin: "carved out of #2855's umbrella scope per the 2026-07-17 IR audit (plan/log/analysis-2026-07/01-ir-audit-2026-07-17.md §2) — the promotion half of #2855's AC has not started even though the underlying buckets are already zero"
+loc-budget-allow:
+  # (#3341) +15-line rationale comment at STRICT_IR_REASONS documenting the
+  # necessary-but-not-sufficient corpus-zero condition (build-safety guardrail).
+  - src/codegen/index.ts
 ---
 
 # #3341 — STRICT_IR_REASONS hardening (per-reason)
