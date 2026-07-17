@@ -14,6 +14,34 @@ origin: "#2984 __get_builtin cluster triage (fable-sub1, 2026-07-11)"
 
 # #3150 — standalone Uint8Array base64/hex codec statics
 
+## Progress (2026-07-17, opus-a) — `fromHex` slice landed
+
+The **`Uint8Array.fromHex(string)`** static factory is now implemented
+standalone-native (`src/codegen/uint8-codec.ts` + a dispatch arm in
+`src/codegen/expressions/call-builtin-static.ts`). It decodes the hex string
+over its UTF-16 code units into the packed-`i8` Uint8Array vec (the same backing
+`new Uint8Array` / `Uint8Array.of` produce), throwing the spec's `SyntaxError`
+on odd length / illegal characters (whitespace is NOT skipped for hex). Only a
+**string-typed** argument routes here — per spec `fromHex` throws a `TypeError`
+without ToString coercion for a non-string, so a non-string arg falls through to
+the existing refusal (no silent wrong coercion, no regression). Gated on
+`noJsHost` (host lane unaffected). Covered by `tests/issue-3150.test.ts`.
+This clears the `fromHex/{illegal-characters,odd-length-input}` + core-decode
+`__get_builtin` CEs.
+
+**Remaining (this issue stays open):**
+- `Uint8Array.fromBase64` (default alphabet + padding; then the `alphabet` /
+  `lastChunkHandling` options, whitespace, `last-chunk-*` fidelity).
+- Instance methods `toHex` / `toBase64` / `setFromHex` / `setFromBase64`
+  (currently silently return `null`).
+- **Static return-type branding** so `results.js`'s
+  `Object.getPrototypeOf(arr) === Uint8Array.prototype` / `arr.buffer` assertions
+  pass — the checker doesn't know `fromHex` returns `Uint8Array` (not in the TS
+  lib), so the result is statically `any` and `instanceof`/prototype checks miss
+  even though the runtime bytes are correct. Fix: teach the checker/type-mapper
+  (or a bundled `.d.ts`) that `Uint8Array.fromHex`/`fromBase64` return
+  `Uint8Array`.
+
 ## Problem
 
 The ES2025 `Uint8Array.fromBase64` / `Uint8Array.fromHex` statics (and the

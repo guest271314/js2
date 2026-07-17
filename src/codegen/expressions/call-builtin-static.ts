@@ -50,6 +50,7 @@ import {
   typedArrayVecStorage,
 } from "../index.js";
 import { ensureNativeArrayFromMapped, ensureNativeIteratorRuntime } from "../iterator-native.js";
+import { ensureUint8FromHex } from "../uint8-codec.js";
 import { compileArrayConstructorCall, compileObjectLiteralAsExternref } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js";
 import {
@@ -668,6 +669,37 @@ export function compileBuiltinStaticCall(
     fctx.body.push({ op: "drop" });
     fctx.body.push({ op: "ref.null.extern" });
     return { kind: "externref" };
+  }
+
+  // (#3150) Standalone-native `Uint8Array.fromHex(string)` — decode a hex string
+  // to a fresh packed-`i8` Uint8Array vec (the same backing `new Uint8Array` /
+  // `Uint8Array.of` produce standalone). Only a STRING-typed argument routes here
+  // — per spec `fromHex(arg)` throws a TypeError WITHOUT ToString coercion for a
+  // non-string, so a non-string arg falls through to the existing refusal (no
+  // silent wrong coercion, no regression). Options / `fromBase64` / instance
+  // `toHex`/`setFromHex` are follow-ups; this slice is the hex static factory.
+  if (
+    noJsHost(ctx) &&
+    ts.isIdentifier(propAccess.expression) &&
+    propAccess.expression.text === "Uint8Array" &&
+    propAccess.name.text === "fromHex" &&
+    expr.arguments.length === 1 &&
+    !ts.isSpreadElement(expr.arguments[0]!)
+  ) {
+    const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+    if (isStringType(argTsType)) {
+      const strVt = nativeStringType(ctx);
+      const at = compileExpression(ctx, fctx, expr.arguments[0]!, strVt);
+      if (at) {
+        if (!valTypesMatch(at, strVt)) coerceType(ctx, fctx, at, strVt);
+        const fromHexIdx = ensureUint8FromHex(ctx);
+        if (fromHexIdx >= 0) {
+          fctx.body.push({ op: "call", funcIdx: fromHexIdx });
+          const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+          return { kind: "ref_null", typeIdx: vecTypeIdx };
+        }
+      }
+    }
   }
 
   // (#2592) Standalone-native TypedArray static factories — `TA.of(...)` and
