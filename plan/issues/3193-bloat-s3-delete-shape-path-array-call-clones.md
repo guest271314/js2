@@ -1,9 +1,10 @@
 ---
 id: 3193
 title: "bloat S3: delete the 5 shape-path Array.prototype.*.call clones, route through the synthetic-call rewrite"
-status: ready
+status: in-progress
+assignee: dev-3193
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-17
 priority: medium
 feasibility: medium
 task_type: refactor
