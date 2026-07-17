@@ -84,6 +84,7 @@ import {
 } from "../string-ops.js";
 import { emitSymbolToString } from "../symbol-native.js";
 import { ensureTaMapFilterHelper } from "../ta-hof-map-filter.js";
+import { ensureUint8ToBase64, ensureUint8ToHex } from "../uint8-codec.js";
 import { tryCompileTemporalMethodCall } from "../temporal-native.js";
 import { ensureTextEncodingHelpers } from "../text-encoding-native.js";
 import { defaultValueInstrs, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
@@ -212,6 +213,26 @@ export function compileReceiverMethodCall(
       }
       fctx.body.push({ op: "call", funcIdx: decodeU8Idx });
       return nativeStringType(ctx);
+    }
+
+    // (#3150) Standalone-native `Uint8Array.prototype.toHex()` / `.toBase64()` —
+    // encode the packed-`i8` Uint8Array vec (the same backing `new Uint8Array` /
+    // `Uint8Array.of` / `fromHex` produce) to a native hex / standard-base64
+    // string. No-argument DEFAULT-options form only: a `.toBase64({...})` call
+    // with an options object carries `arguments.length > 0` and falls through to
+    // the existing dynamic-shape refusal, so no wrong default (base64url /
+    // omitPadding) is silently applied. Standalone-pure (0 host imports).
+    if (recvSym === "Uint8Array" && (method === "toHex" || method === "toBase64") && expr.arguments.length === 0) {
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i8_byte", { kind: "i8" });
+      const expected: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
+      const recvT = compileExpression(ctx, fctx, propAccess.expression, expected);
+      if (recvT && !valTypesMatch(recvT, expected)) coerceType(ctx, fctx, recvT, expected);
+      else if (recvT === null) fctx.body.push({ op: "ref.null", typeIdx: vecTypeIdx });
+      const encIdx = method === "toHex" ? ensureUint8ToHex(ctx) : ensureUint8ToBase64(ctx);
+      if (encIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: encIdx });
+        return nativeStringType(ctx);
+      }
     }
   }
 
