@@ -87,3 +87,204 @@ describe("Default params: caller-side insertion (#869)", () => {
     expect(result).toBe(0);
   });
 });
+
+/**
+ * #869 — extend the caller-side constant path to fold compile-time-constant
+ * numeric *expressions* (`30 * 1000`, `1 << 4`, `Infinity`, `NaN`, …) so they
+ * are emitted directly at the call site instead of taking the sNaN sentinel
+ * fallback. Two properties are locked in:
+ *   1. Foldable defaults give the correct value both when omitted and supplied.
+ *   2. NON-constant defaults (side-effecting calls, references to other params)
+ *      are NEVER folded — they must still evaluate at the callee, and only when
+ *      the argument is actually missing.
+ */
+describe("Default params: constant-folded expression defaults (#869)", () => {
+  it("folds arithmetic default (30 * 1000) when arg omitted", async () => {
+    expect(
+      await runTest(`
+        function f(a: number, b: number = 30 * 1000): number { return b; }
+        export function test(): number { return f(1); }
+      `),
+    ).toBe(30000);
+  });
+
+  it("folds bitwise shift default (1 << 4)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 1 << 4): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(16);
+  });
+
+  it("folds chained multiplication (60 * 60 * 24)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 60 * 60 * 24): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(86400);
+  });
+
+  it("folds parenthesized arithmetic ((2 + 3) * 4)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = (2 + 3) * 4): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(20);
+  });
+
+  it("folds exponentiation (2 ** 10)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 2 ** 10): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(1024);
+  });
+
+  it("folds modulo (7 % 3)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 7 % 3): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(1);
+  });
+
+  it("folds bitwise-and of hex literals (0xff & 0x0f)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 0xff & 0x0f): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(15);
+  });
+
+  it("folds bitwise-not (~5)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = ~5): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(-6);
+  });
+
+  it("folds logical-and default (1 && 7)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 1 && 7): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(7);
+  });
+
+  it("folds logical-or default (0 || 9)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 0 || 9): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(9);
+  });
+
+  it("folds -Infinity default", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = -Infinity): number { return a === -Infinity ? 1 : 0; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(1);
+  });
+
+  it("folds explicit NaN default (fires when omitted)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = NaN): number { return a !== a ? 1 : 0; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(1);
+  });
+
+  it("folds i32 native-int param default (3 << 2)", async () => {
+    expect(
+      await runTest(`
+        type i32 = number;
+        function f(a: i32 = 3 << 2): i32 { return a; }
+        export function test(): i32 { return f(); }
+      `),
+    ).toBe(12);
+  });
+
+  it("supplied arg overrides a folded default", async () => {
+    expect(
+      await runTest(`
+        function f(a: number, b: number = 30 * 1000): number { return b; }
+        export function test(): number { return f(1, 5); }
+      `),
+    ).toBe(5);
+  });
+
+  it("explicit NaN argument is NOT treated as missing (folded default)", async () => {
+    // Regression guard: a caller-side folded default must still distinguish an
+    // explicit NaN argument from an omitted one.
+    expect(
+      await runTest(`
+        function f(a: number = 6 * 7): number { return a !== a ? 1 : 0; }
+        export function test(): number { return f(NaN); }
+      `),
+    ).toBe(1);
+  });
+
+  it("omitted arg uses the folded default value", async () => {
+    expect(
+      await runTest(`
+        function f(a: number = 6 * 7): number { return a; }
+        export function test(): number { return f(); }
+      `),
+    ).toBe(42);
+  });
+
+  // --- NON-constant defaults must NOT be folded (side effects / param refs) ---
+
+  it("side-effecting default expression is preserved (evaluated per omitted call)", async () => {
+    expect(
+      await runTest(`
+        let c = 0;
+        function inc(): number { c++; return c; }
+        function f(a: number = inc()): number { return a; }
+        export function test(): number { return f() + f(); }
+      `),
+    ).toBe(3); // 1 + 2
+  });
+
+  it("side-effecting default is NOT evaluated when the arg is supplied", async () => {
+    expect(
+      await runTest(`
+        let c = 0;
+        function inc(): number { c++; return c; }
+        function f(a: number = inc()): number { return c; }
+        export function test(): number { return f(9); }
+      `),
+    ).toBe(0); // inc() never runs
+  });
+
+  it("default referencing an earlier parameter is NOT folded", async () => {
+    expect(
+      await runTest(`
+        function f(a: number, b: number = a + 1): number { return b; }
+        export function test(): number { return f(10); }
+      `),
+    ).toBe(11);
+  });
+
+  it("default referencing an earlier parameter (multiplication)", async () => {
+    expect(
+      await runTest(`
+        function f(a: number, b: number = a * 2): number { return b; }
+        export function test(): number { return f(5); }
+      `),
+    ).toBe(10);
+  });
+});
