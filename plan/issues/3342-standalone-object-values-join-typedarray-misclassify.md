@@ -16,6 +16,8 @@ language_feature: standalone-completeness, array-join, type-inference
 goal: standalone-parity
 related: [3155, 3170]
 origin: "carved out of #3155 (fix-standalone-object-keys-join, opus-c 2026-07-17) — Object.keys().join was fixed via the native externref-join path, but Object.values()/getOwnPropertyNames() take a DIFFERENT, distinct-root-cause path."
+loc-budget-allow:
+  - src/codegen/expressions/calls-closures.ts
 ---
 
 # #3342 — standalone `Object.values(o).join` / `Object.getOwnPropertyNames(o).join` leak `env::Uint8ClampedArray_join`

@@ -1506,16 +1506,11 @@ export function tryExternClassMethodOnAny(
     if (dsAny !== undefined) return dsAny;
   }
 
-  // (#3342) `join` on an `any`-typed receiver is ambiguous across `Array` and
-  // every `TypedArray` view — all declare a `join` extern with all-externref
-  // params. The first-match loop below binds whichever registered first, which
-  // is a TypedArray (`env::Uint8ClampedArray_join`). That host import is
-  // unsatisfiable under standalone/wasi, so the module fails to instantiate —
-  // e.g. `(Object.values(o) as any).join(",")` /
-  // `(Object.getOwnPropertyNames(o) as any).join(",")`, whose results are boxed
-  // externref arrays. Route to the native externref `join`
-  // (`compileArrayJoinExtern`, host-free under noJsHost since #3155) instead;
-  // the JS-host lane keeps the existing import binding (byte-identical).
+  // (#3342) `join` on an `any` receiver: the first-match loop below binds the
+  // first extern class declaring it — a TypedArray (`env::Uint8ClampedArray_join`),
+  // unsatisfiable standalone (e.g. `(Object.values(o) as any).join(",")`). Route
+  // to the native externref `join` (host-free under noJsHost since #3155); host
+  // lane keeps the existing binding (byte-identical).
   if (noJsHost(ctx) && methodName === "join") {
     const nativeJoin = compileArrayJoinExtern(ctx, fctx, propAccess, expr);
     if (nativeJoin !== null) return nativeJoin;
