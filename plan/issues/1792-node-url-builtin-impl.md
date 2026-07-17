@@ -1,10 +1,12 @@
 ---
 id: 1792
 title: "node:url — URL / URLSearchParams as host constructors"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
+assignee: ttraenkler/opus-b
 created: 2026-06-03
-updated: 2026-06-03
+updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -56,3 +58,35 @@ Tier 0 (JS-host target — standalone deferred):
 
 `tests/issue-1792.test.ts` — compile each Tier 0 snippet under JS-host config
 and assert the result against the host's native `URL`.
+
+## Resolution (opus-b, 2026-07-17)
+
+Wired `URL` / `URLSearchParams` as extern-class host constructors, mirroring the
+`Set`/`Map`/`EventEmitter` (#1794) machinery:
+
+1. **Global form** (`new URL(...)` / `new URLSearchParams(...)`):
+   `registerBuiltinExternClasses` (`src/codegen/extern-declarations.ts`)
+   registers both with their method/property tables, so construction lowers to
+   the `URL_new` / `URLSearchParams_new` host imports. `builtinCtors`
+   (`src/runtime.ts`, `typeof URL`/`URLSearchParams` guarded) binds them to the
+   real WHATWG globals. Skipped under `nativeStrings` (standalone) — a pure-Wasm
+   URL parser is deferred (approach step 4).
+2. **Import form** (`import { URL } from "node:url"`):
+   `NODE_BUILTIN_CLASS_TYPED_STUBS.url` (`src/import-resolver.ts`) supplies the
+   #1794 typed `declare namespace url { class URL {…} } + declare const URL`
+   stub → `namespacePath: ["url"]` → runtime `_resolveNamespacedClass` binds to
+   `require("url").URL` (functionally `=== globalThis.URL`).
+3. Instance property reads (`.pathname`, `.searchParams`, …) flow through the
+   generic `__extern_get` host import; method calls (`.get`, `.getAll`, …)
+   through `__extern_method_call`.
+4. `fileURLToPath` / `pathToFileURL` (AC4) were already routed via the existing
+   `NODE_BUILTIN_FN_TYPED_STUBS.url` named-function imports — verified still
+   working.
+
+**Acceptance:** AC1 (relative pathname → `/a/b`; the issue's `=== "/b"` is a typo
+— Node resolves `./b` against `file:///a/` to `/a/b`), AC2 (searchParams.get),
+AC3 (getAll), AC4 (fileURLToPath), AC6 (global + import forms) all pass. AC5 is
+the `Uint8Array`↔`Buffer` bridge — that's #1793's scope, not URL.
+
+**Note:** Tier 0 covers JS-host mode only. Standalone (WASI) URL is deferred
+(#1471/#1472 family) — a follow-up would port a pure-TS URL parser.

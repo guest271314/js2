@@ -110,6 +110,48 @@ const NODE_BUILTIN_CLASS_TYPED_STUBS: Record<string, Record<string, string>> = {
       "setMaxListeners(n: number): any;",
     ].join("\n    "),
   },
+  // (#1792) node:url — the WHATWG `URL` / `URLSearchParams` classes as named
+  // imports (`import { URL } from "node:url"`). The global form `new URL(...)`
+  // is served by the registerBuiltinExternClasses global registration; this
+  // stub gives the IMPORT form the same #1794 extern-class shape with
+  // namespacePath ["url"] so runtime `_resolveNamespacedClass` binds it to
+  // `deps.url ?? require("url")` — functionally the same host constructor as
+  // the global (`require("url").URL === globalThis.URL` in Node).
+  url: {
+    URL: [
+      "constructor(url: any, base?: any);",
+      "readonly href: string;",
+      "readonly origin: string;",
+      "readonly protocol: string;",
+      "readonly username: string;",
+      "readonly password: string;",
+      "readonly host: string;",
+      "readonly hostname: string;",
+      "readonly port: string;",
+      "readonly pathname: string;",
+      "readonly search: string;",
+      "readonly searchParams: any;",
+      "readonly hash: string;",
+      "toString(): string;",
+      "toJSON(): string;",
+    ].join("\n    "),
+    URLSearchParams: [
+      "constructor(init?: any);",
+      "readonly size: number;",
+      "append(name: string, value: string): any;",
+      "delete(name: string, value?: string): any;",
+      "get(name: string): any;",
+      "getAll(name: string): any;",
+      "has(name: string, value?: string): boolean;",
+      "set(name: string, value: string): any;",
+      "sort(): any;",
+      "toString(): string;",
+      "forEach(cb: any): any;",
+      "entries(): any;",
+      "keys(): any;",
+      "values(): any;",
+    ].join("\n    "),
+  },
 };
 
 /** (#1794) Lookup: is `name` a known node-builtin class export of `moduleName`? */

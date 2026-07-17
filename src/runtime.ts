@@ -7588,6 +7588,13 @@ function resolveImport(
           ...(typeof Intl !== "undefined" && typeof Intl.NumberFormat !== "undefined"
             ? { NumberFormat: Intl.NumberFormat }
             : {}),
+          // (#1792) node:url — WHATWG URL / URLSearchParams globals (Node 18+ /
+          // every browser). Registered as extern-class host constructors so
+          // `new URL(...)` / `new URLSearchParams(...)` bind to the real host
+          // constructor; property/method reads flow through __extern_get /
+          // __extern_method_call.
+          ...(typeof URL !== "undefined" ? { URL } : {}),
+          ...(typeof URLSearchParams !== "undefined" ? { URLSearchParams } : {}),
         };
         let Ctor = deps?.[intent.className] ?? builtinCtors[intent.className];
         // #1044 — Resolve via namespace path (e.g. require('http').Server)
