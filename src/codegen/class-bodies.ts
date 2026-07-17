@@ -56,6 +56,7 @@ import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitWasiErrorConstructor, getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import {
+  emitStandaloneArrayConstructor, // (#2917) native `class Sub extends Array`
   emitStandaloneObjectConstructor, // (#3238) native `class Sub extends Object`
   emitStandaloneVecBuiltinConstructor, // (#3239) native `class Sub extends <TypedArray|SharedArrayBuffer>`
   STANDALONE_VEC_BUILTIN_PARENTS,
@@ -1778,14 +1779,21 @@ function compileClassBodiesInner(
           // (#3238) `class Sub extends Object` — construct a fresh native plain
           // object instead of leaking the `env::__new_Object` host import. The
           // subclass proto/brand fixups below re-point [[Prototype]].
-          emitStandaloneObjectConstructor(ctx, implicitForwarderArity);
-          funcIdx = ctx.funcMap.get(importName);
+          // (#2917) The helper registers PER-ARITY (`__new_Object@N`) and
+          // returns the funcIdx — a plain-name lookup keyed off another call
+          // site's arity mis-called (extra args left on the operand stack
+          // became the forwarder's return value).
+          funcIdx = emitStandaloneObjectConstructor(ctx, implicitForwarderArity);
+        } else if ((ctx.wasi || ctx.standalone) && parentName === "Array") {
+          // (#2917) `class Sub extends Array` — native `$__vec_externref`
+          // backing honoring the Array(...) argument semantics, dropping the
+          // `env::__new_Array` host-import leak.
+          funcIdx = emitStandaloneArrayConstructor(ctx, implicitForwarderArity);
         } else if ((ctx.wasi || ctx.standalone) && STANDALONE_VEC_BUILTIN_PARENTS.has(parentName)) {
           // (#3239) `class Sub extends <TypedArray | SharedArrayBuffer>` — native
           // empty-vec parent, dropping the `env::__new_<Parent>` host import.
           // Identity-only (instanceof is statically resolved); see the helper.
-          emitStandaloneVecBuiltinConstructor(ctx, importName, implicitForwarderArity);
-          funcIdx = ctx.funcMap.get(importName);
+          funcIdx = emitStandaloneVecBuiltinConstructor(ctx, importName, implicitForwarderArity);
         } else {
           funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
           flushLateImportShifts(ctx, fctx);
@@ -2979,15 +2987,19 @@ export function compileSuperCall(
       // (#3238) Explicit `super(...)` in a `class Sub extends Object` ctor —
       // native fresh plain object, no `env::__new_Object` leak. Arg side
       // effects are still evaluated below and passed as (ignored) params.
-      emitStandaloneObjectConstructor(ctx, forwardArity);
-      funcIdx = ctx.funcMap.get(importName);
+      // (#2917) Per-arity helper registration; see the implicit-ctor site.
+      funcIdx = emitStandaloneObjectConstructor(ctx, forwardArity);
+    } else if ((ctx.wasi || ctx.standalone) && builtinParent === "Array") {
+      // (#2917) Explicit `super(...)` in a `class Sub extends Array` ctor —
+      // native `$__vec_externref` backing honoring the Array(...) argument
+      // semantics (args are forwarded, NOT ignored), no `env::__new_Array` leak.
+      funcIdx = emitStandaloneArrayConstructor(ctx, forwardArity);
     } else if ((ctx.wasi || ctx.standalone) && STANDALONE_VEC_BUILTIN_PARENTS.has(builtinParent)) {
       // (#3239) Explicit `super(...)` in a `class Sub extends <TypedArray |
       // SharedArrayBuffer>` ctor — native empty-vec parent, no
       // `env::__new_<Parent>` leak. Arg side effects are still evaluated below
       // and passed as (ignored) params.
-      emitStandaloneVecBuiltinConstructor(ctx, importName, forwardArity);
-      funcIdx = ctx.funcMap.get(importName);
+      funcIdx = emitStandaloneVecBuiltinConstructor(ctx, importName, forwardArity);
     } else {
       funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
