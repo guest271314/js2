@@ -1,7 +1,9 @@
 ---
 id: 3343
 title: "In-Wasm dynamic-$Object recursive read runs away at scale (spurious back-edge on ~60+-node ASTs)"
-status: ready
+status: done
+completed: 2026-07-17
+assignee: ttraenkler/senior-dev
 sprint: current
 created: 2026-07-17
 priority: high
@@ -15,6 +17,12 @@ goal: runtime-eval
 parent: 2927
 related: [2937, 3308, 2928]
 depends_on: []
+# (#3343) The fix is a ~1-line correctness change INSIDE compileForStatement's
+# for-init loop-var binding — it is intrinsic to that function and cannot be
+# relocated to a subsystem module. loops.ts sits at its god-file ceiling, so the
+# fix + its explanatory comment cross it by a few lines. Justified allowance.
+loc-budget-allow:
+  - src/codegen/statements/loops.ts
 ---
 
 # #3343 — In-Wasm dynamic-`$Object` recursive read runs away at scale
@@ -84,14 +92,79 @@ does. Likely a hash/slot-reuse interaction in the dynamic-`$Object` field store
 
 ## Acceptance criteria
 
-- [ ] Root-cause the spurious back-edge in the in-Wasm dynamic-`$Object` read
+- [x] Root-cause the spurious back-edge in the in-Wasm dynamic-`$Object` read
       path (identify the aliasing read: node type, field, collision condition).
-- [ ] `pnpm run dogfood:acorn-probe` reports **`match`** (±0 node count) for the
-      corpus script files currently marked `runaway`/`undercount` (≥ 10 of 13).
-- [ ] A minimal regression test (multi-statement program, exhaustive recursive
-      `$Object` walk terminates with the correct node count).
+      **Re-diagnosed** — the back-edge is NOT a `$Object` read: the reads are
+      faithful. It is a loop-counter control-flow bug (see below).
+- [x] `pnpm run dogfood:acorn-probe` reports **`match`** (±0 node count) for the
+      corpus script files currently marked `runaway`/`undercount` — now **13/13
+      match** (was 11 runaway / 2 undercount).
+- [x] A minimal regression test (multi-statement program, exhaustive recursive
+      walk terminates with the correct node count) — `tests/issue-3343.test.ts`.
 
-## Implementation Plan (arch, 2026-07-17)
+## Root cause (RESOLVED 2026-07-17) — NOT a `$Object` read bug
+
+The issue's "`$Object` hash/slot aliasing" hypothesis is **wrong**. The dynamic
+reads are perfectly faithful (verified by wrapping the host `__extern_get` seam
+and tracing every read on a walk of `loops.js`: 0 non-deterministic reads, no
+back-edge in the object graph, `type` reads consistent). The runaway is a
+**control-flow codegen bug**: the loop **counter** is corrupted, not the data.
+
+**Mechanism** (proven by disassembling the acorn-compiled walker to WAT):
+
+A block-scoped `for (let i = 0; i < len; i++)` loop counter is compiled to a
+**shared module global** (`$__mod_i`) instead of a per-invocation Wasm local,
+**whenever a same-named module-level variable exists**. Compiled-acorn has a
+top-level `i` → global `$__mod_i`, so **every** function's `for (let i)` aliased
+that one global. In a **recursive** walk, `w(node[i])` re-enters `w`, whose own
+array loop reuses `$__mod_i`, clobbering the caller's counter. Nested length-1
+arrays leave the global at `1`, so the outer loop reads `1` → `i++` → `2` →
+re-reads `node[2]` **forever** (the runaway). Single-construct ASTs never recurse
+through nested arrays, so the global is never clobbered mid-loop — which is why
+`≤15`-node walks were `±0` faithful and only `~60+`-node trees ran away. The 2
+"undercount" corpus files are the same bug where a `===`-visited-set walk
+terminates (finite cyclic graph) but skips the re-entered nodes.
+
+The WAT of the walker's array loop showed `global.set $__mod_i` for init/`i++`
+and `call <w>` (the recursion) in the loop body — an unambiguous confirmation.
+
+**Fix**: `src/codegen/statements/loops.ts` `compileForStatement` bound a for-head
+declaration to `ctx.moduleGlobals.get(name)` whenever the name was not already a
+function local. `let`/`const` for-head bindings are **not** hoisted into
+`localMap` (only `var` is), so the existing `hasLocalShadow` guard (the #1745
+`var` fix) missed them and the block-scoped counter grabbed the module global. A
+`for (let/const i)` **always** creates a fresh lexical binding (ECMA-262 §14.7.4);
+inside a function it must be a per-invocation local. The fix adds
+`blockScopedInsideFunction = !isVar && fctx.name !== "__module_init"` and skips
+the module-global path in that case. `var` is unchanged (function-hoist →
+`hasLocalShadow`); module-top-level `let`/`const` (`__module_init`) is unchanged.
+for-of / for-in loop vars already bind via `allocLocal` (never the global) and
+were never affected. Modules without a function-`for(let X)` / module-global-`X`
+name collision are byte-identical.
+
+**Why this gated E2 (#2928)**: the bytecode emitter consumes the AST by
+recursively walking every node in-Wasm — exactly the recursive `for (let i)`
+array iteration that the shared global broke. With per-invocation locals, the
+emitter's walk terminates correctly on any tree.
+
+**Validation**: `dogfood:acorn-probe` 13/13 match; `tests/issue-3343.test.ts`
+2/2; equivalence loop/closure/recursion subset 105/106 (the 1 failure is a
+pre-existing stale-harness test, confirmed by reverting the change). Pre-existing
+failures in `tests/i32-loop-inference.test.ts`, `tests/labeled-loops.test.ts`,
+`tests/issue-790.test.ts` are stale minimal-import harnesses on `main` (identical
+with the fix disabled) — out of scope.
+
+## Implementation Plan (arch, 2026-07-17) — SUPERSEDED / DISPROVEN
+
+> **Superseded 2026-07-17.** This pre-implementation spec assumed the runaway
+> was a standalone `$Object` open-hash-map read bug (`__obj_find` /
+> `__obj_grow` / externref-identity). Empirical root-causing **disproved every
+> one of these hypotheses**: the probe runs in **host mode** (`__extern_get` is
+> a JS import, not the native hash-map), the traced reads are **faithful** (0
+> non-deterministic reads, no object-graph back-edge), and the actual defect is
+> a **control-flow codegen bug** — a `for (let i)` loop counter aliasing a
+> module global (see "## Root cause (RESOLVED)" above). Kept verbatim below as a
+> record of the ruled-out hypotheses; do NOT act on it.
 
 > **Leverage note.** With #3348 resolved as a harness artifact (not a
 > regression), THIS is the real remaining substrate blocker on the
