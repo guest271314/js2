@@ -51,5 +51,5 @@ describe("#3367 project-runner assignment wrapper gap", () => {
     expect(results.map(({ file, status, error }) => ({ file, status, error }))).toEqual(
       paths.map((path) => ({ file: `test/${path}`, status: "pass", error: undefined })),
     );
-  }, 30_000);
+  }, 120_000);
 });

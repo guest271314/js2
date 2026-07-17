@@ -3631,6 +3631,63 @@ export function finalizeStructAndDynamicMemberGet(
   // Does NOT apply to class instances (ctx.classSet) to avoid disrupting typed field access (#856).
   {
     const structObjType = resolveWasmType(ctx, objType);
+    const structObjTypeIdx =
+      structObjType.kind === "ref" || structObjType.kind === "ref_null" ? structObjType.typeIdx : undefined;
+
+    // A widened Object.defineProperty data property can have an exact Wasm
+    // struct type even when TypeScript cannot recover its synthetic type name
+    // (notably a module-global `var obj = {}`). The field already contains the
+    // descriptor's value; sending this read to __extern_get only sees the
+    // descriptor sidecar, whose value bit is deliberately absent for struct
+    // fields, and therefore produces undefined/NaN. Prefer the exact compiled
+    // field before the last-resort host-MOP path. Runtime-sidecar properties
+    // and accessors were handled above, so this is the ordinary static field
+    // lane that a successfully resolved typeName would have taken.
+    const exactStructField =
+      structObjTypeIdx === undefined
+        ? undefined
+        : findAlternateStructsForField(ctx, propName, -1).find(
+            (candidate) => candidate.structTypeIdx === structObjTypeIdx,
+          );
+    if (!typeName && exactStructField) {
+      const structExprType = compileExpression(ctx, fctx, expr.expression);
+      if (structExprType?.kind === "ref_null") {
+        emitNullGuardedStructGet(
+          ctx,
+          fctx,
+          structExprType,
+          exactStructField.fieldType,
+          exactStructField.structTypeIdx,
+          exactStructField.fieldIdx,
+          propName,
+          true,
+        );
+        if (exactStructField.fieldType.kind === "ref") {
+          return { kind: "ref_null", typeIdx: exactStructField.fieldType.typeIdx };
+        }
+      } else if (structExprType?.kind === "externref") {
+        emitExternrefToStructGet(
+          ctx,
+          fctx,
+          exactStructField.fieldType,
+          exactStructField.structTypeIdx,
+          exactStructField.fieldIdx,
+          propName,
+          true,
+        );
+        if (exactStructField.fieldType.kind === "ref") {
+          return { kind: "ref_null", typeIdx: exactStructField.fieldType.typeIdx };
+        }
+      } else if (structExprType) {
+        fctx.body.push({
+          op: "struct.get",
+          typeIdx: exactStructField.structTypeIdx,
+          fieldIdx: exactStructField.fieldIdx,
+        });
+      }
+      return exactStructField.fieldType;
+    }
+
     // (#2838 L4) Route a field-absent read on a typed function-constructor
     // (`__fnctor_*`) or inferred anon-object (`__anon*`) struct receiver through
     // this host-MOP / sidecar path as well — so a prototype accessor installed at
