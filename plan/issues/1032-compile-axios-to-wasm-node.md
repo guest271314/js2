@@ -2,9 +2,9 @@
 id: 1032
 title: "Compile axios to Wasm — Node builtins routed as host imports; harvest error patterns"
 horizon: l
-status: ready
+status: in-progress
 created: 2026-04-11
-updated: 2026-04-28
+updated: 2026-07-17
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ goal: npm-library-support
 sprint: current
 depends_on: [1044]
 ---
+
 # #1032 — Compile axios to Wasm as a real-world I/O stress test
 
 ## Goal
@@ -19,10 +20,11 @@ depends_on: [1044]
 Use [axios](https://github.com/axios/axios) as an out-of-band stress test for the js2wasm compiler, with a specific focus on **Node.js built-in dependencies being treated as host imports** rather than compile errors.
 
 axios is structurally different from the lodash stress test (#1031):
-- **lodash** is pure compute — exercises language semantics, iteration, closures, prototype chain
-- **axios** is I/O-oriented — exercises the *host boundary*: HTTP, streams, URL parsing, buffers, events, zlib, timers, environment detection
 
-Compiling axios forces us to decide how js2wasm's runtime model handles Node.js builtins: they are not part of the ES spec, they are **host services**. The goal of this issue is to treat them as such — route them through host imports — rather than trying to compile or polyfill them. If we can compile axios's *pure* code paths while the Node builtins flow through as imports, we get:
+- **lodash** is pure compute — exercises language semantics, iteration, closures, prototype chain
+- **axios** is I/O-oriented — exercises the _host boundary_: HTTP, streams, URL parsing, buffers, events, zlib, timers, environment detection
+
+Compiling axios forces us to decide how js2wasm's runtime model handles Node.js builtins: they are not part of the ES spec, they are **host services**. The goal of this issue is to treat them as such — route them through host imports — rather than trying to compile or polyfill them. If we can compile axios's _pure_ code paths while the Node builtins flow through as imports, we get:
 
 1. A working HTTP client that reuses the host runtime's Node implementation
 2. A clean line between "compile it" and "import it"
@@ -69,12 +71,14 @@ This is the same pattern as `__extern_method_call` for generic JS object method 
 Compiling the whole axios entry point at once is ambitious. Start with the browser adapter only (no Node builtins), then add the Node adapter:
 
 **Tier 1 — axios pure code, no adapter:**
+
 - `axios/lib/utils.js` — utility helpers
 - `axios/lib/helpers/bind.js`, `cookies.js`, `isAbsoluteURL.js`
 - `axios/lib/core/buildFullPath.js`, `mergeConfig.js`
 - `axios/lib/defaults/transitional.js`
 
 **Tier 2 — core module graph without network:**
+
 - `axios/lib/core/Axios.js`
 - `axios/lib/core/InterceptorManager.js`
 - `axios/lib/core/AxiosError.js`
@@ -82,16 +86,19 @@ Compiling the whole axios entry point at once is ambitious. Start with the brows
 - `axios/lib/cancel/isCancel.js`
 
 **Tier 3 — browser adapter (uses `XMLHttpRequest` / `fetch` — host imports):**
+
 - `axios/lib/adapters/xhr.js`
 - `axios/lib/adapters/fetch.js`
 
 **Tier 4 — Node adapter (the main target of this issue):**
+
 - `axios/lib/adapters/http.js` — imports `http`, `https`, `url`, `zlib`, `stream`, `util`, `follow-redirects`
 - `axios/lib/helpers/buildURL.js`
 - `axios/lib/helpers/formDataToStream.js` — imports `stream`
 - `axios/lib/platform/node/*` — Node-specific platform helpers
 
 **Skip entirely:**
+
 - `follow-redirects` — third-party dependency, out of scope. Treat as host import.
 - `form-data` — third-party dependency. Treat as host import.
 - `proxy-from-env` — third-party. Host import.
@@ -103,19 +110,32 @@ Currently js2wasm compiles TypeScript source and resolves `import` statements. F
 ```ts
 // src/codegen/imports.ts (approximate)
 const NODE_HOST_IMPORT_MODULES = new Set([
-  'http', 'https', 'http2', 'url', 'querystring',
-  'stream', 'stream/web', 'events', 'buffer',
-  'zlib', 'util', 'path', 'process',
-  'net', 'tls', 'fs', 'crypto',
+  "http",
+  "https",
+  "http2",
+  "url",
+  "querystring",
+  "stream",
+  "stream/web",
+  "events",
+  "buffer",
+  "zlib",
+  "util",
+  "path",
+  "process",
+  "net",
+  "tls",
+  "fs",
+  "crypto",
   // and the node: prefix variants
-  ...[...above].map(m => `node:${m}`),
+  ...[...above].map((m) => `node:${m}`),
 ]);
 
 function resolveImport(modulePath: string): ResolvedImport {
   if (NODE_HOST_IMPORT_MODULES.has(modulePath)) {
     return {
-      kind: 'host',
-      hostModule: modulePath.replace(/^node:/, ''),
+      kind: "host",
+      hostModule: modulePath.replace(/^node:/, ""),
       // emit externref import for each named symbol used
     };
   }
@@ -128,8 +148,8 @@ The import emission path should then generate a WIT-style externref import per u
 **At runtime** (JS host mode), the runtime.ts resolveImport handler receives the Node module name and imports the actual Node module:
 
 ```ts
-if (importModule === 'http' && importName === 'request') {
-  return require('http').request;
+if (importModule === "http" && importName === "request") {
+  return require("http").request;
 }
 ```
 
@@ -138,25 +158,25 @@ if (importModule === 'http' && importName === 'request') {
 Create `scripts/axios-stress.ts`:
 
 ```ts
-import { compile } from '../src/index.ts';
-import { readFileSync } from 'node:fs';
+import { compile } from "../src/index.ts";
+import { readFileSync } from "node:fs";
 
 const modules = [
-  'axios/lib/utils.js',
-  'axios/lib/helpers/bind.js',
+  "axios/lib/utils.js",
+  "axios/lib/helpers/bind.js",
   // ... tier list
 ];
 
 for (const mod of modules) {
-  const src = readFileSync(`node_modules/${mod}`, 'utf-8');
+  const src = readFileSync(`node_modules/${mod}`, "utf-8");
   const result = await compile(src, {
     fileName: mod,
-    nodeBuiltinsAsHostImports: true,  // new compile flag
+    nodeBuiltinsAsHostImports: true, // new compile flag
   });
   if (!result.success) {
     console.log(`FAIL ${mod}: ${result.errors[0]?.message}`);
   } else {
-    console.log(`OK   ${mod}  (host imports: ${result.hostImports.join(', ')})`);
+    console.log(`OK   ${mod}  (host imports: ${result.hostImports.join(", ")})`);
   }
 }
 ```
@@ -180,12 +200,13 @@ Once Tier 4 compiles without errors, the ultimate acceptance test is:
 
 ```ts
 const axios = await loadCompiledAxios();
-const res = await axios.get('https://httpbin.org/get');
+const res = await axios.get("https://httpbin.org/get");
 assert(res.status === 200);
-assert(res.data.url === 'https://httpbin.org/get');
+assert(res.data.url === "https://httpbin.org/get");
 ```
 
 This proves:
+
 1. The compile pipeline handles Node-builtin imports correctly
 2. The runtime wiring delivers real Node modules to the Wasm instance
 3. Promise/async flow through the host boundary works
@@ -196,6 +217,7 @@ This proves:
 Same pattern as #1031: for each concentrated bucket, file an issue in `plan/issues/ready/` with `parent: 1032`.
 
 Expected follow-ups (hypothetical):
+
 - "Node http/https host imports — basic request/response flow"
 - "Node stream Readable/Writable externref surface"
 - "Buffer global + Buffer.from host import"
@@ -210,15 +232,15 @@ Append findings to `plan/issues/sprints/41/sprint.md`:
 ## axios stress results
 
 Total modules attempted: N
-  Compile OK: X (Y%)
-  Compile error: X
-  Runtime error: X
+Compile OK: X (Y%)
+Compile error: X
+Runtime error: X
 
 Node builtins used: <list>
 Smoke test (GET httpbin.org): <PASS|FAIL>
 
 Top error buckets:
-  <count> <pattern> → #<followup-issue>
+<count> <pattern> → #<followup-issue>
 
 Follow-up issues filed: #NNNN, #NNNN
 ```
@@ -244,7 +266,7 @@ Follow-up issues filed: #NNNN, #NNNN
 
 **Why not polyfill Node builtins?**
 
-Because it's a bottomless pit. Node's `stream` module alone is ~5K lines of deeply stateful code with undocumented edge cases, and axios uses the *observable behavior* of Node streams (including callback timing, backpressure semantics, and non-obvious async quirks). Re-implementing that in WasmGC is more work than js2wasm's compiler itself. The right call is: **let the host's Node do what Node does, and just import the symbols.**
+Because it's a bottomless pit. Node's `stream` module alone is ~5K lines of deeply stateful code with undocumented edge cases, and axios uses the _observable behavior_ of Node streams (including callback timing, backpressure semantics, and non-obvious async quirks). Re-implementing that in WasmGC is more work than js2wasm's compiler itself. The right call is: **let the host's Node do what Node does, and just import the symbols.**
 
 **Why not compile them from the Node source?**
 
@@ -286,23 +308,23 @@ axios ships its own `index.d.ts` (bundled via the `types` field in `package.json
 
 ### Correction (2026-04-11): module graph already exists
 
-Earlier wording claimed `node:http` imports fall through `preprocessImports` as `declare const http: any`. That is the single-file fallback path only. `compileProject` uses `ModuleResolver` (`src/resolve.ts:27`) + `resolveAllImports` (`src/resolve.ts:204`) + `compileMultiSource` (`src/compiler.ts:406`) to run a real ts.Program over the full transitive closure. Node-builtin *source* will be walked into the ts.Program too, which is wrong for a different reason — Node builtins should be host imports, not compiled from Node's source — but the framing "no module resolver" was incorrect.
+Earlier wording claimed `node:http` imports fall through `preprocessImports` as `declare const http: any`. That is the single-file fallback path only. `compileProject` uses `ModuleResolver` (`src/resolve.ts:27`) + `resolveAllImports` (`src/resolve.ts:204`) + `compileMultiSource` (`src/compiler.ts:406`) to run a real ts.Program over the full transitive closure. Node-builtin _source_ will be walked into the ts.Program too, which is wrong for a different reason — Node builtins should be host imports, not compiled from Node's source — but the framing "no module resolver" was incorrect.
 
 ### Current compiler gaps
 
-- **No Node host-import routing.** When `compileProject` encounters `import http from 'node:http'`, `ModuleResolver` either resolves to Node's built-in module shim (producing nonsense codegen) or to `null` (falls through to the single-file fallback in the calling layer). Neither path recognizes that `http`/`https`/`stream`/`buffer`/... should be external host imports. The fix is a pre-resolver hook that short-circuits Node-builtin specifiers to an extern-import mode *before* the file walker tries to read them. Filed as **#1044**.
+- **No Node host-import routing.** When `compileProject` encounters `import http from 'node:http'`, `ModuleResolver` either resolves to Node's built-in module shim (producing nonsense codegen) or to `null` (falls through to the single-file fallback in the calling layer). Neither path recognizes that `http`/`https`/`stream`/`buffer`/... should be external host imports. The fix is a pre-resolver hook that short-circuits Node-builtin specifiers to an extern-import mode _before_ the file walker tries to read them. Filed as **#1044**.
 - **`await` is a no-op** at src/codegen/expressions.ts:973 (verified 2026-05-21 — was L790). `AwaitExpression` recurses into its operand and returns unchanged — no Promise integration, no microtask suspension, no state-machine lowering. Any code path that exercises real I/O completion observes synchronous resolution only. Tracked as **#1042**.
 - **`Buffer` global not registered** as an extern class (unlike `Map`/`Set` at src/codegen/index.ts:2661). Needs to be added to the extern-class set with method signatures.
 - **`process.env` reads** — axios reads `process.env.NODE_ENV` and `process.env.HTTP_PROXY` at startup. Partial handling today; **#1043** tracks compile-time `process.env.NODE_ENV` substitution + DCE specifically.
 
 ### Projected readiness (JS-host mode, via `compileProject`)
 
-| Tier | Modules | Readiness |
-|---|---|---|
-| Tier 1 — pure helpers (`utils.js`, `bind`, `cookies`, `buildFullPath`, `mergeConfig`) | ~8 | **~60%** once bundled; most fail on `Buffer` refs or ambient Node types |
-| Tier 2 — core (`Axios.js`, `InterceptorManager`, `AxiosError`, `CancelToken`) | ~6 | **~30%** — interceptor chains use Promise chains heavily; `await` no-op breaks them |
-| Tier 3 — browser adapter (`xhr.js`, `fetch.js`) | ~2 | **~10%** — XHR/fetch globals undefined |
-| Tier 4 — Node adapter (`http.js`, `formDataToStream.js`, `platform/node/*`) | ~6 | **~0%** until Node host-import scaffold lands |
+| Tier                                                                                  | Modules | Readiness                                                                           |
+| ------------------------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| Tier 1 — pure helpers (`utils.js`, `bind`, `cookies`, `buildFullPath`, `mergeConfig`) | ~8      | **~60%** once bundled; most fail on `Buffer` refs or ambient Node types             |
+| Tier 2 — core (`Axios.js`, `InterceptorManager`, `AxiosError`, `CancelToken`)         | ~6      | **~30%** — interceptor chains use Promise chains heavily; `await` no-op breaks them |
+| Tier 3 — browser adapter (`xhr.js`, `fetch.js`)                                       | ~2      | **~10%** — XHR/fetch globals undefined                                              |
+| Tier 4 — Node adapter (`http.js`, `formDataToStream.js`, `platform/node/*`)           | ~6      | **~0%** until Node host-import scaffold lands                                       |
 
 ### Top 3 blockers
 
@@ -343,3 +365,44 @@ resolve(specifier: string, containingFile: string): string | null {
 At runtime, `src/runtime.ts` receives the `importModule` + `importName` and resolves via `require(importModule)[importName]`. Same pattern as today's `__extern_*` dispatch but scoped to Node builtins.
 
 **Recommendation:** axios Tiers 1-3 can be attempted today via `compileProject` — they are pure compute and their only multi-file dependency is on other axios files, which `ModuleResolver` already handles. Tier 4 (Node adapter, real GET) is gated on **#1044** (Node host imports) and **#1042** (real `await`). Even Tiers 1-3 compile-cleanly is a valid sprint-41 result.
+
+---
+
+## Progress (2026-07-17, dev-1044) — incremental slice; #1044 now merged
+
+**Context:** the core dependency **#1044** (Node builtins routed as host imports)
+merged via **#3233**, so the compile-time routing this issue proposed now exists.
+Re-ran the Tier 1 ladder against current `main` (axios@1.16.1) to bank recovered
+ground and re-map the frontier. This is an incremental slice — axios is NOT
+fully compiling yet (the flagship goal remains open).
+
+### Landed this slice
+
+- **Tier 1g `lib/utils.js` now compiles AND validates** (~84 KB module,
+  deterministic across runs). The historical **#TBD-3** blocker (`isBuffer` —
+  `fallthru[0] expected i32, got f64`, the i32/f64 `&&`/`fallthru` unification
+  family shared with ESLint #1558 and React-tier1 `mapIntoArray`) no longer
+  reproduces. Unskipped the Tier 1g rung in `tests/stress/axios-tier1.test.ts`
+  as a permanent regression guard, and refreshed the file's blocker-status
+  header to current reality.
+
+### Current frontier (verified 2026-07-17, where axios's compile stops next)
+
+| Rung  | Entry                                   | State                         | Next blocker                                                                                                                                                                                                                                                                                                                            |
+| ----- | --------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1a/1b | `import axios from "axios"` (type-only) | OK + validates                | —                                                                                                                                                                                                                                                                                                                                       |
+| 1c    | `dist/node/axios.cjs` (direct)          | **compile-FAIL**              | `Cannot find module 'form-data'` — a third-party bare import. Per this issue's design, `form-data`/`follow-redirects`/`proxy-from-env` should route as **host imports**, not module-not-found. Next tractable resolver slice.                                                                                                           |
+| 1g    | `lib/utils.js`                          | **OK + validates**            | — (recovered this slice)                                                                                                                                                                                                                                                                                                                |
+| 1h    | `lib/core/AxiosError.js` (direct)       | **compile-FAIL (entry-only)** | TS1093 "Type annotation cannot appear on a constructor declaration" (JSDoc `@returns {Error}` on the ctor) + TS2339/2353 cascade. These are `checkJs`-style diagnostics that are fatal **only for an entry JS file** — as a graph _dependency_ they are filtered by `compiler.ts` `isEntryDiag`, so this does NOT block the real graph. |
+| 1e    | `lib/axios.js` (real graph)             | **hang/OOM**                  | `compileProject` non-termination on the `lib/core/Axios.js` graph — tracked as **#3339**; the dominant real-graph blocker.                                                                                                                                                                                                              |
+
+### Recommended next slices (ordered by tractability)
+
+1. **Third-party bare-specifier → host-import stub** (unblocks 1c): treat an
+   unresolvable non-relative import (`form-data`, `follow-redirects`,
+   `proxy-from-env`) as an extern host import instead of a hard
+   module-not-found — the exact `NODE_HOST_IMPORT_MODULES` pattern #1044
+   established, widened to allowlisted third-party deps. Medium.
+2. **#3339** — the `Axios.js`-graph hang/OOM. Hard; the real Tier 1e/1f gate.
+3. Optional: relax entry-file `checkJs` semantic diagnostics for `allowJs` JS
+   entries (unblocks isolated 1h/1d probing only; not the real graph).

@@ -6,6 +6,7 @@ sprint: Backlog
 created: 2026-07-13
 priority: high
 feasibility: hard
+model: fable
 reasoning_effort: max
 task_type: epic
 area: codegen, runtime, standalone

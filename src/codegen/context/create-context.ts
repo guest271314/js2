@@ -8,6 +8,7 @@
 import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
 import { TsCheckerOracle } from "../../checker/oracle.js";
+import { UsageInference } from "../../checker/usage-inference.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
@@ -48,6 +49,11 @@ export function createCodegenContext(
     // usage under src/codegen/. Contract: registry-free, side-effect-free,
     // memoized (see src/checker/oracle.ts and issue #1930's Design section).
     oracle: new TsCheckerOracle(checker),
+    // (#684) Usage-based any-local inference. Constructed from the local
+    // `checker` parameter (a raw-checker capture that lives entirely in the
+    // checker layer), so this instantiation adds no oracle-ratchet debt.
+    usageInference: new UsageInference(checker),
+    useUsageInfer: options?.useUsageInfer ?? process.env.JS2WASM_USAGE_INFER !== "0",
     funcMap: new Map(),
     structMap: new Map(),
     typeIdxToStructName: new Map(),

@@ -1,7 +1,8 @@
 ---
 id: 2958
 title: "Standalone: unhandled-rejection tracking — report rejected promises with no handler at drain/event-loop exit"
-status: ready
+status: blocked
+depends_on: [2867]
 sprint: current
 created: 2026-07-02
 updated: 2026-07-02
@@ -80,6 +81,7 @@ still actively churning. **Do not implement until #2867 lands.** What follows is
 the execution-ready spec so the next window moves fast once the file settles.
 
 ### Gating reality (important — corrects the title's "standalone")
+
 The native `$Promise` carrier is **`ctx.wasi`-gated**, not `ctx.standalone`:
 `isStandalonePromiseActive()` returns `ctx.wasi === true`
 (async-scheduler.ts ~L3298), and `emitStandalonePromiseThen` /
@@ -90,6 +92,7 @@ exist). **Host mode is byte-inert by construction** — host never registers
 so no host-lane sha256 risk.
 
 ### Data model
+
 - **`$Promise` struct** (`getOrRegisterPromiseType`, async-scheduler.ts ~L258):
   append two fields — `handled: i32 (mut)` and `unhandledNext: externref (mut)`.
   Appending keeps existing `fieldIdx` 0/1/2 (`state`/`value`/`callbacks`) stable,
@@ -100,11 +103,12 @@ so no host-lane sha256 risk.
   next to the microtask globals (~L400). Intrusive singly-linked list head.
 
 ### Emit sites (all in async-scheduler.ts unless noted)
+
 1. **Reject settle** — `buildPromiseSettleBody`, **REJECTED variant only**
    (`settledState === PROMISE_STATE_REJECTED`). After callbacks are read into
    `$callbacks` (L868–872), guard `ref.is_null($callbacks)`: if null (no
    handler at settle) → `promise.unhandledNext = __unhandled_head;
-   __unhandled_head = promise` (O(1) push). The callback-drain loop below is a
+__unhandled_head = promise` (O(1) push). The callback-drain loop below is a
    no-op when callbacks is null, so ordering is safe.
 2. **Late attach ("handle")** — `emitStandalonePromiseThen`, the **already-
    rejected receiver** branch (the inner `then:` enqueuing `rejectWrapperFuncIdx`,
@@ -127,6 +131,7 @@ so no host-lane sha256 risk.
    report or exit.
 
 ### HAZARD — late-import funcIdx shift (#2642 / the memory `*_funcidx_desync` cluster)
+
 `__report_unhandled_rejections` references `__wasi_write_string_stderr` **and**
 `proc_exit`, which are only registered when `console.error` / `process.exit`
 are otherwise used. When this feature is active you MUST (a) **ensure both are
@@ -137,7 +142,9 @@ late import. Emit the report body after all imports are fixed, or repoint by
 name (`ctx.funcMap.get(...)`) at finalize.
 
 ### Test (`tests/issue-2958.test.ts`)
+
 WASI-compile + run under wasmtime (or the standalone harness):
+
 - `Promise.reject(new Error("x"))` with no handler → **nonzero exit** + a stderr
   line. (AC1)
 - same but with `.catch(() => {})` → exit 0, no line. (AC2)
