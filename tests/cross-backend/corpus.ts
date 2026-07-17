@@ -149,16 +149,14 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
     ],
   },
   {
-    // Math.trunc is not yet lowered by the linear backend (Unsupported method
-    // call: .trunc()). Tracked here so the gap is visible and the flag drops
-    // the moment linear gains Math.* support.
+    // #2956 L4: Math.trunc is selector-claimed and lowered by LinearEmitter;
+    // keep it in the executed differential corpus.
     name: "numeric/math-trunc",
     category: "numeric",
     source: `
       export function intdiv(a: number, b: number): number { return Math.trunc(a / b); }
     `,
     calls: [{ fn: "intdiv", args: [17, 5] }],
-    expectLinearUnsupported: true,
   },
   {
     name: "numeric/recursion-fib",
@@ -296,8 +294,8 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
     ],
   },
   {
-    // String.prototype.charCodeAt is not yet lowered by the linear backend
-    // (Unsupported method call: .charCodeAt()). Flagged so the gap is visible.
+    // #2956 L4: charCodeAt uses the linear IR UTF-16 decoder and is now an
+    // executed cross-backend parity row.
     name: "string/charcode",
     category: "string",
     source: `
@@ -308,7 +306,6 @@ export const CROSS_BACKEND_CORPUS: readonly CrossBackendProgram[] = [
       { fn: "code", args: [] },
       { fn: "codeAt", args: [3] },
     ],
-    expectLinearUnsupported: true,
   },
 
   // ── arrays ───────────────────────────────────────────────────────────────

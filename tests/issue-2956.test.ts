@@ -1,11 +1,11 @@
-// #2956 L1 — the linear backend consumes the IR front-end (flag-gated).
+// #2956 — the linear backend consumes the IR front-end (default-on since L4).
 //
-// Under `JS2WASM_LINEAR_IR=1`, selector-claimed numeric/control-flow
-// top-level functions build IR once through the SHARED front-end
+// Selector-claimed numeric/control-flow top-level functions build IR once
+// through the SHARED front-end by default
 // (planIrCompilation → from-ast → verify → linear legality) and lower via
 // `LinearEmitter` into the linear module's pre-assigned slots. Everything
-// else demotes (bucketed) to the linear direct path. Flag off, the module
-// is byte-identical to the pre-#2956 output.
+// else demotes (bucketed) to the linear direct path. `JS2WASM_LINEAR_IR=0`
+// keeps a byte-identical direct-backend escape hatch.
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -21,9 +21,9 @@ afterEach(() => {
   else process.env[FLAG] = savedFlag;
 });
 
-async function compileLinear(src: string, flag: boolean | "0"): Promise<Uint8Array> {
+async function compileLinear(src: string, flag?: boolean): Promise<Uint8Array> {
   if (flag === true) process.env[FLAG] = "1";
-  else if (flag === "0") process.env[FLAG] = "0";
+  else if (flag === false) process.env[FLAG] = "0";
   else delete process.env[FLAG];
   const r = await compile(src, { target: "linear" });
   expect(r.success, r.success ? "" : r.errors.map((e) => e.message).join("; ")).toBe(true);
@@ -88,7 +88,7 @@ describe("#2956 L1: linear backend consumes IR for claimed numeric functions", (
     expect(await run(binary)).toBe(65);
   });
 
-  it("flag OFF is byte-identical (the overlay is inert)", async () => {
+  it("the explicit flag-off escape hatch keeps direct-path value parity", async () => {
     const off1 = await compileLinear(NUMERIC_SRC, false);
     const on = await compileLinear(NUMERIC_SRC, true);
     const off2 = await compileLinear(NUMERIC_SRC, false);
@@ -151,11 +151,11 @@ describe("#2956 L2: selector-claimed vec construction", () => {
     expect(callNumber(ir, "vecBounds")).toBe(0);
   });
 
-  it("JS2WASM_LINEAR_IR=0 keeps vec modules byte-identical to an unset flag", async () => {
-    const unset = await compileLinear(VEC_SRC, false);
-    const zero = await compileLinear(VEC_SRC, "0");
+  it("the default-on vec module is byte-identical to explicit flag-on", async () => {
+    const unset = await compileLinear(VEC_SRC);
+    const explicit = await compileLinear(VEC_SRC, true);
     const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
-    expect(sha(zero)).toBe(sha(unset));
+    expect(sha(unset)).toBe(sha(explicit));
   });
 
   it("unsupported hintless-empty construction stays on the direct fallback", async () => {
@@ -228,11 +228,11 @@ describe("#2956 L2: selector-claimed vec MUTATION (element store + push)", () =>
     expect(callNumber(ir, "test")).toBe(12 + 507 + 8 + 28);
   });
 
-  it("JS2WASM_LINEAR_IR=0 keeps mutation modules byte-identical to an unset flag", async () => {
-    const unset = await compileLinear(VEC_MUT_SRC, false);
-    const zero = await compileLinear(VEC_MUT_SRC, "0");
+  it("the default-on mutation module is byte-identical to explicit flag-on", async () => {
+    const unset = await compileLinear(VEC_MUT_SRC);
+    const explicit = await compileLinear(VEC_MUT_SRC, true);
     const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
-    expect(sha(zero)).toBe(sha(unset));
+    expect(sha(unset)).toBe(sha(explicit));
   });
 
   it("multi-arg push stays on the direct fallback (single plain arg only)", async () => {
@@ -309,11 +309,11 @@ describe("#2956 L2: selector-claimed linear-memory aggregates + ref-cells", () =
     expect(callNumber(exports, "test")).toBe(23);
   });
 
-  it("JS2WASM_LINEAR_IR=0 keeps aggregate modules byte-identical to an unset flag", async () => {
-    const unset = await compileLinear(AGGREGATE_READ_SRC, false);
-    const zero = await compileLinear(AGGREGATE_READ_SRC, "0");
+  it("the default-on aggregate module is byte-identical to explicit flag-on", async () => {
+    const unset = await compileLinear(AGGREGATE_READ_SRC);
+    const explicit = await compileLinear(AGGREGATE_READ_SRC, true);
     const sha = (binary: Uint8Array): string => createHash("sha256").update(binary).digest("hex");
-    expect(sha(zero)).toBe(sha(unset));
+    expect(sha(unset)).toBe(sha(explicit));
   });
 
   it("emits primitive ref-cell allocation and field access through linear-memory handles", () => {
@@ -428,10 +428,39 @@ describe("#2956 L3: selector-claimed linear strings", () => {
     expect(await run(binary)).toBe(1);
   });
 
-  it("JS2WASM_LINEAR_IR=0 keeps string modules byte-identical to an unset flag", async () => {
-    const unset = await compileLinear(STRING_CORE_SRC, false);
-    const zero = await compileLinear(STRING_CORE_SRC, "0");
+  it("the default-on string module is byte-identical to explicit flag-on", async () => {
+    const unset = await compileLinear(STRING_CORE_SRC);
+    const explicit = await compileLinear(STRING_CORE_SRC, true);
     const sha = (binary: Uint8Array): string => createHash("sha256").update(binary).digest("hex");
-    expect(sha(zero)).toBe(sha(unset));
+    expect(sha(unset)).toBe(sha(explicit));
+  });
+});
+
+describe("#2956 L4: default-on overlay + unified fallback ratchet", () => {
+  it("uses the IR overlay when the environment flag is unset", async () => {
+    const defaultBinary = await compileLinear(NUMERIC_SRC);
+    const report = getLastLinearIrReport();
+    expect([...(report?.compiled ?? [])].sort()).toEqual(["add", "fib", "loopSum", "test"]);
+
+    const explicitBinary = await compileLinear(NUMERIC_SRC, true);
+    const sha = (binary: Uint8Array): string => createHash("sha256").update(binary).digest("hex");
+    expect(sha(defaultBinary)).toBe(sha(explicitBinary));
+    expect(await run(defaultBinary)).toBe(65);
+  });
+
+  it("reports selector-rejected functions while compiling them on the direct path", async () => {
+    const binary = await compileLinear(`
+      export function withDefault(value: number = 1): number { return value + 1; }
+    `);
+    const report = getLastLinearIrReport();
+    expect(report?.compiled ?? []).not.toContain("withDefault");
+    expect(report?.rejected).toContainEqual({
+      func: "withDefault",
+      reason: "select:param-shape-rejected",
+      detail: undefined,
+    });
+
+    const exports = await exportedFunctions(binary);
+    expect((exports.withDefault as (value: number) => number)(4)).toBe(5);
   });
 });
