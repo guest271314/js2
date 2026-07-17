@@ -2378,6 +2378,25 @@ export function tryLengthAndNameReads(
           (exprResult.kind === "ref" || exprResult.kind === "ref_null") &&
           (exprResult as any).typeIdx !== vecTypeIdx
         ) {
+          // (#2649) The compiled receiver's OWN static type may itself be a
+          // length-prefixed {length,data} struct that differs from the
+          // TS-resolved vec type — the canonical case is a `$__subview_<elem>`
+          // returned by `ta.subarray(...)`: TS types it as the TypedArray (vec
+          // `vecTypeIdx`), but the runtime value is the subview, whose field 0 IS
+          // the element count. Read it DIRECTLY from the receiver's own type;
+          // the `ref.test vecTypeIdx` fallback below always FAILS on the subview
+          // (sibling subtype of `$__vec_base`, not the vec) and returns 0.
+          const exprTypeIdx = (exprResult as { typeIdx: number }).typeIdx;
+          const exprTypeDef = ctx.mod.types[exprTypeIdx];
+          if (
+            exprTypeDef?.kind === "struct" &&
+            exprTypeDef.fields[0]?.name === "length" &&
+            exprTypeDef.fields[1]?.name === "data"
+          ) {
+            fctx.body.push({ op: "struct.get", typeIdx: exprTypeIdx, fieldIdx: 0 });
+            if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
+            return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+          }
           const lenTmp = allocLocal(fctx, `__len_tmp_${fctx.locals.length}`, { kind: "anyref" });
           fctx.body.push({ op: "local.set", index: lenTmp });
           fctx.body.push({ op: "local.get", index: lenTmp });
