@@ -1,7 +1,8 @@
 ---
 id: 2662
 title: "host (gc) generator backend is EAGER-buffered — breaks lazy/suspension semantics on the default path (architecture)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-dev-1
 created: 2026-06-25
 priority: high
 feasibility: hard

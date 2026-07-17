@@ -21,7 +21,6 @@ import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
 import {
-  bodyHasNewTryRegionAcrossYield,
   compileNativeGeneratorFunction,
   isNativeGeneratorCandidate,
   registerNativeGenerator,
@@ -816,12 +815,17 @@ export function compileNestedFunctionDeclaration(
     //     (EvaluateGeneratorBody suspends before the first body statement;
     //     nothing may run until the first `next()`), which is the root of the
     //     tag-5 comparator vacuity (#2141 S2 / #2626).
-    //   - JS HOST: byte-identical to #3050 — try-region shapes only (the
-    //     eager buffer PROVABLY cannot express `.throw()` into a try-region:
-    //     GeneratorPrototype/throw/try-*), no TDZ-flagged captures (the
-    //     host-lane A/B for the wider population is a separate wave; see
-    //     plan/issues/3032). `isNativeGeneratorCandidate` additionally
-    //     requires FunctionDeclaration + use-site safety under a JS host.
+    //   - JS HOST (#2662): every candidate shape WITHOUT TDZ-flagged captures.
+    //     #3050 admitted only try-region shapes (the eager buffer PROVABLY
+    //     cannot express `.throw()` into a try-region: GeneratorPrototype/
+    //     throw/try-*); #2662 drops that restriction so a plain capturing
+    //     nested `function*` is truly LAZY on the gc lane too (§27.5.3.1 —
+    //     the eager buffer ran the whole body at creation). TDZ-flagged
+    //     captures still bail to eager here: their flag-box threading is only
+    //     validated on the standalone lane (the host-lane A/B for that
+    //     population is a separate wave; see plan/issues/3032).
+    //     `isNativeGeneratorCandidate` additionally requires
+    //     FunctionDeclaration + non-exported + use-site safety under a JS host.
     // Other bails (both lanes): async generators; anything the plan builder
     // rejects (isNativeGeneratorCandidate → buildNativeGeneratorPlan).
     let capturingNativeGen: ReturnType<typeof registerNativeGenerator> = null;
@@ -829,7 +833,7 @@ export function compileNestedFunctionDeclaration(
     if (
       isGenerator &&
       !isAsync &&
-      (capGenStandaloneLane || (tdzFlaggedCaptures.length === 0 && bodyHasNewTryRegionAcrossYield(stmt))) &&
+      (capGenStandaloneLane || tdzFlaggedCaptures.length === 0) &&
       isNativeGeneratorCandidate(ctx, stmt)
     ) {
       const leadingCaptures: NativeGeneratorCaptureParam[] = captures.map((c, i) => {
