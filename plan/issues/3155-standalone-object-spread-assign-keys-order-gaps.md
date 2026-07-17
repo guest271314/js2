@@ -18,6 +18,11 @@ loc-budget-allow:
   # (#3155) the native standalone externref-join `compileArrayJoinExternNative`
   # must live beside `compileArrayJoinExtern` in array-methods.ts (+~100 LOC).
   - src/codegen/array-methods.ts
+coercion-sites-allow:
+  # (#3155) the native externref-join mirrors compileArrayJoinNative's existing
+  # `__extern_toString` element-ToString (§7.1.17) — same coercion vocabulary,
+  # relocated into the new externref-receiver arm, not novel hand-rolling.
+  - src/codegen/array-methods.ts
 ---
 
 # #3155 — standalone object spread / assign / key-enumeration gaps
