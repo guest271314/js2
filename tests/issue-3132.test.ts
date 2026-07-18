@@ -57,7 +57,12 @@ describe("#3132 S1 producer — yield* array-literal unrolls into the driven nat
     expect(genImportNames(r)).toEqual([]);
   });
 
-  it("keeps the legacy path (and its imports) for a non-literal yield* operand", async () => {
+  // (#3388) A non-literal `yield*` operand (identifier / member / string / a
+  // non-drivable call) is NOW driven host-free via the runtime-delegation loop
+  // (GetAsyncIterator + __iterator_next sync-step + settleYield back-edge), so
+  // it drops the `__gen_*` host-import leak — the #3132 S1 "array-literal only"
+  // gate was widened. (Was: kept on the legacy host path with imports.)
+  it("drops the host-import leak for a non-literal yield* operand (#3388 rtDelegate)", async () => {
     const r = await compileStandalone(`
       function go() {
         var arr = [1, 2];
@@ -65,7 +70,7 @@ describe("#3132 S1 producer — yield* array-literal unrolls into the driven nat
       }
       export function test() { go(); return 1; }
     `);
-    expect(genImportNames(r)).not.toEqual([]);
+    expect(genImportNames(r)).toEqual([]);
   });
 });
 
