@@ -129,7 +129,9 @@ today):
 
 `compileCallExpression` is done (#742). #3111 is retargeted onto the five
 call-shape god functions #742 produced (the §2 table). Full byte-identity
-slice plan added to `plan/issues/3111-*.md` in this PR. One-line summary:
+slice plan added to the #3111 issue file
+(`plan/issues/3111-decompose-compilecallexpression-call-shapes.md`) in this
+PR. One-line summary:
 apply the #3108 pattern (shared context bag + order-preserving orchestrator +
 `prove-emit-identity` per slice) to `call-receiver-method.ts`,
 `call-builtin-static.ts`, `call-identifier.ts`, `call-namespace-static.ts`,
