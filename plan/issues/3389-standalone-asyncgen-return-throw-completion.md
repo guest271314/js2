@@ -20,9 +20,15 @@ related: [3132, 3387, 3388, 2865, 2906]
 origin: "2026-07-17 fable-3178 umbrella decomposition — #3132 S4 banked slice, re-grounded: __gen_set_return 268 / __gen_return (async combos) / __gen_throw 80 rows."
 # Slice 1: settleReturn terminator — analyzer admission + CFG plan (async-cps.ts)
 # and the emitter arm + validateAsyncCfg (async-frame.ts).
+# Slice 2a: .return()/.throw() drivers (async-frame.ts) + consumer dispatch
+# (calls.ts) + recognition (call-receiver-method.ts) + producer registry
+# (context/types.ts).
 loc-budget-allow:
   - src/codegen/async-cps.ts
   - src/codegen/async-frame.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/context/types.ts
 ---
 
 # #3389 — async-gen `return`/`throw` completion for the driven lane

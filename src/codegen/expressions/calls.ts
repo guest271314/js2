@@ -4469,6 +4469,25 @@ export function tryEmitAsyncGenReturnThrowDispatch(
   const producers = ctx.asyncGenProducers;
   if (ctx.standalone !== true && ctx.wasi !== true) return null;
   if (producers === undefined || producers.size === 0) return null;
+  // (#3389 slice 2a — correct-or-legacy) `.return(v)` AWAITS its value under a
+  // return completion (§27.6.3.8): a thenable/Promise return value must be
+  // adopted before the IteratorResult settles. The driver fulfils with the raw
+  // value, so bail a STATICALLY Promise/PromiseLike-typed `.return` arg to the
+  // legacy path rather than deliver the un-awaited thenable (wrong value).
+  // `.throw(e)` does NOT await its reason (§27.6.3.9 throws it directly), so no
+  // restriction there.
+  if (method === "return" && argExpr !== undefined) {
+    const builtin = ctx.oracle.builtinReceiverOf(argExpr);
+    const declared = ctx.oracle.declaredNameOf(argExpr);
+    const parts = ctx.oracle.unionPartsOf(argExpr);
+    if (
+      builtin === "Promise" ||
+      declared === "PromiseLike" ||
+      (parts !== undefined && parts.some((p) => p.kind === "builtin" && p.name === "Promise"))
+    ) {
+      return null;
+    }
+  }
   // Evaluate the receiver ONCE into an externref local.
   const recvLocal = allocLocal(fctx, `__agen_rt_recv_${fctx.locals.length}`, { kind: "externref" });
   const rt = compileExpression(ctx, fctx, receiverExpr, { kind: "externref" });
