@@ -1670,18 +1670,26 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
 }
 
 /**
- * (#2662) Yield-payload gate for the WIDENED host-lane population (plain, non-
- * try-region generators newly routed native). The native result struct's
- * `.value` carrier is proven correct under a JS host for numeric and string
- * payloads and the empty `yield;` (#2970 canonical undefined); OBJECT payloads
- * ride the #2864 externref carrier whose property reads come back NaN under
- * both lanes (pre-existing native gap — the eager host path handles them
- * correctly, so those shapes must KEEP the eager path). Boolean payloads are
- * excluded too: `generatorElemValType` classifies them numeric (f64), so
- * `yield true` would surface as `1`, breaking `.value === true` observables
- * the eager path satisfies. NOT applied to try-region shapes — those routed
- * native since #3050 with unrestricted payloads, and re-gating them here would
- * regress their landed `.throw()`-into-try support to the eager path.
+ * (#2662) Yield-payload gate for the WIDENED host-lane population (the
+ * capturing-nested generators newly routed native). NUMERIC yields only:
+ *
+ *   - the f64 carrier's `.value` reads back correctly under a JS host, and
+ *     post-done the UNDEF_F64 sentinel is numerically NaN (spec-correct for an
+ *     exhausted `.value` in a numeric context);
+ *   - STRING yields need the native `$AnyString` ref carrier, which requires
+ *     `ctx.nativeStrings` — OFF in the default gc/host lane, so a string yield
+ *     routed native comes back NaN (verified). The eager host path handles
+ *     strings correctly, so they KEEP it here;
+ *   - OBJECT payloads ride the #2864 externref carrier whose property reads
+ *     come back NaN under the host lane (the boundary-wrapper gap); eager;
+ *   - BOOLEAN payloads: `generatorElemValType` classifies them numeric (f64),
+ *     so `yield true` would surface as `1`, breaking `.value === true`; eager;
+ *   - a bodiless `yield;` yields undefined but the f64 carrier surfaces a
+ *     number (`.value === undefined` fails); eager.
+ *
+ * NOT applied to the #3050 try-region shapes — those routed native with
+ * unrestricted payloads and re-gating them would regress their landed
+ * `.throw()`-into-try support.
  */
 function hostLaneYieldPayloadsAreSafe(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!decl.body) return true;
@@ -1690,16 +1698,11 @@ function hostLaneYieldPayloadsAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
     if (!safe) return;
     if (isFunctionLikeScope(node)) return; // inner generator's yields
     if (ts.isYieldExpression(node) && !node.asteriskToken) {
-      // A bodiless `yield;` yields undefined, but the widened lane's f64
-      // carrier surfaces it as a number (`.value === undefined` fails) —
-      // keep those eager (verified by probe; the #2970 canonical-undefined
-      // handling does not cover this population).
       if (!node.expression) {
         safe = false;
         return;
       }
-      const tag = ctx.oracle.staticJsTypeOf(node.expression);
-      if (tag !== "number" && tag !== "string") safe = false;
+      if (ctx.oracle.staticJsTypeOf(node.expression) !== "number") safe = false;
     }
     ts.forEachChild(node, visit);
   };
