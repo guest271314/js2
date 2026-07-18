@@ -674,11 +674,30 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   }
   collectClassesFromStatements(sourceFile.statements);
 
+  // (#3419) Last-wins for duplicate top-level function declarations. At Script /
+  // function-body top level, duplicate `function f(){}` declarations are legal
+  // JS (§16.1.1 — HoistableDeclarations are var-scoped there) and
+  // GlobalDeclarationInstantiation (§16.1.7) instantiates only the LAST
+  // definition per name. Registering every duplicate created one dead stub
+  // WasmFunction per shadowed declaration and compiled the shadowed body
+  // against the survivor's signature (transient garbage). Skip shadowed
+  // duplicates outright — only declarations WITH a body participate, so
+  // TS overload signatures (bodyless) keep their existing behavior.
+  const lastTopLevelFnWithBody = new Map<string, ts.FunctionDeclaration>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+      lastTopLevelFnWithBody.set(stmt.name.text, stmt);
+    }
+  }
+
   // Third: collect function declarations (uses resolveWasmType for real type indices)
   for (const stmt of sourceFile.statements) {
     if (ts.isFunctionDeclaration(stmt) && (stmt.name || hasExportModifier(stmt))) {
       // Skip declare function stubs (no body, inside or matching declare)
       if (hasDeclareModifier(stmt)) continue;
+      // (#3419) Shadowed duplicate — a later same-name top-level declaration
+      // wins; this one is never observable.
+      if (stmt.name && stmt.body && lastTopLevelFnWithBody.get(stmt.name.text) !== stmt) continue;
 
       // Anonymous `export default function() {}` gets the synthetic name "default"
       const name = stmt.name ? stmt.name.text : "default";
@@ -2185,9 +2204,22 @@ export function compileDeclarations(
     ctx.pendingInitBody = compiledInitFctx.body;
   }
 
+  // (#3419) Last-wins for duplicate top-level function declarations — mirror
+  // the collectDeclarations registration skip: only the LAST declaration per
+  // name has a registered WasmFunction; compiling a shadowed body would write
+  // into the survivor's slot (funcByName resolves by name) with the wrong
+  // signature and then be overwritten anyway.
+  const lastFnWithBody = new Map<string, ts.FunctionDeclaration>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+      lastFnWithBody.set(stmt.name.text, stmt);
+    }
+  }
+
   // Compile top-level function declarations
   for (const stmt of sourceFile.statements) {
     if (ts.isFunctionDeclaration(stmt) && (stmt.name || hasExportModifier(stmt)) && !hasDeclareModifier(stmt)) {
+      if (stmt.name && stmt.body && lastFnWithBody.get(stmt.name.text) !== stmt) continue;
       const fnName = stmt.name ? stmt.name.text : "default";
       if (stmt.body) {
         const idx = funcByName.get(fnName);
