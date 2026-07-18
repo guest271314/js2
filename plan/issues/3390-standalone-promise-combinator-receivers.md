@@ -1,8 +1,7 @@
 ---
 id: 3390
 title: "standalone: Promise combinators with non-Promise receivers — `Promise.all.call(nonCtor)` TypeError + custom-constructor admission (~119 rows)"
-status: in-progress
-assignee: ttraenkler/fable-dev-3
+status: ready
 sprint: current
 created: 2026-07-17
 updated: 2026-07-17
@@ -18,6 +17,12 @@ goal: standalone-mode
 umbrella: 3178
 related: [2903, 2867, 2919, 2922, 3137]
 origin: "2026-07-17 fable-3178 umbrella decomposition — the Promise built-ins residual of the standalone host_import_leak baseline (S5/S6 leftover after #2903 closed)."
+# intentional +119 in calls.ts: slice-1 receiver classifier
+# (isStaticNonConstructorReceiver) + the synchronous native-TypeError emitter
+# (tryEmitStandaloneCombinatorCallTypeError) + its NON_CONSTRUCTOR_GLOBALS set,
+# wired as an early pre-check in the .call block.
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3390 — Promise combinator receiver admission
@@ -128,23 +133,23 @@ Ran the full `built-ins/Promise/{all,allSettled,race,any,prototype}` corpus
 **pass=130, host_import_leak=121, fail=145, skip=0.** The 121 leaks (matches
 the ~119 estimate) bucket by shape family:
 
-| bucket                                            | files | slice |
-| ------------------------------------------------- | ----: | ----- |
-| resolve/reject-element-function-* (element props) |    25 | 3     |
-| invoke-resolve-* (per-iter `Promise.resolve` lookup) | 18 | 3     |
-| capability-* (NewPromiseCapability protocol)      |    15 | 3     |
-| call-resolve/reject-* (custom ctor receiver)       |    8 | 3     |
-| resolve-throws-iterator-return-*                  |     8 | 3     |
-| same/new-resolve/reject-function                  |     7 | 3     |
-| resolve-before-loop-exit                          |     6 | 3     |
-| *-from-same-thenable                              |     6 | 3     |
-| iter-arg-is-string-* (direct form, string iterable) |   5 | (sep) |
-| ctx-ctor-throws (constructor throws)              |     4 | 3     |
-| ctx-ctor (custom constructor receiver)            |     4 | 3     |
-| **ctx-non-ctor (non-constructor receiver → TypeError)** | 4 | **1** |
-| **ctx-non-object (undefined/null/primitive recv)**      | 4 | **1** |
-| species-get-error                                 |     4 | 3     |
-| other                                             |     3 | —     |
+| bucket                                                  | files | slice |
+| ------------------------------------------------------- | ----: | ----- |
+| resolve/reject-element-function-\* (element props)      |    25 | 3     |
+| invoke-resolve-\* (per-iter `Promise.resolve` lookup)   |    18 | 3     |
+| capability-\* (NewPromiseCapability protocol)           |    15 | 3     |
+| call-resolve/reject-\* (custom ctor receiver)           |     8 | 3     |
+| resolve-throws-iterator-return-\*                       |     8 | 3     |
+| same/new-resolve/reject-function                        |     7 | 3     |
+| resolve-before-loop-exit                                |     6 | 3     |
+| \*-from-same-thenable                                   |     6 | 3     |
+| iter-arg-is-string-\* (direct form, string iterable)    |     5 | (sep) |
+| ctx-ctor-throws (constructor throws)                    |     4 | 3     |
+| ctx-ctor (custom constructor receiver)                  |     4 | 3     |
+| **ctx-non-ctor (non-constructor receiver → TypeError)** |     4 | **1** |
+| **ctx-non-object (undefined/null/primitive recv)**      |     4 | **1** |
+| species-get-error                                       |     4 | 3     |
+| other                                                   |     3 | —     |
 
 **Correction to the spec's "resolve-element-function already host-free"
 note (#3380 baseline lag):** the LIVE probe shows all 25 still leak — they
@@ -168,13 +173,14 @@ Both must throw TypeError SYNCHRONOUSLY (§27.2.4.1 step 2 IsConstructor,
 BEFORE touching the iterable).
 
 **Anchor + approach:**
+
 - `src/codegen/expressions/calls.ts`, the `.call`/`.apply` block at ~5909
   (`propAccess.name.text === "call"`). Add an early pre-check
   `tryEmitStandaloneCombinatorCallTypeError(ctx, fctx, expr, propAccess)`
   BEFORE the generic reshape.
 - Gate: `isStandalonePromiseActive(ctx)` (standalone/wasi only → host lane
   byte-identical) AND `propAccess.expression` is `Promise.{all,allSettled,
-  race,any}` (PropertyAccess whose `.expression` is the `Promise`
+race,any}` (PropertyAccess whose `.expression` is the `Promise`
   identifier and `.name` ∈ the four combinators).
 - Receiver = `expr.arguments[0]` (unwrap as/paren/nonnull). Static
   non-constructor verdict, SIDE-EFFECT-FREE receivers only (else fall
@@ -183,8 +189,8 @@ BEFORE touching the iterable).
   - numeric / string / boolean literal, object literal, arrow function,
   - identifier resolving to a known non-constructor global (`eval`,
     `parseInt`, …) or an arrow-bound `const`/`var`.
-  A CONSTRUCTOR (class/function decl, `Promise`, subclass, custom ctor
-  identifier, or any unresolvable/dynamic receiver) → fall through.
+    A CONSTRUCTOR (class/function decl, `Promise`, subclass, custom ctor
+    identifier, or any unresolvable/dynamic receiver) → fall through.
 - Emit (synchronous native throw — the class-to-primitive.ts:190-216
   pattern): `emitWasiErrorConstructor(ctx, "TypeError", 1)`;
   `ensureExnTag(ctx)`; `addStringConstantGlobal(msg)`; then
@@ -200,16 +206,38 @@ Poisoned-iterable order tests belong to slice 3.
 
 ### Done-vs-remaining checklist
 
-- [ ] Slice 1 helper `tryEmitStandaloneCombinatorCallTypeError` in calls.ts,
-      wired as an early pre-check in the `.call` block.
-- [ ] `tests/issue-3390.test.ts` — synchronous TypeError for eval/undefined/
-      null/primitive/object-literal/arrow receivers on all 4 combinators;
-      host lane unaffected; a custom-ctor receiver still falls through
-      (correct-or-legacy).
-- [ ] Corpus re-probe: ctx-non-ctor + ctx-non-object flip to pass, ZERO
-      regressions elsewhere in the 4 dirs.
-- [ ] Gates: tsc, prettier, oracle-ratchet, loc-budget.
-- [ ] RESIDUAL (follow-up issue): slice 2 (`Promise` receiver `.call` →
-      native combinator) + slice 3 (custom-ctor/species machinery, ~54
-      files) + the iter-arg-is-string direct-form gap (5). Record in
-      umbrella #3178.
+- [x] Slice 1 helper `tryEmitStandaloneCombinatorCallTypeError` +
+      `isStaticNonConstructorReceiver` + `NON_CONSTRUCTOR_GLOBALS` in
+      calls.ts, wired as an early pre-check in the `.call` block. Emits the
+      synchronous `__exn`-tag TypeError (class-to-primitive.ts pattern);
+      does NOT compile the iterable.
+- [x] `tests/issue-3390.test.ts` — 21 cases: synchronous TypeError for
+      undefined/null/primitive/Symbol()/eval/arrow/empty-object/no-arg
+      receivers on all 4 combinators; iterable NOT touched (poison-getter
+      probe); host (gc) lane unchanged; direct form + real subclass ctor +
+      global `Promise` receiver all fall through (correct-or-legacy). PASS.
+- [x] Corpus re-probe (built-ins/Promise/{all,allSettled,race,any,prototype},
+      396 files): **pass 130 → 138 (+8), leak 121 → 113 (−8), fail 145
+      unchanged.** The 8 flips are exactly ctx-non-ctor (4) + ctx-non-object
+      (4); ZERO regressions.
+- [x] Blast-radius suites green: promise-combinators, #2867/#2867-gap4,
+      #3137, #2918, #2623-subclass-identity, #2671-capability (68 tests).
+- [x] Gates: tsc 0 err, prettier clean, oracle-ratchet +0 checker usage
+      (pure-AST classifier — no `getTypeAtLocation`), loc-budget allow-listed
+      (+119).
+- [ ] RESIDUAL (follow-up issue, recorded below): slice 2 (`Promise`
+      receiver `.call` → native combinator) + slice 3 (custom-ctor/species
+      machinery, ~54 files: element-function 25, invoke-resolve 18,
+      capability 15, ctx-ctor(+throws) 8, …) + the iter-arg-is-string
+      direct-form string-iterable gap (5). To be filed under umbrella #3178.
+
+## Slice-1 completion note (fable-dev-3, 2026-07-18) — DONE
+
+Slice 1 landed: `Promise.{all,allSettled,race,any}.call(recv, …)` with a
+statically non-constructor, side-effect-free receiver now throws a native
+TypeError on the standalone/wasi lane (§27.2.4.1 IsConstructor, before
+iteration) instead of leaking `Promise_<method>` host imports. +8 host-free
+passes, zero regressions. The remaining 113 `built-ins/Promise` leaks are the
+custom-constructor / species / NewPromiseCapability families (slice 3, an XL
+lift the spec defers) plus the direct-form string-iterable gap (5) — left as
+honest `host_import_leak` residuals for a follow-up under #3178.
