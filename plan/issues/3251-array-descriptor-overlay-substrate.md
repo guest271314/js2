@@ -253,6 +253,74 @@ byte-identical (the #1917 discipline).
   shrink stopping at non-configurable elements (the 28 throw-only tests),
   gOPD("length").
 
+## S1 implementation notes (fable-1, branch `issue-3251-array-overlay-s1`)
+
+- New module `src/codegen/vec-overlay.ts` (reserve + finalize fill); arms in
+  `object-runtime-descriptors.ts` (3 gates), fill wired in `index.ts` between
+  `fillDynamicForinVecArms` and `fillTaDynViewMopArms` (the TA dyn-view arm
+  must keep the front slot of the read helpers); call-site pre-growth
+  standalone-gated in `object-ops.ts`; `FLAG_COMPANION_VALUE = 0x20` claimed
+  in the `$PropEntry` flag table.
+- **Documented S1 boundaries** (deliberate, for S2/S3):
+  - Plain writes do not yet honor `writable:false` / invoke setters (S2 — hook
+    `fillExternSetVecArms`' arm + the typed/inline assignment lanes).
+  - After a later plain write to an overlaid index, the companion's stored
+    value goes stale; gOPD then reports the define-time value while element
+    reads see the fresh vec value (S2 closes this by making gOPD read the vec
+    for non-marker data entries).
+  - OOB defines (value, kind-incompatible value, AND accessor) grow the vec
+    to i+1 (`__vec_elem_set_<t>`, carrier default for value-less slots), per
+    §10.4.2 — required by the dominant `var arr = []; defineProperty(arr,
+    "2", {get}); arr.every(cb)` cluster shape (probes H/I/J/K). Intermediate
+    holes read as the carrier default (null/0) rather than undefined; real
+    hole semantics ride with ArraySetLength (S3). This deliberately diverges
+    from #3116's host-mode deferral: there, hole reads had no overlay to
+    consult; here the read prologue answers for overlaid indices and `[]`
+    lowers to an externref carrier whose null default observes ≈undefined.
+  - `"length"` defines/gOPD keep the legacy no-op/miss (S3).
+  - Symbol keys on vec receivers keep the legacy no-op.
+  - The typed inline `array.get` lane reads through the vec only — an
+    accessor defined on an index read via a STATICALLY-typed local (not
+    through the dynamic lane) is not consulted (the ~204-test cluster reads
+    through `__hof_*`/`__extern_get_idx`, which are covered).
+
+## Resume State (keep current — session-kill insurance)
+
+- **Branch/worktree**: `issue-3251-array-overlay-s1`, checked out in the
+  harness worktree `/workspace/.claude/worktrees/agent-a1966ecc04f08e87f`
+  (fable-1 holds the claim-issue lock). Base `0f7ac132a0` (origin/main).
+- **Implemented (S1 complete, validated)**: `src/codegen/vec-overlay.ts`
+  (reserve + finalize fill: overlay side table, `__vec_dp_value`/`_accessor`/
+  `__vec_gopd`, read prologues in `__extern_get_idx`/`__extern_get`, OOB
+  grow-with-default); 3 vec arms in `object-runtime-descriptors.ts`;
+  fill wired in `index.ts` (between `fillDynamicForinVecArms` and
+  `fillTaDynViewMopArms` — TA arm MUST stay in front); pre-growth
+  standalone-gated in `object-ops.ts`; ctx fields in `context/types.ts` +
+  global-shift entry in `registry/imports.ts`; `tests/issue-3251.test.ts`
+  (18 tests, all green pre-growth-change).
+- **Validation state**: tsc clean; probes A–K all correct (`.tmp/probe-3251.mts`,
+  `.tmp/probe-3251b.mts` in the worktree); host lane byte-identical vs main
+  (`.tmp/probe-host-bytes.mts`, sha 2c52919a… both sides); scoped descriptor
+  suite 119/120 with the single failure (`issue-2668` for-in proto-attrs)
+  failing identically on main.
+- **Next concrete steps**: (1) re-run `tests/issue-3251.test.ts` + the scoped
+  descriptor set after the OOB-growth change, (2) prettier/biome, (3) commit,
+  `git merge origin/main`, push, PR `-R loopdive/js2 --head ttraenkler:issue-3251-array-overlay-s1`,
+  (4) stand down for auto-enqueue; watch standalone floor in merge_group
+  (broad-impact substrate).
+- **Known hazards**: `ref.null`/`ref.cast` abstract heap types — object-runtime's
+  `NONE_HEAP=-18` is `any`, real `none` is `-15` (vec-overlay documents this);
+  never busy-wait on a pegged box; one compile at a time.
+
+## Stale sibling branch (do not delete — hygiene-pass salvage)
+
+`origin/issue-3251-array-descriptor-overlay` (pre-dates this work, from
+opus-defineprop2) holds 2 unlanded docs commits (`plan/log/
+standalone-assertion-fail-dispatch-map.md`, the #1781 dispatch map, ecd5bd2883)
+on a base 1170 commits behind main. Per tech-lead 2026-07-17: leave in place,
+harvest in a later hygiene pass — do NOT merge it into work branches (silent-
+revert hazard, `feedback_longlived_branch_silent_revert`).
+
 ## Provenance
 
 Filed from the #3246 follow-up scope-first analysis (tech-lead-directed). The
