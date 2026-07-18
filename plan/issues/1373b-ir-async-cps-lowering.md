@@ -169,6 +169,24 @@ semantics equal to the legacy sync pass-through they replace.
    microtask calls from IR, no changes to async-frame/async-cps planners, no
    claiming of engine-activated fns, no async methods/arrows, no async
    generators (stay in `async-generator` bucket).
+5b. **The await-only consumption rule (discovered during implementation —
+   load-bearing for parity).** Legacy's #1796 call-site contract classifies a
+   call to an async fn per consumer (`classifyAsyncConsumer`, async-cps.ts):
+   `await`/non-Promise-cast consumers get the raw `T`; **everything else is a
+   THENABLE consumer and gets `wrapAsyncReturn` (`Promise.resolve` mint) at
+   the call site**. The IR emits no such wrap, so a claimed caller using
+   `return f();` / `const p = f();` would observably diverge from legacy
+   (legacy: wrapped Promise → NaN under numeric coercion; IR: raw 42).
+   Parity therefore requires: **a claimed body may reference a local async
+   declaration ONLY as the immediate operand of an `await`** — enforced by
+   the new `expr-async-callee-not-awaited` rejection in `isPhase1Expr`'s
+   identifier-callee call arm (the await arm handles the direct
+   `await f(...)` shape inline). Combined with the call-graph closure, the
+   practical C-1 population is: **exported async declarations + the async
+   fns they (transitively) await, plus fully-claimable sync callers that
+   only `await` them.** Casts (`f() as any as number`) are not IR-claimable
+   expressions anyway, so the cast-consumer population stays legacy
+   automatically.
 6. **Tests / verification**
    - `tests/ir/issue-1373b.test.ts`: extend — (a) selector: engine-activated
      shape (single tail await of a genuinely-pending call, wasi) is NOT
@@ -248,12 +266,27 @@ the blockers land):
   Working tree: the fable-4 agent worktree
   (`/workspace/.claude/worktrees/agent-a09a1f88a93af0c16`).
 - **Claim**: `claim-issue.mjs 1373b ttraenkler/fable-4` taken 2026-07-18.
-- **Done**: re-grounding vs main @667d162225; this plan.
-- **Pending**: C-1 implementation per the numbered steps above (select.ts →
-  from-ast.ts → lower.ts → threading → tests), fallback-baseline refresh,
-  parity + inertness evidence, PR.
-- **Next concrete step**: implement C-1.1 (`select.ts` gate + options) and
-  C-1.4's `asyncEngineWouldActivate` export, then wire from-ast.
+- **Done**: re-grounding vs main @667d162225; this plan; C-1 implementation —
+  `src/codegen/async-static.ts` (leaf extraction of
+  `awaitIsStaticallyResolved`/`staticPromiseResolveSettledExpr` +
+  `unwrapPromiseTypeNode`; async-cps.ts re-exports), `asyncEngineWouldActivate`
+  (async-activation.ts), select.ts (real `isAsyncIrReady`, async fall-through
+  in `whyNotIrClaimable`, Promise<T> return unwrap, `isPhase1Expr` await arm,
+  await-only consumption rule `expr-async-callee-not-awaited`), from-ast.ts
+  (funcKind async, return unwrap, await lowering w/ settled substitution +
+  passthrough), builder.ts (`valueType` accessor, `emitAwait`), lower.ts
+  (await arm rewritten: host identity / native-carrier guarded unwrap
+  mirroring `emitStandaloneAwaitUnwrap`; resolver
+  `nativePromiseCarrierActive`), integration.ts (resolver binding), index.ts
+  (`planIrOverlay` options + overrideMap async unwrap), create-context.ts
+  (default ON, `JS2WASM_IR_ASYNC=0` rollback lever), tests extended in
+  `tests/ir/issue-1373b.test.ts`.
+- **Pending**: local validation (tsc ✓ first pass; vitest tests/ir +
+  async-blast-radius scoped suites), fallback-gate check (script has no
+  engine binding → baseline stays 4 — verify), PR, CI, self-merge.
+- **Next concrete step**: run `npm test -- tests/ir/issue-1373b.test.ts`,
+  fix fallout, then the async blast radius
+  (issue-1042*/2895*/2906*/async-function equivalence).
 
 ## Joint architect spec (S53)
 
