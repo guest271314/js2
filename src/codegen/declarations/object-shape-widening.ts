@@ -1029,7 +1029,15 @@ export function collectPropsFromStatements(
     if (ts.isTryStatement(s)) {
       collectPropsFromStatements(checker, ctx, s.tryBlock.statements, varName, varKey, extraProps, seenProps);
       if (s.catchClause) {
-        collectPropsFromStatements(checker, ctx, s.catchClause.block.statements, varName, varKey, extraProps, seenProps);
+        collectPropsFromStatements(
+          checker,
+          ctx,
+          s.catchClause.block.statements,
+          varName,
+          varKey,
+          extraProps,
+          seenProps,
+        );
       }
       if (s.finallyBlock) {
         collectPropsFromStatements(checker, ctx, s.finallyBlock.statements, varName, varKey, extraProps, seenProps);
