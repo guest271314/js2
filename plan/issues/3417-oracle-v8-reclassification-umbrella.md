@@ -140,7 +140,17 @@ tests host fails, so set-difference ≫ net.) Gap composition:
 **Coverage audit (2026-07-19):** every gap bucket >50 now has an issue —
 `module-init trap` #1781/#3393, `async-marker` #3428, `generator/async-gen` #2961/#680,
 `null-deref` **#3442**, `RegExp` #1474, `Reflect.construct` #1472, `host-import leak` #3418,
-`eval/dynamic-import` #1696, `illegal-cast` **#3443**, `invalid-wasm` #2039, `Promise/SAB/instanceof/dyn-shape` #3418/#1472 (host-refusal). The Promise/SAB/instanceof/dyn-shape (221) are all `env::*` host-import leaks or #1472-Phase-B `__get_builtin` refusals — deferred features, not codegen bugs. Residual uncategorized is ~8 tests, each <50 (acorn-parse internal errors ×5, timeouts ×2, array-too-large ×1) — below the file threshold.
+`eval/dynamic-import` #1696, `illegal-cast` **#3443**, `invalid-wasm` #2039, `Promise/SAB/instanceof/dyn-shape` #3418/#1472 (host-refusal). The Promise/SAB/instanceof/dyn-shape (221) are all `env::*` host-import leaks or #1472-Phase-B `__get_builtin` refusals — deferred features, not codegen bugs.
+
+**Sub-50 long tail also now tracked (2026-07-19):** the `<50` residual signatures
+are captured too — `negative_test_fail` early-error / mis-pass (89 default / 45
+standalone) → **#3444**; compiler internal-crash `Cannot read properties of
+undefined` + `Maximum call stack` (~28 both lanes) → **#3445**; and the catch-all
+long-tail (array-too-large, float-unrepresentable, runtime max-call-stack,
+timeouts) → **#3446**. Prior trackers for all of these (#3026/#721/#418/#2920 neg-test,
+#438/#523/#1606/#2587/#1607 crash, #301/#1171 tail) were all `done` with no open
+successor. Every distinct harvested signature across both lanes is now captured in
+an issue — zero uncaptured.
 
 Fundamentally: the gap is ~**55% host-import-refusal** (generators, RegExp,
 Reflect.construct, Proxy, eval, Promise-host, SAB, instanceof, dyn-shape — features
