@@ -14,6 +14,11 @@ model: fable
 sprint: current
 horizon: s
 related: [3432, 3419, 3087, 3074]
+# Site-required: the builtin:Function acceptance + rationale live inside the
+# resolvesToDynamicAnyCtorValue gate (mostly comment lines citing the JSDoc
+# contextual-typing root cause).
+loc-budget-allow:
+  - src/codegen/expressions/new-super.ts
 ---
 
 # #3434 — `Function`-typed dynamic ctor params miss the #3087 `__construct_closure` route
