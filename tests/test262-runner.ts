@@ -63,6 +63,33 @@ const SANDBOX_GLOBAL_NAMES: ReadonlyArray<string> = [
   "Math",
   "JSON",
   "Reflect",
+  // (#3419) The TypedArray cluster + binary-data builtins. The oracle-v8
+  // literal harness (testTypedArray.js) reads these as VALUES off globalThis
+  // (`Object.getPrototypeOf(Int8Array)`, `[Int8Array, Uint8Array, …]`); before
+  // this list included them, `__extern_get(globalThis, "Int8Array")` returned
+  // undefined in the sandbox and the whole TypedArray harness died at
+  // `Object.getPrototypeOf(undefined)` — ~2k tests. Same vm realm as the rest
+  // of the sandbox, so intra-sandbox identities hold.
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "DataView",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float16Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+  "BigInt",
+  "EvalError",
+  "URIError",
+  "AggregateError",
+  "Proxy",
 ];
 
 const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
