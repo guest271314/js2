@@ -13,6 +13,11 @@ sprint: current
 horizon: l
 related: [2860, 2870, 2862, 2885]
 umbrella: 2860
+# Slice A (#2875, 2026-07-18): +21 native-strings.ts (box-struct ensure comment
+# + addUnionImports call) and +10 array-object-proto.ts (trim flatten + guard).
+loc-budget-allow:
+  - src/codegen/native-strings.ts
+  - src/codegen/array-object-proto.ts
 ---
 
 > **Blocked on #2885** (standalone descriptor-reflection core). The reflective
@@ -176,7 +181,7 @@ family split across two PRs):
   combine (§22.1.3.4); f64 result boxed via `__box_number` ensured in the same
   first late-import batch as `__unbox_number` (funcidx-shift discipline). 10/10
   host-free tests pass; byte-diff neutrality re-verified after `git merge
-  origin/main` (12/12 unrelated programs byte-identical to main; only the two
+origin/main` (12/12 unrelated programs byte-identical to main; only the two
   target reflective programs change output).
 - **Slice 3 — in PR (dev-2875f, salvaged from dev-2875b's rotation):** the full
   search family — `indexOf`, `lastIndexOf` (number results, `__box_number`) and
@@ -229,6 +234,7 @@ family split across two PRs):
     (matches the direct path's static-only `argIsStaticRegExp` fold); no
     test262 case exercises a runtime-only RegExp arg reaching a reflective
     call today.
+
 - **Slice 4 — in PR (dev-2875f): the `not-a-constructor` bucket was a harness
   STUB TYPE BUG, not compiler work.** The runner replaces the test262
   `isConstructor` harness entirely (`needsIsConstructor` preamble,
@@ -250,7 +256,7 @@ family split across two PRs):
   — standalone wins only in sampling (18 diverse files + 5 base-compared);
   full validation in `merge_group`.
   - Adjacent gap (documented, not in-bucket): `const C: any =
-    String.prototype.indexOf; new C()` silently does NOT throw (the direct
+String.prototype.indexOf; new C()` silently does NOT throw (the direct
     member form does) — generic new-on-non-constructor-closure runtime check
     missing.
 - **Slice 5 — in PR (dev-2875f): fromCharCode ToUint16 + zero-arg.** Post-#2477
@@ -272,7 +278,7 @@ family split across two PRs):
     (a) `String.hasOwnProperty("fromCharCode")` → false (static own-property
     reflection over the builtin CONSTRUCTOR object; blocks S15.5.3.2_A1 whose
     typeof + .length asserts already pass); (b) `String.prototype[Symbol.
-    iterator].call(null/undefined)` must throw — the @@iterator symbol-member
+iterator].call(null/undefined)` must throw — the @@iterator symbol-member
     ROC guard; needs TS-symbol-name → `@@<id>` sentinel normalization in the
     reflective-call resolver before the glue arm can fire (2 tests);
     (c) matchAll flags/custom-@@matchAll (route with the RegExp-arg (c)
@@ -294,12 +300,12 @@ poisons `RegExp.prototype` mid-sweep and crashes ~780 files, so a single sweep
 undercounts):** the residual is now **~282 host-pass/standalone-fail** across
 `built-ins/String/**`, matching the #2860 re-measure. Largest coherent buckets:
 
-| bucket                                                              | fails |
-| ------------------------------------------------------------------- | ----: |
-| RegExp-arg family (match 18, replace 21, split 19, replaceAll 13, search 21, matchAll ~22) | ~114 |
-| **trim family (trim 42, trimStart 11, trimEnd 11)** — mostly `wrong_value` | **64** |
-| case family (toLowerCase 14, toUpperCase 11)                        |    25 |
-| substring 16, slice 9, normalize 9, indexOf/lastIndexOf 12, …       |   rest |
+| bucket                                                                                     |  fails |
+| ------------------------------------------------------------------------------------------ | -----: |
+| RegExp-arg family (match 18, replace 21, split 19, replaceAll 13, search 21, matchAll ~22) |   ~114 |
+| **trim family (trim 42, trimStart 11, trimEnd 11)** — mostly `wrong_value`                 | **64** |
+| case family (toLowerCase 14, toUpperCase 11)                                               |     25 |
+| substring 16, slice 9, normalize 9, indexOf/lastIndexOf 12, …                              |   rest |
 
 ### Slice A (THIS PR) — reflective non-string-primitive ToString + trim flatten
 
@@ -342,5 +348,5 @@ ToString now correct across all reflective String methods.
   `null` receivers DO throw (they are `ref.null`). Needs an `is_undefined`
   test alongside `ref.is_null` in every String proto glue's RequireObjectCoercible
   — a separate, shared slice (also fixes the pre-existing `*.call(undefined)
-  throws` assertions in `issue-2875*.test.ts`, which fail on main today).
+throws` assertions in `issue-2875*.test.ts`, which fail on main today).
 - RegExp-arg family (~114), case family (25), substring/slice/normalize.
