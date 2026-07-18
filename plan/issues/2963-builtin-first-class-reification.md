@@ -18,6 +18,16 @@ language_feature: builtins
 goal: standalone-mode
 related: [1472, 2036, 2860, 2964]
 origin: "2026-07-02 July Fable audit §3 cluster 5 (biggest standalone CE family; #1472 Phase-C refusal successor)"
+# (#2963 Tier 2a) The reified Number.is* closure body REUSES the settled
+# `__unbox_number` native — the SAME unbox the direct `Number.is*(n)` call path
+# uses via `compileNumberIsPredicate` — to recover the f64 from the boxed arg
+# after the `__typeof_number` type guard. It is NOT a fresh hand-rolled
+# ToNumber/ToString/ToPrimitive matrix (the coercion engine is deliberately
+# bypassed here because §21.1.2.x requires NO coercion — a non-Number arg is
+# `false`), so the +2 __unbox_number growth in builtin-value-read.ts is a
+# reviewed, intentional reuse of an existing coercion primitive.
+coercion-sites-allow:
+  - src/codegen/builtin-value-read.ts
 ---
 
 # #2963 — reading a builtin as a value is a compile error standalone
