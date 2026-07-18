@@ -1040,7 +1040,15 @@ jobs:
       - name: Compile-time regression guard (#1942)
         if: env.SHARDS_RAN == 'true'
         env:
-          COMPILE_TIMEOUT_THRESHOLD: "25"
+          # Scales with per-shard test density (#3431). The 114→59 merge_group
+          # shard consolidation ~doubles tests-per-shard, so boundary compiles
+          # that flirt with the 30s per-test timeout cross it proportionally more
+          # often under runner CPU contention (25 × 114/59 ≈ 48, rounded to 50
+          # for headroom). This count threshold is the flake-noise filter only;
+          # the aggregate +20% compile-time guard below is UNCHANGED and remains
+          # the systemic-slowdown backstop, so raising this does not weaken real
+          # compile-perf regression detection.
+          COMPILE_TIMEOUT_THRESHOLD: "50"
           AGG_COMPILE_TIME_PCT_THRESHOLD: "20"
         run: |
           if [ ! -f /tmp/cat-diff.txt ]; then
