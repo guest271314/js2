@@ -52,6 +52,7 @@ import {
   isBoundedAsyncGenBody,
   isEmitOperand,
   listTopLevelYieldStarCalls,
+  listTopLevelRtDelegateYieldStars,
   loopAsyncSpillInfo,
   planAsyncCfg,
   planAsyncGenCfg,
@@ -732,6 +733,17 @@ function computeAsyncSpills(
     const delegateCalls = listTopLevelYieldStarCalls(decl);
     for (let i = 0; i < delegateCalls.length; i++) {
       spillNames.push(`__yieldstar_iter_${i}`);
+      spillTypes.push({ kind: "externref" });
+    }
+    // (#3388) One persisted externref slot per RUNTIME-DELEGATION `yield* <expr>`
+    // (non-call, non-array-literal operand) — the GetAsyncIterator result, live
+    // across every settleYield suspend of the delegation loop. Numbered in
+    // source order matching the CFG planner's `__yieldstar_rtiter_<i>` naming
+    // (both walk the same top-level statement list via
+    // `listTopLevelRtDelegateYieldStars`).
+    const rtDelegates = listTopLevelRtDelegateYieldStars(decl);
+    for (let i = 0; i < rtDelegates.length; i++) {
+      spillNames.push(`__yieldstar_rtiter_${i}`);
       spillTypes.push({ kind: "externref" });
     }
     return { spillNames, spillTypes };
@@ -1484,6 +1496,17 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             },
           ];
           const rejectFromP: Instr[] = [
+            // (#2958) The frame is consuming this awaited promise's rejection
+            // (the reason is re-thrown into the resume machine, where a
+            // try/catch in the async body may handle it), so mark it handled —
+            // otherwise an inlined `await Promise.reject(x)` would be reported as
+            // unhandled. No-op when tracking is inactive.
+            ...(rt && rt.markRejectionHandledFuncIdx >= 0
+              ? ([
+                  { op: "local.get", index: pLocal },
+                  { op: "call", funcIdx: rt.markRejectionHandledFuncIdx },
+                ] satisfies Instr[])
+              : []),
             { op: "local.get", index: frameLocal },
             { op: "local.get", index: pLocal },
             {

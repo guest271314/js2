@@ -10,6 +10,7 @@ created: 2026-03-22
 updated: 2026-07-17
 priority: high
 feasibility: hard
+model: fable
 reasoning_effort: max
 goal: performance
 sprint: fable-final
