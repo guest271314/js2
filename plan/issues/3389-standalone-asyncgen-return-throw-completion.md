@@ -169,3 +169,23 @@ with wrapped leak probes + a mixed-module carrier probe.
 Slice 2 (consumer `.return()`/`.throw()` on driven frames) is a follow-up.
 Out of scope both slices: `return` inside try/finally (finally-across-suspend),
 yield\* delegate return forwarding (§27.6.3.7 7.b — needs #3388+#3389 both).
+
+## Slice 1 landed — Documented next slices (fable-dev-3, 2026-07-18)
+
+Slice 1 (settleReturn terminator, PR opened post-#3388-merge) admits the clean
+top-level `return E` shape. Two follow-ups remain for the full ~268-row bucket:
+
+- **Slice 2 — consumer `.return()` / `.throw()` on DRIVEN frames**
+  (`AsyncGeneratorPrototype/{return,throw}` rows + `__gen_throw` combos): add
+  `__async_gen_return_<stem>` / `__async_gen_throw_<stem>` siblings (or a
+  completion-kind param on the existing `__async_gen_next_<stem>` driver) that
+  settle/reject a suspended-at-yield or completed frame. See the Slice 2 block
+  in the Implementation Plan above.
+- **try-across-yield follow-up (the corpus multiplier)**: the has-return
+  async-gen CORPUS files overwhelmingly wrap the `return` in `try`/`catch`/
+  `finally` across a `yield` (e.g. `try { yield* x } catch(e) { } return thrown`),
+  or combine it with `yield*` return-forwarding (§27.6.3.7 7.b). Those stay
+  legacy after slice 1 (correct-or-legacy) and are what gates most of the 268
+  rows — the return-completion handler must run the `finally` on the return
+  path (out of scope for slices 1–2; needs the async-frame handler-region
+  generalization, cross-ref #2906 gap-3 try/finally).
