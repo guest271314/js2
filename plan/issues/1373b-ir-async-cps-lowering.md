@@ -282,12 +282,19 @@ the blockers land):
   (`planIrOverlay` options + overrideMap async unwrap), create-context.ts
   (default ON, `JS2WASM_IR_ASYNC=0` rollback lever), tests extended in
   `tests/ir/issue-1373b.test.ts`.
-- **Pending**: local validation (tsc ✓ first pass; vitest tests/ir +
-  async-blast-radius scoped suites), fallback-gate check (script has no
-  engine binding → baseline stays 4 — verify), PR, CI, self-merge.
-- **Next concrete step**: run `npm test -- tests/ir/issue-1373b.test.ts`,
-  fix fallout, then the async blast radius
-  (issue-1042*/2895*/2906*/async-function equivalence).
+- **Validation so far**: tsc clean (pre + post upstream-merge);
+  tests/ir/issue-1373b.test.ts 26/26 (pre + post-merge); tests/ir +
+  async-function/promise-chains equivalence batch → failure set IDENTICAL to
+  a clean-base control worktree (7 pre-existing: 4× ir/passes end-to-end +
+  3× ir/inline-small end-to-end LinkError __unbox_number — NOT this change;
+  probe-verified plain fns byte-identical gate on/off). Empirical claim
+  split (probe): `base` (statically-resolved await) → engine declines → IR
+  claims; `twice` (`await base()` call operand) → HOST-DRIVE engine claims →
+  IR declines. Merged upstream/main 852c40a9f cleanly.
+- **Pending**: `pnpm run check:ir-fallbacks` (expect baseline unchanged —
+  the gate script passes no engine binding, so asyncs stay bucketed),
+  async engine blast radius (issue-1042*/2895*/2906* files) post-merge,
+  PR, CI, self-merge.
 
 ## Joint architect spec (S53)
 
