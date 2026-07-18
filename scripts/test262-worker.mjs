@@ -94,7 +94,7 @@ function buildOriginalHarnessSandbox(consoleProxy) {
   // real, module-local `$DONE` (lexically in scope inside `asyncTest`) still
   // drives the completion callback that emits the `Test262:AsyncTestComplete`
   // marker.
-  sandbox.$DONE = function () {};
+  sandbox.$DONE = () => {};
   return sandbox;
 }
 
