@@ -49,6 +49,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
+import { scanForDynamicProto, fillDynamicProtoHelpers } from "./dynamic-proto.js"; // (#802)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
@@ -129,6 +130,7 @@ import {
   getRunLoopFuncIdxForWasiStart,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { ensureUnhandledRejectionReporter } from "./unhandled-rejection.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
@@ -2228,6 +2230,12 @@ export function generateModule(
     // default — programs without `new.target` are byte-identical.
     scanForNewTarget(ctx, ast.sourceFile);
 
+    // (#802) Detect proto-mutation receivers up front so class collection can
+    // append the conditional standalone-only `$__proto__` field to marked
+    // hierarchy roots. Off by default — programs without proto mutation are
+    // byte-identical.
+    scanForDynamicProto(ctx, ast.sourceFile);
+
     // (#2001 S1) Detect any array-literal elision up front so externref-element
     // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
     // Off by default — programs without holes are byte-identical.
@@ -2783,6 +2791,16 @@ export function generateModule(
     // native errors (standalone/wasi only) — byte-identical otherwise.
     fillExternGetErrorProps(ctx);
 
+    // (#802 Slices B+C) Mint the struct-proto natives and prepend the
+    // marked-root dispatch arms into `__object_setPrototypeOf` /
+    // `__getPrototypeOf` / `__extern_get`, so `Object.setPrototypeOf(
+    // classInstance, proto)` records the link in the conditional appended
+    // `$__proto__` field and inherited dynamic reads walk it. Mints DEFINED
+    // funcs only (no import shifts). No-op unless standalone AND the
+    // scanForDynamicProto prescan marked a class hierarchy — byte-identical
+    // otherwise.
+    fillDynamicProtoHelpers(ctx);
+
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
     // string helpers exist. `__to_primitive`'s array-reduce arm baked a `call`
@@ -3139,6 +3157,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
     ensureWasiStartExnPrinter(ctx);
   }
 
+  // (#2958) Pre-emit the unhandled-rejection reporter (a no-op unless the native
+  // $Promise carrier registered its tracking substrate AND fd_write/proc_exit
+  // exist). Emitting it here — before any funcidx below is computed — keeps the
+  // index space stable, mirroring the exn-printer discipline above. `_start`
+  // calls it at the tail (after the drain/run-loop), so a still-unhandled
+  // rejection is reported to stderr and the program exits nonzero.
+  const unhandledReporterIdx = ctx.wasi ? ensureUnhandledRejectionReporter(ctx) : -1;
+
   // Choose the WASI program entry that `_start` wraps.
   //
   // #1411 regression: #1978 correctly stopped splicing the module-init body
@@ -3215,6 +3241,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
       if (drainFuncIdx !== null) {
         body.push({ op: "call", funcIdx: drainFuncIdx });
       }
+    }
+
+    // (#2958) After the microtask/event-loop drain has fully quiesced, surface
+    // any promise that rejected without ever getting a handler (Node parity:
+    // report to stderr + exit nonzero). No-op function body when nothing was
+    // tracked; only emitted at all when the reporter exists.
+    if (unhandledReporterIdx >= 0) {
+      body.push({ op: "call", funcIdx: unhandledReporterIdx });
     }
 
     // (#2968) If the uncaught-exception printer was emitted (throwing WASI
@@ -4415,6 +4449,12 @@ export function generateMultiModule(
     // (#2023) Whole-realm new.target detection — OR across all source files.
     for (const sf of multiAst.sourceFiles) {
       scanForNewTarget(ctx, sf);
+    }
+
+    // (#802) Whole-realm proto-mutation receiver detection — OR across all
+    // source files (marked roots must be known before class collection).
+    for (const sf of multiAst.sourceFiles) {
+      scanForDynamicProto(ctx, sf);
     }
 
     // (#2001 S1) Whole-realm array-hole detection — OR across all source files.
