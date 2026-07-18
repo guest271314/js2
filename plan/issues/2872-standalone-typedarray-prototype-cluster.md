@@ -2,7 +2,7 @@
 id: 2872
 title: "Standalone: TypedArray.prototype.* cluster (294 host-pass/standalone-fail, de-masked from #2862)"
 status: in-progress
-assignee: ttraenkler/fable-dev-4
+assignee: ttraenkler/fable-dev-5
 created: 2026-06-30
 updated: 2026-07-18
 priority: high
@@ -22,6 +22,56 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
   - src/codegen/expressions/calls-closures.ts
 ---
+
+## Slice 5 implementation plan (fable-dev-5, 2026-07-18, branch `issue-2872-scalar-hof-any-decline`, stacked on PR #3338)
+
+Executes BOTH parts of the slice-5 root-cause map below (dev-4's takeover PR
+#3338 banked the map; the stale `agent-a30d0acc00d3c78c5` claim-lock was
+force-taken per the takeover already approved there). WHY each change is
+where it is:
+
+1. **Part 2 (load-bearing) — scalar-HOF any-receiver decline in
+   `tryExternClassMethodOnAny` (calls-closures.ts).** The #3139 unconditional
+   refusal list already declines find/findIndex/forEach/some/every/filter/map/
+   reduce/reduceRight/indexOf/lastIndexOf — but NOT `findLast`/`findLastIndex`,
+   so the first-match loop still binds `env::Uint8ClampedArray_findLast[Index]`
+   (the measured host_import_leak ×33). Fix: a SHARED decline
+   `if (noJsHost(ctx) && STANDALONE_TA_SCALAR_HOFS.has(methodName)) return null;`
+   placed before the first-match loop. Uses the existing exported set from
+   calls.ts (calls-closures.ts already imports from `./calls.js` — no new
+   cycle). `noJsHost`-gated (join precedent, line ~1514) so the HOST lane keeps
+   its extern binding byte-identical — zero host-lane risk, unlike widening the
+   unconditional #3139 list. For the siblings the new line is unreachable
+   (they return earlier) — it exists as the family-level standalone guarantee
+   the map asked for. After the decline the standalone ladder bottoms out at
+   the #2151 closed-method dispatcher whose #3098 HOF arm already serves
+   findLast/findLastIndex via the native `__hof_findLast[Index]` backward
+   loops (hof-native.ts NATIVE_HOF_EACH — verified present).
+2. **Part 1 (fold-in) — findLast/findLastIndex join the #3058/#3162 dyn-view
+   two-arm (array-methods.ts).** Add both to `DYN_VIEW_READ_METHODS` AND
+   `FIND_METHODS`. The FIND_METHODS route sends the THEN arm through
+   `ensureNativeArrayHof` (`__hof_findLast[Index]`, backward flag — already
+   implemented), NOT the legacy `compileArrayFind` re-entry whose missing
+   `__call_1_f64` registration was the (now-stale) exclusion note. Gc/host
+   byte-identical by construction: the line-1135 gate `(!FIND_METHODS.has ||
+   ctx.standalone)` keeps the two-arm standalone-only for FIND_METHODS
+   members. Also prune the stale exclusion note.
+
+Checklist (kept current — resume point if interrupted):
+
+- [x] Root-cause map read (PR #3338); code paths verified on this base
+- [x] Claim lock force-taken (stale 07-12 holder; takeover per #3338)
+- [ ] Part 2 decline in calls-closures.ts
+- [ ] Part 1 set additions in array-methods.ts
+- [ ] Probe: any-receiver harness shape — no `env::*_findLast*` import, correct
+      values/order/thisArg/undefined-miss, standalone execute
+- [ ] Probe: plain-array any-receiver findLast unhijacked (guard)
+- [ ] Regression sweep: issue-2872/#3058/#3098/#3162/#1712 suites +
+      prove-emit-identity (host/gc byte-identity)
+- [ ] PR open, CI started
+
+Slice 6 (the ~150-row cross-method `assert.throws` shared-validation-prelude
+cluster) remains the NEXT slice after this — not in this PR.
 
 ## Takeover + fresh 2026-07-18 re-measurement (fable-dev-4)
 
