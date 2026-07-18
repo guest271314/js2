@@ -1,5 +1,5 @@
 ---
-id: 3381
+id: 3403
 title: "Object-integrity tracking maps (frozenVars/sealedVars/nonExtensibleVars/definedPropertyFlags/widenedDefinePropertyKeys) keyed by BARE variable name → cross-function collision (same archetype as #3364)"
 status: ready
 sprint: current
@@ -15,7 +15,16 @@ related: [3364, 2012, 2744, 1460]
 origin: "2026-07-17 codebase audit — VERIFIED reproducing on upstream/main c4c13cbe31"
 ---
 
-# #3381 — object-integrity tracking is keyed by bare variable name (cross-function collision)
+# #3403 — object-integrity tracking is keyed by bare variable name (cross-function collision)
+
+> **Id reassigned 3381 → 3403 (fable-dev-5, 2026-07-18).** This audit issue was
+> hand-picked id 3381, which collided with `3381-refresh-baseline-standalone.md`
+> that landed on main overnight — parking PR #3304 in the merge queue on the
+> `check:issue-ids:against-main` gate. Reallocated via `claim-issue.mjs
+> --allocate` (mechanical takeover; the authoring session was idle since
+> 21:32 the previous night). No content changed — only the `id:` frontmatter,
+> this heading, and the filename. The PR title still reads `docs(#3381)` (a
+> merged commit message, cosmetic only).
 
 ## Summary
 
