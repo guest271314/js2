@@ -1,7 +1,7 @@
 ---
 id: 3394
 title: "standalone: bigint (i64) value reaches externref coercion via extern.convert_any instead of __box_bigint — invalid Wasm (~59 tests)"
-status: in-progress
+status: ready
 assignee: ttraenkler/fable-dev-1
 sprint: current
 created: 2026-07-18
@@ -19,6 +19,10 @@ related: [2039, 2044, 1644]
 test262_bucket: standalone-invalid-wasm
 test262_count: 59
 es_edition: multi
+loc-budget-allow:
+  - src/codegen/map-runtime.ts
+  - src/codegen/destructuring-params.ts
+  - src/codegen/expressions/call-builtin-static.ts
 ---
 
 # #3394 — bigint i64→externref: missing `__box_bigint` box (child of #2039)
@@ -236,11 +240,36 @@ absent on standalone, refuse loudly (#1888), never emit invalid Wasm.
 
 ### Remaining-steps checklist
 
-- [ ] Fix `coerceArgToAnyref` i64 arm (site 1).
-- [ ] Fix Object.create 2nd-arg coercion (site 2).
-- [ ] Reproduce + fix the Temporal array.get boundary (site 3).
-- [ ] Add `tests/issue-3394-bigint-box.test.ts`; A/B bigint + collections suites.
-- [ ] loc-budget / oracle-ratchet gates; grant allows in THIS file if needed.
-- [ ] Open PR to `loopdive/js2wasm`; issue `status: done` + `completed:` if the
-      59-row bucket is fully covered, else slice note.
+- [x] Fix `coerceArgToAnyref` i64 arm (site 1 — Map/Set/WeakMap/WeakSet).
+- [x] Fix Object.create 2nd-arg coercion (site 2 — bare convert_any → coerceType).
+- [x] Reproduce + fix the Temporal array.get boundary (site 3 — `boxToExternref`
+      i64 arm; the real `timezone-wrong-type.js` now validates. Root cause: an
+      inferred `[number|bigint, string]`-tuple array stores the first slot as
+      i64; destructuring it fell to the ref-default `extern.convert_any`).
+- [x] Added `tests/issue-3394-bigint-box.test.ts` (5 tests, all green); A/B
+      bigint + collections + destructuring suites — zero new failures (the 4
+      object-destructuring failures in issue-dstr-requireobj / null-destructure-
+      param-object are PRE-EXISTING on main, unrelated).
+- [x] oracle-ratchet clean; `loc-budget-allow` granted for the 3 god-files.
+- [ ] Open PR to `loopdive/js2wasm`.
+
+### Scope note — what this PR covers vs. the 59 rows
+
+Covers the **valid-Wasm acceptance bar** for the Object (1) + Map/Set (4) +
+Temporal-destructure (51) shapes = ~56 rows. Two follow-ups, out of THIS slice:
+
+- **String:3** (`padStart/padEnd` bigint fill) is a DIFFERENT signature —
+  `call expected (ref null <string>), found i64` (a string-parameter ToString
+  coercion, not the `extern.convert_any` externref bucket). Needs the pad-fill
+  arg to ToString a bigint; tracked as a follow-up.
+- **Standalone Map/Set bigint-KEY equality**: the key now boxes to valid Wasm,
+  but two `__box_bigint(5n)` boxes don't compare equal on the native
+  SameValueZero key path, so `m.get(5n)` after `m.set(5n, …)` misses. This is a
+  runtime-semantics gap (value equality on boxed bigints), NOT invalid-Wasm —
+  the bucket rows were invalid-Wasm (compile fail) before and are valid now
+  (monotonic; whether they then pass at runtime is a separate bucket). Flagged
+  for a follow-up on standalone bigint value-equality.
+
+Issue left `in-progress`/`ready` for those two follow-ups unless the tech lead
+prefers a dedicated child; the invalid-Wasm bulk is fixed.
 - Equivalence tests green.
