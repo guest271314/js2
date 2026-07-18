@@ -18,6 +18,11 @@ goal: standalone-mode
 umbrella: 3178
 related: [3132, 3387, 3388, 2865, 2906]
 origin: "2026-07-17 fable-3178 umbrella decomposition — #3132 S4 banked slice, re-grounded: __gen_set_return 268 / __gen_return (async combos) / __gen_throw 80 rows."
+# Slice 1: settleReturn terminator — analyzer admission + CFG plan (async-cps.ts)
+# and the emitter arm + validateAsyncCfg (async-frame.ts).
+loc-budget-allow:
+  - src/codegen/async-cps.ts
+  - src/codegen/async-frame.ts
 ---
 
 # #3389 — async-gen `return`/`throw` completion for the driven lane
@@ -143,11 +148,11 @@ origin/main; the stack collapses).
    records `returnExpr` and terminates the body (trailing statements are
    unreachable). Suspend-free operand only (`!containsAwaitOrYield(E)`).
    Promise-typed `E` BAILS on the carrier lane (`implicitYieldAwait !== null &&
-   yieldOperandIsPromiseTyped`) — the §27.6.3.8 return-value Await is deferred
+yieldOperandIsPromiseTyped`) — the §27.6.3.8 return-value Await is deferred
    (correct-or-legacy, same policy as `yield await` / #3120); carrier-off admits
    all suspend-free E (documented promise-return value gap, mirrors #3120).
 3. `AsyncCfgTerminator` gains `{ kind: "settleReturn"; value: AsyncCfgOperand |
-   null; resumeState }`. `planAsyncGenCfg`: when `shape.returnExpr !== undefined`
+null; resumeState }`. `planAsyncGenCfg`: when `shape.returnExpr !== undefined`
    the tail state gets `settleReturn(value, resume→doneState)` and a TRAILING
    `settleDone` state is appended — so the first settling `next()` gives
    `{value: E, done: true}` and every SUBSEQUENT `next()` gives
@@ -163,4 +168,4 @@ with wrapped leak probes + a mixed-module carrier probe.
 
 Slice 2 (consumer `.return()`/`.throw()` on driven frames) is a follow-up.
 Out of scope both slices: `return` inside try/finally (finally-across-suspend),
-yield* delegate return forwarding (§27.6.3.7 7.b — needs #3388+#3389 both).
+yield\* delegate return forwarding (§27.6.3.7 7.b — needs #3388+#3389 both).
