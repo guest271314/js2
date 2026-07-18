@@ -19,6 +19,11 @@ related: [2039]
 test262_bucket: standalone-invalid-wasm
 test262_count: 13
 es_edition: multi
+loc-budget-allow:
+  # (#3398) The non-arrow `this`-shadow fix adds a ~15-line explanatory comment
+  # to `arrowOwnLocals` in closures.ts (the correct home — it's the free-var
+  # own-locals helper). +15 over the god-file ceiling is intended.
+  - src/codegen/closures.ts
 ---
 
 # #3398 — tail-call / block-result / arity / ref.test long tail (child of #2039)
