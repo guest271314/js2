@@ -1,7 +1,8 @@
 ---
 id: 3389
 title: "standalone: `return` completion in driven async-gen bodies (settleReturn terminator) + AsyncGeneratorPrototype.return/.throw residual (~300 rows)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-dev-3
 sprint: current
 created: 2026-07-17
 updated: 2026-07-17
@@ -123,3 +124,43 @@ the driven frame's `.return(v)`/`.throw(e)` methods must:
 - The driver-signature change (completion-kind param) touches every driven
   consumer call site — grep `__async_gen_next_` emitters before choosing the
   param vs sibling-function shape.
+
+## Implementation notes (fable-dev-3, 2026-07-18) — Slice 1 in progress
+
+STACKED on #3388's real branch (`fork/issue-3388-asyncgen-yieldstar`, PR #3332)
+per the known-dependency exception — #3389's `settleReturn` sits in the same
+`analyzeAsyncGen`/`planAsyncGenCfg`/`emitAsyncFrameStateMachine` surface #3388
+extended (rtDelegate). PR opens only AFTER #3332 merges (then re-merge
+origin/main; the stack collapses).
+
+### Slice 1 design (top-level `return E` → settleReturn)
+
+1. `AsyncGenShape` gains `returnExpr?: ts.Expression | null` (undefined = no
+   return / fall-through `settleUndefined`+`settleDone`; null = bare `return;`;
+   Expression = `return E`).
+2. `analyzeAsyncGen`: a top-level `ReturnStatement` (statement position, not
+   nested in control flow — `containsOwnScopeReturn` on a LEAD still bails)
+   records `returnExpr` and terminates the body (trailing statements are
+   unreachable). Suspend-free operand only (`!containsAwaitOrYield(E)`).
+   Promise-typed `E` BAILS on the carrier lane (`implicitYieldAwait !== null &&
+   yieldOperandIsPromiseTyped`) — the §27.6.3.8 return-value Await is deferred
+   (correct-or-legacy, same policy as `yield await` / #3120); carrier-off admits
+   all suspend-free E (documented promise-return value gap, mirrors #3120).
+3. `AsyncCfgTerminator` gains `{ kind: "settleReturn"; value: AsyncCfgOperand |
+   null; resumeState }`. `planAsyncGenCfg`: when `shape.returnExpr !== undefined`
+   the tail state gets `settleReturn(value, resume→doneState)` and a TRAILING
+   `settleDone` state is appended — so the first settling `next()` gives
+   `{value: E, done: true}` and every SUBSEQUENT `next()` gives
+   `{value: undefined, done: true}` (§27.6.3.8 completed-frame semantics).
+4. `emitAsyncFrameStateMachine` (async-frame.ts): the `settleReturn` arm mirrors
+   `settleYield` (compute E → externref) but builds `{value: E, done: 1}` (like
+   `settleDone`'s struct but with the real value), settles the result promise,
+   sets STATE=resumeState (the trailing settleDone), spills, returns.
+
+Lockstep is automatic (single `analyzeAsyncGen` gate →
+`isBoundedAsyncGenBody`/`isAsyncGenDriveCandidate`/import-collector), verified
+with wrapped leak probes + a mixed-module carrier probe.
+
+Slice 2 (consumer `.return()`/`.throw()` on driven frames) is a follow-up.
+Out of scope both slices: `return` inside try/finally (finally-across-suspend),
+yield* delegate return forwarding (§27.6.3.7 7.b — needs #3388+#3389 both).
