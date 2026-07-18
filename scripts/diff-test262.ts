@@ -33,101 +33,197 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
-interface HostNoiseQuarantineManifest {
+export interface HostNoiseCanaryProvenance {
+  canary_run_id: number;
+  compiler_sha: string;
+  artifact_id: number;
+  artifact_name: string;
+  compiler_pool_size: number;
+  run_a_entries: number;
+  run_b_entries: number;
+  pass_flips: number;
+  non_pass_status_noise: number;
+  unstable_paths: number;
+}
+
+export interface HostNoiseObservation {
+  canary_run_id: number;
+  run_a_status: string;
+  run_b_status: string;
+  kind: "pass_flip" | "non_pass_status_noise";
+}
+
+export interface HostNoiseQuarantineManifest {
   schema_version: number;
   lane: string;
+  policy: {
+    eligible_paths: string;
+    intersection_paths: string;
+  };
   provenance: {
-    canary_run_id: number;
-    compiler_sha: string;
-    artifact_id: number;
-    artifact_name: string;
-    compiler_pool_size: number;
-    run_a_entries: number;
-    run_b_entries: number;
     generated_by: string;
+    canaries: HostNoiseCanaryProvenance[];
   };
   counts: {
-    pass_flips: number;
-    non_pass_status_noise: number;
-    total: number;
+    canary_runs: number;
+    pass_flip_observations: number;
+    non_pass_status_noise_observations: number;
+    union_paths: number;
+    intersection_paths: number;
   };
   entries: {
     path: string;
-    run_a_status: string;
-    run_b_status: string;
-    kind: "pass_flip" | "non_pass_status_noise";
+    observations: HostNoiseObservation[];
   }[];
 }
 
 export interface HostNoiseQuarantine {
   manifest: HostNoiseQuarantineManifest;
   paths: ReadonlySet<string>;
+  intersectionPaths: ReadonlySet<string>;
 }
+
+export const HOST_NOISE_ELIGIBILITY_POLICY = "union-of-complete-same-sha-pool4-canaries";
+export const HOST_NOISE_INTERSECTION_POLICY = "observed-in-every-recorded-canary";
 
 /**
  * #3426 — Load and validate the exact-path JS-host noise quarantine generated
- * from a same-compiler canary. Fail closed: this file influences required gate
- * arithmetic, so malformed provenance, duplicate/unsorted paths, or a count /
- * transition mismatch must abort the diff instead of silently changing scope.
+ * from complete same-compiler canaries. Eligibility is the exact union of
+ * observed A/B status changes; the exact intersection remains available as the
+ * repeat-confirmed subset. Fail closed: this file influences required gate
+ * arithmetic, so malformed provenance, duplicate/unsorted observations, or a
+ * count / transition mismatch must abort instead of silently changing scope.
  * The standalone lane never calls this loader.
  */
-export function loadHostNoiseQuarantine(): HostNoiseQuarantine {
-  const source = new URL("./test262-host-noise-quarantine.json", import.meta.url);
-  const manifest = JSON.parse(readFileSync(source, "utf-8")) as HostNoiseQuarantineManifest;
+export function validateHostNoiseQuarantineManifest(manifest: HostNoiseQuarantineManifest): HostNoiseQuarantine {
   if (
-    manifest.schema_version !== 1 ||
+    manifest.schema_version !== 2 ||
     manifest.lane !== "js-host" ||
-    !Number.isInteger(manifest.provenance?.canary_run_id) ||
-    manifest.provenance.canary_run_id <= 0 ||
-    !/^[0-9a-f]{40}$/.test(manifest.provenance?.compiler_sha ?? "") ||
-    !Number.isInteger(manifest.provenance?.artifact_id) ||
-    manifest.provenance.artifact_id <= 0 ||
-    manifest.provenance?.artifact_name !== "test262-canary-report" ||
-    !Number.isInteger(manifest.provenance?.compiler_pool_size) ||
-    manifest.provenance.compiler_pool_size <= 0 ||
-    !Number.isInteger(manifest.provenance?.run_a_entries) ||
-    !Number.isInteger(manifest.provenance?.run_b_entries) ||
-    manifest.provenance.run_a_entries <= 0 ||
-    manifest.provenance.run_a_entries !== manifest.provenance.run_b_entries ||
+    manifest.policy?.eligible_paths !== HOST_NOISE_ELIGIBILITY_POLICY ||
+    manifest.policy?.intersection_paths !== HOST_NOISE_INTERSECTION_POLICY ||
     manifest.provenance?.generated_by !== "scripts/test262-canary-diff.ts" ||
+    !Array.isArray(manifest.provenance?.canaries) ||
+    manifest.provenance.canaries.length < 1 ||
     !Array.isArray(manifest.entries)
   ) {
     throw new Error("invalid Test262 host-noise quarantine provenance/schema (#3426)");
   }
 
+  const canaryRunIds = new Set<number>();
+  const artifactIds = new Set<number>();
+  const canaryByRunId = new Map<number, HostNoiseCanaryProvenance>();
+  let previousRunId = 0;
+  for (const canary of manifest.provenance.canaries) {
+    if (
+      !Number.isInteger(canary.canary_run_id) ||
+      canary.canary_run_id <= 0 ||
+      (previousRunId !== 0 && canary.canary_run_id <= previousRunId) ||
+      canaryRunIds.has(canary.canary_run_id) ||
+      !/^[0-9a-f]{40}$/.test(canary.compiler_sha ?? "") ||
+      !Number.isInteger(canary.artifact_id) ||
+      canary.artifact_id <= 0 ||
+      artifactIds.has(canary.artifact_id) ||
+      canary.artifact_name !== "test262-canary-report" ||
+      canary.compiler_pool_size !== 4 ||
+      !Number.isInteger(canary.run_a_entries) ||
+      !Number.isInteger(canary.run_b_entries) ||
+      canary.run_a_entries <= 0 ||
+      canary.run_a_entries !== canary.run_b_entries ||
+      !Number.isInteger(canary.pass_flips) ||
+      canary.pass_flips < 0 ||
+      !Number.isInteger(canary.non_pass_status_noise) ||
+      canary.non_pass_status_noise < 0 ||
+      !Number.isInteger(canary.unstable_paths) ||
+      canary.unstable_paths !== canary.pass_flips + canary.non_pass_status_noise
+    ) {
+      throw new Error(`invalid Test262 host-noise canary provenance for run ${canary.canary_run_id || "<unknown>"}`);
+    }
+    canaryRunIds.add(canary.canary_run_id);
+    artifactIds.add(canary.artifact_id);
+    canaryByRunId.set(canary.canary_run_id, canary);
+    previousRunId = canary.canary_run_id;
+  }
+
   const paths = new Set<string>();
-  let passFlips = 0;
-  let nonPassNoise = 0;
+  const intersectionPaths = new Set<string>();
+  const observationCounts = new Map<number, { passFlips: number; nonPassNoise: number; total: number }>();
+  for (const runId of canaryRunIds) observationCounts.set(runId, { passFlips: 0, nonPassNoise: 0, total: 0 });
+  let passFlipObservations = 0;
+  let nonPassNoiseObservations = 0;
   let previousPath = "";
   for (const entry of manifest.entries) {
     if (
       typeof entry.path !== "string" ||
       entry.path.length === 0 ||
-      typeof entry.run_a_status !== "string" ||
-      typeof entry.run_b_status !== "string" ||
-      entry.run_a_status === entry.run_b_status ||
+      !Array.isArray(entry.observations) ||
+      entry.observations.length < 1 ||
       paths.has(entry.path) ||
       (previousPath !== "" && entry.path.localeCompare(previousPath) <= 0)
     ) {
       throw new Error(`invalid/duplicate/unsorted Test262 host-noise quarantine entry: ${entry.path || "<empty>"}`);
     }
-    const aPass = entry.run_a_status === "pass";
-    const bPass = entry.run_b_status === "pass";
-    if (entry.kind === "pass_flip" && aPass !== bPass) passFlips++;
-    else if (entry.kind === "non_pass_status_noise" && !aPass && !bPass) nonPassNoise++;
-    else throw new Error(`inconsistent Test262 host-noise transition kind for ${entry.path}`);
+
+    const observedRunIds = new Set<number>();
+    let previousObservationRunId = 0;
+    for (const observation of entry.observations) {
+      if (
+        !Number.isInteger(observation.canary_run_id) ||
+        !canaryRunIds.has(observation.canary_run_id) ||
+        observedRunIds.has(observation.canary_run_id) ||
+        (previousObservationRunId !== 0 && observation.canary_run_id <= previousObservationRunId) ||
+        typeof observation.run_a_status !== "string" ||
+        typeof observation.run_b_status !== "string" ||
+        observation.run_a_status === observation.run_b_status
+      ) {
+        throw new Error(`invalid/duplicate/unsorted Test262 host-noise observation for ${entry.path}`);
+      }
+      const aPass = observation.run_a_status === "pass";
+      const bPass = observation.run_b_status === "pass";
+      const runCounts = observationCounts.get(observation.canary_run_id)!;
+      if (observation.kind === "pass_flip" && aPass !== bPass) {
+        passFlipObservations++;
+        runCounts.passFlips++;
+      } else if (observation.kind === "non_pass_status_noise" && !aPass && !bPass) {
+        nonPassNoiseObservations++;
+        runCounts.nonPassNoise++;
+      } else {
+        throw new Error(`inconsistent Test262 host-noise transition kind for ${entry.path}`);
+      }
+      runCounts.total++;
+      observedRunIds.add(observation.canary_run_id);
+      previousObservationRunId = observation.canary_run_id;
+    }
+    if (observedRunIds.size === canaryRunIds.size) intersectionPaths.add(entry.path);
     paths.add(entry.path);
     previousPath = entry.path;
   }
+
+  for (const [runId, observed] of observationCounts) {
+    const expected = canaryByRunId.get(runId)!;
+    if (
+      observed.passFlips !== expected.pass_flips ||
+      observed.nonPassNoise !== expected.non_pass_status_noise ||
+      observed.total !== expected.unstable_paths
+    ) {
+      throw new Error(`Test262 host-noise observation count mismatch for canary run ${runId}`);
+    }
+  }
   if (
-    manifest.counts?.pass_flips !== passFlips ||
-    manifest.counts?.non_pass_status_noise !== nonPassNoise ||
-    manifest.counts?.total !== paths.size ||
-    paths.size !== passFlips + nonPassNoise
+    manifest.counts?.canary_runs !== canaryRunIds.size ||
+    manifest.counts?.pass_flip_observations !== passFlipObservations ||
+    manifest.counts?.non_pass_status_noise_observations !== nonPassNoiseObservations ||
+    manifest.counts?.union_paths !== paths.size ||
+    manifest.counts?.intersection_paths !== intersectionPaths.size
   ) {
     throw new Error("Test262 host-noise quarantine count mismatch (#3426)");
   }
-  return { manifest, paths };
+  return { manifest, paths, intersectionPaths };
+}
+
+export function loadHostNoiseQuarantine(): HostNoiseQuarantine {
+  const source = new URL("./test262-host-noise-quarantine.json", import.meta.url);
+  const manifest = JSON.parse(readFileSync(source, "utf-8")) as HostNoiseQuarantineManifest;
+  return validateHostNoiseQuarantineManifest(manifest);
 }
 
 // #3189 — the four UNCATCHABLE Wasm-trap error categories. A trap aborts the
@@ -698,10 +794,11 @@ Environment:
                                 host-free — a carrier migration removing a host dep, not a regression.
   --help, -h                    Show this help
 
-Host-lane note: #3426 excludes only the exact paths in
-scripts/test262-host-noise-quarantine.json from fine regression and compile-time
-gate arithmetic. Every matching transition remains listed as QUARANTINED. The
-standalone invocation (--exclude-leaky-baseline-regressions) never loads or
+Host-lane note: #3426 excludes only the exact union of paths observed changing
+status in complete same-SHA pool-4 A/B canaries recorded by
+scripts/test262-host-noise-quarantine.json. The repeat-confirmed intersection is
+reported separately. Every matching transition remains listed as QUARANTINED.
+The standalone invocation (--exclude-leaky-baseline-regressions) never loads or
 applies this JS-host-only manifest.
 
 Note: #2940 vacuity reclassifications (pass → a NEW row scored 'vacuous' — the
@@ -1015,20 +1112,30 @@ async function run(
     const quarantinedImprovements = improvements.filter((entry) => entry.hostQuarantined).length;
     const quarantinedOther = otherChanges.filter((entry) => entry.hostQuarantined).length;
     const { provenance, counts } = hostNoiseQuarantine.manifest;
+    const intersectionTransitions = quarantinedTransitions.filter((entry) =>
+      hostNoiseQuarantine.intersectionPaths.has(entry.file),
+    ).length;
     console.log(
       `=== Host canary quarantine (#3426): ${quarantinedTransitions.length} observed transition(s) excluded from host fine/compile-time gate arithmetic ===`,
     );
+    for (const canary of provenance.canaries) {
+      console.log(
+        `  Evidence: same-SHA run ${canary.canary_run_id}, compiler ${canary.compiler_sha}, artifact ${canary.artifact_id}, pool ${canary.compiler_pool_size}; ` +
+          `${canary.unstable_paths} exact paths (${canary.pass_flips} pass flips + ${canary.non_pass_status_noise} non-pass noise).`,
+      );
+    }
     console.log(
-      `  Evidence: same-SHA run ${provenance.canary_run_id}, compiler ${provenance.compiler_sha}, artifact ${provenance.artifact_id}, pool ${provenance.compiler_pool_size}; ` +
-        `manifest ${counts.total} exact paths (${counts.pass_flips} pass flips + ${counts.non_pass_status_noise} non-pass noise).`,
+      `  Manifest policy: ${counts.union_paths} union-eligible exact paths; ${counts.intersection_paths} intersection paths observed in all ${counts.canary_runs} canaries.`,
     );
     console.log(
-      `  Current raw quarantined transitions: ${quarantinedRegressions} regression(s), ${quarantinedImprovements} improvement(s), ${quarantinedOther} other status change(s).`,
+      `  Current raw quarantined transitions: ${quarantinedRegressions} regression(s), ${quarantinedImprovements} improvement(s), ${quarantinedOther} other status change(s); ` +
+        `${intersectionTransitions} intersection, ${quarantinedTransitions.length - intersectionTransitions} union-only.`,
     );
     // Always list every observed quarantined transition, including under
     // --quiet: the required workflow uploads this output as the audit artifact.
     for (const entry of quarantinedTransitions) {
-      console.log(`  QUARANTINED ${entry.file}: ${entry.from} → ${entry.to}`);
+      const evidenceClass = hostNoiseQuarantine.intersectionPaths.has(entry.file) ? "intersection" : "union-only";
+      console.log(`  QUARANTINED ${entry.file}: ${entry.from} → ${entry.to} [${evidenceClass}]`);
     }
     console.log();
   }

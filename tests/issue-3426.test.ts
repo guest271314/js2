@@ -9,7 +9,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadHostNoiseQuarantine } from "../scripts/diff-test262.js";
+import {
+  loadHostNoiseQuarantine,
+  validateHostNoiseQuarantineManifest,
+  type HostNoiseQuarantineManifest,
+} from "../scripts/diff-test262.js";
 
 interface FixtureRow {
   file: string;
@@ -19,26 +23,21 @@ interface FixtureRow {
   error_category?: string;
 }
 
-interface ManifestEntry {
-  path: string;
-  kind: "pass_flip" | "non_pass_status_noise";
-}
-
-interface Manifest {
-  schema_version: number;
-  lane: string;
-  provenance: {
-    canary_run_id: number;
-    compiler_sha: string;
-    artifact_id: number;
-    compiler_pool_size: number;
-  };
-  counts: { pass_flips: number; non_pass_status_noise: number; total: number };
-  entries: ManifestEntry[];
-}
-
-const manifest = JSON.parse(readFileSync("scripts/test262-host-noise-quarantine.json", "utf-8")) as Manifest;
-const passFlipPaths = manifest.entries.filter((entry) => entry.kind === "pass_flip").map((entry) => entry.path);
+const manifest = JSON.parse(
+  readFileSync("scripts/test262-host-noise-quarantine.json", "utf-8"),
+) as HostNoiseQuarantineManifest;
+const passFlipPaths = manifest.entries
+  .filter((entry) => entry.observations.some((observation) => observation.kind === "pass_flip"))
+  .map((entry) => entry.path);
+const unionOnlyPassFlipPath = manifest.entries.find(
+  (entry) =>
+    entry.observations.length === 1 && entry.observations.some((observation) => observation.kind === "pass_flip"),
+)?.path;
+const intersectionPassFlipPath = manifest.entries.find(
+  (entry) =>
+    entry.observations.length === manifest.provenance.canaries.length &&
+    entry.observations.some((observation) => observation.kind === "pass_flip"),
+)?.path;
 
 function runDiff(baselineRows: FixtureRow[], candidateRows: FixtureRow[], extraArgs: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "issue-3426-diff-"));
@@ -59,25 +58,59 @@ function runDiff(baselineRows: FixtureRow[], candidateRows: FixtureRow[], extraA
 }
 
 describe("#3426 — host Test262 same-SHA noise quarantine", () => {
-  it("pins the exact audited canary provenance and 360 + 150 path set", () => {
+  it("pins the audited canary provenance and exact union/intersection sets", () => {
     const loaded = loadHostNoiseQuarantine();
     expect(manifest).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       lane: "js-host",
       provenance: {
-        canary_run_id: 29632875780,
-        compiler_sha: "852c40a9f5167a2a959d53faa066cb0753b623cc",
-        artifact_id: 8426392963,
-        compiler_pool_size: 4,
+        canaries: [
+          {
+            canary_run_id: 29632875780,
+            compiler_sha: "852c40a9f5167a2a959d53faa066cb0753b623cc",
+            artifact_id: 8426392963,
+            compiler_pool_size: 4,
+            pass_flips: 360,
+            non_pass_status_noise: 150,
+            unstable_paths: 510,
+          },
+          {
+            canary_run_id: 29643714720,
+            compiler_sha: "dae79d5a311a0bf683341230c39e6c5a7f6176ad",
+            artifact_id: 8429653584,
+            compiler_pool_size: 4,
+            pass_flips: 366,
+            non_pass_status_noise: 165,
+            unstable_paths: 531,
+          },
+        ],
       },
-      counts: { pass_flips: 360, non_pass_status_noise: 150, total: 510 },
+      counts: {
+        canary_runs: 2,
+        pass_flip_observations: 726,
+        non_pass_status_noise_observations: 315,
+        union_paths: 932,
+        intersection_paths: 109,
+      },
     });
-    expect(loaded.paths.size).toBe(510);
-    expect(new Set(manifest.entries.map((entry) => entry.path)).size).toBe(510);
+    expect(loaded.paths.size).toBe(932);
+    expect(loaded.intersectionPaths.size).toBe(109);
+    expect(new Set(manifest.entries.map((entry) => entry.path)).size).toBe(932);
+    expect(unionOnlyPassFlipPath).toBe("test/annexB/built-ins/Date/prototype/getYear/length.js");
+    expect(intersectionPassFlipPath).toBe("test/annexB/built-ins/Date/prototype/setYear/length.js");
+  });
+
+  it("rejects an observation that is not sourced to a recorded same-SHA canary", () => {
+    const invalid = structuredClone(manifest);
+    invalid.entries[0].observations[0].canary_run_id = 99999999999;
+    expect(() => validateHostNoiseQuarantineManifest(invalid)).toThrow(
+      "invalid/duplicate/unsorted Test262 host-noise observation",
+    );
   });
 
   it("passes and fully reports bidirectional churn on canary-known host paths", () => {
-    const [regressedPath, improvedPath] = passFlipPaths;
+    const regressedPath = unionOnlyPassFlipPath!;
+    const improvedPath = intersectionPassFlipPath!;
     const result = runDiff(
       [
         { file: regressedPath, status: "pass", wasm_sha: "aaaaaaaaaaaa", compile_ms: 100 },
@@ -91,8 +124,8 @@ describe("#3426 — host Test262 same-SHA noise quarantine", () => {
 
     expect(result.status).toBe(0);
     expect(result.output).toContain("Host canary quarantine (#3426): 2 observed transition(s)");
-    expect(result.output).toContain(`QUARANTINED ${regressedPath}: pass → fail`);
-    expect(result.output).toContain(`QUARANTINED ${improvedPath}: fail → pass`);
+    expect(result.output).toContain(`QUARANTINED ${regressedPath}: pass → fail [union-only]`);
+    expect(result.output).toContain(`QUARANTINED ${improvedPath}: fail → pass [intersection]`);
     expect(result.output).toContain("Regressions with wasm-hash change: 0");
     expect(result.output).toContain("Improvements (other → pass): 0");
   });
