@@ -1,5 +1,5 @@
 ---
-id: 3434
+id: 3435
 title: "new TA() on a JSDoc Function-typed callback param falls to the __new_TA extern import — TypedArray harness wall"
 status: done
 created: 2026-07-18
@@ -21,7 +21,7 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
 ---
 
-# #3434 — `Function`-typed dynamic ctor params miss the #3087 `__construct_closure` route
+# #3435 — `Function`-typed dynamic ctor params miss the #3087 `__construct_closure` route
 
 ## Problem
 

@@ -310,7 +310,7 @@ function resolvesToDynamicAnyCtorValue(ctx: CodegenContext, calleeExpr: ts.Expre
   if (!ts.isParameter(decl) && !ts.isVariableDeclaration(decl) && !ts.isBindingElement(decl)) return false;
   const fact = ctx.oracle.typeFactOf(calleeExpr);
   if (fact.kind === "any" || fact.kind === "unknown") return true;
-  // (#3434) A binding typed as the bare lib `Function` interface is equally a
+  // (#3435) A binding typed as the bare lib `Function` interface is equally a
   // DYNAMIC ctor value: under checkJs the harness JSDoc
   // (`@callback … @param {Function} TypedArrayConstructor`) contextually types
   // the callback param as `Function`, so the oracle reports `builtin:Function`
