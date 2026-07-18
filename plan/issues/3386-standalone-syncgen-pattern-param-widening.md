@@ -19,6 +19,9 @@ goal: standalone-mode
 umbrella: 3178
 related: [2920, 3164, 3302, 3032, 2938, 3312, 2581]
 origin: "2026-07-17 fable-3178 umbrella decomposition — largest sync-gen residual cohort in the standalone host_import_leak baseline (post-#2961 accounting)."
+loc-budget-allow:
+  - src/codegen/generators-native.ts
+  - src/codegen/context/types.ts
 ---
 
 # #3386 — sync-generator pattern params: widen the native admission
