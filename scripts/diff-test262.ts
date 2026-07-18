@@ -88,6 +88,7 @@ export const ORACLE_REBASE_DRIFT_TOLERANCE = 25;
 //     before and independent of this gate in BOTH branches — an allowance
 //     never excuses a new trap.
 export const REGRESSIONS_ALLOW_KEY = "regressions-allow";
+export const TRAP_GROWTH_ALLOW_KEY = "trap-growth-allow";
 
 export interface RegressionsAllowance {
   /** Declared ceiling on non-excused wasm-change regressions. */
@@ -165,21 +166,25 @@ export function evaluateRebaseGate(opts: {
  * Multiple valid declarations: the ceiling is the MAX single declaration (one
  * PR = one honest reclassification; declarations deliberately do NOT sum).
  */
-async function readRegressionsAllowance(): Promise<{ allowance: RegressionsAllowance | null; notes: string[] }> {
+export async function readChangeScopedNumericAllowance(opts: {
+  key: string;
+  label: string;
+  overrideEnv: string;
+}): Promise<{ allowance: RegressionsAllowance | null; notes: string[] }> {
   const notes: string[] = [];
   const { resolveChangeBase, changeSetNumericAllowances, parseFrontmatterCountReason } =
     await import("./lib/change-scope.mjs");
-  const overrideFile = process.env.REGRESSIONS_ALLOW_FILE;
+  const overrideFile = process.env[opts.overrideEnv];
   if (overrideFile !== undefined && overrideFile !== "") {
     let parsed: { count: number; reason: string } | null | undefined;
     try {
-      parsed = parseFrontmatterCountReason(readFileSync(overrideFile, "utf-8"), REGRESSIONS_ALLOW_KEY);
+      parsed = parseFrontmatterCountReason(readFileSync(overrideFile, "utf-8"), opts.key);
     } catch {
       parsed = undefined;
     }
     if (parsed === null) {
       notes.push(
-        `⚠️  regressions-allow (#3303): MALFORMED declaration in ${overrideFile} (needs positive-integer count + non-empty reason) — ignored.`,
+        `⚠️  ${opts.label}: MALFORMED declaration in ${overrideFile} (needs positive-integer count + non-empty reason) — ignored.`,
       );
     }
     if (!parsed) return { allowance: null, notes };
@@ -188,23 +193,31 @@ async function readRegressionsAllowance(): Promise<{ allowance: RegressionsAllow
   const repoRoot = process.cwd();
   const { base, how } = resolveChangeBase(repoRoot);
   if (!base) return { allowance: null, notes };
-  const { declarations, invalid } = changeSetNumericAllowances(repoRoot, base, REGRESSIONS_ALLOW_KEY);
+  const { declarations, invalid } = changeSetNumericAllowances(repoRoot, base, opts.key);
   for (const p of invalid) {
     notes.push(
-      `⚠️  regressions-allow (#3303): MALFORMED declaration in ${p} (needs positive-integer count + non-empty reason) — ignored.`,
+      `⚠️  ${opts.label}: MALFORMED declaration in ${p} (needs positive-integer count + non-empty reason) — ignored.`,
     );
   }
   if (declarations.length === 0) return { allowance: null, notes };
   const best = declarations.reduce((a, b) => (b.count > a.count ? b : a));
   if (declarations.length > 1) {
     notes.push(
-      `regressions-allow (#3303): ${declarations.length} declarations in the change-set (base via ${how}) — using the max ceiling ${best.count} from ${best.source}; declarations do not sum.`,
+      `${opts.label}: ${declarations.length} declarations in the change-set (base via ${how}) — using the max ceiling ${best.count} from ${best.source}; declarations do not sum.`,
     );
   }
   return {
     allowance: { count: best.count, reason: best.reason, sources: declarations.map((d) => d.source) },
     notes,
   };
+}
+
+async function readRegressionsAllowance(): Promise<{ allowance: RegressionsAllowance | null; notes: string[] }> {
+  return readChangeScopedNumericAllowance({
+    key: REGRESSIONS_ALLOW_KEY,
+    label: "regressions-allow (#3303)",
+    overrideEnv: "REGRESSIONS_ALLOW_FILE",
+  });
 }
 
 /**
@@ -1181,14 +1194,25 @@ async function run(
   const netPerTest = improvements.length - regressionsWasmChange;
   let gateFailed = false;
 
-  // #3189 — uncatchable-trap GROWTH ratchet. Applies in BOTH the normal and the
-  // oracle-rebase branches: a genuinely new trap is a real regression regardless
-  // of net_per_test or an oracle re-baseline (the four trap categories are not
-  // touched by any oracle reclassification, so they stay comparable across a
-  // forward bump). A trap escapes try/catch and poisons the whole file, so the
-  // crash-free goal forbids ANY growth. Decreases auto-bank via promote-baseline.
+  // #3189 — uncatchable-trap GROWTH ratchet. A regressions-allow declaration
+  // never affects this ratchet. #3370 adds a separate, change-scoped
+  // trap-growth-allow ceiling for an oracle bump whose literal harness changes
+  // the compiled workload. It is read only in rebase mode, remains inert for
+  // same-oracle changes, and is bounded per category like the existing
+  // operational tolerance.
   const trapTolerance = Number.parseInt(process.env.TRAP_RATCHET_TOLERANCE ?? "0", 10) || 0;
-  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, trapTolerance);
+  let trapAllowance: RegressionsAllowance | null = null;
+  if (rebaseMode) {
+    const loaded = await readChangeScopedNumericAllowance({
+      key: TRAP_GROWTH_ALLOW_KEY,
+      label: "trap-growth-allow (#3370)",
+      overrideEnv: "TRAP_GROWTH_ALLOW_FILE",
+    });
+    trapAllowance = loaded.allowance;
+    for (const note of loaded.notes) console.log(note);
+  }
+  const effectiveTrapTolerance = Math.max(trapTolerance, trapAllowance?.count ?? 0);
+  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, effectiveTrapTolerance);
   console.log(
     `=== Trap categories (baseline → candidate): ` +
       TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +
@@ -1197,6 +1221,16 @@ async function run(
   for (const reason of trapGrowth.failures) {
     console.log(`=== GATE FAIL: ${reason} ===`);
     gateFailed = true;
+  }
+  if (trapAllowance && trapGrowth.failures.length === 0) {
+    const maxGrowth = Math.max(
+      0,
+      ...TRAP_ERROR_CATEGORIES.map((c) => trapGrowth.newCounts[c] - trapGrowth.baseCounts[c]),
+    );
+    console.log(
+      `=== trap-growth-allow (#3370): maximum category growth ${maxGrowth} within declared per-category ceiling ${trapAllowance.count} — ` +
+        `reason: ${trapAllowance.reason} (declared in ${trapAllowance.sources.join(", ")}). ===`,
+    );
   }
 
   // #3086 — is this a deliberate oracle RE-BASELINE? (forward-monotonic bump

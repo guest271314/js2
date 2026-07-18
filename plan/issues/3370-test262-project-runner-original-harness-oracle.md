@@ -25,6 +25,9 @@ files:
 regressions-allow:
   count: 20457
   reason: "#3370 replaces the synthetic Test262 wrapper with the literal upstream harness; measured oracle-v7 to v8 rebaseline: host 8106, standalone 20457"
+trap-growth-allow:
+  count: 47
+  reason: "#3370 changes the compiled harness workload; measured oracle-v7 to v8 maximum per-category growth is unreachable +47"
 ---
 
 # #3370 — make the original Test262 harness the project-runner oracle
@@ -75,6 +78,9 @@ rewritten surrogate rather than the upstream test.
 - Recorded the measured v7-to-v8 rebaseline ceiling: 8,106 host regressions
   and 20,457 standalone regressions. The standalone transition removes the
   synthetic lane's host-dependent raw passes from conformance accounting.
+- Recorded a separate 47-test, per-category trap-growth ceiling for this
+  oracle bump. It authorizes the measured `unreachable` 8-to-55 transition
+  without relaxing the ratchet for same-oracle or later changes.
 
 ## Validation
 
