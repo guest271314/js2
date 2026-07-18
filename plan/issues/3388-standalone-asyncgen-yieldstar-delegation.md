@@ -1,8 +1,10 @@
 ---
 id: 3388
 title: "standalone: async-gen `yield*` over non-literal sources in NESTED/method producers — runtime delegation with §27.6.3.7 GetIterator error semantics (~600 rows)"
-status: in-progress
+status: done
+completed: 2026-07-18
 assignee: ttraenkler/fable-dev-2
+pr: 3332
 sprint: current
 created: 2026-07-17
 updated: 2026-07-18
