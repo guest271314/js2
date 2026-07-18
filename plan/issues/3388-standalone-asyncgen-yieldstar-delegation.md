@@ -135,7 +135,7 @@ lags; see #3380).
 
 ## Concrete implementation plan (fable-dev-2, 2026-07-18) — resume-ready
 
-**Branch**: `issue-3388-asyncgen-yieldstar-delegation` (worktree
+**Branch**: `issue-3388-asyncgen-yieldstar` (worktree
 `/Users/thomas/Documents/Arbeit/Startup/Projekte/Mosaic/code/@loopdive/ts2wasm/.claude/worktrees/agent-a843226f60c86c747`).
 **Base**: origin/main. **Predecessor**: #3387 (PR #3322, fable-dev-3) lands
 first; re-merge before enqueue. Per fable-dev-3, #3387 only touches
@@ -244,3 +244,59 @@ host-buffer lane (the `__gen_yield_star` leak, ~600 rows).
 - Mix-safety: a module with one delegating gen + one legacy-only gen keeps the
   carrier decision coherent (pre-pass ⊆ emit — the shared gate propagation
   above guarantees it).
+
+---
+
+## Progress log (fable-dev-2, 2026-07-18)
+
+**Core rtDelegate machinery IMPLEMENTED + runtime-proven (host-free).** Design
+simplified from the plan's 5-state to a **3-state no-await loop** (init → pump →
+settleYield-back-edge), consistent with the #3120 mode routing the spec §"Edge
+cases" mandates ("delegation does NOT re-await inner values on the modeled
+lane") — the reusable `__iterator`/`__iterator_next` are SYNC helpers, so the
+dominant sync-backed-iterable shape needs no per-element await.
+
+Landed on branch `issue-3388-asyncgen-yieldstar`:
+- `AsyncGenYield.rtDelegate?: ts.Expression` field (async-cps.ts).
+- `analyzeAsyncGen` gate widened: `yield* <non-call, non-array-literal>` →
+  rtDelegate segment (async-cps.ts:~2354).
+- `planAsyncGenCfg` 3-state runtime-delegation loop (async-cps.ts:~2560).
+- `listTopLevelRtDelegateYieldStars` walker + `__yieldstar_rtiter_<i>` frame
+  spill numbering (async-cps.ts + async-frame.ts `computeAsyncSpills`).
+
+**Verified working (wasi driver harness, imports: [] host-free):**
+- `yield* <identifier bound to array>` → yields 11,22,33 then done. ✓
+- leading/trailing plain yields around `yield*` → 1,2,3,4 then done. ✓
+- method async-gen `yield* arr`, module-scope `yield* arr`, `yield* "str"`
+  compile host-free (no `__gen_yield_star` leak). ✓
+
+**REMAINING (the blocking item for a net-positive PR):**
+1. **GetIterator TypeError must throw, not trap.** `yield* <non-iterable>`
+   (e.g. `yield* (42 as any)`) currently TRAPS with `RuntimeError: illegal cast`
+   in the `__iterator` (GetIterator §7.4.1) hard-cast TAIL
+   (iterator-native.ts `buildIteratorBody`, the trap tail after all arms). The
+   §27.6.3.7 GetIterator-error corpus (getiter-*-not-callable) is a LARGE part
+   of the ~600 rows and currently PASSES on the legacy host path — admitting
+   those shapes to a native path that TRAPS would REGRESS them (PASS→FAIL). Fix:
+   make the trap tail throw a native TypeError via the exn tag (`ensureExnTag` /
+   `__new_TypeError`) — this is spec-correct for ALL GetIterator consumers
+   (§7.4.1 "If method is undefined, throw a TypeError"), currently a trap. It is
+   a SHARED-helper change (sync for-of / spread also consume `__iterator`), so it
+   needs its own careful validation (full test262) — do NOT ship the rtDelegate
+   admission WITHOUT it, or the error-test corpus regresses. Options: (a) throw
+   in the tail (broad, spec-correct, needs test262); (b) a narrower async-gen-only
+   pre-check that keeps a KNOWN-non-iterable operand on legacy — but iterability
+   is a runtime property, so (a) is the real fix.
+2. **String yield* value fidelity.** `yield* "ab"` iterates the right COUNT
+   (2 elements then done) but element VALUE fidelity for native strings via
+   `__iterator_next` needs a string-value read verification (the probe read
+   values as f64 → could not display string chars). Verify with a string-typed
+   consumer before claiming string support.
+3. **Nested driven+rtDelegate combo** (`outer(){ yield* g() }` where `g` itself
+   `yield* arr`) hits the #680 CE — a separate interaction; bank as follow-up.
+
+**Gates confirmed OK**: `isAwaitFreeAsyncGenBody` (rtDelegate has awaited:null →
+await-free ✓), `isAsyncGenDriveCandidate` carrier-off standalone lane admits it,
+`asyncGenDelegatesRegistered` vacuous for non-call operands ✓.
+
+**Sequencing**: re-merge #3387 (PR #3322) / origin/main before enqueue.
