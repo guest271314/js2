@@ -1149,8 +1149,30 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // js-string builtin (no genuine user function shadows the name), fall
     // through and register the global; a real user function of the same name
     // keeps the original skip behaviour.
+    // Only a GENUINE user-defined function (a *defined* function, whose
+    // funcIdx >= numImportFuncs) shadows a module-level `var` of the same name.
+    // A funcMap entry that is a host IMPORT or a reserved stdlib slot
+    // (funcIdx < numImportFuncs) does NOT: per ECMAScript a module-level
+    // `var <name>` binding shadows the ambient host global, so the user's value
+    // must still get its `$__mod_<name>` global. Otherwise the binding stays a
+    // `__module_init` local, invisible to every other function, and reads from a
+    // nested/helper function silently return null.
+    //
+    // (#3428) The test262 host harness triggers exactly this: the runtime shim
+    // declares `var print = function (v) { console.log(v); }` while
+    // `doneprintHandle.js` defines `function __consolePrintHandle__(m){ print(m); }`.
+    // Whenever the compiled module ALSO references another host builtin (e.g.
+    // `String(error)` inside `$DONE`), the whitelisted `print` host global lands
+    // in `funcMap` first, so `registerModuleGlobal("print", …)` was skipped —
+    // `print` never got a `$__mod_print` global, `compileClosureCall` bailed
+    // (neither local nor module-global), and the `$DONE → __consolePrintHandle__
+    // → print → console.log(marker)` chain emitted nothing. The async completion
+    // marker was therefore never observed (4,617 tests). The wasm:js-string
+    // builtin carve-out (#2669: concat/length/equals/substring/charCodeAt, which
+    // are ALSO imports with funcIdx < numImportFuncs) is the special case this
+    // generalises — every import-slot collision now correctly yields the global.
     const fnIdx = ctx.funcMap.get(name);
-    if (fnIdx !== undefined && fnIdx !== ctx.jsStringImports.get(name)) return; // shadowed by a user function
+    if (fnIdx !== undefined && fnIdx >= ctx.numImportFuncs) return; // shadowed by a real user-defined function
     if (ctx.moduleGlobals.has(name)) return; // skip if already registered
     if (ctx.classSet.has(name)) return; // skip class expression variables
 
