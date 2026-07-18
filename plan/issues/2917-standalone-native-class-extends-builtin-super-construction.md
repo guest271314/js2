@@ -429,3 +429,36 @@ element writes don't grow arrays (plain `any[]` too); Error-family
 
 **Remaining slices** (per Split & ordering above): ArrayBuffer+DataView,
 Date, RegExp, Function — each its own issue id referencing #2917 + #3240.
+
+## Resume State (2026-07-18, fable-2917)
+
+- **Branch**: `issue-2917-extends-builtin-native` (pushed to fork
+  `ttraenkler/js2` = `origin` in this checkout). Worktree:
+  `/workspace/.claude/worktrees/agent-a39423e9c6da689e8`.
+- **Done & committed** (all green locally):
+  - `cbee6f3325` — extends-Object own-field illegal-cast fix
+    (`externrefBackedOwnFieldBacking` in registry/error-types.ts; arms in
+    expressions/assignment.ts `emitExternrefBackedOwnFieldWrite` +
+    property-access.ts `emitExternrefBackedOwnFieldRead`; dispatch call site
+    passes `typeName`, SuppressedError caller omits it → error-struct arm).
+  - `7249f08870` — `emitStandaloneArrayConstructor` (object-runtime.ts) +
+    per-arity `__new_X@N` registration for all three standalone ctor helpers
+    (returns funcIdx; class-bodies call sites consume it).
+  - `3fc1659c30` — merge of upstream/main (issue-file conflict resolved:
+    took main's re-grounded plan, appended Progress).
+  - `c6d73d054c` — shared `resolveStandaloneBuiltinSuperCtorIdx` ladder
+    (class-bodies.ts, near `externrefParams`) + §23.1.1.1 RangeError arm.
+- **Validation state**: `tests/issue-2917-standalone-extends-builtin.test.ts`
+  16/16; regression files 2101a / 3239 / 1536c / 2188 / 2188-ml / 3234 /
+  3231 all pass on the branch; `tests/issue-1455.test.ts` has 2 failures
+  (WeakRef, TypeError-subclass) **confirmed pre-existing on clean main
+  0f7ac132a0** via /workspace control run — NOT from this branch.
+- **Next concrete steps**: (1) push branch; (2) open PR against
+  `loopdive/js2` main (`gh pr create -R loopdive/js2 --head
+  ttraenkler:issue-2917-extends-builtin-native`); (3) CI-wait per
+  developer.md; broad-impact — watch the standalone floor + `merge_group`;
+  (4) after merge: release the claim (`claim-issue.mjs 2917 --release` —
+  multi-slice issue, remaining slices are re-claimable), keep issue
+  `in-progress`→`ready` for the next slice owner.
+- **If resuming mid-CI**: check `gh pr checks` for the PR from this branch;
+  fix-forward on the branch; never enqueue manually.
