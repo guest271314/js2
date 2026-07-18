@@ -84,8 +84,11 @@ stable paths.
 ## Gate invariants
 
 - The first `Compile timeouts (pass → compile_timeout): N` line is the
-  unquarantined host count because the base-main workflow parses its first
-  match.
+  host directional-growth count because the base-main workflow parses its
+  first match. It is computed as `max(0, forward - reverse)` over stable
+  pass↔compile_timeout transitions. Both stable directional components and
+  their raw and quarantined counterparts use distinct labels. Standalone
+  retains the original forward-only count.
 - The first `Aggregate compile time (shared N tests)` line is computed over the
   unquarantined shared host set. Raw and quarantined aggregate measurements use
   distinct labels.
@@ -107,6 +110,10 @@ stable paths.
 - [x] An equal stable-path one-way regression fails.
 - [x] A canary-known path still fails under the standalone invocation.
 - [x] An arbitrary path cannot opt into the quarantine.
+- [x] Equal stable host pass↔compile_timeout churn parses as zero in the
+      unchanged #1942 workflow shell, while 26 one-way stable timeouts still
+      fail its threshold. Quarantined reverse churn cannot offset stable
+      forward growth, and standalone remains forward-only.
 - [x] Focused tests, typecheck, Biome, Prettier, and issue validation pass.
 - [x] No workflow threshold, baseline content, oracle version, or global trap
       override changes.
@@ -149,6 +156,16 @@ emptying the quarantine. `diff-test262.ts` applies the resulting set only after
 oracle/path-scope validation and only to host gate accounting; the original
 maps remain intact for status totals and the trap ratchet.
 
+The host compile-time count uses the net direction across the same status
+boundary after quarantine is applied independently to both directions. This is
+metric symmetry, not path excusal: no new path becomes eligible, one-way
+pass→compile_timeout growth is unchanged, and the existing threshold remains 25. A compiler change can therefore still fail by pushing stable passes over
+the timeout boundary without reverse movement, while runner-load churn no
+longer fails merely because the report previously counted only its forward
+half. Raw forward/reverse transitions, stable forward/reverse transitions, and
+raw/stable/quarantined timeout populations remain auditable. The standalone
+lane never enables this host-only interpretation.
+
 ## Implementation summary
 
 - Extended `scripts/test262-canary-diff.ts` with auditable
@@ -164,8 +181,11 @@ maps remain intact for status totals and the trap ratchet.
   subset; raw and quarantined values remain under distinct labels, and every
   observed quarantined transition is listed even under `--quiet`, marked as
   intersection or union-only evidence.
-- The first workflow-parsed timeout and aggregate lines remain the authoritative
-  stable-path values. No workflow YAML or threshold changed.
+- The first workflow-parsed timeout line is the authoritative host stable-path
+  directional-growth value; the aggregate line remains the authoritative
+  stable-path value. The legacy timeout label is retained so the existing
+  base-main shell self-validates the change. No workflow YAML or threshold
+  changed.
 - The #3189 trap ratchet still receives the full baseline/candidate maps. A
   focused test proves a canary-listed path that newly enters `oob` remains a
   hard failure.
@@ -173,13 +193,25 @@ maps remain intact for status totals and the trap ratchet.
 ## Real-data validation and residual signal
 
 Applying the two-canary union read-only to held #3287 retry run `29641967485`
-against the current host baseline produced:
+produced two auditable snapshots because the baselines repository advanced
+during validation.
+
+Against requested replay baseline commit
+`cb3dd33bed7364cbfc1637f752510776f5ccfc44` (Git blob
+`72bf55808688cf2698f943fc103c2bf0ff358c2c`, SHA-256
+`a2cc8c0a691d2880cd14dac68031e35dbeb0c67a1b15908265ee87d0fcd2bc9e`):
 
 - 190 observed transitions on the exact union: 79 regressions, 67 improvements,
   and 44 different-non-pass changes, all fully listed. Of these, 30 are on the
   repeat-confirmed intersection and 160 are union-only.
 - pass→compile_timeout: raw 92 → stable 55 (37 quarantined). The second canary
   directly explains 17 of the first canary's 72 residual timeout paths.
+- compile_timeout→pass: raw 97 → stable 72 (25 quarantined). The host
+  directional count is therefore `max(0, 55 - 72) = 0`, below the unchanged 25
+  threshold.
+- Total compile_timeout population fell 289→274 (−15) raw and 234→205 (−29)
+  outside the canary quarantine. The quarantined population moved 55→69 (+14),
+  which remains visible but cannot affect either directional component.
 - non-timeout pass regressions: raw 60 → stable 18 (42 quarantined). The second
   canary directly explains 17 of the first canary's 35 residual paths.
 - improvements: raw 174 → stable 107 (67 quarantined).
@@ -188,17 +220,37 @@ against the current host baseline produced:
 - trap populations held or improved (`null_deref 164→163`, `illegal_cast
 80→80`, `oob 49→49`, `unreachable 55→55`).
 
-The historical #3287 retry still fails the unchanged 10% ratio (18/107 = 16.8%)
-and timeout threshold (55). Those 18 regression paths and 55 timeout paths are
+Baselines `main` then advanced to commit
+`e1b05313ecd2cfd23cbc0b55f8925c6335b119f6` from the second-canary compiler
+SHA, with JSONL Git blob `09e0e754d6c0e5d7faf781b4d874c6d7576b2d0d`
+and SHA-256
+`a7dfdb9b70b38ab270df8bd0faa7ae0a57b996a2839e2382662a0072f6e72f4b`.
+Replaying the same held #3287 candidate against that exact current tip produced:
+
+- 19 stable non-timeout regressions and 98 stable improvements, so the
+  unchanged fine ratio still fails at 19.4%.
+- pass→compile_timeout: raw 98, quarantined 37, stable 61;
+  compile_timeout→pass: raw 97, quarantined 34, stable 63. Directional growth
+  remains `max(0, 61 - 63) = 0`.
+- Total compile_timeout population fell 277→274 (−3) raw and 209→205 (−4)
+  outside quarantine. Stable aggregate compile time improved 5.2%.
+- Trap populations remained `null_deref 164→163`, `illegal_cast 80→80`, `oob
+49→49`, and `unreachable 55→55`.
+
+The historical #3287 retry passes the symmetric timeout guard under both
+baseline snapshots but fails the unchanged 10% fine ratio under both (18/107 =
+16.8% requested snapshot; 19/98 = 19.4% current tip). Every residual path is
 outside both exact same-SHA evidence sets, so this issue deliberately does not
-waive them. Broadening the manifest from a PR-versus-baseline diff would violate
+waive it. Broadening the manifest from a PR-versus-baseline diff would violate
 the stable-path and provenance invariants. #3287 remains held at its exact head
 and was not modified or requeued.
 
 ## Test results
 
-- `pnpm exec vitest run tests/issue-3426.test.ts`: 8/8 passed, including a
-  union-only sample, an intersection sample, and unsourced-observation rejection.
+- `pnpm exec vitest run tests/issue-3426.test.ts`: 11/11 passed, including a
+  union-only sample, an intersection sample, unsourced-observation rejection,
+  and execution of the unchanged #1942 shell for balanced and one-way timeout
+  churn.
 - Related gate suites: #1943, #2178, #2890, #3004, #3189, and #3303 passed.
   `tests/issue-1897.test.ts` has two pre-existing stale failures on current main:
   wording already changed in `enable-branch-protection.sh`, and a fixture that

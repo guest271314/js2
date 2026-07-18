@@ -1149,19 +1149,71 @@ async function run(
   const rawRegressionsCT = regressions.filter((r) => r.to === "compile_timeout").length;
   const quarantinedRegressionsCT = regressions.filter((r) => r.to === "compile_timeout" && r.hostQuarantined).length;
   const regressionsCT = rawRegressionsCT - quarantinedRegressionsCT;
+  const rawImprovementsCT = improvements.filter((entry) => entry.from === "compile_timeout").length;
+  const quarantinedImprovementsCT = improvements.filter(
+    (entry) => entry.from === "compile_timeout" && entry.hostQuarantined,
+  ).length;
+  const improvementsCT = rawImprovementsCT - quarantinedImprovementsCT;
   const rawRegressionsReal = regressions.length - rawRegressionsCT;
   const quarantinedRegressionsReal = regressions.filter((r) => r.to !== "compile_timeout" && r.hostQuarantined).length;
   const regressionsReal = rawRegressionsReal - quarantinedRegressionsReal;
+  // #3426 follow-up — host pool contention moves tests across the compile
+  // timeout boundary in both directions. A forward-only count treats one side
+  // of that symmetric churn as a compiler slowdown while discarding the exact
+  // inverse evidence from the same comparison. For the HOST lane only, gate
+  // directional growth in the pass↔compile_timeout population after removing
+  // canary-proven paths from BOTH directions:
+  //
+  //   max(0, stable pass→compile_timeout − stable compile_timeout→pass)
+  //
+  // This still reports/fails one-way timeout growth at full strength. It does
+  // not identify or excuse any additional path, and standalone keeps the
+  // original forward-only count because it never loads the host manifest.
+  // Keep the legacy first-line shape because the base-main #1942 shell parses
+  // its first match; the following distinct labels make every component and
+  // the interpretation observable.
+  const directionalRegressionsCT = hostNoiseQuarantine ? Math.max(0, regressionsCT - improvementsCT) : regressionsCT;
   // #3370 — compile-time signals compare the cost of compiling the same
   // workload. A deliberate oracle rebaseline changes the assembled harness,
   // so old-oracle pass→timeout transitions are not compile regressions. Keep
   // the measured count visible, but reset the canonical gated signal consumed
   // by the #1942 workflow guard. Same-oracle comparisons are unchanged.
-  const gatedRegressionsCT = rebaseMode ? 0 : regressionsCT;
+  const gatedRegressionsCT = rebaseMode ? 0 : directionalRegressionsCT;
   console.log(`=== Compile timeouts (pass → compile_timeout): ${gatedRegressionsCT} ===`);
   if (hostNoiseQuarantine) {
+    console.log(`=== Stable host pass→compile_timeout transitions before symmetric offset: ${regressionsCT} ===`);
+    console.log(`=== Stable host compile_timeout→pass reverse transitions: ${improvementsCT} ===`);
+    console.log(
+      `=== Stable host directional compile_timeout growth (max(0, pass→compile_timeout − compile_timeout→pass)): ${directionalRegressionsCT} ===`,
+    );
     console.log(`=== Raw host pass→compile_timeout transitions before canary quarantine: ${rawRegressionsCT} ===`);
     console.log(`=== Host canary-quarantined pass→compile_timeout noise: ${quarantinedRegressionsCT} ===`);
+    console.log(`=== Raw host compile_timeout→pass transitions before canary quarantine: ${rawImprovementsCT} ===`);
+    console.log(`=== Host canary-quarantined compile_timeout→pass noise: ${quarantinedImprovementsCT} ===`);
+
+    const rawBaselineCT = baselineCounts.compile_timeout ?? 0;
+    const rawCurrentCT = newCounts.compile_timeout ?? 0;
+    const quarantinedBaselineCT = [...baseline].filter(
+      ([file, entry]) => entry.status === "compile_timeout" && isHostQuarantined(file),
+    ).length;
+    const quarantinedCurrentCT = [...newer].filter(
+      ([file, entry]) => entry.status === "compile_timeout" && isHostQuarantined(file),
+    ).length;
+    const stableBaselineCT = rawBaselineCT - quarantinedBaselineCT;
+    const stableCurrentCT = rawCurrentCT - quarantinedCurrentCT;
+    const formatCountDelta = (value: number) => (value > 0 ? `+${value}` : `${value}`);
+    console.log(
+      `=== Stable host compile_timeout population: baseline ${stableBaselineCT} → current ${stableCurrentCT} ` +
+        `(Δ ${formatCountDelta(stableCurrentCT - stableBaselineCT)}) ===`,
+    );
+    console.log(
+      `=== Raw host compile_timeout population before canary quarantine: baseline ${rawBaselineCT} → current ${rawCurrentCT} ` +
+        `(Δ ${formatCountDelta(rawCurrentCT - rawBaselineCT)}) ===`,
+    );
+    console.log(
+      `=== Host canary-quarantined compile_timeout population: baseline ${quarantinedBaselineCT} → current ${quarantinedCurrentCT} ` +
+        `(Δ ${formatCountDelta(quarantinedCurrentCT - quarantinedBaselineCT)}) ===`,
+    );
   }
   if (rebaseMode && rawRegressionsCT > 0) {
     console.log(

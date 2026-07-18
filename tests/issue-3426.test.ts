@@ -57,6 +57,74 @@ function runDiff(baselineRows: FixtureRow[], candidateRows: FixtureRow[], extraA
   }
 }
 
+function workflowParsedTimeoutCount(output: string): number {
+  const parsed = output.match(/Compile timeouts \(pass → compile_timeout\): (\d+)/)?.[1];
+  expect(parsed, "workflow-parsed compile-timeout summary line").toBeDefined();
+  return Number(parsed);
+}
+
+function extractWorkflowRunBlock(stepName: string): string {
+  const workflow = readFileSync(".github/workflows/test262-sharded.yml", "utf-8");
+  const lines = workflow.split("\n");
+  const nameIndex = lines.findIndex((line) => line.includes(`- name: ${stepName}`));
+  expect(nameIndex, `step "${stepName}" not found`).toBeGreaterThan(-1);
+  const runIndex = lines.findIndex((line, index) => index > nameIndex && /^\s+run: \|/.test(line));
+  expect(runIndex, `run block for "${stepName}" not found`).toBeGreaterThan(nameIndex);
+  const runIndent = lines[runIndex].match(/^(\s*)/)![1].length;
+  const raw: string[] = [];
+  for (let index = runIndex + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.trim() === "") {
+      raw.push("");
+      continue;
+    }
+    if (line.match(/^(\s*)/)![1].length <= runIndent) break;
+    raw.push(line);
+  }
+  const minIndent = Math.min(
+    ...raw.filter((line) => line.trim() !== "").map((line) => line.match(/^(\s*)/)![1].length),
+  );
+  return raw.map((line) => (line.trim() === "" ? "" : line.slice(minIndent))).join("\n");
+}
+
+function runCompileTimeWorkflowGuard(diffOutput: string) {
+  const dir = mkdtempSync(join(tmpdir(), "issue-3426-compile-guard-"));
+  try {
+    const diffPath = join(dir, "cat-diff.txt");
+    writeFileSync(diffPath, diffOutput);
+    const shell = extractWorkflowRunBlock("Compile-time regression guard (#1942)").replaceAll(
+      "/tmp/cat-diff.txt",
+      '"$TEST_CAT_DIFF_FILE"',
+    );
+    const result = spawnSync("bash", ["-c", shell], {
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        TEST_CAT_DIFF_FILE: diffPath,
+        COMPILE_TIMEOUT_THRESHOLD: "25",
+        AGG_COMPILE_TIME_PCT_THRESHOLD: "20",
+      },
+    });
+    return { status: result.status, output: `${result.stdout}${result.stderr}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function timeoutChurnRows(forwardPaths: string[], reversePaths: string[]) {
+  const baseline: FixtureRow[] = [];
+  const candidate: FixtureRow[] = [];
+  for (const file of forwardPaths) {
+    baseline.push({ file, status: "pass", wasm_sha: "aaaaaaaaaaaa", compile_ms: 100 });
+    candidate.push({ file, status: "compile_timeout", wasm_sha: null });
+  }
+  for (const file of reversePaths) {
+    baseline.push({ file, status: "compile_timeout", wasm_sha: null });
+    candidate.push({ file, status: "pass", wasm_sha: "bbbbbbbbbbbb", compile_ms: 100 });
+  }
+  return { baseline, candidate };
+}
+
 describe("#3426 — host Test262 same-SHA noise quarantine", () => {
   it("pins the audited canary provenance and exact union/intersection sets", () => {
     const loaded = loadHostNoiseQuarantine();
@@ -216,5 +284,54 @@ describe("#3426 — host Test262 same-SHA noise quarantine", () => {
     expect(result.output).toContain("Host canary-quarantined pass→compile_timeout noise: 1");
     expect(result.output).toContain("Raw host aggregate before canary quarantine");
     expect(result.output).toContain("Host canary-quarantined aggregate contribution");
+  });
+
+  it("lets the unchanged host workflow guard absorb symmetric stable timeout churn", () => {
+    const forwardPaths = Array.from({ length: 26 }, (_, index) => `test/stable/forward-${index}.js`);
+    const reversePaths = Array.from({ length: 26 }, (_, index) => `test/stable/reverse-${index}.js`);
+    const rows = timeoutChurnRows(forwardPaths, reversePaths);
+    const result = runDiff(rows.baseline, rows.candidate);
+
+    expect(result.status).toBe(0);
+    expect(workflowParsedTimeoutCount(result.output)).toBe(0);
+    expect(result.output).toContain("Stable host pass→compile_timeout transitions before symmetric offset: 26");
+    expect(result.output).toContain("Stable host compile_timeout→pass reverse transitions: 26");
+    expect(result.output).toContain("Stable host directional compile_timeout growth");
+    expect(result.output).toContain("compile_timeout population: baseline 26 → current 26 (Δ 0)");
+
+    const guard = runCompileTimeWorkflowGuard(result.output);
+    expect(guard.status).toBe(0);
+    expect(guard.output).toContain("pass→compile_timeout=0 (threshold 25)");
+  });
+
+  it("keeps one-way stable timeout growth blocking and excludes quarantined reverse noise from the offset", () => {
+    const forwardPaths = Array.from({ length: 26 }, (_, index) => `test/stable/one-way-${index}.js`);
+    const quarantinedReversePaths = passFlipPaths.slice(0, 26);
+    const rows = timeoutChurnRows(forwardPaths, quarantinedReversePaths);
+    const result = runDiff(rows.baseline, rows.candidate);
+
+    expect(result.status).toBe(0);
+    expect(workflowParsedTimeoutCount(result.output)).toBe(26);
+    expect(result.output).toContain("Stable host pass→compile_timeout transitions before symmetric offset: 26");
+    expect(result.output).toContain("Stable host compile_timeout→pass reverse transitions: 0");
+    expect(result.output).toContain("Raw host compile_timeout→pass transitions before canary quarantine: 26");
+    expect(result.output).toContain("Host canary-quarantined compile_timeout→pass noise: 26");
+
+    const guard = runCompileTimeWorkflowGuard(result.output);
+    expect(guard.status).toBe(1);
+    expect(guard.output).toContain("pass→compile_timeout=26 (threshold 25)");
+    expect(guard.output).toContain("COMPILE-TIME regression");
+  });
+
+  it("keeps standalone on the original forward-only timeout count", () => {
+    const forwardPaths = Array.from({ length: 26 }, (_, index) => `test/standalone/forward-${index}.js`);
+    const reversePaths = Array.from({ length: 26 }, (_, index) => `test/standalone/reverse-${index}.js`);
+    const rows = timeoutChurnRows(forwardPaths, reversePaths);
+    const result = runDiff(rows.baseline, rows.candidate, ["--exclude-leaky-baseline-regressions"]);
+
+    expect(result.status).toBe(0);
+    expect(workflowParsedTimeoutCount(result.output)).toBe(26);
+    expect(result.output).not.toContain("Stable host compile_timeout→pass reverse transitions");
+    expect(result.output).not.toContain("Host canary quarantine (#3426)");
   });
 });
