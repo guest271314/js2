@@ -149,13 +149,23 @@ were not minimized (harness-dependent, like #3397).
 
 ```ts
 export function test(): any {
-  var obj = { make() { return { index: 0, get val() { return this.index; } }; } };
+  var obj = {
+    make() {
+      return {
+        index: 0,
+        get val() {
+          return this.index;
+        },
+      };
+    },
+  };
   return obj.make();
 }
 // → INVALID: "not enough arguments on the stack for struct.new (need 2, got 1)"
 ```
 
 Trigger matrix (all `--target standalone`):
+
 - object-literal METHOD (`make(){…}` OR `[Symbol.iterator](){…}`) returning an
   object literal with a DATA prop + a GETTER (`{ index:0, get val(){} }`) →
   **INVALID**. This is the real `Array.from(obj)` shape
@@ -213,9 +223,52 @@ Scope: sub-mechanism 3 ONLY (the banked minimal repro). Plan:
    regression sweep (object-literal suites + emit-identity); no host change.
 
 Checklist:
-- [ ] Repro confirmed on base
-- [ ] Bypass path located
-- [ ] Fix + committed suite
-- [ ] Array.from samples measured base vs branch
-- [ ] Anon-struct/object-literal sweep + prove-emit-identity
-- [ ] PR open
+
+- [x] Repro confirmed on base
+- [x] Root located (NOT the getter-gate bypass dev-1 hypothesized — see below)
+- [x] Fix + committed suite (5 cases)
+- [x] Array.from samples measured base vs branch
+- [x] Anon-struct/object-literal sweep + prove-emit-identity
+- [x] PR open
+
+### Actual root cause (fable-dev-5) — non-arrow `this`-capture, NOT a getter-gate bypass
+
+dev-1's hypothesis (the getter host-path gate at literals.ts:1285 not firing)
+was a symptom, not the cause. Instrumenting the anon-struct registration
+(`ensureStructForType`) + the dynamic field auto-add
+(`property-access-dispatch.ts`) showed the sequence:
+
+1. `ensureStructForType` correctly builds `__anon_0` for the OUTER object
+   `{ make(): {…} }` with ONE field `make:externref` (the getter gate DID fire
+   for the inner object — it never became a struct).
+2. The inner getter `get val() { return this.index; }` is lifted as a closure.
+   The free-variable scan (`collectReferencedIdentifiers`) collects `this` as a
+   capturable name for EVERY function-like, and `arrowOwnLocals` did not shadow
+   it — so the getter captured the ENCLOSING `make` method's `this`, a
+   `(ref $__anon_0)`.
+3. Inside the getter, `this.index` therefore statically resolved against the
+   OUTER `__anon_0` struct (via `resolveThisStructName`). `index` wasn't a field
+   of it, so the dynamic-property auto-add path APPENDED `index` to the
+   already-emitted `__anon_0` — but the `struct.new` for `make`'s return was
+   already emitted with the 1-field arity → "not enough arguments on the stack
+   for struct.new (need 2, got 1)". Invalid Wasm in BOTH lanes.
+
+**Fix:** `arrowOwnLocals` (closures.ts) shadows `this` for NON-arrows. Only
+arrows inherit the lexical `this` (§8.1.1.3); a function expression /
+object-literal method / accessor binds its own dynamic `this` at call time
+(the closure-call path installs the receiver via `__current_this`). Callers
+force-cast accessor/method decls to `FunctionExpression`, so `isArrowFunction`
+is the reliable discriminator.
+
+**Validated:** committed suite 5/5 (repro valid+correct both lanes; iterator
+method-mutates/getter-observes; arrow-inherits-this guard; outer-struct-intact
+guard). `Array/from/source-object-iterator-{1,2}` standalone CE→pass (the 2
+cited rows). Array/from full dir (47 files): ONLY those 2 flip, 0 regressions.
+Full `tests/equivalence/` + accessor/objlit-method suites: failure set
+identical base↔branch (the 14 failing files all PASS in isolation — known
+in-process test262-runner realm pollution). `prove-emit-identity` IDENTICAL
+56/56 (host lane unaffected on the corpus).
+
+**Remaining #3398 sub-mechanisms (NOT this PR):** return_call TCO (3),
+block-result fallthru (4), ref.test/cast rec-group (3) — all harness-dependent,
+not minimized.
