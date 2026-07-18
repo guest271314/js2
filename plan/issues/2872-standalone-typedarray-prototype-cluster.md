@@ -58,19 +58,50 @@ throw is missing:
 | **findLast/findLastIndex** | **43** | **host_import_leak 33** (`env::Uint8ClampedArray_findLast[Index]`) + assertion_fail 10 |
 | includes/indexOf/lastIndexOf | 60 | assertion_fail (assert.sameValue) |
 
-**SLICE 5 (this branch, the clean self-contained one) — `findLast` /
-`findLastIndex` on `Uint8ClampedArray`.** Unlike every other method, the
-dominant failure here is a genuine **host_import_leak** (`env::
-Uint8ClampedArray_findLast` ×17, `env::Uint8ClampedArray_findLastIndex` ×16) —
-the native dyn-view HOF arm covers the other TA element kinds but not the
-CLAMPED variant for these two reverse-iterating callback methods. This mirrors
-the slice-1–4 per-method dyn-view pattern (the value path already exists for
-non-clamped; extend the clamped element-kind arm). Entry points: the reverse
-callback setup at `array-methods.ts:6226`/`:6270` (`setupArrayLoopReverse`,
-`findLast`/`findLastIndex` array impls) and the TA dyn-view HOF dispatch in
-`ta-hof-map-filter.ts` + the `#3058/#3098` `__hof` substrate — find where the
-non-clamped element kinds route native and the clamped kind falls to the
-per-ctor `env::Uint8ClampedArray_*` import, and extend it.
+**SLICE 5 — `findLast` / `findLastIndex` host-free (PRECISELY root-caused
+2026-07-18; deeper than a clean "add to set" — NOT yet landed).** The dominant
+failure is a genuine **host_import_leak** (`env::Uint8ClampedArray_findLast`
+×17, `env::Uint8ClampedArray_findLastIndex` ×16). Traced end-to-end — it is a
+**two-part** gap, not one:
+
+1. **Direct-receiver path (FIXED by a 1-line-ish change, verified):** the
+   `#3058` dyn-view two-arm set `DYN_VIEW_READ_METHODS` (array-methods.ts:829)
+   + `FIND_METHODS` (:867) EXCLUDED findLast/findLastIndex behind a **stale**
+   note ("legacy `compileArrayFind` re-entry misses `__call_1_f64` → CE"). The
+   `#3098` `__hof` substrate ALREADY has the backward steppers (`__hof_findLast`
+   /`__hof_findLastIndex`, `hof-native.ts:63-64,110` `backward` flag), exactly
+   like the already-shipped find/findIndex. Adding findLast/findLastIndex to
+   BOTH sets makes a **statically-typed** `new Uint8ClampedArray([…]).findLast(cb)`
+   compile host-free + correct (probe-verified: values right, `typeof` of
+   not-found = "undefined", reverse order correct, identical behaviour to the
+   shipped `find`). This part is a safe, isolated win.
+
+2. **`any`-receiver harness path (the ACTUAL test262 shape — STILL LEAKS after
+   part 1):** test262's `testWithTypedArrayConstructors(TA => new TA(…).method)`
+   wraps the receiver as `any`, producing the boxed `$__ta_dyn_view`. The
+   two-arm THEN arm then handles it correctly, BUT the two-arm always ALSO
+   compiles its **ELSE arm** (the "not a dyn-view at runtime" fallback), which
+   re-dispatches via `compileExpression` →
+   `compileReceiverMethodCall` → **`tryExternClassMethodOnAny`
+   (calls-closures.ts:~1519 first-match loop)**. That loop greedily binds the
+   first extern class declaring the method — a TypedArray view — to the per-ctor
+   `env::Uint8ClampedArray_findLast` HOST import (addImport at
+   calls-closures.ts:1550). Because the import is emitted at COMPILE time (both
+   arms compile), the binary leaks even though the THEN arm would run. **Fix
+   location: `tryExternClassMethodOnAny`** — it already has the exact precedent
+   at line 1514 (`join` routes native under `noJsHost` instead of binding
+   `env::Uint8ClampedArray_join`) and the `.slice`/`.replace` `continue`
+   refusals (line 1543). Under `noJsHost`, a TA-view extern-class binding for a
+   scalar-HOF method (the `STANDALONE_TA_SCALAR_HOFS` set in calls.ts:1514 —
+   find/findIndex/findLast/findLastIndex/forEach/some/every/reduce/reduceRight)
+   should be **declined** (`continue`) so the call falls through to the
+   host-free generic path, exactly like `join`. This is a SHARED fix: it would
+   also close the same latent any-receiver leak for the other scalar HOFs, so it
+   warrants its own measure-first slice + a full any-receiver regression sweep
+   (the dispatch is sensitive — the #1712 acorn `.replace` collision lived
+   here). Both parts together are slice 5; part 2 is the load-bearing one for
+   the test262 harness rows and is why this was reverted rather than shipped
+   half-done (part 1 alone flips ~0 harness rows).
 
 **SLICE 6+ (the BIG lever, NOT this PR — recommend a dedicated follow-on) —
 the cross-method `assert.throws` cluster (~150+ rows).** slice/set/map/subarray/
