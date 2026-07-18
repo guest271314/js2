@@ -1,11 +1,11 @@
 ---
 id: 3426
 title: "Quarantine exact same-SHA unstable host Test262 paths from fine gates"
-status: done
+status: in-review
 sprint: current
 created: 2026-07-18
 updated: 2026-07-18
-completed: 2026-07-18
+pr: 3367
 priority: critical
 horizon: m
 feasibility: hard
@@ -15,7 +15,7 @@ area: testing
 language_feature: n/a
 goal: ci-reliability
 depends_on: [3425]
-related: [1217, 1942, 3287]
+related: [1217, 1942, 3287, 3434]
 assignee: "ttraenkler/codex-sendev-test262-quarantine"
 ---
 
@@ -61,6 +61,48 @@ canaries, including a 109-path intersection, confirms path-specific host
 harness or runtime nondeterminism. Repeating #3425 or raising the global
 ratio/timeout limits would treat the symptom without preserving signal on
 stable paths.
+
+### Residual metadata-contamination root cause
+
+Gibbs' follow-up isolated all but one of the requested-baseline residual
+non-timeout regressions to destructive original-harness descriptor checks:
+
+- `propertyHelper.js` and legacy descriptor tests delete configurable method,
+  `name`, or `length` descriptors during the primary variant;
+- primary and strict variants are separate pool jobs and can therefore reach a
+  reused (or different) fork;
+- `runtime.__get_builtin` intentionally returns host-realm intrinsic objects;
+- worker cleanup returns early when the parent method identity is unchanged,
+  so deleted child metadata survives; and
+- the realm canary did not include `SharedArrayBuffer` or
+  `AsyncDisposableStack`, and only snapshotted one descriptor level.
+
+The affected requested-baseline paths were:
+
+1. `test/built-ins/String/prototype/at/length.js`
+2. `test/built-ins/AsyncDisposableStack/prototype/defer/prop-desc.js`
+3. `test/built-ins/String/prototype/concat/S15.5.4.6_A9.js`
+4. `test/built-ins/AsyncDisposableStack/prototype/disposeAsync/length.js`
+5. `test/built-ins/Object/groupBy/length.js`
+6. `test/built-ins/Date/prototype/getDate/length.js`
+7. `test/built-ins/Map/prototype/delete/length.js`
+8. `test/built-ins/Math/random/length.js`
+9. `test/built-ins/Date/prototype/getUTCHours/length.js`
+10. `test/built-ins/Promise/prototype/catch/length.js`
+11. `test/built-ins/Iterator/prototype/map/length.js`
+12. `test/built-ins/SharedArrayBuffer/prototype/slice/descriptor.js`
+13. `test/built-ins/DataView/prototype/setUint8/length.js`
+14. `test/built-ins/JSON/parse/length.js`
+15. `test/built-ins/Reflect/ownKeys/length.js`
+16. `test/built-ins/Object/values/function-length.js`
+17. `test/built-ins/Number/isInteger/length.js`
+
+The containment fix extends the existing post-test canary, not the eager
+cleanup hot path. It snapshots available modern intrinsic roots plus the
+`name`/`length` descriptors of function-valued data/accessor children. Any
+parent method or child metadata drift recycles that fork before the next pool
+job. Clean workers remain live; there is no global realm rebuild per test.
+The 932-path evidence quarantine is unchanged.
 
 ## Scope
 
@@ -245,12 +287,47 @@ waive it. Broadening the manifest from a PR-versus-baseline diff would violate
 the stable-path and provenance invariants. #3287 remains held at its exact head
 and was not modified or requeued.
 
+### Post-containment #3287 replay projection
+
+All 17 paths above were rerun through the unmodified original harness on Node
+25 with a pool-size-1 unified worker. Primary and strict both passed for every
+path (34/34 variants), and every destructive variant produced its exact realm
+drift recycle reason. The immutable run `29641967485` artifact was then
+replayed with only those 17 independently verified `fail` rows projected to
+`pass`; no timeout, quarantine, baseline, or other candidate row was changed.
+
+Against the requested `cb3dd33b` baseline, the unchanged diff now reports:
+
+- 1 stable non-timeout regression versus 107 stable improvements (0.9%, below
+  the unchanged 10% limit);
+- stable pass→compile_timeout 55 and compile_timeout→pass 72, for directional
+  growth 0 (below the unchanged 25 limit);
+- stable aggregate compile time −2.2%; and
+- unchanged/improved trap populations.
+
+The sole requested-baseline regression is
+`Object/defineProperty/15.2.3.6-3-179.js`. It is a deterministic strict host-set
+exception false positive, not cross-test contamination; current main already
+contains the same failing baseline row. Follow-up #3434 owns that semantics.
+
+Against baseline tip `e1b05313`, a deliberately conservative projection of the
+same exact 17 repairs reports 5 stable non-timeout regressions versus 101
+improvements (5.0%), stable timeout directions 61/63 (growth 0), and aggregate
+compile time −5.2%. Both unchanged host gates therefore pass even without
+projecting any additional current-baseline metadata rows.
+
 ## Test results
 
 - `pnpm exec vitest run tests/issue-3426.test.ts`: 11/11 passed, including a
   union-only sample, an intersection sample, unsourced-observation rejection,
   and execution of the unchanged #1942 shell for balanced and one-way timeout
   churn.
+- Node 25 pool-size-1 original-harness canary suite: 6/6 passed, covering
+  `Math.random.length`, `AsyncDisposableStack.prototype.defer`,
+  `SharedArrayBuffer.prototype.slice`, `String.prototype.concat.length` and
+  `.name`, plus a clean-worker no-recycle control.
+- Full 17-path metadata replay: 17/17 files and 34/34 primary/strict variants
+  passed; the temporary replay file was removed after validation.
 - Related gate suites: #1943, #2178, #2890, #3004, #3189, and #3303 passed.
   `tests/issue-1897.test.ts` has two pre-existing stale failures on current main:
   wording already changed in `enable-branch-protection.sh`, and a fixture that
