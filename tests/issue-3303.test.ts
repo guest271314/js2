@@ -107,6 +107,22 @@ describe("#3370 — baseline-writer trap ceiling containment", () => {
     expect(effectiveBaselineTrapTolerance(4, 8, 7, 47)).toBe(4);
     expect(effectiveBaselineTrapTolerance(4, undefined, 8, 47)).toBe(4);
   });
+
+  it("keeps the landed merge parent available in both baseline writers", () => {
+    const sharded = readFileSync(join(ROOT, ".github/workflows/test262-sharded.yml"), "utf8");
+    const refresh = readFileSync(join(ROOT, ".github/workflows/refresh-baseline.yml"), "utf8");
+
+    function checkoutForJob(workflow: string, job: string): string {
+      const start = workflow.indexOf(`\n  ${job}:\n`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const setupNode = workflow.indexOf("\n      - name: Setup Node", start);
+      expect(setupNode).toBeGreaterThan(start);
+      return workflow.slice(start, setupNode);
+    }
+
+    expect(checkoutForJob(sharded, "promote-baseline")).toContain("fetch-depth: 2");
+    expect(checkoutForJob(refresh, "merge-and-promote")).toContain("fetch-depth: 2");
+  });
 });
 
 // ---------------------------------------------------------------------------
