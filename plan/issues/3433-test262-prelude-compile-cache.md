@@ -18,6 +18,10 @@ files:
   - src/codegen/expressions/calls.ts
   - src/codegen/context/types.ts
   - tests/issue-3433.test.ts
+loc-budget-allow:
+  - src/codegen/expressions.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/context/types.ts
 ---
 
 # #3433 — restore test262 shard speed after the oracle-v8 harness flip
