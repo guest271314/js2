@@ -19,6 +19,13 @@ related: [2039]
 test262_bucket: standalone-invalid-wasm
 test262_count: 70
 es_edition: multi
+loc-budget-allow:
+  # (#3396) The fwd-ref boxed-capture re-type guard adds an 18-line explanatory
+  # comment + the `!boxedCaptures.has(name)` condition to the pre-hoisted-slot
+  # re-type block; this is the correct home for the fix (the re-type block IS in
+  # variables.ts) and cannot move to a subsystem module. +17 over the god-file
+  # ceiling is intended.
+  - src/codegen/statements/variables.ts
 ---
 
 # #3396 — closure/reaction-record struct TYPE mismatch (child of #2039)
