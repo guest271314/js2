@@ -11,6 +11,16 @@ feasibility: hard
 reasoning_effort: high
 goal: property-model
 sprint: current
+# (#802 Slice A / #3102) The Slice-A prescan-wiring + representation-lockstep
+# hooks are integration points INSIDE existing functions (prescan invocation,
+# object-literal promotion gate, the two variable-local slot-typers, and the
+# three context fields), so they cannot move into the new src/codegen/dynamic-proto.ts
+# module. Granting this change-set the sanctioned LOC allowance.
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/literals.ts
+  - src/codegen/context/types.ts
+  - src/codegen/statements/variables.ts
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
 
@@ -256,6 +266,25 @@ wrong-field write at scale → −2,788.
   getPrototypeOf, for-in) already handles `$Object`. **No struct-layout change.**
 - Ship + measure. This alone should move the `Object.setPrototypeOf` /
   `Object.prototype.__proto__` test262 buckets in standalone.
+
+> **Slice A — LANDED (PR #3318).** New `src/codegen/dynamic-proto.ts`
+> (`scanForDynamicProto`) detects object-literal receivers of
+> `Object.setPrototypeOf` / `Reflect.setPrototypeOf` / `o.__proto__ =` (unwrapping
+> `(o as any)`, resolving a `const/let/var` binding to its object-literal
+> initializer by lexical-scope walk; `Object.create` excluded). Marked receivers
+> lower to the open `$Object` via `compileObjectLiteralAsExternref` — zero
+> struct-layout change. Representation lockstep: the let/const pre-hoist
+> slot-typer + `compileVariableStatement` + the `var`-hoist path consult the same
+> `ctx.dynamicProtoLiteralNodes` set, so the receiver's local is `externref` and
+> reads route through `__extern_get` (a WAT probe during dev showed a missing
+> pre-hoist slot-type override was casting the promoted `$Object` back to the
+> inferred struct and nulling the receiver). **Standalone-only** (spec §0: the
+> dropped-link gap is standalone-specific; gc/host stays byte-for-byte unchanged).
+> Tests: `tests/issue-802-slice-a.test.ts` (14, all pass — 10 standalone incl.
+> inherited field/method reads, shadowing, null proto, `setPrototypeOf` return,
+> direct-literal & `__proto__=` & `Reflect` receivers; 4 gc/host regression
+> guards). `dynamicProtoClasses` is added but left unpopulated for Slice B.
+> **Slices B/C/D remain outstanding**; issue stays `status: ready`.
 
 **Slice B — class-instance proto receivers → conditional `$__proto__` field. (HIGHER risk, gated.)**
 - Prescan populates `dynamicProtoClasses` (§2), promoting marks to roots.
