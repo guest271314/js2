@@ -18,6 +18,11 @@ goal: standalone-mode
 umbrella: 3178
 related: [3132, 3228, 2906, 2865, 2895, 3388, 3389]
 origin: "2026-07-17 fable-3178 umbrella decomposition — the for-await-of cohort of the standalone host_import_leak baseline; probe matrix isolated NESTING as the gate."
+# intentional +47 in async-cps.ts: the for-await dstr HEAD exemption in
+# asyncGenBodyHasPatternLocals + the forAwaitHeadPatternAdmissible predicate
+# (nested-with-init correct-or-legacy guard), the load-bearing #3387 seam fix.
+loc-budget-allow:
+  - src/codegen/async-cps.ts
 ---
 
 # #3387 — nested async-gen for-await bodies: close the drivability seam
