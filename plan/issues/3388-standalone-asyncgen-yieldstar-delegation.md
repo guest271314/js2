@@ -1,10 +1,11 @@
 ---
 id: 3388
 title: "standalone: async-gen `yield*` over non-literal sources in NESTED/method producers — runtime delegation with §27.6.3.7 GetIterator error semantics (~600 rows)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-dev-2
 sprint: current
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-18
 priority: high
 horizon: l
 feasibility: hard
@@ -129,3 +130,117 @@ lags; see #3380).
   conflict; sequence the PRs, second re-merges first).
 - `__gen_yield_star` import retirement must not orphan the HOST-lane eager
   buffer which still uses it (host lane byte-identical — SHA probe).
+
+---
+
+## Concrete implementation plan (fable-dev-2, 2026-07-18) — resume-ready
+
+**Branch**: `issue-3388-asyncgen-yieldstar-delegation` (worktree
+`/Users/thomas/Documents/Arbeit/Startup/Projekte/Mosaic/code/@loopdive/ts2wasm/.claude/worktrees/agent-a843226f60c86c747`).
+**Base**: origin/main. **Predecessor**: #3387 (PR #3322, fable-dev-3) lands
+first; re-merge before enqueue. Per fable-dev-3, #3387 only touches
+`asyncGenBodyHasPatternLocals` + a new `forAwaitHeadPatternAdmissible` — DISJOINT
+from the functions below, so the async-cps.ts merge is textual-adjacency only.
+Cite #3387's issue-file "Implementation notes": the module-scope host-free arm
+is the **lead-statement path**, not `planForAwaitAsyncCfg`'s CFG arms.
+
+### Root-cause / seam (verified)
+`analyzeAsyncGen` (async-cps.ts:~2296) rejects any `yield*` whose operand is not
+a driven-async-gen CALL (#2570, `delegate`) or an ARRAY LITERAL (#3132 S1) — the
+gate at **async-cps.ts:2343** `if (src === undefined || !ts.isArrayLiteralExpression(src)) return null;`.
+That single `return null` propagates through `isBoundedAsyncGenBody` /
+`isAsyncGenDriveCandidate` (async-frame.ts:2073) so nested/method async-gens with
+`yield* <identifier|member|non-drivable-call|string>` demote to the legacy #680
+host-buffer lane (the `__gen_yield_star` leak, ~600 rows).
+
+### Reusable machinery (do NOT rebuild)
+- **GetIterator**: `ensureAsyncIterator(ctx, fctx)` (statements/destructuring.ts:407)
+  → standalone `__iterator` (native, USER arm handles custom iterables via
+  `ensureNativeIteratorRuntime`). This is the sync-backed GetAsyncIterator the
+  `planForAwaitCfg` CONSUMER (async-cps.ts:1630) already uses.
+- **IteratorStep+Value**: `__iterator_next(iter) -> (i32 done, externref value)`
+  (iterator-native.ts:474, USER arm = custom `.next()`).
+- **The CONSUMER dual to copy**: `planForAwaitCfg` (async-cps.ts:1630) — same
+  GetIterator + sync-step + per-element await. #3388 is its PRODUCER dual:
+  replace "run body" with "settleYield(value)" + back-edge (the #2570 pump's
+  `settleYield ... resumeState: pump` shape, async-cps.ts:2618).
+
+### Design — new RUNTIME-DELEGATION segment (non-call yield*)
+1. **`AsyncGenYield`** (async-cps.ts:~2150): add
+   `readonly rtDelegate?: ts.Expression;` — the paren-stripped arbitrary operand.
+   Mutually exclusive with `delegate`/`awaited`/`plain`. (Distinct from #2570's
+   `delegate?: ts.CallExpression`, which stays for driven-gen calls.)
+2. **`analyzeAsyncGen` yield\* arm** (async-cps.ts:2310-2363): AFTER the #2570
+   call-delegate check and the #3132 array-literal arm, replace the
+   `!ts.isArrayLiteralExpression → return null` reject with: paren-strip the
+   operand; if it is any expression (identifier/member/call/string/element-
+   access), push `{ leads, awaited:null, plain:null, rtDelegate: src }` and
+   `continue`. Keep rejecting only genuinely-unhandled shapes (spread — none
+   here). Guard: skip when the operand `containsAwaitOrYield` (nested suspend in
+   the operand expr — bank as follow-up).
+3. **`planAsyncGenCfg`** (async-cps.ts:2496 loop): add a `y.rtDelegate !== undefined`
+   branch BEFORE the `y.delegate` branch. Emit the 5-state loop (dual of
+   planForAwaitCfg + #2570 back-edge):
+   - `init(k)`  : `[leads]` → `iter := GetAsyncIterator(operand)` (compile the
+     operand expr, coerce externref, `call ensureAsyncIterator`, store the
+     PERSISTED spill slot) → `goto pump`.
+   - `pump(k+1)`: `{done,value} = __iterator_next(iter)` (transient locals) →
+     `condGoto(done, after, awaitStep)`.
+   - `awaitStep(k+2)`: `suspend(await value, resume→yieldStep)` — the
+     AsyncFromSync §27.1.4.4 per-element await (only on the not-done path).
+   - `yieldStep(k+3)`: `settleYield(<awaited value from SENT>, fromSent:true,
+     resumeState: pump)` — the BACK-EDGE (next outer kick re-pumps).
+   - `after(k+4)`: next segment's first state (completion value discarded —
+     statement position only; `analyzeAsyncGen` only accepts `yield*` as a
+     top-level ExpressionStatement, so `yield*` is never in value position).
+   `id += 4` (5 states, same accounting as #2570's 4-state `id += 4`).
+4. **Frame spill** (async-frame.ts `computeAsyncGenSpills`/`computeAsyncSpills`,
+   + `listTopLevelYieldStarCalls` sibling): number a per-rtDelegate spill
+   `__yieldstar_rtiter_<i>` exactly like `__yieldstar_iter_<i>` (#2570) /
+   `FORAWAIT_ITER_SPILL`. Add a `listTopLevelRtDelegateYieldStars(fn)` walker
+   (mirror `listTopLevelYieldStarCalls`, async-cps.ts:2210) so the spill layout
+   and the CFG planner number them identically. This is the ONLY async-frame.ts
+   touch — a NEW spill name, no renumber of existing states (disjoint from #3387).
+
+### §27.6.3.7 error semantics (the corpus tests — edge cases §"Edge cases")
+- GetIterator not-callable / getter-throws → the native `__iterator` USER arm
+  already throws a TypeError; it surfaces through the outer driven `next()`
+  promise REJECTION via the exn tag (ensureExnTag). Verify `__iterator`'s
+  not-an-object / not-callable arm throws (may need an explicit TypeError arm —
+  CHECK `buildIteratorBody` USER arm; if it traps instead of throwing, add the
+  throw). This is the largest corpus slice.
+- `.next()` not callable / result not object / done|value getter throws →
+  `__iterator_next` USER arm propagation → same rejection path.
+
+### Slices / checklist
+- [ ] S1a: `AsyncGenYield.rtDelegate` field + `analyzeAsyncGen` gate widening.
+- [ ] S1b: `planAsyncGenCfg` 5-state runtime-delegation loop.
+- [ ] S1c: frame spill numbering (`__yieldstar_rtiter_<i>` +
+      `listTopLevelRtDelegateYieldStars`).
+- [ ] S1d: verify GetIterator/next error paths reject (not trap); add TypeError
+      arm to `__iterator` USER path if it traps.
+- [ ] S2: method/object-literal lanes (shared gate — should admit
+      automatically once analyzeAsyncGen accepts; verify the #3132 S2
+      receiver-threading + #3312 `methodBodyRefsShadowedOuterLocal` guards still
+      bail correctly; measure-first on already-host-free `same-line-async-gen-rs-*`).
+- [ ] Tests: tests/issue-3388-*.test.ts — value forwarding order, done exits,
+      each abrupt GetIterator path → TypeError via rejection; zero pass→fail on
+      tests/issue-3132*.test.ts + tests/issue-2570-*.test.ts + driven-consumer scans.
+- [ ] Re-merge #3387 (or origin/main once #3322 lands) before enqueue.
+
+### Deferred (correct-or-legacy, NOT this slice)
+- Outer `.return()`/`.throw()` forwarding into the delegate (§27.6.3.7
+  steps 7.b/7.c) → **#3389** completion machinery.
+- yield* in VALUE position (`x = yield* g`) — analyzeAsyncGen only accepts
+  statement-position yields.
+- Nested await/yield INSIDE the yield* operand expression.
+- Genuine @@asyncIterator (async-native, not sync-backed) await-the-result-promise
+  model — slice 1 uses the sync-step + await-value (AsyncFromSync) model that the
+  reusable `__iterator`/`__iterator_next` provide (the dominant test262 shape).
+
+### Regression-risk notes
+- `__gen_yield_star` host import must stay for the HOST lane eager buffer
+  (host bytes unchanged — SHA-probe a host-mode async-gen `yield*` before/after).
+- Mix-safety: a module with one delegating gen + one legacy-only gen keeps the
+  carrier decision coherent (pre-pass ⊆ emit — the shared gate propagation
+  above guarantees it).
