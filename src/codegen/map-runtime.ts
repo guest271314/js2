@@ -1435,6 +1435,32 @@ function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValTyp
       }
       return;
     }
+    case "i64": {
+      // (#3394) A collection key/value that is an i64 (a bigint element, or a
+      // native `type i64 = number`) has no anyref supertype — leaving it raw
+      // emits `call[N] expected anyref, found i64` on `__map_set`/`__set_add`/…
+      // A BRANDED bigint boxes as a JS bigint via `__box_bigint` (mirrors the
+      // type-coercion.ts:2001 i64→externref arm); a native i64 boxes as a
+      // number. Both then `any.convert_extern` up to anyref. `__box_bigint` /
+      // `__box_number` are registered by the callers' addUnionImports (same
+      // note as the f64/i32 arms), so a funcMap lookup avoids a mid-body import
+      // shift; falls through to the number box if `__box_bigint` is absent.
+      if (t.bigint === true) {
+        const boxBigIdx = ctx.funcMap.get("__box_bigint");
+        if (boxBigIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: boxBigIdx });
+          fctx.body.push({ op: "any.convert_extern" });
+          return;
+        }
+      }
+      fctx.body.push({ op: "f64.convert_i64_s" });
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" });
+      }
+      return;
+    }
     case "externref":
       fctx.body.push({ op: "any.convert_extern" });
       return;
