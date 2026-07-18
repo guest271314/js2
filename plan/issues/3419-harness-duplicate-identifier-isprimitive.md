@@ -14,6 +14,14 @@ model: fable
 sprint: current
 horizon: m
 related: [3370, 3417, 3188]
+# Small, site-required growth: last-wins skips must live in the exact
+# registration/body/hoist loops they gate; the counter gate is one predicate
+# call. The reusable analysis went to loop-analysis.ts (non-god file).
+loc-budget-allow:
+  - src/codegen/declarations.ts
+  - src/codegen/statements/nested-declarations.ts
+  - src/codegen/statements/loops.ts
+  - src/compiler.ts
 ---
 
 # #3419 — duplicate top-level function declaration in concatenated harness is a hard error
