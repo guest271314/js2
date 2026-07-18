@@ -1,7 +1,8 @@
 ---
 id: 3398
 title: "standalone: tail-call ABI mismatch / block-result fallthru / call arity / ref.test-cast long tail — invalid Wasm (~13 tests)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-dev-5
 sprint: current
 created: 2026-07-18
 updated: 2026-07-18
@@ -190,3 +191,31 @@ Sub-mechanism 3 (struct.new arity): minimal repro banked, root direction
 identified; **fix DEFERRED** (anonymous-struct-shape contamination is deeper
 than a one-liner). Sub-mechanisms 1/2/4: harness-dependent, not minimized.
 Build DEFERRED — hand off with this repro.
+
+---
+
+## Slice plan (fable-dev-5, 2026-07-18, branch `issue-3398-getter-structnew-fix`, continuation of dev-1's banked repro)
+
+Scope: sub-mechanism 3 ONLY (the banked minimal repro). Plan:
+
+1. Reproduce on this base; dump the anon-struct registration trace for the
+   repro (who builds `$__anon_0` merging outer `make` + inner `index` and
+   dropping the getter `val`).
+2. Locate the method-return object-literal compile entry that bypasses
+   `compileObjectLiteral`'s getter gate (literals.ts:1285 —
+   `compileObjectLiteralWithAccessors`); per dev-1 likely a contextual
+   struct-new path keyed on the method's inferred return type.
+3. Fix by ROUTING (option a: make the bypass path consult the getter gate) —
+   preferred over teaching the shape-builder accessor handling (option b),
+   which duplicates the gate's logic.
+4. Validate: repro → valid + correct runtime (getter reads `this.index`);
+   `Array/from/source-object-iterator-1.js` + `-2` standalone; anon-struct
+   regression sweep (object-literal suites + emit-identity); no host change.
+
+Checklist:
+- [ ] Repro confirmed on base
+- [ ] Bypass path located
+- [ ] Fix + committed suite
+- [ ] Array.from samples measured base vs branch
+- [ ] Anon-struct/object-literal sweep + prove-emit-identity
+- [ ] PR open
