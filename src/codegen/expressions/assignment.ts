@@ -4,6 +4,7 @@
  */
 import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
+import { integrityVarKey } from "../widened-var-key.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
 import { emitHoleToUndefined } from "../array-holes.js";
@@ -2701,7 +2702,7 @@ export function emitAssignToTarget(
 ): void {
   if (ts.isPropertyAccessExpression(target)) {
     // Compile-away: frozen object property writes throw TypeError
-    if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
+    if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(integrityVarKey(ctx, target.expression))) {
       emitThrowTypeError(ctx, fctx, "Cannot assign to read only property of frozen object");
       return;
     }
@@ -3540,7 +3541,9 @@ function compilePropertyAssignment(
     // failed [[Set]] directly: strict PutValue throws; sloppy PutValue returns
     // the RHS while leaving the object unchanged.
     if (
-      ctx.nonExtensibleVars.has(receiverName) &&
+      // (#3403) per-declaration key (receiverName stays bare above for the
+      // out-of-scope moduleGlobals/definePropertyReceiverKeys checks).
+      ctx.nonExtensibleVars.has(integrityVarKey(ctx, target.expression)) &&
       !objectLiteralInitializerHasProperty(ctx, target.expression, propName)
     ) {
       const rhsType = compileExpression(ctx, fctx, value);
@@ -3554,7 +3557,7 @@ function compilePropertyAssignment(
   }
 
   // Compile-away: if the target object is frozen, emit TypeError throw
-  if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
+  if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(integrityVarKey(ctx, target.expression))) {
     // Evaluate RHS for side effects, then throw
     const rhsType = compileExpression(ctx, fctx, value);
     if (rhsType) {

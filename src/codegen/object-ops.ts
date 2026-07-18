@@ -23,7 +23,7 @@ import { emitThrowRangeError, emitThrowTypeError } from "./expressions/helpers.j
 import { buildThrowJsErrorInstrs } from "./js-errors.js"; // (#3177 slice 4) defineProperty rejection sentinel → TypeError
 import { emitMappedArgReverseSync } from "./expressions/logical-ops.js";
 import { resolveStructName } from "./expressions/misc.js";
-import { widenedStructNameForUse } from "./widened-var-key.js";
+import { widenedStructNameForUse, integrityVarKey } from "./widened-var-key.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
@@ -1850,7 +1850,7 @@ export function compileObjectDefineProperty(
     // JS-host default lane, so gate the record + check to host mode; standalone
     // keeps origin/main behaviour.
     if (!ctx.standalone && ts.isIdentifier(objArg)) {
-      const dpKey = `${objArg.text}:${propName}`;
+      const dpKey = `${integrityVarKey(ctx, objArg)}:${propName}`; // (#3403) per-declaration key
       const existingFlags = ctx.definedPropertyFlags.get(dpKey);
       const newFlags = applyDescriptorFlags(existingFlags, descWritable, descEnumerable, descConfigurable, true, false);
       // On an illegal transition, RETURN immediately — emitting the compiled
@@ -2181,7 +2181,7 @@ export function compileObjectDefineProperty(
       true,
     );
     if (propName) {
-      const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
+      const varName = ts.isIdentifier(objArg) ? integrityVarKey(ctx, objArg) : undefined; // (#3403) per-declaration key
       if (varName) {
         const isAccessor = !!(getNode || setNode);
         const key = `${varName}:${propName}`;
@@ -2273,7 +2273,7 @@ export function compileObjectDefineProperty(
     // Uses priorExistingFlags captured BEFORE the current call updated the map.
     // Also: if the object is frozen, ALL data properties are non-writable non-configurable,
     // even if they weren't explicitly set via defineProperty (i.e. original struct fields).
-    const varName2 = ts.isIdentifier(objArg) ? objArg.text : undefined;
+    const varName2 = ts.isIdentifier(objArg) ? integrityVarKey(ctx, objArg) : undefined; // (#3403) per-declaration key
     const isFrozenProperty = varName2 !== undefined && ctx.frozenVars.has(varName2) && isKnownExistingField;
     const shouldStoreDescriptorDefaults =
       varName2 !== undefined &&
@@ -3039,7 +3039,7 @@ function emitExternDefinePropertyNoValue(
     // Compile-time tracking
     if (propName && ts.isObjectLiteralExpression(descArg)) {
       const isAccessor = isAccessorDesc;
-      const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
+      const varName = ts.isIdentifier(objArg) ? integrityVarKey(ctx, objArg) : undefined; // (#3403) per-declaration key
       if (varName) {
         const key = `${varName}:${propName}`;
         const existingFlags = ctx.definedPropertyFlags.get(key);
@@ -3276,7 +3276,7 @@ function emitExternDefinePropertyNoValue(
     // includes getExpr/setExpr. #1718's applyDescriptorFlags below preserves
     // omitted writable/enumerable/configurable on partial redefine.
     const isAccessor = isAccessorDesc;
-    const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
+    const varName = ts.isIdentifier(objArg) ? integrityVarKey(ctx, objArg) : undefined; // (#3403) per-declaration key
     if (varName) {
       const key = `${varName}:${propName}`;
       const trackedExistingFlags = ctx.definedPropertyFlags.get(key);
@@ -3591,7 +3591,7 @@ export function compileObjectDefineProperties(
           );
           if (ts.isIdentifier(objArg)) {
             const isAccessor = false;
-            const key = `${objArg.text}:${propName}`;
+            const key = `${integrityVarKey(ctx, objArg)}:${propName}`; // (#3403) per-declaration key
             const trackedExistingFlags = ctx.definedPropertyFlags.get(key);
             const isDefinePropertyWidenedField = ctx.widenedDefinePropertyKeys.has(key);
             const currentFlags =
@@ -3838,7 +3838,7 @@ export function compileObjectDefineProperties(
 
           // Update compile-time flags
           if (ts.isIdentifier(objArg)) {
-            const key = `${objArg.text}:${propName}`;
+            const key = `${integrityVarKey(ctx, objArg)}:${propName}`; // (#3403) per-declaration key
             ctx.definedPropertyFlags.set(key, newFlagsForStructField);
           }
 
@@ -3951,7 +3951,7 @@ export function compileObjectDefineProperties(
 
           if (ts.isIdentifier(objArg)) {
             const isAccessor = true;
-            const key = `${objArg.text}:${propName}`;
+            const key = `${integrityVarKey(ctx, objArg)}:${propName}`; // (#3403) per-declaration key
             const newFlags = applyDescriptorFlags(
               ctx.definedPropertyFlags.get(key),
               descWritable,
@@ -4015,7 +4015,7 @@ export function compileObjectDefineProperties(
           // Update compile-time flags for externref path
           if (ts.isIdentifier(objArg)) {
             const isAccessor = false;
-            const key = `${objArg.text}:${propName}`;
+            const key = `${integrityVarKey(ctx, objArg)}:${propName}`; // (#3403) per-declaration key
             const newFlags = applyDescriptorFlags(
               ctx.definedPropertyFlags.get(key),
               descWritable,
@@ -4183,6 +4183,9 @@ export function compileObjectKeysOrValues(
   // by Object.defineProperty calls. shapePropFlags is initialized with defaults after
   // compilation, so it won't reflect defineProperty updates during this pass.
   const argVarName = ts.isIdentifier(arg) ? arg.text : undefined;
+  // (#3403) per-declaration key for definedPropertyFlags; argVarName stays bare
+  // for the out-of-scope definePropertyReceiverKeys scan.
+  const argVarKey = ts.isIdentifier(arg) ? integrityVarKey(ctx, arg) : undefined;
 
   // (#2746) An object that received an `Object.defineProperty` ADDING a property
   // beyond its static struct shape needs the runtime own-property set: the
@@ -4230,7 +4233,7 @@ export function compileObjectKeysOrValues(
 
   const enumUserFields = userFields.filter((e) => {
     if (argVarName) {
-      const key = `${argVarName}:${e.field.name}`;
+      const key = `${argVarKey}:${e.field.name}`; // (#3403) per-declaration key
       const flags = ctx.definedPropertyFlags.get(key);
       if (flags !== undefined) {
         return !!(flags & PROP_FLAG_ENUMERABLE);
@@ -4786,14 +4789,18 @@ export function compilePropertyIntrospection(
     // subsequent configurable `delete` that tombstoned it — the root of the
     // `11.4.1-4.a-1/-2`, `11.4.1-4-a-4-s` failures.
     const recvVarName = ts.isIdentifier(recvExpr) ? recvExpr.text : undefined;
+    // (#3403) per-declaration key for definedPropertyFlags; recvVarName/prefix
+    // stay bare for the out-of-scope definePropertyReceiverKeys/sidecar scans.
+    const recvVarKey = ts.isIdentifier(recvExpr) ? integrityVarKey(ctx, recvExpr) : undefined;
     let needsRuntime = false;
     if (recvVarName) {
       const prefix = `${recvVarName}:`;
+      const dpfPrefix = `${recvVarKey}:`; // (#3403) per-declaration key
       // (#2726) Pre-existing signal (mode-agnostic): an inline object-literal
       // descriptor recorded in `definedPropertyFlags`. Routing on this in BOTH
       // modes preserves origin/main behavior.
       for (const k of ctx.definedPropertyFlags.keys()) {
-        if (k.startsWith(prefix)) {
+        if (k.startsWith(dpfPrefix)) {
           needsRuntime = true;
           break;
         }
@@ -4862,7 +4869,7 @@ export function compilePropertyIntrospection(
     let result = has ? 1 : 0;
     if (isPropertyIsEnumerable && has) {
       if (recvVarName) {
-        const key = `${recvVarName}:${staticKey}`;
+        const key = `${recvVarKey}:${staticKey}`; // (#3403) per-declaration key
         const flags = ctx.definedPropertyFlags.get(key);
         if (flags !== undefined) {
           result = flags & PROP_FLAG_ENUMERABLE ? 1 : 0;
