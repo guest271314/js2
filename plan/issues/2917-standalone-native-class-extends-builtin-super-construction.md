@@ -17,6 +17,11 @@ language_feature: classes
 goal: standalone
 related: [1366a, 1455, 1721, 1833, 2029, 2188, 2379, 2395, 2620, 2622, 2709, 2916, 3238, 3239, 3240]
 origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, per-builtin backing-instance substrate (representation-scale, à la #2379)"
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/property-access.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/class-bodies.ts
 ---
 
 # #2917 — Standalone native `class X extends <Builtin>` super-construction
