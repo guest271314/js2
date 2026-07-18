@@ -1200,7 +1200,10 @@ jobs:
             # isolation automatically. Missing/unstamped reports keep the
             # backward-compatible predecessor behavior.
             LATEST_ORACLE=$(node -e "try { const r=require('/tmp/baseline-meta-fresh.json'); process.stdout.write(String(r.oracle_version ?? '')); } catch {}")
-            PRED_ORACLE=$(node -e "try { const r=require('/tmp/pred-group/test262-report-merged.json'); process.stdout.write(String(r.oracle_version ?? '')); } catch {}")
+            # The predecessor artifact intentionally contains only JSONLs, not
+            # test262-report-merged.json. Read the stamp from its first row so
+            # recovery also works with artifacts produced before this guard.
+            PRED_ORACLE=$(node -e "try { const line=require('fs').readFileSync(process.argv[1], 'utf8').split(/\\r?\\n/, 1)[0]; const r=JSON.parse(line); process.stdout.write(String(r.oracle_version ?? '')); } catch {}" /tmp/pred-group/test262-results-merged.jsonl)
             if [ -n "$LATEST_ORACLE" ] && [ -n "$PRED_ORACLE" ] && [ "$LATEST_ORACLE" != "$PRED_ORACLE" ]; then
               echo "pred_path=oracle-mismatch" >> "$GITHUB_OUTPUT"
               echo "Predecessor artifact ${ART_NAME} uses oracle v${PRED_ORACLE}, published baseline uses v${LATEST_ORACLE} — keeping baseline from (b)/(c) until promotion catches up."

@@ -132,6 +132,11 @@ describe("#3370 — baseline-writer trap ceiling containment", () => {
     );
     expect(predecessorStep).toContain("pred_path=oracle-mismatch");
     expect(predecessorStep).toContain('[ "$LATEST_ORACLE" != "$PRED_ORACLE" ]');
+    expect(predecessorStep).toContain(
+      "PRED_ORACLE=$(node -e \"try { const line=require('fs').readFileSync(process.argv[1]",
+    );
+    expect(predecessorStep).toContain("/tmp/pred-group/test262-results-merged.jsonl)");
+    expect(predecessorStep).not.toContain("/tmp/pred-group/test262-report-merged.json");
   });
 });
 

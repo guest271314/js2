@@ -96,7 +96,10 @@ rewritten surrogate rather than the upstream test.
   from the published baseline oracle. This prevents an already-landed v8 group
   artifact from converting the stranded v7-to-v8 recovery into a same-oracle
   flake comparison before the v8 baseline has actually been published; equal
-  versions continue to use predecessor isolation normally.
+  versions continue to use predecessor isolation normally. The stamp is read
+  from the predecessor JSONL itself because the group artifact does not publish
+  `test262-report-merged.json`; relying on that nonexistent file left the first
+  recovery rerun on the same 84-regression flake comparison.
 
 ## Validation
 
