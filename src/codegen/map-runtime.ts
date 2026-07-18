@@ -1464,12 +1464,41 @@ function coerceArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValTyp
  * to a queried `none`-null, so SameValueZero null/undefined equality works once
  * the representation is uniform.
  */
+/**
+ * (#3395) Peel `as`/`satisfies`/parenthesized/`!` wrappers that never change a
+ * value's runtime identity, so a null/undefined literal behind such a wrapper
+ * (`null as any`, `(undefined)`) is still recognized as a null literal by the
+ * collection element null-guard.
+ */
+function unwrapExprWrappers(expr: ts.Expression): ts.Expression {
+  let e: ts.Expression = expr;
+  while (
+    ts.isAsExpression(e) ||
+    ts.isParenthesizedExpression(e) ||
+    ts.isNonNullExpression(e) ||
+    ts.isSatisfiesExpression(e) ||
+    ts.isTypeAssertionExpression(e)
+  ) {
+    e = e.expression;
+  }
+  return e;
+}
+
 export function compileCollectionElementArg(
   ctx: CodegenContext,
   fctx: FunctionContext,
   argExpr: ts.Expression | undefined,
 ): void {
-  if (argExpr !== undefined && isNullOrUndefinedLiteral(argExpr)) {
+  // (#3395) Unwrap `as`/parenthesized/`!` wrappers before the null-literal
+  // check: a Weak-collection key written `s.has(null as any)` (or the raw
+  // `s.has(null)` whose `null` reaches here through a cast) is an AsExpression,
+  // not a bare NullKeyword, so the guard below missed it — `compileExpression`
+  // then emitted a TYPED `ref.null $Struct` and `coerceArgToAnyref`'s externref
+  // arm fed it to `any.convert_extern` ("expected externref, found ref.null of
+  // type (ref null N)"), invalid Wasm. Unwrapping routes it to the canonical
+  // `ref.null NONE_HEAP` path (identical runtime ABSENT/undefined semantics).
+  const unwrapped = argExpr !== undefined ? unwrapExprWrappers(argExpr) : undefined;
+  if (unwrapped !== undefined && isNullOrUndefinedLiteral(unwrapped)) {
     // Canonical anyref-subtype null matching the runtime's ABSENT/`undefined`
     // sentinel — bypasses the `compileExpression` typed-`ref.null` + externref
     // mismatch.
@@ -1477,7 +1506,7 @@ export function compileCollectionElementArg(
     // the $undefined singleton (distinct from null) so `m.get(k)` reads back
     // `undefined`, not `null`; a NULL literal keeps the canonical ref.null.
     // Legacy lanes conflate both to ref.null byte-identically.
-    if (argExpr.kind !== ts.SyntaxKind.NullKeyword && undefinedSingletonActive(ctx)) {
+    if (unwrapped.kind !== ts.SyntaxKind.NullKeyword && undefinedSingletonActive(ctx)) {
       if (ctx.undefinedGlobalIdx === undefined) ensureAnyValueType(ctx);
       if (ctx.undefinedGlobalIdx !== undefined) {
         fctx.body.push({ op: "global.get", index: ctx.undefinedGlobalIdx });
