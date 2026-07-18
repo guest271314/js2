@@ -28,6 +28,13 @@ loc-budget-allow:
   - src/codegen/object-ops.ts
   - src/codegen/registry/imports.ts
   - src/codegen/object-runtime.ts
+# (#2108 coercion-sites ratchet) vec-overlay's number_toString uses are NOT a
+# hand-rolled coercion matrix — they canonicalise an array index to its
+# property key (§7.1.19, the same number_toString pattern __extern_get_idx's
+# own $Object arm and fillDynamicForinVecArms already use) for __obj_find
+# companion lookups and the ArraySetLength shrink walk.
+coercion-sites-allow:
+  - src/codegen/vec-overlay.ts
 ---
 
 # #3251 — array-descriptor OVERLAY substrate (standalone)
