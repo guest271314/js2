@@ -4,6 +4,7 @@ title: "standalone: array-descriptor OVERLAY substrate — $Vec receivers have n
 status: in-progress
 assignee: ttraenkler/fable-1
 sprint: current
+s1_completed: 2026-07-18
 created: 2026-07-13
 priority: high
 feasibility: hard
@@ -303,11 +304,12 @@ byte-identical (the #1917 discipline).
   (`.tmp/probe-host-bytes.mts`, sha 2c52919a… both sides); scoped descriptor
   suite 119/120 with the single failure (`issue-2668` for-in proto-attrs)
   failing identically on main.
-- **Next concrete steps**: (1) re-run `tests/issue-3251.test.ts` + the scoped
-  descriptor set after the OOB-growth change, (2) prettier/biome, (3) commit,
-  `git merge origin/main`, push, PR `-R loopdive/js2 --head ttraenkler:issue-3251-array-overlay-s1`,
-  (4) stand down for auto-enqueue; watch standalone floor in merge_group
-  (broad-impact substrate).
+- **S1 validation COMPLETE (2026-07-18)**: issue-3251 suite 18/18 post-growth;
+  descriptor suite 119/120 (single failure = pre-existing main failure);
+  read-lane collateral (3183/2190/2190b/2186/3098) — exactly the same 3
+  failures as main (pre-existing); host sha unchanged. S1 PR is up; epic stays
+  in-progress for S2 (write-side enforcement + gOPD staleness) and S3
+  (ArraySetLength). Next dev: pick S2 from the boundaries list above.
 - **Known hazards**: `ref.null`/`ref.cast` abstract heap types — object-runtime's
   `NONE_HEAP=-18` is `any`, real `none` is `-15` (vec-overlay documents this);
   never busy-wait on a pegged box; one compile at a time.
