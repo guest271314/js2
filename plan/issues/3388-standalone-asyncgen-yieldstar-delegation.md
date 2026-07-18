@@ -20,6 +20,16 @@ goal: standalone-mode
 umbrella: 3178
 related: [3132, 3387, 3389, 2906, 2865, 3075]
 origin: "2026-07-17 fable-3178 umbrella decomposition — the yield-star cohort of the standalone host_import_leak baseline (#3132 S3, re-grounded with the nesting-seam finding)."
+# (#3102) Intended god-file growth: the rtDelegate segment + planAsyncGenCfg
+# 3-state runtime-delegation loop live in async-cps.ts (the async-CPS analyzer/
+# planner — the correct subsystem home); the GetIterator §7.4.1 throw-not-trap
+# tails + eager TypeError-ctor registration live in iterator-native.ts (the
+# native iterator runtime); the __yieldstar_rtiter spill numbering in
+# async-frame.ts. All three are the canonical subsystem modules for this logic.
+loc-budget-allow:
+  - src/codegen/async-cps.ts
+  - src/codegen/iterator-native.ts
+  - src/codegen/async-frame.ts
 ---
 
 # #3388 — async-gen `yield*` delegation for nested + method producers
