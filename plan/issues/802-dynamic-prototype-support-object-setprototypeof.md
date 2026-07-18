@@ -12,6 +12,19 @@ feasibility: hard
 reasoning_effort: high
 goal: property-model
 sprint: current
+# (#3102) Intended god-file growth for the #802 Slice B+C dynamic-proto wiring:
+# the conditional $__proto__ field append (class-bodies), the typed
+# getPrototypeOf field-read arm (call-builtin-static), the scanForDynamicProto
+# + fillDynamicProtoHelpers invocations (index), the context fields (types), and
+# the INITIAL_CAP export (object-runtime). The bulk of the new logic lives in the
+# NEW src/codegen/dynamic-proto.ts (not a god-file); these are the minimal edits
+# to the existing subsystem modules.
+loc-budget-allow:
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/index.ts
+  - src/codegen/context/types.ts
+  - src/codegen/object-runtime.ts
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
 
