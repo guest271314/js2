@@ -10,11 +10,23 @@
 // The script writes a human-readable summary to stdout, and on the LAST
 // line writes `FLIP_COUNT=<N>` so a CI step can grep it cheaply.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 interface Entry {
   file: string;
   status: string;
+}
+
+interface HostQuarantineEntry {
+  path: string;
+  run_a_status: string;
+  run_b_status: string;
+  kind: "pass_flip" | "non_pass_status_noise";
+}
+
+function optionValue(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
 }
 
 function loadResults(path: string): Map<string, string> {
@@ -36,9 +48,24 @@ function loadResults(path: string): Map<string, string> {
 }
 
 function main(): void {
-  const [, , aPath, bPath] = process.argv;
+  const args = process.argv.slice(2);
+  const optionsWithValues = new Set([
+    "--write-host-quarantine",
+    "--run-id",
+    "--compiler-sha",
+    "--artifact-id",
+    "--compiler-pool-size",
+  ]);
+  const positional = args.filter(
+    (arg, index) => !arg.startsWith("--") && !optionsWithValues.has(args[index - 1] ?? ""),
+  );
+  const [aPath, bPath] = positional;
   if (!aPath || !bPath) {
-    console.error("usage: test262-canary-diff.ts <run-a.jsonl> <run-b.jsonl>");
+    console.error(
+      "usage: test262-canary-diff.ts <run-a.jsonl> <run-b.jsonl> " +
+        "[--write-host-quarantine <manifest.json> --run-id <id> --compiler-sha <40-hex> " +
+        "--artifact-id <id> --compiler-pool-size <n>]",
+    );
     process.exit(2);
   }
 
@@ -131,6 +158,71 @@ function main(): void {
     }
     if (missingFiles.length > 10) console.log(`  ... ${missingFiles.length - 10} more`);
     console.log("");
+  }
+
+  const quarantinePath = optionValue(args, "--write-host-quarantine");
+  if (quarantinePath) {
+    const runId = optionValue(args, "--run-id");
+    const compilerSha = optionValue(args, "--compiler-sha");
+    const artifactId = optionValue(args, "--artifact-id");
+    const compilerPoolSize = optionValue(args, "--compiler-pool-size");
+    if (
+      !runId ||
+      !/^\d+$/.test(runId) ||
+      !compilerSha ||
+      !/^[0-9a-f]{40}$/.test(compilerSha) ||
+      !artifactId ||
+      !/^\d+$/.test(artifactId) ||
+      !compilerPoolSize ||
+      !/^\d+$/.test(compilerPoolSize)
+    ) {
+      console.error(
+        "--write-host-quarantine requires numeric --run-id/--artifact-id/--compiler-pool-size and a full lowercase 40-hex --compiler-sha",
+      );
+      process.exit(2);
+    }
+    if (missing > 0) {
+      console.error("refusing to write a host quarantine from incomplete canary runs (missing paths > 0)");
+      process.exit(2);
+    }
+
+    const entries: HostQuarantineEntry[] = [
+      ...flippedFiles.map((entry) => ({
+        path: entry.file,
+        run_a_status: entry.a,
+        run_b_status: entry.b,
+        kind: "pass_flip" as const,
+      })),
+      ...noiseFiles.map((entry) => ({
+        path: entry.file,
+        run_a_status: entry.a,
+        run_b_status: entry.b,
+        kind: "non_pass_status_noise" as const,
+      })),
+    ].sort((left, right) => left.path.localeCompare(right.path));
+
+    const manifest = {
+      schema_version: 1,
+      lane: "js-host",
+      provenance: {
+        canary_run_id: Number(runId),
+        compiler_sha: compilerSha,
+        artifact_id: Number(artifactId),
+        artifact_name: "test262-canary-report",
+        compiler_pool_size: Number(compilerPoolSize),
+        run_a_entries: a.size,
+        run_b_entries: b.size,
+        generated_by: "scripts/test262-canary-diff.ts",
+      },
+      counts: {
+        pass_flips: flip,
+        non_pass_status_noise: noise,
+        total: entries.length,
+      },
+      entries,
+    };
+    writeFileSync(quarantinePath, `${JSON.stringify(manifest, null, 2)}\n`);
+    console.log(`HOST_QUARANTINE_WRITTEN=${quarantinePath} (${entries.length} exact paths)`);
   }
 
   // Last line — the CI step greps for this.
