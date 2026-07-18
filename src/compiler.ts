@@ -904,7 +904,10 @@ function runPipeline(input: PipelineInput): CompileResult {
     if (useLinear) {
       mod = multiAst
         ? generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" })
-        : generateLinearModule(entryAst, { exposeArenaReset: options.allocator === "arena-reset" });
+        : generateLinearModule(entryAst, {
+            exposeArenaReset: options.allocator === "arena-reset",
+            allocationPolicy: options.allocator === "analysis-stack" ? "analysis-stack-arena-v1" : "arena-v1",
+          });
       // Fail the compile on unsupported linear-backend constructs instead of
       // emitting a structurally invalid binary (#1868).
       if (collectLinearCodegenErrors(mod, errors)) {
