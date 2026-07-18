@@ -14,6 +14,10 @@ model: fable
 sprint: current
 horizon: m
 related: [3419, 3417, 3370]
+# Site-required: the skip-gate + rationale live at the exact match-and-recast
+# arm in variables.ts (mostly comment lines documenting the #2873 RTT hazard).
+loc-budget-allow:
+  - src/codegen/statements/variables.ts
 ---
 
 # #3432 — `argFactory.bind` non-callable: declaration-closures in arrays lose host callability
