@@ -1414,7 +1414,25 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             }
           }
 
-          if (matchedClosureInfo) {
+          // (#3432) The match-and-recast below is only sound when the LOCAL SLOT
+          // actually takes the narrowed closure type. When the slot is (or must
+          // stay) externref — the #962 guard already refuses to narrow it — the
+          // sequence was `any.convert_extern` + guarded cast to ONE
+          // signature-matched closure struct + widen back to externref: a pure
+          // round-trip whose else-arm NULLS the value. Closure wrapper structs
+          // are sibling `sub final` types with creation-ORDER-dependent RTTs
+          // (see reference #2873), and `closureInfoByTypeIdx` iteration picks an
+          // arbitrary first match, so a perfectly good closure of a SIBLING
+          // wrapper type read out of an array (`var f = factories[k]`) was
+          // destroyed to null — testTypedArray.js's `argFactory.bind(...)`
+          // then threw "bind called on non-callable" (~1.8k TypedArray tests).
+          // Skip the destructive recast whenever the slot stays externref; the
+          // externref-callee dispatch handles calls on it in both lanes.
+          const slotTypeForCast =
+            localIdx < fctx.params.length
+              ? fctx.params[localIdx]?.type
+              : fctx.locals[localIdx - fctx.params.length]?.type;
+          if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {
             // Convert externref back to closure struct ref (guarded to avoid illegal cast)
             fctx.body.push({ op: "any.convert_extern" });
             emitGuardedRefCast(fctx, matchedClosureInfo.structTypeIdx);
