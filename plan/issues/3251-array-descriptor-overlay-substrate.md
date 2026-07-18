@@ -18,6 +18,16 @@ umbrella: 1781
 related: [3246, 2042, 2992, 3116, 2668]
 horizon: xl
 epic: true
+# (#3102 LOC ratchet) S1 grows only the unavoidable arm/wiring lines in these
+# god-files (+36/+18/+12/+8/+5/+4); the substrate itself is the new subsystem
+# module src/codegen/vec-overlay.ts (~1.4k lines), per the consolidation plan.
+loc-budget-allow:
+  - src/codegen/object-runtime-descriptors.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - src/codegen/object-ops.ts
+  - src/codegen/registry/imports.ts
+  - src/codegen/object-runtime.ts
 ---
 
 # #3251 — array-descriptor OVERLAY substrate (standalone)
