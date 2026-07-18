@@ -2057,6 +2057,18 @@ interface AsyncGenYield {
    * being undefined).
    */
   readonly delegate?: ts.CallExpression;
+  /**
+   * (#3388) `yield* <expr>` RUNTIME DELEGATION over an ARBITRARY async/sync
+   * iterable operand — an identifier, member access, string, element access, or
+   * a call the #2570 driven-gen delegate arm did NOT accept. Lowered by
+   * {@link planAsyncGenCfg} as a 5-state runtime loop: `GetAsyncIterator` →
+   * `__iterator_next` sync step → per-element `await value` (AsyncFromSync
+   * §27.1.4.4) → `settleYield` back-edge. The producer-side dual of
+   * {@link planForAwaitCfg}. Mutually exclusive with `delegate`/`awaited`/`plain`
+   * (all null/undefined on an rtDelegate segment). Statement position only
+   * (`yield*`'s completion value is discarded).
+   */
+  readonly rtDelegate?: ts.Expression;
 }
 
 /**
@@ -2094,6 +2106,39 @@ export function listTopLevelYieldStarCalls(fn: ts.FunctionLikeDeclaration): ts.C
     let src = e.expression;
     while (src !== undefined && ts.isParenthesizedExpression(src)) src = src.expression;
     if (src !== undefined && ts.isCallExpression(src)) out.push(src);
+  }
+  return out;
+}
+
+/**
+ * (#3388) The top-level `yield* <expr>` statements whose operand is NOT a
+ * driven-async-gen call (#2570) and NOT an array literal (#3132 S1) — i.e. the
+ * RUNTIME-DELEGATION operands (identifier/member/element-access/string, or a
+ * call the driven arm rejects). Used to NUMBER the per-segment
+ * `__yieldstar_rtiter_<i>` frame spills consistently between the spill layout
+ * (`computeAsyncSpills`) and the CFG planner, which both walk the same
+ * statement list. Purely syntactic — the driven/array-literal admission that
+ * `analyzeAsyncGen` applies is a REFINEMENT (a call the driven arm accepts is
+ * excluded here because it is a CallExpression handled by
+ * `listTopLevelYieldStarCalls`), so the two lists partition the `yield*` calls:
+ * this returns the operands that will become `rtDelegate` segments.
+ */
+export function listTopLevelRtDelegateYieldStars(fn: ts.FunctionLikeDeclaration): ts.Expression[] {
+  const out: ts.Expression[] = [];
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return out;
+  for (const st of body.statements) {
+    const e = ts.isExpressionStatement(st) ? st.expression : null;
+    if (e === null || !ts.isYieldExpression(e) || e.asteriskToken === undefined) continue;
+    let src = e.expression;
+    while (src !== undefined && ts.isParenthesizedExpression(src)) src = src.expression;
+    if (src === undefined) continue;
+    // A driven-gen delegate CALL is numbered by listTopLevelYieldStarCalls; an
+    // array-literal unrolls statically (no spill). Everything else — including a
+    // NON-drivable call — is an rtDelegate operand.
+    if (ts.isArrayLiteralExpression(src)) continue;
+    if (ts.isCallExpression(src)) continue; // driven-gen call → __yieldstar_iter_<i>
+    out.push(src);
   }
   return out;
 }
@@ -2217,24 +2262,42 @@ function analyzeAsyncGen(
         // the admitted bodies drop their `__gen_*` host-import leak in
         // lockstep with the native emit.
         const src = e.expression;
-        if (src === undefined || !ts.isArrayLiteralExpression(src)) return null;
-        for (const el of src.elements) {
-          if (ts.isSpreadElement(el)) return null; // spread — runtime drain, S3
-          if (ts.isOmittedExpression(el)) {
-            segments.push({ leads, awaited: null, plain: null }); // hole → yield undefined
+        if (src !== undefined && ts.isArrayLiteralExpression(src)) {
+          for (const el of src.elements) {
+            if (ts.isSpreadElement(el)) return null; // spread — runtime drain, S3
+            if (ts.isOmittedExpression(el)) {
+              segments.push({ leads, awaited: null, plain: null }); // hole → yield undefined
+              leads = [];
+              continue;
+            }
+            if (containsAwaitOrYield(el)) return null; // nested suspend — S3
+            // (#3120) Promise-typed elements: yield* delegation does NOT apply
+            // the implicit AsyncGeneratorYield await to the *inner* iterator's
+            // values on the carrier lane distinction we model here — route them
+            // through the same mode check as a plain `yield el` for consistency.
+            if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, el)) {
+              segments.push({ leads, awaited: el, plain: null });
+            } else {
+              segments.push({ leads, awaited: null, plain: el });
+            }
             leads = [];
-            continue;
           }
-          if (containsAwaitOrYield(el)) return null; // nested suspend — S3
-          // (#3120) Promise-typed elements: yield* delegation does NOT apply
-          // the implicit AsyncGeneratorYield await to the *inner* iterator's
-          // values on the carrier lane distinction we model here — route them
-          // through the same mode check as a plain `yield el` for consistency.
-          if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, el)) {
-            segments.push({ leads, awaited: el, plain: null });
-          } else {
-            segments.push({ leads, awaited: null, plain: el });
-          }
+          continue;
+        }
+        // (#3388) `yield* <expr>` over an ARBITRARY iterable operand
+        // (identifier / member / element-access / string / a call the #2570
+        // driven-gen arm above did NOT accept). Lowered as a RUNTIME DELEGATION
+        // loop (GetAsyncIterator + __iterator_next sync-step + per-element
+        // await + settleYield back-edge) by `planAsyncGenCfg`. Reject only when
+        // the operand itself contains a nested suspend (await/yield inside the
+        // operand expr — the iterator would have to be produced across a
+        // suspend; banked follow-up) or is missing. Statement position only,
+        // guaranteed by the enclosing ExpressionStatement match.
+        if (src === undefined || containsAwaitOrYield(src)) return null;
+        {
+          let rtSrc: ts.Expression = src;
+          while (ts.isParenthesizedExpression(rtSrc)) rtSrc = rtSrc.expression;
+          segments.push({ leads, awaited: null, plain: null, rtDelegate: rtSrc });
           leads = [];
         }
         continue;
@@ -2370,7 +2433,122 @@ export function planAsyncGenCfg(
   const states: AsyncCfgState[] = [];
   let id = 0;
   let delegateIdx = 0;
+  let rtDelegateIdx = 0;
   for (const y of shape.segments) {
+    if (y.rtDelegate !== undefined) {
+      // (#3388) `yield* <expr>` RUNTIME DELEGATION over an arbitrary iterable
+      // operand (identifier / member / string / non-drivable call) — the
+      // producer-side dual of `planForAwaitCfg`. A 3-state loop, one element
+      // per outer `next()` kick:
+      //
+      //   init(k)  : [leads] iter := GetAsyncIterator(operand)   (frame spill —
+      //              lazy: runs on the kick that REACHES the yield*) → goto pump
+      //   pump(k+1): {done,value} = __iterator_next(iter)   (sync IteratorStep;
+      //              transient done/value locals) → condGoto(done, after, yieldOut)
+      //   yield(k+2): settleYield(value, resume→pump)   ← the BACK-EDGE: the NEXT
+      //              outer kick re-enters pump and steps the iterator again
+      //   after(k+3): the next segment's first state (or settleDone)
+      //
+      // Slice 1 (#3388) does NOT re-await inner element values (consistent with
+      // the #3120 mode routing — the operand's element type is unknown, so a
+      // raw forward matches the #2570 delegate's behaviour). A rejected
+      // GetIterator / next() (TypeError per §27.6.3.7) surfaces through the
+      // native `__iterator` / `__iterator_next` USER arms → the outer driven
+      // `next()` promise rejection (never a trap). `.throw()`/`.return()`
+      // forwarding into the delegate is #3389. The completion value (done
+      // result's value) is discarded — `yield*` is accepted in STATEMENT
+      // position only.
+      const iterSpillName = `__yieldstar_rtiter_${rtDelegateIdx}`;
+      rtDelegateIdx += 1;
+      const operand = y.rtDelegate;
+      const initId = id;
+      const pumpId = id + 1;
+      const yieldId = id + 2;
+      const afterId = id + 3;
+
+      // Transient (same-dispatch) done/value locals — recomputed each pump,
+      // never crossing the settleYield suspend (settleYield reads `value` in the
+      // SAME dispatch as the pump that set it).
+      const RT_DONE = "__yieldstar_rtdone";
+      const RT_VALUE = "__yieldstar_rtvalue";
+
+      // init: iter := GetAsyncIterator(operand) into the persisted frame spill.
+      const initEmit: AsyncCfgStepEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const srcType = compileExpression(ctx, fctx, operand);
+        if (srcType !== null && srcType !== undefined) {
+          coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        const iterIdx = ensureAsyncIterator(ctx, fctx);
+        if (iterIdx === undefined) {
+          // Native iterator runtime unavailable (not the standalone/wasi drive
+          // lane this plan runs on) — leave iter null; pump faults done=1.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: iterSlot });
+          return;
+        }
+        fctx.body.push({ op: "call", funcIdx: iterIdx });
+        fctx.body.push({ op: "local.set", index: iterSlot });
+      };
+
+      // pump: {done, value} = __iterator_next(iter). The native helper returns
+      // (i32 done, externref value) — value on top, done below.
+      const pumpEmit: AsyncCfgStepEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const doneSlot = fctx.localMap.get(RT_DONE) ?? allocLocal(fctx, RT_DONE, { kind: "i32" });
+        const valueSlot = fctx.localMap.get(RT_VALUE) ?? allocLocal(fctx, RT_VALUE, { kind: "externref" });
+        const nextIdx = ctx.funcMap.get("__iterator_next");
+        if (nextIdx === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: valueSlot });
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "local.set", index: doneSlot });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: iterSlot });
+        fctx.body.push({ op: "call", funcIdx: nextIdx });
+        fctx.body.push({ op: "local.set", index: valueSlot }); // value (top)
+        fctx.body.push({ op: "local.set", index: doneSlot }); // done (below)
+      };
+
+      const doneCond: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(RT_DONE)! });
+        return { kind: "i32" };
+      };
+
+      const yieldValue: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(RT_VALUE)! });
+        return { kind: "externref" };
+      };
+
+      states.push(
+        {
+          id: initId,
+          resumeFrom: null,
+          lead: asLead(y.leads),
+          emit: initEmit,
+          terminator: { kind: "goto", target: pumpId },
+        },
+        {
+          id: pumpId,
+          resumeFrom: null,
+          lead: [],
+          emit: pumpEmit,
+          terminator: { kind: "condGoto", cond: { emit: doneCond }, whenTrue: afterId, whenFalse: yieldId, handler: 0 },
+        },
+        {
+          id: yieldId,
+          resumeFrom: null,
+          lead: [],
+          terminator: { kind: "settleYield", value: { emit: yieldValue }, fromSent: false, resumeState: pumpId },
+        },
+      );
+      id += 3;
+      continue;
+    }
     if (y.delegate !== undefined) {
       // (#2570) `yield* inner(...)` DELEGATION — the lazy 4-state pump loop.
       // One OUTER `next()` kick pumps the inner driven gen exactly ONE step:
