@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-// #3426 — Standalone universal harness-prelude host-import leak.
+// #3436 — Standalone universal harness-prelude host-import leak.
 //
 // The test262 "fyi" runtime prelude (`scripts/test262-fyi-runtime.js`) is
 // prepended verbatim to EVERY test262 file. In standalone (`--target
@@ -35,7 +35,7 @@ async function standalone(src: string) {
   return r;
 }
 
-describe("#3426 standalone harness-prelude host-import leak", () => {
+describe("#3436 standalone harness-prelude host-import leak", () => {
   it("compiles the universal prelude + a trivial body with ZERO host imports", async () => {
     const r = await standalone(`${PRELUDE}\nexport function f(): number { return 1; }`);
     expect(envImports(r)).toEqual([]);

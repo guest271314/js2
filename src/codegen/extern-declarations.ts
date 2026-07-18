@@ -684,7 +684,7 @@ export function collectExternDeclarations(
       // skip the stub so the unified-collector finalize can emit the WasmGC
       // native scanners (registered under the same funcMap names) instead.
       if ((ctx.wasi || ctx.standalone) && (name === "parseInt" || name === "parseFloat")) continue;
-      // #3426: `structuredClone` has no host under WASI / standalone. The
+      // #3436: `structuredClone` has no host under WASI / standalone. The
       // universal test262 prelude's `$262.detachArrayBuffer` references the
       // ambient global (a `typeof structuredClone !== "function"` guard, then a
       // call), which would otherwise materialize an unsatisfiable

@@ -32,7 +32,7 @@ function compileConsoleCall(
     return compileConsoleCallWasi(ctx, fctx, expr, method);
   }
 
-  // (#3426) Standalone mode: no JS host to receive console output, and the
+  // (#3436) Standalone mode: no JS host to receive console output, and the
   // `env.console_*` imports are deliberately NOT registered (import-collector
   // finalize). Lower to a native no-op sink: evaluate each argument for its
   // side effects, then drop the produced value so the stack stays balanced.

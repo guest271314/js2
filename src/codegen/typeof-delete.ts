@@ -1341,7 +1341,7 @@ export function compileTypeofExpression(
       }
       const sym = ctx.checker.getSymbolAtLocation(ident);
       const hasValueDecl = !!sym?.valueDeclaration;
-      // (#3426) In standalone / WASI mode `structuredClone` is deliberately NOT
+      // (#3436) In standalone / WASI mode `structuredClone` is deliberately NOT
       // provided — its host import is skipped in extern-declarations, so the
       // global genuinely does not exist and `typeof structuredClone` must be
       // "undefined" (§13.5.3: typeof of an unresolvable Reference). The TS lib
@@ -1564,7 +1564,7 @@ export function compileTypeofComparison(
         fctx.body.push({ op: "i32.const", value: result });
         return { kind: "i32" };
       }
-      // (#3426) standalone/WASI: `structuredClone` is deliberately unprovided
+      // (#3436) standalone/WASI: `structuredClone` is deliberately unprovided
       // (host import skipped in extern-declarations), so `typeof structuredClone`
       // is "undefined". The lib's ambient `valueDeclaration` would otherwise fold
       // it to "function" below, defeating the universal test262 prelude's own

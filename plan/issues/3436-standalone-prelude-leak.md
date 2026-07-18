@@ -1,10 +1,10 @@
 ---
-id: 3426
+id: 3436
 title: "Eliminate standalone harness-prelude host-import leak (console_log_externref + structuredClone)"
 status: done
 created: 2026-07-17
 completed: 2026-07-18
-assignee: ttraenkler/senior-dev-3426
+assignee: ttraenkler/senior-dev-3436
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -21,7 +21,7 @@ loc-budget-allow:
   - src/codegen/typeof-delete.ts
 ---
 
-# #3426 — Eliminate standalone harness-prelude host-import leak
+# #3436 — Eliminate standalone harness-prelude host-import leak
 
 ## Problem
 
@@ -57,7 +57,7 @@ dual-mode precedents (`parseInt`/`parseFloat`, `escape`/`unescape`):
 - A standalone compile of `print(1); console.log(2);` emits **zero** `env::*`
   imports (verified: no `console_log_externref`, no `structuredClone`).
 - `typeof structuredClone === "undefined"` in standalone.
-- `tests/issue-3426-standalone-prelude-leak.test.ts` passes.
+- `tests/issue-3436-standalone-prelude-leak.test.ts` passes.
 
 ## Implementation notes
 
