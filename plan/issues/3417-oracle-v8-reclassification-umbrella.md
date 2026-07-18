@@ -125,15 +125,22 @@ tests host fails, so set-difference ≫ net.) Gap composition:
 | wasm exception during module init | 2,348 | #1781 |
 | async completion marker not observed | 2,027 | #3428 |
 | generator / async-gen lowering | 1,867 | #2961/#680 |
-| null-deref (standalone codegen) | 789 | — |
+| null-deref (standalone codegen) | 789 | #3442 (new) / #2865 async subset |
 | RegExp (host-refused) | 617 | #1474 |
 | Reflect.construct standalone | 354 | #1472 |
 | other host-import leak | 276 | #3418 |
 | eval/dynamic-import | 102 | #1696 |
-| illegal cast / invalid wasm / OOB (standalone codegen) | 152 | — |
-| Promise host-routed / SharedArrayBuffer / instanceof / dyn-shape | 221 | — |
+| illegal cast (standalone codegen) | 92 | #3443 (new) |
+| invalid wasm (standalone codegen) | 59 | #2039 (in-progress) |
+| OOB (standalone codegen) | 2 | #2039 (in-progress) |
+| Promise host-routed / SharedArrayBuffer / instanceof / dyn-shape | 221 | #3418 / #1472-PhaseB (all host-refusal, not codegen bugs) |
 | Proxy (host-refused) | 32 | #1472 |
-| misc cited (#2620/#1907/#2029/#2717/#2046) + uncategorized | 60 | — |
+| misc cited (#2620/#1907/#2029/#2717/#2046) + uncategorized | 60 | resp. trackers; ~8 uncategorized <50 (acorn internal-error ×5, timeout ×2, array-too-large ×1) |
+
+**Coverage audit (2026-07-19):** every gap bucket >50 now has an issue —
+`module-init trap` #1781/#3393, `async-marker` #3428, `generator/async-gen` #2961/#680,
+`null-deref` **#3442**, `RegExp` #1474, `Reflect.construct` #1472, `host-import leak` #3418,
+`eval/dynamic-import` #1696, `illegal-cast` **#3443**, `invalid-wasm` #2039, `Promise/SAB/instanceof/dyn-shape` #3418/#1472 (host-refusal). The Promise/SAB/instanceof/dyn-shape (221) are all `env::*` host-import leaks or #1472-Phase-B `__get_builtin` refusals — deferred features, not codegen bugs. Residual uncategorized is ~8 tests, each <50 (acorn-parse internal errors ×5, timeouts ×2, array-too-large ×1) — below the file threshold.
 
 Fundamentally: the gap is ~**55% host-import-refusal** (generators, RegExp,
 Reflect.construct, Proxy, eval, Promise-host, SAB, instanceof, dyn-shape — features
