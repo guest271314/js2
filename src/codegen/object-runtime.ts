@@ -358,8 +358,8 @@ export function emitStandaloneVecBuiltinConstructor(
  *     representation `compileExternrefArgument` produces for numeric args;
  *     deliberately NOT ToNumber-coercing, so `new Sub("3")` stays `["3"]`) →
  *     array with that length (elements are holes, read back as undefined via
- *     the null externref slots). Length is `i32.trunc_sat_f64_u` best-effort:
- *     the §23.1.1.1 non-integer/out-of-range RangeError is not modeled;
+ *     the null externref slots). A non-integral / negative / ≥2^32 length
+ *     throws a real RangeError per §23.1.1.1 step 4b;
  *   - otherwise → array OF the effective args (raw externrefs — already the
  *     uniform boxed element representation the `$__vec_base` dynamic
  *     accessors read back).
@@ -390,6 +390,23 @@ export function emitStandaloneArrayConstructor(ctx: CodegenContext, argCount: nu
   const isUndefIdx = ctx.funcMap.get("__extern_is_undefined");
   const boxNumTypeIdx = ctx.nativeBoxNumberTypeIdx;
   if (isUndefIdx === undefined || boxNumTypeIdx === undefined || boxNumTypeIdx < 0) return undefined; // defensive
+  // §23.1.1.1 step 4b — a non-integral / negative / ≥2^32 single numeric arg
+  // throws a real RangeError (`$Error_struct` via the native ctor, so
+  // `catch (e) { e instanceof RangeError }` works — the throwNativeError
+  // pattern from registry/imports.ts).
+  emitWasiErrorConstructor(ctx, "RangeError", 1);
+  const rangeErrCtorIdx = ctx.funcMap.get("__new_RangeError");
+  const rangeErrMsg = "Invalid array length";
+  addStringConstantGlobal(ctx, rangeErrMsg);
+  const exnTagIdx = ensureExnTag(ctx);
+  const throwRangeInstrs: Instr[] =
+    rangeErrCtorIdx !== undefined
+      ? [
+          ...stringConstantExternrefInstrs(ctx, rangeErrMsg),
+          { op: "call", funcIdx: rangeErrCtorIdx },
+          { op: "throw", tagIdx: exnTagIdx },
+        ]
+      : [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx: exnTagIdx }];
 
   const vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -404,11 +421,13 @@ export function emitStandaloneArrayConstructor(ctx: CodegenContext, argCount: nu
   const anyLocal = argCount + 1; // anyref — number-box test scratch
   const lenLocal = argCount + 2; // i32 — single-numeric-arg length
   const dataLocal = argCount + 3; // (ref null $__arr_externref)
+  const nLocal = argCount + 4; // f64 — single-numeric-arg raw value (RangeError check)
   const locals: { name: string; type: ValType }[] = [
     { name: "k", type: { kind: "i32" } },
     { name: "any", type: { kind: "anyref" } },
     { name: "len", type: { kind: "i32" } },
     { name: "data", type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+    { name: "n", type: { kind: "f64" } },
   ];
 
   const body: Instr[] = [];
@@ -465,6 +484,22 @@ export function emitStandaloneArrayConstructor(ctx: CodegenContext, argCount: nu
               { op: "local.get", index: anyLocal },
               { op: "ref.cast", typeIdx: boxNumTypeIdx },
               { op: "struct.get", typeIdx: boxNumTypeIdx, fieldIdx: 0 },
+              { op: "local.set", index: nLocal },
+              // RangeError when n != trunc(n) (also catches NaN) | n < 0 | n >= 2^32
+              { op: "local.get", index: nLocal },
+              { op: "local.get", index: nLocal },
+              { op: "f64.trunc" },
+              { op: "f64.ne" },
+              { op: "local.get", index: nLocal },
+              { op: "f64.const", value: 0 },
+              { op: "f64.lt" },
+              { op: "i32.or" },
+              { op: "local.get", index: nLocal },
+              { op: "f64.const", value: 4294967296 },
+              { op: "f64.ge" },
+              { op: "i32.or" },
+              { op: "if", blockType: { kind: "empty" }, then: throwRangeInstrs, else: [] },
+              { op: "local.get", index: nLocal },
               { op: "i32.trunc_sat_f64_u" },
               { op: "local.tee", index: lenLocal },
               { op: "local.get", index: lenLocal },

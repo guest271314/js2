@@ -209,3 +209,34 @@ describe("#2917 regression controls", () => {
     expect(labels).toContain("env::__new_Array");
   });
 });
+
+describe("#2917 — §23.1.1.1 RangeError on invalid single numeric length", () => {
+  it("new X(3.5) throws a catchable RangeError", async () => {
+    expect(
+      await runStandalone(`
+        class X extends Array {}
+        export function f(): number {
+          try {
+            const x = new X(3.5);
+            return x.length;
+          } catch (e) {
+            return e instanceof RangeError ? -1 : -2;
+          }
+        }
+      `),
+    ).toBe(-1);
+  });
+
+  it("new X(-1) throws RangeError; integral length still fine", async () => {
+    expect(
+      await runStandalone(`
+        class X extends Array {}
+        export function f(): number {
+          let r: number = 0;
+          try { new X(-1); r = 100; } catch (e) { r = e instanceof RangeError ? 1 : 2; }
+          return r * 10 + new X(4).length;
+        }
+      `),
+    ).toBe(14);
+  });
+});
