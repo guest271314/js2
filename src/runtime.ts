@@ -7258,7 +7258,8 @@ function resolveImport(
         isBool = true;
       }
       const consoleFn = (v: any): void => {
-        const target = typeof con[method] === "function" ? con : console;
+        const globalConsole = console as unknown as Record<string, any>;
+        const target: Record<string, any> = typeof con[method] === "function" ? con : globalConsole;
         (target[method] as (...a: any[]) => void).call(target, v);
       };
       return isBool ? (v: number) => consoleFn(Boolean(v)) : (v: any) => consoleFn(v);
