@@ -2,7 +2,7 @@
 id: 3396
 title: "standalone: closure-env / promise-reaction / for-loop struct type A used where type B expected — struct.set/get/call-param invalid Wasm (~70 tests)"
 status: in-progress
-assignee: ttraenkler/fable-dev-2
+assignee: ttraenkler/fable-dev-5
 sprint: current
 created: 2026-07-18
 updated: 2026-07-18
@@ -167,11 +167,14 @@ this file). Reproduced the exact bucket signature `struct.set[0] expected type
 
 ```ts
 export function test(): number {
-  var pf: any = function () { return x; }; // closure captures x BEFORE its decl
-  let x = "o";                             // let, REF-typed initializer (string)
+  var pf: any = function () {
+    return x;
+  }; // closure captures x BEFORE its decl
+  let x = "o"; // let, REF-typed initializer (string)
   return 1;
 }
 ```
+
 → `--target standalone` emits INVALID Wasm:
 `struct.set[0] expected type (ref null 43), found local.get of type (ref null 6)`.
 
@@ -184,15 +187,15 @@ is the trigger — the for-in destructuring is NOT required).
 
 ### Trigger matrix (what flips valid ↔ invalid)
 
-| shape | valid? |
-|---|---|
-| fwd closure over `let x = "o"` (string) | **INVALID** |
-| closure AFTER `let x = "o"` (normal order) | valid |
-| fwd closure over `var x = "o"` (hoisted) | valid |
-| fwd closure over `let x = 5` (number/f64) | valid |
-| fwd closure over `let x: any` (uninitialised) | valid |
-| fwd ARROW closure over `let x = "o"` | **INVALID** |
-| two fwd closures over the same `let x = "o"` | **INVALID** |
+| shape                                         | valid?      |
+| --------------------------------------------- | ----------- |
+| fwd closure over `let x = "o"` (string)       | **INVALID** |
+| closure AFTER `let x = "o"` (normal order)    | valid       |
+| fwd closure over `var x = "o"` (hoisted)      | valid       |
+| fwd closure over `let x = 5` (number/f64)     | valid       |
+| fwd closure over `let x: any` (uninitialised) | valid       |
+| fwd ARROW closure over `let x = "o"`          | **INVALID** |
+| two fwd closures over the same `let x = "o"`  | **INVALID** |
 
 **Necessary + sufficient trigger:** a `let`/`const` binding with a **ref-typed
 (externref/string/object) initializer**, captured by a closure that appears
@@ -203,6 +206,7 @@ uninitialised/`any` bindings all avoid it.
 ### Root cause (localized)
 
 The mutable-capture **ref-cell** struct type drifts between two sites:
+
 - **forward-capture site** (closure created BEFORE `let x`): `x`'s type is not
   yet resolved, so `cap.valType` falls back to the GENERIC boxed type →
   `getOrRegisterRefCellType(ctx, cap.valType)` yields the generic ref-cell
@@ -252,3 +256,59 @@ Remaining work: implement + validate the closure-env fix (equivalence tests for
 forward-captured let/const closures across string/object types; no host
 regression), then re-measure the bucket and sub-slice the Promise/DataView
 remainder.
+
+---
+
+## FIX (fable-dev-5, 2026-07-18, same-team continuation on this branch)
+
+**Exact mechanism (one level deeper than the fix-direction above — neither of
+the two proposed directions was needed):** the forward-capture site and the
+init site were NOT independently resolving the cell type. Instrumentation
+(`allocLocal` + construction + init-store traces) showed the closure
+construction (`emitClosureConstruction`, closures/arrow-phases.ts) correctly
+allocates `__boxed_x` as `(ref_null <cell>)` and re-aims `localMap[x]` at it,
+with `boxedCaptures[x] = {cell, valType}` consistent. The drift happens
+AFTERWARD, in the **declaration's pre-hoisted-slot re-type block**
+(`variables.ts` ~1268, "If we reused a pre-hoisted slot but inference found a
+more precise type"): it resolves `existingIdx = localMap.get(name)` — which
+after the re-aim is the CELL slot — and its default arm MUTATES that slot's
+declared type to the let's VALUE type (`(ref 6)`). Every already-emitted
+`local.tee` (closure construct) and the box-aware init `struct.set` then
+disagree with the slot: `struct.set[0] expected (ref null <cell>), found
+local.get of type (ref null <value>)`. Why the matrix holds: `var` hoisted
+slots aren't re-aimed before their decl (the closure boxes lazily at
+construct, but `var x` decl runs FIRST in source order → normal-order valid);
+f64 initializers hit the `existingIsRef && newIsPrimitive` refusal arm; `any`
+keeps kind-equal externref → no mutation.
+
+**Fix (1 guard):** skip the entire re-type block when
+`fctx.boxedCaptures?.has(name)` — the slot is the ref-cell box and must keep
+the cell type; the `boxedForInitStore` write below is already cell-aware.
+Mirrors the explicit `boxedCaptures` skips the #3037 any-object-carrier and
+#3097 TA-view arms in the same function already carry (the default arm and
+the block itself lacked the guard).
+
+**Validated:**
+
+- `tests/issue-3396-closure-struct-type.test.ts` (8): 2-line repro valid;
+  read-through/mutation-through cell; fwd arrow + const object; TWO fwd
+  closures sharing one cell; normal-order guard; fwd-number guard;
+  non-captured re-type still applies.
+- probeBefore family (all 30 `scope-*-open` test262 files, standalone, vs
+  base): 3 × compile_error(INVALID-WASM) → fail (de-masked), 0 regressions.
+  The de-masked residual is the per-iteration/TDZ ReferenceError machinery
+  (`dereferencing a null pointer in assert_throws()` — a null-cell deref
+  instead of a thrown ReferenceError on an in-TDZ read through a captured
+  cell) — a SEPARATE mechanism, not this slice.
+- `language/statements/{for-in,let,const}` (121 files): 1 flip
+  (scope-body-lex-open CE→fail), 0 regressions.
+- Closure-capture suites (585/1528/2029/2623/2692/3024/3121/flatmap): failures
+  identical base↔branch (7 pre-existing in this darwin env — timing-only
+  diff), 0 new.
+
+**Sub-buckets remaining (unchanged, per the sub-slicing above):**
+`call[N] … found externref` family (18 — e.g. `S8.7_A4.js`, no closures
+involved: `new String` wrapper + `+=`; different mechanism), Promise
+reaction-record (13 — sample now fails on `env::Promise_any` host-import leak
+#2961, also not this mechanism), DataView struct.get (5), TDZ-ReferenceError
+null-deref residual (the de-masked probeBefore fails).
