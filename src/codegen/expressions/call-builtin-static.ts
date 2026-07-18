@@ -2189,7 +2189,14 @@ export function compileBuiltinStaticCall(
           if (!descType) {
             fctx.body.push({ op: "ref.null.extern" });
           } else if (descType.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
+            // (#3394) Use coerceType, not a bare extern.convert_any: a PRIMITIVE
+            // descriptors arg (e.g. `Object.create(o, 5n)` — a bigint, which is
+            // a TypeError at runtime but must still COMPILE to valid Wasm) is
+            // i64/i32/f64 on the stack, and extern.convert_any is illegal on a
+            // non-ref value ("extern.convert_any expected anyref, found i64").
+            // coerceType routes i64-bigint → __box_bigint, i32/f64 → __box_*,
+            // ref → extern.convert_any (mirrors the 1st-arg path above).
+            coerceType(ctx, fctx, descType, { kind: "externref" });
           }
           fctx.body.push({ op: "call", funcIdx: dpIdx });
         } else {

@@ -2,6 +2,7 @@
 id: 3395
 title: "standalone: object/closure GC ref not boxed (or double-boxed) at externref boundaries — any.convert_extern / extern.convert_any invalid Wasm (~34 tests)"
 status: ready
+assignee: ttraenkler/fable-dev-1
 sprint: current
 created: 2026-07-18
 updated: 2026-07-18
@@ -18,7 +19,15 @@ related: [2039, 1888]
 test262_bucket: standalone-invalid-wasm
 test262_count: 34
 es_edition: multi
+loc-budget-allow:
+  - src/codegen/map-runtime.ts
+  - src/codegen/weak-collections-runtime.ts
 ---
+
+> **SLICE 1 (fable-dev-1, 2026-07-18) — SHAPE 2 fixed (Weak-collection typed
+> null, ~6 rows).** Shapes 1 (missing box in class/private-method init) and 3
+> (== double-convert with a wrapper Object) remain — see the "Progress" section
+> at the bottom for grounded findings + resume anchors. Issue stays `ready`.
 
 # #3395 — object/closure ref ↔ externref boxing at boundaries (child of #2039)
 
@@ -155,3 +164,66 @@ call $eq_operand              ;; result already externref; do NOT extern.convert
 - All 34 rows compile to valid Wasm (or refuse loudly).
 - WeakSet/WeakMap identity semantics preserved (round-trip test).
 - No host-mode regression; equivalence tests green.
+
+---
+
+## Progress (fable-dev-1, 2026-07-18)
+
+Branch `issue-3395-extern-boxing`, worktree
+`/workspace/.claude/worktrees/agent-aeb10fb7d183a166f`.
+
+### SHAPE 2 — DONE (Weak-collection typed null → invalid Wasm; ~6 rows)
+
+Root: `WeakSet`/`WeakMap` `get`/`has`/`delete`/`set`/`add` compiled the key/value
+arg RAW (`compileExpression` + `coerceMapKeyToAnyref`) in
+`src/codegen/weak-collections-runtime.ts`, so a null/undefined key literal
+(incl. `null as any` — the §CanBeHeldWeakly "value cannot be held weakly" rows)
+emitted a TYPED `ref.null $Struct` that `coerceArgToAnyref`'s externref arm fed
+to `any.convert_extern` ("expected externref, found ref.null of type (ref null
+N)"). Unlike the Map/Set native path, the weak path did NOT use the
+`compileCollectionElementArg` null-literal guard.
+
+Fix: route weak-collection args through `compileCollectionElementArg` (canonical
+`ref.null NONE_HEAP` null-guard + the #3394 i64 arm), and add an
+`as`/paren/`!`/`satisfies` unwrap (`unwrapExprWrappers`) to that guard so a
+WRAPPED null literal is still recognized. Verified: WeakSet.has(null)→false,
+object identity round-trips (add/has, set/get), WeakMap unregressed.
+`tests/issue-3395-extern-boxing.test.ts` (5 tests, green).
+
+### SHAPE 1 — NOT reproduced standalone-of-raw-body (missing box; ~17 rows)
+
+`prod-private-generator.js` (`call[1] expected externref, found struct.new of
+type (ref 7)` in `C_init`). RESUME ANCHOR: the raw test body compiles VALID on
+BOTH main and this branch (`--target standalone`) — the failing `C_init`
+boxing is only reached with the test262 harness (`assert`/`verifyProperty`)
+injected, which the standalone probe lacks. To reproduce: run the file through
+the actual test262 runner (`pnpm run test:262` filtered) or replicate the
+harness's private-method registration path. The fix is per the plan's Shape-1
+investigation anchors (class-init / private-method emit in `index.ts`; the
+call-arg coercion must route through `coerceType(refType, externref)` for the
+externref private-method slot).
+
+### SHAPE 3 — reproduced, deep root (== double-convert; ~11 rows)
+
+Minimal repro: `true == new String("x")` (also `1 == new String`,
+`new String == 1`) → `extern.convert_any[0] expected anyref, found call of type
+externref`. `new Boolean`/`new Number` inline are VALID — only the STRING
+wrapper. `const s = new String("x"); true == s` (via local) is VALID — only the
+INLINE `new String` operand double-converts. WAT shows `call $__new_String`
+(returns externref) immediately followed by a second `extern.convert_any`. The
+`new String` producer itself correctly returns `{kind:"externref"}`
+(`new-builtin-globals.ts:159-174`); the second convert is emitted in the `==`
+wrapper-equality dispatch (`binary-ops-typed-dispatch.ts`, the
+`isEqOp`/`wrapperEquality` operand-coercion cascade). RESUME ANCHOR: trace which
+branch fires for `boolean == <String-wrapper externref>` (the
+`isStringType(rightTsType)` gate is FALSE for a `String` OBJECT, so it falls to
+the `else if (isNumericOp || isEqOp || isNeqOp)` valueOf-coercion arm ~:370);
+add an "operand already externref → skip the convert / use any.convert_extern"
+guard there per the plan's Shape-3 fix.
+
+### Regression status
+
+Weak/Map/Set suites green (issue-2162-standalone-weak, issue-3242-weakref,
+issue-2378, issue-2861, issue-3309, issue-2162-map-foreach — 50 tests). The
+shape-2 change is scoped to the standalone/native weak-collection arg path;
+host mode unchanged.
