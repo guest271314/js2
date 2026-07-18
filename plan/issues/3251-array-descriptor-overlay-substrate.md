@@ -331,6 +331,23 @@ byte-identical (the #1917 discipline).
   `NONE_HEAP=-18` is `any`, real `none` is `-15` (vec-overlay documents this);
   never busy-wait on a pegged box; one compile at a time.
 
+## 2026-07-18 merge-queue park — diagnosed INFRA COLLATERAL (not this PR)
+
+PR #3327 was auto-parked on its first merge_group run (29631783983). Diagnosis
+(fable-1): the standalone lane collapsed to 4,508 pass / 43,469 compile_error,
+every CE = `standalone target emitted host imports: env::console_log_externref,
+env::structuredClone (#2961)` — HOST-wrapper import signatures recorded under
+the standalone lane. UNRELATED PR #3322 failed its merge_group with
+byte-identical counts; fresh-based #3325 passed the same hour on the same main
+tip. Verdict: a stale-base merge-group precompile-cache/lane bug on main (post
+#3380/#2961 overnight changes), NOT an overlay regression — S1+current-main
+compiles standalone locally with zero imports (probes + 18/18 suite; those
+import names have no standalone emission sites in the compiler). Actions:
+main catch-up merged+pushed on the S1 branch, determination documented on the
+PR, hold removed ONCE, escalated to the tech lead (#3322 owner needs the same
+catch-up; a [CI-FIX] should own the lane bug). Diagnostic artifacts: the
+merged-report jsonls under the worktree `.tmp/mg-merged/` + `.tmp/mg-3322-merged/`.
+
 ## Stale sibling branch (do not delete — hygiene-pass salvage)
 
 `origin/issue-3251-array-descriptor-overlay` (pre-dates this work, from
