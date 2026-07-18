@@ -549,7 +549,7 @@ export function runtimeAccessorDescriptorKey(
     ts.forEachChild(node, visit);
   };
   visit(receiver.getSourceFile());
-  return found ? key : undefined;
+  return found ? bareKey : undefined;
 }
 
 export function emitRuntimeDescriptorGet(
