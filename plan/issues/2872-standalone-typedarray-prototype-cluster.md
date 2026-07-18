@@ -61,14 +61,45 @@ Checklist (kept current — resume point if interrupted):
 
 - [x] Root-cause map read (PR #3338); code paths verified on this base
 - [x] Claim lock force-taken (stale 07-12 holder; takeover per #3338)
-- [ ] Part 2 decline in calls-closures.ts
-- [ ] Part 1 set additions in array-methods.ts
-- [ ] Probe: any-receiver harness shape — no `env::*_findLast*` import, correct
-      values/order/thisArg/undefined-miss, standalone execute
-- [ ] Probe: plain-array any-receiver findLast unhijacked (guard)
-- [ ] Regression sweep: issue-2872/#3058/#3098/#3162/#1712 suites +
-      prove-emit-identity (host/gc byte-identity)
+- [x] Part 2 decline in calls-closures.ts
+- [x] Part 1 set additions in array-methods.ts
+- [x] Part 3 (surfaced during verification, see below): `__hof_*` S1
+      undefined-singleton producer fix in hof-native.ts
+- [x] Probe: any-receiver harness shape — no `env::*_findLast*` import, correct
+      values/order/thisArg/undefined-miss, standalone execute (suite 10/10)
+- [x] Probe: plain-array any-receiver findLast unhijacked (guard)
+- [x] Regression sweep: issue-2872×3 / #3058 / #3098 / #3162 / #1712×5 suites
+      green (only 2 PRE-EXISTING env failures, verified identical on clean
+      base: issue-2001-s2 reduce-hole, issue-1712-capture arity-0) +
+      prove-emit-identity IDENTICAL 56/56 vs base (gc/host byte-inert)
+- [x] Scoped test262 (standalone, `TypedArray/prototype/{findLast,findLastIndex}`,
+      50 files): base 4 pass / 12 fail / 34 CE → branch **24 pass / 26 fail /
+      0 CE** = **+20 pass, −34 CE, 0 regressions**
+- [x] Collateral sweep (all 9 scalar-HOF dirs, 245 files, per-file diff):
+      every flipped line is in findLast/findLastIndex; siblings
+      (find/findIndex/forEach/some/every/reduce/reduceRight) ZERO flips
 - [ ] PR open, CI started
+
+### Part 3 (found during verification): `__hof_*` S1 undefined-producer gap
+
+The slice-5 suite exposed a THIRD gap beyond the banked two: under the #2106
+`undefinedSingleton` regime (default ON since 2026-07-04, 6f7f93c85) a null
+externref is JS `null`, NOT `undefined` — but `ensureNativeArrayHof` still
+emitted legacy `ref.null.extern` for its "returns undefined" results
+(`find`/`findLast` miss, `forEach` result, reduce-of-empty). So
+`a.findLast(missPred) === undefined` was FALSE (the value classified as
+`null`: typeof "object", `=== null` true) — and this bug was LIVE on main for
+the shipped #3162 `find`/`findIndex` (its own suite's miss test fails on a
+clean checkout; invisible in CI because the `quality` gate runs only
+CHANGED test files, and #3162's PR presumably predates/raced the flip's full
+effect). Fix: `undefinedExternInstrs(ctx) ?? ref.null.extern` at the three
+result sites in hof-native.ts (regime-off builds byte-identical). The
+committed suite asserts miss `=== undefined`, falsiness, and `??` coalescing.
+
+Remaining fails in the two dirs are the KNOWN follow-on buckets (not this
+slice): the slice-6 cross-method `assert.throws` cluster (brand/detach/OOB
+spec throws, ~150+ rows), reflective `name`/`length`/`prop-desc` (#2885-glue),
+and resizable-buffer mid-iteration semantics.
 
 Slice 6 (the ~150-row cross-method `assert.throws` shared-validation-prelude
 cluster) remains the NEXT slice after this — not in this PR.

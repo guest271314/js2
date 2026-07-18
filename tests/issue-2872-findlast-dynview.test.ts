@@ -136,6 +136,18 @@ describe("#2872 slice 5: dyn-view findLast/findLastIndex host-free", () => {
     ).toBe(2);
   });
 
+  it("miss result is falsy and ??-coalesces (S1 singleton semantics)", async () => {
+    // The S1 `$undefined` singleton the miss now returns must behave like JS
+    // undefined beyond ===: falsy under ToBoolean and nullish for `??`.
+    expect(
+      await runStandalone(
+        H(
+          `const x: any = a.findLast(function (v: any) { return v === 99; }); if (!x) r = r + 1; const y: any = x ?? 7; if (y === 7) r = r + 1; r = r - 1;`,
+        ),
+      ),
+    ).toBe(5);
+  });
+
   it("does not disturb find/findIndex (the #3162 siblings)", async () => {
     expect(
       await runStandalone(
