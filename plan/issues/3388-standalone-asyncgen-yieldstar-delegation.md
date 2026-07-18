@@ -300,3 +300,33 @@ await-free ✓), `isAsyncGenDriveCandidate` carrier-off standalone lane admits i
 `asyncGenDelegatesRegistered` vacuous for non-call operands ✓.
 
 **Sequencing**: re-merge #3387 (PR #3322) / origin/main before enqueue.
+
+### Throw-not-trap fix — precise approach (for the resumer)
+
+The GetIterator error path (remaining item #1) is tractable via
+`buildThrowJsErrorInstrs(ctx, "TypeError", msg)` (src/codegen/js-errors.ts:66),
+which returns a raw `Instr[]` that constructs a REAL `TypeError` instance and
+`throw`s it (no fctx needed). Splice it into the `__iterator` (and, for
+`.next()`-not-callable, `__iterator_next`) HARD-CAST TAIL in `buildIteratorBody`
+/ `buildIteratorNextBody` (iterator-native.ts), replacing the `ref.cast` that
+traps (`illegal cast`) when a subject matches no arm.
+
+**Index-shift caveat (the real work):** `buildThrowJsErrorInstrs` with
+`forceInModuleCtor:true` reads `ctx.funcMap.get("__new_TypeError")`, and the
+default path `ensureLateImport`s it. `buildIteratorBody` runs both eagerly
+(`ensureNativeIteratorRuntime`) AND at finalize (`fillNativeIteratorLateArms`) —
+registering `__new_TypeError` at finalize is the #2043 late-shift hazard. So:
+EAGERLY register the WASI TypeError constructor (`emitWasiErrorConstructor(ctx,
+"TypeError", 1)`) in `ensureNativeIteratorRuntime` BEFORE the `registerNative`
+calls (gated on `ctx.standalone || ctx.wasi`), then have the tail reference
+`ctx.funcMap.get("__new_TypeError")` by name (stable, shift-maintained). Bake
+the throw instrs into the tail at build time (both the eager vec-only body and
+the finalize USER-arm rebuild). Validate: (a) `yield* 42` / `yield* {}` reject
+with a `TypeError` instance (not a trap, not null); (b) sync `for (const x of
+42)` now throws TypeError too (spec §7.4.1 — a NET IMPROVEMENT, but re-run the
+for-of / spread / iterator suites + full test262 to confirm no regression on the
+shared helper); (c) the ~600-row error corpus flips host_import_leak → pass.
+
+This is the ONE remaining blocker before opening the PR — without it the
+GetIterator-error corpus regresses PASS→FAIL (trap). The value-forwarding core
+is done and proven.
