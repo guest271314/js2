@@ -22,7 +22,11 @@ files:
   - scripts/test262-fyi-reader.mjs
   - tests/test262-oracle-version.ts
   - tests/issue-3370.test.ts
+regressions-allow:
+  count: 20457
+  reason: "#3370 replaces the synthetic Test262 wrapper with the literal upstream harness; measured oracle-v7 to v8 rebaseline: host 8106, standalone 20457"
 ---
+
 # #3370 — make the original Test262 harness the project-runner oracle
 
 ## Problem
@@ -68,6 +72,9 @@ rewritten surrogate rather than the upstream test.
   failures cannot count as passes.
 - Bumped the Test262 oracle from v7 to v8. Landing requires an
   `ORACLE_REBASE=1` baseline refresh.
+- Recorded the measured v7-to-v8 rebaseline ceiling: 8,106 host regressions
+  and 20,457 standalone regressions. The standalone transition removes the
+  synthetic lane's host-dependent raw passes from conformance accounting.
 
 ## Validation
 

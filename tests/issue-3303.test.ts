@@ -282,6 +282,48 @@ describe("#3303 — CLI gate behaviour (rebase-mode, REGRESSIONS_ALLOW_FILE hook
     expect(r.status).toBe(1);
   });
 
+  it("resets compile-time gate signals when an oracle bump changes the harness workload (#3370)", () => {
+    const allowFile = writeAllowanceFile(tmp, 100);
+    const rows = {
+      base: [{ oracle_version: 1, file: "test/x/a.js", status: "pass", compile_ms: 100, wasm_sha: "base" }],
+      cand: [
+        {
+          oracle_version: 2,
+          file: "test/x/a.js",
+          status: "compile_timeout",
+          compile_ms: 1000,
+          wasm_sha: "candidate",
+        },
+      ],
+    };
+    const r = runDiffCli(rows, { REGRESSIONS_ALLOW_FILE: allowFile });
+    expect(r.out).toContain("Compile timeouts (pass → compile_timeout): 0");
+    expect(r.out).toContain("1 raw pass→compile_timeout transition(s) are not comparable");
+    expect(r.out).toContain("Aggregate compile time (shared 1 tests): baseline 100ms → current 1000ms (Δ +0.0%)");
+    expect(r.out).toContain("raw aggregate delta +900.0%");
+    expect(r.status).toBe(0);
+  });
+
+  it("keeps compile-time gate signals unchanged for the same oracle", () => {
+    const rows = {
+      base: [{ oracle_version: 1, file: "test/x/a.js", status: "pass", compile_ms: 100, wasm_sha: "base" }],
+      cand: [
+        {
+          oracle_version: 1,
+          file: "test/x/a.js",
+          status: "compile_timeout",
+          compile_ms: 1000,
+          wasm_sha: "candidate",
+        },
+      ],
+    };
+    const r = runDiffCli(rows, { REGRESSIONS_ALLOW_FILE: "/dev/null" });
+    expect(r.out).toContain("Compile timeouts (pass → compile_timeout): 1");
+    expect(r.out).toContain("Aggregate compile time (shared 1 tests): baseline 100ms → current 1000ms (Δ +900.0%)");
+    expect(r.out).not.toContain("Oracle re-baseline compile-time note (#3370)");
+    expect(r.status).toBe(0);
+  });
+
   it("MALFORMED declaration (count without reason) is ignored with a loud warning", () => {
     const bad = join(tmp, "9999-malformed.md");
     writeFileSync(bad, fm("regressions-allow:\n  count: 100"));

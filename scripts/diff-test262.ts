@@ -678,6 +678,8 @@ async function run(
   const oracleRebase = process.env.ORACLE_REBASE === "1";
   const baseOracle = baselineLoaded.oracleVersion;
   const newOracle = newerLoaded.oracleVersion;
+  const rebaseMode =
+    oracleRebase || (typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle);
   const fmtOracle = (v: number | "mixed" | undefined) =>
     v === undefined ? "unstamped (pre-#2096)" : v === "mixed" ? "mixed (multiple versions)" : `v${v}`;
 
@@ -702,8 +704,7 @@ async function run(
     // #3086: a FORWARD monotonic bump auto-rebases (see the block comment
     // above); a backward skew still requires the explicit env flag.
     const forwardBump = typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle;
-    const rebaseEffective = oracleRebase || forwardBump;
-    if (!rebaseEffective) {
+    if (!rebaseMode) {
       console.error(
         `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
           `  baseline oracle = ${fmtOracle(baseOracle)}, new oracle = ${fmtOracle(newOracle)}.\n` +
@@ -887,7 +888,18 @@ async function run(
   // line above stays unchanged for backwards compat with the dashboard.
   const regressionsCT = regressions.filter((r) => r.to === "compile_timeout").length;
   const regressionsReal = regressions.length - regressionsCT;
-  console.log(`=== Compile timeouts (pass → compile_timeout): ${regressionsCT} ===`);
+  // #3370 — compile-time signals compare the cost of compiling the same
+  // workload. A deliberate oracle rebaseline changes the assembled harness,
+  // so old-oracle pass→timeout transitions are not compile regressions. Keep
+  // the measured count visible, but reset the canonical gated signal consumed
+  // by the #1942 workflow guard. Same-oracle comparisons are unchanged.
+  const gatedRegressionsCT = rebaseMode ? 0 : regressionsCT;
+  console.log(`=== Compile timeouts (pass → compile_timeout): ${gatedRegressionsCT} ===`);
+  if (rebaseMode && regressionsCT > 0) {
+    console.log(
+      `=== Oracle re-baseline compile-time note (#3370): ${regressionsCT} raw pass→compile_timeout transition(s) are not comparable across oracle versions. ===`,
+    );
+  }
   console.log(`=== Regressions excluding compile_timeout: ${regressionsReal} ===`);
 
   // #2098: split compile_timeout regressions by baseline compile cost, encoding
@@ -954,11 +966,17 @@ async function run(
     aggShared += 1;
   }
   const aggPct = aggBaseMs > 0 ? ((aggCurMs - aggBaseMs) / aggBaseMs) * 100 : 0;
+  const gatedAggPct = rebaseMode ? 0 : aggPct;
   // Round to whole ms for the sums and one decimal for the percentage so the
   // workflow's `grep -oE '[0-9.-]+'` parses deterministically.
   console.log(
-    `=== Aggregate compile time (shared ${aggShared} tests): baseline ${Math.round(aggBaseMs)}ms → current ${Math.round(aggCurMs)}ms (Δ ${aggPct >= 0 ? "+" : ""}${aggPct.toFixed(1)}%) ===`,
+    `=== Aggregate compile time (shared ${aggShared} tests): baseline ${Math.round(aggBaseMs)}ms → current ${Math.round(aggCurMs)}ms (Δ ${gatedAggPct >= 0 ? "+" : ""}${gatedAggPct.toFixed(1)}%) ===`,
   );
+  if (rebaseMode && aggPct !== 0) {
+    console.log(
+      `=== Oracle re-baseline compile-time note (#3370): raw aggregate delta ${aggPct >= 0 ? "+" : ""}${aggPct.toFixed(1)}%; the #1942 comparison resets because oracle ${fmtOracle(baseOracle)} → ${fmtOracle(newOracle)} changes the compiled harness workload. ===`,
+    );
+  }
 
   // #1222: filter regressions where the compiled Wasm binary is byte-identical
   // on both base and PR. A test that compiles to the same bytes cannot have
@@ -1184,9 +1202,6 @@ async function run(
   // #3086 — is this a deliberate oracle RE-BASELINE? (forward-monotonic bump
   // auto-rebase, or ORACLE_REBASE=1). Same condition the oracle guard above used
   // to PROCEED across versions; both `baseOracle`/`newOracle` are in scope here.
-  const rebaseMode =
-    oracleRebase || (typeof baseOracle === "number" && typeof newOracle === "number" && newOracle > baseOracle);
-
   if (rebaseMode) {
     // A pure re-baseline has ~0 improvements → net/ratio are inapplicable (see
     // ORACLE_REBASE_DRIFT_TOLERANCE). The intended reclassification is already
