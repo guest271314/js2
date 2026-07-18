@@ -937,6 +937,10 @@ export interface FunctionContext {
 export interface CodegenContext {
   mod: WasmModule;
   checker: ts.TypeChecker;
+  /** True when the single-file input is an ECMAScript Module goal. Script-goal
+   * module init uses the host global object for top-level `this`; module goal
+   * keeps top-level `this` undefined (#3365). */
+  sourceIsModule: boolean;
   /**
    * (#1930) THE type-query boundary. Prefer `ctx.oracle` over raw
    * `ctx.checker` in ALL new code — the oracle-ratchet CI gate fails on
@@ -1128,24 +1132,27 @@ export interface CodegenContext {
   classNewTargetIds: Map<string, number>;
   /**
    * (#802) Dynamic prototype support. Set by the `scanForDynamicProto` pre-scan
-   * when the module contains any `Object.setPrototypeOf` / `Reflect.setPrototypeOf`
-   * / `o.__proto__ =` proto-mutation site. Off by default — a module that never
-   * mutates a prototype is byte-for-byte unchanged.
-   *
-   * `dynamicProtoLiteralNodes` (Slice A) holds the object-literal AST nodes that
-   * are RECEIVERS of such a mutation; `compileObjectLiteral` (and the matching
-   * variable-local typing in statements/variables.ts + index.ts) promote just
-   * those literals to the open `$Object` representation, which already carries a
-   * mutable `$proto` field and the native setPrototypeOf/read/getPrototypeOf
-   * machine — so this needs ZERO struct-layout change.
-   *
-   * `dynamicProtoClasses` (class-instance receiver NAMES) is reserved for Slice B
-   * (a conditional appended `$__proto__` struct field) and is intentionally left
-   * empty by Slice A.
+   * when the program mutates an object's [[Prototype]] at runtime
+   * (`Object.setPrototypeOf` / `Reflect.setPrototypeOf` / `o.__proto__ = v`).
+   * `dynamicProtoClasses` holds the hierarchy-ROOT class names whose instances
+   * are proto-mutation receivers — ONLY those classes get the appended
+   * standalone-only `$__proto__` externref struct field (Slice B; the #799a
+   * unconditional-append regression is avoided by this gating).
+   * `dynamicProtoLiteralNodes` marks object-literal AST nodes that are proto
+   * receivers (Slice A consumes it: promote the literal to a native `$Object`,
+   * standalone-only, via `compileObjectLiteral` + the matching variable-local
+   * typing in statements/variables.ts + index.ts — zero struct-layout change).
+   * `dynProtoSentinelGlobalIdx` is the lazily-reserved mutable externref global
+   * holding the "explicitly null prototype" sentinel `$Object` (distinguishes
+   * `setPrototypeOf(o, null)` from "never dynamically set" in the appended
+   * field; undefined until first needed). Everything is gated on the marked
+   * sets being non-empty, so programs without proto mutation are
+   * byte-identical.
    */
   usesDynamicProto: boolean;
   dynamicProtoClasses: Set<string>;
   dynamicProtoLiteralNodes: WeakSet<ts.Node>;
+  dynProtoSentinelGlobalIdx: number | undefined;
   /**
    * (#2001 S1) Sparse-array hole support. Set by the `scanForArrayHoles`
    * pre-scan when the program contains any array-literal elision

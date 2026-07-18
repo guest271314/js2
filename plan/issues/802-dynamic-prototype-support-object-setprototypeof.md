@@ -1,25 +1,33 @@
 ---
 id: 802
 title: "- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)"
-status: ready
+status: in-progress
+assignee: ttraenkler/fable-dev-2
 model: opus
 fable_role: spec
 created: 2026-03-26
-updated: 2026-07-17
+updated: 2026-07-18
 priority: low
 feasibility: hard
 reasoning_effort: high
 goal: property-model
 sprint: current
-# (#802 Slice A / #3102) The Slice-A prescan-wiring + representation-lockstep
-# hooks are integration points INSIDE existing functions (prescan invocation,
-# object-literal promotion gate, the two variable-local slot-typers, and the
-# three context fields), so they cannot move into the new src/codegen/dynamic-proto.ts
-# module. Granting this change-set the sanctioned LOC allowance.
+# (#3102) Intended god-file growth for the #802 dynamic-proto wiring across all
+# slices. Slice B+C (landed): the conditional $__proto__ field append
+# (class-bodies), the typed getPrototypeOf field-read arm (call-builtin-static),
+# the scanForDynamicProto + fillDynamicProtoHelpers invocations (index), the
+# context fields (types), the INITIAL_CAP export (object-runtime). Slice A: the
+# object-literal → $Object promotion gate (literals) + the representation-lockstep
+# variable-local slot-typers (statements/variables + index). All are integration
+# points INSIDE existing functions; the bulk of the new logic lives in the NEW
+# src/codegen/dynamic-proto.ts (not a god-file).
 loc-budget-allow:
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/class-bodies.ts
   - src/codegen/index.ts
-  - src/codegen/literals.ts
   - src/codegen/context/types.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/literals.ts
   - src/codegen/statements/variables.ts
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
@@ -418,3 +426,62 @@ parameter), do **not** silently drop the proto:
 - `src/codegen/expressions/call-namespace-static.ts` (`:640-716`) — Reflect struct arm.
 - `src/codegen/dyn-read.ts` + `src/codegen/member-get-dispatch.ts` — Slice C read walk.
 - `src/codegen/object-runtime-prototype.ts` (`:138+`) — shared `__set_struct_proto_checked` / `__struct_proto_get` native helpers.
+
+---
+
+## Implementation status (2026-07-18, fable-dev-2)
+
+**Slices B + C landed** (standalone class-instance dynamic prototype). PR branch
+`issue-802-impl-bc`.
+
+### What shipped
+- **New `src/codegen/dynamic-proto.ts`**: `scanForDynamicProto` prescan (marks
+  hierarchy-ROOT class names + object-literal nodes that are proto receivers;
+  promotes a marked subclass to its declared root; unwraps `as`/paren/`!` casts;
+  handles the `const c: any = new C()` initializer case) and
+  `fillDynamicProtoHelpers` finalize fill. The fill mints four DEFINED natives —
+  `__struct_proto_set` (§10.1.2.1 with cycle refusal + null sentinel),
+  `__struct_proto_get` (inherited read, mutually recursive with `__extern_get`
+  for mixed struct/`$Object` chains), `__struct_proto_read`
+  (`Object.getPrototypeOf` per-class, most-derived-first, falls back to the
+  compile-time proto singleton when never set), `__dynproto_norm` (sentinel →
+  null) — and PREPENDS a marked-root `ref.test` dispatch arm into
+  `__object_setPrototypeOf` / `__getPrototypeOf` / `__extern_get`.
+- **`class-bodies.ts`**: appends the conditional `(field $__proto__ (mut
+  externref))` LAST, standalone-only, gated on `ctx.dynamicProtoClasses`. The
+  `#799a` −2,788 regression is avoided structurally: prescan-gated (a typical
+  module marks zero classes) + append-last (no positional `fieldIdx` shift) +
+  every class-struct `struct.new` site iterates the field list and defaults the
+  externref field automatically (audited: both ctor alloc loops, the lazy
+  proto/class-object singleton inits, the fnctor ctor, the object-literal path).
+- **`call-builtin-static.ts`**: typed `Object.getPrototypeOf(instance)` reads
+  the field inline (non-null struct receiver) or routes a nullable receiver
+  through the generic `__getPrototypeOf` marked arm.
+- **Context**: `usesDynamicProto`, `dynamicProtoClasses`,
+  `dynamicProtoLiteralNodes`, `dynProtoSentinelGlobalIdx`.
+- **Kill switch**: `JS2WASM_NO_DYNPROTO=1` disables the prescan marks, disabling
+  all of Slice B/C wholesale (§8 rollback shape preserved).
+- **Test**: `tests/issue-802-dynamic-proto-class.test.ts` (17 cases: inherited
+  read, null sentinel, singleton identity, set-proto identity, cycle refusal,
+  multi-level struct chains, `__proto__` setter, Reflect, subclass root
+  promotion, two hierarchies, own-field shadow, `Object.keys` no-leak,
+  regression guards).
+
+### Deferred to follow-ups (out of THIS PR's scope)
+- **Slice A** (object-literal → `$Object` promotion): owned by opus-802a.
+  `dynamicProtoLiteralNodes` is POPULATED by the prescan here but not yet
+  CONSUMED — Slice A wires it. No behavior change from populating it.
+- **Slice D** (`isPrototypeOf` / `instanceof` with a dynamically-reset
+  class-instance proto; `__extern_has` marked arm; non-object-proto exactness).
+
+### Known-pre-existing failures (NOT caused by this PR — verified via the
+`JS2WASM_NO_DYNPROTO=1` kill-switch A/B; both are plain-`$Object` paths this PR
+never touches, and have no classes):
+- `tests/issue-2747.test.ts` "walks a multi-level `__proto__` chain" — the
+  two-level `proto.__proto__ = grand` for-in walk on plain objects drops the
+  grandparent key.
+- `tests/issue-2009.test.ts` R3b "named-source spreads (variables)" — object
+  spread insertion-order.
+
+`status: in-progress` (not `done`) because the #802 epic also has Slices A + D;
+this PR completes the class-instance backbone (B + C).
