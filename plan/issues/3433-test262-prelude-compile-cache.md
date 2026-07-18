@@ -1,9 +1,10 @@
 ---
 id: 3433
 title: "Test262 v8 harness-prelude compile cost: kill the quadratic per-call file rescans, then reuse prelude front-end work"
-status: in-progress
+status: done
 created: 2026-07-18
 updated: 2026-07-18
+completed: 2026-07-18
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -36,12 +37,12 @@ entries caused false baselines"), so every CI run compiles everything fresh.
 Steady-state in-process `compile()` medians (8 runs), mirroring
 `doCompile(originalHarness=true)`:
 
-| shape | small-body test | map test | propertyHelper test |
-| --- | --- | --- | --- |
-| full assembly | 720 ms | 519 ms | **1,963 ms** |
-| body only | 173 ms | 63 ms | 59 ms |
-| prelude only | 528 ms | 575 ms | 2,176 ms |
-| trivial `var x` | 0.7 ms | 0.7 ms | 0.7 ms |
+| shape           | small-body test | map test | propertyHelper test |
+| --------------- | --------------- | -------- | ------------------- |
+| full assembly   | 720 ms          | 519 ms   | **1,963 ms**        |
+| body only       | 173 ms          | 63 ms    | 59 ms               |
+| prelude only    | 528 ms          | 575 ms   | 2,176 ms            |
+| trivial `var x` | 0.7 ms          | 0.7 ms   | 0.7 ms              |
 
 So: (1) per-compile fixed overhead is nil (libs already cached in-process);
 (2) the prelude is 75–97 % of every compile; (3) cost is **superlinear** in
@@ -70,7 +71,7 @@ receivers (common in the upstream harness: `var x;` patterns in sta.js /
 propertyHelper.js).
 
 The "prelude recompiled tens of thousands of times" framing is the
-multiplier; the *nonlinearity* is the real killer. Fixing the scans is a pure,
+multiplier; the _nonlinearity_ is the real killer. Fixing the scans is a pure,
 semantics-identical compile-work optimization (exactly the honesty bar: cache
 compilation work, never verdicts).
 
@@ -103,12 +104,12 @@ compilation work, never verdicts).
 - [x] Investigate: read runner/worker/assembler; profile; find root cause
 - [x] Allocate id + claim lock + branch `issue-3433-test262-prelude-compile-cache`
 - [x] Issue file with plan committed early (insurance)
-- [ ] Fix 1: async-assignment memo
-- [ ] Fix 2: ident-assignment memo
-- [ ] Re-profile + record numbers
-- [ ] Byte-identity + verdict-identity sample validation
-- [ ] Unit test (tests/issue-3433.test.ts)
-- [ ] typecheck + prettier + scoped suites (issue-3370 tests, 2961, chunk smoke)
+- [x] Fix 1: async-assignment memo
+- [x] Fix 2: ident-assignment memo
+- [x] Re-profile + record numbers
+- [x] Byte-identity + verdict-identity sample validation
+- [x] Unit test (tests/issue-3433.test.ts)
+- [x] typecheck + prettier + scoped suites (issue-3370 tests, 2961, chunk smoke)
 - [ ] PR to loopdive/js2, report to coordinator
 
 ## Roadmap: lane-asymmetric harness strategy (user design input, 2026-07-18)
@@ -117,7 +118,7 @@ Documented for the next window; NOT in scope for this PR.
 
 - **JS-host (V8) lane — policy option**: run the real assert.js/sta.js
   natively in V8 and compile only the test body. Not the #3370 rewriting-sin
-  (harness stays unmodified), but it moves the measurement boundary: 
+  (harness stays unmodified), but it moves the measurement boundary:
   Test262Error cross-boundary identity, `verifyProperty` MOP on wasm-created
   objects, and script-global sharing between harness and test become interop
   requirements — some failures would become boundary-artifacts rather than
@@ -133,4 +134,48 @@ Documented for the next window; NOT in scope for this PR.
 
 ## Results
 
-(to be filled after implementation)
+Implemented fixes 1 + 2 (per-compile memos on `CodegenContext`, lazily
+initialized; the scans' detection results are equivalent by construction —
+see the #3433 comments at both sites).
+
+**Speed** (interleaved old-bundle vs new-bundle per test, single process, real
+110-test slice: 60 × `built-ins/Object/defineProperty` [propertyHelper] +
+25 × `language/expressions/addition` + 25 × `built-ins/Array/prototype/map`):
+
+- old: 659 ms/test → new: 250 ms/test — **2.64× on the mixed slice**
+- propertyHelper-heavy assemblies: ~1,963 ms → ~511 ms (**~3.8×**)
+- post-fix CPU profile is flat (no function > 5 % self time); compile cost is
+  now roughly linear in source size (6.9 KB ≈ 340 ms, 19.3 KB ≈ 510 ms full
+  assembly, noisy shared box).
+
+**Byte identity** (honesty bar):
+
+- 37-variant fixed sample (18 files × sloppy/strict, incl. propertyHelper,
+  compareArray, negative-parse, generator-strict): all compiled binaries
+  byte-identical old vs new; success/error fields identical.
+- 110-test slice: 108/110 byte-identical. The 2 exceptions
+  (`Array/prototype/map/15.4.4.19-1-{10,13}.js`) differ ONLY in the
+  TS-checker-internal symbol id embedded in the late-bound
+  `__@toStringTag@<id>` field/accessor names (`@63` → `@12449`) — the memo
+  changes checker query ORDER, and TS allocates symbol ids lazily on first
+  query. Same struct shape, same code, deterministic per compiler; the id
+  suffix is already treated as unstable elsewhere (see
+  `generators-native.ts` `startsWith("__@iterator")`). Executed both tests
+  old vs new (sloppy + strict): identical verdicts (all four fail
+  identically pre- and post-change — pre-existing cross-realm fail).
+
+**Suites**: typecheck clean; `issue-3433` (4/4), `issue-2612` + `issue-2767`
+(15/15), `issue-3370` (5/5, incl. the 50/50 unified-worker parity run with
+strict reruns, after `git submodule update --init --checkout test262-fyi/data`),
+`issue-2961` + `issue-2961-standalone-no-raw-pass` + `test262-fyi-runner`
+(18/18), chunk smoke via `TEST262_PATH_FILTER` on chunk1/chunk2 (the one fail,
+`map/create-proto-from-ctor-realm-array.js`, reproduces byte-for-byte on the
+pre-change compiler — pre-existing conformance fail).
+
+**Expected CI effect**: host-shard wall time is dominated by compile;
+per-compile cost drops ~2.6–3.8× on exactly the harness-assembly shapes CI
+compiles ~73k times (43k tests × ~1.7 strict-rerun factor), so shards should
+return to the few-minute range. The remaining per-compile cost is genuine
+linear codegen of the prelude; further reduction needs the deferred options
+below (front-end snapshot ceiling measured at only ~13 %, so the next real
+lever is disk-cache re-enable or compiled-prefix reuse).
