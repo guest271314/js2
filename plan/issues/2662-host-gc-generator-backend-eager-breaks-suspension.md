@@ -1,7 +1,7 @@
 ---
 id: 2662
 title: "host (gc) generator backend is EAGER-buffered — breaks lazy/suspension semantics on the default path (architecture)"
-status: in-progress
+status: ready
 assignee: ttraenkler/fable-dev-1
 created: 2026-06-25
 priority: high
@@ -13,7 +13,17 @@ language_feature: generators
 goal: spec-completeness
 related: [1344, 1665, 2157]
 test262_bucket: built-ins/GeneratorPrototype
+loc-budget-allow:
+  - src/codegen/generators-native.ts
+  - src/codegen/statements/nested-declarations.ts
 ---
+
+> **SLICE 1 LANDED (fable-dev-1, 2026-07-18)** — capturing-NESTED generators
+> (the wrapped-test262 shape) now run lazily on the default gc/host lane. Issue
+> stays `ready`: the TOP-LEVEL generator lever (requires the Option-(ii)
+> JS-boundary wrapper) is the remaining epic scope, and #1344 S-B/S-C are still
+> gated on measuring the GeneratorPrototype buckets after the wrapper lands. See
+> the `## Implementation Plan` section below.
 
 # #2662 — host (gc) generator backend is eager-buffered (architectural correctness gap)
 
@@ -194,16 +204,25 @@ eager → all 4 regressions resolved, zero new regressions.
 
 - [x] Narrow candidate gate to capturing-nested + try-region; add payload/
       yield*/return helpers; alias-escape bail. Typecheck green.
-- [x] Probe battery: acceptance (lazy nested, interleave, test262-shape) green;
-      2035/680-keeps-eager regressions resolved.
-- [x] A/B chunk 1 (files 1–50) — confirm zero new failures (re-verify: initial
-      compare txt was contaminated by a stale main-src checkout).
-- [ ] A/B chunks 2 & 3 (files 51–146) — zero new failures.
-- [ ] Add `tests/issue-2662-gc-lazy-nested-generators.test.ts`.
-- [ ] Set issue `status: done` + `completed:` in the impl PR; open PR to
-      `loopdive/js2wasm`, confirm CI starts clean.
-- [ ] Follow-up issue for the top-level lever (JS-boundary wrapper) — the
-      remaining #2662 epic scope; #1344 S-B/S-C still gated on that.
+- [x] Restrict widened payload to NUMERIC-only (string needs nativeStrings the
+      host gc lane lacks → NaN; object/bool/bodiless also unsafe on the carrier).
+- [x] Probe battery: acceptance (lazy nested, interleave, test262-shape,
+      infinite) green; the 4 initial regressions (2035×3, 680-keeps-eager)
+      resolved.
+- [x] A/B FULL 146-file generator blast radius (chunks 1–3) — mine 48 == main
+      48 failing tests, ZERO new failures. (The initial contradictory compare
+      was a stale main-src checkout artifact; re-verified clean.)
+- [x] Added `tests/issue-2662-gc-lazy-nested-generators.test.ts` (7 tests, all
+      green: 4 lazy-behavior + 3 eager guard-rails, setExports-wired harness).
+- [x] `loc-budget-allow` granted for the two touched god-files (+155 / +4 lines).
+- [ ] Open PR to `loopdive/js2wasm`, confirm CI starts clean. Issue stays
+      `ready` (epic continues) — NOT `done`.
+- [ ] FOLLOW-UP (remaining epic scope, separate issue/PR): the TOP-LEVEL
+      generator lever — the Option-(ii) JS-boundary wrapper that gives an
+      escaping native generator a JS-callable object and canonicalizes the
+      post-done `.value` sentinel to `undefined` at the host boundary. Only then
+      can top-level gens go lazy AND the GeneratorPrototype return/throw buckets
+      be re-measured to give #1344 S-B/S-C a target.
 
 ---
 
