@@ -1498,6 +1498,17 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
             },
           ];
           const rejectFromP: Instr[] = [
+            // (#2958) The frame is consuming this awaited promise's rejection
+            // (the reason is re-thrown into the resume machine, where a
+            // try/catch in the async body may handle it), so mark it handled —
+            // otherwise an inlined `await Promise.reject(x)` would be reported as
+            // unhandled. No-op when tracking is inactive.
+            ...(rt && rt.markRejectionHandledFuncIdx >= 0
+              ? ([
+                  { op: "local.get", index: pLocal },
+                  { op: "call", funcIdx: rt.markRejectionHandledFuncIdx },
+                ] satisfies Instr[])
+              : []),
             { op: "local.get", index: frameLocal },
             { op: "local.get", index: pLocal },
             {
