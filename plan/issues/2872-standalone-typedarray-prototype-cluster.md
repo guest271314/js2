@@ -2,9 +2,9 @@
 id: 2872
 title: "Standalone: TypedArray.prototype.* cluster (294 host-pass/standalone-fail, de-masked from #2862)"
 status: in-progress
-assignee: ttraenkler/agent-a30d0acc00d3c78c5
+assignee: ttraenkler/fable-dev-4
 created: 2026-06-30
-updated: 2026-07-12
+updated: 2026-07-18
 priority: high
 task_type: bug
 feasibility: hard
@@ -22,6 +22,68 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
   - src/codegen/expressions/calls-closures.ts
 ---
+
+## Takeover + fresh 2026-07-18 re-measurement (fable-dev-4)
+
+**Assignee cleared 2026-07-18** — was `ttraenkler/agent-a30d0acc00d3c78c5`,
+stale since 07-11/07-12 (docs-only newest activity, 6 days dead, no open PR;
+tech-lead approved the takeover after a coordination scan). The 4 prior branches
+(`issue-2872-standalone-typedarray-hof`/`-proto`, `-real-clusters`,
+`ta-proto-methods`) carry slices 1–4 that already MERGED to main per the
+progress log below (`.fill`, `copyWithin`/`reverse`, `reduce`/`reduceRight` +
+boolean-result boxing). This takeover grounds on landed main, not those branches.
+
+**Fresh gap re-measure** (2026-07-18 promoted standalone baseline vs host, official
+scope, `file|strict` match): `built-ins/TypedArray/prototype/*` = **690 gap rows**
+(host pass ∧ standalone not-pass), up from the 294 original estimate — the metric
+de-masked runtime failures as the carriers landed (this is the #2860 re-measure's
+"assertion_fail now dominates" shift, localised to TA.prototype).
+
+### Two coherent slices (per-method + failure-signature sub-bucketing)
+
+The dominant failure across NEARLY EVERY method is **`assertion_fail` with an
+`assert.throws` signature** — the method is implemented but a spec-mandated
+throw is missing:
+
+| method | gap | dominant category |
+| ------ | --: | ----------------- |
+| slice | 58 | assertion_fail 45 (assert.throws 17), type_error 11 |
+| set | 53 | assertion_fail 46 (assert.throws 22) |
+| map | 48 | assertion_fail 38 (assert.throws 17) |
+| subarray | 46 | assertion_fail 38 (assert.throws 13) |
+| filter | 43 | assertion_fail 35 (assert.throws 15) |
+| fill | 27 | assertion_fail 25 (assert.throws 10) — *slice-1 landed the value path* |
+| copyWithin | 22 | assertion_fail 20 — *slice-2 landed value path* |
+| reduce/reduceRight | 44 | assertion_fail 34 — *slice-4 landed value path* |
+| **findLast/findLastIndex** | **43** | **host_import_leak 33** (`env::Uint8ClampedArray_findLast[Index]`) + assertion_fail 10 |
+| includes/indexOf/lastIndexOf | 60 | assertion_fail (assert.sameValue) |
+
+**SLICE 5 (this branch, the clean self-contained one) — `findLast` /
+`findLastIndex` on `Uint8ClampedArray`.** Unlike every other method, the
+dominant failure here is a genuine **host_import_leak** (`env::
+Uint8ClampedArray_findLast` ×17, `env::Uint8ClampedArray_findLastIndex` ×16) —
+the native dyn-view HOF arm covers the other TA element kinds but not the
+CLAMPED variant for these two reverse-iterating callback methods. This mirrors
+the slice-1–4 per-method dyn-view pattern (the value path already exists for
+non-clamped; extend the clamped element-kind arm). Entry points: the reverse
+callback setup at `array-methods.ts:6226`/`:6270` (`setupArrayLoopReverse`,
+`findLast`/`findLastIndex` array impls) and the TA dyn-view HOF dispatch in
+`ta-hof-map-filter.ts` + the `#3058/#3098` `__hof` substrate — find where the
+non-clamped element kinds route native and the clamped kind falls to the
+per-ctor `env::Uint8ClampedArray_*` import, and extend it.
+
+**SLICE 6+ (the BIG lever, NOT this PR — recommend a dedicated follow-on) —
+the cross-method `assert.throws` cluster (~150+ rows).** slice/set/map/subarray/
+filter/fill/copyWithin all share a missing spec-throw: calling the method with a
+detached buffer, an out-of-bounds/invalid index arg, or a wrong receiver brand
+must throw TypeError/RangeError but does not (the tests are
+`assert.throws(TypeError, () => ta.method(bad))`). A SHARED validation-prelude
+(detached-buffer guard + ToIntegerOrInfinity/range checks + brand check) emitted
+once and reused across the dyn-view method arms would flip a large coherent
+batch — but it needs its own measure-first slice (each method's exact throw
+conditions differ) and touches the shared dyn-view method emitter, so it is a
+separate PR from slice 5. Flagging it here as the highest-remaining-lever
+follow-on for tech-lead scheduling.
 
 ## Progress (2026-07-12, fable) — Slice 4: dyn-view reduce/reduceRight + boolean-result boxing (REUSE-first)
 
