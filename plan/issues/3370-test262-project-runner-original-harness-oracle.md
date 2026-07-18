@@ -92,6 +92,11 @@ rewritten surrogate rather than the upstream test.
   scoped trap ceiling exactly once. The first oracle-v8 promotion exposed the
   former depth-1 checkout by seeing an empty issue diff and correctly refusing
   to publish `oob +4` / `unreachable +47` with tolerance zero.
+- Reject a merge-group predecessor artifact when its stamped oracle differs
+  from the published baseline oracle. This prevents an already-landed v8 group
+  artifact from converting the stranded v7-to-v8 recovery into a same-oracle
+  flake comparison before the v8 baseline has actually been published; equal
+  versions continue to use predecessor isolation normally.
 
 ## Validation
 

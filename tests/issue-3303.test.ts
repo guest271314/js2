@@ -122,6 +122,16 @@ describe("#3370 — baseline-writer trap ceiling containment", () => {
 
     expect(checkoutForJob(sharded, "promote-baseline")).toContain("fetch-depth: 2");
     expect(checkoutForJob(refresh, "merge-and-promote")).toContain("fetch-depth: 2");
+
+    const predecessorStep = sharded.slice(
+      sharded.indexOf("- name: Resolve predecessor-group baseline (#1956)"),
+      sharded.indexOf(
+        "- name: Check baseline staleness (#1235",
+        sharded.indexOf("- name: Resolve predecessor-group baseline (#1956)"),
+      ),
+    );
+    expect(predecessorStep).toContain("pred_path=oracle-mismatch");
+    expect(predecessorStep).toContain('[ "$LATEST_ORACLE" != "$PRED_ORACLE" ]');
   });
 });
 

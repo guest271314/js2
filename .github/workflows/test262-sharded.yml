@@ -1192,6 +1192,20 @@ jobs:
           fi
           unzip -o /tmp/pred-group/art.zip -d /tmp/pred-group >/dev/null 2>&1 || true
           if [ -s /tmp/pred-group/test262-results-merged.jsonl ]; then
+            # #3370 — do not let a merge-group artifact from a newly landed
+            # oracle hide the fact that the published baseline is still on the
+            # previous oracle. The oracle-bump recovery must compare against the
+            # published baseline so its bounded rebaseline declarations run;
+            # once promotion succeeds, equal versions restore predecessor
+            # isolation automatically. Missing/unstamped reports keep the
+            # backward-compatible predecessor behavior.
+            LATEST_ORACLE=$(node -e "try { const r=require('/tmp/baseline-meta-fresh.json'); process.stdout.write(String(r.oracle_version ?? '')); } catch {}")
+            PRED_ORACLE=$(node -e "try { const r=require('/tmp/pred-group/test262-report-merged.json'); process.stdout.write(String(r.oracle_version ?? '')); } catch {}")
+            if [ -n "$LATEST_ORACLE" ] && [ -n "$PRED_ORACLE" ] && [ "$LATEST_ORACLE" != "$PRED_ORACLE" ]; then
+              echo "pred_path=oracle-mismatch" >> "$GITHUB_OUTPUT"
+              echo "Predecessor artifact ${ART_NAME} uses oracle v${PRED_ORACLE}, published baseline uses v${LATEST_ORACLE} — keeping baseline from (b)/(c) until promotion catches up."
+              exit 0
+            fi
             mkdir -p benchmarks/results
             cp /tmp/pred-group/test262-results-merged.jsonl benchmarks/results/test262-current.jsonl
             echo "pred_path=hit" >> "$GITHUB_OUTPUT"
