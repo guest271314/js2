@@ -1322,6 +1322,25 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     if (hasRest) return null;
     for (const el of elements) {
       const id = el.name as ts.Identifier;
+      // (#3386) FUNCTION-VALUED element defaults (`[g = function(){}]`,
+      // `[g = () => 1]`, `[g = function*(){}]`) still bail. The emit-site
+      // destructure compiles the default into a closure/native-gen-state ref
+      // whose wasm rep does not cleanly round-trip the spill field in every
+      // lane — the class-method lane in particular emits an "illegal cast" at
+      // runtime (the `#3164` host-mix fixture, `*method([gen = function*(){}]
+      // = [])`). This is the documented W3 "throwing / function-valued
+      // default" exclusion; the dominant `dflt-*` cohort uses numeric / object
+      // / call-expression defaults, which are admitted (throwing defaults are
+      // CallExpressions and lower correctly). A later slice can widen this
+      // once the closure-valued spill round-trip is proven in all lanes.
+      if (
+        el.initializer &&
+        (ts.isFunctionExpression(el.initializer) ||
+          ts.isArrowFunction(el.initializer) ||
+          ts.isClassExpression(el.initializer))
+      ) {
+        return null;
+      }
       const elemTsType = ctx.checker.getTypeAtLocation(el);
       const bindType = resolveBindingElementType(el, elemTsType, (t) => resolveWasmType(ctx, t));
       const safe = spillSafeValType(bindType);
