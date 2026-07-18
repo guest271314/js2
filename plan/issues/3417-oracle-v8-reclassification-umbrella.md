@@ -91,6 +91,58 @@ note linkage, no duplication.
 **#3418** (shim import-leak) — recovers ~18–30k standalone passes with a contained
 import-DCE fix. This is the priority for the remaining Fable window.
 
+## 2026-07-19 harvest refresh (post-#3369-recovery baselines)
+
+Re-harvested the freshly published baselines (default `test262-current.jsonl`,
+standalone `test262-standalone-current.jsonl`; oracle v8; Temporal/`official:false`
+excluded). Confirms the buckets above still hold, plus:
+
+- **Default lane** — pass 27,827 / 43,106 (64.6%). Largest single **untracked**
+  bucket is the TypedArray-ctor `Cannot convert null to object [in __module_init()]`
+  cluster (**2,069**: TypedArray 1,316 + TypedArrayConstructors 619 + Atomics 90).
+  This is `null`-in-`__module_init`, distinct from #3423's `undefined`-in-
+  `verifyProperty` — filed as **#3441**. Async `[object WebAssembly.Exception]`
+  AsyncTestFailure (1,272, class-elements/async-gen/for-await-dstr) and
+  `obj should have an own property m` (311, class private methods) remain within
+  the async-marker #3421 / assert.throws #3287 families.
+- **Standalone lane** — pass 24,171 / 43,106 (56.1%). Dominated by
+  `wasm exception during module init` (**7,063**, diffuse across
+  Object/String/Array/TypedArray/class/annexB/Proxy — the standing post-#3393
+  standalone-floor runtime-trap surface, umbrella #1781, not a single root cause)
+  and `async completion marker not observed` (3,257, #3428/#3421). Self-citing
+  refusals rank #2961(4,822 → leak/#3418), #1472(807 Reflect.construct+dyn-shape),
+  #680(513 generator lowering), #1907/#1888(61 builtin static value-reads),
+  #2620(31 extends-Set/Map) — all existing deferred trackers.
+
+## Host↔standalone gap (2026-07-19)
+
+`host_pass ∧ ¬standalone_pass` (official) = **8,855** tests. (The oft-quoted
+~3,656 is the *net* pass-count difference; standalone also uniquely passes ~5,199
+tests host fails, so set-difference ≫ net.) Gap composition:
+
+| bucket | count | cited # |
+| --- | ---: | --- |
+| wasm exception during module init | 2,348 | #1781 |
+| async completion marker not observed | 2,027 | #3428 |
+| generator / async-gen lowering | 1,867 | #2961/#680 |
+| null-deref (standalone codegen) | 789 | — |
+| RegExp (host-refused) | 617 | #1474 |
+| Reflect.construct standalone | 354 | #1472 |
+| other host-import leak | 276 | #3418 |
+| eval/dynamic-import | 102 | #1696 |
+| illegal cast / invalid wasm / OOB (standalone codegen) | 152 | — |
+| Promise host-routed / SharedArrayBuffer / instanceof / dyn-shape | 221 | — |
+| Proxy (host-refused) | 32 | #1472 |
+| misc cited (#2620/#1907/#2029/#2717/#2046) + uncategorized | 60 | — |
+
+Fundamentally: the gap is ~**55% host-import-refusal** (generators, RegExp,
+Reflect.construct, Proxy, eval, Promise-host, SAB, instanceof, dyn-shape — features
+the host lane routes through a JS import that standalone refuses/defers) plus the
+**module-init-trap + async-marker layer** (~4,375, standalone modules that compile
+but trap at init or never emit the async completion marker), and only a small
+**genuine standalone-codegen-bug residual** (~940: null-deref/illegal-cast/invalid-
+wasm/OOB with no host-import excuse). Uncategorized residual is ~8 tests.
+
 ## Flap evidence (content-current cluster)
 
 During the 2026-07-18 v8 baseline stabilization, PR #3365 (a **CI-only** merge_group
