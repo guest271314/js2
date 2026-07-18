@@ -134,6 +134,17 @@ function _buildFreshSandbox(consoleProxy?: Console): Record<string, any> {
   if (consoleProxy) sandbox.console = consoleProxy;
   // Provide globalThis as the sandbox itself so `ctx.globalThis === ctx`.
   sandbox.globalThis = sandbox;
+  // (#3428) asyncHelpers.js guards `asyncTest` with
+  // `Object.prototype.hasOwnProperty.call(globalThis, "$DONE")` and throws
+  // "asyncTest called without async flag" when it's absent. A JS engine running
+  // the harness as a SCRIPT exposes the top-level `function $DONE`
+  // (doneprintHandle.js) as a globalThis own-property, but our compiled MODULE
+  // keeps `$DONE` a module-local binding, so the guard failed on all 225
+  // asyncTest-based tests. Expose a stub own-property so the guard passes; the
+  // real, module-local `$DONE` (lexically in scope inside `asyncTest`) still
+  // drives the completion callback that emits the `Test262:AsyncTestComplete`
+  // marker.
+  sandbox.$DONE = () => {};
   return sandbox;
 }
 
