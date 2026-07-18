@@ -12,6 +12,7 @@ import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { resolveArrayInfo } from "../array-methods.js";
+import { numberIsPredicateOps } from "../number-is-predicate-ops.js";
 import {
   emitArrayIteratorPrototypeSingleton,
   emitFunctionPrototypeObjectSingleton,
@@ -354,59 +355,19 @@ export function compileBuiltinStaticCall(
     }
     if (method === "isNaN" && expr.arguments.length >= 1) {
       // NaN !== NaN is true; for any other number it's false.
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.ne" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isNaN", v));
     }
     if (method === "isInteger" && expr.arguments.length >= 1) {
       // n === trunc(n) && isFinite(n)
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.trunc" },
-        { op: "f64.eq" },
-        // finite: n - n === 0 (Infinity - Infinity = NaN, NaN !== 0)
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-        { op: "i32.and" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isInteger", v));
     }
     if (method === "isFinite" && expr.arguments.length >= 1) {
       // isFinite(n) → n - n === 0.0
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isFinite", v));
     }
     if (method === "isSafeInteger" && expr.arguments.length >= 1) {
       // isSafeInteger(n) = isInteger(n) && abs(n) <= MAX_SAFE_INTEGER
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        // isInteger: n === trunc(n) && isFinite(n)
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.trunc" },
-        { op: "f64.eq" },
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-        { op: "i32.and" },
-        // abs(n) <= MAX_SAFE_INTEGER
-        { op: "local.get", index: v },
-        { op: "f64.abs" },
-        { op: "f64.const", value: Number.MAX_SAFE_INTEGER },
-        { op: "f64.le" },
-        { op: "i32.and" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isSafeInteger", v));
     }
     if ((method === "parseFloat" || method === "parseInt") && expr.arguments.length >= 1) {
       // Delegate to the global parseInt / parseFloat host import

@@ -2,12 +2,12 @@
 id: 2963
 title: "Reify builtins as first-class values: retire the `__get_builtin` dynamic-shape CE cluster (~400 compile errors)"
 status: in-progress
-assignee: ttraenkler/fable-identity
+assignee: ttraenkler/opus-dev-b
 sprint: current
 model: fable
 fable_role: spec
 created: 2026-07-02
-updated: 2026-07-09
+updated: 2026-07-18
 priority: high
 horizon: l
 feasibility: hard
@@ -337,3 +337,31 @@ per-method ToNumber edge cases — cite §21.3 per method in tests). Tier
 2f/2g: S–M. 2e: S after the standalone time-source check. Independent of
 #2916/#2651 (different substrate); no coordination needed beyond ordinary
 merge hygiene.
+
+### Phase 2 progress log
+
+- **Tier 2a — `Number.is{Integer,Finite,NaN,SafeInteger}` — DONE** (opus-dev-b,
+  2026-07-18). Wired real bodies in `ensureStandaloneBuiltinStaticMethodClosure`
+  (`builtin-value-read.ts`): fixed 1-arg `[externref] -> i32` closure, body =
+  `__typeof_number` guard (no ToNumber; the settled guard already excludes the
+  #2979 UNDEF_F64-sentinel `$BoxedNumber`, so `Number.isNaN(undefined)` is
+  correctly `false`) -> `__unbox_number` -> the **shared** `numberIsPredicateOps`
+  (new leaf `src/codegen/number-is-predicate-ops.ts`, also adopted by the direct
+  `call-builtin-static.ts` path -> observational identity guaranteed, byte-inert
+  over the 56-entry emit-identity corpus). Both natives are standalone-DEFINED
+  (host-free). Meta rows added to `STANDALONE_STATIC_METHOD_META`. Test:
+  `tests/issue-2963-number-is-value.test.ts` (8 cases: per-method invocation,
+  no-coercion, undefined/null/bool -> false, identity, `.name`, direct-form
+  non-regression).
+  - **Pre-existing gap surfaced (NOT introduced here, orthogonal follow-up):**
+    `.name`/`.length` reflective reads on a reified builtin value have a
+    multi-value dispatch collision — co-extracting two statics that share a
+    wrapper signature (verified on `main` with `Object.keys` + `Reflect.ownKeys`,
+    both `externref -> externref`; also `Array.isArray` + any `Number.is*`, both
+    `externref -> i32`) makes the SECOND value's `.name` mis-resolve, and
+    `.length` reads 0 for EVERY wired static (Math.max included). Invocation and
+    per-single-value `.name` are correct. Worth a dedicated issue on the reified
+    builtin-fn meta reflective-read dispatch.
+- Remaining Phase 2 tiers: 2b (`Object.is`/SameValue), 2c (table-driven
+  `Math.*`), 2d (`Number.parseFloat/parseInt`), 2e (`Date.now`), 2f (`Array.of`),
+  2g (`Array.from` subset). `Promise.*` stays throwing (out of scope).
