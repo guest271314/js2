@@ -17,6 +17,14 @@ language_feature: uri-functions
 goal: standalone-mode
 umbrella: 2860
 related: [2500, 863, 2961]
+loc-budget-allow:
+  # (#3401) +27 LOC in extern-declarations.ts: the standalone/wasi native-skip
+  # is extended from parseInt/parseFloat to the URI family + escape/unescape
+  # (which have standalone natives since #2500/#3063/#3064), plus a load-bearing
+  # explanatory comment on WHY the leak was context-dependent (libReferencedNames).
+  # The added logic belongs on this collector arm (it IS the extern-declaration
+  # skip list); there is no separate subsystem module for it.
+  - src/codegen/extern-declarations.ts
 origin: "2026-07-18 fable-dev-4 #2860 re-measurement — #2500 (native URI carrier) is done, yet 48 official built-ins/{decode,encode}URI* tests still emit env::decodeURI/... host imports (host_import_leak). The carrier exists but is not dispatched for these call shapes."
 ---
 
