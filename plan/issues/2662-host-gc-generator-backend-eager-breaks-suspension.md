@@ -109,6 +109,104 @@ senior-dev build. Blocks #1344 S-B/S-C from moving the dashboard.
 
 ---
 
+## Implementation Plan (fable-dev-1, 2026-07-18) — SLICE 1: capturing-nested host-lane laziness
+
+> Handoff-ready. Branch `issue-2662-gc-lazy-generators`, worktree
+> `/workspace/.claude/worktrees/agent-aeb10fb7d183a166f`. If interrupted, an
+> Opus dev resumes from this section + the `## Suspended Work` note (if present).
+
+### Slice boundary (what this PR lands, and what it deliberately does NOT)
+
+**LANDS — capturing NESTED generators run lazily on the default gc/host lane.**
+This is the exact wrapped-test262 conformance shape: `wrapTest` nests every
+test's top-level `function* g()` inside `export function test()`, capturing the
+test-locals (`var`s). Those now route to the native lazy state machine on the
+host lane (previously eager-buffer). Verified: `var iterations`-capturing
+nested gen driven by for-of has `iterations === 0` before the first drive and
+`=== 3` after (was eager: all 3 ran at creation).
+
+**DOES NOT LAND — top-level generator host-lane laziness.** Deliberately kept
+eager. Root cause (the architecture writeup's Option-(ii) PREREQUISITE, verified
+here by probe): a top-level generator can ESCAPE to a JS caller (export / return
+value), where the native state struct is opaque — `gen.next is not a function`,
+and a host `.value` read post-exhaustion surfaces the `UNDEF_F64` sentinel as
+**NaN**, not `undefined` (the runtime cannot distinguish a generator-result
+struct from any other struct to canonicalize the sentinel). A capturing nested
+generator CANNOT escape (it is local to its enclosing fn, never a module value),
+so the boundary blocker does not apply — the struct stays in-module, driven by
+native dispatch. Top-level laziness waits on the JS-boundary wrapper lever.
+
+Also out of scope for this slice (kept eager on the host lane): `yield*`
+delegation (single-level only), `return <expr>` terminal values (§27.5.1.2 — the
+native host carrier has no `__gen_set_return` equivalent), non-numeric/string
+yields (object/boolean payloads come back NaN via the externref carrier),
+bodiless `yield;`, and TDZ-flagged (`let`/`const`) captures (host-lane TDZ
+threading is the separate #3032 wave — `var` captures work, which is what the
+test262 GeneratorPrototype tests use).
+
+### The 4 regressions found by the initial (over-wide) approach, and the fix
+
+The first attempt widened `isNativeGeneratorCandidate`'s host lane to admit
+EVERY plannable free `function*` declaration (top-level included) with safe
+uses. That regressed 4 local tests, all rooted in the JS-boundary gap:
+
+1. `issue-2035` raw `next()` post-done value → NaN not undefined.
+2. `issue-2035` `gen.return(v)` terminal value → wrong.
+3. `issue-2035` `yield*` delegation return-value leak → `illegal cast` trap.
+4. `issue-680` "keeps the JS host eager-buffer fallback outside standalone" —
+   a contract test asserting top-level gens stay eager.
+
+Fix: NARROW the host-lane widening from "all top-level" to "capturing nested
+ONLY" (+ keep the #3050 try-region set unchanged). Top-level gens revert to
+eager → all 4 regressions resolved, zero new regressions.
+
+### Files / functions touched
+
+- `src/codegen/generators-native.ts`
+  - `isNativeGeneratorCandidate` host-lane block (`!noJsHostTarget`): now admits
+    `isTryRegion` (#3050, unrestricted) OR `isCapturingNested` (#2662, restricted
+    to safe payloads + no `yield*` + no `return <expr>`); plus an EXPORT bail
+    (closes a latent #3050 hole where an exported try-region gen handed JS the
+    un-callable struct).
+  - New helpers: `hostLaneYieldPayloadsAreSafe` (numeric/string yields only),
+    `bodyHasYieldStarDelegation`, `bodyHasReturnWithValue`.
+  - `hostLaneGeneratorUsesAreSafe`: added a value-reference (alias-escape) bail —
+    a non-call reference of the gen name (`const h = g`, `f(g)`) that resolves to
+    this decl fails the walk (calls through an alias are invisible to the walk).
+- `src/codegen/statements/nested-declarations.ts`
+  - Capturing-nested host-lane gate (line ~832): dropped the
+    `bodyHasNewTryRegionAcrossYield` requirement so plain capturing nested gens
+    (not just try-region) go native when `tdzFlaggedCaptures.length === 0`;
+    removed the now-unused `bodyHasNewTryRegionAcrossYield` import.
+
+### Test plan
+
+- New test file `tests/issue-2662-gc-lazy-nested-generators.test.ts` (TODO):
+  the lazy-creation proof, side-effect interleaving, for-of/spread drive, and
+  the "top-level stays eager / escaping gen stays a JS Generator object"
+  guard-rails, all on the gc/host lane.
+- Regression gate: the ~146-file generator blast radius (`grep -Fl 'function*'
+  tests`). A/B vs main must show ZERO new failing tests. Pre-existing failures
+  (issue-680 lowers/persists/registers, issue-1516 prototype-identity,
+  generator-yield-contexts fn-expr) are unrelated to this change.
+
+### Remaining-steps checklist
+
+- [x] Narrow candidate gate to capturing-nested + try-region; add payload/
+      yield*/return helpers; alias-escape bail. Typecheck green.
+- [x] Probe battery: acceptance (lazy nested, interleave, test262-shape) green;
+      2035/680-keeps-eager regressions resolved.
+- [x] A/B chunk 1 (files 1–50) — confirm zero new failures (re-verify: initial
+      compare txt was contaminated by a stale main-src checkout).
+- [ ] A/B chunks 2 & 3 (files 51–146) — zero new failures.
+- [ ] Add `tests/issue-2662-gc-lazy-nested-generators.test.ts`.
+- [ ] Set issue `status: done` + `completed:` in the impl PR; open PR to
+      `loopdive/js2wasm`, confirm CI starts clean.
+- [ ] Follow-up issue for the top-level lever (JS-boundary wrapper) — the
+      remaining #2662 epic scope; #1344 S-B/S-C still gated on that.
+
+---
+
 # ARCHITECTURE WRITEUP (2026-06-25, sd-2651) — DECISION + PoC verdict + cost model
 
 > This section is the durable spec a future session builds from. The build is
