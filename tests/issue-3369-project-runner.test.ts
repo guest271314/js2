@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { runTest262File } from "./test262-runner.js";
 
+const SAMPLE_COMPILE_TIMEOUT_MS = 30_000;
+
 function sortedArraySample(): string[] {
   const root = resolve("test262/test/language/expressions/array");
   return readdirSync(root, { recursive: true })
@@ -21,7 +23,7 @@ describe("#3369 project-runner array parity", () => {
 
     const failures = [];
     for (const path of samplePaths) {
-      const result = await runTest262File(resolve("test262/test", path), "language");
+      const result = await runTest262File(resolve("test262/test", path), "language", SAMPLE_COMPILE_TIMEOUT_MS);
       restoreHostBuiltins();
       if (result.status !== "pass") {
         failures.push({ path, status: result.status, error: result.error, reason: result.reason });
