@@ -6,7 +6,7 @@
   "codegen/async-scheduler.ts": 3,
   "codegen/binary-ops-typed-dispatch.ts": 25,
   "codegen/binary-ops.ts": 10,
-  "codegen/builtin-value-read.ts": 1,
+  "codegen/builtin-value-read.ts": 5,
   "codegen/class-to-primitive.ts": 1,
   "codegen/closed-method-dispatch.ts": 1,
   "codegen/closure-exports.ts": 4,
@@ -60,5 +60,6 @@
   "codegen/ta-hof-map-filter.ts": 3,
   "codegen/type-coercion.ts": 34,
   "codegen/vec-access-exports.ts": 1,
+  "codegen/vec-overlay.ts": 2,
   "codegen/wasi.ts": 1
 }
