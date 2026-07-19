@@ -17,6 +17,7 @@ import { availableParallelism } from "os";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
 import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
+import { isRecordedVerdictSentinel } from "../scripts/verdict-once.mjs";
 import { findNthAssert } from "./test262-assert-locator.js";
 import { ORACLE_VERSION } from "./test262-oracle-version.js";
 import {
@@ -777,6 +778,15 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   );
                   return;
                 } catch (execErr: any) {
+                  // #3407: recordResult() writes the canonical JSONL row and then
+                  // throws a ConformanceError sentinel for any non-pass verdict.
+                  // The "pass" record above can be reclassified to compile_error
+                  // inside recordResult (standalone host-import leak) and throw
+                  // that sentinel INTO this catch. Reclassifying it here would
+                  // write a SECOND, contradictory row for the same file. Rethrow
+                  // the already-recorded verdict before any classification branch;
+                  // the outer guard is defense in depth.
+                  if (isRecordedVerdictSentinel(execErr)) throw execErr;
                   const execRecordMetadata = metadataFromImports(result.imports, reachedFixtureTest);
                   if (execErr === originalHarnessNoThrow) {
                     recordResult(
@@ -831,14 +841,15 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   }
                 }
               } catch (e: any) {
-                // #1221: recordResult() throws a ConformanceError after
+                // #1221/#3407: recordResult() throws a ConformanceError after
                 // writing the JSONL row whenever status !== "pass". If we
                 // catch THAT and call recordResult again, we double-write
                 // the row (e.g. a "fail" row followed by a "compile_error"
                 // row prefixed "[fail] …"). Re-throw so the inner record
                 // is the only JSONL entry, matching the non-FIXTURE path
-                // which has no outer catch.
-                if (e instanceof ConformanceError) throw e;
+                // which has no outer catch. Shared guard with the inner catch
+                // so both catches apply one identical duplicate policy.
+                if (isRecordedVerdictSentinel(e)) throw e;
                 recordResult(
                   relPath,
                   category,
