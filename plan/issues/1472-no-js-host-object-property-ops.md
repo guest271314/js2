@@ -1,7 +1,7 @@
 ---
 id: 1472
 title: "host-independence: eliminate JS host object/property ops for standalone Wasm"
-status: done
+status: ready
 pr: 1047
 created: 2026-05-20
 updated: 2026-06-03
@@ -1311,3 +1311,7 @@ honest refusals (protects the conformance number) before the real generic arm.
 - Bare method-call forms (`o.hasOwnProperty(k)`, `o.isPrototypeOf(x)`) route
   through `__extern_method_call` / `__proto_method_call` — the any-receiver method
   dispatch slice (#2151), already a separate task.
+
+## Reopened 2026-07-20 (harvest cross-reference)
+
+Marked `status: done` but the test262 harvest shows **942 live failures still citing #1472** in the error field. Premature close — reopened as `ready`. See the sprint-73 harvest note.
