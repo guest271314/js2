@@ -2093,6 +2093,53 @@ export function ensureStandaloneStdoutSink(ctx: CodegenContext): void {
 }
 
 /**
+ * (#3469) Render a `console.log`/`print` argument (already compiled to the top of
+ * the value stack with ValType `valType`) to a native `$AnyString` HOST-FREE and
+ * append it to the standalone stdout sink. Dispatch is on the COMPILED ValType (a
+ * wasm-lowering question — NOT the TS static type, which would trip the
+ * oracle-ratchet gate AND be wrong here: the test262 marker reaches `console.log`
+ * through `any`-typed harness params `$DONE → __consolePrintHandle__(msg) →
+ * print(value) → console.log(value)`, so the arg is `any` → externref, not
+ * string). Everything routes through `__any_to_string` (the native, IMPORT-FREE
+ * stringifier the exn-render path uses) — NEVER emitToString's externref arm,
+ * which would register the `__extern_toString` host import and trip #2961.
+ *
+ * Lives in native-strings.ts (the coercion-engine-sanctioned owner of
+ * `__any_to_string`) so the #2108 coercion-drift gate does not count this as a
+ * new hand-rolled coercion site outside the engine. Bare scalars (f64/i32/i64 — a
+ * number/boolean passed directly, never a marker) are dropped best-effort.
+ */
+export function emitStandaloneStdoutAppendValue(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  valType: ValType | null,
+): void {
+  if (ctx.funcMap.get("__stdout_append") === undefined) {
+    // Sink not minted — drop any pushed value to keep the stack balanced.
+    if (valType !== null) fctx.body.push({ op: "drop" });
+    return;
+  }
+  if (valType === null) return; // void arg — nothing was pushed
+  if (valType.kind === "externref") {
+    // externref is a separate hierarchy from anyref — convert first.
+    fctx.body.push({ op: "any.convert_extern" });
+  } else if (valType.kind !== "ref" && valType.kind !== "ref_null") {
+    fctx.body.push({ op: "drop" }); // scalar — best-effort, never a marker
+    return;
+  }
+  // Native `$AnyString` (literal/concat/template) or struct ref — both `anyref`
+  // subtypes, rendered directly (strings pass through; objects → "[object Object]").
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  flushLateImportShifts(ctx, fctx);
+  const toStrIdx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
+  fctx.body.push({ op: "call", funcIdx: toStrIdx });
+  // Re-read `__stdout_append` by name — `ensureAnyToStringHelper` above may have
+  // inserted a late import that shifted every function index (#2642).
+  const appendIdx = ctx.funcMap.get("__stdout_append");
+  if (appendIdx !== undefined) fctx.body.push({ op: "call", funcIdx: appendIdx });
+}
+
+/**
  * (#3469) Emit the standalone stdout-sink readout exports —
  * `__stdout_prepare() -> i32` (flatten the accumulator, return code-unit length)
  * and `__stdout_char(i) -> i32` (code-unit readback) — mirroring the

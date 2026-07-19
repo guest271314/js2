@@ -12,7 +12,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
 import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
-import { ensureAnyToStringHelper, ensureNativeStringExternBridge } from "../native-strings.js";
+import { emitStandaloneStdoutAppendValue, ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
@@ -42,42 +42,14 @@ function compileConsoleCall(
   // (`$DONE → print → console.log("Test262:AsyncTestComplete")`) is observable.
   if (ctx.standalone) {
     const appendName = "__stdout_append";
-    // Re-read the append funcidx BY NAME at every emission point: the arg compile
-    // / `ensureAnyToStringHelper` below can insert a late import that shifts every
-    // function index (#2642) — a cached idx would resolve to the wrong function.
-    const emitAppend = (): void => {
+    // Append a native-string literal (arg separator / trailing newline) to the
+    // sink. `__stdout_append` is re-read by name because the per-arg render
+    // (`emitStandaloneStdoutAppendValue`) can insert a late import that shifts
+    // every function index (#2642).
+    const appendLiteral = (s: string): void => {
+      compileStringLiteral(ctx, fctx, s);
       const idx = ctx.funcMap.get(appendName);
       if (idx !== undefined) fctx.body.push({ op: "call", funcIdx: idx });
-    };
-    // Render a value already on the stack (compiled ValType `vt`) to a native
-    // `$AnyString` HOST-FREE and append it. Dispatch is on the COMPILED ValType
-    // (a wasm-lowering question), NOT the TS static type — the latter would trip
-    // the oracle-ratchet gate AND be wrong here: the test262 marker reaches
-    // console.log through `any`-typed harness params
-    // (`$DONE → __consolePrintHandle__(msg) → print(value) → console.log(value)`),
-    // so at THIS call site the arg is `any` → externref, not string. Everything
-    // routes through `__any_to_string` (the native, IMPORT-FREE stringifier the
-    // exn-render path uses) — NEVER emitToString's externref arm, which would
-    // register the `__extern_toString` host import and trip #2961.
-    const renderAndAppend = (vt: ValType | null): void => {
-      if (vt === null) return; // void arg — nothing was pushed
-      if (vt.kind === "externref") {
-        // externref is a separate hierarchy from anyref — convert first.
-        fctx.body.push({ op: "any.convert_extern" });
-      } else if (vt.kind !== "ref" && vt.kind !== "ref_null") {
-        // Scalar (f64/i32/i64): a number/boolean passed directly. Never a marker
-        // (markers are strings), so drop it best-effort to keep the stack balanced.
-        fctx.body.push({ op: "drop" });
-        return;
-      }
-      // A native `$AnyString` (literal/concat/template) or a struct ref — both are
-      // `anyref` subtypes, so `__any_to_string` renders them directly (strings
-      // pass through; objects → "[object Object]").
-      const anyToStrIdx = ensureAnyToStringHelper(ctx);
-      flushLateImportShifts(ctx, fctx);
-      const idx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
-      fctx.body.push({ op: "call", funcIdx: idx });
-      emitAppend();
     };
     if (ctx.funcMap.get(appendName) === undefined) {
       // The sink helper was not minted (native strings unavailable, or the
@@ -90,15 +62,14 @@ function compileConsoleCall(
     }
     let first = true;
     for (const arg of expr.arguments) {
-      if (!first) {
-        compileStringLiteral(ctx, fctx, " ");
-        emitAppend();
-      }
+      if (!first) appendLiteral(" ");
       first = false;
-      renderAndAppend(compileExpression(ctx, fctx, arg));
+      // The per-arg render (ValType dispatch + `__any_to_string`) lives in
+      // native-strings.ts, the coercion-engine-sanctioned owner of that helper,
+      // so this call site holds no hand-rolled coercion vocabulary (#2108 gate).
+      emitStandaloneStdoutAppendValue(ctx, fctx, compileExpression(ctx, fctx, arg));
     }
-    compileStringLiteral(ctx, fctx, "\n");
-    emitAppend();
+    appendLiteral("\n");
     return VOID_RESULT;
   }
 
