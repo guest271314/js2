@@ -29,7 +29,9 @@ function isIssueFile(file) {
   const name = basename(file);
   if (NON_ISSUE_BASENAMES.has(name)) return false;
   if (EXPLICIT_ISSUE_BASENAMES.has(name)) return true;
-  if (dirname(file) === "plan/issues/sprints" && /^\d+\.md$/.test(name)) return false;
+  // Frozen `<N>.md` and pre-freeze `<N>-<slug>.md` (e.g. `73-plan.md`) sprint
+  // docs are planning artifacts, not issues — else `73-plan.md` collides with #73.
+  if (dirname(file) === "plan/issues/sprints" && /^\d+(?:-[\w-]+)?\.md$/.test(name)) return false;
   return /^\d+[a-z]?(?:[-_].+)?\.md$/i.test(name);
 }
 
