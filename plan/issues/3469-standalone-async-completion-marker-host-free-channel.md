@@ -1,7 +1,7 @@
 ---
 id: 3469
 title: "Standalone async tests: originalHarness completion marker unobservable host-free (channel + drain gate)"
-status: in-progress
+status: done
 sprint: current
 priority: high
 horizon: l
@@ -10,6 +10,7 @@ assignee: ttraenkler/senior-dev-async-sink
 parents: [3417]
 refs: [2860, 3178, 3428, 3436]
 created: 2026-07-19
+completed: 2026-07-19
 ---
 
 ## Problem
@@ -73,8 +74,58 @@ empirically on a representative subset (see Test Results), NOT claimed at 2,024.
   rope (O(1) `__str_concat` append); `__stdout_prepare` flattens once into a
   `$FlatString` global that `__stdout_char` indexes — same shape as the exn
   render buffer, avoiding O(n²) readback.
-- **Index-shift safety.** The append helper + acc global are minted lazily at the
-  first standalone `console.log` call site; the append funcidx is re-read by name
-  after each `emitToString` (which can insert a late import via
-  `__extern_toString`), mirroring the WASI `writeStr` re-read discipline (#2642).
-  Readout exports are emitted at finalize (append-only) like the exn exports.
+- **Index-shift safety.** The append helper + acc global are minted in the
+  pre-body window (gated on `ctx.usesStandaloneConsoleSink`), so `__stdout_append`'s
+  funcidx is final for every call site that bakes it; the funcidx is still re-read
+  by name at each emission point (`compileExpression`/`ensureAnyToStringHelper` can
+  insert a late import that shifts indices, #2642). Readout exports are emitted at
+  finalize (append-only) like the exn exports.
+- **The `any`-typed param chain was the load-bearing subtlety.** The marker does
+  NOT reach `console.log` as a string literal — it flows through `any`-typed
+  harness params (`$DONE → __consolePrintHandle__(msg) → print(value) →
+  console.log(value)`), so at the call site the arg is statically `any`, compiled
+  to an `externref`. A static-type gate that only rendered `string` args dropped
+  it. Fix: the externref/any arm renders host-free via `any.convert_extern` +
+  `__any_to_string` (the same native stringifier the exn-render path uses) — NOT
+  `emitToString`'s externref arm, which would register the `__extern_toString`
+  host import and trip #2961.
+
+## Test Results
+
+Focused unit test: `tests/issue-3469-standalone-async-completion-sink.test.ts`
+(6 tests, all pass) — sync marker, async `.then`/await drain→marker, failure
+marker, object/any no-import-leak, sink-only-when-console-used, newline splitting.
+`tests/issue-3436-standalone-prelude-leak.test.ts` still passes (6/6).
+
+**Flip-to-pass ceiling (empirical, deterministic-stride sample of real test262
+async files, `--target standalone` via `assembleOriginalHarness` + drain + sink):**
+
+| family              | n  | complete (→PASS) | failure (observed) | nothing | CE | inst-throw | import-leak |
+| ------------------- | -- | ---------------- | ------------------ | ------- | -- | ---------- | ----------- |
+| async-function      | 25 | 23               | 1                  | 0       | 0  | 1          | 0           |
+| async-arrow         | 25 | 24               | 0                  | 0       | 0  | 1          | 0           |
+| for-await-of        | 25 | 17               | 2                  | 0       | 2  | 4          | 0           |
+| Promise-combinator  | 25 | 5                | 1                  | 12      | 0  | 3          | 4           |
+| await-expr          | 13 | 4                | 0                  | 0       | 2  | 7          | 0           |
+| async-gen           | 25 | 0                | 1                  | 0       | 0  | 0          | 24          |
+| **TOTAL**           |138 | **73 (52.9%)**   | 5                  | 12      | 4  | 16         | 28          |
+
+**Honest read:** ~53% of runnable async tests now flip to PASS; another ~4%
+produce an observable FAILURE marker. The rest were ALSO failing before (as the
+opaque `async completion marker not observed`) and now re-bucket to their honest
+signatures: `import-leak` (async-gen / some Promise-combinators need host imports
+— the #3178 substrate, pre-existing), `instantiate-throw` (real standalone
+feature gaps), `compile-error`, or `nothing` (Promise-combinators a single drain
+can't complete). This does NOT claim 2,024 passes; it makes completion OBSERVABLE
+for 100% and un-blocks the standalone async scoring effort.
+
+**Verdict-neutrality note:** this runs for every standalone `console.log`. The
+async cohort is strictly non-regressing (all were failing). The only pass→fail
+surface is a non-async standalone test whose `console.log` arg makes
+`__any_to_string` trap where the old `drop` did not — probed with
+null/undefined/object/array/Symbol/BigInt/function/class/Map/Error/RegExp: none
+trap, zero import leaks. The harness prelude only calls `console.log` inside the
+`print` function body (never at top level), so non-async tests that never call
+`print`/`console.log` execute none of the new code. Full verdict-neutrality is
+confirmed only on the `merge_group` standalone floor — do NOT read PR-green as
+neutral.
