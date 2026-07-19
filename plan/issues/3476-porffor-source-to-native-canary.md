@@ -1,15 +1,17 @@
 ---
 id: 3476
 title: "Porffor source-to-native canary: real TypeScript through shared linear-memory planning"
-status: ready
+status: done
 sprint: porffor-backend
 created: 2026-07-20
 updated: 2026-07-20
+completed: 2026-07-20
 priority: high
 horizon: m
 feasibility: medium
 reasoning_effort: high
 model: gpt-5.6-sol
+assignee: ttraenkler/porffor-3476-dev
 task_type: test
 area: ir, codegen-linear, backend, ci
 language_feature: compiler-internals
@@ -246,7 +248,9 @@ public entry point.
   Porffor gitlink, or this workflow changes. Do not add it to `merge_group`, the
   normal `CI` job graph, package install hooks, or required checks.
 - Use `actions/checkout` with normal submodules disabled, then explicitly run
-  `git submodule update --init --checkout vendor/Porffor`. Verify
+  `git -c submodule.porffor.update=checkout submodule update --init --checkout
+  vendor/Porffor`. The per-command override is required because `.gitmodules`
+  deliberately sets `submodule.porffor.update=none`. Verify
   `git -C vendor/Porffor rev-parse HEAD` equals both the superproject gitlink
   (`git rev-parse HEAD:vendor/Porffor`) and `PORFFOR_IR_COMMIT` before testing.
 - Use the repository's current Node/Corepack/pnpm setup, set `CC=clang`, install
@@ -296,33 +300,33 @@ freeze backend function indices or unrelated rendered-C formatting.
 
 ## Acceptance criteria
 
-- [ ] A checked-in `.ts` fixture, not `IrFunctionBuilder`, is the sole source of
+- [x] A checked-in `.ts` fixture, not `IrFunctionBuilder`, is the sole source of
       the canary's typed SSA module.
-- [ ] The current production `compile(..., { target: "linear" })` path reports
+- [x] The current production `compile(..., { target: "linear" })` path reports
       the exact verified `IrModule` and `LinearMemoryPlan` it consumed, with no
       selector fallback, post-claim demotion, or second AST-to-IR lowering.
-- [ ] For both `arena-v1` and `analysis-stack-arena-v1`, the exact
+- [x] For both `arena-v1` and `analysis-stack-arena-v1`, the exact
       source-derived `(IrModule, LinearMemoryPlan)` pair feeds
       `lowerIrModuleToPorffor()`; no test rebuilds IR or re-plans memory.
-- [ ] Direct JavaScript, linear-Wasm, and the Porffor-rendered native executable
+- [x] Direct JavaScript, linear-Wasm, and the Porffor-rendered native executable
       produce identical fixed outputs and deterministic stress checksums.
-- [ ] The arena row uses planned arena allocations; the analysis-stack row
+- [x] The arena row uses planned arena allocations; the analysis-stack row
       promotes both fixed, owned, local sites and proves mark/allocate/restore
       plus arena overflow fallback is present in both backend adapters.
-- [ ] ASan and UBSan execute at least 20,000 native calls under each policy and
+- [x] ASan and UBSan execute at least 20,000 native calls under each policy and
       report no address, bounds, alignment, lifetime, or undefined-behavior
       failure. LeakSanitizer alone may be disabled for the intentional arena.
-- [ ] The Porffor adapter still emits JS2-planned `ptr`/`Load`/`Store`
+- [x] The Porffor adapter still emits JS2-planned `ptr`/`Load`/`Store`
       operations and does not use Porffor object layouts, builtins, NaN-boxed
       `jsval`, `RawC`, or Porffor GC.
-- [ ] The Porffor gitlink and compatibility fingerprint remain pinned to
+- [x] The Porffor gitlink and compatibility fingerprint remain pinned to
       `60a1d41d60580ff4faa38ffd5f7783d23df68bad` and are checked before rendering.
-- [ ] A separate optional workflow initializes only `vendor/Porffor` and runs
+- [x] A separate optional workflow initializes only `vendor/Porffor` and runs
       the sanitizer canary; ordinary install, build, typecheck, and test jobs
       remain submodule-free and green when Porffor is absent.
-- [ ] `LinearMemoryPlan` gains no Porffor enum, C fragment, renderer field,
+- [x] `LinearMemoryPlan` gains no Porffor enum, C fragment, renderer field,
       native symbol name, or Porffor-specific policy decision.
-- [ ] The complete implementation, fixture, tests, workflow, and issue-status
+- [x] The complete implementation, fixture, tests, workflow, and issue-status
       update land in one implementation PR.
 
 ## Non-goals
@@ -385,9 +389,10 @@ pnpm run format:check
 Pinned Porffor + native sanitizer validation:
 
 ```bash
-git submodule update --init --checkout vendor/Porffor
+git -c submodule.porffor.update=checkout submodule update --init --checkout vendor/Porffor
 test "$(git -C vendor/Porffor rev-parse HEAD)" = "$(git rev-parse HEAD:vendor/Porffor)"
-CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_SANITIZERS=1 \
+CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 \
+  PORFFOR_NATIVE_SANITIZERS=1 \
   pnpm exec vitest run \
     tests/issue-3476-porffor-source-to-native-canary.test.ts \
     tests/issue-3295-porffor-compat.test.ts \
@@ -410,3 +415,41 @@ GATE_BASE=origin/main pnpm run check:issue-ids:against-main
 
 Do not run full local test262 for this slice; normal PR and merge-group CI own
 the broader conformance gates.
+
+## Implementation Summary
+
+- `LinearIrResult` now retains the exact verified `IrModule` object passed to
+  `planLinearMemory()`, including a coherent empty module on early exits. The
+  production linear compiler still owns lowering and planning; no Porffor
+  dependency or public target was added.
+- The checked-in fixed-record fixture is compiled sequentially through the
+  production linear target with `bump` and `analysis-stack`. Each immediately
+  captured report supplies its unchanged `(irModule, memoryPlan)` pair to the
+  Porffor adapter. Direct JavaScript, linear-Wasm, and rendered native C agree
+  on four fixed results and a 20,000-call checksum under both policies.
+- The test proves arena versus stack allocation classes, symbolic stack
+  mark/allocate/restore, JS2 `Load`/`Store` lowering, and the absence of
+  Porffor object/GC/`jsval` escape hatches. Required mode fails if Porffor,
+  Clang, or sanitizer mode is unavailable, so advisory CI cannot pass by
+  skipping native execution.
+- The advisory workflow leaves ordinary jobs submodule-free, overrides the
+  gitlink's intentional `update=none` setting only for `vendor/Porffor`, and
+  verifies checkout, gitlink, and compatibility fingerprint equality before
+  running ASan/UBSan.
+
+The source lowerer currently assigns stable `AllocSiteId` values but does not
+populate the optional line/column `IrSiteId` on `object.new`. An initial test
+assertion for those absent coordinates was therefore invalid. The final canary
+proves source provenance through the sole checked-in source, exact compiled
+function/report identity, and allocation-ID continuity into the shared plan;
+adding coordinate metadata would require an out-of-scope source-builder change.
+
+## Test Results
+
+- `JS2WASM_PORFFOR_ROOT=tests/fixtures/porffor-intentionally-absent pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts --reporter=dot` — 1 passed, 1 skipped (native optional), file passed.
+- `CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts --reporter=dot` — 2/2 passed under ASan/UBSan.
+- Focused #3476/#3295/#3297/#3299/#3300 matrix — 5 files, 22/22 tests passed with the pinned checkout.
+- `pnpm run typecheck`, `pnpm run build`, `pnpm run lint`, `pnpm run format:check`, `pnpm run check:linear-ir`, `pnpm run check:ir-fallbacks`, `pnpm run check:loc-budget`, `pnpm run check:dead-exports`, `pnpm run check:issues`, `pnpm run check:issue-ids`, and `GATE_BASE=origin/main pnpm run check:issue-ids:against-main` passed.
+- Workflow parsing/semantics, the `update=checkout` submodule override, gitlink
+  pin equality, and `git diff --check` passed. Local test262 was intentionally
+  not run.
