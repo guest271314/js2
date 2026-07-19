@@ -2,7 +2,7 @@
 id: 3453
 title: "CI publish: bump publish-npm.yml Node 20 → 24 (npm 12 EBADENGINE)"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-19
 updated: 2026-07-19
 completed: 2026-07-19

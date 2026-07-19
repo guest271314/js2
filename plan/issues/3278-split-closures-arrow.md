@@ -3,7 +3,7 @@ id: 3278
 title: "Decompose compileArrowAsClosure — extract capture-analysis / struct-minting / destructuring / construction phases into named phase helpers"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: hard
 model: opus

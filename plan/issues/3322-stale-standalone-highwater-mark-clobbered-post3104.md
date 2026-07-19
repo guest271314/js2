@@ -2,7 +2,7 @@
 id: 3322
 title: "#2097 standalone high-water mark clobbered to a stale, too-high value by a race with #3104's landing — wedged the entire merge queue"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-16
 completed: 2026-07-16
 priority: critical

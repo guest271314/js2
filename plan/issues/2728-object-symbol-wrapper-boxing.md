@@ -5,13 +5,13 @@ status: done
 assignee: dev-builtins
 completed: 2026-07-17
 created: 2026-06-26
-updated: 2026-07-17
+updated: 2026-07-19
 priority: low
 feasibility: medium
 task_type: bugfix
 area: codegen
 goal: test262-conformance
-sprint: current
+sprint: 72
 depends_on: []
 related: [1568, 3280, 3383]
 # (#2728) The new `__new_Symbol` host handler belongs in runtime.ts alongside

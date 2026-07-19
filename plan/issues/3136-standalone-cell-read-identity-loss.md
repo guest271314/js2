@@ -4,9 +4,9 @@ title: "Standalone: object read back through a boxed-capture cell loses `===` id
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/dev-standalone2
-sprint: current
+sprint: 72
 created: 2026-07-10
-updated: 2026-07-17
+updated: 2026-07-19
 priority: medium
 horizon: s
 feasibility: medium

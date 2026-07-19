@@ -4,7 +4,7 @@ title: "Land #3285 slice-1 (PR #3104) — oracle-version bump alone doesn't clea
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-s2
-sprint: current
+sprint: 72
 created: 2026-07-15
 priority: high
 feasibility: medium

@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-14
 assignee: ttraenkler/sendev-waveb
 created: 2026-03-17
-updated: 2026-07-14
+updated: 2026-07-19
 priority: high
 # (#742 Wave B, PR by sendev-waveb) The identifier-callee dispatch arm was moved
 # verbatim into the new sibling module call-identifier.ts. Two change-scoped
@@ -30,7 +30,7 @@ coercion-sites-allow:
 # src/codegen/expressions/calls.ts and table-drive the dispatch chain.
 feasibility: medium
 goal: maintainability
-sprint: current
+sprint: 72
 depends_on: [688]
 files:
   src/codegen/expressions.ts:

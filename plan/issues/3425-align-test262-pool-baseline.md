@@ -2,9 +2,9 @@
 id: 3425
 title: "Align merge-group Test262 compiler pool with published baseline"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 completed: 2026-07-18
 priority: critical
 horizon: s

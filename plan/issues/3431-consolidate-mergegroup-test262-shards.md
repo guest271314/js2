@@ -2,9 +2,9 @@
 id: 3431
 title: "Consolidate test262 shards for merge_group validation (~60min -> ~20-30min)"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 completed: 2026-07-18
 priority: high
 horizon: m

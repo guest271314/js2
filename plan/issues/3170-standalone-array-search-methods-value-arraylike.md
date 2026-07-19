@@ -4,7 +4,7 @@ title: "standalone: Array.prototype.indexOf/lastIndexOf/includes — method-as-v
 status: done
 assignee: ttraenkler/opus-3170
 created: 2026-07-12
-updated: 2026-07-13
+updated: 2026-07-19
 completed: 2026-07-16
 priority: high
 feasibility: hard
@@ -14,7 +14,7 @@ es_edition: multi
 language_feature: array-methods
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 72
 horizon: m
 related: [2860, 2670, 3169, 2861, 2175, 3317, 3318]
 origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff"

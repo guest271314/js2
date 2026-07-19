@@ -3,7 +3,7 @@ id: 3263
 title: "Split TextEncoder/TextDecoder helpers out of native-strings.ts god-file"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

@@ -3,7 +3,7 @@ id: 3457
 title: "ci(test262): make the merge_group regression-ratio gate flap-tolerant (stop false-parking symmetric content-current churn)"
 status: done
 assignee: ttraenkler/senior-dev-3457
-sprint: current
+sprint: 72
 created: 2026-07-19
 updated: 2026-07-19
 completed: 2026-07-19

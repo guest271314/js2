@@ -4,7 +4,7 @@ title: "[SUBSTRATE][ARCH] Standalone native instanceof operator + isPrototypeOf 
 status: in-progress
 updated: 2026-07-17
 assignee: ttraenkler/sendev-instanceof
-sprint: fable-final
+sprint: current
 created: 2026-07-01
 priority: medium
 horizon: l

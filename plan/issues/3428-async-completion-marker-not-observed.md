@@ -4,9 +4,9 @@ title: "Host async-verdict: 'async completion marker not observed' on 4,617 asyn
 status: done
 assignee: ttraenkler/opus-dev-d
 completed: 2026-07-18
-sprint: current
+sprint: 72
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: m
 feasibility: hard

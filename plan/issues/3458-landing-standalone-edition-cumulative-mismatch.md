@@ -2,7 +2,7 @@
 id: 3458
 title: "fix(website): standalone edition conformance is per-edition, not cumulative — total mismatches js-host on the landing page"
 status: done
-sprint: current
+sprint: 72
 priority: medium
 horizon: s
 task_type: fix

@@ -3,7 +3,7 @@ id: 3132
 title: "Standalone native ASYNC GENERATORS — retire env::__create_async_generator leaky-passes (~2,800 files)"
 status: done
 completed: 2026-07-16
-sprint: current
+sprint: 72
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -15,7 +15,7 @@ horizon: xl
 umbrella: 2860
 related: [3075, 2906, 2865, 2938, 2936, 2980, 2895, 2922, 1042, 3120, 3312, 3313]
 created: 2026-07-10
-updated: 2026-07-16
+updated: 2026-07-19
 assignee: ttraenkler/fable-3132-s2
 loc-budget-allow:
   - src/codegen/class-bodies.ts

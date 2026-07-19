@@ -3,7 +3,7 @@ id: 3277
 title: "Decompose ensureNativeStringHelpers — extract the rope/flatten/UTF-8 core + concat/compare/slice builders (slice 2, empties the god-function)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: hard
 model: opus

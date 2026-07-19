@@ -4,7 +4,7 @@ title: "tests/issue-2949-s5-2-eq.test.ts fails standalone with a module-init cyc
 status: done
 assignee: ttraenkler/fable-3317
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: medium
 feasibility: medium

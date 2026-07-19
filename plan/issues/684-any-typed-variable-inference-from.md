@@ -6,12 +6,12 @@ status: done
 completed: 2026-07-17
 assignee: dev-684
 created: 2026-03-20
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: hard
 reasoning_effort: max
 goal: builtin-methods
-sprint: current
+sprint: 72
 # (#684) Intended god-file growth: a new context field + option and the
 # wiring at the three local-slot minting sites. The analysis itself lives in
 # the new module src/checker/usage-inference.ts (not a god file).

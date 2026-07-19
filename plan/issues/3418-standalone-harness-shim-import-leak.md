@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen-standalone
 goal: standalone-mode
 model: fable
-sprint: current
+sprint: 72
 horizon: l
 related: [3370, 3393, 2961, 2860, 1781, 3417]
 loc-budget-allow:

@@ -5,7 +5,7 @@ status: done
 model: fable
 fable_role: implement
 created: 2026-05-08
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-05-21
 priority: medium
 feasibility: hard
@@ -14,7 +14,7 @@ task_type: feature
 area: ir, codegen
 language_feature: async
 goal: ir-full-coverage
-sprint: fable-final
+sprint: 72
 closed: 2026-05-20
 ---
 # #1373 — IR: async function support

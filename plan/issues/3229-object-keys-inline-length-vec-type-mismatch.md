@@ -3,9 +3,9 @@ id: 3229
 title: "Object.keys/values/entries(closedStruct).length INLINE returns 0 — static-enumeration vec type (vec-of-externref) mismatches the `.length` dispatch type (vec-of-string); mode-agnostic"
 status: done
 assignee: ttraenkler/dev-conform
-sprint: current
+sprint: 72
 created: 2026-07-13
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: medium
 feasibility: medium

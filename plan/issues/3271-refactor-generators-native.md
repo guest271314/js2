@@ -3,7 +3,7 @@ id: 3271
 title: "refactor(codegen): break up generators-native.ts god-file + DRY cleanup"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

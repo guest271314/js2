@@ -5,12 +5,12 @@ status: done
 assignee: ttraenkler/dev-spec
 completed: 2026-07-17
 created: 2026-03-28
-updated: 2026-07-17
+updated: 2026-07-19
 priority: low
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
-sprint: current
+sprint: 72
 test262_skip: 19
 test262_ce: 25
 # Intended registry growth: registering a new typed-array family (BigInt64Array/

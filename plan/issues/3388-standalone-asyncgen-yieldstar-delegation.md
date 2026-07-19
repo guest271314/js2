@@ -5,9 +5,9 @@ status: done
 completed: 2026-07-18
 assignee: ttraenkler/fable-dev-2
 pr: 3332
-sprint: current
+sprint: 72
 created: 2026-07-17
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: l
 feasibility: hard

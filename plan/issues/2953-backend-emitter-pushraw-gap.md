@@ -6,9 +6,9 @@ completed: 2026-07-16
 assignee: ttraenkler/opus-1a
 branch: symphony/porffor/2953-after-pr-3146
 pr: 3159
-sprint: current
+sprint: 72
 created: 2026-07-02
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 horizon: l
 feasibility: medium

@@ -4,12 +4,12 @@ title: "`new (Fn as any)()` on a function-style constructor returns null (dynami
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-b
-sprint: current
+sprint: 72
 priority: medium
 horizon: m
 feasibility: medium
 created: 2026-07-12
-updated: 2026-07-17
+updated: 2026-07-19
 task_type: bugfix
 area: codegen
 language_feature: function-constructors, new-expression, any-callee
