@@ -40,7 +40,7 @@ regressions, and each false-park costs a `hold` + a full re-validation run.
 ## Fix (spec)
 
 1. **Require ASYMMETRIC churn before parking** — park only when regressions
-   *materially exceed* improvements, not on a raw ratio. Net-neutral symmetric
+   _materially exceed_ improvements, not on a raw ratio. Net-neutral symmetric
    flap must pass.
 2. **Exclude `compile_timeout` / `ct_flake` ≤ 5000 ms noise from the regression
    numerator** — runner-load contention timeouts are not content regressions
@@ -62,7 +62,7 @@ regressions, and each false-park costs a `hold` + a full re-validation run.
 ## Related
 
 - #1943 (established the 10 % ratio / 50-per-bucket gate this refines).
-- #3404 (sibling: promote tolerates single-shard *upload* flake — a different
+- #3404 (sibling: promote tolerates single-shard _upload_ flake — a different
   flake, not this content-churn gate).
 - #3447 (same spirit: contention-tolerant compile-timeout count guard).
 - #3376 (logged the flap evidence during the firefight).
