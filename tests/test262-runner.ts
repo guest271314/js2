@@ -18,6 +18,7 @@ import { ts } from "../src/ts-api.js";
 import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-original-harness.js";
+import { SANDBOX_GLOBAL_NAMES } from "../scripts/test262-sandbox-globals.mjs";
 
 // #1310: per-shard global isolation for test262.
 //
@@ -40,57 +41,12 @@ import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-
 // vm realm's built-ins as properties on it — `ctx.Array` is `undefined`.
 // We therefore use `vm.runInContext("...")` to extract the realm's
 // built-ins explicitly and copy the references onto the sandbox object.
-const SANDBOX_GLOBAL_NAMES: ReadonlyArray<string> = [
-  "Array",
-  "Object",
-  "Function",
-  "String",
-  "Number",
-  "Boolean",
-  "Symbol",
-  "Promise",
-  "Map",
-  "Set",
-  "WeakMap",
-  "WeakSet",
-  "Date",
-  "RegExp",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "SyntaxError",
-  "ReferenceError",
-  "Math",
-  "JSON",
-  "Reflect",
-  // (#3419) The TypedArray cluster + binary-data builtins. The oracle-v8
-  // literal harness (testTypedArray.js) reads these as VALUES off globalThis
-  // (`Object.getPrototypeOf(Int8Array)`, `[Int8Array, Uint8Array, …]`); before
-  // this list included them, `__extern_get(globalThis, "Int8Array")` returned
-  // undefined in the sandbox and the whole TypedArray harness died at
-  // `Object.getPrototypeOf(undefined)` — ~2k tests. Same vm realm as the rest
-  // of the sandbox, so intra-sandbox identities hold.
-  "ArrayBuffer",
-  "SharedArrayBuffer",
-  "DataView",
-  "Int8Array",
-  "Uint8Array",
-  "Uint8ClampedArray",
-  "Int16Array",
-  "Uint16Array",
-  "Int32Array",
-  "Uint32Array",
-  "Float16Array",
-  "Float32Array",
-  "Float64Array",
-  "BigInt64Array",
-  "BigUint64Array",
-  "BigInt",
-  "EvalError",
-  "URIError",
-  "AggregateError",
-  "Proxy",
-];
+//
+// (#3441) The name list itself now lives in the single shared source
+// scripts/test262-sandbox-globals.mjs (imported above as SANDBOX_GLOBAL_NAMES),
+// so this runner lane and the sharded-CI worker (scripts/test262-worker.mjs)
+// can never drift again — the #3419 TypedArray cluster (+ Atomics) is applied
+// to both by construction.
 
 const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
   ["Array", "prototype", "push"],

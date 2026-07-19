@@ -1,8 +1,10 @@
 ---
 id: 3441
 title: "TypedArray constructor cluster throws 'Cannot convert null to object' at __module_init (2,069 default-lane fails)"
-status: ready
+status: done
 created: 2026-07-19
+completed: 2026-07-20
+assignee: ttraenkler/senior-dev
 priority: high
 task_type: bug
 area: test262-conformance
@@ -171,3 +173,39 @@ now #3419-vs-worker) — the two hand-maintained twins are the root problem.
 Runner-side fix only; no compiler change, no host-import surface change. The
 standalone lane's TypedArray intrinsic story stays #2375/#2651/#2901
 (`src/codegen/builtin-value-read.ts:652-671`).
+
+## Resolution (2026-07-20, senior-dev)
+
+Confirmed the architect diagnosis end-to-end before touching code:
+
+- Read both twin lists: `tests/test262-runner.ts` `SANDBOX_GLOBAL_NAMES` had
+  the #3419 TypedArray cluster; `scripts/test262-worker.mjs`
+  `ORIGINAL_HARNESS_SANDBOX_GLOBALS` stopped at `Reflect`. `Atomics` was on
+  neither.
+- `test262/harness/testTypedArray.js:64` reads
+  `var TypedArray = Object.getPrototypeOf(Int8Array);` at module-init top level;
+  the trap string originates at `src/runtime.ts:9996` (`__getPrototypeOf`).
+- Isolated before/after repro (compile once, instantiate + `__module_init`
+  twice): the 22-name worker list traps `Cannot convert undefined to object`;
+  the extended list runs clean. Sandbox is the sole difference. (Local
+  `Object.create(null)` sandbox yields the `undefined` wording; the harvest's
+  `null` wording is the same `__getPrototypeOf` site — both fixed by seeding the
+  globals.)
+- Real-sample runner probe: `use-default-proto-if-custom-proto-is-not-object.js`
+  and `internals/Set/detached-buffer.js` now progress PAST module init into the
+  test body (residual honest TypedArray-semantics fails), no module-init trap.
+
+**Fix (chosen: shared-list extraction — kills the drift class):**
+
+- New `scripts/test262-sandbox-globals.mjs` exports the single
+  `SANDBOX_GLOBAL_NAMES` (base + #3419 cluster + `Atomics`), side-effect-free.
+- `scripts/test262-worker.mjs` and `tests/test262-runner.ts` both import it; the
+  two hand-maintained twins are gone, so this parity class (#3227, #3428 B,
+  #3419-vs-worker) can't recur.
+- Regression test `tests/issue-3441.test.ts` asserts the shared list ⊇ the
+  cluster + `Atomics` and that the built sandbox exposes `Int8Array`/`Atomics`.
+
+Expected: the ~2,069 `Cannot convert null to object [in __module_init()]`
+default-lane bucket (+90 Atomics) collapses; the honest fail→pass flip is a
+fraction of that (residuals reclassify to real TypedArray-semantics fails). This
+is an intended large baseline change — not a regression.
