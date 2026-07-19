@@ -204,6 +204,12 @@ export class CompilerPool {
       // (#2119) false ⇒ do not infer module-strictness (→ keep mapped
       // arguments) despite the synthetic `export function test()` wrapper.
       inferModuleStrictArguments?: boolean;
+      // (#3461) Fast native-harness oracle (host lane): when set, `source` is
+      // the body-only `bindingShim + body` unit and `harnessPrefix` is run
+      // NATIVELY in the per-test sandbox before instantiation. Absent ⇒ honest
+      // whole-assembly compile (unchanged).
+      nativeHarness?: boolean;
+      harnessPrefix?: string;
     } = {},
     timeoutMs = 30_000,
   ): Promise<TestResult> {
@@ -220,6 +226,10 @@ export class CompilerPool {
         metaPath: opts.metaPath,
         target: opts.target,
         inferModuleStrictArguments: opts.inferModuleStrictArguments,
+        // (#3461) forwarded only in fast native-harness mode; undefined ⇒ the
+        // worker takes its unchanged honest path.
+        nativeHarness: opts.nativeHarness || false,
+        harnessPrefix: opts.harnessPrefix,
       },
       timeoutMs,
       opts.label,

@@ -1194,6 +1194,14 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 
 process.on("message", async (msg) => {
   const { id, source, execute, isNegative, isRuntimeNegative, expectedErrorType, originalHarness, asyncTest } = msg;
+  // (#3461) Fast native-harness oracle (host lane). When set, `source` is the
+  // body-only `bindingShim + body` unit (the harness was NOT concatenated into
+  // it); `harnessPrefix` is run natively in the per-test sandbox before
+  // instantiation so the compiled body resolves `assert`, `verifyProperty`, etc.
+  // through the `globalSandbox` bridge. Absent ⇒ the honest whole-assembly path,
+  // byte-unchanged. Standalone target never sets this (the caller gates on host).
+  const nativeHarness = originalHarness && msg.nativeHarness === true && typeof msg.harnessPrefix === "string";
+  const harnessPrefix = nativeHarness ? msg.harnessPrefix : "";
   const target = compileTargetFromMessage(msg.target);
   const compileStart = performance.now();
 
@@ -1424,11 +1432,27 @@ process.on("message", async (msg) => {
       error: (...values) => appendHarnessOutput(values.map(String).join(" ")),
       warn: (...values) => appendHarnessOutput(values.map(String).join(" ")),
     };
+    // (#3461) Build the harness sandbox once. In fast native-harness mode, run
+    // the harness prefix NATIVELY in it (the sandbox was contextified by
+    // buildOriginalHarnessSandbox, so runInContext can execute directly against
+    // it) — this populates `sandbox.assert`, `sandbox.Test262Error`,
+    // `sandbox.verifyProperty`, … as the harness declares them. The compiled
+    // body-only module then resolves those symbols through the `globalSandbox`
+    // bridge + the binding shim, exactly as the honest whole-assembly path does
+    // in-wasm. The verdict tail below is UNCHANGED — only WHERE the harness code
+    // runs moved.
+    let harnessSandbox;
+    if (originalHarness) {
+      harnessSandbox = buildOriginalHarnessSandbox(consoleProxy);
+      if (nativeHarness && harnessPrefix.length > 0) {
+        runInContext(harnessPrefix, harnessSandbox);
+      }
+    }
     const importObj = buildImports(
       result.imports,
       originalHarness ? { console: consoleProxy } : undefined,
       result.stringPool,
-      originalHarness ? { globalSandbox: buildOriginalHarnessSandbox(consoleProxy) } : undefined,
+      originalHarness ? { globalSandbox: harnessSandbox } : undefined,
     );
 
     try {
