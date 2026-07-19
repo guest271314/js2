@@ -2,14 +2,14 @@
 id: 3454
 title: "release.mjs: bump jsr.json version in lockstep (JSR frozen at 0.60.1)"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-19
 updated: 2026-07-19
 completed: 2026-07-19
 priority: high
 horizon: s
 feasibility: easy
-task_type: bug
+task_type: infrastructure
 area: ci, release
 goal: release-pipeline
 related: [3453, 3455]

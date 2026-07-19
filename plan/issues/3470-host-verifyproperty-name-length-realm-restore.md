@@ -4,7 +4,7 @@ title: "Host-lane test262: verifyProperty name/length delete leaks across shared
 status: done
 completed: 2026-07-19
 assignee: ttraenkler/senior-dev
-sprint: current
+sprint: 72
 created: 2026-07-19
 priority: high
 feasibility: low

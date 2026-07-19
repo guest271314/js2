@@ -4,7 +4,7 @@ title: "codegen: relocate TypedArray.prototype.set bounds check out of array-met
 status: done
 assignee: dev-refactor
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-07-17
 priority: low
 horizon: s

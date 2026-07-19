@@ -6,13 +6,13 @@ status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-gamma
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: medium
 task_type: bug
 area: runtime
 goal: spec-completeness
-sprint: current
+sprint: 72
 related: [2106, 3316, 3319, 3328, 2606, 3008]
 loc-budget-allow:
   - src/codegen/map-runtime.ts

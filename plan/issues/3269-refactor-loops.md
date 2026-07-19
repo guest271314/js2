@@ -3,7 +3,7 @@ id: 3269
 title: "refactor(codegen): break up loops.ts god-file — extract analysis + for-of-destructuring + for-await helpers, DRY dedups"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

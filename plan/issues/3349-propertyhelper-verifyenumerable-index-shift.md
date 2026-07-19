@@ -3,7 +3,7 @@ id: 3349
 title: "propertyHelper.js fails to compile at all (verifyEnumerable index-shift, #2043 class) — blocks up to 9.8% of test262 by inclusion count"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-07-17
 priority: high
 feasibility: medium

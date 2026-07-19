@@ -2,7 +2,7 @@
 id: 2763
 title: "[SUBSTRATE][ARCH] instanceof value-rep residual: cross-realm Object/Function identity + .prototype access on dynamic Function values"
 status: ready
-sprint: fable-final
+sprint: current
 created: 2026-06-28
 updated: 2026-07-17
 priority: medium

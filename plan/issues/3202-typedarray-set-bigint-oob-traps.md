@@ -10,7 +10,7 @@ task_type: bug
 area: ci
 language_feature: typed-array
 goal: crash-free
-sprint: current
+sprint: 72
 horizon: m
 related: [3189, 3173]
 # loc-budget-allow retired by #3358: the +LOC this granted was the

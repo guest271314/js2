@@ -5,12 +5,12 @@ status: done
 assignee: dev-refactor
 completed: 2026-07-17
 created: 2026-04-02
-updated: 2026-07-17
+updated: 2026-07-19
 priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: performance
-sprint: current
+sprint: 72
 depends_on: [906, 907]
 files:
   src/codegen/index.ts:

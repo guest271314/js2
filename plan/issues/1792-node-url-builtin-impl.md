@@ -3,10 +3,10 @@ id: 1792
 title: "node:url — URL / URLSearchParams as host constructors"
 horizon: m
 status: done
-sprint: current
+sprint: 72
 assignee: ttraenkler/opus-b
 created: 2026-06-03
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: high
 feasibility: medium

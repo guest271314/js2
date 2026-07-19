@@ -4,7 +4,7 @@ title: "Standalone: member-read on String.prototype.at result returns empty (.le
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/dev-standalone2
-sprint: current
+sprint: 72
 priority: low
 feasibility: medium
 reasoning_effort: medium

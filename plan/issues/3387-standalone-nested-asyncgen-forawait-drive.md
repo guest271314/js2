@@ -4,9 +4,9 @@ title: "standalone: NESTED async generators with for-await bodies leak the host 
 status: done
 assignee: ttraenkler/fable-dev-3
 completed: 2026-07-18
-sprint: current
+sprint: 72
 created: 2026-07-17
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: l
 feasibility: hard

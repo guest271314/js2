@@ -2,9 +2,9 @@
 id: 3022
 title: "UMBRELLA: Object.defineProperty(ies) descriptor fidelity + non-object-receiver tail (~728 default-lane fails)"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-03
-updated: 2026-07-05
+updated: 2026-07-19
 priority: high
 horizon: m
 feasibility: hard

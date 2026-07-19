@@ -4,7 +4,7 @@ title: "Split object-runtime.ts — extract standalone Proxy dispatch subsystem 
 status: done
 completed: 2026-07-14
 assignee: ttraenkler/senior-dev-splitproxy
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

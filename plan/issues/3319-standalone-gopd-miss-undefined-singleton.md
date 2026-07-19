@@ -4,7 +4,7 @@ title: "standalone: gOPD miss + descriptor undefined-slots materialize as null, 
 status: done
 assignee: ttraenkler/fable-3316
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: high
 horizon: m
