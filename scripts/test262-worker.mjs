@@ -1209,6 +1209,53 @@ function extractWasmExceptionMessage(err, instance) {
   return safeStringifyThrown(err);
 }
 
+/**
+ * (#3469) Standalone host-free async drive + output capture. On
+ * `--target standalone` there is no host `console` import (kept out so the
+ * #2961 import-leak gate stays green) and no `fd_write`, so `.then`/await
+ * continuations live on the in-module WASM microtask ring and printed output
+ * lands in an in-module GC-string sink instead of the host `consoleProxy`. The
+ * originalHarness path never drove either. This:
+ *   1. calls `__drain_microtasks()` so scheduled continuations run (which reach
+ *      `$DONE → print → console.log("Test262:AsyncTestComplete")`);
+ *   2. reads the native `__stdout_prepare`/`__stdout_char` sink and appends each
+ *      printed line to `harnessOutput`, so the existing marker poll observes it.
+ * All three exports are compiler intrinsics present only on the host-free lane;
+ * feature-detected so the js-host lane (which populates `harnessOutput` via
+ * `consoleProxy`) is untouched. Returns any error thrown while draining (an
+ * async continuation that threw uncaught), else null.
+ */
+function drainAndCaptureNativeStdout(instance, append) {
+  const exp = instance?.exports;
+  if (!exp) return null;
+  let drainError = null;
+  if (typeof exp.__drain_microtasks === "function") {
+    try {
+      exp.__drain_microtasks();
+    } catch (err) {
+      drainError = err;
+    }
+  }
+  if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
+    let len = 0;
+    try {
+      len = exp.__stdout_prepare() | 0;
+    } catch {
+      len = 0;
+    }
+    if (len > 0) {
+      let out = "";
+      for (let i = 0; i < len; i++) out += String.fromCharCode(exp.__stdout_char(i) & 0xffff);
+      // Split into lines matching the consoleProxy's per-call `harnessOutput`
+      // entries (each console.log emitted a trailing "\n"). Drop the empty tail.
+      for (const line of out.split("\n")) {
+        if (line.length > 0) append(line);
+      }
+    }
+  }
+  return drainError;
+}
+
 function originalHarnessExceptionMatches(err, instance, expectedErrorType) {
   if (!expectedErrorType) return true;
   if (err instanceof WebAssembly.Exception && instance) {
@@ -1711,6 +1758,16 @@ process.on("message", async (msg) => {
       }
 
       if (asyncTest) {
+        // (#3469) Host-free (standalone) async: the .then/await continuations are
+        // on the in-module microtask ring and console.log has no host sink. Drain
+        // the ring so they run, then mirror the native stdout sink into
+        // `harnessOutput` so the marker poll below observes the completion marker.
+        // No-op on the js-host lane (no such intrinsics; `consoleProxy` feeds
+        // `harnessOutput` directly).
+        let standaloneDrainError = null;
+        if (target === "standalone") {
+          standaloneDrainError = drainAndCaptureNativeStdout(instance, appendHarnessOutput);
+        }
         const deadline = Date.now() + 1_000;
         const findMarker = (prefix) => {
           for (let i = 0; i < harnessOutput.length; i++) {
@@ -1738,10 +1795,18 @@ process.on("message", async (msg) => {
           return;
         }
         if (!findMarker("Test262:AsyncTestComplete")) {
+          // (#3469) If the host-free drain itself threw (an async continuation
+          // that escaped uncaught) and produced no marker, surface that error —
+          // it is the test's real async outcome — rather than the generic
+          // "not observed", so it re-buckets as an honest failure.
+          const noMarkerError =
+            standaloneDrainError != null
+              ? `async continuation threw before completion: ${extractWasmExceptionMessage(standaloneDrainError, instance)}`
+              : "async completion marker not observed";
           sendResult({
             id,
             status: "fail",
-            error: "async completion marker not observed",
+            error: noMarkerError,
             compileMs,
             execMs: performance.now() - execStart,
             ...buildResultMetadata(result, true),

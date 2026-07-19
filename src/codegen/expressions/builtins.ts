@@ -12,7 +12,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
 import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
-import { ensureNativeStringExternBridge } from "../native-strings.js";
+import { emitStandaloneStdoutAppendValue, ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
@@ -32,22 +32,44 @@ function compileConsoleCall(
     return compileConsoleCallWasi(ctx, fctx, expr, method);
   }
 
-  // (#3436) Standalone mode: no JS host to receive console output, and the
-  // `env.console_*` imports are deliberately NOT registered (import-collector
-  // finalize). Lower to a native no-op sink: evaluate each argument for its
-  // side effects, then drop the produced value so the stack stays balanced.
-  // test262 verdicts come from thrown exceptions, not printed output, so
-  // discarding the output is behaviourally faithful for the conformance lane.
+  // (#3436/#3469) Standalone mode: no JS host to receive console output, and the
+  // `env.console_*` imports are deliberately NOT registered (keeps #2961's
+  // import-leak gate green); there is also no `fd_write` sink (unlike WASI).
+  // Instead of the original pure no-op (#3436), render each argument to a native
+  // string and append it to the in-module `__stdout_acc` rope (space-separated,
+  // trailing newline). The runner reads that back host-free via
+  // `__stdout_prepare`/`__stdout_char`, so the test262 async completion marker
+  // (`$DONE → print → console.log("Test262:AsyncTestComplete")`) is observable.
   if (ctx.standalone) {
-    for (const arg of expr.arguments) {
-      const res = compileExpression(ctx, fctx, arg);
-      // `compileExpression` returns `null` for a void expression (nothing
-      // pushed) and a ValType otherwise — mirror the expression-statement
-      // discard convention (statements.ts) and only drop when a value landed.
-      if (res !== null) {
-        fctx.body.push({ op: "drop" });
+    const appendName = "__stdout_append";
+    // Append a native-string literal (arg separator / trailing newline) to the
+    // sink. `__stdout_append` is re-read by name because the per-arg render
+    // (`emitStandaloneStdoutAppendValue`) can insert a late import that shifts
+    // every function index (#2642).
+    const appendLiteral = (s: string): void => {
+      compileStringLiteral(ctx, fctx, s);
+      const idx = ctx.funcMap.get(appendName);
+      if (idx !== undefined) fctx.body.push({ op: "call", funcIdx: idx });
+    };
+    if (ctx.funcMap.get(appendName) === undefined) {
+      // The sink helper was not minted (native strings unavailable, or the
+      // pre-body flag was not set) — fall back to the original no-op drop.
+      for (const arg of expr.arguments) {
+        const res = compileExpression(ctx, fctx, arg);
+        if (res !== null) fctx.body.push({ op: "drop" });
       }
+      return VOID_RESULT;
     }
+    let first = true;
+    for (const arg of expr.arguments) {
+      if (!first) appendLiteral(" ");
+      first = false;
+      // The per-arg render (ValType dispatch + `__any_to_string`) lives in
+      // native-strings.ts, the coercion-engine-sanctioned owner of that helper,
+      // so this call site holds no hand-rolled coercion vocabulary (#2108 gate).
+      emitStandaloneStdoutAppendValue(ctx, fctx, compileExpression(ctx, fctx, arg));
+    }
+    appendLiteral("\n");
     return VOID_RESULT;
   }
 

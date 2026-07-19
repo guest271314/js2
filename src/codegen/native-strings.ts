@@ -2008,3 +2008,245 @@ export function emitExceptionRenderExports(ctx: CodegenContext): void {
     mod.exports.push({ name: "__exn_render_char", desc: { kind: "func", index: funcIdx } });
   }
 }
+
+/**
+ * (#3469) Mint the standalone host-free `console.log`/`print` output sink — the
+ * in-module accumulator global (`__stdout_acc`, a `$AnyString` rope) plus the
+ * `__stdout_append(s)` helper that concatenates onto it. Called in the pre-body
+ * emission window (`src/codegen/index.ts`, alongside `emitDeferredWasiHelpers`)
+ * so the append funcidx is stable for every `console.*` call site that bakes it,
+ * and gated on `ctx.usesStandaloneConsoleSink` (set by `finalizeUnifiedCollector`
+ * when the source uses `console.*` in standalone mode).
+ *
+ * Why this exists: on `--target standalone` there is no host `console_*` import
+ * (deliberately, so #2961's import-leak gate stays green) and no `fd_write` sink
+ * (unlike WASI). Before this, `console.log` lowered to a pure no-op (#3436), so
+ * the test262 async completion marker (`$DONE → print → console.log(
+ * "Test262:AsyncTestComplete")`) went nowhere and every host-free async test
+ * timed out with `async completion marker not observed`. The sink records printed
+ * output into a GC string the runner reads back via `__stdout_prepare`/
+ * `__stdout_char` — 100% host-free (no import), mirroring `__exn_render_*`.
+ *
+ * Idempotent (guarded by `ctx.stdoutAccGlobalIdx >= 0`). No-op unless
+ * standalone + native strings + `__str_concat` available.
+ */
+export function ensureStandaloneStdoutSink(ctx: CodegenContext): void {
+  if (!ctx.standalone) return;
+  if (!ctx.nativeStrings) return;
+  if (ctx.stdoutAccGlobalIdx >= 0) return; // already minted
+
+  // `__str_concat`(a: ref $AnyString, b: ref $AnyString) -> ref $AnyString is
+  // emitted by ensureNativeStringHelpers (already run in the import-collection
+  // finalize, long before the pre-body window). Ensure defensively — idempotent.
+  ensureNativeStringHelpers(ctx);
+  const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  if (concatIdx === undefined || anyStrTypeIdx < 0) return;
+
+  const mod = ctx.mod;
+
+  // (mut ref null $AnyString) — the accumulated output rope, null until first log.
+  const accGlobalIdx = ctx.numImportGlobals + mod.globals.length;
+  mod.globals.push({
+    name: "__stdout_acc",
+    type: { kind: "ref_null", typeIdx: anyStrTypeIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
+  });
+  ctx.stdoutAccGlobalIdx = accGlobalIdx;
+
+  // __stdout_append(s: ref null $AnyString) -> void
+  //   if (s == null) return;
+  //   if (acc == null) { acc = s; return; }
+  //   acc = __str_concat(acc, s);   // rope append, O(1) for long strings
+  const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: anyStrTypeIdx }], [], "$stdout_append_type");
+  const funcIdx = mintDefinedFunc(ctx);
+  const body: Instr[] = [
+    // if s is null → nothing to append
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
+    // if acc is null → acc = s (first line), done
+    { op: "global.get", index: accGlobalIdx },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 0 }, { op: "global.set", index: accGlobalIdx }, { op: "return" }],
+    },
+    // acc = __str_concat(acc, s) — both non-null here
+    { op: "global.get", index: accGlobalIdx },
+    { op: "ref.as_non_null" },
+    { op: "local.get", index: 0 },
+    { op: "ref.as_non_null" },
+    { op: "call", funcIdx: concatIdx },
+    { op: "global.set", index: accGlobalIdx },
+  ];
+  ctx.funcMap.set("__stdout_append", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__stdout_append",
+    typeIdx,
+    locals: [],
+    body,
+    exported: false,
+  } as WasmFunction);
+}
+
+/**
+ * (#3469) Render a `console.log`/`print` argument (already compiled to the top of
+ * the value stack with ValType `valType`) to a native `$AnyString` HOST-FREE and
+ * append it to the standalone stdout sink. Dispatch is on the COMPILED ValType (a
+ * wasm-lowering question — NOT the TS static type, which would trip the
+ * oracle-ratchet gate AND be wrong here: the test262 marker reaches `console.log`
+ * through `any`-typed harness params `$DONE → __consolePrintHandle__(msg) →
+ * print(value) → console.log(value)`, so the arg is `any` → externref, not
+ * string). Everything routes through `__any_to_string` (the native, IMPORT-FREE
+ * stringifier the exn-render path uses) — NEVER emitToString's externref arm,
+ * which would register the `__extern_toString` host import and trip #2961.
+ *
+ * Lives in native-strings.ts (the coercion-engine-sanctioned owner of
+ * `__any_to_string`) so the #2108 coercion-drift gate does not count this as a
+ * new hand-rolled coercion site outside the engine. Bare scalars (f64/i32/i64 — a
+ * number/boolean passed directly, never a marker) are dropped best-effort.
+ */
+export function emitStandaloneStdoutAppendValue(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  valType: ValType | null,
+): void {
+  if (ctx.funcMap.get("__stdout_append") === undefined) {
+    // Sink not minted — drop any pushed value to keep the stack balanced.
+    if (valType !== null) fctx.body.push({ op: "drop" });
+    return;
+  }
+  if (valType === null) return; // void arg — nothing was pushed
+  if (valType.kind === "externref") {
+    // externref is a separate hierarchy from anyref — convert first.
+    fctx.body.push({ op: "any.convert_extern" });
+  } else if (valType.kind !== "ref" && valType.kind !== "ref_null") {
+    fctx.body.push({ op: "drop" }); // scalar — best-effort, never a marker
+    return;
+  }
+  // Native `$AnyString` (literal/concat/template) or struct ref — both `anyref`
+  // subtypes, rendered directly (strings pass through; objects → "[object Object]").
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  flushLateImportShifts(ctx, fctx);
+  const toStrIdx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
+  fctx.body.push({ op: "call", funcIdx: toStrIdx });
+  // Re-read `__stdout_append` by name — `ensureAnyToStringHelper` above may have
+  // inserted a late import that shifted every function index (#2642).
+  const appendIdx = ctx.funcMap.get("__stdout_append");
+  if (appendIdx !== undefined) fctx.body.push({ op: "call", funcIdx: appendIdx });
+}
+
+/**
+ * (#3469) Emit the standalone stdout-sink readout exports —
+ * `__stdout_prepare() -> i32` (flatten the accumulator, return code-unit length)
+ * and `__stdout_char(i) -> i32` (code-unit readback) — mirroring the
+ * `__exn_render_prepare`/`__exn_render_char` pattern. Called at finalize (see
+ * `emitStdoutSinkExports` call in codegen/index.ts, right after
+ * `emitExceptionRenderExports`). No-op unless the sink was minted
+ * (`ctx.stdoutAccGlobalIdx >= 0`). Lets the runner read printed output with ZERO
+ * host imports, so the test262 async completion marker is observable host-free.
+ */
+export function emitStdoutSinkExports(ctx: CodegenContext): void {
+  if (ctx.stdoutAccGlobalIdx < 0) return; // sink never minted
+  if (!ctx.nativeStrings) return;
+  if (ctx.funcMap.has("__stdout_prepare")) return;
+
+  const flattenIdx = ctx.funcMap.get("__str_flatten") ?? ctx.nativeStrHelpers.get("__str_flatten");
+  const flatTypeIdx = ctx.nativeStrTypeIdx;
+  const dataTypeIdx = ctx.nativeStrDataTypeIdx;
+  if (flattenIdx === undefined || flatTypeIdx < 0 || dataTypeIdx < 0) return;
+
+  const mod = ctx.mod;
+  const accGlobalIdx = ctx.stdoutAccGlobalIdx;
+
+  // (mut ref null $FlatString) — the flattened readout buffer (set by prepare).
+  const flatGlobalIdx = ctx.numImportGlobals + mod.globals.length;
+  mod.globals.push({
+    name: "__stdout_flat",
+    type: { kind: "ref_null", typeIdx: flatTypeIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: flatTypeIdx }],
+  });
+
+  // __stdout_prepare() -> i32 : flatten acc → __stdout_flat, return len (0 if empty).
+  {
+    const typeIdx = addFuncType(ctx, [], [{ kind: "i32" }], "$stdout_prepare_type");
+    const funcIdx = mintDefinedFunc(ctx);
+    const body: Instr[] = [
+      { op: "global.get", index: accGlobalIdx },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      { op: "global.get", index: accGlobalIdx },
+      { op: "ref.as_non_null" },
+      { op: "call", funcIdx: flattenIdx },
+      { op: "global.set", index: flatGlobalIdx },
+      { op: "global.get", index: flatGlobalIdx },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+    ];
+    ctx.funcMap.set("__stdout_prepare", funcIdx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__stdout_prepare",
+      typeIdx,
+      locals: [],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__stdout_prepare", desc: { kind: "func", index: funcIdx } });
+  }
+
+  // __stdout_char(i: i32) -> i32 : code-unit readback from the prepared buffer.
+  {
+    const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }], "$stdout_char_type");
+    const funcIdx = mintDefinedFunc(ctx);
+    const L_I = 0;
+    const L_BUF = 1;
+    const body: Instr[] = [
+      { op: "global.get", index: flatGlobalIdx },
+      { op: "local.tee", index: L_BUF },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // i < 0 || i >= len → 0
+      { op: "local.get", index: L_I },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      { op: "local.get", index: L_I },
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 0 }, // len
+      { op: "i32.ge_s" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // data[off + i]
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 2 }, // data
+      { op: "local.get", index: L_BUF },
+      { op: "struct.get", typeIdx: flatTypeIdx, fieldIdx: 1 }, // off
+      { op: "local.get", index: L_I },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: dataTypeIdx },
+    ];
+    ctx.funcMap.set("__stdout_char", funcIdx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: "__stdout_char",
+      typeIdx,
+      locals: [{ name: "buf", type: { kind: "ref_null", typeIdx: flatTypeIdx } }],
+      body,
+      exported: true,
+    } as WasmFunction);
+    mod.exports.push({ name: "__stdout_char", desc: { kind: "func", index: funcIdx } });
+  }
+}
