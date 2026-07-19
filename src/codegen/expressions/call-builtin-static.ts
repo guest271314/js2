@@ -2189,7 +2189,14 @@ export function compileBuiltinStaticCall(
           if (!descType) {
             fctx.body.push({ op: "ref.null.extern" });
           } else if (descType.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
+            // (#3394) Use coerceType, not a bare extern.convert_any: a PRIMITIVE
+            // descriptors arg (e.g. `Object.create(o, 5n)` — a bigint, which is
+            // a TypeError at runtime but must still COMPILE to valid Wasm) is
+            // i64/i32/f64 on the stack, and extern.convert_any is illegal on a
+            // non-ref value ("extern.convert_any expected anyref, found i64").
+            // coerceType routes i64-bigint → __box_bigint, i32/f64 → __box_*,
+            // ref → extern.convert_any (mirrors the 1st-arg path above).
+            coerceType(ctx, fctx, descType, { kind: "externref" });
           }
           fctx.body.push({ op: "call", funcIdx: dpIdx });
         } else {
@@ -2246,6 +2253,18 @@ export function compileBuiltinStaticCall(
   ) {
     const arg0 = expr.arguments[0]!;
     const arg1 = expr.arguments[1]!;
+    // §10.4.1.1: in Script code, top-level `this` is the realm global object.
+    // It must stay on the host-MOP path here: the checker's global interface
+    // resolves to a large static struct, whose missing-property fast path would
+    // return undefined without consulting the property just created by sloppy
+    // unresolvable PutValue. This is deliberately gOPD-local; general Script
+    // `this` lowering belongs to the source-goal implementation (#3365).
+    const isScriptGlobalThisReceiver =
+      arg0.kind === ts.SyntaxKind.ThisKeyword &&
+      fctx.name === "__module_init" &&
+      !ts.isExternalModule(arg0.getSourceFile()) &&
+      !ctx.standalone &&
+      !ctx.wasi;
 
     // (#2874) Under standalone, register the native object runtime so the
     // typed-receiver fast path's `ensureLateImport("__create_descriptor", …)`
@@ -2267,7 +2286,7 @@ export function compileBuiltinStaticCall(
     // host import and already passes) — gated on ctx.standalone so host
     // bytes stay identical.
     const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
-    const structName = resolveStructName(ctx, arg0TsType);
+    const structName = isScriptGlobalThisReceiver ? undefined : resolveStructName(ctx, arg0TsType);
     const literalKeyText = (e: ts.Expression): string | undefined => {
       if (ts.isStringLiteral(e)) return e.text;
       if (!ctx.standalone) return undefined;
@@ -2674,6 +2693,16 @@ export function compileBuiltinStaticCall(
         compileStringLiteral(ctx, fctx, builtinName);
       }
       fctx.body.push({ op: "call", funcIdx: getBuiltinFuncIdx });
+      objType = { kind: "externref" };
+    } else if (isScriptGlobalThisReceiver) {
+      ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const globalThisIdx = ctx.funcMap.get("__get_globalThis");
+      if (globalThisIdx === undefined) {
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "call", funcIdx: globalThisIdx });
       objType = { kind: "externref" };
     } else {
       objType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
