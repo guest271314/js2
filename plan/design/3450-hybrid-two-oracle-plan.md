@@ -8,7 +8,7 @@
 - **Companion doc**: the A/B measurement + boundary-flip analysis lives in
   `plan/design/3450-native-harness-ab-findings.md` (PR #3395, spike branch
   `spike-3450-native-harness-ab`). This file is the *build plan*; that file is
-  the *evidence*. Both fold into `plan/issues/3450-*.md` once #3389 lands. This
+  the *evidence*. Both fold into the #3450 issue file once #3389 lands. This
   plan is written as a companion (not an in-place extension of the spike doc)
   deliberately: the spike doc is in-flight on #3395, so a same-file edit would
   force a whole-file merge conflict. Cross-reference, don't overwrite.
