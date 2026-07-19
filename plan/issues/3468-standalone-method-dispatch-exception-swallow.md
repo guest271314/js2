@@ -22,6 +22,9 @@ loc-budget-allow:
   - src/codegen/object-runtime.ts
   - src/codegen/context/types.ts
   - src/codegen/index.ts
+  # the top-level-statement keep arm (#3468 routing) must live in the existing
+  # top-level-statement classifier next to the #2671 host arm it mirrors.
+  - src/codegen/declarations.ts
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)

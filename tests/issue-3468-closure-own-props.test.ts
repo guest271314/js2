@@ -15,20 +15,24 @@
  * `$Object` "bag" reached by `ref.eq` on the closure identity, reusing the
  * existing `$Object` prop machinery.
  *
- * ## Reachability (important — see the `.skip` block)
- * The C-core RUNTIME substrate is verified below through the DYNAMIC member path
- * (a receiver flowing through an `any`-typed local — e.g. `const g = fn`), which
- * lowers to `__extern_set`/`__extern_get`/`__extern_method_call` and therefore
- * hits the new arms.
- *
- * A member op on a bare **function-DECLARATION** receiver (`assert.x = fn`,
- * `assert.x`, `assert.m()` — exactly what the test262 harness uses) is instead
- * lowered STATICALLY against the closure-wrapper struct (the write is dropped;
- * the read resolves to undefined) and never reaches these arms. Fixing that
- * needs a front-end member-dispatch routing change (deferred — the A/routing
- * follow-on, tracked on #3468). The harness-shaped cases are therefore `.skip`ed
- * with the expected post-routing behaviour, so they document the target without
- * failing CI.
+ * ## Two parts
+ * 1. **C-core runtime substrate** — the closure-own-property side table, verified
+ *    through the DYNAMIC member path (a receiver via an `any`-typed local, e.g.
+ *    `const g = fn`), which lowers to `__extern_set`/`__extern_get`/
+ *    `__extern_method_call` → the new arms.
+ * 2. **Top-level front-end routing** — a `F.<name> = …` write on a top-level
+ *    FUNCTION DECLARATION (the test262 `assert.sameValue = function(){…}` shape)
+ *    was DROPPED under standalone: the #2671 keep that retains such statements in
+ *    `__module_init` was gated `!ctx.standalone`. So `assert.sameValue` never
+ *    stored and `assert.sameValue(1,2)` invoked `undefined` → every assertion was
+ *    a vacuous pass. A standalone counterpart keep (declarations.ts) retains the
+ *    statement so the ordinary write-arm records it in the C-core side table. The
+ *    same write already worked from INSIDE a function; only the top-level
+ *    collection dropped it. Reads and calls on a function receiver already routed
+ *    dynamically. Fix scoped to a bare-identifier top-level-function receiver
+ *    writing a NON-builtin, non-special name; classes (not function declarations)
+ *    and `.name`/`.length`/`.call`/`.apply`/`.bind`/`.prototype`/`.constructor`
+ *    are excluded. gc/host is untouched (byte-identical).
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -41,9 +45,11 @@ async function runStandalone(src: string): Promise<{ ret: unknown; threw: boolea
     skipSemanticDiagnostics: true,
   });
   expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
-  const { instance } = await WebAssembly.instantiate(r.binary, {});
-  const fn = (instance.exports.test ?? instance.exports.main) as ((...a: unknown[]) => unknown) | undefined;
+  // The harness assertions run at TOP LEVEL (in `__module_init`), so a throw can
+  // surface during instantiation itself — keep it inside the try/catch.
   try {
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    const fn = (instance.exports.test ?? instance.exports.main) as ((...a: unknown[]) => unknown) | undefined;
     return { ret: fn?.(), threw: false };
   } catch (e) {
     return { ret: undefined, threw: true, err: String((e as Error)?.message ?? e) };
@@ -119,11 +125,29 @@ describe("#3468 C-core — closure own-property side table (dynamic path, verifi
   });
 });
 
-// The test262 `assert` harness uses bare function-DECLARATION member ops, which
-// currently lower statically and bypass the C-core arms (see file header). These
-// are the acceptance cases that go green once the front-end routing follow-on
-// lands; skipped so they document the target without failing CI today.
-describe.skip("#3468 — assert harness (pending front-end routing follow-on)", () => {
+describe("#3468 — top-level function-declaration property write (front-end routing)", () => {
+  it("stores + reads back a top-level `F.p = v` write on a function declaration", async () => {
+    const { ret } = await runStandalone(`
+      function memo(){}
+      memo.cache = 5;
+      export function test(): number { return memo.cache; }
+    `);
+    expect(ret).toBe(5);
+  });
+
+  it("invokes a method assigned at top level on a function declaration", async () => {
+    const { ret } = await runStandalone(`
+      function assert(){}
+      assert.sv = function (a) { return a + 1; };
+      export function test(): number { return assert.sv(41); }
+    `);
+    expect(ret).toBe(42);
+  });
+});
+
+// The test262 `assert` harness — bare function-DECLARATION member ops at top
+// level, the exact shape whose vacuous passes motivated #3468. Now green.
+describe("#3468 — assert harness fires (vacuous passes correctly fail)", () => {
   const HARNESS = `
     function Test262Error(message) { this.message = message; }
     function assert(mustBeTrue, message) { if (mustBeTrue === true) { return; } throw new Test262Error(message); }
@@ -148,5 +172,23 @@ describe.skip("#3468 — assert harness (pending front-end routing follow-on)", 
        assert.throws(TypeError, function(){});`;
     const { threw } = await runStandalone(src);
     expect(threw).toBe(true);
+  });
+});
+
+describe("#3468 — routing exclusions (no unintended regressions)", () => {
+  it("does not affect a class static method call (class is not a function declaration)", async () => {
+    const { ret } = await runStandalone(`
+      class C { static m(){ return 42; } }
+      export function test(): number { return C.m(); }
+    `);
+    expect(ret).toBe(42);
+  });
+
+  it("leaves fn.call / fn.apply working", async () => {
+    const { ret } = await runStandalone(`
+      function add(a, b){ return a + b; }
+      export function test(): number { return add.call(null, 3, 4) + add.apply(null, [10, 20]); }
+    `);
+    expect(ret).toBe(37);
   });
 });
