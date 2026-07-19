@@ -207,6 +207,7 @@ const _origArrayProtoSymbols = new Set(Object.getOwnPropertySymbols(Array.protot
 // safer mechanism (e.g. process.disconnect() before exit, or per-test
 // fork recycle for known-polluter test paths).
 const _typedArrayProto = Object.getPrototypeOf(Int8Array.prototype); // %TypedArray%.prototype
+const _typedArrayCtor = Object.getPrototypeOf(Int8Array); // %TypedArray% (abstract constructor)
 const _iteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
 const _PROTO_EXTRA_CLEANUP = [
   ["Number.prototype", Number.prototype],
@@ -539,6 +540,153 @@ const _accessorOrig = _ACCESSOR_SNAPSHOTS.map(([name, obj, keys]) => ({
     .filter(([, d]) => d !== undefined && typeof d.get === "function"),
 }));
 
+// --- Category 5 (#3470) — function .name/.length own-property restore.
+//
+// test262's verifyProperty() (harness/propertyHelper.js:63-66 asserts
+// __hasOwnProperty(obj, name); the destructive probe is isConfigurable() at
+// line 140, `delete obj[name]`) probes configurable:true via
+// `delete obj[name]` and does NOT restore when no `restore` option is
+// passed -- the common case for built-ins/**/name.js and length.js tests.
+// When `obj` is itself a prototype method or a constructor (e.g.
+// `Date.prototype.getYear`, `Int8Array`), the delete removes THAT
+// FUNCTION's own "name"/"length" sub-property. None of the restore logic
+// above catches this: the function's identity never changes
+// (Date.prototype.getYear is still the same function reference), so
+// _restoreMethodProp's `cur === orig` check is a no-op. The next test
+// (whether that's this same test's auto strict-rerun landing on the same
+// fork, or any later test that reads the sub-property) then sees it
+// missing and fails "obj should have an own property name"/"length". Real
+// Node passes (fresh realm per test); standalone passes (fresh per-module
+// builtins). Only this shared-host-builtin fork leaks.
+//
+// The curated _METHOD_SNAPSHOTS/_STATIC_SNAPSHOTS lists above don't cover
+// every method (e.g. annexB Date.prototype.getYear isn't listed at all),
+// so rather than extending those lists this enumerates every
+// function-valued own property on a comprehensive root-object list
+// directly -- closing the gap for annexB methods too, without touching the
+// FATAL/recycle validation paths above (kept best-effort: built-in
+// function name/length descriptors are always configurable:true per spec,
+// so defineProperty here should never fail in practice).
+const _FN_SUBPROP_ROOTS = [
+  Object.prototype,
+  Object,
+  Array.prototype,
+  Array,
+  String.prototype,
+  String,
+  Number.prototype,
+  Number,
+  Boolean.prototype,
+  Boolean,
+  Function.prototype,
+  RegExp.prototype,
+  RegExp,
+  Map.prototype,
+  Set.prototype,
+  WeakMap.prototype,
+  WeakSet.prototype,
+  Promise.prototype,
+  Promise,
+  Error.prototype,
+  Date.prototype,
+  Date,
+  Math,
+  JSON,
+  Reflect,
+  _typedArrayProto,
+  _typedArrayCtor,
+  Int8Array.prototype,
+  Int8Array,
+  Uint8Array.prototype,
+  Uint8Array,
+  Uint8ClampedArray.prototype,
+  Uint8ClampedArray,
+  Int16Array.prototype,
+  Int16Array,
+  Uint16Array.prototype,
+  Uint16Array,
+  Int32Array.prototype,
+  Int32Array,
+  Uint32Array.prototype,
+  Uint32Array,
+  Float32Array.prototype,
+  Float32Array,
+  Float64Array.prototype,
+  Float64Array,
+  BigInt64Array.prototype,
+  BigInt64Array,
+  BigUint64Array.prototype,
+  BigUint64Array,
+  DataView.prototype,
+  DataView,
+  _iteratorProto,
+];
+
+function _snapshotFnSubProps(root) {
+  const out = [];
+  let keys;
+  try {
+    keys = [...Object.getOwnPropertyNames(root), ...Object.getOwnPropertySymbols(root)];
+  } catch {
+    return out;
+  }
+  for (const key of keys) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(root, key);
+    } catch {
+      continue;
+    }
+    if (!desc || typeof desc.value !== "function") continue;
+    const fn = desc.value;
+    out.push({
+      fn,
+      nameDesc: Object.getOwnPropertyDescriptor(fn, "name"),
+      lengthDesc: Object.getOwnPropertyDescriptor(fn, "length"),
+    });
+  }
+  return out;
+}
+
+const _fnSubPropOrig = (() => {
+  const seen = new Set();
+  const out = [];
+  for (const root of _FN_SUBPROP_ROOTS) {
+    for (const snap of _snapshotFnSubProps(root)) {
+      if (seen.has(snap.fn)) continue;
+      seen.add(snap.fn);
+      out.push(snap);
+    }
+  }
+  return out;
+})();
+
+function _restoreFnSubProp(fn, key, orig) {
+  if (!orig) return true;
+  let cur;
+  try {
+    cur = Object.getOwnPropertyDescriptor(fn, key);
+  } catch {
+    cur = undefined;
+  }
+  if (
+    cur &&
+    cur.value === orig.value &&
+    cur.writable === orig.writable &&
+    cur.enumerable === orig.enumerable &&
+    cur.configurable === orig.configurable
+  ) {
+    return true;
+  }
+  try {
+    Object.defineProperty(fn, key, orig);
+  } catch {
+    /* residual check below */
+  }
+  const after = Object.getOwnPropertyDescriptor(fn, key);
+  return !!after && after.value === orig.value;
+}
+
 // Same sentinel-style dirty check as the JS-host test262 runner (#1310),
 // applied in the unified sharded worker so both js-host and standalone matrix
 // targets recycle a fork after a test mutates core host prototypes.
@@ -836,6 +984,16 @@ function restoreBuiltins() {
       return recycleCleanup(reason);
     }
   }
+
+  // (#3470) Restore function .name/.length sub-properties (see
+  // _FN_SUBPROP_ROOTS comment above) poisoned by verifyProperty()'s
+  // unrestored configurability probe. Best-effort, not wired into the
+  // FATAL/recycle checks above -- a missing name/length sub-prop doesn't
+  // break compilation the way the poison classes above do.
+  for (const { fn, nameDesc, lengthDesc } of _fnSubPropOrig) {
+    _restoreFnSubProp(fn, "name", nameDesc);
+    _restoreFnSubProp(fn, "length", lengthDesc);
+  }
   return cleanCleanup();
 }
 
@@ -1049,6 +1207,53 @@ function extractWasmExceptionMessage(err, instance) {
     return info;
   }
   return safeStringifyThrown(err);
+}
+
+/**
+ * (#3469) Standalone host-free async drive + output capture. On
+ * `--target standalone` there is no host `console` import (kept out so the
+ * #2961 import-leak gate stays green) and no `fd_write`, so `.then`/await
+ * continuations live on the in-module WASM microtask ring and printed output
+ * lands in an in-module GC-string sink instead of the host `consoleProxy`. The
+ * originalHarness path never drove either. This:
+ *   1. calls `__drain_microtasks()` so scheduled continuations run (which reach
+ *      `$DONE → print → console.log("Test262:AsyncTestComplete")`);
+ *   2. reads the native `__stdout_prepare`/`__stdout_char` sink and appends each
+ *      printed line to `harnessOutput`, so the existing marker poll observes it.
+ * All three exports are compiler intrinsics present only on the host-free lane;
+ * feature-detected so the js-host lane (which populates `harnessOutput` via
+ * `consoleProxy`) is untouched. Returns any error thrown while draining (an
+ * async continuation that threw uncaught), else null.
+ */
+function drainAndCaptureNativeStdout(instance, append) {
+  const exp = instance?.exports;
+  if (!exp) return null;
+  let drainError = null;
+  if (typeof exp.__drain_microtasks === "function") {
+    try {
+      exp.__drain_microtasks();
+    } catch (err) {
+      drainError = err;
+    }
+  }
+  if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
+    let len = 0;
+    try {
+      len = exp.__stdout_prepare() | 0;
+    } catch {
+      len = 0;
+    }
+    if (len > 0) {
+      let out = "";
+      for (let i = 0; i < len; i++) out += String.fromCharCode(exp.__stdout_char(i) & 0xffff);
+      // Split into lines matching the consoleProxy's per-call `harnessOutput`
+      // entries (each console.log emitted a trailing "\n"). Drop the empty tail.
+      for (const line of out.split("\n")) {
+        if (line.length > 0) append(line);
+      }
+    }
+  }
+  return drainError;
 }
 
 function originalHarnessExceptionMatches(err, instance, expectedErrorType) {
@@ -1553,6 +1758,16 @@ process.on("message", async (msg) => {
       }
 
       if (asyncTest) {
+        // (#3469) Host-free (standalone) async: the .then/await continuations are
+        // on the in-module microtask ring and console.log has no host sink. Drain
+        // the ring so they run, then mirror the native stdout sink into
+        // `harnessOutput` so the marker poll below observes the completion marker.
+        // No-op on the js-host lane (no such intrinsics; `consoleProxy` feeds
+        // `harnessOutput` directly).
+        let standaloneDrainError = null;
+        if (target === "standalone") {
+          standaloneDrainError = drainAndCaptureNativeStdout(instance, appendHarnessOutput);
+        }
         const deadline = Date.now() + 1_000;
         const findMarker = (prefix) => {
           for (let i = 0; i < harnessOutput.length; i++) {
@@ -1580,10 +1795,18 @@ process.on("message", async (msg) => {
           return;
         }
         if (!findMarker("Test262:AsyncTestComplete")) {
+          // (#3469) If the host-free drain itself threw (an async continuation
+          // that escaped uncaught) and produced no marker, surface that error —
+          // it is the test's real async outcome — rather than the generic
+          // "not observed", so it re-buckets as an honest failure.
+          const noMarkerError =
+            standaloneDrainError != null
+              ? `async continuation threw before completion: ${extractWasmExceptionMessage(standaloneDrainError, instance)}`
+              : "async completion marker not observed";
           sendResult({
             id,
             status: "fail",
-            error: "async completion marker not observed",
+            error: noMarkerError,
             compileMs,
             execMs: performance.now() - execStart,
             ...buildResultMetadata(result, true),

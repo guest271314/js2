@@ -57,42 +57,67 @@ export function resolveGenericCallSiteTypes(
 }
 
 /**
+ * Result of scanning a function's call sites for a parameter's type.
+ *  - `type`: the concrete wasm type all *conclusive* call sites agree on, or
+ *    `null` when there are no conclusive call sites (none at all / all-`any`
+ *    args / a type conflict between sites).
+ *  - `sawCallSite`: whether *any* internal call to the function was found at
+ *    all, regardless of the argument types. This distinguishes "no call sites"
+ *    (an exported/host-only entrypoint — body inference is the only signal)
+ *    from "called, but with polymorphic/`any` args" (the function is invoked
+ *    internally with runtime values whose type we cannot pin — body inference
+ *    would be UNSOUND, see `inferParamTypeFromBody`). (#3471)
+ */
+export interface CallSiteParamInference {
+  type: ValType | null;
+  sawCallSite: boolean;
+}
+
+/**
  * Infer a concrete type for an untyped function parameter by scanning call sites.
  * When a parameter has no type annotation (TS gives it `any`), we look at every
  * call to that function and collect the argument types at the given index.
- * If all call sites agree on a single concrete wasm type, we return it.
- * Returns null if no call site found or types disagree.
+ * If all call sites agree on a single concrete wasm type, we return it as `type`.
+ * `type` is null if no call site found or types disagree; `sawCallSite` reports
+ * whether the function is called internally at all (see #3471 and
+ * {@link inferParamTypeFromBody}).
  */
 export function inferParamTypeFromCallSites(
   ctx: CodegenContext,
   funcName: string,
   paramIndex: number,
   sourceFile: ts.SourceFile,
-): ValType | null {
+): CallSiteParamInference {
   let agreed: ValType | null = null;
   let conflict = false;
+  let sawCallSite = false;
 
   function visit(node: ts.Node) {
-    if (conflict) return;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === funcName) {
-      const arg = node.arguments[paramIndex];
-      if (arg) {
-        const argType = ctx.checker.getTypeAtLocation(arg);
-        // Skip if the argument itself is also `any` — no useful info
-        if (argType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) {
-          // Don't count this call site — it doesn't help
-        } else {
-          const wasmType = resolveWasmType(ctx, argType);
-          if (agreed === null) {
-            agreed = wasmType;
-          } else if (agreed.kind !== wasmType.kind) {
-            conflict = true;
-          } else if (
-            (agreed.kind === "ref" || agreed.kind === "ref_null") &&
-            (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
-            (agreed as { typeIdx: number }).typeIdx !== (wasmType as { typeIdx: number }).typeIdx
-          ) {
-            conflict = true;
+      // A matching call exists regardless of arg types — the function IS invoked
+      // internally, so its params are determined by runtime call args, not the
+      // body-usage fallback. Record this before any conflict short-circuit.
+      sawCallSite = true;
+      if (!conflict) {
+        const arg = node.arguments[paramIndex];
+        if (arg) {
+          const argType = ctx.checker.getTypeAtLocation(arg);
+          // Skip if the argument itself is also `any` — no useful info
+          if (argType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) {
+            // Don't count this call site — it doesn't help
+          } else {
+            const wasmType = resolveWasmType(ctx, argType);
+            if (agreed === null) {
+              agreed = wasmType;
+            } else if (agreed.kind !== wasmType.kind) {
+              conflict = true;
+            } else if (
+              (agreed.kind === "ref" || agreed.kind === "ref_null") &&
+              (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+              (agreed as { typeIdx: number }).typeIdx !== (wasmType as { typeIdx: number }).typeIdx
+            ) {
+              conflict = true;
+            }
           }
         }
       }
@@ -101,14 +126,21 @@ export function inferParamTypeFromCallSites(
   }
 
   forEachChild(sourceFile, visit);
-  return conflict ? null : agreed;
+  return { type: conflict ? null : agreed, sawCallSite };
 }
 
 /**
- * #1121: Fallback param-type inference from body usage. Used when
- * `inferParamTypeFromCallSites` finds no call sites (e.g. an exported
- * entrypoint that is only called from JS host) but the function body
- * itself reveals how the parameter is used.
+ * #1121: Fallback param-type inference from body usage. Used ONLY when
+ * `inferParamTypeFromCallSites` finds **zero** call sites (e.g. an exported
+ * entrypoint that is only called from JS host) — the caller gates this on
+ * `!sawCallSite` (#3471). It must NOT run when the function is called
+ * internally with `any`/polymorphic args: seeing a single numeric use of the
+ * param (`1 / a`) here is NOT proof the param is always a number at runtime.
+ * A polymorphic helper (e.g. test262's `isSameValue(a, b)`, which does
+ * `1 / a` but is also called with strings/objects) would be narrowed to f64,
+ * coercing every non-number arg to `NaN` at the call boundary — silently
+ * corrupting comparisons like `a !== a`. So this fallback is sound only for
+ * the truly-uncalled case where the body is the sole signal.
  *
  * Recognises three numeric-flow patterns:
  *  1. `param` passed as an argument to a function whose return is in
@@ -210,6 +242,32 @@ export function inferParamTypeFromBody(
   }
   forEachChild(decl.body, visit);
   return foundNumericUse ? { kind: "f64" } : null;
+}
+
+/**
+ * (#3471) Resolve a concrete wasm type for an implicit-`any` parameter, combining
+ * both inference sources with the correct precedence and soundness gate:
+ *  1. Call-site inference — if every conclusive call site agrees, use that type.
+ *  2. Body-usage fallback — ONLY when the function has **zero** internal call
+ *     sites (`!sawCallSite`), i.e. an exported/host-only entrypoint whose body is
+ *     the sole signal. A function that IS called internally with `any`/
+ *     polymorphic args (call-site inference inconclusive) is NOT body-narrowed:
+ *     a single numeric use (`1 / a`) does not prove the param is always a number,
+ *     and narrowing it to f64 would coerce non-number args to NaN at the call
+ *     boundary — the isSameValue miscompile behind #3471.
+ * Returns null to leave the param on its resolved (`externref`) type.
+ */
+export function inferImplicitAnyParamType(
+  ctx: CodegenContext,
+  funcName: string,
+  paramIndex: number,
+  sourceFile: ts.SourceFile,
+  decl: ts.FunctionLikeDeclaration,
+): ValType | null {
+  const callSites = inferParamTypeFromCallSites(ctx, funcName, paramIndex, sourceFile);
+  if (callSites.type) return callSites.type;
+  if (callSites.sawCallSite) return null;
+  return inferParamTypeFromBody(ctx, decl, paramIndex);
 }
 
 /**

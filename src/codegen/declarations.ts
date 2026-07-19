@@ -99,11 +99,7 @@ export {
 } from "./declarations/object-shape-widening.js";
 export { inferNumericReturnTypes } from "./declarations/param-return-inference.js";
 // Import-back: symbols the declaration trunk still calls internally.
-import {
-  inferParamTypeFromBody,
-  inferParamTypeFromCallSites,
-  resolveGenericCallSiteTypes,
-} from "./declarations/param-return-inference.js";
+import { inferImplicitAnyParamType, resolveGenericCallSiteTypes } from "./declarations/param-return-inference.js";
 import {
   collectInterface,
   collectObjectType,
@@ -229,8 +225,9 @@ function lowerParamType(
     (wasmType.kind === "externref" ||
       (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
   ) {
-    let inferred = inferParamTypeFromCallSites(ctx, funcName, index, sourceFile);
-    if (!inferred) inferred = inferParamTypeFromBody(ctx, stmt, index);
+    // (#3471) Call-site inference first; body-usage fallback ONLY for a
+    // genuinely-uncalled function (see inferImplicitAnyParamType).
+    const inferred = inferImplicitAnyParamType(ctx, funcName, index, sourceFile, stmt);
     if (inferred) wasmType = inferred;
   }
   return wasmType;

@@ -2019,6 +2019,21 @@ export interface CodegenContext {
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
   /**
+   * (#3469) Standalone host-free `console.log`/`print` output sink. On
+   * `--target standalone` `console.log` has no host import and no `fd_write`
+   * (unlike WASI), so it lowered to a pure no-op (#3436) — which made the
+   * test262 async completion marker (`$DONE → print → console.log(
+   * "Test262:AsyncTestComplete")`) unobservable. When the source uses
+   * `console.*` in standalone mode, `finalizeUnifiedCollector` sets this flag;
+   * the pre-body phase then mints an in-module `$AnyString` accumulator global
+   * (`__stdout_acc`, index below) + a `__stdout_append` helper, and finalize
+   * emits `__stdout_prepare`/`__stdout_char` readout exports (mirroring the
+   * `__exn_render_*` pattern) so the runner can read printed output host-free.
+   */
+  usesStandaloneConsoleSink: boolean;
+  /** (#3469) Global index of the `__stdout_acc` accumulator, -1 until minted. */
+  stdoutAccGlobalIdx: number;
+  /**
    * (#2866) Type index of the native `$Symbol` carrier struct
    * `(struct (field $id i32) (field $desc (ref null $AnyString)))`, used in
    * `--target standalone`/`wasi` (host-free) to represent a Symbol value as a

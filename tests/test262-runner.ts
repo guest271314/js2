@@ -4286,6 +4286,41 @@ async function runOriginalHarnessVariant(
       const moduleInit = (instance.exports as Record<string, any>).__module_init;
       if (typeof moduleInit === "function") moduleInit();
 
+      // (#3469) Host-free (standalone) async drive + output capture. Standalone
+      // has no host `console` import (kept out so the #2961 gate stays green) and
+      // no `fd_write`, so .then/await continuations live on the in-module WASM
+      // microtask ring and printed output lands in an in-module GC-string sink
+      // rather than `consoleProxy`. Drain the ring so the continuations run
+      // (reaching `$DONE → print → console.log(marker)`), then mirror the native
+      // `__stdout_prepare`/`__stdout_char` sink into `output` so the marker poll
+      // below observes it. Feature-detected intrinsics; no-op on the js-host lane.
+      let standaloneDrainError: unknown = null;
+      if (target === "standalone" && meta.flags?.includes("async")) {
+        const exp = instance.exports as Record<string, any>;
+        if (typeof exp.__drain_microtasks === "function") {
+          try {
+            exp.__drain_microtasks();
+          } catch (err) {
+            standaloneDrainError = err;
+          }
+        }
+        if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
+          let len = 0;
+          try {
+            len = exp.__stdout_prepare() | 0;
+          } catch {
+            len = 0;
+          }
+          if (len > 0) {
+            let sink = "";
+            for (let i = 0; i < len; i++) sink += String.fromCharCode(exp.__stdout_char(i) & 0xffff);
+            for (const line of sink.split("\n")) {
+              if (line.length > 0) appendOutput(line);
+            }
+          }
+        }
+      }
+
       if (meta.flags?.includes("async")) {
         const deadline = Date.now() + Math.min(timeoutMs, 1_000);
         while (
@@ -4321,7 +4356,13 @@ async function runOriginalHarnessVariant(
         return {
           pass: false,
           phase: "runtime",
-          detail: "async completion marker not observed",
+          // (#3469) If the host-free drain threw (an async continuation that
+          // escaped uncaught) and no marker was produced, surface that error as
+          // the test's real async outcome instead of the generic "not observed".
+          detail:
+            standaloneDrainError != null
+              ? `async continuation threw before completion: ${originalHarnessThrownText(standaloneDrainError, instance)}`
+              : "async completion marker not observed",
           timing: timing(),
           wasm_sha,
         };

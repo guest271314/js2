@@ -1321,6 +1321,19 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   // no-op sink (arguments evaluated for side effects, then dropped) — test262
   // verdicts come from thrown exceptions, not printed output — so no console
   // host import is needed here.
+  // (#3469) Standalone has no host console import AND no `fd_write` sink, so
+  // `console.*`/`print` lowered to a pure no-op (#3436) — the test262 async
+  // completion marker (`$DONE → print → console.log("Test262:AsyncTestComplete")`)
+  // went nowhere and every host-free async test timed out unobserved. When the
+  // source uses `console.*` in standalone mode, flag it so the pre-body phase
+  // mints the in-module GC string sink (`__stdout_acc` + `__stdout_append`) and
+  // finalize emits the `__stdout_prepare`/`__stdout_char` readout exports. The
+  // sink stays 100% host-free (WasmGC in-module), so the #2961 import-leak gate
+  // still rejects genuine host imports.
+  if (ctx.standalone && state.consoleNeededByMethod.size > 0) {
+    ctx.usesStandaloneConsoleSink = true;
+  }
+
   if (!ctx.wasi && !ctx.standalone) {
     const CONSOLE_METHODS = ["log", "warn", "error", "info", "debug"] as const;
     for (const method of CONSOLE_METHODS) {
