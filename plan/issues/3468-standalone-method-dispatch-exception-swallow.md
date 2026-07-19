@@ -2,8 +2,10 @@
 id: 3468
 title: "Standalone: method calls on function objects silently swallow assertions (assert.sameValue/throws never fire) — root cause is function-object own-property gap, NOT a catch_all swallow"
 status: blocked
+spec: complete
+assignee: ttraenkler/sendev-3468-closure-props
 created: 2026-07-19
-blocked_reason: "root-caused; needs architect spec (approach A/B/C) + stakeholder floor-rebaseline decision before implementation"
+blocked_reason: "root-caused; C-core implemented + PR open; STAYS blocked pending stakeholder floor-rebaseline decision (this fix flips vacuous standalone passes to correct FAILs — measured delta reported to tech-lead)"
 priority: high
 feasibility: hard
 task_type: bug
@@ -182,3 +184,95 @@ throw); offer as an optional standalone-correctness win, separate PR.
 In the worktree `.tmp/`: `repro.mjs`, `probe2.mjs`-`probe8.mjs`, `caseA.wat`,
 `C_tail.wat`. All use `compile(src, { target: "standalone", ... })` and
 `WebAssembly.instantiate`.
+
+## Implementation Plan
+
+> Recommendation: **Approach C** (runtime closure-identity side property table),
+> phased **C-core → C-complete**. NOT A, NOT B. Verified against `origin/main`.
+
+### Recommendation & why (C over A/B)
+
+The three terminal dispatch helpers **already receive the closure receiver** as
+an externref and simply bail in their "not a `$Object`" arm:
+
+| Op | route | terminal helper (object-runtime.ts) | dead arm today |
+| --- | --- | --- | --- |
+| `f.p = v` | `__set_member_p` | `__extern_set` | non-`$Object` arm → `return` (no-op) |
+| `f.p` | `__get_member_p` | `__extern_get` | miss arm → undefined |
+| `f.m()` | `__call_m_m_0` | `__extern_method_call` | else → `ref.null.extern` |
+
+**C fills those three currently-dead arms.** Blast radius ≈ 0 (the `$Object`
+fast-path is untouched; only closure-receiver property ops, 100% broken today,
+change), general (fixes the `assert` harness AND real programs incl. aliased
+receivers), and reuses the existing `$Object` prop machinery for per-closure
+own props.
+
+### Phasing
+- **C-core (this issue):** wire the 3 helpers + side table. MEASURE floor delta.
+- **C-complete (follow-on):** route reflection (`in` / `delete` / ownKeys /
+  `getOwnPropertyDescriptor`) through the same prop-bag.
+- **A (optional):** compile-time fast-path for statically-named accesses.
+
+### Changes — C-core (as implemented)
+
+**1. Runtime structure** — struct
+`$ClosurePropEntry { next: (mut ref null $ClosurePropEntry); key: eqref; bag: externref }`
++ module global `$__closure_prop_head : (mut ref null $ClosurePropEntry)` init
+`ref.null`. Registered in `ensureObjectRuntime`'s type section, gated on
+`ctx.standalone` (host/gc uses `env::__extern_*` imports → never touches these →
+byte-identical). Linked list: prepend O(1), lookup = walk with `ref.eq`.
+
+**2. Reserved-then-filled helpers** (mirror `reserveApplyClosure`/
+`fillApplyClosure` — reserve funcIdx w/ `unreachable` stub at object-runtime-emit
+time so the `__extern_*` bodies bake a stable `call <idx>`; fill at FINALIZE once
+`collectClosureBaseWrapperTypeIdxs` is complete; the late-import shifter keeps
+`funcMap` + baked calls in sync). Guarded on the `ctx.closurePropHelpersReserved`
+flag so a fill never runs without a reserve.
+- `__is_closure_internal(externref)->i32` — `ref.test` chain over the base
+  wrapper types (same shape as `emitIsClosureExport`).
+- `__closure_bag_lookup(externref recv)->externref` — walk head; `ref.eq(key,
+  recv-as-eqref)` → `bag`; miss → `ref.null.extern` (read; never creates).
+- `__closure_bag_ensure(externref recv)->externref` — as lookup; on miss
+  `bag=__new_plain_object()`, prepend entry, `global.set head`, return bag.
+- `__closure_prop_get(obj,key)->externref` / `__closure_prop_set(obj,key,val)->()`
+  — thin wrappers that self-call `__extern_get`/`__extern_set` on the bag.
+
+> **Deviation from the sketch (WHY):** the spec sketched "3 helpers, inline the
+> arm bodies." But the `set`/`get` arms need to self-call `__extern_set`/
+> `__extern_get` on the bag, and a func's own funcIdx is **not** in `funcMap`
+> while its body is being built (`registerNative` mints at registration time,
+> after the body array is constructed). Routing the self-call through two extra
+> reserved-and-filled wrappers (`__closure_prop_get`/`_set`, filled at FINALIZE
+> when both `__extern_get`/`_set` funcIdxs ARE in `funcMap`) is the clean fix and
+> avoids touching the registration of the two hottest object-runtime funcs.
+> `__extern_method_call`'s else-arm is inlined directly (its deps — `extern_get`,
+> `apply_closure` (reserved), `__nullish_to_null` — are all live at build time).
+
+Receiver→eqref for `ref.eq`: `any.convert_extern` → `ref.cast EQ_HEAP_TYPE(-19)`.
+Closures are eq-structs and `__is_closure_internal` guards every call, so the
+cast is always safe.
+
+**3–5. The three arms** now route their non-`$Object`/miss/else branch through
+the helpers (`__closure_prop_set` / `__closure_prop_get` / inline closure mirror
+guarded by `__is_closure_internal`). `.name`/`.length` `bfnGetMetaIdx` meta-arm
+stays FIRST in `__extern_get`, so builtin metadata still answers before the
+side-table fallback. `.prototype`/`.constructor`/`.__proto__` are special-cased
+upstream and never reach these helpers.
+
+**6. Finalize wiring** — `fillClosurePropHelpers(ctx)` next to `fillApplyClosure`
+in `index.ts`.
+
+### Floor interaction — MEASURE FIRST
+Fixing fn props flips vacuous standalone passes to truth: should-FAIL vacuous
+passes → correctly FAIL (dominant; trips standalone-floor on `merge_group`);
+fail-only-because-method-uncallable → may flip fail→pass. Net truthful,
+predominantly downward. #3468 STAYS `blocked` until the stakeholder approves the
+rebaseline; the red regression test cannot merge before then.
+
+### Test plan (vitest, target "standalone")
+- Harness: `assert.sameValue(1,2)` THROWS; `assert.throws(TypeError,()=>{})`
+  THROWS; control `assert.sameValue(2,2)` no-throw.
+- Own-prop round-trip: `function memo(){}; (memo as any).cache=5; ===5`.
+- Method call + side effect: `(fn as any).m=()=>777; (fn as any).m()===777`.
+- Aliasing/identity: `const g=fn; (g as any).x=5; (fn as any).x===5`.
+- Distinct instances don't cross-talk; builtin `.name`/`.length` not shadowed.
