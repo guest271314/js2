@@ -21,7 +21,7 @@ import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
 import { popBody, pushBody } from "./context/bodies.js";
-import { resolveWidenedVarKey } from "./widened-var-key.js";
+import { resolveWidenedVarKey, integrityVarKey } from "./widened-var-key.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
@@ -494,10 +494,12 @@ export function runtimeAccessorDescriptorKey(
   propName: string,
 ): string | undefined {
   if (!ts.isIdentifier(receiver)) return undefined;
-  const key = `${receiver.text}:${propName}`;
-  const flags = ctx.definedPropertyFlags.get(key);
-  if (flags !== undefined && (flags & DESCRIPTOR_FLAG_ACCESSOR) !== 0 && ctx.sidecarDefinedPropertyKeys.has(key)) {
-    return key;
+  // (#3403) definedPropertyFlags is per-declaration keyed; sidecar stays bare.
+  const dpfKey = `${integrityVarKey(ctx, receiver)}:${propName}`;
+  const bareKey = `${receiver.text}:${propName}`;
+  const flags = ctx.definedPropertyFlags.get(dpfKey);
+  if (flags !== undefined && (flags & DESCRIPTOR_FLAG_ACCESSOR) !== 0 && ctx.sidecarDefinedPropertyKeys.has(bareKey)) {
+    return bareKey;
   }
 
   // The source fallback below exists for module globals whose function bodies
@@ -551,7 +553,7 @@ export function runtimeAccessorDescriptorKey(
     ts.forEachChild(node, visit);
   };
   visit(receiver.getSourceFile());
-  return found ? key : undefined;
+  return found ? bareKey : undefined;
 }
 
 export function emitRuntimeDescriptorGet(
