@@ -1758,7 +1758,18 @@ export interface CodegenContext {
    * `__async_gen_next_<stem>` helper typed for the FIRST gen's frame — a
    * guaranteed `ref.cast` trap for the second).
    */
-  asyncGenProducers?: Map<string, { stateTypeIdx: number; nextHelperName: string; decl: ts.Node }>;
+  asyncGenProducers?: Map<
+    string,
+    {
+      stateTypeIdx: number;
+      nextHelperName: string;
+      decl: ts.Node;
+      /** (#3389 slice 2a) `__async_gen_return_<stem>` — the `.return(v)` driver. */
+      returnHelperName?: string;
+      /** (#3389 slice 2a) `__async_gen_throw_<stem>` — the `.throw(e)` driver. */
+      throwHelperName?: string;
+    }
+  >;
   /**
    * (#2865) True once ANY async generator was emitted on the LEGACY buffer path
    * (`__create_async_generator`). The `.next()` runtime dispatch chain uses this

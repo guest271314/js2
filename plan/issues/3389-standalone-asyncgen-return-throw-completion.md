@@ -20,9 +20,15 @@ related: [3132, 3387, 3388, 2865, 2906]
 origin: "2026-07-17 fable-3178 umbrella decomposition — #3132 S4 banked slice, re-grounded: __gen_set_return 268 / __gen_return (async combos) / __gen_throw 80 rows."
 # Slice 1: settleReturn terminator — analyzer admission + CFG plan (async-cps.ts)
 # and the emitter arm + validateAsyncCfg (async-frame.ts).
+# Slice 2a: .return()/.throw() drivers (async-frame.ts) + consumer dispatch
+# (calls.ts) + recognition (call-receiver-method.ts) + producer registry
+# (context/types.ts).
 loc-budget-allow:
   - src/codegen/async-cps.ts
   - src/codegen/async-frame.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/context/types.ts
 ---
 
 # #3389 — async-gen `return`/`throw` completion for the driven lane
@@ -189,3 +195,81 @@ top-level `return E` shape. Two follow-ups remain for the full ~268-row bucket:
   rows — the return-completion handler must run the `finally` on the return
   path (out of scope for slices 1–2; needs the async-frame handler-region
   generalization, cross-ref #2906 gap-3 try/finally).
+
+## Slice 2 — implementation-ready spec (fable-dev-3, 2026-07-18)
+
+Full source investigation done; this is a de-risked, ground-truth spec so slice 2
+can be implemented cleanly (fresh, not rushed at a deep session's tail — it
+touches the shared async-gen frame state machine that 5 in-flight PRs ride).
+Two independent sub-slices, ONE PR each.
+
+### Sub-slice 2a — `.return(v)` / `.throw(e)` consumer methods (LOW RISK)
+
+**Key simplification:** bodies with try/finally or catch ACROSS a yield stay
+legacy (that's sub-slice 2b / out of scope). So for every gen the driven lane
+ADMITS, a suspended-at-yield `.return(v)`/`.throw(e)` runs NO further body — it
+just completes the frame. Therefore we do NOT need to kick the resume machine
+or add a MODE_RETURN/MODE_THROW resume path. Just settle + mark-done.
+
+**Mark-done WITHOUT touching the shared dispatch:** set `frame.STATE` to the
+gen's existing `settleDone` state id. A subsequent `.next()` re-dispatches
+there → `{value: undefined, done: true}` (settleDone is entry-independent). No
+done-guard, no change to `emitAsyncFrameStateMachine`'s if-chain (zero
+regression surface on the shared machine).
+
+Steps (all in async-frame.ts + the two dispatch files):
+
+1. `AsyncFrameInfo.settleDoneStateId?: number`. In `ensureAsyncResumeFunction`
+   after `cfg` is built (async-frame.ts:1044), set it to the id of the state
+   whose `terminator.kind === "settleDone"` (exactly one per gen cfg — the last
+   state; for a `return E` body it's the trailing settleDone slice 1 appended).
+2. `emitAsyncGenReturnThrowHelpers(ctx, info, promiseTypeIdx)` next to
+   `emitAsyncGenNextHelper` (async-frame.ts:2530). Two exported funcs
+   `(frame externref, arg externref) -> externref`:
+   - `__async_gen_return_<stem>`: f=cast; p=fresh pending $Promise;
+     f.result_promise=p; build IteratorResult `{value: arg, done: 1}`
+     (`ensureNativeGeneratorResultType(ctx,{externref})`); `rt.fulfillFuncIdx(p,
+result)`; `f.STATE = info.settleDoneStateId`; return p.
+   - `__async_gen_throw_<stem>`: f=cast; p=fresh; f.result_promise=p;
+     `rt.rejectFuncIdx(p, arg)`; `f.STATE = settleDoneStateId`; return p.
+     (`rt = ensureAsyncDriveRuntime(ctx)`; `.fulfillFuncIdx`/`.rejectFuncIdx` —
+     the same handles `emitAsyncFrameStateMachine` uses at async-frame.ts:1247.)
+     §27.6.3.9: a completed-frame `.throw` still rejects — same code path (STATE
+     already at settleDone; reject again is correct). `.return` on a completed
+     frame → `{value: v, done: true}` — same path.
+3. In `emitAsyncGenerator` (async-frame.ts:2457) call the new helper after
+   `emitAsyncGenNextHelper`. Extend `ctx.asyncGenProducers` entry with
+   `returnHelperName`/`throwHelperName` (additive — #2570/#3388 delegate
+   resolution reads `nextHelperName`/`stateTypeIdx`/`decl` only, so new optional
+   fields are inert there).
+4. `tryEmitAsyncGenReturnThrowDispatch(ctx, fctx, receiverExpr, method, argExpr)`
+   in calls.ts, modeled on `tryEmitAsyncGenNextDispatch` (calls.ts:4400) — same
+   `ref.test` producer chain, but call `p.returnHelperName`/`throwHelperName`
+   with (recv, arg). Miss arm: host `__gen_return`/`__gen_throw` only when
+   `asyncGenLegacyBufferEmitted`, else null (host-free floor), mirroring next.
+5. Recognize `.return(v)`/`.throw(e)` (arg count 0 or 1) on the
+   `AsyncGenerator`/`AsyncIterableIterator`/`AsyncIterator` receiver at
+   call-receiver-method.ts:337-349 (the block that today only handles `.next()`
+   and comments "`.throw()`/`.return()` are 3d-iii").
+
+- Corpus: `built-ins/AsyncGeneratorPrototype/{return,throw}` (25 rows) + the
+  `__gen_throw` (80) / `__gen_set_return` combos on simple-body gens.
+- Tests: `.return(v)` on a suspended-at-yield gen → `{v,true}` + subsequent
+  next→`{undefined,true}`; `.throw(e)` → rejected(e) + gen done; `.return`/
+  `.throw` on a completed gen; correct-or-legacy: a gen with try/finally across
+  a yield keeps the legacy path (its `.return` runs finally — 2b).
+
+### Sub-slice 2b — try-across-yield return admission (HIGHER RISK, the corpus multiplier)
+
+WHY slice-1's corpus flip was modest: most `has-return` async-gen corpus files
+wrap the `return` in `try { … yield … } finally { … }` (or catch), which
+`analyzeAsyncGen` bails today (`containsAwaitOrYield` on the try lead + no
+handler-region support in the GEN cfg). Admitting them needs the #2906 Gap-3
+handler-region machinery (finalizer inline copy + abrupt-path catch replay,
+async-frame.ts:1833-1871) EXTENDED to the async-gen settleYield/settleReturn
+terminators: a `.return()`/`.throw()` or a body `return` that crosses a try must
+run the `finally` on the completion path before settling. This is the genuinely
+hard part (handler regions interacting with the yield suspend/resume + the
+return completion) and should be its own carefully-validated PR after 2a, using
+the #3132 S2 lockstep tests as the mix-safety template. Out of scope until 2a
+lands and the handler-region-in-gen design gets an architect pass.
