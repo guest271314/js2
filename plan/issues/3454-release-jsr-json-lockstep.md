@@ -9,7 +9,7 @@ completed: 2026-07-19
 priority: high
 horizon: s
 feasibility: easy
-task_type: bug
+task_type: infrastructure
 area: ci, release
 goal: release-pipeline
 related: [3453, 3455]
