@@ -1,7 +1,8 @@
 ---
 id: 3422
 title: "Strict-mode rerun: read-only assign / delete non-configurable don't match spec — ~666 default reclassifications"
-status: ready
+status: in-progress
+assignee: ttraenkler/senior-dev
 created: 2026-07-18
 priority: medium
 feasibility: medium
