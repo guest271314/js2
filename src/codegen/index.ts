@@ -369,7 +369,24 @@ const TYPED_ARRAY_PACKED_STORAGE: Readonly<Record<string, { key: string; type: V
   Uint32Array: { key: "i32_elem", type: { kind: "i32" } },
 };
 
+/**
+ * (#838) The two BigInt typed-array views. Unlike the numeric views these can
+ * NOT fall back to `f64` element storage — an f64 cannot hold an arbitrary
+ * 64-bit BigInt. They always use a dedicated `i64` element vec in BOTH the
+ * host/gc and standalone/WASI lanes (BigInt is represented as a first-class
+ * `{ kind: "i64", bigint: true }` value throughout the compiler, so `array.get`/
+ * `array.set` on the i64 backing array need no packing/unpacking). `BigInt64Array`
+ * stores signed 64-bit two's-complement; `BigUint64Array` stores the same 64 raw
+ * bits interpreted unsigned — the wasm i64 element holds identical bits either
+ * way (ToBigInt64/ToBigUint64 both reduce mod 2^64, which i64 arithmetic already
+ * does), so both map to the same `i64` storage.
+ */
+export const BIGINT_TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set(["BigInt64Array", "BigUint64Array"]);
+
 export function typedArrayVecStorage(ctx: CodegenContext, name: string): { key: string; type: ValType } {
+  // (#838) BigInt views always use i64 storage, independent of target mode —
+  // f64 cannot represent a 64-bit BigInt.
+  if (BIGINT_TYPED_ARRAY_NAMES.has(name)) return { key: "i64", type: { kind: "i64" } };
   if (ctx.wasi || ctx.standalone) {
     const packed = TYPED_ARRAY_PACKED_STORAGE[name];
     if (packed) return packed;
@@ -5319,7 +5336,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // storage; other typed arrays keep the legacy f64 representation.
     // Covers: Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
     //         Int32Array, Uint32Array, Float32Array, Float64Array
-    if (sym?.name && TYPED_ARRAY_NAMES.has(sym.name)) {
+    // (#838) BigInt64Array/BigUint64Array resolve to an i64-element vec (they are
+    // deliberately kept OUT of `TYPED_ARRAY_NAMES` so the f64-assuming host
+    // marshalling classifier treats them as "other"; `typedArrayVecStorage`
+    // returns i64 for them).
+    // (#838 gate — fable-dev-5) Only in standalone/wasi: in js-host the BigInt
+    // views stay host globals (externref) so SharedArrayBuffer/Atomics interop
+    // works — the native i64-vec has no js-host Atomics bridge yet (see the
+    // construction-path notes in new-builtin-globals.ts / new-super.ts). Numeric
+    // views map to a native vec in js-host too, but their Atomics bridge exists.
+    const isBigIntView838 = sym?.name !== undefined && BIGINT_TYPED_ARRAY_NAMES.has(sym.name);
+    if (sym?.name && (TYPED_ARRAY_NAMES.has(sym.name) || (isBigIntView838 && (ctx.wasi || ctx.standalone)))) {
       const storage = typedArrayVecStorage(ctx, sym.name);
       const vecIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
       return { kind: "ref_null", typeIdx: vecIdx };
@@ -6176,6 +6203,13 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     // resolveStructNameForExpr sees the override at every later access.
     let initForcesExternref = false;
     if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      // (#802 Slice A) A proto-receiver object literal is built as an open
+      // `$Object` (externref, standalone-only) in compileObjectLiteral; the
+      // hoisted `var` slot must be externref to match (mirrors the let/const path
+      // in statements/variables.ts via ctx.dynamicProtoLiteralNodes).
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(decl.initializer)) {
+        initForcesExternref = true;
+      }
       for (const p of decl.initializer.properties) {
         if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
           initForcesExternref = true;
@@ -6824,11 +6858,25 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
             (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
             spreadCtxType.getProperties().length === 0;
         }
-        if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
+        // (#802 Slice A) A proto-receiver object literal is promoted to an open
+        // `$Object` (externref) by compileObjectLiteral. This pre-hoist allocator
+        // is the AUTHORITATIVE let/const slot-typer, so the externref override
+        // MUST be applied here too — otherwise the slot is the inferred struct and
+        // the promoted `$Object` externref is ref.cast to it at runtime (cast
+        // fails → the receiver goes null and `o.x`/inherited reads return NaN).
+        // Registers the name in externrefAccessorVars so reads route through the
+        // dynamic `__extern_get` path. Standalone-only (gc/host keeps its existing
+        // closed-struct + host-sidecar path unchanged).
+        const initIsProtoReceiverLiteral =
+          ctx.standalone &&
+          decl.initializer !== undefined &&
+          ts.isObjectLiteralExpression(decl.initializer) &&
+          ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+        if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
         let wasmType: ValType =
-          initIsAccessorLiteral || initIsHostSpreadLiteral
+          initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral
             ? { kind: "externref" }
             : isI32Coerced
               ? { kind: "i32" }
