@@ -10,7 +10,6 @@ import { resolveArrayInfo } from "../array-methods.js";
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
-import { emitToString } from "../coercion-engine.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
 import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
 import { ensureAnyToStringHelper, ensureNativeStringExternBridge } from "../native-strings.js";
@@ -43,12 +42,42 @@ function compileConsoleCall(
   // (`$DONE → print → console.log("Test262:AsyncTestComplete")`) is observable.
   if (ctx.standalone) {
     const appendName = "__stdout_append";
-    // Re-read the append funcidx BY NAME at every emission point: `emitToString`
-    // / `compileExpression` below can insert a late import that shifts every
+    // Re-read the append funcidx BY NAME at every emission point: the arg compile
+    // / `ensureAnyToStringHelper` below can insert a late import that shifts every
     // function index (#2642) — a cached idx would resolve to the wrong function.
     const emitAppend = (): void => {
       const idx = ctx.funcMap.get(appendName);
       if (idx !== undefined) fctx.body.push({ op: "call", funcIdx: idx });
+    };
+    // Render a value already on the stack (compiled ValType `vt`) to a native
+    // `$AnyString` HOST-FREE and append it. Dispatch is on the COMPILED ValType
+    // (a wasm-lowering question), NOT the TS static type — the latter would trip
+    // the oracle-ratchet gate AND be wrong here: the test262 marker reaches
+    // console.log through `any`-typed harness params
+    // (`$DONE → __consolePrintHandle__(msg) → print(value) → console.log(value)`),
+    // so at THIS call site the arg is `any` → externref, not string. Everything
+    // routes through `__any_to_string` (the native, IMPORT-FREE stringifier the
+    // exn-render path uses) — NEVER emitToString's externref arm, which would
+    // register the `__extern_toString` host import and trip #2961.
+    const renderAndAppend = (vt: ValType | null): void => {
+      if (vt === null) return; // void arg — nothing was pushed
+      if (vt.kind === "externref") {
+        // externref is a separate hierarchy from anyref — convert first.
+        fctx.body.push({ op: "any.convert_extern" });
+      } else if (vt.kind !== "ref" && vt.kind !== "ref_null") {
+        // Scalar (f64/i32/i64): a number/boolean passed directly. Never a marker
+        // (markers are strings), so drop it best-effort to keep the stack balanced.
+        fctx.body.push({ op: "drop" });
+        return;
+      }
+      // A native `$AnyString` (literal/concat/template) or a struct ref — both are
+      // `anyref` subtypes, so `__any_to_string` renders them directly (strings
+      // pass through; objects → "[object Object]").
+      const anyToStrIdx = ensureAnyToStringHelper(ctx);
+      flushLateImportShifts(ctx, fctx);
+      const idx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
+      fctx.body.push({ op: "call", funcIdx: idx });
+      emitAppend();
     };
     if (ctx.funcMap.get(appendName) === undefined) {
       // The sink helper was not minted (native strings unavailable, or the
@@ -66,40 +95,7 @@ function compileConsoleCall(
         emitAppend();
       }
       first = false;
-      const tsType = ctx.checker.getTypeAtLocation(arg);
-      const valType = compileExpression(ctx, fctx, arg);
-      // Render the argument to a native `$AnyString` HOST-FREE. The test262 async
-      // marker reaches `console.log` through `any`-typed harness params
-      // (`$DONE → __consolePrintHandle__(msg) → print(value) → console.log(value)`),
-      // so at THIS call site the arg is statically `any`, compiled to an
-      // `externref` — NOT string-typed. A static-type gate would drop it.
-      let producedString: boolean;
-      if (valType !== null && valType.kind === "externref") {
-        // externref → anyref → `__any_to_string` (the native, IMPORT-FREE
-        // stringifier the exn-render path uses). emitToString's externref arm
-        // would instead register the `__extern_toString` HOST import and trip the
-        // #2961 import-leak gate — that is exactly what we must avoid here.
-        fctx.body.push({ op: "any.convert_extern" });
-        const anyToStrIdx = ensureAnyToStringHelper(ctx);
-        flushLateImportShifts(ctx, fctx);
-        const idx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
-        fctx.body.push({ op: "call", funcIdx: idx });
-        producedString = true;
-      } else {
-        // string / number / boolean / struct-ref / void — every `emitToString`
-        // arm reachable here is host-free (string pass-through, native
-        // `number_toString`/bool, or the `__any_to_string` struct arm). The
-        // importing externref arm is unreachable (handled above).
-        const st = emitToString(ctx, fctx, valType, tsType, "string");
-        producedString = st.kind === "ref" || st.kind === "ref_null";
-      }
-      if (producedString) {
-        emitAppend();
-      } else {
-        // emitToString declined (e.g. `number_toString` not registered) and left
-        // a scalar on the stack — drop it to keep the stack balanced.
-        fctx.body.push({ op: "drop" });
-      }
+      renderAndAppend(compileExpression(ctx, fctx, arg));
     }
     compileStringLiteral(ctx, fctx, "\n");
     emitAppend();

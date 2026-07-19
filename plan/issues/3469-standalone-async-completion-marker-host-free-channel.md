@@ -52,13 +52,18 @@ observes completion.
 ## Fix (runtime + runner, dual-lane)
 
 1. **RUNTIME (compiler):** give `--target standalone` a native host-free output
-   sink for `console.log`/`print`. Accumulate each call's rendered arguments
-   (via the existing `emitToString` value→native-string cascade) into an
-   in-module `$AnyString` global (`__stdout_acc`), joined with spaces + a
-   trailing newline. Expose readout exports `__stdout_prepare() -> i32` (flatten,
-   return code-unit length) and `__stdout_char(i) -> i32`, mirroring the existing
-   `__exn_render_prepare`/`__exn_render_char` pattern. Stays 100% host-free
-   (WasmGC in-module) so the #2961 import-leak gate still rejects genuine leaks.
+   sink for `console.log`/`print`. Each argument is rendered to a native
+   `$AnyString` via `__any_to_string` (the import-free stringifier the exn-render
+   path uses; `externref` args are `any.convert_extern`'d first), then appended to
+   an in-module `$AnyString` accumulator global (`__stdout_acc`), joined with
+   spaces + a trailing newline. Dispatch is on the compiled **ValType** (a
+   wasm-lowering question), NOT the TS static type — the latter trips the
+   oracle-ratchet gate and is wrong here (see the `any`-param note below). Expose
+   readout exports `__stdout_prepare() -> i32` (flatten, return code-unit length)
+   and `__stdout_char(i) -> i32`, mirroring `__exn_render_prepare`/
+   `__exn_render_char`. Stays 100% host-free (WasmGC in-module) so the #2961
+   import-leak gate still rejects genuine leaks. Bare scalar args (a number/bool
+   passed directly, `f64`/`i32`) are dropped best-effort — never a marker.
 2. **RUNNER (worker + local runner):** in the originalHarness `asyncTest` path,
    for the standalone (host-free) target, call
    `instance.exports.__drain_microtasks()` after top-level `(start)` execution,
@@ -95,10 +100,17 @@ empirically on a representative subset (see Test Results), NOT claimed at 2,024.
   harness params (`$DONE → __consolePrintHandle__(msg) → print(value) →
   console.log(value)`), so at the call site the arg is statically `any`, compiled
   to an `externref`. A static-type gate that only rendered `string` args dropped
-  it. Fix: the externref/any arm renders host-free via `any.convert_extern` +
-  `__any_to_string` (the same native stringifier the exn-render path uses) — NOT
+  it. Fix: dispatch on the compiled ValType and render every non-scalar via
+  `__any_to_string` (`externref` → `any.convert_extern` first; `ref`/`ref_null`
+  native-string/struct are `anyref` subtypes rendered directly) — never
   `emitToString`'s externref arm, which would register the `__extern_toString`
   host import and trip #2961.
+- **ValType dispatch, not `ctx.checker` (oracle-ratchet).** Using
+  `ctx.checker.getTypeAtLocation(arg)` here would trip the #1930/#3273
+  oracle-ratchet gate (`quality`). It is also unnecessary: what we need is a
+  wasm-lowering question ("is the compiled value an externref, a GC ref, or a
+  scalar?"), answerable from the ValType alone — which is deliberately ABOVE what
+  `ctx.oracle` expresses. Net checker growth is 0.
 
 ## Test Results
 
