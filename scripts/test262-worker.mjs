@@ -207,6 +207,7 @@ const _origArrayProtoSymbols = new Set(Object.getOwnPropertySymbols(Array.protot
 // safer mechanism (e.g. process.disconnect() before exit, or per-test
 // fork recycle for known-polluter test paths).
 const _typedArrayProto = Object.getPrototypeOf(Int8Array.prototype); // %TypedArray%.prototype
+const _typedArrayCtor = Object.getPrototypeOf(Int8Array); // %TypedArray% (abstract constructor)
 const _iteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
 const _PROTO_EXTRA_CLEANUP = [
   ["Number.prototype", Number.prototype],
@@ -539,6 +540,153 @@ const _accessorOrig = _ACCESSOR_SNAPSHOTS.map(([name, obj, keys]) => ({
     .filter(([, d]) => d !== undefined && typeof d.get === "function"),
 }));
 
+// --- Category 5 (#3470) — function .name/.length own-property restore.
+//
+// test262's verifyProperty() (harness/propertyHelper.js:63-66 asserts
+// __hasOwnProperty(obj, name); the destructive probe is isConfigurable() at
+// line 140, `delete obj[name]`) probes configurable:true via
+// `delete obj[name]` and does NOT restore when no `restore` option is
+// passed -- the common case for built-ins/**/name.js and length.js tests.
+// When `obj` is itself a prototype method or a constructor (e.g.
+// `Date.prototype.getYear`, `Int8Array`), the delete removes THAT
+// FUNCTION's own "name"/"length" sub-property. None of the restore logic
+// above catches this: the function's identity never changes
+// (Date.prototype.getYear is still the same function reference), so
+// _restoreMethodProp's `cur === orig` check is a no-op. The next test
+// (whether that's this same test's auto strict-rerun landing on the same
+// fork, or any later test that reads the sub-property) then sees it
+// missing and fails "obj should have an own property name"/"length". Real
+// Node passes (fresh realm per test); standalone passes (fresh per-module
+// builtins). Only this shared-host-builtin fork leaks.
+//
+// The curated _METHOD_SNAPSHOTS/_STATIC_SNAPSHOTS lists above don't cover
+// every method (e.g. annexB Date.prototype.getYear isn't listed at all),
+// so rather than extending those lists this enumerates every
+// function-valued own property on a comprehensive root-object list
+// directly -- closing the gap for annexB methods too, without touching the
+// FATAL/recycle validation paths above (kept best-effort: built-in
+// function name/length descriptors are always configurable:true per spec,
+// so defineProperty here should never fail in practice).
+const _FN_SUBPROP_ROOTS = [
+  Object.prototype,
+  Object,
+  Array.prototype,
+  Array,
+  String.prototype,
+  String,
+  Number.prototype,
+  Number,
+  Boolean.prototype,
+  Boolean,
+  Function.prototype,
+  RegExp.prototype,
+  RegExp,
+  Map.prototype,
+  Set.prototype,
+  WeakMap.prototype,
+  WeakSet.prototype,
+  Promise.prototype,
+  Promise,
+  Error.prototype,
+  Date.prototype,
+  Date,
+  Math,
+  JSON,
+  Reflect,
+  _typedArrayProto,
+  _typedArrayCtor,
+  Int8Array.prototype,
+  Int8Array,
+  Uint8Array.prototype,
+  Uint8Array,
+  Uint8ClampedArray.prototype,
+  Uint8ClampedArray,
+  Int16Array.prototype,
+  Int16Array,
+  Uint16Array.prototype,
+  Uint16Array,
+  Int32Array.prototype,
+  Int32Array,
+  Uint32Array.prototype,
+  Uint32Array,
+  Float32Array.prototype,
+  Float32Array,
+  Float64Array.prototype,
+  Float64Array,
+  BigInt64Array.prototype,
+  BigInt64Array,
+  BigUint64Array.prototype,
+  BigUint64Array,
+  DataView.prototype,
+  DataView,
+  _iteratorProto,
+];
+
+function _snapshotFnSubProps(root) {
+  const out = [];
+  let keys;
+  try {
+    keys = [...Object.getOwnPropertyNames(root), ...Object.getOwnPropertySymbols(root)];
+  } catch {
+    return out;
+  }
+  for (const key of keys) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(root, key);
+    } catch {
+      continue;
+    }
+    if (!desc || typeof desc.value !== "function") continue;
+    const fn = desc.value;
+    out.push({
+      fn,
+      nameDesc: Object.getOwnPropertyDescriptor(fn, "name"),
+      lengthDesc: Object.getOwnPropertyDescriptor(fn, "length"),
+    });
+  }
+  return out;
+}
+
+const _fnSubPropOrig = (() => {
+  const seen = new Set();
+  const out = [];
+  for (const root of _FN_SUBPROP_ROOTS) {
+    for (const snap of _snapshotFnSubProps(root)) {
+      if (seen.has(snap.fn)) continue;
+      seen.add(snap.fn);
+      out.push(snap);
+    }
+  }
+  return out;
+})();
+
+function _restoreFnSubProp(fn, key, orig) {
+  if (!orig) return true;
+  let cur;
+  try {
+    cur = Object.getOwnPropertyDescriptor(fn, key);
+  } catch {
+    cur = undefined;
+  }
+  if (
+    cur &&
+    cur.value === orig.value &&
+    cur.writable === orig.writable &&
+    cur.enumerable === orig.enumerable &&
+    cur.configurable === orig.configurable
+  ) {
+    return true;
+  }
+  try {
+    Object.defineProperty(fn, key, orig);
+  } catch {
+    /* residual check below */
+  }
+  const after = Object.getOwnPropertyDescriptor(fn, key);
+  return !!after && after.value === orig.value;
+}
+
 // Same sentinel-style dirty check as the JS-host test262 runner (#1310),
 // applied in the unified sharded worker so both js-host and standalone matrix
 // targets recycle a fork after a test mutates core host prototypes.
@@ -835,6 +983,16 @@ function restoreBuiltins() {
       console.error(`[unified-worker pid=${process.pid}] FATAL: ${reason} — recycling`);
       return recycleCleanup(reason);
     }
+  }
+
+  // (#3470) Restore function .name/.length sub-properties (see
+  // _FN_SUBPROP_ROOTS comment above) poisoned by verifyProperty()'s
+  // unrestored configurability probe. Best-effort, not wired into the
+  // FATAL/recycle checks above -- a missing name/length sub-prop doesn't
+  // break compilation the way the poison classes above do.
+  for (const { fn, nameDesc, lengthDesc } of _fnSubPropOrig) {
+    _restoreFnSubProp(fn, "name", nameDesc);
+    _restoreFnSubProp(fn, "length", lengthDesc);
   }
   return cleanCleanup();
 }
