@@ -89,7 +89,6 @@ import {
   methodBodyUsesSuper,
   fnExprBodyReferencesThis,
   bodyReferencesOwnName,
-  bodyHasNewTryRegionAcrossYield,
   isFunctionLikeScope,
 } from "./generators-native-ast-scan.js";
 
@@ -1578,6 +1577,56 @@ function bodyReferencesUnresolvableIdentifier(ctx: CodegenContext, decl: Generat
 }
 
 /**
+ * (#3032 W6) HOST-lane shape bails for the native routing, covering the two
+ * body shapes the state machine still miscompiles (verified pre-existing on
+ * the standalone lane, where they are baseline-accounted; the host lane must
+ * not INHERIT them as pass→fail flips — it keeps the eager path instead):
+ *
+ *   - `yield (… yield …)` — a yield nested in another yield's operand. The
+ *     plan builder collapses the two suspends (first `next()` returns the
+ *     OUTER operand instead of the inner yield's value —
+ *     `generators/yield-as-yield-operand.js` returns 0 for `yield yield 1`).
+ *   - `yield*` delegation — the host-lane resume fn routes the delegate
+ *     through the `__iterator` chain, which traps (`illegal cast`) when the
+ *     delegate is a host-side generator object (an eager-lowered inner —
+ *     `generators/yield-star-before-newline.js`). Standalone delegates
+ *     native→native and is unaffected.
+ *
+ * Both scans stop at nested function boundaries (a nested generator's yields
+ * are its own).
+ */
+function bodyHasHostUnsupportedYieldShape(decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  let found = false;
+  const containsYield = (node: ts.Node): boolean => {
+    if (ts.isYieldExpression(node)) return true;
+    if (isFunctionLikeScope(node)) return false;
+    let hit = false;
+    ts.forEachChild(node, (c) => {
+      if (!hit && containsYield(c)) hit = true;
+    });
+    return hit;
+  };
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (isFunctionLikeScope(node)) return;
+    if (ts.isYieldExpression(node)) {
+      if (node.asteriskToken) {
+        found = true; // yield* delegation
+        return;
+      }
+      if (node.expression && containsYield(node.expression)) {
+        found = true; // yield nested in a yield operand
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
+/**
  * (#3050) Conservative HOST-lane use-site safety walk. The native generator
  * state struct is a WasmGC ref the JS host cannot iterate, so it must never
  * escape to a host-iterating context. Walks every `<name>(…)` call in the
@@ -1616,14 +1665,117 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
     );
   };
 
-  /** A reference/result value consumed in an allowlisted, host-safe position? */
-  const useIsSafe = (node: ts.Node): boolean => {
+  /**
+   * (#3032 W6) The `{value, done}` RESULT of a `.next()/.return()/.throw()`
+   * call on a native generator is ALSO a raw WasmGC struct. Reflection on it
+   * (`Object.getPrototypeOf(result)`, passing it as a call argument like
+   * `hasOwnProperty.call(result, …)`) sees the struct, not a plain object —
+   * `GeneratorPrototype/next/result-prototype.js` regressed exactly there. So
+   * a result value must itself stay in allowlisted consumers: property reads
+   * (`r.value`/`r.done`), `typeof`, statement-drop, or a binding whose every
+   * use is again allowlisted.
+   */
+  const resultConsumptionIsSafe = (call: ts.Node): boolean => {
+    const p = call.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === call) return true; // .value/.done chains
+    if (ts.isExpressionStatement(p)) return true; // result dropped
+    if (ts.isTypeOfExpression(p)) return true;
+    if (ts.isParenthesizedExpression(p)) return resultConsumptionIsSafe(p);
+    if (ts.isVariableDeclaration(p) && p.initializer === call && ts.isIdentifier(p.name)) {
+      return resultBindingUsesAreSafe(p.name);
+    }
+    if (
+      ts.isBinaryExpression(p) &&
+      p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      p.right === call &&
+      ts.isIdentifier(p.left)
+    ) {
+      if (!resultBindingUsesAreSafe(p.left)) return false;
+      // The assignment expression's own value is the result too.
+      return ts.isExpressionStatement(p.parent) ? true : resultConsumptionIsSafe(p);
+    }
+    return false;
+  };
+
+  /** Every reference of a RESULT binding is an allowlisted result consumer? */
+  const resultBindingUsesAreSafe = (bindingName: ts.Identifier): boolean => {
+    const sym = checker.getSymbolAtLocation(bindingName);
+    if (!sym) return false;
+    let safe = true;
+    const visitRef = (node: ts.Node): void => {
+      if (!safe) return;
+      if (ts.isIdentifier(node) && node.text === bindingName.text && node !== bindingName) {
+        if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+        if (ts.isPropertyAssignment(node.parent) && node.parent.name === node) return;
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
+        const refSym = checker.getSymbolAtLocation(node);
+        if (refSym !== sym) return;
+        const p = node.parent;
+        if (ts.isPropertyAccessExpression(p) && p.expression === node) return; // r.value / r.done
+        if (ts.isTypeOfExpression(p)) return;
+        // Reassignment target — the RHS is checked at its own call site.
+        if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
+          return;
+        }
+        safe = false;
+      }
+      ts.forEachChild(node, visitRef);
+    };
+    ts.forEachChild(sf, visitRef);
+    return safe;
+  };
+
+  /**
+   * A reference/result value consumed in an allowlisted, host-safe position?
+   *
+   * `viaBinding` distinguishes the TWO ways this walk reaches a consumer:
+   *
+   *   - `false` — the node is the generator CALL expression itself
+   *     (`for (x of g())`, `[...g()]`, `Array.from(g())`, `g().next()`). The
+   *     for-of driver / spread-drain / Array.from-drain all see the call's
+   *     native state-struct ValType directly, so they lower to the WasmGC
+   *     native path (`tryCompileNativeGeneratorForOf` / `emitNativeGeneratorToVec`).
+   *
+   *   - `true` — the node is a REFERENCE to a `var/let iter = g()` binding
+   *     (`for (x of iter)`, `[...iter]`, `Array.from(iter)`). The binding's
+   *     inferred TS type is `Generator<T>`, which resolves to **externref**, so
+   *     the generator result is `extern.convert_any`-coerced on assignment and
+   *     the state-struct type is LOST at the reference. An iteration/drain
+   *     consumer over that externref falls to the JS-host iterator protocol,
+   *     which cannot drive a raw WasmGC struct — `next()` reports `done` on the
+   *     first call and the loop body is silently skipped (#3468: for-of
+   *     break/continue/return-label tests over `var it = values()` regressed to
+   *     "unreachable following for..of"). Only `.next()/.throw()/.return()`
+   *     member CALLS have a native-aware lowering that recognises the struct
+   *     through the externref; every host-protocol iteration consumer of a
+   *     binding is unsafe and keeps the generator on the eager host path.
+   */
+  const useIsSafe = (node: ts.Node, viaBinding: boolean): boolean => {
     const p = node.parent;
-    if (ts.isPropertyAccessExpression(p) && p.expression === node) return true; // .next()/.throw()/.value…
-    if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
-    if (ts.isSpreadElement(p)) return true;
-    if (isArrayFromArg(node)) return true;
-    if (ts.isParenthesizedExpression(p)) return useIsSafe(p);
+    if (ts.isPropertyAccessExpression(p) && p.expression === node) {
+      // (#3032 W6) A resume-method CALL (`it.next()/…`) produces a raw result
+      // struct — its consumption must be allowlisted too (see
+      // resultConsumptionIsSafe). Non-call member reads (`.value`, `.length`)
+      // and other member names keep the original terminal-safe answer.
+      const memberName = p.name.text;
+      if (
+        (memberName === "next" || memberName === "return" || memberName === "throw") &&
+        ts.isCallExpression(p.parent) &&
+        p.parent.expression === p
+      ) {
+        return resultConsumptionIsSafe(p.parent);
+      }
+      return true;
+    }
+    // Iteration / drain consumers are native-safe ONLY over the direct call
+    // expression (state-struct ValType visible), NOT over an externref binding
+    // reference (#3468).
+    if (!viaBinding) {
+      if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
+      if (ts.isSpreadElement(p)) return true;
+      if (isArrayFromArg(node)) return true;
+    }
+    if (ts.isParenthesizedExpression(p)) return useIsSafe(p, viaBinding);
     return false;
   };
 
@@ -1642,23 +1794,30 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
         if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
         const refSym = checker.getSymbolAtLocation(node);
         if (refSym !== sym) return;
+        // (#3032 W6) A RE-ENTRANT use — the instance binding referenced INSIDE
+        // the generator's own body (`function* g() { iter.return(42); }`,
+        // GeneratorPrototype/{return,throw}/from-state-executing) — is unsafe:
+        // inside the resume fn the binding rides an any/externref capture cell,
+        // so the member call dynamic-dispatches to the host shim with a raw
+        // state struct (`gen.return` reads `undefined`). Keep such generators
+        // on the eager host path.
+        if (node.getStart() >= decl.getStart() && node.getEnd() <= decl.getEnd()) {
+          safe = false;
+          return;
+        }
         const p = node.parent;
-        if (useIsSafe(node)) return;
+        if (useIsSafe(node, /* viaBinding */ true)) return;
         // Reassignment target (`iter = g()` again) — the RHS call is checked
         // at its own call site.
         if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
           return;
         }
-        // Array-destructuring SOURCE: `[a] = iter` / `const [a] = iter`.
-        if (ts.isVariableDeclaration(p) && p.initializer === node && !ts.isIdentifier(p.name)) return;
-        if (
-          ts.isBinaryExpression(p) &&
-          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          p.right === node &&
-          ts.isArrayLiteralExpression(p.left)
-        ) {
-          return;
-        }
+        // (#3468) Array-destructuring SOURCE over a binding (`[a] = iter` /
+        // `const [a] = iter`) is NOT native-safe: the binding is externref, so
+        // the destructure drain falls to the host protocol (yields NaN/defaults).
+        // Only the DIRECT-call destructuring form (`[a] = g()`) drains natively;
+        // it is admitted at the call site below, not here. So a binding used as a
+        // destructuring source keeps the generator on the eager host path.
         safe = false;
       }
       ts.forEachChild(node, visitRef);
@@ -1701,7 +1860,7 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
       (checker.getSymbolAtLocation(node.expression)?.declarations?.includes(decl) ?? true)
     ) {
       const p = node.parent;
-      if (useIsSafe(node)) {
+      if (useIsSafe(node, /* viaBinding */ false)) {
         // safe direct consumer
       } else if (ts.isVariableDeclaration(p) && p.initializer === node) {
         if (ts.isIdentifier(p.name)) {
@@ -1732,158 +1891,43 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
   return allSafe;
 }
 
-/**
- * (#2662) Yield-payload gate for the WIDENED host-lane population (the
- * capturing-nested generators newly routed native). NUMERIC yields only:
- *
- *   - the f64 carrier's `.value` reads back correctly under a JS host, and
- *     post-done the UNDEF_F64 sentinel is numerically NaN (spec-correct for an
- *     exhausted `.value` in a numeric context);
- *   - STRING yields need the native `$AnyString` ref carrier, which requires
- *     `ctx.nativeStrings` — OFF in the default gc/host lane, so a string yield
- *     routed native comes back NaN (verified). The eager host path handles
- *     strings correctly, so they KEEP it here;
- *   - OBJECT payloads ride the #2864 externref carrier whose property reads
- *     come back NaN under the host lane (the boundary-wrapper gap); eager;
- *   - BOOLEAN payloads: `generatorElemValType` classifies them numeric (f64),
- *     so `yield true` would surface as `1`, breaking `.value === true`; eager;
- *   - a bodiless `yield;` yields undefined but the f64 carrier surfaces a
- *     number (`.value === undefined` fails); eager.
- *
- * NOT applied to the #3050 try-region shapes — those routed native with
- * unrestricted payloads and re-gating them would regress their landed
- * `.throw()`-into-try support.
- */
-function hostLaneYieldPayloadsAreSafe(ctx: CodegenContext, decl: GeneratorDecl): boolean {
-  if (!decl.body) return true;
-  let safe = true;
-  const visit = (node: ts.Node): void => {
-    if (!safe) return;
-    if (isFunctionLikeScope(node)) return; // inner generator's yields
-    if (ts.isYieldExpression(node) && !node.asteriskToken) {
-      if (!node.expression) {
-        safe = false;
-        return;
-      }
-      if (ctx.oracle.staticJsTypeOf(node.expression) !== "number") safe = false;
-    }
-    ts.forEachChild(node, visit);
-  };
-  ts.forEachChild(decl.body, visit);
-  return safe;
-}
-
-/**
- * (#2662) True when the generator body contains a `yield*` delegation. The
- * host-lane native carrier does not lower `yield*` for the widened
- * (capturing-nested) population — a `yield* inner()` over a native inner
- * traps (`illegal cast`) or drops values. `yield*` delegation is out of scope
- * for the "single-level generator" slice; keep those bodies on the eager path.
- * Does not descend into nested function-likes (their yields belong to inner
- * generators).
- */
-function bodyHasYieldStarDelegation(decl: GeneratorDecl): boolean {
-  if (!decl.body) return false;
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (isFunctionLikeScope(node)) return;
-    if (ts.isYieldExpression(node) && node.asteriskToken) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  ts.forEachChild(decl.body, visit);
-  return found;
-}
-
-/**
- * (#2662) True when the generator body has a `return <expr>` with a value
- * (not a bare `return;`). §27.5.1.2: the return value belongs ONLY to the
- * terminal `{value, done:true}` IteratorResult and must be excluded from
- * IteratorClose consumers. The eager host path routes it through
- * `__gen_set_return` (correct); the widened native host-lane carrier has no
- * equivalent — the return value surfaces as an extra yielded element / NaN
- * post-done (#2035 semantics, verified). Keep such bodies eager on the host
- * lane. Does not descend into nested function-likes.
- */
-function bodyHasReturnWithValue(decl: GeneratorDecl): boolean {
-  if (!decl.body) return false;
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (isFunctionLikeScope(node)) return;
-    if (ts.isReturnStatement(node) && node.expression) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  ts.forEachChild(decl.body, visit);
-  return found;
-}
-
 export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!noJsHostTarget(ctx)) {
-    // JS-HOST lane. The eager-buffer lowering runs the WHOLE body at generator
-    // creation, breaking every observable that depends on WHEN the body runs
-    // (§27.5.3.1 suspend-at-start, `.throw()`/`.return()` interruption,
-    // finally-on-abrupt, infinite generators). Two disjoint native-routing
-    // populations are admitted here — every OTHER host-lane generator keeps the
-    // eager path (byte-identical), and non-plannable shapes still fall back via
-    // the plan gate below:
-    //
-    //   (#3050) TRY-REGION shapes — a free `function*` DECLARATION whose body
-    //     has a catch across a yield or a yielding finally. The eager buffer
-    //     PROVABLY cannot express `.throw()`/abrupt resumption into a try, so
-    //     these route native with UNRESTRICTED payloads.
-    //
-    //   (#2662) CAPTURING NESTED generators — a `function*` nested inside an
-    //     enclosing function that captures an outer binding. This is the
-    //     wrapped-test262 conformance shape (every test's top-level
-    //     `function* g()` becomes nested inside `export function test()`,
-    //     capturing the test-locals) and the #2662 acceptance target: make it
-    //     LAZY on the default gc lane. Crucially, a capturing nested generator
-    //     CANNOT escape to a JS caller (it is local to its enclosing function,
-    //     never exported / returned as a module value), so the opaque-native-
-    //     struct→JS boundary blocker (the Option-(ii) prerequisite: a returned
-    //     state struct has no callable `.next`, and a host `.value` read post-
-    //     exhaustion surfaces the UNDEF_F64 sentinel as NaN, not `undefined`)
-    //     does NOT apply — the struct stays in-module, driven by native
-    //     dispatch. TOP-LEVEL generators are deliberately NOT widened here:
-    //     they can be exported / returned to JS, where that boundary gap bites
-    //     (verified: `g().next().value` post-done → NaN on the host lane).
-    //     Their lazy routing waits on the JS-boundary wrapper (the #2662 epic's
-    //     remaining lever).
+    // (#3050 → #3032 W6) JS-HOST lane: the eager-buffer lowering evaluates the
+    // whole body at creation, which violates §27.5 EvaluateGeneratorBody
+    // (GeneratorStart SUSPENDS at start-of-body; nothing runs until the first
+    // `next()`), cannot express a `.throw()`/abrupt resumption into a
+    // try-region (GeneratorPrototype/throw/try-{catch,finally}-*), and cannot
+    // deliver a `next(v)` sent value into the body (the buffer replays
+    // pre-computed yields). #3050 scoped host-lane native routing to exactly
+    // the try-region shapes; #3032 W6 drops that restriction — every free
+    // `function*` DECLARATION that passes the conservative safety walks below
+    // (resolvable identifiers + allowlisted use sites) now routes through the
+    // native state machine under the JS host too, making creation lazy and
+    // `next(v)` two-way for the dominant test262 shape. Non-plannable shapes
+    // still fall back to the eager buffer via the plan gate below; generator
+    // EXPRESSIONS and METHODS keep their host-lane lowerings (thunk / eager)
+    // for now — separate W6 slices.
     if (!ts.isFunctionDeclaration(decl)) return false;
-    const isTryRegion = bodyHasNewTryRegionAcrossYield(decl);
-    const isCapturingNested = generatorCapturesOuterScope(ctx, decl);
-    if (!isTryRegion && !isCapturingNested) return false;
-    // An EXPORTED generator escapes to JS by construction (the opaque-struct
-    // boundary blocker); keep it eager. A capturing nested generator is never
-    // exported, so this only guards the try-region population — and closes a
-    // latent #3050 hole where an exported try-region generator with no unsafe
-    // in-module use routed native and handed JS the un-callable struct.
-    const mods = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
-    if (mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+    // (#3032 W6) An EXPORTED generator declaration keeps the eager host path:
+    // its factory is called directly from JS (`instance.exports.g().next()`),
+    // and the native factory returns a raw WasmGC state struct the host
+    // cannot invoke `.next()` on. The use-site safety walk below cannot see
+    // host-side consumers — the export boundary is the one escape it cannot
+    // model — so gate on the export modifier itself. (In-module callers of an
+    // exported generator are unaffected: they ride the eager host object,
+    // exactly the pre-W6 behavior.)
+    if (ts.getModifiers(decl)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+    // (#3032 W6) Body shapes the native machine still miscompiles (nested
+    // yield operands, `yield*` delegation) keep the eager host path — see
+    // bodyHasHostUnsupportedYieldShape.
+    if (bodyHasHostUnsupportedYieldShape(decl)) return false;
     // Conservative: a body referencing an UNRESOLVABLE identifier (e.g.
     // `try { yield test262unresolvable } catch (e) {…}`) keeps the eager path —
     // its host-lane semantics ride #928's deferred-pending-throw (the eager
     // eval's JS ReferenceError is re-thrown at the first next()), which the
     // resume-time evaluation may not reproduce identically.
     if (bodyReferencesUnresolvableIdentifier(ctx, decl)) return false;
-    // (#2662) The widened (capturing-nested, non-try-region) population runs on
-    // the native carrier, which is byte-correct only for numeric/string yields
-    // and has NO terminal-return / `yield*`-delegation support on the host
-    // lane (both surface wrong values — verified). Restrict to proven-safe
-    // payloads + single-level (no `yield*`) + no `return <expr>`. The #3050
-    // try-region set keeps its exact pre-#2662 routing (unrestricted).
-    if (!isTryRegion) {
-      if (!hostLaneYieldPayloadsAreSafe(ctx, decl)) return false;
-      if (bodyHasYieldStarDelegation(decl)) return false;
-      if (bodyHasReturnWithValue(decl)) return false;
-    }
     // Conservative use-site safety walk: the native state struct is a WasmGC
     // ref the JS HOST cannot iterate — if it escapes to any host-iterating
     // context (an EAGER generator's `yield*`, for-await-of, Promise.all,
@@ -2368,9 +2412,41 @@ export function registerNativeGenerator(
     stateFields.push({ name: "pending", type: { kind: "i32" }, mutable: true });
   }
 
+  // (#3032 W6) NOMINAL BRAND for the state struct. Two generators with the
+  // same shape (e.g. `function* g1() { yield; }` and `function* g2() {
+  // yield 1; }`) mint structurally IDENTICAL state structs, which WasmGC
+  // iso-recursive canonicalization merges — `ref.test $__GenState_g1` then
+  // MATCHES a g2 instance, and every state-type dispatch chain
+  // (buildNativeGeneratorDispatch, the iterator-carrier GENSTATE step) resumes
+  // the FIRST-registered generator's resume fn on the other's state
+  // (`iter = g2(); iter.next().value` returned g1's `undefined` —
+  // generators/yield-as-statement.js, BOTH lanes). Defeat canonicalization
+  // structurally: each state struct declares a DISTINCT empty supertype from a
+  // per-module brand CHAIN (`__GenBrand_0` open no-parent, `__GenBrand_n` sub
+  // of `__GenBrand_{n-1}` — each distinct by ancestry depth). Type-level only:
+  // no field/layout/operand changes, and every `ref.test`/`ref.cast` site
+  // becomes nominally precise for free.
+  const brandName = `__GenBrand_${ctx.nativeGenerators.size}`;
+  const brandTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: brandName,
+    fields: [],
+    superTypeIdx: ctx.genStateBrandTipIdx ?? -1, // -1 = open, no parent (the __vec_base convention)
+  });
+  ctx.structMap.set(brandName, brandTypeIdx);
+  ctx.typeIdxToStructName.set(brandTypeIdx, brandName);
+  ctx.genStateBrandTipIdx = brandTypeIdx;
+
   const stateName = `__GenState_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({ kind: "struct", name: stateName, fields: stateFields });
+  ctx.mod.types.push({
+    kind: "struct",
+    name: stateName,
+    fields: stateFields,
+    superTypeIdx: brandTypeIdx,
+    final: true,
+  });
   ctx.structMap.set(stateName, stateTypeIdx);
   ctx.typeIdxToStructName.set(stateTypeIdx, stateName);
   ctx.structFields.set(stateName, stateFields);
@@ -3861,8 +3937,3 @@ export {
   tryCompileNativeGeneratorForOf,
   emitNativeGeneratorToVec,
 } from "./generators-native-consumer.js";
-
-// (#3271) `bodyHasNewTryRegionAcrossYield` moved to the AST-scan module; it is
-// imported back above for local use and re-exported here so external importers
-// (statements/nested-declarations.ts) are unaffected by the move.
-export { bodyHasNewTryRegionAcrossYield };
