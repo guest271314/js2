@@ -1157,7 +1157,9 @@ export interface CodegenContext {
    * standalone-only `$__proto__` externref struct field (Slice B; the #799a
    * unconditional-append regression is avoided by this gating).
    * `dynamicProtoLiteralNodes` marks object-literal AST nodes that are proto
-   * receivers (Slice A consumes it: promote the literal to a native `$Object`).
+   * receivers (Slice A consumes it: promote the literal to a native `$Object`,
+   * standalone-only, via `compileObjectLiteral` + the matching variable-local
+   * typing in statements/variables.ts + index.ts — zero struct-layout change).
    * `dynProtoSentinelGlobalIdx` is the lazily-reserved mutable externref global
    * holding the "explicitly null prototype" sentinel `$Object` (distinguishes
    * `setPrototypeOf(o, null)` from "never dynamically set" in the appended
