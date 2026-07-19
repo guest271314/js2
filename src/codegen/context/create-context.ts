@@ -168,9 +168,13 @@ export function createCodegenContext(
     tupleTypeMap: new Map(),
     fast: options?.fast ?? false,
     nativeStrings,
-    // (#745 S2) union→$AnyValue rep: opt-in while consumers are made
-    // carrier-agnostic (S3); flips lane-default later (see types.ts doc).
-    unionAnyRep: options?.unionAnyRep ?? false,
+    // (#745 S4.5 default-flip) union→$AnyValue rep — default ON in
+    // native-string lanes now that the S3 (eq/truthiness/concat) and S4
+    // (params/returns/any-boundary) consumer sweeps landed. Host (JS-host)
+    // lane stays default-OFF until S5 (hard-gated on #2141). Explicit option
+    // wins; set JS2WASM_UNION_ANYREP=0 to force the legacy externref union
+    // regime for A/B control (mirrors JS2WASM_UNDEF_SINGLETON, #2106).
+    unionAnyRep: options?.unionAnyRep ?? (nativeStrings && process.env.JS2WASM_UNION_ANYREP !== "0"),
     // #1719 S1 — ITER_OVERRIDDEN brand; set later by the
     // sourceOverridesArrayIterator pre-scan in index.ts. Default OFF.
     arrayIteratorMaybeOverridden: false,

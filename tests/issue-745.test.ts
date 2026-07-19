@@ -1,25 +1,29 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #745 S2 — known heterogeneous primitive unions on the `$AnyValue` carrier
- * (opt-in `unionAnyRep` flag).
+ * #745 S4.5 — known heterogeneous primitive unions on the `$AnyValue` carrier,
+ * now the LANE DEFAULT for native-string lanes.
  *
- * Guards three invariants:
- *   1. FLAG OFF (the default) is byte-identical to the legacy regime — even
- *      for union-bearing input — in both the default (JS-host) and
- *      standalone lanes. This is the #1917-style neutrality gate that makes
- *      the slice landable while consumers are still carrier-unaware.
- *   2. FLAG ON with union-free input is byte-identical to flag off: the
- *      `resolveWasmType` mapping is the only behaviour keyed on the flag,
- *      and it only fires on heterogeneous primitive union types.
- *   3. FLAG ON in standalone: typeof-narrowed reads/writes over a
- *      `number | string` local behave correctly through the existing
- *      `$AnyValue` coercion arms (boxToAny producer, inline tag-checked
- *      unbox consumer) — no host imports, no externref round-trip.
+ * As of the S4.5 default-flip (`create-context.ts`), `unionAnyRep` is derived
+ * from the lane: ON for native-string lanes (standalone / wasi / fast /
+ * strictNoHostImports / explicit `nativeStrings`), OFF for the JS-host lane
+ * (until S5, hard-gated on #2141). The explicit `unionAnyRep` option still
+ * overrides the lane default, and the `JS2WASM_UNION_ANYREP=0` env kill-switch
+ * forces the legacy externref regime for A/B control (mirrors #2106).
  *
- * NOT yet covered (documented S3 scope in the issue file): strict-eq /
- * truthiness / string-concat / call-boundary / union→any operands with the
- * flag ON — those consumers are not carrier-agnostic yet, which is exactly
- * why the flag defaults OFF.
+ * Guards:
+ *   1. HOST lane stays default-OFF — explicit false === unset, even for
+ *      union-bearing input (the S5 gate is still closed).
+ *   2. STANDALONE lane is default-ON — unset === explicit true; explicit
+ *      false differs (opt-out is live); the env kill-switch ≡ explicit false.
+ *   3. Default-ON with union-FREE input is byte-identical to explicit-off:
+ *      the `resolveWasmType` mapping only fires on heterogeneous primitive
+ *      union types (see decision 4 for the revised neutrality invariant).
+ *   4. Behaviour (S2 narrowing / S3 carrier-agnostic consumers / S4
+ *      params-returns-any-boundary) is correct on the DEFAULT native lane —
+ *      the run() helpers no longer pass the flag; one explicit-flag case per
+ *      suite proves the option is still honored.
+ *   5. A wasi-lane smoke confirms the flip reaches wasi and emits no
+ *      env.__box_ / __unbox_ / __typeof_ host import.
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -49,31 +53,81 @@ async function binaryOf(src: string, opts: object): Promise<Uint8Array> {
   return r.binary!;
 }
 
-describe("#745 S2 — flag OFF is byte-identical (neutrality gate)", () => {
-  it("union-bearing input, default lane: explicit false === unset", async () => {
+describe("#745 S4.5 — host lane stays default-OFF (S5 gate still closed)", () => {
+  it("union-bearing input, default (host) lane: explicit false === unset", async () => {
     const off = await binaryOf(HET_UNION_SRC, {});
     const explicit = await binaryOf(HET_UNION_SRC, { unionAnyRep: false });
     expect(Buffer.from(explicit).equals(Buffer.from(off))).toBe(true);
   });
+});
 
-  it("union-bearing input, standalone lane: explicit false === unset", async () => {
-    const off = await binaryOf(HET_UNION_SRC, { target: "standalone" });
-    const explicit = await binaryOf(HET_UNION_SRC, { target: "standalone", unionAnyRep: false });
-    expect(Buffer.from(explicit).equals(Buffer.from(off))).toBe(true);
+describe("#745 S4.5 — standalone lane is default-ON (the flip)", () => {
+  it("standalone lane: unset === explicit true (default-on proof)", async () => {
+    const unset = await binaryOf(HET_UNION_SRC, { target: "standalone" });
+    const on = await binaryOf(HET_UNION_SRC, {
+      target: "standalone",
+      unionAnyRep: true,
+    });
+    expect(Buffer.from(unset).equals(Buffer.from(on))).toBe(true);
+  });
+
+  it("standalone lane: explicit false !== unset on union-bearing input (opt-out is live)", async () => {
+    const unset = await binaryOf(HET_UNION_SRC, { target: "standalone" });
+    const off = await binaryOf(HET_UNION_SRC, {
+      target: "standalone",
+      unionAnyRep: false,
+    });
+    expect(Buffer.from(unset).equals(Buffer.from(off))).toBe(false);
+  });
+
+  it("env kill-switch: JS2WASM_UNION_ANYREP=0 ≡ explicit false", async () => {
+    // The env var is read once per compile at ctx creation (no cross-compile
+    // caching), so an in-process set/restore is safe for this A/B comparison.
+    // Computed-member `delete` (not a `= undefined` write, which Node coerces
+    // to the string "undefined") — mirrors tests/issue-2956.test.ts.
+    const FLAG = "JS2WASM_UNION_ANYREP";
+    const prev = process.env[FLAG];
+    const restore = () => {
+      if (prev === undefined) delete process.env[FLAG];
+      else process.env[FLAG] = prev;
+    };
+    try {
+      process.env[FLAG] = "0";
+      const killed = await binaryOf(HET_UNION_SRC, { target: "standalone" });
+      // Compile the explicit-false reference with the env restored so only the
+      // kill-switch path is under test.
+      restore();
+      const off = await binaryOf(HET_UNION_SRC, {
+        target: "standalone",
+        unionAnyRep: false,
+      });
+      expect(Buffer.from(killed).equals(Buffer.from(off))).toBe(true);
+    } finally {
+      restore();
+    }
   });
 });
 
-describe("#745 S2 — flag ON, union-free input stays byte-identical", () => {
+describe("#745 S4.5 — union-free input stays byte-identical under the flip", () => {
+  // Revised neutrality invariant (decision 4): byte-identity to the legacy
+  // regime holds for native-lane modules that are union-free AND never emit
+  // `__any_unbox_bool`. Do NOT add an any-truthiness-using-but-union-free
+  // fixture here — the tag-5 truthiness arm and honest tag-4 boolean boxing
+  // are intended module-wide drift classes and would (correctly) break the
+  // byte-identity these cases assert.
   it("default lane", async () => {
     const off = await binaryOf(UNION_FREE_SRC, {});
     const on = await binaryOf(UNION_FREE_SRC, { unionAnyRep: true });
     expect(Buffer.from(on).equals(Buffer.from(off))).toBe(true);
   });
 
-  it("standalone lane", async () => {
-    const off = await binaryOf(UNION_FREE_SRC, { target: "standalone" });
-    const on = await binaryOf(UNION_FREE_SRC, { target: "standalone", unionAnyRep: true });
-    expect(Buffer.from(on).equals(Buffer.from(off))).toBe(true);
+  it("standalone lane: explicit false === unset (default-on is a no-op with no union)", async () => {
+    const off = await binaryOf(UNION_FREE_SRC, {
+      target: "standalone",
+      unionAnyRep: false,
+    });
+    const unset = await binaryOf(UNION_FREE_SRC, { target: "standalone" });
+    expect(Buffer.from(unset).equals(Buffer.from(off))).toBe(true);
   });
 
   it("nullable single-kind + literal-union input stays byte-identical (mapping must not fire)", async () => {
@@ -85,15 +139,33 @@ export function test(): number {
   if (x !== null) return m === "b" ? x - 4 : 0;
   return 0;
 }`;
-    const off = await binaryOf(src, { target: "standalone" });
-    const on = await binaryOf(src, { target: "standalone", unionAnyRep: true });
-    expect(Buffer.from(on).equals(Buffer.from(off))).toBe(true);
+    const off = await binaryOf(src, {
+      target: "standalone",
+      unionAnyRep: false,
+    });
+    const unset = await binaryOf(src, { target: "standalone" });
+    expect(Buffer.from(unset).equals(Buffer.from(off))).toBe(true);
   });
 });
 
-describe("#745 S2 — flag ON, standalone narrowed union behaviour", () => {
+describe("#745 S4.5 — wasi lane smoke (flip reaches wasi, no host box imports)", () => {
+  it('HET_UNION_SRC under { target: "wasi" } compiles and emits no env.__box_/__unbox_/__typeof_ import', async () => {
+    const r = await compile(HET_UNION_SRC, {
+      fileName: "t.ts",
+      target: "wasi",
+    });
+    expect(r.success).toBe(true);
+    const mod = new WebAssembly.Module(r.binary!);
+    const leaks = WebAssembly.Module.imports(mod).filter((imp) => /^__(box|unbox|typeof)_/.test(imp.name));
+    expect(leaks).toEqual([]);
+  });
+});
+
+describe("#745 S2 — default native lane, narrowed union behaviour", () => {
+  // run() proves the DEFAULT (flag unset). One explicit-flag case below keeps
+  // the option honored.
   async function run(src: string): Promise<unknown> {
-    const r = await compile(src, { fileName: "t.ts", target: "standalone", unionAnyRep: true });
+    const r = await compile(src, { fileName: "t.ts", target: "standalone" });
     expect(r.success).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary!, {});
     return (instance.exports as { test?: () => unknown }).test?.();
@@ -128,8 +200,22 @@ describe("#745 S2 — flag ON, standalone narrowed union behaviour", () => {
     ).toBe(1);
   });
 
-  it("standalone module with the flag on stays host-import-free", async () => {
-    const r = await compile(HET_UNION_SRC, { fileName: "t.ts", target: "standalone", unionAnyRep: true });
+  it("explicit unionAnyRep:true still honored (option overrides lane default)", async () => {
+    const r = await compile(HET_UNION_SRC, {
+      fileName: "t.ts",
+      target: "standalone",
+      unionAnyRep: true,
+    });
+    expect(r.success).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary!, {});
+    expect((instance.exports as { test?: () => unknown }).test?.()).toBe(1);
+  });
+
+  it("standalone module on the default lane stays host-import-free", async () => {
+    const r = await compile(HET_UNION_SRC, {
+      fileName: "t.ts",
+      target: "standalone",
+    });
     expect(r.success).toBe(true);
     // instantiate with an EMPTY import object — any env/__box_* leak throws.
     await expect(WebAssembly.instantiate(r.binary!, {})).resolves.toBeDefined();
@@ -180,10 +266,10 @@ describe("#745 S2 — isHeterogeneousPrimitiveUnion predicate", () => {
 
 // ───────────────────────────── S3 ─────────────────────────────
 // Carrier-agnostic consumers (strict-eq / truthiness / string concat) for
-// `$AnyValue`-repped union locals — the first three rows of the S2 gap table.
-describe("#745 S3 — flag ON, carrier-agnostic consumers (standalone)", () => {
+// `$AnyValue`-repped union locals — now on the DEFAULT native lane.
+describe("#745 S3 — default native lane, carrier-agnostic consumers", () => {
   async function run(src: string): Promise<unknown> {
-    const r = await compile(src, { fileName: "t.ts", target: "standalone", unionAnyRep: true });
+    const r = await compile(src, { fileName: "t.ts", target: "standalone" });
     expect(r.success).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary!, {});
     return (instance.exports as { test?: () => unknown }).test?.();
@@ -273,7 +359,21 @@ describe("#745 S3 — flag ON, carrier-agnostic consumers (standalone)", () => {
     ).toBe(1);
   });
 
-  it("S3 consumers stay host-import-free", async () => {
+  it("explicit unionAnyRep:true still honored (option overrides lane default)", async () => {
+    const r = await compile(
+      `export function test(): number {
+  let x: number | string = 5;
+  for (let i = 0; i < 2; i++) if (i === 1) x = "done";
+  return x === "done" ? 1 : 0;
+}`,
+      { fileName: "t.ts", target: "standalone", unionAnyRep: true },
+    );
+    expect(r.success).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary!, {});
+    expect((instance.exports as { test?: () => unknown }).test?.()).toBe(1);
+  });
+
+  it("S3 consumers stay host-import-free (default lane)", async () => {
     const r = await compile(
       `export function test(): number {
   let x: number | string = 5;
@@ -282,7 +382,7 @@ describe("#745 S3 — flag ON, carrier-agnostic consumers (standalone)", () => {
   if (x === "done" && x && s === "done") return 1;
   return 0;
 }`,
-      { fileName: "t.ts", target: "standalone", unionAnyRep: true },
+      { fileName: "t.ts", target: "standalone" },
     );
     expect(r.success).toBe(true);
     await expect(WebAssembly.instantiate(r.binary!, {})).resolves.toBeDefined();
@@ -291,10 +391,10 @@ describe("#745 S3 — flag ON, carrier-agnostic consumers (standalone)", () => {
 
 // ───────────────────────────── S4 ─────────────────────────────
 // Union params/returns + union→any boundaries on the `$AnyValue` carrier —
-// the last three rows of the S2 gap table.
-describe("#745 S4 — flag ON, union params/returns/any-boundary (standalone)", () => {
+// now on the DEFAULT native lane.
+describe("#745 S4 — default native lane, union params/returns/any-boundary", () => {
   async function run(src: string): Promise<unknown> {
-    const r = await compile(src, { fileName: "t.ts", target: "standalone", unionAnyRep: true });
+    const r = await compile(src, { fileName: "t.ts", target: "standalone" });
     expect(r.success).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary!, {});
     return (instance.exports as { test?: () => unknown }).test?.();
@@ -330,11 +430,22 @@ export function test(): number { let x: boolean | string = true; const a = h(x);
     ).toBe(1);
   });
 
-  it("S4 paths stay host-import-free", async () => {
+  it("explicit unionAnyRep:true still honored (option overrides lane default)", async () => {
+    const r = await compile(
+      `function g(k: number): number | string { return k > 0 ? 7 : "neg"; }
+export function test(): number { const a = g(1); const b = g(-1); return (typeof a === "number" && a === 7 && b === "neg") ? 1 : 0; }`,
+      { fileName: "t.ts", target: "standalone", unionAnyRep: true },
+    );
+    expect(r.success).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary!, {});
+    expect((instance.exports as { test?: () => unknown }).test?.()).toBe(1);
+  });
+
+  it("S4 paths stay host-import-free (default lane)", async () => {
     const r = await compile(
       `function g(k: number): number | string { return k > 0 ? k * 2 : "neg"; }
 export function test(): number { const a = g(2); return typeof a === "number" && a === 4 ? 1 : 0; }`,
-      { fileName: "t.ts", target: "standalone", unionAnyRep: true },
+      { fileName: "t.ts", target: "standalone" },
     );
     expect(r.success).toBe(true);
     await expect(WebAssembly.instantiate(r.binary!, {})).resolves.toBeDefined();
