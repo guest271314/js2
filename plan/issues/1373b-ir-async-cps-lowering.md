@@ -17,6 +17,16 @@ sprint: Backlog
 depends_on: [1326c]
 note: "Verified 2026-05-21: src/codegen/async-scheduler.ts exists; src/codegen/async-cps.ts does NOT exist yet (still pending #1042 introducing it). async-cluster-architect-spec.md exists. Unblocked 2026-06-16 (se1): sole dependency #1326c flipped done — Phase 1C microtask queue + chained .then landed on main."
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DEFERRED EPIC, NOT dev-claimable this sprint. Commit 79dad304f ('docs(#55/#1373b): re-ground verdict — genuine EPIC, deferral correct') + 3897722bf de-prioritised CPS off top. The CPS gate-flip is blocked on the synchronous-consumption-contract architecture wall (larger than one sprint). Same epic as #1042. → backlog (was ready, but no landable slice)."
+loc-budget-allow:
+  # #1373b Phase C-1: IR claims the sync-pass-through async population.
+  # Growth is the core feature work (IR selection/build/lowering + the
+  # engine-consistency wiring in the codegen driver). Intended.
+  - src/ir/select.ts
+  - src/ir/from-ast.ts
+  - src/ir/builder.ts
+  - src/ir/integration.ts
+  - src/codegen/index.ts
+  - src/codegen/context/types.ts
 ---
 # #1373b — IR async Phase C: CPS lowering
 
