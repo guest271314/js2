@@ -130,6 +130,7 @@ import {
   sourceHasMethodReassignment,
   standaloneThenMissArmCanBeNative,
   tryEmitAsyncGenNextDispatch,
+  tryEmitAsyncGenReturnThrowDispatch,
 } from "./calls.js";
 
 /**
@@ -335,15 +336,30 @@ export function compileReceiverMethodCall(
   }
 
   // (#2865) `.next()` on a DRIVEN async-generator object (typed receiver).
-  // `next(v)` sent-value delivery + `.throw()`/`.return()` are 3d-iii.
+  // `next(v)` sent-value delivery is still 3d-iii; `.return()`/`.throw()` are
+  // now handled (#3389 slice 2a).
   {
     const recvSymName = receiverType.getSymbol()?.name;
-    if (
-      propAccess.name.text === "next" &&
-      expr.arguments.length === 0 &&
-      (recvSymName === "AsyncGenerator" || recvSymName === "AsyncIterableIterator" || recvSymName === "AsyncIterator")
-    ) {
+    const isAsyncGenRecv =
+      recvSymName === "AsyncGenerator" || recvSymName === "AsyncIterableIterator" || recvSymName === "AsyncIterator";
+    if (isAsyncGenRecv && propAccess.name.text === "next" && expr.arguments.length === 0) {
       const dispatched = tryEmitAsyncGenNextDispatch(ctx, fctx, propAccess.expression);
+      if (dispatched !== null) return dispatched;
+    }
+    // (#3389 slice 2a) `.return(v)` / `.throw(e)` on a driven async-gen — the
+    // consumer-completion protocol (§27.6.3.8/.9). One optional arg.
+    if (
+      isAsyncGenRecv &&
+      (propAccess.name.text === "return" || propAccess.name.text === "throw") &&
+      expr.arguments.length <= 1
+    ) {
+      const dispatched = tryEmitAsyncGenReturnThrowDispatch(
+        ctx,
+        fctx,
+        propAccess.expression,
+        propAccess.name.text,
+        expr.arguments[0],
+      );
       if (dispatched !== null) return dispatched;
     }
   }

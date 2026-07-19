@@ -4593,6 +4593,104 @@ export function tryEmitAsyncGenNextDispatch(
 }
 
 /**
+ * (#3389 slice 2a) `.return(v)` / `.throw(e)` on a DRIVEN async-generator
+ * receiver — the sibling of {@link tryEmitAsyncGenNextDispatch}. Routes to the
+ * per-gen `__async_gen_return_<stem>` / `__async_gen_throw_<stem>` driver (which
+ * settles/rejects a fresh result promise and completes the frame). `method` is
+ * `"return"` or `"throw"`; `argExpr` is the single optional arg (undefined → the
+ * `ref.null.extern` sentinel). Runtime-dispatched by `ref.test`ing each
+ * registered producer's frame struct, exactly like `.next()`.
+ *
+ * Miss arm: the legacy host `__gen_return`/`__gen_throw` is kept ONLY when a
+ * legacy buffer async gen was emitted (`asyncGenLegacyBufferEmitted`); else a
+ * plain null result, so an all-driven module stays host-free. Returns null
+ * (fall through) off the standalone/wasi lane or when no driven producers exist.
+ */
+export function tryEmitAsyncGenReturnThrowDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiverExpr: ts.Expression,
+  method: "return" | "throw",
+  argExpr: ts.Expression | undefined,
+): ValType | null {
+  const producers = ctx.asyncGenProducers;
+  if (ctx.standalone !== true && ctx.wasi !== true) return null;
+  if (producers === undefined || producers.size === 0) return null;
+  // (#3389 slice 2a — correct-or-legacy) `.return(v)` AWAITS its value under a
+  // return completion (§27.6.3.8): a thenable/Promise return value must be
+  // adopted before the IteratorResult settles. The driver fulfils with the raw
+  // value, so bail a STATICALLY Promise/PromiseLike-typed `.return` arg to the
+  // legacy path rather than deliver the un-awaited thenable (wrong value).
+  // `.throw(e)` does NOT await its reason (§27.6.3.9 throws it directly), so no
+  // restriction there.
+  if (method === "return" && argExpr !== undefined) {
+    const builtin = ctx.oracle.builtinReceiverOf(argExpr);
+    const declared = ctx.oracle.declaredNameOf(argExpr);
+    const parts = ctx.oracle.unionPartsOf(argExpr);
+    if (
+      builtin === "Promise" ||
+      declared === "PromiseLike" ||
+      (parts !== undefined && parts.some((p) => p.kind === "builtin" && p.name === "Promise"))
+    ) {
+      return null;
+    }
+  }
+  // Evaluate the receiver ONCE into an externref local.
+  const recvLocal = allocLocal(fctx, `__agen_rt_recv_${fctx.locals.length}`, { kind: "externref" });
+  const rt = compileExpression(ctx, fctx, receiverExpr, { kind: "externref" });
+  if (rt !== null && rt !== undefined && (rt as ValType).kind !== "externref") {
+    coerceType(ctx, fctx, rt as ValType, { kind: "externref" });
+  }
+  fctx.body.push({ op: "local.set", index: recvLocal });
+  // Evaluate the arg ONCE into an externref local (undefined → null sentinel).
+  const argLocal = allocLocal(fctx, `__agen_rt_arg_${fctx.locals.length}`, { kind: "externref" });
+  if (argExpr !== undefined) {
+    const at = compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+    if (at !== null && at !== undefined && (at as ValType).kind !== "externref") {
+      coerceType(ctx, fctx, at as ValType, { kind: "externref" });
+    }
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  fctx.body.push({ op: "local.set", index: argLocal });
+  // funcMap lookups AFTER the receiver/arg compiles (which may shift indices).
+  const hostName = method === "return" ? "__gen_return" : "__gen_throw";
+  const wantHostFallback = ctx.asyncGenLegacyBufferEmitted === true;
+  const hostIdx = wantHostFallback ? ctx.funcMap.get(hostName) : undefined;
+  let chain: Instr[] =
+    hostIdx !== undefined
+      ? [
+          { op: "local.get", index: recvLocal },
+          { op: "local.get", index: argLocal },
+          { op: "call", funcIdx: hostIdx },
+        ]
+      : [{ op: "ref.null.extern" }];
+  for (const p of [...producers.values()].reverse()) {
+    const helperName = method === "return" ? p.returnHelperName : p.throwHelperName;
+    if (helperName === undefined) continue;
+    const helperIdx = ctx.funcMap.get(helperName);
+    if (helperIdx === undefined) continue;
+    chain = [
+      { op: "local.get", index: recvLocal },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: p.stateTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "local.get", index: recvLocal },
+          { op: "local.get", index: argLocal },
+          { op: "call", funcIdx: helperIdx },
+        ],
+        else: chain,
+      },
+    ];
+  }
+  fctx.body.push(...chain);
+  return { kind: "externref" };
+}
+
+/**
  * (#2903) Host-import names that PRODUCE promises the standalone module did
  * not mint natively. Checked (alongside the pre-body syntactic scan flag
  * `ctx.moduleHasHostPromiseSource`) before replacing the `.then`/`.catch`

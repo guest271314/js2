@@ -319,6 +319,14 @@ export interface AsyncFrameInfo {
   /** (#2906 slice 3d-i) `{value: externref, done: i32}` IteratorResult struct typeIdx (async-gen only). */
   asyncGenResultTypeIdx?: number;
   /**
+   * (#3389 slice 2a) The `settleDone` state id of this gen's CFG. The
+   * `.return()`/`.throw()` driver helpers set `frame.STATE` to it after
+   * settling/rejecting, so a subsequent `.next()` re-dispatches into settleDone
+   * → `{value: undefined, done: true}` — completing the frame WITHOUT touching
+   * the shared resume dispatch. Set in `ensureAsyncResumeFunction`; async-gen only.
+   */
+  settleDoneStateId?: number;
+  /**
    * (#2865) Capture-cell metadata of a NESTED producer (lifted with captures
    * as leading params — nested-declarations.ts). The frame captures the cells
    * as param fields; the resume body must deref reads/writes through them, so
@@ -1048,6 +1056,15 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     reportError(ctx, info.decl, `internal: async CFG plan violates the emitter contract — ${cfgError} (#2906)`);
     info.resumeFuncIdx = -1;
     return -1;
+  }
+
+  // (#3389 slice 2a) Record this gen's `settleDone` state id so the
+  // `.return()`/`.throw()` drivers can complete the frame by re-pointing STATE
+  // there (subsequent `.next()` → `{value: undefined, done: true}`). Exactly one
+  // settleDone per gen cfg (the terminal state).
+  if (info.asyncGen) {
+    const doneState = cfg.states.find((s) => s.terminator.kind === "settleDone");
+    if (doneState !== undefined) info.settleDoneStateId = doneState.id;
   }
 
   // Host backend never touches the native scheduler (no `$Promise` struct, no
@@ -2455,6 +2472,8 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
 
   // Per-gen re-entrant next() driver + the generic reader probes (once/module).
   emitAsyncGenNextHelper(ctx, info, promiseTypeIdx);
+  // (#3389 slice 2a) Per-gen `.return(v)` / `.throw(e)` drivers.
+  emitAsyncGenReturnThrowHelpers(ctx, info, promiseTypeIdx);
   ensureAsyncGenReaderProbes(ctx, promiseTypeIdx, resultTypeIdx);
 
   // (#2865) Register the producer so (a) the `.next()` runtime dispatch chain
@@ -2468,6 +2487,8 @@ export function emitAsyncGenerator(ctx: CodegenContext, fctx: FunctionContext, d
     ctx.asyncGenProducers.set(stem, {
       stateTypeIdx: info.stateTypeIdx,
       nextHelperName: `__async_gen_next_${stem}`,
+      returnHelperName: `__async_gen_return_${stem}`,
+      throwHelperName: `__async_gen_throw_${stem}`,
       decl,
     });
   }
@@ -2574,6 +2595,103 @@ function emitAsyncGenNextHelper(ctx: CodegenContext, info: AsyncFrameInfo, promi
     exported: false,
   });
   ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#3389 slice 2a) Build + export the per-gen `.return(v)` / `.throw(e)` drivers
+ * `__async_gen_return_<stem>(frame, arg) -> Promise` /
+ * `__async_gen_throw_<stem>(frame, arg) -> Promise`.
+ *
+ * For every body the DRIVEN lane admits, try/finally + catch ACROSS a yield stay
+ * legacy (2b), so a suspended-at-yield `.return`/`.throw` runs NO further body —
+ * it just COMPLETES the frame. So the drivers do not kick the resume machine:
+ *   `.return(v)`: mint a fresh pending result promise, store it, fulfil it with
+ *     `{value: v, done: true}` (§27.6.3.8 return completion), and complete the
+ *     frame by re-pointing `frame.STATE` at its `settleDone` state (a subsequent
+ *     `.next()` then re-dispatches there → `{value: undefined, done: true}`).
+ *   `.throw(e)`: mint + store the promise, REJECT it with `e` (§27.6.3.9), and
+ *     complete the frame the same way.
+ * A completed frame's `.return`/`.throw` takes the identical path (STATE is
+ * already at settleDone; settling/rejecting a fresh promise is correct). No
+ * change to the shared resume dispatch — zero regression surface on it.
+ */
+function emitAsyncGenReturnThrowHelpers(ctx: CodegenContext, info: AsyncFrameInfo, promiseTypeIdx: number): void {
+  const stem = sanitizeTypeName(info.functionName);
+  const rt = ensureAsyncDriveRuntime(ctx);
+  const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
+  const frameRef: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
+  const promiseRef: ValType = { kind: "ref", typeIdx: promiseTypeIdx };
+  const doneStateId = info.settleDoneStateId ?? 0;
+
+  // Shared prologue: cast the carrier, mint a fresh pending result promise, store
+  // it into `frame.result_promise`. Leaves the frame ref in $f (local 2) and the
+  // promise ref in $p (local 3). Params: 0 = frame externref, 1 = arg externref.
+  const prologue = (fLocal: number, pLocal: number): Instr[] => [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.stateTypeIdx },
+    { op: "local.set", index: fLocal },
+    { op: "i32.const", value: PROMISE_STATE_PENDING },
+    { op: "ref.null.extern" },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: promiseTypeIdx },
+    { op: "local.set", index: pLocal },
+    { op: "local.get", index: fLocal },
+    { op: "local.get", index: pLocal },
+    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.resultPromiseFieldIdx },
+  ];
+  // Shared epilogue: complete the frame (STATE = settleDone) and return $p.
+  const epilogue = (fLocal: number, pLocal: number): Instr[] => [
+    { op: "local.get", index: fLocal },
+    { op: "i32.const", value: doneStateId },
+    { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+    { op: "local.get", index: pLocal },
+    { op: "extern.convert_any" },
+  ];
+
+  const register = (name: string, settleIdx: number, buildValue: (fLocal: number, pLocal: number) => Instr[]): void => {
+    if (ctx.funcMap.has(name)) return;
+    const typeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      `${name}_type`,
+    );
+    const funcIdx = mintDefinedFunc(ctx);
+    ctx.funcMap.set(name, funcIdx);
+    const fLocal = 2;
+    const pLocal = 3;
+    const body: Instr[] = [
+      ...prologue(fLocal, pLocal),
+      // settle: settleIdx(p, <value>) → drop
+      { op: "local.get", index: pLocal },
+      ...buildValue(fLocal, pLocal),
+      { op: "call", funcIdx: settleIdx },
+      { op: "drop" },
+      ...epilogue(fLocal, pLocal),
+    ];
+    pushDefinedFunc(ctx, funcIdx, {
+      name,
+      typeIdx,
+      locals: [
+        { name: "$f", type: frameRef },
+        { name: "$p", type: promiseRef },
+      ],
+      body,
+      exported: false,
+    });
+    ctx.mod.exports.push({ name, desc: { kind: "func", index: funcIdx } });
+  };
+
+  // `.return(v)` → fulfil with IteratorResult {value: arg, done: true}.
+  register(`__async_gen_return_${stem}`, rt.fulfillFuncIdx, () => [
+    { op: "local.get", index: 1 }, // arg (value)
+    { op: "i32.const", value: 1 }, // done = true
+    { op: "struct.new", typeIdx: resultTypeIdx },
+    { op: "extern.convert_any" },
+  ]);
+  // `.throw(e)` → reject with the raw reason `arg`.
+  register(`__async_gen_throw_${stem}`, rt.rejectFuncIdx, () => [{ op: "local.get", index: 1 }]);
 }
 
 /**
