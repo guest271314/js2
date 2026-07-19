@@ -1,9 +1,9 @@
 ---
 id: 3468
 title: "Standalone: method calls on function objects silently swallow assertions (assert.sameValue/throws never fire) — root cause is function-object own-property gap, NOT a catch_all swallow"
-status: in-progress
+status: blocked
 created: 2026-07-19
-assignee: ttraenkler/senior-dev
+blocked_reason: "root-caused; needs architect spec (approach A/B/C) + stakeholder floor-rebaseline decision before implementation"
 priority: high
 feasibility: hard
 task_type: bug
