@@ -29,6 +29,8 @@ import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js"
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
+import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
+import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { collectLocalCallEdges, irFirstBodyIsProvenLowerable, type ValueDomain } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
@@ -66,6 +68,7 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
+import { fillVecOverlayHelpers } from "./vec-overlay.js"; // (#3251 S1)
 import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
 import {
   sourceContainsClass,
@@ -366,7 +369,24 @@ const TYPED_ARRAY_PACKED_STORAGE: Readonly<Record<string, { key: string; type: V
   Uint32Array: { key: "i32_elem", type: { kind: "i32" } },
 };
 
+/**
+ * (#838) The two BigInt typed-array views. Unlike the numeric views these can
+ * NOT fall back to `f64` element storage — an f64 cannot hold an arbitrary
+ * 64-bit BigInt. They always use a dedicated `i64` element vec in BOTH the
+ * host/gc and standalone/WASI lanes (BigInt is represented as a first-class
+ * `{ kind: "i64", bigint: true }` value throughout the compiler, so `array.get`/
+ * `array.set` on the i64 backing array need no packing/unpacking). `BigInt64Array`
+ * stores signed 64-bit two's-complement; `BigUint64Array` stores the same 64 raw
+ * bits interpreted unsigned — the wasm i64 element holds identical bits either
+ * way (ToBigInt64/ToBigUint64 both reduce mod 2^64, which i64 arithmetic already
+ * does), so both map to the same `i64` storage.
+ */
+export const BIGINT_TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set(["BigInt64Array", "BigUint64Array"]);
+
 export function typedArrayVecStorage(ctx: CodegenContext, name: string): { key: string; type: ValType } {
+  // (#838) BigInt views always use i64 storage, independent of target mode —
+  // f64 cannot represent a 64-bit BigInt.
+  if (BIGINT_TYPED_ARRAY_NAMES.has(name)) return { key: "i64", type: { kind: "i64" } };
   if (ctx.wasi || ctx.standalone) {
     const packed = TYPED_ARRAY_PACKED_STORAGE[name];
     if (packed) return packed;
@@ -1740,6 +1760,12 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       jsHostExterns,
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
+      // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
+      // async engine ($AsyncFrame drive / host-drive) declines it — the
+      // legacy sync-pass-through population. Engine-activated functions keep
+      // byte-identical routing.
+      supportsAsyncIr: ctx.supportsAsyncIr,
+      asyncEngineClaims: (fn) => asyncEngineWouldActivate(ctx, fn),
     },
     typeMap,
   );
@@ -1803,15 +1829,25 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       // — `Generator<T>` doesn't resolve as `IrType.object` and
       // would otherwise drop the generator from `safeSelection`.
       const isGenerator = !!fn.asteriskToken;
+      // (#1373b C-1) IR-claimed async fns (sync-pass-through model) register
+      // the raw `T` unwrapped from the `Promise<T>` annotation — matching
+      // the declaration pre-pass's `unwrapPromiseType` result type, so the
+      // IR-lowered signature equals the legacy-registered one (the #1796
+      // call-site contract stays intact). The selector only claims asyncs
+      // with an explicit `Promise<T>` annotation, so the unwrap is non-null
+      // for every claimed async fn.
+      const isAsyncFn = !isGenerator && hasAsyncModifier(fn);
+      const asyncUnwrapped = isAsyncFn ? unwrapPromiseTypeNode(fn.type) : null;
+      const effectiveReturnNode = isAsyncFn ? (asyncUnwrapped ?? undefined) : fn.type;
       // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
       // (it has no representation for void in IrType) and set returnType
       // to null. The lowerer treats null returnType as "no result".
-      const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
+      const isVoidReturn = !isGenerator && effectiveReturnNode?.kind === ts.SyntaxKind.VoidKeyword;
       const returnType: IrType | null = isGenerator
         ? ({ kind: "val", val: { kind: "externref" } } as IrType)
         : isVoidReturn
           ? null
-          : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
+          : resolvePositionType(effectiveReturnNode, entry?.returnType, ctx, classShapes);
       const params: IrType[] = [];
       for (let i = 0; i < fn.parameters.length; i++) {
         const p = fn.parameters[i]!;
@@ -2768,6 +2804,17 @@ export function generateModule(
     // reads (`arr[k]`, `arr["length"]`) instead of empty / undefined. Standalone
     // only (no-op otherwise).
     fillDynamicForinVecArms(ctx);
+
+    // (#3251 S1) Array-descriptor overlay: fill the reserved
+    // `__vec_dp_value` / `__vec_dp_accessor` / `__vec_gopd` bodies (companion
+    // `$Object` per vec receiver, delegating ValidateAndApply/merge/gOPD to
+    // the `$Object` natives + vec value write-back) and splice the overlay
+    // read prologues into `__extern_get_idx` / `__extern_get`. Runs AFTER the
+    // vec fills above (needs every carrier + `__obj_index_of_key`) and BEFORE
+    // `fillTaDynViewMopArms` below so the TypedArray dyn-view arm keeps the
+    // front slot (TA receivers must exit before the overlay consult).
+    // Standalone only (no-op otherwise).
+    fillVecOverlayHelpers(ctx);
 
     // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
     // (each fill prepends at body[0]; last fill wins the front slot, and the
@@ -5289,7 +5336,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // storage; other typed arrays keep the legacy f64 representation.
     // Covers: Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
     //         Int32Array, Uint32Array, Float32Array, Float64Array
-    if (sym?.name && TYPED_ARRAY_NAMES.has(sym.name)) {
+    // (#838) BigInt64Array/BigUint64Array resolve to an i64-element vec (they are
+    // deliberately kept OUT of `TYPED_ARRAY_NAMES` so the f64-assuming host
+    // marshalling classifier treats them as "other"; `typedArrayVecStorage`
+    // returns i64 for them).
+    // (#838 gate — fable-dev-5) Only in standalone/wasi: in js-host the BigInt
+    // views stay host globals (externref) so SharedArrayBuffer/Atomics interop
+    // works — the native i64-vec has no js-host Atomics bridge yet (see the
+    // construction-path notes in new-builtin-globals.ts / new-super.ts). Numeric
+    // views map to a native vec in js-host too, but their Atomics bridge exists.
+    const isBigIntView838 = sym?.name !== undefined && BIGINT_TYPED_ARRAY_NAMES.has(sym.name);
+    if (sym?.name && (TYPED_ARRAY_NAMES.has(sym.name) || (isBigIntView838 && (ctx.wasi || ctx.standalone)))) {
       const storage = typedArrayVecStorage(ctx, sym.name);
       const vecIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
       return { kind: "ref_null", typeIdx: vecIdx };
@@ -6146,6 +6203,13 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     // resolveStructNameForExpr sees the override at every later access.
     let initForcesExternref = false;
     if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      // (#802 Slice A) A proto-receiver object literal is built as an open
+      // `$Object` (externref, standalone-only) in compileObjectLiteral; the
+      // hoisted `var` slot must be externref to match (mirrors the let/const path
+      // in statements/variables.ts via ctx.dynamicProtoLiteralNodes).
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(decl.initializer)) {
+        initForcesExternref = true;
+      }
       for (const p of decl.initializer.properties) {
         if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
           initForcesExternref = true;
@@ -6794,11 +6858,25 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
             (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
             spreadCtxType.getProperties().length === 0;
         }
-        if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
+        // (#802 Slice A) A proto-receiver object literal is promoted to an open
+        // `$Object` (externref) by compileObjectLiteral. This pre-hoist allocator
+        // is the AUTHORITATIVE let/const slot-typer, so the externref override
+        // MUST be applied here too — otherwise the slot is the inferred struct and
+        // the promoted `$Object` externref is ref.cast to it at runtime (cast
+        // fails → the receiver goes null and `o.x`/inherited reads return NaN).
+        // Registers the name in externrefAccessorVars so reads route through the
+        // dynamic `__extern_get` path. Standalone-only (gc/host keeps its existing
+        // closed-struct + host-sidecar path unchanged).
+        const initIsProtoReceiverLiteral =
+          ctx.standalone &&
+          decl.initializer !== undefined &&
+          ts.isObjectLiteralExpression(decl.initializer) &&
+          ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+        if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
         let wasmType: ValType =
-          initIsAccessorLiteral || initIsHostSpreadLiteral
+          initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral
             ? { kind: "externref" }
             : isI32Coerced
               ? { kind: "i32" }

@@ -94,25 +94,6 @@ export function nodeContainsYield(root: ts.Node): boolean {
 }
 
 /**
- * (#2920) Collect every bound identifier in a param binding pattern
- * (recursively — nested array/object patterns and rest elements included;
- * array holes skipped). Used to register each destructured PARAM name as a
- * live-across-yield spill and to resolve its spill ValType from the checker.
- */
-export function collectPatternBindingIdentifiers(pattern: ts.BindingPattern): ts.Identifier[] {
-  const out: ts.Identifier[] = [];
-  const visitPattern = (pat: ts.BindingPattern): void => {
-    for (const el of pat.elements) {
-      if (ts.isOmittedExpression(el)) continue;
-      if (ts.isIdentifier(el.name)) out.push(el.name);
-      else visitPattern(el.name);
-    }
-  };
-  visitPattern(pattern);
-  return out;
-}
-
-/**
  * (#2920) A spilled destructured-param local must round-trip through a state
  * struct field, so its ValType needs a struct-construction default. Scalars and
  * nullable refs qualify; a non-null `ref` is widened to `ref_null` (matching the
@@ -281,35 +262,5 @@ export function bodyReferencesOwnName(body: ts.Node, name: string): boolean {
     ts.forEachChild(node, visit);
   }
   ts.forEachChild(body, visit);
-  return found;
-}
-
-/**
- * (#3050) True when the generator body contains a try statement that crosses a
- * yield AND needs the NEW try-region machinery: it has a catch clause, or its
- * finally itself yields. (A finally-only try with a yield-free finally is the
- * legacy kind-L shape the eager host path also handles observably-correctly for
- * `.next()` driving, so it does NOT flip the host lane.) Does not descend into
- * nested function-likes — their yields/trys belong to inner generators.
- */
-export function bodyHasNewTryRegionAcrossYield(decl: GeneratorDecl): boolean {
-  if (!decl.body) return false;
-  let found = false;
-  function visit(node: ts.Node): void {
-    if (found) return;
-    if (isFunctionLikeScope(node)) {
-      return;
-    }
-    if (ts.isTryStatement(node) && nodeContainsYield(node)) {
-      const finallyYields =
-        node.finallyBlock !== undefined && node.finallyBlock.statements.some((s) => statementContainsYield(s));
-      if (node.catchClause || finallyYields) {
-        found = true;
-        return;
-      }
-    }
-    ts.forEachChild(node, visit);
-  }
-  ts.forEachChild(decl.body, visit);
   return found;
 }

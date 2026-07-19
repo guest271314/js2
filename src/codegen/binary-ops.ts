@@ -707,9 +707,19 @@ export function compileBinaryExpression(
           // Emit ToNumber(operand) as f64 for a string / number / boolean side.
           const emitToNumber = (operand: ts.Expression, isStr: boolean, isBool: boolean): void => {
             if (isStr) {
-              // native string ref → externref → __str_to_number → f64
-              compileExpression(ctx, fctx, operand);
-              fctx.body.push({ op: "extern.convert_any" });
+              // native string ref → externref → __str_to_number → f64.
+              // (#3395 shape 3) A native `$AnyString` REF operand must be boxed
+              // to externref first (`extern.convert_any`), but a string-typed
+              // operand that ALREADY compiles to externref — a `new String(x)`
+              // wrapper object, or any prior boxing — must NOT be re-converted:
+              // `extern.convert_any` on an externref is invalid Wasm
+              // ("expected anyref, found ... of type externref", the
+              // `true == new String("+1")` residual). Gate the box on the
+              // compiled operand's real ValType.
+              const ot = compileExpression(ctx, fctx, operand);
+              if (ot && ot.kind !== "externref") {
+                fctx.body.push({ op: "extern.convert_any" });
+              }
               fctx.body.push({ op: "call", funcIdx: strToNumIdx });
             } else if (isBool) {
               compileExpression(ctx, fctx, operand);
@@ -1420,6 +1430,17 @@ export function compileBinaryExpression(
   //
   // #1179-followup: the multiplication arm is guarded by `isI32MulSafe`
   // — see comment on that helper for the rationale.
+  //
+  // (#1930 Slice 3 — three-question doctrine.) This is THE **Q-WRAP**
+  // matcher: "may this expression be EVALUATED in i32 such that the result
+  // is bit-identical to ToInt32(spec value) — GIVEN the caller guarantees an
+  // enclosing ToInt32 (bitwise / `| 0`) context?" It legitimately accepts
+  // forms the Q-CANON matchers (`isI32SafeExprForArray`,
+  // array-element-typing.ts; `isI32SafeExpr`, function-body.ts) must reject:
+  // `+`/`-` (exact in f64 ≤ 2^32; wrap ≡ ToInt32 — verdict V2), gated `*`
+  // (2^53 proof via `isI32MulSafe`), and `>>>` (uint32 VALUE diverges above
+  // 2^31 but the i32 BITS are ToInt32-identical — verdict V3). Do NOT copy
+  // arms between the questions; see issue #1930's divergence-verdict table.
   const isI32PureExpr = (e: ts.Expression): boolean => {
     const inner = peel(e);
     if (ts.isIdentifier(inner)) return isI32LocalRef(inner);
