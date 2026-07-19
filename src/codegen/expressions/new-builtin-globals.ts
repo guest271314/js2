@@ -866,8 +866,21 @@ export function tryCompileBuiltinGlobalNew(
       "Uint32Array",
       "Float32Array",
       "Float64Array",
+      // (#838) BigInt views — i64-element storage via `typedArrayVecStorage`.
+      "BigInt64Array",
+      "BigUint64Array",
     ]);
-    if (TYPED_ARRAY_NAMES.has(expr.expression.text)) {
+    // (#838 gate — fable-dev-5) The BigInt views take the native i64-vec path
+    // ONLY in standalone/wasi. In js-host they stay host globals: a native
+    // i64-element vec is not a valid receiver for the host `Atomics.wait/notify`
+    // bridge (index-validation over an i64 vec doesn't throw the spec RangeError
+    // first — the merge_group regression on `Atomics/*/bigint/*` tests), and the
+    // SharedArrayBuffer-backed construction needs the real host BigInt64Array.
+    // Numeric views ride native f64/packed vecs in js-host and DO pass Atomics
+    // because the bridge handles those element kinds; extending it to i64 is the
+    // follow-up. Mirrors the dual-mode principle (host lane → host paths).
+    const isBigIntView838 = expr.expression.text === "BigInt64Array" || expr.expression.text === "BigUint64Array";
+    if (TYPED_ARRAY_NAMES.has(expr.expression.text) && (!isBigIntView838 || ctx.wasi || ctx.standalone)) {
       // (#2593) Standalone/WASI packs integer views into i8/i16/i32 storage
       // (Int8/Uint8/Uint8Clamped→i8_byte, Int16/Uint16→i16_byte,
       // Int32/Uint32→i32_byte); host/gc and the float views keep f64.
@@ -1043,7 +1056,31 @@ export function tryCompileBuiltinGlobalNew(
                 const dstStoreKind =
                   dstArrDef.element.kind === "i8" || dstArrDef.element.kind === "i16" ? "i32" : dstArrDef.element.kind;
                 let convertInstrs: Instr[];
-                if (srcReadKind === "externref" && dstStoreKind !== "externref") {
+                if (dstStoreKind === "i64") {
+                  // (#838) BigInt view (BigInt64Array/BigUint64Array) copy target.
+                  // A boxed element (`new BigInt64Array([1n, 2n])` — the literal
+                  // widens to an `any[]`/externref vec) goes through §7.1.13
+                  // ToBigInt (`__to_bigint`), NOT ToNumber — the elements are JS
+                  // bigints and unboxing them as f64 would trap / lose the value.
+                  // An already-i64 source (a `bigint[]` vec) is stored directly
+                  // (identity); the same-array-type fast path (array.copy) above
+                  // handles the common i64→i64 case, so this arm only fires for a
+                  // heterogeneous source (externref) or a width-mismatched i64 vec.
+                  if (srcReadKind === "externref") {
+                    addUnionImports(ctx);
+                    const toBigintIdx = ctx.funcMap.get("__to_bigint");
+                    convertInstrs = toBigintIdx !== undefined ? [{ op: "call", funcIdx: toBigintIdx }] : [];
+                  } else if (srcReadKind === "i64") {
+                    convertInstrs = [];
+                  } else if (srcReadKind === "f64") {
+                    // Numeric source into a BigInt view — ToBigInt over a Number
+                    // throws TypeError per spec; we approximate with a truncating
+                    // convert (rare/degenerate path).
+                    convertInstrs = [{ op: "i64.trunc_sat_f64_s" }];
+                  } else {
+                    convertInstrs = [{ op: "i64.extend_i32_s" }];
+                  }
+                } else if (srcReadKind === "externref" && dstStoreKind !== "externref") {
                   // ToNumber the boxed element via the single coercion table
                   // (#2108 — coercionPlan's externref→i32 row is exactly
                   // unbox + trunc_sat; externref→f64 is the bare unbox).
