@@ -1670,6 +1670,28 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
   let allSafe = true;
   const visit = (node: ts.Node): void => {
     if (!allSafe) return;
+    // (#2662) A NON-CALL value reference of the generator name (`const h = g`,
+    // `obj.fn = g`, `g.prototype…`, a call argument `f(g)`) aliases or escapes
+    // the FUNCTION itself; calls through the alias are invisible to this walk,
+    // so the state struct could reach a host-iterating context unchecked. Only
+    // references that RESOLVE to this declaration bail (a shadowing same-named
+    // binding is someone else's value; symbol-less resolution failures bail
+    // conservatively). The declaration's own name and pure property NAMES are
+    // not value references.
+    if (
+      ts.isIdentifier(node) &&
+      node.text === genName &&
+      node !== decl.name &&
+      !(ts.isCallExpression(node.parent) && node.parent.expression === node) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !(ts.isVariableDeclaration(node.parent) && node.parent.name === node) &&
+      !(ts.isBindingElement(node.parent) && node.parent.name === node) &&
+      (checker.getSymbolAtLocation(node)?.declarations?.includes(decl) ?? true)
+    ) {
+      allSafe = false;
+      return;
+    }
     if (
       ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
@@ -1710,25 +1732,158 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
   return allSafe;
 }
 
+/**
+ * (#2662) Yield-payload gate for the WIDENED host-lane population (the
+ * capturing-nested generators newly routed native). NUMERIC yields only:
+ *
+ *   - the f64 carrier's `.value` reads back correctly under a JS host, and
+ *     post-done the UNDEF_F64 sentinel is numerically NaN (spec-correct for an
+ *     exhausted `.value` in a numeric context);
+ *   - STRING yields need the native `$AnyString` ref carrier, which requires
+ *     `ctx.nativeStrings` — OFF in the default gc/host lane, so a string yield
+ *     routed native comes back NaN (verified). The eager host path handles
+ *     strings correctly, so they KEEP it here;
+ *   - OBJECT payloads ride the #2864 externref carrier whose property reads
+ *     come back NaN under the host lane (the boundary-wrapper gap); eager;
+ *   - BOOLEAN payloads: `generatorElemValType` classifies them numeric (f64),
+ *     so `yield true` would surface as `1`, breaking `.value === true`; eager;
+ *   - a bodiless `yield;` yields undefined but the f64 carrier surfaces a
+ *     number (`.value === undefined` fails); eager.
+ *
+ * NOT applied to the #3050 try-region shapes — those routed native with
+ * unrestricted payloads and re-gating them would regress their landed
+ * `.throw()`-into-try support.
+ */
+function hostLaneYieldPayloadsAreSafe(ctx: CodegenContext, decl: GeneratorDecl): boolean {
+  if (!decl.body) return true;
+  let safe = true;
+  const visit = (node: ts.Node): void => {
+    if (!safe) return;
+    if (isFunctionLikeScope(node)) return; // inner generator's yields
+    if (ts.isYieldExpression(node) && !node.asteriskToken) {
+      if (!node.expression) {
+        safe = false;
+        return;
+      }
+      if (ctx.oracle.staticJsTypeOf(node.expression) !== "number") safe = false;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(decl.body, visit);
+  return safe;
+}
+
+/**
+ * (#2662) True when the generator body contains a `yield*` delegation. The
+ * host-lane native carrier does not lower `yield*` for the widened
+ * (capturing-nested) population — a `yield* inner()` over a native inner
+ * traps (`illegal cast`) or drops values. `yield*` delegation is out of scope
+ * for the "single-level generator" slice; keep those bodies on the eager path.
+ * Does not descend into nested function-likes (their yields belong to inner
+ * generators).
+ */
+function bodyHasYieldStarDelegation(decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (isFunctionLikeScope(node)) return;
+    if (ts.isYieldExpression(node) && node.asteriskToken) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
+/**
+ * (#2662) True when the generator body has a `return <expr>` with a value
+ * (not a bare `return;`). §27.5.1.2: the return value belongs ONLY to the
+ * terminal `{value, done:true}` IteratorResult and must be excluded from
+ * IteratorClose consumers. The eager host path routes it through
+ * `__gen_set_return` (correct); the widened native host-lane carrier has no
+ * equivalent — the return value surfaces as an extra yielded element / NaN
+ * post-done (#2035 semantics, verified). Keep such bodies eager on the host
+ * lane. Does not descend into nested function-likes.
+ */
+function bodyHasReturnWithValue(decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (isFunctionLikeScope(node)) return;
+    if (ts.isReturnStatement(node) && node.expression) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
 export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!noJsHostTarget(ctx)) {
-    // (#3050) JS-HOST lane: the eager-buffer lowering evaluates the whole body
-    // at creation, so it PROVABLY cannot express a `.throw()`/abrupt resumption
-    // into a try-region (statements after a suspended yield already ran —
-    // GeneratorPrototype/throw/try-{catch,finally}-*). Route exactly those
-    // shapes — a free `function*` DECLARATION whose body has a catch across a
-    // yield or a yielding finally — through the native state machine even under
-    // the JS host. Every other host-lane generator keeps the eager path
-    // unchanged (zero behavior delta), and non-plannable shapes still fall back
-    // via the plan gate below.
+    // JS-HOST lane. The eager-buffer lowering runs the WHOLE body at generator
+    // creation, breaking every observable that depends on WHEN the body runs
+    // (§27.5.3.1 suspend-at-start, `.throw()`/`.return()` interruption,
+    // finally-on-abrupt, infinite generators). Two disjoint native-routing
+    // populations are admitted here — every OTHER host-lane generator keeps the
+    // eager path (byte-identical), and non-plannable shapes still fall back via
+    // the plan gate below:
+    //
+    //   (#3050) TRY-REGION shapes — a free `function*` DECLARATION whose body
+    //     has a catch across a yield or a yielding finally. The eager buffer
+    //     PROVABLY cannot express `.throw()`/abrupt resumption into a try, so
+    //     these route native with UNRESTRICTED payloads.
+    //
+    //   (#2662) CAPTURING NESTED generators — a `function*` nested inside an
+    //     enclosing function that captures an outer binding. This is the
+    //     wrapped-test262 conformance shape (every test's top-level
+    //     `function* g()` becomes nested inside `export function test()`,
+    //     capturing the test-locals) and the #2662 acceptance target: make it
+    //     LAZY on the default gc lane. Crucially, a capturing nested generator
+    //     CANNOT escape to a JS caller (it is local to its enclosing function,
+    //     never exported / returned as a module value), so the opaque-native-
+    //     struct→JS boundary blocker (the Option-(ii) prerequisite: a returned
+    //     state struct has no callable `.next`, and a host `.value` read post-
+    //     exhaustion surfaces the UNDEF_F64 sentinel as NaN, not `undefined`)
+    //     does NOT apply — the struct stays in-module, driven by native
+    //     dispatch. TOP-LEVEL generators are deliberately NOT widened here:
+    //     they can be exported / returned to JS, where that boundary gap bites
+    //     (verified: `g().next().value` post-done → NaN on the host lane).
+    //     Their lazy routing waits on the JS-boundary wrapper (the #2662 epic's
+    //     remaining lever).
     if (!ts.isFunctionDeclaration(decl)) return false;
-    if (!bodyHasNewTryRegionAcrossYield(decl)) return false;
+    const isTryRegion = bodyHasNewTryRegionAcrossYield(decl);
+    const isCapturingNested = generatorCapturesOuterScope(ctx, decl);
+    if (!isTryRegion && !isCapturingNested) return false;
+    // An EXPORTED generator escapes to JS by construction (the opaque-struct
+    // boundary blocker); keep it eager. A capturing nested generator is never
+    // exported, so this only guards the try-region population — and closes a
+    // latent #3050 hole where an exported try-region generator with no unsafe
+    // in-module use routed native and handed JS the un-callable struct.
+    const mods = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
+    if (mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
     // Conservative: a body referencing an UNRESOLVABLE identifier (e.g.
     // `try { yield test262unresolvable } catch (e) {…}`) keeps the eager path —
     // its host-lane semantics ride #928's deferred-pending-throw (the eager
     // eval's JS ReferenceError is re-thrown at the first next()), which the
     // resume-time evaluation may not reproduce identically.
     if (bodyReferencesUnresolvableIdentifier(ctx, decl)) return false;
+    // (#2662) The widened (capturing-nested, non-try-region) population runs on
+    // the native carrier, which is byte-correct only for numeric/string yields
+    // and has NO terminal-return / `yield*`-delegation support on the host
+    // lane (both surface wrong values — verified). Restrict to proven-safe
+    // payloads + single-level (no `yield*`) + no `return <expr>`. The #3050
+    // try-region set keeps its exact pre-#2662 routing (unrestricted).
+    if (!isTryRegion) {
+      if (!hostLaneYieldPayloadsAreSafe(ctx, decl)) return false;
+      if (bodyHasYieldStarDelegation(decl)) return false;
+      if (bodyHasReturnWithValue(decl)) return false;
+    }
     // Conservative use-site safety walk: the native state struct is a WasmGC
     // ref the JS HOST cannot iterate — if it escapes to any host-iterating
     // context (an EAGER generator's `yield*`, for-await-of, Promise.all,
