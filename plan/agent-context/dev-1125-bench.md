@@ -268,7 +268,7 @@ User asked for a Claude Code statusline sprint progress bar (e.g. " sprint 45 " 
 
 ## Operational notes for next session
 
-1. **Use `node scripts/next-issue-id.mjs` BEFORE creating any issue file**. The tool landed during this session as commit `e002a706f`. Even then, the ID can collide if main moves between check and merge — the safer pattern is to defer ID assignment to push time, but the tool reduces the collision rate dramatically.
+1. **Allocate an issue ID atomically with `node scripts/claim-issue.mjs --allocate` (`pnpm run new:issue-id`) BEFORE creating any issue file** — it RESERVES the id (first-push-wins on the `issue-assignments` ref) against main + open PRs, so concurrent branches can't collide. `scripts/next-issue-id.mjs` (`pnpm run preview:issue-id`) only PREDICTS `max+1` without reserving and races; use it for read-only visibility only, never to allocate. (Historical note: this session predated the atomic reserver and used the predictor `next-issue-id.mjs`, which landed as commit `e002a706f`.)
 
 2. **Two agents working the same issue independently is a real failure mode.** PR #74 and PR #75 both fixed #1186 with functionally-equivalent patches. The `file-locks.md` mechanism gave both agents (me with `compileForOfString`, the other agent with whatever they claimed) false confidence. Consider:
    - File-locks should claim by ISSUE number, not just by function-in-file.

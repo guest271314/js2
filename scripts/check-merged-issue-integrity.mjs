@@ -161,8 +161,9 @@ if (result.status !== 0) {
   console.error(
     `\n[merged-issue-integrity] FAILED against the merge with ${baseRef}. ` +
       `This is the collision that would otherwise wedge the merge queue. ` +
-      `Rename the colliding issue file to a fresh id (see ` +
-      `\`node scripts/next-issue-id.mjs\`) and re-push.`,
+      `Rename the colliding issue file to a freshly RESERVED id ` +
+      `(\`node scripts/claim-issue.mjs --allocate\` — atomic: reserves against ` +
+      `main + open PRs + the issue-assignments ref) and re-push.`,
   );
 }
 process.exit(result.status ?? 1);
