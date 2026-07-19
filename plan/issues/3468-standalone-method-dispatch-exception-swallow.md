@@ -276,3 +276,45 @@ rebaseline; the red regression test cannot merge before then.
 - Method call + side effect: `(fn as any).m=()=>777; (fn as any).m()===777`.
 - Aliasing/identity: `const g=fn; (g as any).x=5; (fn as any).x===5`.
 - Distinct instances don't cross-talk; builtin `.name`/`.length` not shadowed.
+
+## C-core IMPLEMENTATION FINDING (2026-07-19) — runtime done, ROUTING GAP blocks the harness
+
+C-core was implemented (`src/codegen/closure-props.ts` + the three arms in
+`object-runtime.ts` + finalize wiring in `index.ts`) and the **runtime substrate
+is verified correct** — but through the DYNAMIC member path only. A decisive gap
+was found that **overturns the spec's "blast radius ≈ 0 / routing already works"
+premise**:
+
+**Verified working (dynamic path — a receiver flowing through an `any`-typed
+local, e.g. `const g = fn`):**
+- own-prop round-trip `(g as any).cache = 5; (g as any).cache` → `5`
+- method call `(g as any).m = () => 777; (g as any).m()` → `777` (+ side effects run)
+- identity `const g = fn; (g as any).x = 5; (fn as any).x` → `5` (`ref.eq` identity holds)
+- distinct closures isolated → `11`, not `22`
+- host/gc mode byte-identical (nothing emitted there); `--target standalone` only
+
+**The gap — function-DECLARATION member ops bypass the dynamic path entirely:**
+`assert.sameValue = fn`, `assert.sameValue`, `assert.sameValue(1,2)` (a bare
+function-declaration receiver, which is EXACTLY the test262 `assert` harness
+shape) are lowered STATICALLY against the closure-wrapper struct — WAT-confirmed:
+the **write emits no runtime op** (silently dropped) and the **read resolves to
+undefined** (`ref.cast (ref <wrapper>)` then no field). The real harness WAT
+contains **zero** `__extern_*` / `__set_member` / `__closure_prop_*` calls, so the
+filled arms are **unreachable for the harness**.
+
+**Consequence: C-core as scoped yields floor delta ≈ 0.** The motivating vacuous
+passes do NOT flip, because the assert harness never reaches the fixed arms. The
+architect's "WAT-confirmed routes to `__extern_set`" held only for the local-alias
+case, not the function-declaration case.
+
+**To actually fix the harness** the front-end member dispatch must route a
+function/closure receiver's NON-builtin member get/set/call to the dynamic path
+(`__get_member`/`__set_member`/`__extern_method_call` → the C-core arms). Decision
+points: `compilePropertyAccess` (`src/codegen/property-access.ts`) for reads; the
+member-assignment lowering for writes; the method-call lowering for calls.
+Exclusions to avoid regressions: `.name`/`.length`/`.call`/`.apply`/`.bind`/
+`.prototype`/`.constructor`, class statics, and any statically-known member. This
+is **A/front-end-routing territory** (deferred by this task's "C-core only"
+scope) and its blast radius is NOT ≈0 — it changes how every function-value
+member access lowers, so it needs full test262, not a canary. **Scope decision
+pending with the tech-lead/stakeholder.** #3468 stays `blocked`.

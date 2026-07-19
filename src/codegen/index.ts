@@ -90,6 +90,7 @@ import {
   fillExternIsArray,
   fillProxyDispatch,
 } from "./object-runtime.js";
+import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177) dyn-view §10.4.5 MOP arms
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
@@ -2719,6 +2720,13 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#3468 C-core) Fill the reserved closure-own-property side-table helpers
+    // now that every closure root + `__extern_get`/`__extern_set`/
+    // `__new_plain_object` are registered. Needs `__apply_closure` filled first
+    // (the method-call arm dispatches through it). No-op when the helpers were
+    // never reserved (`ctx.closurePropHelpersReserved` — gc/host mode).
+    fillClosurePropHelpers(ctx);
 
     // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
     // closure root is registered (the callable gate needs the COMPLETE
