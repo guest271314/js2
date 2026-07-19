@@ -21,7 +21,12 @@
 // --allocate --dry-run --no-pr-scan`); it does not consult open PRs.
 //
 // Usage:  node scripts/next-issue-id.mjs        -> prints e.g. 1745 (preview only)
-//         pnpm run new:issue-id
+//         pnpm run preview:issue-id             -> same, read-only preview
+//
+// NOTE: `pnpm run new:issue-id` is NO LONGER this predictor — it now runs the
+// ATOMIC reserver (`claim-issue.mjs --allocate`), which MUTATES the reservation
+// ref on the orphan `issue-assignments` branch. Use `pnpm run preview:issue-id`
+// when you want visibility WITHOUT reserving an id.
 
 import { execSync } from "node:child_process";
 import { readdirSync } from "node:fs";

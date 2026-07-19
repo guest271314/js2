@@ -1,9 +1,9 @@
 ---
 id: 3408
 title: "Retire non-atomic issue-ID entrypoints and stale collision-remediation guidance"
-status: ready
+status: in-review
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: s
 feasibility: easy
