@@ -6,7 +6,7 @@ completed: 2026-07-16
 pr: 3113
 assignee: ttraenkler/sendev-1102
 created: 2026-04-12
-updated: 2026-07-16
+updated: 2026-07-19
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -14,7 +14,7 @@ task_type: feature
 language_feature: eval
 goal: spec-completeness
 model: fable
-sprint: current
+sprint: 72
 required_by: [1584]
 es_edition: ES5
 # oracle-ratchet-allow: resolveConstStringBinding needs BINDING resolution

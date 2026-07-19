@@ -3,7 +3,7 @@ id: 3261
 title: "standalone: __host_loose_eq / __extern_toString / __date_format leak env::* imports (missing native-helper set membership)"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-07-14
 priority: medium
 feasibility: medium

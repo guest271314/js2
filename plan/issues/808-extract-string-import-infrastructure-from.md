@@ -4,13 +4,13 @@ title: "Extract string/import infrastructure from index.ts → imports.ts"
 status: done
 assignee: ttraenkler/senior-dev
 created: 2026-03-26
-updated: 2026-07-14
+updated: 2026-07-19
 completed: 2026-07-14
 priority: high
 feasibility: medium
 reasoning_effort: high
 goal: maintainability
-sprint: current
+sprint: 72
 subtask_of: 688
 related: [3182]
 # LOC-regrowth ratchet (#3102/#3131): this extraction MOVES ~1.8k LOC of import

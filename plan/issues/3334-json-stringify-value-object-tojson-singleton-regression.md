@@ -6,14 +6,14 @@ status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-gamma
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: medium
 task_type: bug
 area: runtime
 language_feature: json
 goal: spec-completeness
-sprint: current
+sprint: 72
 related: [2933, 2106, 3008, 2166]
 # The fix must live at the toJSON guard inside the codec builder.
 loc-budget-allow:

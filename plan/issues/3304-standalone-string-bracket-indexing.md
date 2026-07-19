@@ -4,7 +4,7 @@ title: "standalone: primitive-string bracket indexing (s[i]) returns garbage —
 status: done
 assignee: ttraenkler/sendev-date-3174
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-19
 completed: 2026-07-16
 priority: high
 feasibility: medium
@@ -15,7 +15,7 @@ es_edition: multi
 language_feature: string
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 72
 horizon: s
 related: [3174, 1910, 3027, 2891]
 loc-budget-allow:

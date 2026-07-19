@@ -11,7 +11,7 @@ fable_role: spec
 task_type: epic
 area: codegen
 goal: standalone
-sprint: fable-final
+sprint: current
 horizon: xl
 related: [2861, 2862, 2863, 2864, 2865, 2866, 2867, 2868, 2872, 2873, 2874, 2875, 2876, 2877, 2878, 2879, 3027, 3169, 3170, 3171, 3172, 3173, 3174, 3175, 3176, 3177]
 ---

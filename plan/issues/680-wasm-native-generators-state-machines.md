@@ -1,7 +1,7 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: done
+status: ready
 completed: 2026-06-12
 created: 2026-03-20
 updated: 2026-06-03
@@ -288,3 +288,7 @@ it flips ~0. The "sequential numeric yields" harvest label was misleading (it
 appeared in a sampled error string but is not a meaningfully-occurring gate, same
 class as the #68 BigInt64Array_new mislabel). If non-numeric yields are wanted
 for completeness, treat as a low-priority #680 follow-up, not a conformance slice.
+
+## Reopened 2026-07-20 (harvest cross-reference)
+
+Marked `status: done` but the test262 harvest shows **398 live failures still citing #680** in the error field. Premature close — reopened as `ready`. See the sprint-73 harvest note.

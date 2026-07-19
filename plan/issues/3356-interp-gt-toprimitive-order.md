@@ -13,7 +13,7 @@ task_type: bug
 area: interp, codegen
 language_feature: relational-operators
 goal: runtime-eval
-sprint: current
+sprint: 72
 # (#3102/#3131) +5-line growth is the #3310 comment correction itself — a note
 # about fillApplyClosure's measured byte cost (+114 B/standalone module) cannot
 # live anywhere except at that code, so "move to a subsystem module" does not

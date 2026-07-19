@@ -2,7 +2,7 @@
 id: 3325
 title: "declare function host-dep call is silently dropped (env import bound but never called)"
 status: done
-sprint: current
+sprint: 72
 assignee: ttraenkler/opus-b
 goal: npm-library-support
 feasibility: medium
@@ -13,7 +13,7 @@ language_feature: host-interop
 task_type: bug
 horizon: s
 created: 2026-07-16
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 loc-budget-allow:
   - src/runtime.ts

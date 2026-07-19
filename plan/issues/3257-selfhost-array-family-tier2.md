@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/sendev-3256
 completed: 2026-07-16
 pr: 3122
-sprint: current
+sprint: 72
 priority: high
 horizon: xl
 feasibility: hard

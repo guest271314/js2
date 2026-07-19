@@ -13,7 +13,7 @@ area: codegen
 language_feature: standalone, console, structuredClone
 goal: standalone-conformance
 related: [3380, 3381]
-sprint: current
+sprint: 72
 loc-budget-allow:
   - src/codegen/declarations/import-collector.ts
   - src/codegen/expressions/builtins.ts

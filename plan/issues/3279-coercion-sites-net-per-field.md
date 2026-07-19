@@ -3,9 +3,9 @@ id: 3279
 title: "Coercion-site drift gate: net-per-vocabulary — stop relocation-shift failures on god-file splits"
 status: done
 assignee: ttraenkler/senior-dev-coercion
-sprint: current
+sprint: 72
 created: 2026-07-14
-updated: 2026-07-14
+updated: 2026-07-19
 completed: 2026-07-14
 priority: high
 horizon: m

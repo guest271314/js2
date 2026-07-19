@@ -4,7 +4,7 @@ title: "In-Wasm dynamic-$Object recursive read runs away at scale (spurious back
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/senior-dev
-sprint: current
+sprint: 72
 created: 2026-07-17
 priority: high
 horizon: m

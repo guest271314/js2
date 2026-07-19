@@ -3,7 +3,7 @@ id: 3344
 title: "CI: baseline promote pipeline can hang indefinitely + emergency workflow_dispatch retrigger loses change-set scoping"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 priority: critical
 horizon: m
 feasibility: medium

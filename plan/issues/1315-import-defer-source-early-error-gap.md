@@ -5,7 +5,7 @@ horizon: m
 status: done
 completed: 2026-07-17
 created: 2026-05-07
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -13,7 +13,7 @@ task_type: bugfix
 area: codegen
 language_feature: modules, import-defer, import-source
 goal: spec-completeness
-sprint: current
+sprint: 72
 ---
 # #1315 — `import.defer` / `import.source` early error detection gap (157 negative tests)
 

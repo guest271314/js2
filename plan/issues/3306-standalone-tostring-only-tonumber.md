@@ -4,7 +4,7 @@ title: "standalone: ToNumber of a toString-only object drops the native-string r
 status: done
 assignee: ttraenkler/sendev-date-3174
 created: 2026-07-16
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: high
 feasibility: medium
@@ -15,7 +15,7 @@ es_edition: multi
 language_feature: coercion
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 72
 horizon: s
 related: [3174, 3304, 2891, 866, 1806]
 origin: "root-caused during #3174 residual analysis (Date ctor coercion-order rows); carried through #3304 as the next-next candidate"

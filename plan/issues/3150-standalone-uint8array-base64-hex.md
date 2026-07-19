@@ -3,7 +3,7 @@ id: 3150
 title: "standalone: Uint8Array.fromBase64 / fromHex (+ toBase64/toHex/setFrom*) (12 __get_builtin CEs)"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 priority: medium
 horizon: m
 feasibility: medium

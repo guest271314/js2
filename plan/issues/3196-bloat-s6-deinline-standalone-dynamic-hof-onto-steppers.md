@@ -14,7 +14,7 @@ area: codegen
 es_edition: n/a
 language_feature: array-methods
 goal: maintainability
-sprint: fable-final
+sprint: current
 horizon: l
 umbrella: 3182
 related: [3098, 3029, 3102, 3185]

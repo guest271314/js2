@@ -4,7 +4,7 @@ title: "Optimize repeated string concatenation via compile-time folding and coun
 status: done
 assignee: ttraenkler/dev-perf
 created: 2026-04-09
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: medium
 feasibility: medium
@@ -12,7 +12,7 @@ reasoning_effort: high
 task_type: feature
 language_feature: strings-concat
 goal: generator-model
-sprint: current
+sprint: 72
 es_edition: multi
 loc-budget-allow:
   - src/codegen/statements/loops.ts

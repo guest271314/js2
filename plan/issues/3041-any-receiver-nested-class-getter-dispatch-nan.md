@@ -3,9 +3,9 @@ id: 3041
 title: "get-accessor via an any-typed receiver on a class declared inside a function returns NaN/undefined (dynamic accessor dispatch gap)"
 status: done
 assignee: ttraenkler/dev-conform
-sprint: current
+sprint: 72
 created: 2026-07-05
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: medium
 horizon: m

@@ -4,9 +4,9 @@ title: "IR module-level (top-level statement) adoption — clears gate G3 of the
 status: done
 completed: 2026-07-16
 assignee: ttraenkler/fable-b
-sprint: current
+sprint: 72
 created: 2026-07-11
-updated: 2026-07-16
+updated: 2026-07-19
 note: "Slice 1 (selector + telemetry) landed via PR #3160; Slice 2 (claim-feeding lowering + __module_init patch, f64/i32 module bindings) lands in this PR."
 priority: high
 horizon: l

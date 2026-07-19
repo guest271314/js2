@@ -4,7 +4,7 @@ title: "Standalone: TypedArray.prototype.subarray returns an empty view (.length
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/dev-standalone2
-sprint: current
+sprint: 72
 priority: medium
 feasibility: medium
 reasoning_effort: medium

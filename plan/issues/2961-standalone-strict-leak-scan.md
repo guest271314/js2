@@ -5,10 +5,10 @@ status: done
 completed: 2026-07-17
 assignee: dev-2961
 depends_on: [3009]
-sprint: current
+sprint: 72
 model: opus
 created: 2026-07-02
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 horizon: m
 feasibility: medium

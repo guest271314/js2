@@ -4,7 +4,7 @@ title: "async-gen dstr host-free-FAIL cluster: root decomposition + error-path m
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-s2
-sprint: current
+sprint: 72
 priority: medium
 feasibility: hard
 reasoning_effort: high

@@ -5,7 +5,7 @@ status: ready
 updated: 2026-07-17
 model: fable
 fable_role: spec
-sprint: fable-final
+sprint: current
 created: 2026-06-26
 priority: low
 area: codegen

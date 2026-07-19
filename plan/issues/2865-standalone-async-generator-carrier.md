@@ -12,7 +12,7 @@ feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: fable-final
+sprint: current
 horizon: xl
 related: [2860, 2864, 2867]
 umbrella: 2860

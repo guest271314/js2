@@ -1,7 +1,7 @@
 ---
 id: 2026
 title: "classes are not first-class values: new K() on a parameter throws 'No dependency provided for extern class', .constructor identity broken"
-status: done
+status: ready
 assignee: ttraenkler/cs-2158
 sprint: 63
 created: 2026-06-10
@@ -415,3 +415,7 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
   pure-Wasm (no host import) so both modes must pass.
 - Confirm no test262 `built-ins/`/`language/` regressions in the
   classes/new buckets (CI).
+
+## Reopened 2026-07-20 (harvest cross-reference)
+
+Marked `status: done` but the test262 harvest shows **1464 live failures still citing #2026** in the error field. Premature close — reopened as `ready`. See the sprint-73 harvest note.

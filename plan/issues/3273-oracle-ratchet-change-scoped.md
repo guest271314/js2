@@ -3,9 +3,9 @@ id: 3273
 title: "Oracle ratchet gate: make change-scoped (net) — stop whole-tree re-flagging sibling split modules"
 status: done
 assignee: ttraenkler/senior-dev-oracle
-sprint: current
+sprint: 72
 created: 2026-07-14
-updated: 2026-07-14
+updated: 2026-07-19
 completed: 2026-07-14
 priority: high
 horizon: m

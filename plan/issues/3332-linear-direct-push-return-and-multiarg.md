@@ -4,7 +4,7 @@ title: "linear direct path: arr.push returns 0 (not new length) and drops extra 
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/dev-standalone2
-sprint: current
+sprint: 72
 goal: backend-agnostic-ir
 feasibility: medium
 depends_on: []
@@ -15,7 +15,7 @@ task_type: bug
 area: codegen-linear
 horizon: s
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 related: [2956, 1854]
 loc-budget-allow:
   # Intended +13 LOC in the direct-path push lowering: evaluate the receiver

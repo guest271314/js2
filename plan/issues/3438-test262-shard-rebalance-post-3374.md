@@ -4,7 +4,7 @@ title: Rebalance test262 CI shards from post-#3374 timings (weight-map refresh)
 status: done
 assignee: ttraenkler/sendev-shards
 completed: 2026-07-18
-sprint: current
+sprint: 72
 priority: high
 horizon: m
 feasibility: hard

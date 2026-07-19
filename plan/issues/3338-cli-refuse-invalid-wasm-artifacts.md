@@ -5,7 +5,7 @@ status: done
 assignee: dev-refactor
 completed: 2026-07-17
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -13,7 +13,7 @@ task_type: bugfix
 area: cli, compiler, optimizer
 language_feature: compiler-output-validation
 goal: trustworthiness
-sprint: current
+sprint: 72
 horizon: s
 es_edition: n/a
 complexity: S

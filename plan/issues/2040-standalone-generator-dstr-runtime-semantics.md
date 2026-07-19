@@ -4,12 +4,12 @@ title: "standalone: generator/destructuring runtime-semantics residual — rest-
 status: done
 completed: 2026-07-16
 assignee: ttraenkler/fable-beta
-sprint: current
+sprint: 72
 loc-budget-allow:
   - src/codegen/any-helpers.ts
   - src/codegen/context/types.ts
 created: 2026-06-10
-updated: 2026-07-16
+updated: 2026-07-19
 priority: critical
 horizon: l
 feasibility: hard
