@@ -3,6 +3,8 @@ id: 745
 title: "Tagged union representation to replace externref boxing"
 horizon: xl
 status: in-progress
+model: fable
+fable_role: implement
 assignee: ttraenkler/fable-gamma
 created: 2026-03-22
 updated: 2026-07-19
@@ -11,7 +13,7 @@ feasibility: hard
 model: fable
 reasoning_effort: max
 goal: performance
-sprint: current
+sprint: fable-final
 related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
 # S2 flag plumbing (CompileOptions -> CodegenOptions -> ctx) + the resolveWasmType
 # mapping necessarily touch the option/driver files; the predicate itself lives

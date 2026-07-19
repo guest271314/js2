@@ -1,10 +1,10 @@
 ---
 id: 2787
 title: "Differential-test corpus failures — 2 malformed_wasm + 13 mismatch + 6 runtime_error"
-status: ready
+status: in-review
 sprint: Backlog
 created: 2026-06-28
-updated: 2026-06-28
+updated: 2026-07-19
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -113,6 +113,46 @@ The binary validates but throws during instantiation/execution:
   diff-test codegen failures, which are on the default WasmGC + JS-host path.
 
 ---
+
+## Harness fix (2026-07-19) — async side-effect capture (corpus 96→99 match)
+
+**Root cause (harness, not compiler):** the js2wasm lane in `scripts/diff-test.ts`
+restored the monkey-patched `console.log` in its `finally` block *immediately*
+after calling `__module_init()`. Corpus programs that schedule callbacks via
+`Promise.resolve().then(...)` / `async`/`await` invoke the host `console.log`
+import **after** `__module_init()` returns — i.e. after the capture window had
+already been torn down. Consequences: (1) those late writes leaked to the real
+stdout (the stray `42` / `4` / `30` lines seen in harness output), and (2) the
+program recorded **empty** output → a false `mismatch` against the V8 oracle,
+which runs the full job queue before exiting.
+
+This directly contradicts the 2026-07-06 note's claim that promise output "stayed
+empty even after a 50ms + microtask drain": draining the microtask + macrotask
+job queue **before** restoring `console.log` captures the output verbatim. The
+compiler's Promise/async lowering works for these programs; only the harness was
+dropping the async output.
+
+**Fix:** `runJs2wasm` now awaits `drainAsync()` (bounded microtask + `setTimeout(0)`
+macrotask drain) inside the capture window before restoring `console.log`. This
+flips three programs from false `mismatch` to `match` and eliminates the stdout
+pollution:
+
+- `builtins/07-promise-basic.js` — now captures `42` (#1042 cluster — not a gap)
+- `builtins/08-promise-chain.js` — now captures `4`
+- `builtins/09-async-await.js` — now captures `30`
+
+Corpus: **96 → 99 / 104 match** (3 mismatch, 2 runtime_error, 0 malformed_wasm).
+The committed `diff-test-baseline.json` is refreshed to this state so the delta
+gate now protects these three programs from regressing back to empty output.
+Scoped regression test: `tests/issue-2787.test.ts`. `runJs2wasm` is now exported
+and `main()` is guarded behind an entry-point check so the test can import it
+without triggering a full corpus run.
+
+The remaining 5 failing programs (`array/12-from-of`, `closures/07-arrow-this`,
+`object/06-delete` mismatches; `builtins/14-spread-args`,
+`closures/08-method-chain` runtime_errors) are genuine substrate-level compiler
+gaps tracked by #2796/#2797, correctly deferred — no harness or cheap localized
+fix applies.
 
 ## Re-measure (2026-07-06) — corpus improved 20→9 failing
 

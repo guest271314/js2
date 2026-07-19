@@ -226,6 +226,8 @@ if (dupes.length === 0) {
     for (const f of files) console.error(`    plan/issues/${f}`);
   }
   console.error("");
-  console.error("Fix: rename the newer file to use a fresh ID (next after the current max).");
+  console.error("Fix: reserve a FRESH id atomically and rename the newer file —");
+  console.error("  NEW=$(node scripts/claim-issue.mjs --allocate)   # prints the reserved id");
+  console.error("  git mv plan/issues/<old>-<slug>.md plan/issues/$NEW-<slug>.md   # then set frontmatter id: $NEW");
   process.exit(1);
 }

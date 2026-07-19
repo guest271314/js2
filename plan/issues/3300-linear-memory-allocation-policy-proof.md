@@ -1,10 +1,11 @@
 ---
 id: 3300
 title: "Porffor backend P5: prove shared allocation-policy leverage"
-status: in-review
+status: done
 sprint: porffor-backend
 created: 2026-07-16
 updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 horizon: l
 feasibility: hard

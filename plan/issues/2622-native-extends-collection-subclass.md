@@ -2,7 +2,10 @@
 id: 2622
 title: "Standalone native `class X extends Set/Map/WeakMap/WeakSet` subclass — construction + [[SetData]] algebra + iteration + instanceof"
 status: backlog
-sprint: Backlog
+updated: 2026-07-17
+model: fable
+fable_role: spec
+sprint: fable-final
 created: 2026-06-22
 priority: medium
 feasibility: hard
