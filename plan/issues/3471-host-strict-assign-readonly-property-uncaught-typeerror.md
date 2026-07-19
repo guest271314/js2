@@ -1,8 +1,7 @@
 ---
 id: 3471
 title: "Host lane: strict-mode assignment to a non-writable host property throws but isn't caught as instanceof TypeError inside compiled try/catch (~433-541 test262 tests)"
-status: in-progress
-assignee: ttraenkler/senior-dev
+status: ready
 sprint: current
 created: 2026-07-19
 priority: high
@@ -155,6 +154,32 @@ Fixing #3471 first (or with #3470) should flip the ~433 tests currently
 failing on this signature (module a small number that hit yet other
 issues underneath once this layer clears — same caution as always:
 signature-addressed ≠ guaranteed flip count, verify on CI).
+
+## Handoff note (2026-07-19)
+
+Routed by tech lead to a senior-dev (Opus) — `feasibility: hard` +
+`area: codegen` is out of the originating dev's (runner-only #3470) lane.
+Preliminary narrowing already done (see "Repro" above): the bug does
+**not** reproduce in small hand-rolled snippets, even ones matching
+`isWritable()`'s shape closely (tried: static key access, computed key
+access via a separately-declared helper function, both with
+`inferModuleStrictArguments: true` AND with a literal `"use strict";`
+prologue + `deferTopLevelInit: true` matching the real
+`runOriginalHarnessVariant` compile options exactly). It DOES reproduce
+via the full `assembleOriginalHarness`-bundled harness + test body
+(`propertyHelper.js`'s real `verifyProperty`/`isWritable`, not a
+simplified copy) compiled and run through `runTest262File`/the unified
+worker. Next step for whoever picks this up: bisect the REAL assembled
+source (`assembleOriginalHarness(source, meta).strictRerun.source`,
+dumped to a scratch file) by trimming sections and recompiling, to find
+the minimal diff between "reproduces" and "doesn't" — likely something
+about the specific `verifyProperty` call chain (2 levels of nesting:
+test body → `verifyProperty` → `isWritable`), or the `__isArray`/
+`nonIndexNumericPropertyName` branches in the real `isWritable`, or
+something about compiling the ~19KB bundled harness specifically (WASM
+exception tag identity across many more functions/closures than a small
+snippet has). Not yet isolated further — ran out of scope for a
+runner-only issue before finishing the bisection.
 
 ## Task
 
