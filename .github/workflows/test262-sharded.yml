@@ -1101,28 +1101,51 @@ jobs:
       # pass) converts passes to timeouts and trips no gate. Two cheap signals
       # — both already EMITTED by diff-test262.ts (#1942) into the catastrophic
       # guard's /tmp/cat-diff.txt — gate that surface:
-      #   1. count: pass→compile_timeout above COMPILE_TIMEOUT_THRESHOLD
-      #      (N=25, calibrated above the observed contention-flake floor; the
-      #      #1589 serial retry already absorbs most CT flake, and the
-      #      test262-canary separates non-determinism).
-      #   2. aggregate: sum(compile_ms) over the shared both-compiled set, fail
-      #      when it rises > AGG_COMPILE_TIME_PCT_THRESHOLD (20%). Immune to
-      #      single-test flake and set churn — it measures the same population
-      #      on both sides, so a 20% jump is a real systemic slowdown.
+      #   1. count: pass→compile_timeout tests (the CT count).
+      #   2. aggregate: sum(compile_ms) over the shared both-compiled set (a
+      #      signed Δ%). Immune to single-test flake and set churn — it measures
+      #      the same population on both sides, so a jump is a real systemic
+      #      slowdown.
       # Reuses /tmp/cat-diff.txt from the catastrophic guard (same job, same
       # merged report) so this adds no extra diff run.
-      - name: Compile-time regression guard (#1942)
+      #
+      # Contention-tolerant trigger (#3447 / CI-acceleration review §5-B, lever
+      # L2). The old flat `CT > 50 ⇒ fail` priced runner CPU contention as if it
+      # were a compile-perf regression: it FALSE-EJECTED PR #3365 from the merge
+      # queue TWICE, both times with CT>50 while the aggregate compile-time Δ was
+      # only +3.2% — and a genuine regression that pushes >50 tests past the 30s
+      # per-test timeout cannot leave the aggregate that flat. Real slowdowns
+      # move BOTH signals; contention moves only the count. So:
+      #   • FAIL on (CT > CT_SOFT AND aggregate Δ > +10%)  — both signals agree.
+      #   • FAIL unconditionally on CT > CT_HARD           — survivor-bias hole:
+      #       a pathological slowdown times out its victims, removing them from
+      #       the both-compiled shared set, so the aggregate can stay flat while
+      #       the count spikes into the hundreds. CT_HARD (~boundary-population
+      #       scale) still catches that even when the aggregate arm is fooled.
+      #   • CT_SOFT < CT ≤ CT_HARD with a flat aggregate ⇒ ::warning + run
+      #       summary, NO fail (this is the #3365 contention regime).
+      # The aggregate +20% arm (AGG_COMPILE_TIME_PCT_THRESHOLD) is UNCHANGED and
+      # remains the standalone systemic-slowdown backstop.
+      - name: Compile-time regression guard (#1942, #3447)
         if: env.SHARDS_RAN == 'true'
         env:
-          # Scales with per-shard test density (#3431). The 114→59 merge_group
-          # shard consolidation ~doubles tests-per-shard, so boundary compiles
-          # that flirt with the 30s per-test timeout cross it proportionally more
-          # often under runner CPU contention (25 × 114/59 ≈ 48, rounded to 50
-          # for headroom). This count threshold is the flake-noise filter only;
-          # the aggregate +20% compile-time guard below is UNCHANGED and remains
-          # the systemic-slowdown backstop, so raising this does not weaken real
-          # compile-perf regression detection.
-          COMPILE_TIMEOUT_THRESHOLD: "50"
+          # CT_SOFT: contention-flake floor. A CT above this is only actionable
+          #   when the aggregate arm agrees (see the combined trigger). Scaled
+          #   with per-shard test density (#3431): the 114→59 merge_group shard
+          #   consolidation ~doubles tests-per-shard, so boundary compiles that
+          #   flirt with the 30s per-test timeout cross it proportionally more
+          #   often under CPU contention (25 × 114/59 ≈ 48, rounded to 50).
+          CT_SOFT: "50"
+          # CT_HARD: unconditional-fail ceiling (~boundary-population scale). A CT
+          #   this high is a real pathological slowdown regardless of the
+          #   aggregate — it closes the survivor-bias hole (timed-out victims
+          #   leave the shared set, flattening the aggregate).
+          CT_HARD: "200"
+          # AGG_SOFT_PCT: the aggregate-agreement threshold for the combined
+          #   trigger (both signals must move). +3.2% (the #3365 case) stays well
+          #   under this; a real slowdown that times out 50+ tests does not.
+          AGG_SOFT_PCT: "10"
+          # AGG_COMPILE_TIME_PCT_THRESHOLD: UNCHANGED standalone systemic backstop.
           AGG_COMPILE_TIME_PCT_THRESHOLD: "20"
         run: |
           if [ ! -f /tmp/cat-diff.txt ]; then
@@ -1137,18 +1160,41 @@ jobs:
           AGG_LINE=$(grep -F 'Aggregate compile time (shared' /tmp/cat-diff.txt | head -1)
           AGG_PCT=$(echo "$AGG_LINE" | grep -oE 'Δ [+-]?[0-9]+\.[0-9]+%' | grep -oE '[-]?[0-9]+\.[0-9]+' | head -1)
           AGG_PCT="${AGG_PCT:-0.0}"
-          echo "Compile-time guard: pass→compile_timeout=${CT} (threshold ${COMPILE_TIMEOUT_THRESHOLD}); aggregate compile-time Δ=${AGG_PCT}% (threshold +${AGG_COMPILE_TIME_PCT_THRESHOLD}%)."
-          echo "  ${AGG_LINE}"
-          fail=0
-          if [ "$CT" -gt "$COMPILE_TIMEOUT_THRESHOLD" ]; then
-            echo "::error::COMPILE-TIME regression: ${CT} tests went pass→compile_timeout, exceeding the ${COMPILE_TIMEOUT_THRESHOLD} flake threshold. A spike this large is a real compile-perf regression (compilation got slow enough to cross the 30s per-test timeout), not runner-load noise. See #1942."
-            fail=1
-          fi
-          # Integer-compare the percentage (floor): strip the fractional part
-          # for the shell -gt comparison, so +20.x stays under a 20% threshold
-          # and only +21%+ trips.
+          # Integer floor of the signed percent (for the ×1 -gt comparisons):
+          # strip the fractional part so +20.x stays under a 20 threshold.
           AGG_INT=$(echo "$AGG_PCT" | grep -oE '^-?[0-9]+')
           AGG_INT="${AGG_INT:-0}"
+          echo "Compile-time guard: pass→compile_timeout=${CT} (soft ${CT_SOFT}, hard ${CT_HARD}); aggregate compile-time Δ=${AGG_PCT}% (combined-arm +${AGG_SOFT_PCT}%, standalone +${AGG_COMPILE_TIME_PCT_THRESHOLD}%)."
+          echo "  ${AGG_LINE}"
+          fail=0
+          # 1. Unconditional CT ceiling — closes the survivor-bias hole where a
+          #    pathological slowdown flattens the aggregate by evicting victims.
+          if [ "$CT" -gt "$CT_HARD" ]; then
+            echo "::error::COMPILE-TIME regression: ${CT} tests went pass→compile_timeout, exceeding the hard ceiling ${CT_HARD}. A spike this large is a pathological compile-perf regression regardless of the aggregate Δ (timed-out tests drop out of the shared set, so the aggregate can look flat). See #1942/#3447."
+            fail=1
+          # 2. Combined trigger — both signals must agree for a soft-range CT to
+          #    fail. Contention moves only the count; a real slowdown moves both.
+          elif [ "$CT" -gt "$CT_SOFT" ] && [ "$AGG_INT" -gt "$AGG_SOFT_PCT" ]; then
+            echo "::error::COMPILE-TIME regression: ${CT} tests went pass→compile_timeout (> soft ${CT_SOFT}) AND aggregate compile time rose ${AGG_PCT}% (> +${AGG_SOFT_PCT}%) over the shared both-compiled set. Both signals agree — this is a real compile-perf regression, not runner-load noise. See #1942/#3447."
+            fail=1
+          elif [ "$CT" -gt "$CT_SOFT" ]; then
+            # 3. Soft-range CT with a flat aggregate: the #3365 contention regime.
+            #    Warn + record, do NOT fail (CT>50 at Δ=+3.2% false-ejected #3365
+            #    from the merge queue twice — do not repeat that).
+            echo "::warning::Elevated pass→compile_timeout count ${CT} (> soft ${CT_SOFT}, ≤ hard ${CT_HARD}) but aggregate compile-time Δ is only ${AGG_PCT}% (≤ +${AGG_SOFT_PCT}%). Treating as runner CPU contention, not a compile-perf regression (see #3365). Not failing."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Compile-time guard: elevated timeout count (contention, not failed)"
+                echo ""
+                echo "- pass→compile_timeout count: **${CT}** (soft ${CT_SOFT}, hard ${CT_HARD})"
+                echo "- aggregate compile-time Δ: **${AGG_PCT}%** (combined-arm threshold +${AGG_SOFT_PCT}%)"
+                echo ""
+                echo "Both signals must agree to fail; only the count moved, so this is priced as runner CPU contention (#3447)."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          # 4. Standalone aggregate backstop (UNCHANGED): a systemic slowdown that
+          #    lifts the whole shared set > +20% fails on its own, independent of CT.
           if [ "$AGG_INT" -gt "$AGG_COMPILE_TIME_PCT_THRESHOLD" ]; then
             echo "::error::COMPILE-TIME regression: aggregate compile time rose ${AGG_PCT}% over the shared both-compiled test set, exceeding the +${AGG_COMPILE_TIME_PCT_THRESHOLD}% threshold. This is a systemic compilation slowdown (the same tests take materially longer to compile). See #1942."
             fail=1
